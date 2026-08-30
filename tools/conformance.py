@@ -138,6 +138,17 @@ CASES: list[tuple[str, str, str]] = [
 
     # ---- expressions (in a method body, the position that has diverged)
     ("expr", "arithmetic", _component("  provide s { fn f(x) = x + 1 * 2 }")),
+    # Int32 bitwise operators (item 366, docs/arithmetic.md): `& ^ ~ | << >>`
+    # in one kernel, plus the `.to_int32()` narrow and `.to_int()` widen that
+    # bracket it. Every tier lowers these to native bit ops with the same
+    # value (proved by execution in tests/test_cross_tier_execution.py); the
+    # matrix pins that each one still *emits* on all six.
+    ("expr", "Int32 bitwise",
+     "fn mask(a: Int32, b: Int32, n: Int32) -> Int32 {\n"
+     "  return (((a & b) ^ ~a) | (a << n)) >> 1.to_int32()\n"
+     "}\n"
+     + _component("  provide s { fn f(x) { let a = x.to_int32()\n"
+                  "    return mask(a, a, 2.to_int32()).to_int() } }")),
     ("expr", "comparison", _component("  provide s { fn f(x) { let b = x > 1  return x } }")),
     ("expr", "unary", _component("  provide s { fn f(x) = -x }")),
     ("expr", "ternary", _component("  provide s { fn f(x) = x > 0 ? 1 : 0 }")),

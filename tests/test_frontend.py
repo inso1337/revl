@@ -118,6 +118,9 @@ REJECTIONS = {
     "t21_int32_narrow_implicit.rvl": "this function's return expects `Int32`, got `Int`",
     "t22_int32_width_mix.rvl": "`+` does not mix `Int32` and `Int`",
     "t23_int32_remainder.rvl": "`%` is Int-only; widen the Int32 operands with `.to_int()` first",
+    # Bitwise operators are Int32-only (item 366): Int/Float have no uniform
+    # bitwise meaning across the six tiers, so `& | ^ ~ << >>` are restricted.
+    "t28_bitwise_non_int32.rvl": "`|` requires `Int32` operands, got `Float`",
     # errata harvest, checker side (docs/v2.0-roadmap.md 75(b)(c)):
     # 75(b) a stdlib-named method on a receiver whose provenance no
     #       constructor pins used to lower as that builtin and misdispatch at

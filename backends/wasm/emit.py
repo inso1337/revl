@@ -2146,9 +2146,17 @@ _TRAPPING_INT_OPS = {"+": "call $int_add", "-": "call $int_sub", "*": "call $int
 _TRAPPING_INT32_OPS = {"+": "call $int32_add", "-": "call $int32_sub",
                        "*": "call $int32_mul"}
 _RAW_INT_OPS = {"/": "i64.div_s", "%": "i64.rem_s"}
+#: Int32 bitwise operators (item 366). wasm is the reference substrate: every
+#: one is a single native i32 instruction, and both shifts mask the count to 5
+#: bits (mod 32) exactly as the spec requires, so no count-masking is emitted
+#: here. `>>` is `shr_s` — the arithmetic, sign-extending shift. `~` is unary
+#: and handled in `_un_expr` (xor with -1). They never trap (bit patterns).
+_BITWISE_INT32_OPS = {"&": "i32.and", "|": "i32.or", "^": "i32.xor",
+                      "<<": "i32.shl", ">>": "i32.shr_s"}
 _COMPARISON_OPS = frozenset(set(_CMP_SUFFIX) | set(_BOOL_OPS))
 _BINARY_OPS = frozenset(set(_CMP_SUFFIX) | set(_BOOL_OPS)
-                        | set(_TRAPPING_INT_OPS) | set(_RAW_INT_OPS))
+                        | set(_TRAPPING_INT_OPS) | set(_RAW_INT_OPS)
+                        | set(_BITWISE_INT32_OPS))
 
 
 def _bin_instr(op: str, operand_ty: str | None) -> str | None:
@@ -2166,6 +2174,10 @@ def _bin_instr(op: str, operand_ty: str | None) -> str | None:
             # Int32 comparisons are signed i32 (lt_s/…); Bool uses eq/ne only.
             return f"i32.{_CMP_SUFFIX[op]}"
         return None
+    if op in _BITWISE_INT32_OPS:
+        # Bitwise ops are Int32-only (docs/arithmetic.md); each is one native
+        # i32 instruction, shifts self-mask the count to mod 32.
+        return _BITWISE_INT32_OPS[op] if operand_ty == "Int32" else None
     if operand_ty == "Int32":
         # Only `+ - *` reach here for Int32 (docs/arithmetic.md): `/` yields
         # Float (refused on this tier) and `%` is Int-only.
@@ -3523,6 +3535,8 @@ class _V3Emitter:
                 # result can be rendered (docs/strings.md); the value never
                 # enters the storage ABI.
                 return "Float"
+            if op in ("&", "|", "^", "<<", ">>"):
+                return "Int32"  # bitwise ops are Int32-only (docs/arithmetic.md)
             if node.get("operands") == "Int32":
                 return "Int32"  # Int32 arithmetic stays Int32 (docs/arithmetic.md)
             return "Int"
@@ -3530,6 +3544,8 @@ class _V3Emitter:
             op = node.get("op")
             if op == "!":
                 return "Bool"
+            if op == "~":
+                return "Int32"  # bitwise complement is Int32-only (docs/arithmetic.md)
             if op == "-":
                 return "Int32" if node.get("operands") == "Int32" else "Int"
             raise EmitError(f"unsupported unary operator {op!r}")
@@ -3979,6 +3995,10 @@ class _V3Emitter:
             raise EmitError(f"{where}: void operand in unary expression")
         if op == "!":
             return _E(f"{operand.wat}\n      (i32.eqz)", "Bool")
+        if op == "~":
+            # Int32 bitwise complement (item 366): xor with -1. A bit op, so it
+            # never traps; the operand is Int32 (the checker guarantees it).
+            return _E(f"{operand.wat}\n      (i32.const -1)\n      (i32.xor)", "Int32")
         if op == "-":
             # negation is a subtraction from zero, and `0 - MIN` overflows: it
             # goes through the checked helper like any other subtraction, at the
