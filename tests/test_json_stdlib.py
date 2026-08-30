@@ -69,13 +69,16 @@ def consumer_ir(tmp_path_factory):
 
 def test_module_imports_and_externs_reach_the_ir(consumer_ir):
     names = {e["name"]: e for e in consumer_ir["externs"]}
-    assert set(names) == {"json_parse", "json_stringify"}
+    assert set(names) == {"json_parse", "json_stringify", "json_try_parse"}
     assert names["json_parse"]["returns"] == "Any"
     assert names["json_stringify"]["returns"] == "Str"
+    # item 362: the total parse returns the Result channel instead of raising
+    assert names["json_try_parse"]["returns"] == "Result[Any, Str]"
     # the module ships @py, @ts, @rs and @go bodies (item 140); java and wasm
     # remain documented refusals (docs/stdlib-json.md)
     assert set(names["json_parse"]["bodies"]) == {"py", "ts", "rs", "go"}
     assert set(names["json_stringify"]["bodies"]) == {"py", "ts", "rs", "go"}
+    assert set(names["json_try_parse"]["bodies"]) == {"py", "ts", "rs", "go"}
     assert consumer_ir["ir_version"] == 3
 
 
@@ -83,6 +86,7 @@ def test_module_file_is_the_documented_surface():
     text = STDLIB.read_text(encoding="utf-8")
     assert "pub extern pure fn json_parse" in text
     assert "pub extern pure fn json_stringify" in text
+    assert "pub extern pure fn json_try_parse" in text
 
 
 # ---------------------------------------------------------------- py tier
