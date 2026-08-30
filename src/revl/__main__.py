@@ -211,6 +211,10 @@ def _boundary(ir: dict) -> dict:
                  "backends": sorted((extern_class.get(name, {}).get("bodies") or {}).keys())}
                 for name in sorted(host)
             ],
+            # taint provenance (item 249, Decision 5): origins that reach an
+            # emission here, and origins declassified here. Present only when the
+            # component touches taint, so a taint-free surface is byte-identical.
+            **({"taint": comp["taint"]} if comp.get("taint") else {}),
         }
     return report
 

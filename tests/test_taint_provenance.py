@@ -185,6 +185,56 @@ def test_qualifier_is_stripped_from_the_emitted_ir():
     assert fns["sanitize"]["params"][0]["type"] == "Str"
 
 
+# --- 5. provenance on the G8 audit surface (Decision 5) -----------------------
+
+def test_taint_and_declassify_tokens_reach_the_audit_surface():
+    """A web-tainted value reaching a (non-refusing) emission, and a declassified
+    one, both leave stable tokens on the audit surface — so `revl audit --diff`
+    treats a newly-routed exfiltration edge or a newly-added `endorse` as a
+    widening, the same way it already treats one more emission."""
+    from revl.audit_diff import audit_report, crossings
+    src = (
+        "extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py { return \"\" }\n"
+        "extern emission[net] fn send(body: Str) = @py { return }\n"
+        "extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }\n"
+        "service Ops { emission fn go(url: Str) }\n"
+        "component Agent provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(url) {\n"
+        "      let page = emit fetch(url)\n"
+        "      emit send(page)\n"          # web taint reaches a send: recorded
+        "      let safe = endorse(page)\n"  # a declassification: recorded
+        "      emit run(safe)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    ir = compile_source(src, "audit.rvl")
+    tokens = crossings(audit_report(ir))
+    assert "taint:Agent:web" in tokens
+    assert "declassify:Agent:web" in tokens
+
+
+def test_no_taint_tokens_without_qualifiers():
+    """Byte-identity for the audit surface: a program with no qualifier carries
+    no `taint:`/`declassify:` token at all."""
+    from revl.audit_diff import audit_report, crossings
+    src = (
+        "extern emission[web] fn fetch(url: Str) -> Str = @py { return \"\" }\n"
+        "extern emission[net] fn send(body: Str) = @py { return }\n"
+        "service Ops { emission fn go(url: Str) }\n"
+        "component Agent provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(url) { let page = emit fetch(url)  emit send(page) }\n"
+        "  }\n"
+        "}\n"
+    )
+    ir = compile_source(src, "plain_audit.rvl")
+    assert "taint" not in ir["components"][0]
+    tokens = crossings(audit_report(ir))
+    assert not any(t.startswith(("taint:", "declassify:")) for t in tokens)
+
+
 # --- the type-surgery helpers (unit) ------------------------------------------
 
 def test_strip_qualifiers_is_recursive_and_idempotent():
