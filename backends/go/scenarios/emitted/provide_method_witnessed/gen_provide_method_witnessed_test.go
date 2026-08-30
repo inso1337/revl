@@ -272,12 +272,23 @@ func (f *RevlFrame) commit() {
 	// stc-go disposers, so this is their sole disposal — no double-free with the
 	// fiber's own unwind. commit() is the LAST-registered inverse, hence stc-go
 	// runs it FIRST on unwind, so this is ordered before any body inverse runs.
+	//
+	// item 369: replay in reverse INVOCATION order (LIFO), NOT registration
+	// order. `deferred` is appended newest-last as each provide-method fires
+	// (registerMethodWitnessed), so it must be drained newest-FIRST — exactly
+	// like the activation-body path, where stc-go unwinds its disposer stack
+	// LIFO. On a COMMIT order is immaterial (every entry no-op discharges); on
+	// an ABORT two inverses whose paths OVERLAP must undo newest-first or a FIFO
+	// replay leaves residue or DESTROYS pre-session data (every stdlib/fs.rvl
+	// inverse is idempotent-and-total, so the oldest inverse runs first, no-ops,
+	// and the newer one undoes into the hole — G7, 243 §2). Mirrors the py/ts
+	// runtimes.
 	f.mu.Lock()
 	deferred := f.deferred
 	f.deferred = nil
 	f.mu.Unlock()
-	for _, d := range deferred {
-		_ = d()
+	for i := len(deferred) - 1; i >= 0; i-- {
+		_ = deferred[i]()
 	}
 }
 
@@ -449,6 +460,11 @@ type FsError struct {
 	Code string `json:"code"`
 }
 
+type Move struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
 func unstash(w Stash) {
 	if _, err := os.Stat(w.Bak); err == nil {
 		_ = os.Rename(w.Bak, w.Path)
@@ -464,9 +480,24 @@ func stash_path(p string) RevlResult[Stash, FsError] {
 	return RevlOk[Stash, FsError]{Value: Stash{Path: p, Bak: bak}}
 }
 
+func unmove(w Move) {
+	if _, err := os.Stat(w.To); err == nil {
+		_ = os.Rename(w.To, w.From)
+	}
+	return
+}
+
+func move_e(a string, b string) RevlResult[Move, FsError] {
+	if err := os.Rename(a, b); err != nil {
+		return RevlErr[Move, FsError]{Value: FsError{Code: err.Error()}}
+	}
+	return RevlOk[Move, FsError]{Value: Move{From: a, To: b}}
+}
+
 // service Ops
 type Ops interface {
 	Touch(p string)
+	Mv(a string, b string)
 }
 
 var _keyOps = stc.NewKey[Ops]("ops")
@@ -520,6 +551,35 @@ func (revlSelf *Agent_ops) Touch(p string) {
 				}
 			}()
 			unstash(result)
+			return nil
+		})
+	}
+}
+
+func (revlSelf *Agent_ops) Mv(a string, b string) {
+	var _revlWit2 RevlResult[Move, FsError]
+	_revlWit2 = move_e(a, b)
+	if _revlOk2, _revlIsOk2 := _revlWit2.(RevlOk[Move, FsError]); _revlIsOk2 {
+		result := _revlOk2.Value
+		_ = result
+		revlSelf.revlFrame.registerMethodWitnessed(func() (_revlErr error) {
+			if revlSelf.revlFrame.committed {
+				// item 318 a5a: discharge — the mutation is the deliverable
+				// and persists; witness GC'd (out of scope).
+				return nil
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					revlSelf.revlFrame.recordResidue(RevlTeardownRecord{
+						Kind: "restore-residue", CrossingKey: "move_e", CrossingMethod: "unmove",
+						AttemptedCall: "unmove", AttemptedPhase: 1,
+						ErrorType: "panic", ErrorMessage: fmt.Sprint(r),
+						Outcome: "failed", Referent: "move_e",
+						Hint: "the witnessed inverse " + "unmove" + " panicked during abort replay; verify and finish by hand",
+					})
+				}
+			}()
+			unmove(result)
 			return nil
 		})
 	}
