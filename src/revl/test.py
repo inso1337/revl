@@ -798,6 +798,41 @@ def cross_tier_sweep_command(ir: dict) -> int:
     return 0
 
 
+def schedule_command(ir: dict, seed=None, seeds: int = None) -> int:
+    """`revl test --schedule-seed <S>` / `--schedule-seeds <N>`: deterministic
+    concurrency / schedule testing (roadmap item 295, docs/design/295-schedule-
+    testing.md).
+
+    A `fault test` proves A8/R4 at one failure *point*; the fault sweep sweeps
+    every point. This sweeps every *interleaving*: a seeded scheduler drives the
+    composition through many orderings of its concurrent lifecycle steps and,
+    for each, checks residue-free / no-deadlock / stable-final-state / correct
+    teardown / no-use-after-withdrawal. Like the sweep it activates components
+    for real on the py reference tier, so a missing cordis-py runtime is a *skip
+    with a reason*, never a pass.
+    """
+    if not (ir.get("components") or []):
+        print("[schedule] no components to schedule")
+        return 0
+    if not _cordis_available():
+        print("[schedule] skipped: schedule testing activates components for "
+              "real and needs the cordis-py runtime, which this interpreter "
+              "does not have\n"
+              "        set it up:  sh backends/python/setup.sh\n"
+              "        then rerun under that interpreter:  "
+              "backends/python/.venv/bin/python -m revl test --schedule-seeds 200")
+        return 0
+
+    from .schedule import run_schedules  # noqa: PLC0415 — lazy: needs cordis
+
+    failures, _dossier = run_schedules(ir, seed=seed, seeds=seeds)
+    if failures:
+        print(f"[schedule] {failures} interleaving(s) violated a property",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def mock_requires_command(ir: dict) -> int:
     """`revl test --mock-requires`: run every `lifecycle test` in mock world
     (docs/auto-mocks.md).
@@ -834,7 +869,8 @@ def mock_requires_command(ir: dict) -> int:
 
 
 def test_command(ir: dict, backend: str, sweep: bool = False,
-                 mock_requires: bool = False) -> int:
+                 mock_requires: bool = False, schedule_seed=None,
+                 schedule_seeds: int = None) -> int:
     """Run the document's `test` blocks on the chosen tier(s); exit code.
 
     With ``sweep`` set, run the exhaustive fault sweep instead (py tier only —
@@ -843,7 +879,17 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     With ``mock_requires`` set, run every `lifecycle test` in mock world — every
     unmet `requires` satisfied by a generated mock, zero real providers (py tier
     only; docs/auto-mocks.md).
+
+    With ``schedule_seed`` / ``schedule_seeds`` set, run schedule testing — the
+    seeded interleaving sweep (py tier only; roadmap item 295,
+    docs/design/295-schedule-testing.md).
     """
+    if schedule_seed is not None or schedule_seeds is not None:
+        if backend not in ("py", "all"):
+            print(f"[schedule] note: schedule testing runs on the py reference "
+                  f"tier only, not `{backend}` (docs/design/295-schedule-testing.md)")
+        return schedule_command(ir, seed=schedule_seed, seeds=schedule_seeds)
+
     if mock_requires:
         if backend not in ("py", "all"):
             print(f"[mock-requires] note: mock world runs on the py reference "

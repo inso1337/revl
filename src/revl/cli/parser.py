@@ -367,6 +367,18 @@ def build_parser() -> argparse.ArgumentParser:
                            "(item-37-typed, seeded; emissions recorded-not-crossed), "
                            "so a consumer boots with zero real providers "
                            "(py tier; docs/auto-mocks.md)")
+    test.add_argument("--schedule-seed", type=int, default=None, metavar="SEED",
+                      help="schedule testing: replay one seeded interleaving of "
+                           "the composition's concurrent lifecycle steps and "
+                           "check residue / deadlock / stable-final-state / "
+                           "teardown / use-after-withdrawal — reproducible from "
+                           "the seed (py tier; docs/design/295-schedule-testing.md)")
+    test.add_argument("--schedule-seeds", type=int, default=None, metavar="N",
+                      help="schedule testing: sample N seeded interleavings "
+                           "(a random walk over the schedule space) plus the "
+                           "canonical sequential baseline, and report any "
+                           "interleaving that violates a property (py tier; "
+                           "docs/design/295-schedule-testing.md)")
 
     mcp = sub.add_parser("mcp", help="MCP bridge: serve the compiler, or project services <-> tools")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)

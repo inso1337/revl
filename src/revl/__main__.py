@@ -237,7 +237,9 @@ def _run_query(args, ir: dict) -> int:
 def _run_test(args, ir: dict) -> int:
     """`revl test` — compile and run the composition's `test` blocks."""
     return test_command(ir, args.backend, sweep=getattr(args, "sweep", False),
-                        mock_requires=getattr(args, "mock_requires", False))
+                        mock_requires=getattr(args, "mock_requires", False),
+                        schedule_seed=getattr(args, "schedule_seed", None),
+                        schedule_seeds=getattr(args, "schedule_seeds", None))
 
 
 def _run_erase_report(args, ir: dict) -> int:
