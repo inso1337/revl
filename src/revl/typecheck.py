@@ -1169,6 +1169,24 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         if (case is not None and case.get("payload") is None
                 and not str(case.get("adt", "")).startswith(("Opt", "Result"))):
             return case["adt"]
+        # item 380 (the soundness hole): a bare reference to a top-level `fn`
+        # is a first-class function value (docs/function-types.md — arrows and
+        # fn names alike can be "checked, stored, passed and returned"), so it
+        # has a type: the fn's function type `(params...) -> returns`. Before
+        # this it inferred to `None` (unknown), and `None` short-circuits every
+        # downstream compatibility check — so `return f` in a `-> Str` fn, or
+        # `apply(wrong_sig_fn)`, type-checked as ANY type and silently
+        # miscompiled. Typing it here is what lets the return/argument check
+        # REFUSE the mismatch, while a return of a correctly function-typed
+        # value (item 92/342) still passes because the types now agree. Generic
+        # and unit-returning fns are left untyped (unchanged): a `_TPARAM`
+        # marker must not leak into a rendered type, and a bare value use of
+        # either is exotic — leaving them at `None` is a no-op, never a
+        # regression.
+        sig = (types.get(FNS_KEY) or {}).get(expr.name)
+        if sig is not None and not sig.get("tparams") \
+                and sig.get("returns") is not None:
+            return format_type(FN_HEAD, list(sig["params"]) + [sig["returns"]])
         return None
     if isinstance(expr, ExprBin):
         lt = infer_ast(expr.left, tenv, types, filename)
