@@ -77,6 +77,9 @@ _IMPORT_ALIAS = {
     "set_trace": "_revl_set_trace",
     "retry_idempotent": "_revl_retry_idempotent",
     "Clock": "_revl_Clock",
+    "SessionOwner": "_revl_SessionOwner",
+    "set_session_owner": "_revl_set_session_owner",
+    "clear_session_owner": "_revl_clear_session_owner",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
 
@@ -2252,6 +2255,7 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
     out.add(1, "# need a runtime.")
     out.add(1, "from cordis import Context")
     out.add(0)
+    uses_abort = _lifecycle_uses_abort(test)
     out.add(1, "async def _run():")
     out.add(2, "root = Context()")
     if _lifecycle_uses_clock(test):
@@ -2261,6 +2265,14 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
         out.add(2, "_revl_Clock.reset()")
     out.add(2, "events = []")
     out.add(2, "_revl_fibers = {}")
+    if uses_abort:
+        # item 377: register a 245 session-commit owner BEFORE any component
+        # loads, so every activation frame joins its live-frame registry and an
+        # `abort` step can mark them aborting (the exact seam `Session.abort`
+        # drives, docs/design/245-session-commit.md). Cleared in `finally`, so a
+        # later lifecycle test in the same file gets the pre-245 world back.
+        out.add(2, "_revl_owner = _revl_SessionOwner()")
+        out.add(2, "_revl_set_session_owner(_revl_owner)")
     out.add(2, "_revl_set_trace(events.append)")
     out.add(2, "try:")
     out.add(3, "baseline = _revl_residue(root)")
@@ -2271,6 +2283,8 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
         _lifecycle_step(out, 3, step, where)
     out.add(2, "finally:")
     out.add(3, "_revl_set_trace(None)")
+    if uses_abort:
+        out.add(3, "_revl_clear_session_owner()")
     out.add(3, "for fiber in reversed(list(_revl_fibers.values())):")
     out.add(4, "try:")
     out.add(5, "await fiber.dispose()")
@@ -2308,6 +2322,27 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         # statement observes it (docs/time-coeffect.md §advance).
         out.add(indent, f"_revl_Clock.advance({int(step['ms'])})")
         out.add(indent, "await _revl_settle()")
+    elif kind == "abort":
+        # item 377 (F-H1.7): drive the enclosing session frame's 245 abort,
+        # mirroring `revl.mcp.session.Session.abort` exactly — mark every live
+        # frame aborting (so its teardown reverts rather than commits), replay
+        # the witnessed inverses by disposing LIFO, then finalize. The witnessed
+        # mutations revert and the deferral queue is dropped, so the workspace is
+        # left byte-identical to before (docs/design/245-session-commit.md).
+        out.add(indent, "_revl_owner.begin_abort()   # mark frames abort, drop queue")
+        out.add(indent, "for _fiber in reversed(list(_revl_fibers.values())):")
+        out.add(indent + 1, "try:")
+        out.add(indent + 2, "await _fiber.dispose()   # replay inverses")
+        out.add(indent + 1, "except Exception:")
+        out.add(indent + 2, "pass")
+        out.add(indent, "_revl_fibers.clear()")
+        out.add(indent, "_revl_owner.finalize_abort()")
+        # the aborted session is over; a fresh owner means any component loaded
+        # after the abort is a clean new session (Session.abort resets), never
+        # inheriting the aborted verdict.
+        out.add(indent, "_revl_owner = _revl_SessionOwner()")
+        out.add(indent, "_revl_set_session_owner(_revl_owner)")
+        out.add(indent, "await _revl_settle()")
     elif kind == "assert_no_residue":
         out.add(indent, f"_revl_no_residue(root, baseline, events, {where!r})")
     elif kind == "assert":
@@ -2315,6 +2350,13 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         out.add(indent, f"assert {rendered}, {where + ': assertion failed'!r}")
     else:  # pragma: no cover — the lowerer emits nothing else
         raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
+
+
+def _lifecycle_uses_abort(test: dict) -> bool:
+    """True iff a lifecycle test drives a session abort (an `abort` step, item
+    377). Only such a test registers the 245 session-commit owner and imports
+    its symbols — an abort-free lifecycle test stays byte-identical to before."""
+    return any(step.get("step") == "abort" for step in test.get("body") or [])
 
 
 def _lifecycle_uses_clock(test: dict) -> bool:
@@ -2790,6 +2832,11 @@ def emit(ir: dict) -> str:
         # clock coeffect, so `Clock` is imported (for `advance`/`reset`) only
         # then — a timer-free document's output is unchanged.
         | ({"Clock"} if any(_lifecycle_uses_clock(t) for t in lifecycle) else set())
+        # item 377: only a lifecycle test with an `abort` step drives the 245
+        # session-commit owner (`begin_abort`/`finalize_abort`), so the owner
+        # symbols are imported only then — an abort-free document is unchanged.
+        | ({"SessionOwner", "set_session_owner", "clear_session_owner"}
+           if any(_lifecycle_uses_abort(t) for t in lifecycle) else set())
         # item 167: a routed require resolves its worker realms by label, so the
         # emitted router needs the runtime's realm-label registry.
         | ({"realm_label"} if any(c.get("routes") for c in components) else set())
