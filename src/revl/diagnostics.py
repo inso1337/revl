@@ -202,8 +202,15 @@ def obligations(holes: list[dict]) -> dict:
 
 
 def report(error: RevlError) -> dict:
-    """A failed compile as an agent-consumable document."""
-    return {"ok": False, "diagnostics": [classify(error)]}
+    """A failed compile as an agent-consumable document.
+
+    A multi-refusal compile raises a `RevlErrors` carrier (item 386) whose
+    `.errors` holds every collected refusal; map `classify` over the list. A
+    single `RevlError` (no `.errors`) still yields a one-element list, so every
+    existing single-error consumer is unchanged.
+    """
+    errors = getattr(error, "errors", None) or [error]
+    return {"ok": False, "diagnostics": [classify(e) for e in errors]}
 
 
 def ok(**payload) -> dict:
