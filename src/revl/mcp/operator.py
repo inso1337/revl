@@ -66,9 +66,10 @@ TOOL_VERB = {
     # gates who may say yes to an irreversible crossing, in the same profile
     # grammar as `commit` — an operator without it cannot launder authority
     # through the prompt (docs/design/246-auto-approve.md, Decision 4). Its
-    # `_targets` branch resolves the presented ticket hash to the crossing's
-    # component, so a subject-scoped `may approve on payments` grant is usable
-    # while other components are live.
+    # `_targets` branch resolves the presented ticket hash — or an item-344
+    # standing grant's capability — to the crossing's component, so a subject-
+    # scoped `may approve on payments` grant is usable while other components are
+    # live.
     "revl_approve": "approve",
 }
 
@@ -395,30 +396,45 @@ def _targets(verb: str, session, arguments: dict) \
     if verb == "restore":
         return _snapshot_targets(arguments.get("snapshot"))
     if verb == "approve":
-        return _approve_targets(session, arguments.get("hash"))
+        return _approve_targets(session, arguments)
     # unload / edit / snapshot / undo operate on the whole running composition
     return _live_targets(ir)
 
 
-def _approve_targets(session, ticket_hash) \
+def _approve_targets(session, arguments: dict) \
         -> list[tuple[str, frozenset[str]]] | None:
-    """A `revl_approve`'s target: the component the presented ticket names,
-    resolved against the session's outstanding-ticket table WITHOUT running
-    anything (the same resolve-without-running pattern `_snapshot_targets` uses
-    for `restore`). An unknown hash is undecidable here — the handler will refuse
-    it by the outstanding-ticket table before minting anything, so gating defers
-    (None) and does not spuriously scope a hash that will never be honoured. A
-    known hash scopes to the crossing component and its realms, so a subject-
-    scoped `may approve on payments` grant is not defeated by other live
-    components (Decision 2's approve branch)."""
-    tickets = getattr(session, "_tickets", None) or {}
-    ticket = tickets.get(ticket_hash)
-    if ticket is None:
-        return None
+    """A `revl_approve`'s target: the crossing component the approval names,
+    resolved WITHOUT running anything (the same resolve-without-running pattern
+    `_snapshot_targets` uses for `restore`). A ticket `hash` resolves against the
+    session's outstanding-ticket table; a proactive item-344 `capability` grant
+    resolves against the live class map. Either way the target scopes to the
+    crossing component and its realms, so a subject-scoped `may approve on
+    payments` grant is not defeated by other live components (Decision 2's
+    approve branch). Undecidable inputs — an unknown hash, or a capability that
+    resolves to more than one component — defer (None): the handler refuses them
+    by the outstanding-ticket table / the ambiguity guard before minting
+    anything, so gating never spuriously scopes an input that will not be
+    honoured."""
     from ..policy import component_realms  # noqa: PLC0415 — read-only reuse
-    name = ticket.get("component")
+    ticket_hash = arguments.get("hash")
+    tickets = getattr(session, "_tickets", None) or {}
+    ticket = tickets.get(ticket_hash) if ticket_hash else None
+    name = None
+    if ticket is not None:
+        name = ticket.get("component")
+    elif arguments.get("capability") is not None:
+        # item 344: a proactive capability grant — scope to its crossing
+        # component when the capability resolves to exactly one, else defer.
+        class_map = getattr(session, "_class_map", None)
+        if class_map is not None:
+            resolved = class_map.crossings_for_capability(arguments["capability"])
+            components = {t["component"] for t in resolved}
+            if len(components) == 1:
+                name = next(iter(components))
+    if name is None:
+        return None  # unknown hash / ambiguous capability — handler refuses it
     manifest = (session.ir or {}).get("manifest") or {}
-    realms = component_realms(manifest, name) if name else frozenset()
+    realms = component_realms(manifest, name)
     return [(name or WHOLE, frozenset({name or WHOLE}) | frozenset(realms))]
 
 

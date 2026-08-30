@@ -213,6 +213,31 @@ class ClassMap:
             return None
         return {**reach, "component": provider, "key": key, "method": method}
 
+    def crossings_for_capability(self, capability: str) -> list[dict]:
+        """Every LIVE class-(c) crossing whose reach capability set includes
+        `capability`, deduplicated by (component, reach-closure candidate hash).
+        The standing-grant path (roadmap item 344, fork b) reads this to mint a
+        capability-scoped grant against the semantic identity of the crossing —
+        not one ticket hash — and the operator verb gate reads it to scope the
+        `approve` verb when a grant is minted proactively (no outstanding
+        ticket). A capability reachable only via distinct closures yields one
+        entry per closure, so a proactive mint over an ambiguous capability is
+        visible to the caller as more than one target."""
+        seen: dict = {}
+        for sid, reach in self._reach.items():
+            if reach["class"] != "c":
+                continue
+            caps = reach["capabilities"]
+            if capability not in caps:
+                continue
+            component = self.index.scopes[sid]["component"]
+            chash = self.candidate_hash(reach["closureComponents"])
+            key = (component, chash)
+            if key not in seen:
+                seen[key] = {"component": component, "candidateHash": chash,
+                             "capabilities": sorted(caps)}
+        return list(seen.values())
+
     def activation_reaches(self) -> list[dict]:
         """Every component's activation-body reach, in load order. The activation
         gate reads this so a candidate whose activation body reaches a class-(c)
