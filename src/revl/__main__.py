@@ -311,7 +311,11 @@ def _run_audit(args, ir: dict) -> int:
     manifest = ir.get("manifest") or {}
     declared_externs = [
         {"name": ext["name"], "class": ext.get("class"),
-         "backends": sorted((ext.get("bodies") or {}).keys())}
+         "backends": sorted((ext.get("bodies") or {}).keys()),
+         # item 373: carry the reach onto the audit extern entry so the surface
+         # can name what a crossing is bounded to. Absent unless declared, so the
+         # `--json` audit of every existing composition is byte-identical.
+         **({"reach": ext["reach"]} if ext.get("reach") else {})}
         for ext in ir.get("externs") or []
     ]
     if args.json:
@@ -405,7 +409,15 @@ def _run_audit(args, ir: dict) -> int:
     if declared_externs:
         print("\nexterns (verbatim host code — unchecked inside, typed at the boundary):")
         for ext in declared_externs:
-            print(f"  {ext['name']}  [{ext['class']}]  backends: "
+            # item 373: name the REACH between the classification and the
+            # backends, so a confined crossing is visibly distinct from an
+            # unconfined one (`engine_run [emission] reach: confined(cwd)
+            # backends: py, ts`). A bare emission carries no reach and prints
+            # exactly as before — byte-compatible.
+            reach = ext.get("reach")
+            reach_str = (f"  reach: {reach['kind']}({reach['target']})"
+                         if reach else "")
+            print(f"  {ext['name']}  [{ext['class']}]{reach_str}  backends: "
                   f"{', '.join(ext['backends']) or '—'}")
     if distribution:
         print("\ndistributability (interop-bridge §4: which services may cross a process seam):")
