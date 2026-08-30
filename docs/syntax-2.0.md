@@ -414,6 +414,43 @@ extern emission fn send(sock: Socket, data: Bytes)
   place full fluency is wanted is exactly the place checking was never
   promised.
 
+### 6.0 `config` — static configuration for a document-global extern
+
+A document-global extern is context-free by construction: it has no component,
+so it cannot `require` a service to read configuration, and the historical
+workaround was ambient environment variables (the wart recorded in
+docs/design/378-sync-extern-service-reach.md, roadmap item 379). An extern that
+needs *static* configuration — provider identity, an endpoint, a model name —
+declares a typed `config` block, the same shape a component carries, resolved
+once at plug time from the composition `--config` map and bound in the host body
+as `_revl_config`:
+
+```revl
+extern emission fn raw_model_post(body: Str) -> Str
+  config { provider: Str, endpoint: Str, model: Str = "default" }
+  = @py {
+      return post(_revl_config["provider"], _revl_config["endpoint"], _revl_config["model"], body)
+  }
+```
+
+- The schema is checked like a component's: a non-`null` default must fit its
+  declared field type, and a required field (no default) missing at load is
+  refused at admission — the same `--config` preflight a component gets, never a
+  runtime `KeyError` inside the host body.
+- The value is resolved **once at plug**, so a config extern gets a static
+  identity, not a live service. A mechanism that must observe a service whose
+  state changes at runtime (a live provider swap) is not a config extern — it is
+  a `provide` method on a component that `requires` the service (option (c) in
+  the design note). Config is static data; a live reach needs a home component.
+- `config` touches neither color nor capability: a sync config extern stays
+  sync (A1 is untouched — config is data, not an async op), and it reaches no
+  service, so it needs no capability grant. A *secret* carried in config is
+  governed by the untrusted-author admission profile
+  (docs/design/329-untrusted-author-profile.md), unchanged: a model-authored
+  source that `no_extern` refuses still cannot declare one.
+- An extern with no `config` block is byte-identical across parse, IR, and every
+  emitted tier — the clause is purely additive.
+
 ### 6.1 `acquire` and the two undos — the durable-resource discipline
 
 An `acquire` extern that opens a durable host resource — a socket, a pool, a
@@ -709,7 +746,9 @@ decl        := ['pub'] (typedecl | fndecl | service | component | extern)
 typedecl    := 'type' IDENT generics? '=' (record | variant ('|' variant)*)
 fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type] block
 component   := (unchanged from 1.x) + blockeffect + fail
-extern      := 'extern' class 'fn' sig ['undo' expr] ['compensate' expr] hostbody+
+extern      := 'extern' class 'fn' sig ['undo' expr] ['compensate' expr]
+                 ['config' '{' configfield (',' configfield)* '}'] hostbody+
+configfield := IDENT ':' type ['=' literal]         -- same as a component's
 hostbody    := '=' '@' IDENT '{' <verbatim host text, brace-balanced> '}'
                  -- brace-balancing skips host strings, char/rune literals and
                  -- block comments, so a `}` inside `"}"` or `/* } */` does not
