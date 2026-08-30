@@ -225,6 +225,8 @@ def test_initialize_and_tools_list():
                           "revl_commit", "revl_commit_confirm", "revl_abort",
                           # the auto-approve policy (docs/design/246-auto-approve.md)
                           "revl_approve",
+                          # early revocation of a standing grant (roadmap item 379)
+                          "revl_revoke",
                           # generation history + operator undo (docs/generation-history.md)
                           "revl_undo",
                           # component leases: the multi-agent workspace (item 61)
