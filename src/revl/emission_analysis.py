@@ -302,10 +302,15 @@ class _EmissionEvidence:
             if decl.classification == "emission"
         }
         # async externs (roadmap item 80): name -> decl, for the v1 coloring
-        # check to locate an async extern a body reaches (async-extern.md §3)
+        # check to locate an async extern a body reaches (async-extern.md §3).
+        # item 388: a poly extern (`fn|async`) is pre-seeded as the async form
+        # here too, so an awaited call site resolves during lowering and an A1
+        # diagnostic names it as an "extern" (the ordering wrinkle, design
+        # §"honest hard part" #3). Its sync clone is split off with the async
+        # membership cleared in the post-pass.
         self.async_externs = {
             decl.name: decl for decl in program.externs
-            if getattr(decl, "async_", False)
+            if getattr(decl, "async_", False) or getattr(decl, "colour_poly", False)
         }
 
     def locate(self, decl) -> tuple[str | None, int | None]:
