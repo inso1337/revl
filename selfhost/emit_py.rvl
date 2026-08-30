@@ -598,6 +598,15 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
   if (step == "assert") {
     return emit_assert(value_field(node, "expr"), indent)
   }
+  // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
+  if (step == "break") {
+    out = out.push(line(indent, "break"))
+    return out
+  }
+  if (step == "continue") {
+    out = out.push(line(indent, "continue"))
+    return out
+  }
   out = out.push(line(indent, `<<UNSUPPORTED-STEP:${step}>>`))
   return out
 }

@@ -16,3 +16,42 @@ fn arrows(xs: List[Int]) -> List[Int] {
   let f = (n: Int) => n + 1
   return xs
 }
+
+// item 379 / 391 (self-host port): `break`/`continue` in `while` and `for`,
+// nested under `if`, with a nested-loop `break` targeting the innermost loop.
+fn find_first(xs: List[Int], target: Int) -> Int {
+  var idx = 0
+  for (x of xs) {
+    if (x == target) { break }
+    idx += 1
+  }
+  return idx
+}
+fn sum_positive(xs: List[Int]) -> Int {
+  var total = 0
+  for (x of xs) {
+    if (x < 0) { break }
+    if (x == 0) { continue }
+    total += x
+  }
+  return total
+}
+fn count_skips(n: Int) -> Int {
+  var i = n
+  var steps = 0
+  while (i > 0) {
+    i -= 1
+    if (i == 3) { continue }
+    steps += 1
+  }
+  return steps
+}
+fn first_hit(rows: List[List[Int]], t: Int) -> Int {
+  var hits = 0
+  for (row of rows) {
+    for (v of row) {
+      if (v == t) { hits += 1; break }
+    }
+  }
+  return hits
+}

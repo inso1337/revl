@@ -4227,6 +4227,16 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     return mk_one("{\"step\":\"assert\",\"expr\":".concat(lir_expr(r.e, env)).concat("}"),
                   env, muts, r.i)
   }
+  // item 379 / 391: bare loop control. Additive step kinds, no payload but a
+  // `line` for diagnostics (the reference `_lower_pure_stmt` carries `line` on
+  // break/continue, unlike the sibling while/for/if steps). The parser refused a
+  // `break` outside a loop, so lowering only records it; teardown is untouched
+  // (frame-neutral, docs/design/379-break-continue.md Decision 1).
+  if (t.kind == "kw" && (t.text == "break" || t.text == "continue")) {
+    let js = "{\"step\":".concat(jstr(t.text)).concat(",\"line\":")
+      .concat(t.line.to_str()).concat("}")
+    return mk_one(js, env, muts, i + 1)
+  }
   if (t.kind == "kw" && t.text == "if") {
     let c = expr_at(ts, i + 1)
     if (is_bad(c.e) || c.i <= i + 1 || !atk(ts, c.i, "{")) { return mk_one("", env, muts, hi) }

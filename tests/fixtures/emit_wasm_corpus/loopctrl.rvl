@@ -1,0 +1,71 @@
+// wasm Path B — `break`/`continue` (item 379, self-host port item 391).
+//
+// wasm has no native break/continue, so a loop that carries either gets NAMED
+// labels — `(block $revl_brk_N (loop $revl_top_N ...))` — which a `br` resolves
+// regardless of how many `if` labels it sits under; anonymous depth arithmetic
+// would misresolve a `break` written one `if` deep. `break` is `(br
+// $revl_brk_N)`; a `while`'s `continue` re-tests at the head, `(br
+// $revl_top_N)`. A `for`'s `continue` must NOT branch to the head (that skips
+// the `idx += 1` after the body), so the body is wrapped in an inner `(block
+// $revl_cnt_N ...)` with the increment after it and `continue` is `(br
+// $revl_cnt_N)`. A loop with neither keeps the anonymous skeleton, so every
+// existing golden stays byte-stable. The break-label id is a SEPARATE counter
+// from the `for`-cursor id, so they diverge under nesting.
+
+// while + break, one `if` deep: the loop carries a break, so named labels.
+fn count_to_limit(n: Int, limit: Int) -> Int {
+  var i = 0
+  while (i < n) {
+    if (i >= limit) { break }
+    i = i + 1
+  }
+  return i
+}
+
+// while + continue: `continue` re-tests the head, skipping the rest of the body.
+fn count_odds(n: Int) -> Int {
+  var i = 0
+  var odds = 0
+  while (i < n) {
+    i = i + 1
+    if (i % 2 == 0) { continue }
+    odds = odds + 1
+  }
+  return odds
+}
+
+// for + continue: the increment must still run, so `continue` falls out of the
+// inner `$revl_cnt` block INTO the idx bump, not back to the loop head.
+fn sum_nonneg(xs: List[Int]) -> Int {
+  var total = 0
+  for (x of xs) {
+    if (x < 0) { continue }
+    total = total + x
+  }
+  return total
+}
+
+// for + break, plus a nested `for` whose inner break targets the INNER loop
+// only: the outer `for` carries no control at its own level (anonymous skeleton,
+// cursor id 1) while the inner one gets named labels (cursor id 2, break-label
+// id 1) — the two counters diverge.
+fn first_match(rows: List[List[Int]], t: Int) -> Int {
+  var hits = 0
+  for (row of rows) {
+    for (v of row) {
+      if (v == t) { hits = hits + 1; break }
+    }
+  }
+  return hits
+}
+
+// while (true) with no break: the fn ends in a non-terminating loop, so the
+// terminates-check (`diverges`) must add the trailing stack-polymorphic
+// `unreachable` the non-unit result needs (C4 / bug 398). No labels: no break.
+fn spin(n: Int) -> Int {
+  var i = 0
+  while (true) {
+    i = i + 1
+    if (i > n) { return i }
+  }
+}

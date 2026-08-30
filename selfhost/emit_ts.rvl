@@ -1237,6 +1237,9 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
     let r = expr(value_field(node, "expr"), counter, a)
     return { lines: [`${pad}${r.text}`], counter: r.counter }
   }
+  // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
+  if (step == "break") { return { lines: [`${pad}break`], counter: counter } }
+  if (step == "continue") { return { lines: [`${pad}continue`], counter: counter } }
   return { lines: [`${pad}<<UNSUPPORTED-STEP:${step}>>`], counter: counter }
 }
 
