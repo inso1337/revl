@@ -76,6 +76,12 @@ export function emitFixtures(): void {
   // the router/method-witnessed fixtures above.
   const emitTsWitnessedFs = emitFixture
   emitTsWitnessedFs('ts_witnessed_fs.ir.json', 'ts_witnessed_fs.ts')
+  // item 131: explicit async/await EFFECT composition — the LIFO teardown
+  // ACROSS an in-flight `effect await` acquisition (async_effect_composition.
+  // test.ts). Carries no `test` blocks, so the alias keeps the pair off
+  // `generated_coverage.test.ts`'s scan, like the fixtures above.
+  const emitAsyncEffectComposition = emitFixture
+  emitAsyncEffectComposition('async_effect_composition.ir.json', 'async_effect_composition.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone
