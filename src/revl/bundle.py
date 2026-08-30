@@ -301,6 +301,26 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
             sources[0], 0,
             f"composition has {len(holes)} open hole(s), it is a draft, not "
             "admitted, and cannot be bundled (fill the holes, docs/holes.md)")
+    # item 396 stage 4 (interim clean refusal): `revl bundle` copies sources
+    # flat by basename (below) and `revl verify` recompiles the bundled source,
+    # so a root-relative external host-body file would not travel with the
+    # bundle and verify could not reproduce it. Refuse cleanly, naming the gap,
+    # rather than emit a bundle that cannot verify. Full body-file bundle
+    # support (carrying the files under their root-relative paths and
+    # re-hashing them in verify) is the follow-up.
+    file_externs = sorted(
+        e.get("name") for e in (ir.get("externs") or []) if e.get("body_files"))
+    if file_externs:
+        raise RevlError(
+            sources[0], 0,
+            "cannot bundle a composition whose extern splices an external "
+            "host-body file (`= @backend file \"path\"`): "
+            f"{', '.join(file_externs)}",
+            hint="`revl bundle` copies sources flat by basename, so a "
+                 "root-relative body file would not travel with the bundle and "
+                 "`revl verify` could not reproduce it. Inline the body "
+                 "(`= @backend { ... }`) to bundle for now; carrying body files "
+                 "through the bundle is the item 396 stage 4 follow-up.")
 
     norm_ir = _canonical_ir(ir)
     ir_text = _ir_text(norm_ir)
