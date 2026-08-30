@@ -213,3 +213,50 @@ func TestFrameEnumeratesEveryPerCallCrossing(t *testing.T) {
 		t.Fatalf("commit surfaced residue over discharged crossings: %v", got)
 	}
 }
+
+// 5. item 369: OVERLAPPING per-tool-call ops must replay LIFO on abort. Tests
+//    1–4 above use DISJOINT paths, so FIFO and LIFO drain are indistinguishable
+//    — which is how the go tier's FIFO commit() drain (`for _, d := range
+//    deferred`) hid. Two per-call `mv` ops on a shared path expose it:
+//    `mv a b ; mv b c ; abort` must land on `a` (LIFO: unmove(c->b) then
+//    unmove(b->a)). A FIFO drain replays unmove(b->a) first (a no-op — `b` is
+//    absent), then unmove(c->b), leaving the WRONG `b`.
+func TestOverlappingMovesRevertLIFOOnAbort(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.txt")
+	b := filepath.Join(dir, "b.txt")
+	c := filepath.Join(dir, "c.txt")
+	if err := os.WriteFile(a, []byte("A"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	_, f, ops := loadAgentWithOps(t)
+	frame := soleFrame(t)
+
+	ops.Mv(a, b)
+	ops.Mv(b, c)
+	if _, err := os.Stat(c); err != nil {
+		t.Fatalf("mv chain did not land on c: %v", err)
+	}
+
+	frame.Abort()
+	f.Dispose()
+	waitGone(f)
+
+	// LIFO abort must restore the ORIGINAL name a.txt, with no b/c residue.
+	if _, err := os.Stat(a); err != nil {
+		t.Fatalf("abort landed on the wrong name (FIFO deferred replay): a.txt missing: %v", err)
+	}
+	if data, err := os.ReadFile(a); err != nil || string(data) != "A" {
+		t.Fatalf("a.txt content wrong after abort: %q err=%v", string(data), err)
+	}
+	if _, err := os.Stat(b); !os.IsNotExist(err) {
+		t.Fatalf("abort left residue at b.txt")
+	}
+	if _, err := os.Stat(c); !os.IsNotExist(err) {
+		t.Fatalf("abort left residue at c.txt")
+	}
+	if got := frame.Residue(); len(got) != 0 {
+		t.Fatalf("abort left teardown residue: %v", got)
+	}
+}
