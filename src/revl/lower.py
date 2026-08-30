@@ -16,6 +16,7 @@ from __future__ import annotations
 import dataclasses
 import keyword
 import os
+import re
 
 from . import holes
 from .errors import RevlError, RevlErrors
@@ -1790,6 +1791,83 @@ def _check_deferred_extern(decl, filename: str) -> None:
             code="G4", category="deferred")
 
 
+def _check_poly_extern(decl, filename: str) -> None:
+    """The `fn|async` (caller-decided colour) checker obligations
+    (docs/design/388-caller-decided-extern-colour.md, option a, stages 2 and 7).
+
+    A poly extern is one authored host body whose colour is decided at the CALL
+    SITE — a sync call site clones it to a `def`/`function`, an async call site
+    to an `async def`/`async function`. That is sound only for a colour-agnostic
+    (await-free) body, which the compiler cannot verify inside opaque host text
+    (G8, item 24; the body is not sandboxed, docs/design/329-untrusted-author-
+    profile.md). So these are the honest-by-review envelope plus one cheap lint:
+
+    1. `fn|async` only on an `emission`. The colour it wears is the async/sync
+       emission colour; `pure`/`acquire`/`witnessed` have no async story (they
+       run on pure or synchronous teardown paths), exactly as a fixed `async`
+       extern is emission-only (lower.py async-validity block).
+    2. `fn|async` and a fixed `async` are mutually exclusive. A fixed `async`
+       already picks the colour, so pairing it with the "either colour" marker is
+       contradictory.
+    3. `fn|async` and `deferred` are mutually exclusive. A deferred emission
+       returns Unit at the call and fires later, so there is no call-site colour
+       to decide (the same reason `deferred` and `async` are exclusive).
+    4. A poly extern cannot declare `compensate`, exactly as a fixed `async`
+       extern cannot (the compensation seam is synchronous on every tier).
+    5. The `await`-keyword lint: refuse a `fn|async` `@py`/`@ts` body whose text
+       contains the tier's suspend keyword (`await`). A colour-agnostic body
+       cannot suspend, so its sync clone would be invalid host code (an `await`
+       outside an `async def` is a Python SyntaxError). Stated honestly as a LINT,
+       not a proof: a body can suspend without the keyword (an event-loop
+       `run_until_complete`), and the keyword can appear inside a string literal.
+    """
+    if decl.classification != "emission":
+        raise RevlError(
+            filename, decl.line,
+            f"`fn|async` (caller-decided colour) is only valid on an `emission` "
+            f"extern; `{decl.name}` is `{decl.classification}`",
+            hint="the marker chooses the sync-vs-async EMISSION colour at the call "
+                 "site; a `pure` extern is callable from pure positions with no "
+                 "async story, and an `acquire`/`witnessed` extern runs on the "
+                 "synchronous teardown path (docs/design/388-caller-decided-"
+                 "extern-colour.md)")
+    if decl.async_:
+        raise RevlError(
+            filename, decl.line,
+            f"extern `{decl.name}` is both `async` and `fn|async` — a fixed "
+            f"`async` already picks the colour",
+            hint="drop the `async` modifier to let the call site decide the "
+                 "colour, or drop `|async` to fix it async (item 388)")
+    if decl.deferred:
+        raise RevlError(
+            filename, decl.line,
+            f"a `fn|async` emission cannot be `deferred`; `{decl.name}` is both",
+            hint="a deferred emission returns Unit at the call and fires at the "
+                 "session commit, so there is no call-site colour to decide "
+                 "(item 388)")
+    if decl.compensate is not None:
+        raise RevlError(
+            filename, decl.line,
+            f"a `fn|async` emission cannot declare `compensate`; `{decl.name}` "
+            f"declares both",
+            hint="the compensation seam is synchronous on every tier, exactly as "
+                 "for a fixed `async` extern (item 388)")
+    for body in decl.bodies:
+        # word-boundary match so `await` the keyword is caught while an
+        # identifier like `awaited_result` or `no_await` is not.
+        if re.search(r"\bawait\b", body.text):
+            raise RevlError(
+                filename, body.line,
+                f"the `fn|async` extern `{decl.name}` has an `@{body.backend}` "
+                f"body containing `await`, but a caller-decided-colour body must "
+                f"be colour-agnostic (await-free)",
+                hint="a `fn|async` body is cloned into a sync `def`/`function` at "
+                     "sync call sites, where an `await` is invalid — author the "
+                     "suspending work as a fixed `async` extern instead, or (once "
+                     "item 373 lands) share only the await-free span through a "
+                     "host-body fragment (item 388)")
+
+
 def _check_deferred_not_in_teardown(program, filename: str) -> None:
     """Rule: deferred emissions are refused in teardown positions — the `undo`
     and `compensate` slots (docs/design/245-session-commit.md, Decision 2).
@@ -2127,6 +2205,21 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
         # enforced here, before the flag reaches the IR.
         if decl.deferred:
             _check_deferred_extern(decl, filename)
+        # item 388: the caller-decided colour marker `fn|async`. A poly extern
+        # fixes no colour; lowering splits it into concrete sync/async clones per
+        # call-site colour (below, in the component-lowering post-pass). Its
+        # validity envelope mirrors the `async` one directly above, because a poly
+        # extern IS an emission that may be emitted async: emission-only, not
+        # `deferred`, not ALSO a fixed `async` (the two spellings are mutually
+        # exclusive — a fixed `async` already picks the colour), and no
+        # `compensate` (the compensation seam is synchronous, exactly as for a
+        # fixed `async` extern). Plus the cheap per-backend `await`-keyword lint:
+        # a colour-agnostic body cannot suspend, so an `await` in a `fn|async`
+        # host body is refused. This is a LINT, not a proof — colour-agnosticism
+        # is unprovable inside opaque host text (G8, item 24) — but it catches the
+        # common authoring mistake at compile time.
+        if decl.colour_poly:
+            _check_poly_extern(decl, filename)
         # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
         # validate the typed `config` schema the same way a component's config is
         # validated (lower.py:4681 default-type compatibility). Config is STATIC
@@ -2189,7 +2282,20 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             # additive async flag (docs/design/async-extern.md §4), mirroring
             # the service-method spelling at lower.py:2583. Absent means sync;
             # `ir_version` stays 3 (confirmed human decision, §4).
-            **({"async": True} if decl.async_ else {}),
+            #
+            # item 388: a poly extern (`fn|async`) is PRE-SEEDED here as the async
+            # form (`async: True`) so awaited call sites resolve during the
+            # coloring fixpoint and component lowering (the ordering wrinkle,
+            # design §"honest hard part" #3). `colour_poly: True` marks the entry
+            # for `_finalize_poly_externs`, the post-pass that — after every
+            # component has recorded which colours its call sites requested —
+            # keeps this entry only if an async call site exists, splits off a
+            # `_revl_sync` clone only if a sync call site exists, and PRUNES the
+            # unused colour. The marker is stripped there, so the final IR carries
+            # only concrete clones and a poly extern nobody calls emits nothing
+            # (additive, the item-342 property extended to externs).
+            **({"async": True, "colour_poly": True} if decl.colour_poly
+               else {"async": True} if decl.async_ else {}),
             # additive deferred flag (docs/design/245-session-commit.md,
             # Decision 2): class (b), the deferrable emission. Absent means the
             # emission fires at the call (class c). Only an `emission` extern may
@@ -3675,6 +3781,16 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename, types)
+    # item 388: the poly externs (`fn|async`), pre-seeded above as async IR
+    # entries. `extern_colour_instances` is the shared registry each provide
+    # method fills with the colour its call sites of a poly extern requested (the
+    # analog of `sync_monomorphs`); `_finalize_poly_externs` reads it after the
+    # component loop to split/prune each poly entry into its concrete clones.
+    # Empty unless the program declares a poly extern, so every downstream section
+    # is byte-identical without one.
+    poly_extern_names: set = {
+        d.name for d in program.externs if getattr(d, "colour_poly", False)}
+    extern_colour_instances: dict = {}
     # item 246: the declaration-owned approval facts, stashed on the type table so
     # `_lower_emit_step`'s per-crossing obligation can read them with no signature
     # change. Empty `required` set unless an extern declared `requires approval`,
@@ -3833,6 +3949,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                                             emitting_caps, emission_evidence, spawn_reg,
                                             async_colored, witnessed_externs,
                                             colour_polymorphic, sync_monomorphs,
+                                            poly_extern_names, extern_colour_instances,
                                             errors=errors)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
@@ -3884,6 +4001,16 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # site registers none, so `fns` (and every downstream section) is
     # byte-identical to before.
     _collect(_synthesize_sync_monomorphs, fns, sync_monomorphs)
+
+    # item 388: caller-decided extern colour. Now that every provide method has
+    # recorded which colours its poly-extern call sites requested, split each
+    # pre-seeded poly extern into its concrete sync/async clones and PRUNE the
+    # colour no call site used (the eager-expand-and-prune resolution of the
+    # ordering wrinkle). Additive — no poly extern means `poly_extern_names` is
+    # empty and `externs` is byte-identical.
+    if poly_extern_names:
+        _collect(_finalize_poly_externs, externs, poly_extern_names,
+                 extern_colour_instances)
 
     # Taint/provenance verdict (item 249, Slice A): refuse any untrusted-origin
     # value that reaches a `Trusted[T]` sink without a declassifier on its path
@@ -5143,6 +5270,91 @@ def _monomorphize_sync_callback_calls(node, env) -> None:
             _monomorphize_sync_callback_calls(value, env)
 
 
+def _resolve_poly_extern_calls(node, env, is_async: bool) -> None:
+    """Caller-decided extern colour at a call site (item 388, stage 3 — the
+    EXTERN analog of `_monomorphize_sync_callback_calls`).
+
+    A poly extern (`fn|async`) is pre-seeded as the async form (its IR entry
+    carries `async: True`, named `engine_run`). Walk a provide-method body and,
+    at each call of a poly extern, record the enclosing method's colour into the
+    shared `env.extern_colour_instances` map so the post-pass knows which clones
+    to keep:
+
+    - An ASYNC method's call resolves to the async clone (the pre-seeded entry,
+      original name), left in place: it is in `async_externs`/`_PY_ASYNC_EXTERNS`,
+      so the existing name-keyed await machinery awaits it, which A1 permits
+      inside an async method.
+    - A SYNC method's call is rewritten to the `_revl_sync` clone name and the
+      sync colour recorded. The rewrite runs BEFORE the A1 admission (exactly
+      where item 342's monomorph hook runs), so the sync call site has already
+      cleared async membership — the sync clone is a concrete `def` not in the
+      async set, so A1 never fires and no `await` lands in the sync function.
+
+    Reuses `_monomorph_callee` for both lowered call shapes (`{kind: fn, name}`
+    and `{kind: call, callee: {kind: var, name}}`)."""
+    if isinstance(node, dict):
+        origin, set_name = _monomorph_callee(node)
+        if origin is not None and origin in env.poly_externs:
+            inst = env.extern_colour_instances.setdefault(
+                origin, {"sync": False, "async": False, "sync_name": None})
+            if is_async:
+                inst["async"] = True
+            else:
+                sync_name = inst["sync_name"] or _sync_monomorph_name(origin, env)
+                inst["sync"] = True
+                inst["sync_name"] = sync_name
+                set_name(sync_name)
+        for value in node.values():
+            _resolve_poly_extern_calls(value, env, is_async)
+    elif isinstance(node, list):
+        for value in node:
+            _resolve_poly_extern_calls(value, env, is_async)
+
+
+def _finalize_poly_externs(externs: list, poly_names: set,
+                           instances: dict) -> None:
+    """Materialize and prune the concrete clones of every poly extern (item 388,
+    stage 4 — the EXTERN analog of `_synthesize_sync_monomorphs`, plus the
+    eager-expand-and-PRUNE resolution of the ordering wrinkle).
+
+    Each poly extern was pre-seeded as one async IR entry (`colour_poly: True`).
+    After every component has recorded which colours its call sites requested
+    (`instances[name]`), rewrite that single entry into the concrete clones that
+    are actually used, IN PLACE so emission order is deterministic:
+
+    - async requested -> keep the pre-seeded entry as the async clone (original
+      name, `async: True`);
+    - sync requested  -> a deep-copied clone with `async` dropped and the
+      `_revl_sync` name the sync call sites were rewritten to;
+    - a colour NObody requested is PRUNED. A poly extern called in only one
+      colour emits exactly one clone (a sync-only program emits no async clone
+      and vice-versa); a poly extern nobody calls emits nothing at all (additive:
+      parser, IR, and every golden stay byte-identical without a poly extern).
+
+    The `colour_poly` marker is stripped from every surviving clone, so the final
+    IR carries only ordinary concrete extern entries the emitters already
+    understand."""
+    import copy
+
+    for name in poly_names:
+        idx = next((i for i, e in enumerate(externs)
+                    if e.get("name") == name and e.get("colour_poly")), None)
+        if idx is None:
+            continue
+        preseed = externs[idx]
+        preseed.pop("colour_poly", None)
+        inst = instances.get(name) or {}
+        replacement: list = []
+        if inst.get("async"):
+            replacement.append(preseed)          # keep as the async clone
+        if inst.get("sync"):
+            clone = copy.deepcopy(preseed)
+            clone["name"] = inst.get("sync_name") or f"{name}_revl_sync"
+            clone.pop("async", None)             # the sync clone is a blocking def
+            replacement.append(clone)
+        externs[idx:idx + 1] = replacement       # prune the unused colour
+
+
 def _synthesize_sync_monomorphs(fns: list, sync_monomorphs: dict) -> None:
     """Materialize the sync clones requested by item-342 call sites, appending
     each to `fns`. A clone is the origin fn with `async` dropped and every
@@ -5429,6 +5641,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      witnessed_externs: set | None = None,
                      colour_polymorphic: set | None = None,
                      sync_monomorphs: dict | None = None,
+                     poly_externs: set | None = None,
+                     extern_colour_instances: dict | None = None,
                      errors: list | None = None) -> dict:
     env = Env(comp, services, filename, types)
     env.emitting_fns = emitting_fns or set()
@@ -5448,6 +5662,14 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # sync call sites fill with monomorph requests (monomorph-name -> origin).
     env.colour_polymorphic = set(colour_polymorphic) if colour_polymorphic else set()
     env.sync_monomorphs = sync_monomorphs if sync_monomorphs is not None else {}
+    # item 388: the poly externs (`fn|async`) and the shared registry each
+    # provide method fills with the call-site colour it requested. `_resolve_poly
+    # _extern_calls` reads `poly_externs` to spot a poly-extern call and records
+    # into `extern_colour_instances`; `_finalize_poly_externs` reads it after the
+    # component loop. Empty unless the program declares a poly extern.
+    env.poly_externs = set(poly_externs) if poly_externs else set()
+    env.extern_colour_instances = (extern_colour_instances
+                                   if extern_colour_instances is not None else {})
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
     # instance-parametric components: the registry of spawn targets, edges,
     # templates and G4 spawn-boundary sites (docs/design-v2-instances.md)
@@ -6141,6 +6363,16 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # left untouched — item 92's coercion (loop stays async) is unchanged.
         if not decl.async_ and env.colour_polymorphic:
             _monomorphize_sync_callback_calls(mbody, env)
+
+        # item 388: caller-decided extern colour. Record the colour each
+        # poly-extern (`fn|async`) call site requests, and in a SYNC method
+        # rewrite the call to the extern's `_revl_sync` clone. Runs in BOTH
+        # colours, right beside the item-342 hook and BEFORE the A1 admission
+        # below: the sync rewrite clears the poly extern's async membership so a
+        # sync method calling it is not refused, while an async method's call
+        # stays at the pre-seeded async name and is awaited (admitted here).
+        if env.poly_externs:
+            _resolve_poly_extern_calls(mbody, env, bool(decl.async_))
 
         # async coloring (docs/design/async-extern.md §3): an async call is
         # admitted only inside a provide method whose service operation is
