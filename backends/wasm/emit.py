@@ -979,6 +979,13 @@ class _ComponentEmitter:
         self.v3._match_counter = 0
         self.v3._cdiv_counter = 0
         self.v3._loop_counter = 0
+        # item 379: label ids for loops that carry a `break`/`continue`
+        # (docs/design/379-break-continue.md). A SEPARATE counter from
+        # `_loop_counter` so it never renumbers `for` scratch temps — a program
+        # with no loop control flow keeps byte-identical `$for_*` locals and the
+        # anonymous `br 0`/`br 1` skeleton.
+        self.v3._brk_labels = 0
+        self.v3._loop_label_stack = []
         self.v3._for_temps = []
         self.v3._local_types = {}
         self.extra_locals = set()
@@ -1013,12 +1020,14 @@ class _ComponentEmitter:
         Save the activation function's rendering state across them."""
         return (self.extra_locals, self.func_uses_v3, self.v3._tmp,
                 self.v3._arrows, self.v3._arrow_counter, self.v3._match_counter,
-                self.v3._loop_counter, self.v3._for_temps, self.v3._local_types)
+                self.v3._loop_counter, self.v3._for_temps, self.v3._local_types,
+                self.v3._brk_labels, self.v3._loop_label_stack)
 
     def _restore_function_state(self, saved: tuple) -> None:
         (self.extra_locals, self.func_uses_v3, self.v3._tmp,
          self.v3._arrows, self.v3._arrow_counter, self.v3._match_counter,
-         self.v3._loop_counter, self.v3._for_temps, self.v3._local_types) = saved
+         self.v3._loop_counter, self.v3._for_temps, self.v3._local_types,
+         self.v3._brk_labels, self.v3._loop_label_stack) = saved
 
     def _to_v3(self, node: Any, scope: dict[str, str],
                types: dict[str, str | None], where: str) -> Any:
@@ -4674,6 +4683,35 @@ class _V3Emitter:
                                     f"for_idx_{self._loop_counter}"]
                 self._collect_locals(stmt.get("body") or [], acc)
 
+    # item 379 (docs/design/379-break-continue.md).
+    _LOOP_REGISTERING_STEPS = frozenset({
+        "effect", "let-effect", "emit", "timer", "approval", "spawn",
+    })
+
+    def _loop_control_targets(self, stmts: list, kinds: frozenset) -> bool:
+        """True when a step whose kind is in `kinds` (`break` and/or `continue`)
+        appears in `stmts` targeting the loop these are the body of — at any
+        statement depth, but not inside a nested `while`/`for`, which captures
+        its own control flow. Used both to decide whether a loop needs named
+        labels and (with `{"break"}`) to judge `while (true)` divergence."""
+        for stmt in stmts or []:
+            k = stmt.get("step")
+            if k in kinds:
+                return True
+            if k == "if":
+                if (self._loop_control_targets(stmt.get("then") or [], kinds)
+                        or self._loop_control_targets(stmt.get("else") or [], kinds)):
+                    return True
+        return False
+
+    def _guard_frame_neutral_loop(self, body, where: str) -> None:
+        for child in body or []:
+            if isinstance(child, dict) and child.get("step") in self._LOOP_REGISTERING_STEPS:
+                raise EmitError(
+                    f"{where}: frame-neutral loop invariant: a `{child['step']}` "
+                    "step inside a while/for body "
+                    "(docs/design/379-break-continue.md)")
+
     def _emit_stmts(self, stmts: list, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
         out: list[str] = []
         for stmt in stmts or []:
@@ -4744,20 +4782,55 @@ class _V3Emitter:
                 out.append("(i32.eqz)")
                 out.append("(if (then unreachable))")
             elif step == "while":
+                self._guard_frame_neutral_loop(stmt.get("body"), where)
                 cond = self._expr(stmt.get("cond"), scope, where, "Bool")
                 body_scope = _Scope(dict(scope.slots), dict(scope.types))
-                body_lines = self._emit_stmts(stmt.get("body") or [], body_scope, where, expected_return)
-                out.append("(block")
-                out.append("  (loop")
-                out.append("    " + cond.wat)
-                out.append("    (i32.eqz)")
-                out.append("    (br_if 1)")
-                out.extend("    " + line for line in body_lines)
-                out.append("    (br 0)")
-                out.append("  )")
-                out.append(")")
+                body = stmt.get("body") or []
+                # wasm has no native break/continue: a loop that carries either
+                # gets NAMED labels so a `br` resolves regardless of how many
+                # `if` labels it sits under (anonymous depth arithmetic would
+                # break under nesting). A loop with neither keeps the original
+                # anonymous skeleton, so every existing golden stays byte-stable.
+                if self._loop_control_targets(body, frozenset({"break", "continue"})):
+                    self._brk_labels += 1
+                    n = self._brk_labels
+                    brk, top = f"$revl_brk_{n}", f"$revl_top_{n}"
+                    self._loop_label_stack.append(("while", brk, top, None))
+                    body_lines = self._emit_stmts(body, body_scope, where, expected_return)
+                    self._loop_label_stack.pop()
+                    out.append(f"(block {brk}")
+                    out.append(f"  (loop {top}")
+                    out.append("    " + cond.wat)
+                    out.append("    (i32.eqz)")
+                    out.append(f"    (br_if {brk})")
+                    out.extend("    " + line for line in body_lines)
+                    out.append(f"    (br {top})")
+                    out.append("  )")
+                    out.append(")")
+                else:
+                    body_lines = self._emit_stmts(body, body_scope, where, expected_return)
+                    out.append("(block")
+                    out.append("  (loop")
+                    out.append("    " + cond.wat)
+                    out.append("    (i32.eqz)")
+                    out.append("    (br_if 1)")
+                    out.extend("    " + line for line in body_lines)
+                    out.append("    (br 0)")
+                    out.append("  )")
+                    out.append(")")
             elif step == "for":
                 out.extend(self._emit_for(stmt, scope, where, expected_return))
+            elif step == "break":
+                if not self._loop_label_stack:
+                    raise EmitError(f"{where}: `break` outside a loop")
+                out.append(f"(br {self._loop_label_stack[-1][1]})")
+            elif step == "continue":
+                if not self._loop_label_stack:
+                    raise EmitError(f"{where}: `continue` outside a loop")
+                kind, _brk, top, cnt = self._loop_label_stack[-1]
+                # `while` re-tests at the loop head; `for` must fall out of the
+                # inner `$revl_cnt` block so the increment after it still runs.
+                out.append(f"(br {cnt if kind == 'for' else top})")
             else:
                 raise EmitError(f"{where}: unsupported v3 statement step {step!r}")
         return out
@@ -4766,13 +4839,20 @@ class _V3Emitter:
         """Does this statement list return/trap on every path (never falling
         through to its end)? Only the *last* statement can carry the whole
         list, so it decides: a `return` diverges; an `if` diverges when it has
-        an `else` and both arms diverge. Everything else may fall through.
+        an `else` and both arms diverge; a `while (true)` diverges iff its body
+        has no reachable `break` that targets it. Everything else may fall
+        through.
 
         wasm's validator does no such flow analysis: an `if/else` with no result
         type is always a fallthrough point to it, even when both arms `return`.
-        A non-unit function whose body ends in a diverging `if/else` therefore
-        reaches its end with an unsatisfied result unless a trailing
+        A non-unit function whose body ends in a diverging control structure
+        therefore reaches its end with an unsatisfied result unless a trailing
         `unreachable` (stack-polymorphic) closes it — see `_emit_function`.
+
+        This mirrors the frontend `_definitely_returns` (src/revl/lower.py),
+        which the checker uses to accept a declared-return fn ending in
+        `while (true)`; if the two disagreed, that fn would type-check yet emit
+        wasm wasmtime rejects (bug 398 / C4, docs/design/379-break-continue.md).
         """
         if not stmts:
             return False
@@ -4784,6 +4864,13 @@ class _V3Emitter:
             else_branch = last.get("else")
             return bool(else_branch) and self._diverges(last.get("then") or []) \
                 and self._diverges(else_branch)
+        if step == "while":
+            cond = last.get("cond")
+            if isinstance(cond, dict) and cond.get("kind") == "lit" and cond.get("value") is True:
+                # `while (true)` never exits, so it diverges — UNLESS a reachable
+                # `break` can leave it (a `continue` cannot; it re-enters the
+                # loop). A break-bearing `while (true)` may fall through.
+                return not self._loop_control_targets(last.get("body") or [], frozenset({"break"}))
         return False
 
     def _emit_for(self, stmt: dict, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
@@ -4797,6 +4884,7 @@ class _V3Emitter:
         iter_ty = self._infer_type(stmt.get("iterable"), scope)
         if not _is_list_type(iter_ty):
             raise EmitError(f"{where}: `for … of` iterates a List, got {iter_ty!r}")
+        self._guard_frame_neutral_loop(stmt.get("body"), where)
         elem_ty = _list_elem(iter_ty)
         bind = _ident(stmt.get("bind"), f"{where}: loop bind")
         self._declare_local(f"l_{bind}", elem_ty, where)
@@ -4804,17 +4892,51 @@ class _V3Emitter:
         body_scope = _Scope(dict(scope.slots), dict(scope.types))
         body_scope.slots[stmt.get("bind")] = f"(local.get $l_{bind})"
         body_scope.types[stmt.get("bind")] = elem_ty
-        body_lines = self._emit_stmts(stmt.get("body") or [], body_scope, where, expected_return)
+        body = stmt.get("body") or []
         ptr, cnt, idx = f"$for_ptr_{n}", f"$for_cnt_{n}", f"$for_idx_{n}"
         element = self._slot_load(
             f"(i32.add (local.get {ptr}) "
             f"(i32.add (i32.const {_SLOT}) "
             f"(i32.mul (local.get {idx}) (i32.const {_SLOT}))))",
             elem_ty)
-        out = [
+        prologue = [
             it.wat, f"(local.set {ptr})",
             f"(i32.load (local.get {ptr}))", f"(local.set {cnt})",
             "(i32.const 0)", f"(local.set {idx})",
+        ]
+        if self._loop_control_targets(body, frozenset({"break", "continue"})):
+            # A loop carrying break/continue gets named labels. `continue` must
+            # NOT branch to the loop head (that would skip the `idx += 1` after
+            # the body and spin forever), so the body is wrapped in an inner
+            # `$revl_cnt` block with the increment emitted after it: `continue`
+            # is `(br $revl_cnt)`, which falls out of that block INTO the
+            # increment; `break` is `(br $revl_brk)`.
+            self._brk_labels += 1
+            ln = self._brk_labels
+            brk, top, cntl = f"$revl_brk_{ln}", f"$revl_top_{ln}", f"$revl_cnt_{ln}"
+            self._loop_label_stack.append(("for", brk, top, cntl))
+            body_lines = self._emit_stmts(body, body_scope, where, expected_return)
+            self._loop_label_stack.pop()
+            out = prologue + [
+                f"(block {brk}",
+                f"  (loop {top}",
+                f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))",
+                f"    (br_if {brk})",
+                f"    {element}",
+                f"    (local.set $l_{bind})",
+                f"    (block {cntl}",
+            ]
+            out.extend("      " + line for line in body_lines)
+            out.extend([
+                "    )",
+                f"    (local.set {idx} (i32.add (local.get {idx}) (i32.const 1)))",
+                f"    (br {top})",
+                "  )",
+                ")",
+            ])
+            return out
+        body_lines = self._emit_stmts(body, body_scope, where, expected_return)
+        out = prologue + [
             "(block",
             "  (loop",
             f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))",
@@ -4873,6 +4995,9 @@ class _V3Emitter:
 
         local_names: set[str] = set()
         self._loop_counter = 0
+        # item 379: fresh per function so label ids are deterministic per body.
+        self._brk_labels = 0
+        self._loop_label_stack: list[tuple] = []
         self._for_temps: list[str] = []
         self._arrows: dict = {}
         self._arrow_counter = 0

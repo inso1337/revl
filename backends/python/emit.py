@@ -2026,6 +2026,23 @@ def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
         raise EmitError(f"unsupported let_pattern kind {node['pattern']!r}")
 
 
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant
+# is enforced whole-IR in the frontend (`_validate_no_loop_scoped_registration`);
+# this is the cheap per-emitter belt-and-suspenders — a teardown-registering step
+# must never be a loop body's child on any tier.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
     step = node["step"]
     if step in ("let", "assign"):
@@ -2046,6 +2063,7 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
             for s in node["else"]:
                 _fn_stmt(s, out, indent + 1)
     elif step == "while":
+        _guard_frame_neutral_loop(node["body"])
         out.add(indent, f"while {_expr(node['cond'])}:")
         if not node["body"]:
             out.add(indent + 1, "pass")
@@ -2053,12 +2071,17 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
             for s in node["body"]:
                 _fn_stmt(s, out, indent + 1)
     elif step == "for":
+        _guard_frame_neutral_loop(node["body"])
         out.add(indent, f"for {_mangle(node['bind'])} in {_expr(node['iterable'])}:")
         if not node["body"]:
             out.add(indent + 1, "pass")
         else:
             for s in node["body"]:
                 _fn_stmt(s, out, indent + 1)
+    elif step == "break":
+        out.add(indent, "break")
+    elif step == "continue":
+        out.add(indent, "continue")
     elif step == "expr":
         out.add(indent, _expr(node["expr"]))
     elif step == "assert":
