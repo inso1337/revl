@@ -239,6 +239,12 @@ needs_cordis = pytest.mark.skipif(
     reason="cordis-py runtime not installed (sh backends/python/setup.sh)")
 needs_go = pytest.mark.skipif(shutil.which("go") is None, reason="go not installed")
 
+from revl.run_java import java_runtime_reason  # noqa: E402
+
+needs_java = pytest.mark.skipif(
+    java_runtime_reason() is not None,
+    reason=f"no working JDK for the java tier ({java_runtime_reason()})")
+
 
 @needs_cordis
 def test_py_reference_tier_sweeps_the_two_phase_composition_residue_free():
@@ -275,6 +281,40 @@ def test_the_two_phase_abort_is_exercised_on_the_reference_tier(capsys):
     assert "compensate" in out
     assert "compensation is not inversion" in out
     assert "0 failed" in out
+
+
+@needs_java
+def test_java_tier_sweeps_the_two_phase_composition_residue_free():
+    # roadmap item 341 (found by the 125 sweep): a `fail` injected mid-body
+    # lowers to a `throw`. The java emitter now (a) DROPS the unreachable
+    # post-`fail` tail so javac accepts the class, and (b) renders the
+    # fail-forced modern path's provider signatures with the v1 renderer so an
+    # undeclared surface type (`Row`) erases to `Object` instead of a literal
+    # `List<Row>` javac cannot resolve; and the RunOnce driver now drives a
+    # faulting activation (self-reverting, LIFO teardown, no-residue proof)
+    # rather than aborting. Before these, this record loud-skipped as a "gap".
+    record = fault_mod._compiled_tier_sweep("java", _two_phase(), {}, {}, None)
+    assert record["status"] == "executed", record["reason"]
+    # four top-level steps, every one residue-free
+    assert len(record["points"]) == 4
+    assert all(p["status"] == "clean" for p in record["points"]), record["points"]
+
+
+@needs_cordis
+@needs_java
+def test_py_and_java_sweep_the_same_faults_and_agree():
+    # java JOINS the cross-tier agreement: the same injected fault, at the same
+    # four points, leaves no residue on both the py reference and the java tier,
+    # and the two AGREE.
+    failures, dossier = fault_mod.cross_tier_sweep(
+        _two_phase(), tiers=("py", "java"), out=lambda _line: None)
+    assert failures == 0
+    executed = dossier["agreement"]["executed"]
+    assert "py" in executed and "java" in executed, dossier["agreement"]
+    assert dossier["agree"] is True
+    assert dossier["agreement"]["points"] == 4
+    assert dossier["counts"]["disagreements"] == 0
+    assert dossier["roadmapItem"] == 125
 
 
 def test_absent_compiled_toolchains_loud_skip_and_never_count_as_executed(
