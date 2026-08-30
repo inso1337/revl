@@ -2671,6 +2671,11 @@ def _uses_str_methods(node) -> bool:
     if isinstance(node, dict):
         if node.get("kind") == "len":
             return True
+        # item 104: a component-position sized `.length` stays a `field` node
+        # marked `sized_length` and emits `revlLen(...)`, so the helper must be
+        # emitted for it too (else `revlLen` is undefined at runtime).
+        if node.get("kind") == "field" and node.get("sized_length"):
+            return True
         if node.get("kind") == "builtin" and node.get("method") in _STR_METHOD_NAMES:
             return True
         return any(_uses_str_methods(v) for v in node.values())

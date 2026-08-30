@@ -496,7 +496,7 @@ field read `.kind` on a value of type `Any` — an erased value has no known fie
   bind it to a record type first (`let e: SomeRecord = …; e.kind` — an `Opt[T]` field then reads back the empty Opt on absence), or walk it with stdlib/value.rvl (`value_is_object(v)`, `value_opt(v, "kind")`, `value_field_or`)
 ```
 
-Fix, two designed surfaces (roadmap item 379):
+Fix, two designed surfaces (roadmap item 380):
 
 * bind the value to a **record type** and read the field there. A field whose
   declared type is `Opt[T]` then reads TOTAL on every tier — absent is the

@@ -1174,7 +1174,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                                    alt=f"?.{expr.name}")
         if expr.name == "length" and (thead in _SIZED_HEADS):
             return "Int"
-        # item 379: a field read off a value whose static type is `Any`/`Value`
+        # item 380: a field read off a value whose static type is `Any`/`Value`
         # (the erased-dynamic types — a parsed JSON body, `json_parse`'s result)
         # is the 279/299 silent-divergence class: py raises `KeyError` on an
         # absent key, ts yields `undefined`, and neither is a defensible total

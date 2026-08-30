@@ -365,7 +365,7 @@ def _uses_true_division(node) -> bool:
 
 
 def _uses_opt_field(node) -> bool:
-    """Does any field read carry the item-379 `opt` flag (an `Opt[T]`-declared
+    """Does any field read carry the item-380 `opt` flag (an `Opt[T]`-declared
     field, read TOTAL)? The `_revl_opt_field` helper is emitted only then, so a
     module with no optional-field read stays byte-identical."""
     if isinstance(node, dict):
@@ -850,7 +850,7 @@ class _ComponentEmitter:
                 return f"len({self._expr(expr.get('target'), where)})"
             # record literals are dicts; ADT payloads are objects — the
             # preamble helper reads either shape. An `Opt[T]`-declared field
-            # reads TOTAL (item 379): absent -> None, the Opt's empty case.
+            # reads TOTAL (item 380): absent -> None, the Opt's empty case.
             helper = "_revl_opt_field" if expr.get("opt") else "_revl_field"
             return f"{helper}({self._expr(expr.get('target'), where)}, {name!r})"
         if kind == "index":
@@ -1879,7 +1879,7 @@ def _expr(node: dict) -> str:
             return f"len({_expr(node['target'])})"
         # record literals are dicts; ADT payloads are objects — the preamble
         # helper reads either shape. An `Opt[T]`-declared field reads TOTAL
-        # (item 379): absent -> None, the Opt's empty case.
+        # (item 380): absent -> None, the Opt's empty case.
         helper = "_revl_opt_field" if node.get("opt") else "_revl_field"
         return f"{helper}({_expr(node['target'])}, {node['name']!r})"
     if kind == "index":
@@ -2973,7 +2973,7 @@ def emit(ir: dict) -> str:
     out.add(0, "    return v[name] if isinstance(v, dict) else getattr(v, name)")
     out.add(0)
     if _uses_opt_field(ir):
-        # item 379: an `Opt[T]`-declared field reads TOTAL — an absent key (or a
+        # item 380: an `Opt[T]`-declared field reads TOTAL — an absent key (or a
         # non-record receiver) is the Opt's empty case (`None`), never a raise.
         # This is what makes `e.kind ?? default` mean the same on every tier
         # (py's `_revl_field` raises `KeyError` here; ts is total by JS accident).

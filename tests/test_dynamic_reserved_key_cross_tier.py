@@ -1,5 +1,5 @@
-"""Roadmap items 279 / 299 / 379 — the dynamic reserved-word field-access class,
-now CLOSED at the frontend by item 379.
+"""Roadmap items 279 / 299 / 380 — the dynamic reserved-word field-access class,
+now CLOSED at the frontend by item 380.
 
 History. Item 279 found the TS tier reading a reserved-word key on a `json_parse`
 / `Any` (dynamic) value as `undefined`: the key was renamed on ACCESS
@@ -10,9 +10,9 @@ found none reproduced the *silent* class — a dynamic field access on those tie
 emits a static field selection the target compiler rejects loudly (or, for wasm,
 `json_parse` is refused at emit).
 
-Item 379 supersedes that whole finding at the ROOT. `tc.range.name` is a NON-`Opt`
+Item 380 supersedes that whole finding at the ROOT. `tc.range.name` is a NON-`Opt`
 field read off a value whose static type is `Any` — exactly the 279/299
-divergence class — and item 379(2) makes the FRONTEND REFUSE it: a field read
+divergence class — and item 380(2) makes the FRONTEND REFUSE it: a field read
 off `Any`/`Value` is a compile error on every tier, before any emit, because an
 erased value has no known fields and neither a py raw-key read nor a ts
 `undefined` is a defensible total answer. So the class can no longer be WRITTEN,
@@ -55,7 +55,7 @@ from revl.errors import RevlError  # noqa: E402
 # The two-line 279 lighthouse: read a reserved-word key off a dynamic
 # (`json_parse` / `Any`) value. `{w}` is BOTH a valid revl identifier AND a
 # reserved word in some tier, so historically the sanitizer fired on the access.
-# Item 379 now refuses the read at the frontend before any of that matters.
+# Item 380 now refuses the read at the frontend before any of that matters.
 _SRC = """
 pub extern pure fn jp(s: Str) -> Any
   = @py {{ import json; return json.loads(s) }}
@@ -75,7 +75,7 @@ def _compile(word: str) -> dict:
     return compile_source(_SRC.format(w=word))
 
 
-# ------------------------------------------------- item 379: refused at the frontend
+# ------------------------------------------------- item 380: refused at the frontend
 
 @pytest.mark.parametrize("word", ["range", "class", "move", "function"])
 def test_dynamic_reserved_key_read_is_refused_at_the_frontend(word):
@@ -123,7 +123,7 @@ def _emit(backend: str, ir: dict) -> str:
     sys.path.insert(0, path)
     try:
         spec = importlib.util.spec_from_file_location(
-            f"emit_{backend}_dyn379", ROOT / "backends" / backend / "emit.py")
+            f"emit_{backend}_dyn380", ROOT / "backends" / backend / "emit.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         out = module.emit(ir)
