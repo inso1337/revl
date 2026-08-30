@@ -89,6 +89,8 @@ REJECTIONS = {
     "foreign_len_builtin.rvl": "revl has no `len(...)`",
     "foreign_print_builtin.rvl": "revl has no `print`",
     "foreign_throw.rvl": "revl has no `throw`",
+    "foreign_increment.rvl": "revl has no `++` increment operator",
+    "foreign_decrement.rvl": "revl has no `--` decrement operator",
     "a1_await_in_method.rvl": "`await` is only allowed in a component body",
     # roadmap item 80: a sync provide method that reaches an `async` extern is
     # refused with the twin of the emission-propagation diagnostic (async-

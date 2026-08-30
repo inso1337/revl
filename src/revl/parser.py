@@ -3245,7 +3245,40 @@ class Parser:
             return self._match_expr()
         if tok.kind == "kw" and tok.value == "if":
             return self._if_expr()
+        self._reject_incr_decr(tok)  # item 384 / syntax-2.0 §3.3
         raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
+
+    def _reject_incr_decr(self, tok) -> None:
+        """item 384 / syntax-2.0 §3.3: `i++` / `i--` lex as two adjacent
+        `+`/`-` tokens — revl has no in/decrement, expressions are pure. This
+        fires ONLY on the `_primary` error path, which no valid program
+        reaches, so it is false-positive-free. `++` strands a `+` in operand
+        position (`_unary` has no unary `+`), so the erroring token IS a `+`
+        with a `+` on one side; postfix `--` is consumed as `x - (- <next>)`,
+        so the erroring token sits just past a `- -` pair. Either way the
+        author wanted mutation: redirect to the §3.3-promised `+= 1` / `-= 1`
+        instead of the cryptic `expected an expression, found '+'`."""
+        toks, i = self.toks, self.pos
+        sign = None
+        if tok.kind == "+" and (
+                (i > 0 and toks[i - 1].kind == "+")
+                or (i + 1 < len(toks) and toks[i + 1].kind == "+")):
+            sign = "+"
+        elif i >= 2 and toks[i - 1].kind == "-" and toks[i - 2].kind == "-":
+            sign = "-"
+        if sign is None:
+            return
+        word = "increment" if sign == "+" else "decrement"
+        # postfix `--` errors on the token PAST the operator pair; point the
+        # diagnostic back at the operator itself.
+        line = toks[i - 1].line if sign == "-" else tok.line
+        raise self.err(
+            line,
+            f"revl has no `{sign}{sign}` {word} operator — expressions are pure "
+            "(syntax-2.0 §3.3)",
+            hint=f"mutate a `var` with `{sign}= 1` (write `i {sign}= 1`), inside "
+                 "a `while`/`for` loop body",
+        )
 
     def _arrow_body(self):
         """The body of an arrow `=> …`. A closure body is a single pure
