@@ -8,9 +8,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "backends" / "python"))
 
+from _backend_import import backend_emitter  # noqa: E402
+from revl import compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 from revl.lexer import lex  # noqa: E402
+
+_emit = backend_emitter("python")
 
 
 def _toks(source):
@@ -68,10 +73,15 @@ def test_grouped_float():
     assert ts[0].value == 1000.5
 
 
-@pytest.mark.parametrize("bad", ["_1", "1_", "1__0", "0xFF_", "0x_FF", "0xFF__FF", "0x", "0b", "0o"])
+@pytest.mark.parametrize("bad", ["1_", "1__0", "0xFF_", "0x_FF", "0xFF__FF", "0x", "0b", "0o"])
 def test_malformed_number_literals_rejected(bad):
     with pytest.raises(RevlError):
         _toks(bad)
+
+
+def test_leading_underscore_is_identifier_not_number():
+    # `_1` starts with `_`, so it is a plain identifier — never number-lexed.
+    assert [t.kind for t in _toks("_1")] == ["ident", "eof"]
 
 
 def test_decimal_still_lexes_dot_method():
@@ -109,3 +119,33 @@ def test_single_quote_can_hold_double():
 def test_unterminated_single_quote():
     with pytest.raises(RevlError):
         _toks("'oops")
+
+
+# --- end-to-end: the literals lower + emit + run to the right value on py ----
+
+def _run_py(source):
+    ir = compile_source(source)
+    ns: dict = {}
+    exec(compile(_emit.emit(ir), "emitted.py", "exec"), ns)
+    return ns
+
+
+def test_literals_compile_and_run_on_py():
+    ns = _run_py(
+        """
+        fn hex_val() -> Int { return 0xFF }
+        fn bin_val() -> Int { return 0b1010 }
+        fn oct_val() -> Int { return 0o17 }
+        fn grouped() -> Int { return 1_000_000 }
+        fn mask() -> Int { return 0xFF_FF }
+        fn greet() -> Str { return 'hello' }
+        fn quote_char() -> Str { return 'a' }
+        """
+    )
+    assert ns["hex_val"]() == 255
+    assert ns["bin_val"]() == 10
+    assert ns["oct_val"]() == 15
+    assert ns["grouped"]() == 1000000
+    assert ns["mask"]() == 0xFFFF
+    assert ns["greet"]() == "hello"
+    assert ns["quote_char"]() == "a"
