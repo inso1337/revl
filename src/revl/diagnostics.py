@@ -17,7 +17,7 @@ import re
 from .errors import RevlError
 
 # guarantee/amendment tag embedded in the message, e.g. "... (G4)"
-_TAG = re.compile(r"\((G[1-8]|A[1-9]|R[1-5]|T[1-9])\)")
+_TAG = re.compile(r"\((G[1-9]|A[1-9]|R[1-5]|T[1-9])\)")
 
 # what each guarantee is *about* — the one-line description an agent can
 # surface without reading DESIGN.md
@@ -30,6 +30,7 @@ GUARANTEES = {
     "G6": "purity outside effect forms",
     "G7": "derived LIFO teardown",
     "G8": "the boundary surface is enumerable",
+    "G9": "untrusted data cannot create authority without a declared declassification",
     "A1": "iteration boundaries exist only during activation",
     "A2": "no acquisition after a provision",
     "A3": "host-safe identifiers",
@@ -60,6 +61,9 @@ FIXES = {
           "every recursive call structurally smaller",
     "G8": "keep the boundary enumerable — declare host code as an `extern` with a "
           "`pure`/`acquire`/`emission` classification",
+    "G9": "an untrusted value cannot directly create authority — declassify it "
+          "first: parse it with a `verified fn` that returns `Trusted[T]`, wrap it "
+          "in `endorse(...)`, or gate it on a human approval",
     "A1": "`await` is an iteration boundary and exists only during activation — "
           "move it into the component body",
     "A2": "acquire everything before the first `provide`",
