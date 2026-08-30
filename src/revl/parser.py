@@ -1029,22 +1029,26 @@ class Parser:
                      "accumulator auto-registers (docs/design/243-witnessed-externs.md)",
             )
         classification = self.next().value
-        # Capability scope, `witnessed[fs]` (docs/design/243-witnessed-externs.md).
-        # A witnessed mutation is capability-scoped exactly like an emission — the
-        # bracket is revl's parameterisation bracket — and joins the same authority
-        # namespace. Only `witnessed` carries a scope on an extern today; the parse
-        # is refused on the others so the surface stays honest.
+        # Capability scope, `witnessed[fs]` / `emission[gateway.send]`
+        # (docs/design/243-witnessed-externs.md, item 343). A witnessed mutation
+        # and an emission are capability-scoped alike — the bracket is revl's
+        # parameterisation bracket — and both join the same authority namespace.
+        # The declared token, not the extern NAME, is the emission's capability,
+        # so a `capability C requires approval` rule and a standing grant target
+        # the crossing by token (item 344). `pure`/`acquire` cross no boundary,
+        # so the parse is still refused on them and the surface stays honest.
         capabilities: tuple[str, ...] = ()
         if self.at("["):
-            if classification != "witnessed":
+            if classification not in ("witnessed", "emission"):
                 raise self.err(
                     self.peek().line,
                     f"`{classification}` extern takes no capability scope",
-                    hint="only a `witnessed[caps]` extern is capability-scoped "
-                         "(docs/design/243-witnessed-externs.md); write "
-                         f"`{classification} fn ...` without the bracket",
+                    hint="only a `witnessed[caps]` or `emission[caps]` extern is "
+                         "capability-scoped (docs/design/243-witnessed-externs.md, "
+                         f"item 343); write `{classification} fn ...` without the "
+                         "bracket",
                 )
-            capabilities = self._capability_list(kind="witnessed")
+            capabilities = self._capability_list(kind=classification)
         # Optional `async` modifier between the classification and `fn`,
         # mirroring where service-op modifiers sit (parser.py:895-906). The
         # classification stays first and mandatory, so the "unclassified
@@ -1123,11 +1127,21 @@ class Parser:
         `emission` extern (docs/capabilities.md). They are not resolved here —
         a service is written before its providers exist — the G4 check in
         lower.py compares them against what a provider's body actually reaches.
+
+        An entry may be a realm-style dotted token (`gateway.send`,
+        `production.payment`) so an emission scope names the same tokens the
+        item-246 `Approval[C]` / item-33 policy grammar do (item 343). A bare
+        ident is the single-segment case, so every pre-343 `witnessed[fs]` list
+        parses to the same tokens byte-for-byte.
         """
         line = self.expect("[").line
         names: list[str] = []
         while not self.at("]"):
-            names.append(self.expect("ident", what="a capability name").value)
+            parts = [self.expect("ident", what="a capability name").value]
+            while self.at("."):
+                self.next()
+                parts.append(self.expect("ident").value)
+            names.append(".".join(parts))
             if self.at(","):
                 self.next()
         self.expect("]")

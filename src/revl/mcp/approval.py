@@ -129,7 +129,15 @@ class ClassMap:
             if klass == "emission":
                 c = "b" if fact.get("deferred") else "c"
                 cls = worse(cls, c)
-                caps.add(name)
+                # item 343: a capability-scoped `emission[gateway.send]` is keyed
+                # on its declared TOKEN, exactly as a witnessed extern is (below),
+                # so a `capability C requires approval` rule and a 344 standing
+                # grant target the crossing by token. A bare `emission` declares
+                # no scope, so `capabilities` is absent and we fall back to the
+                # extern name — the pre-343 behaviour, byte-for-byte.
+                for cap in (self.index.externs.get(name) or {}).get(
+                        "capabilities") or [name]:
+                    caps.add(cap)
                 crossings.append({
                     "kind": "extern", "component": comp, "scope": scope["kind"],
                     "name": name, "class": klass, "actionClass": c})
