@@ -1,0 +1,30 @@
+// REJECTED — A1 (roadmap item 131): a component ACTIVATION body whose `emit`
+// step reaches a required async service operation, with no `await` marker.
+//
+// `model.complete` is a required async service operation — a suspension
+// source reached through a required key (rule 3 of the item-92 async-reach).
+// A bare `emit model.complete(...)` step has no in-flight window: py would
+// build a coroutine and never await it (the emission never fires), and ts
+// would fire a floating unordered Promise. This is one of the four
+// admitted-but-silently-wrong shapes item 131 flips to a compile error.
+//
+// The one-token fix is the awaited emission step: `await emit
+// model.complete(...)` — the `await` is a divert boundary (paper §4.3.2), so
+// it is spelled, never inserted.
+//
+// expected error:
+//   `emit` step reaches async operation `model.complete` but the emission is
+//   not awaited
+
+service Model {
+  emission async fn complete(msgs: Str) -> Str
+}
+service Runner {
+  emission fn go() -> Str
+}
+component Agent requires model: Model provides runner: Runner {
+  emit model.complete("hi")
+  provide runner {
+    fn go() { return "ok" }
+  }
+}
