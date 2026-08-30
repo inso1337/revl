@@ -20,9 +20,16 @@
 // `@py`), every function here is PURE revl built on the base List/Str surface
 // (`for … of`, `.push`, `.length()`, `.charCodeAt`). There is no `@py` block,
 // so — unlike value.rvl / str.rvl — there is NOTHING to defer per tier: the
-// module compiles and runs identically on EVERY backend (py/ts/rs/go/java/wasm)
-// the moment they emit the base List/Str builtins. The py tier is executed by
-// the test suite (tests/test_list_stdlib.py); the other tiers inherit for free.
+// first-order kit (`str_lt`/`list_contains`/`list_sort`/`list_dedup`) compiles
+// and runs identically on EVERY backend (py/ts/rs/go/java/wasm) the moment they
+// emit the base List/Str builtins. The py tier is executed by the test suite
+// (tests/test_list_stdlib.py); the other tiers inherit for free.
+//
+// The map/filter/reduce trio at the FOOT of this file (roadmap item 383) is the
+// one exception to "every backend": it takes a FUNCTION-VALUE parameter, which
+// the java and wasm tiers cannot represent — so a program that reaches those
+// three refuses at emit on java/wasm while running on py/ts/rs/go. See the note
+// on that section, docs/function-types.md §4, and tests/test_list_transforms.py.
 //
 // ------------------------------------------------------------------- ordering
 // `list_sort` is ascending lexicographic by UNICODE CODE POINT, byte-for-byte
@@ -108,4 +115,43 @@ pub fn list_dedup(xs: List[Str]) -> List[Str] {
     if (!list_contains(out, x)) { out = out.push(x) }
   }
   return out
+}
+
+// ============================================================ map / filter / reduce
+// Roadmap item 383. The higher-order transform trio every TS/Python program
+// reaches for, and that base revl only spelled as an explicit
+// `var acc = []; for (x of xs) { acc = acc.push(...) }` loop. Generic over the
+// element type (and, for map/reduce, the result), these are still PURE revl —
+// but UNLIKE `str_lt`/`list_contains`/`list_sort`/`list_dedup` above they take a
+// FUNCTION-VALUE parameter (items 92/342), so they do NOT share this module's
+// "runs on every backend" property: a function value lowers on the py, ts, rust
+// and go tiers, but the java and wasm tiers cannot represent one — importing a
+// program that reaches `list_map`/`list_filter`/`list_reduce` refuses at emit on
+// those two tiers (docs/function-types.md §4). The receiver-first `xs.map(f)` /
+// `xs.filter(p)` / `xs.reduce(init, f)` dot-sugar desugars to exactly these
+// calls before typing and lowering (src/revl/parser.py `desugar_list_transform`).
+//
+//     use "stdlib/list.rvl" { list_map, list_filter, list_reduce }
+
+// `[f(x) for x in xs]` — apply `f` to every element, left to right.
+pub fn list_map[T, U](xs: List[T], f: (T) -> U) -> List[U] {
+  var out = []
+  for (x of xs) { out = out.push(f(x)) }
+  return out
+}
+
+// keep the elements `p` answers `true` for, in order.
+pub fn list_filter[T](xs: List[T], p: (T) -> Bool) -> List[T] {
+  var out = []
+  for (x of xs) { if (p(x)) { out = out.push(x) } }
+  return out
+}
+
+// left fold: thread an accumulator from `init` through `f(acc, x)`, left to
+// right. `xs.reduce(0, (a, x) => a + x)` sums; the receiver-first arg order puts
+// `init` before the folding function, matching the dot-sugar.
+pub fn list_reduce[T, A](xs: List[T], init: A, f: (A, T) -> A) -> A {
+  var acc = init
+  for (x of xs) { acc = f(acc, x) }
+  return acc
 }
