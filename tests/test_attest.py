@@ -152,8 +152,11 @@ def test_attestation_shape_and_guarantees():
     assert att["timestamp"] == NOW
     assert att["signer"] == "ci@revl"
     assert len(att["signature"]) == 64
-    # the guarantees an admitted verdict proves: the composition G-rules
-    assert att["guarantees"] == ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8"]
+    # the guarantees an admitted verdict proves: the composition G-rules. G9
+    # (item 249, information-flow / taint) joins the family — a compile-time
+    # admission refusal like the rest, vacuously proven when a composition
+    # declares no taint qualifier.
+    assert att["guarantees"] == ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9"]
     # key_id is a non-secret fingerprint — never the key itself
     assert att["key_id"] == A.key_id(KEY)
     assert KEY.decode() not in json.dumps(att)
