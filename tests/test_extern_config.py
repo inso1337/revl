@@ -100,7 +100,12 @@ def test_py_emit_binds_revl_config_for_config_extern():
     src = emit.emit(compile_source(_RAW_MODEL_POST))
     assert "_REVL_EXTERN_CONFIG = {}" in src
     assert "def raw_model_post(body):" in src
-    assert "_revl_config = _REVL_EXTERN_CONFIG.get('raw_model_post') or {}" in src
+    # item 395: the bind now routes through the fail-loud helper, passing the
+    # required (non-defaulted) fields and the resolved defaults from the schema.
+    assert (
+        "_revl_config = _revl_extern_config('raw_model_post', "
+        "['provider', 'endpoint'], {'model': 'default'})"
+    ) in src
 
 
 def test_py_emit_no_config_extern_is_byte_identical():
