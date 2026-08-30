@@ -44,6 +44,7 @@ from .typecheck import (
     _is_wildcard,
     _check_method_namespace_disjoint,
 )
+from .taint import extract_and_normalize, check_taint
 from .parser import (
     _describe_expr,
     AbortStmt,
@@ -3249,6 +3250,14 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     component entries>]} — see compile_files for how it is derived.
     """
     ambient = ambient or {}
+
+    # Taint/provenance (roadmap item 249, Slice A). Read the `Untrusted[T]` /
+    # `Trusted[T]` qualifier surface off every declaration and STRIP it from the
+    # declared types in place, so base typing, method lookup and the emitted IR
+    # are byte-identical for any program that uses no qualifier. The flow verdict
+    # (`check_taint`, below) runs once every component body is lowered.
+    taint_model = extract_and_normalize(program)
+
     ambient_services = {
         name: _service_from_ir(name, spec)
         for name, spec in (ambient.get("services") or {}).items()
@@ -3440,6 +3449,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # site registers none, so `fns` (and every downstream section) is
     # byte-identical to before.
     _synthesize_sync_monomorphs(fns, sync_monomorphs)
+
+    # Taint/provenance verdict (item 249, Slice A): refuse any untrusted-origin
+    # value that reaches a `Trusted[T]` sink without a declassifier on its path
+    # (G9). No-op and byte-identical when the program declared no qualifier.
+    check_taint(program, fns, components, taint_model, program.filename)
 
     # state hand-off admission (roadmap item 53): a candidate provider that
     # *accepts* a `handoff` on a key some running provider *exports* must accept
