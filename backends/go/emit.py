@@ -1579,13 +1579,25 @@ def _acquire_value_go_type(acquire, services, requires) -> str:
 # — the surface type of the value argument, then mapped to a Go type. No site
 # pinning a concrete type falls back to `string` (the historical surface, and
 # what a write-free / read-only Map keeps).
+#
+# The value type is learned from ANY map value-writing verb, not the literal
+# name "insert": a CAS-only writer (`insert_if_absent`, item 397) must pin `V`
+# just as `insert` does, or the Map would emit with the string default and
+# mistype (item 402). Every value-writer takes the value as arg[1].
 # --------------------------------------------------------------------------
 
+# Map verbs that write a value at arg[1]; each pins the host Map's value type V.
+_MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+
 def _map_insert_value_types(node, bind, env, out):
-    """Collect the surface types of the value argument at every
-    `bind.insert(k, v)` call inside an expression node (recurses)."""
+    """Collect the surface types of the value argument at every map
+    value-writing call (`insert`, `insert_if_absent`, ...) on `bind` inside an
+    expression node (recurses). The value type `V` is inferred structurally
+    from the value argument of ANY writer, never by matching a single verb
+    name, so a CAS-only writer still pins a concrete `V` (item 402)."""
     if isinstance(node, dict):
-        if node.get("kind") == "call" and node.get("method") == "insert":
+        if node.get("kind") == "call" and node.get("method") in _MAP_VALUE_WRITERS:
             target = node.get("target")
             if (isinstance(target, dict)
                     and (target.get("id") or target.get("name")) == bind):

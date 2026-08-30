@@ -2479,11 +2479,19 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
     return None
 
 
+# Map verbs that write a value at arg[1]; each pins the host Map's value type V.
+# Inferring V from ANY writer (not the literal name "insert") lets a CAS-only
+# writer (`insert_if_absent`, item 397) pin a concrete V instead of the Str
+# default (item 402).
+_MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+
 def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
                       functions: list, v3_ctx: _V3Ctx | None,
                       candidates: list[str]) -> None:
-    """Collect candidate value types from `bind.insert(k, v)` anywhere in an
-    expression; recurses into sub-expressions. Handles both the v1 call shape
+    """Collect candidate value types from any map value-writing call
+    (`insert`, `insert_if_absent`, ...) on `bind` anywhere in an expression;
+    recurses into sub-expressions. Handles both the v1 call shape
     (`target`/`method`) and the 2.0 shape (`callee` as a field access)."""
     if not isinstance(node, dict):
         return
@@ -2491,7 +2499,7 @@ def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
         target = node.get("target") or {}
         if (target.get("kind") in ("name", "var")
                 and (target.get("id") or target.get("name")) == bind
-                and node.get("method") == "insert"):
+                and node.get("method") in _MAP_VALUE_WRITERS):
             args = node.get("args") or []
             if len(args) >= 2:
                 t = _map_value_expr_type(args[1], var_types, env, functions, v3_ctx)
@@ -2502,7 +2510,7 @@ def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
             ct = callee.get("target") or {}
             if (ct.get("kind") in ("name", "var")
                     and (ct.get("id") or ct.get("name")) == bind
-                    and callee.get("name") == "insert"):
+                    and callee.get("name") in _MAP_VALUE_WRITERS):
                 args = node.get("args") or []
                 if len(args) >= 2:
                     t = _map_value_expr_type(args[1], var_types, env, functions, v3_ctx)

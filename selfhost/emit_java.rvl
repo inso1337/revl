@@ -1485,8 +1485,16 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
   }
   return ""
 }
-// `_map_expr_inserts`: collect candidate value types from `bind.insert(k, v)`
-// anywhere in an expression (both call shapes), recursing into subexpressions.
+// `_is_map_value_writer`: a Map verb that writes a value at arg[1]; each pins
+// the host Map's value type V. Inferring V from ANY writer (not the literal
+// name "insert") lets a CAS-only writer (`insert_if_absent`, item 397) pin a
+// concrete V instead of the Str default (item 402).
+fn is_map_value_writer(method: Str) -> Bool {
+  return method == "insert" || method == "insert_if_absent"
+}
+// `_map_expr_inserts`: collect candidate value types from any map value-writing
+// call (`insert`, `insert_if_absent`, ...) on `bind` anywhere in an expression
+// (both call shapes), recursing into subexpressions.
 fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, services: Any,
                     functions: List[Any], ctx: Ctx, types: Any, cands: List[Str]) -> List[Str] {
   if (value_kind(node) != "record") { return cands }
@@ -1495,7 +1503,7 @@ fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, s
     let target = value_field(node, "target")
     let tk = value_str(value_field(target, "kind"))
     if ((tk == "name" || tk == "var") && node_ref_name(target) == bind
-        && value_str(value_field(node, "method")) == "insert") {
+        && is_map_value_writer(value_str(value_field(node, "method")))) {
       let args = value_list(value_field(node, "args"))
       if (args.length() >= 2) {
         let t = map_value_expr_type(args[1], var_types, comp, services, functions, ctx, types)
@@ -1507,7 +1515,7 @@ fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, s
       let ct = value_field(callee, "target")
       let ctk = value_str(value_field(ct, "kind"))
       if ((ctk == "name" || ctk == "var") && node_ref_name(ct) == bind
-          && value_str(value_field(callee, "name")) == "insert") {
+          && is_map_value_writer(value_str(value_field(callee, "name")))) {
         let args = value_list(value_field(node, "args"))
         if (args.length() >= 2) {
           let t = map_value_expr_type(args[1], var_types, comp, services, functions, ctx, types)
