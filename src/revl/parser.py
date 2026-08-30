@@ -370,6 +370,32 @@ class HostBodyFile:
 
 
 @dataclass
+class HostRef:
+    """item 396 option B: an extern body that IMPORTS a host symbol from an
+    external host MODULE, `= @backend ref sym from "path"`. Unlike a
+    `HostBodyFile` (option A, a compile-time text splice), this is NOT replaced:
+    the referenced file is a normal host module and the emitter generates a LAZY
+    import THUNK that imports the symbol at the extern's FIRST CALL (never at
+    module top — a module-top import would run host code at artifact LOAD,
+    outside every classification/approval/witness gate).
+
+    The parser is IO-free and records the symbol and the written path. The
+    compiler's ref resolver (`hostref.resolve_refs`) checks the file EXISTS under
+    the ROOT-tree jail, pins a content hash of its bytes, and records the
+    root-relative path (the emitted import specifier is derived from it). The
+    node then flows THROUGH lower into the additive `refs` IR key, so an extern
+    that uses no ref lowers to a byte-identical IR.
+    """
+    backend: str
+    symbol: str        # the host identifier imported from the referenced module
+    path: str          # the path string exactly as written
+    line: int
+    # set by the compiler's ref resolver (hostref.resolve_refs):
+    rel_path: str | None = None   # resolved path RELATIVE TO THE ROOT tree
+    sha256: str | None = None     # sha256 of the resolved file's raw bytes
+
+
+@dataclass
 class ExternDecl:
     name: str
     classification: str  # 'pure' | 'acquire' | 'emission' | 'witnessed'
@@ -377,9 +403,11 @@ class ExternDecl:
     returns: str | None
     undo: object | None
     compensate: object | None
-    # item 396: a body element is a resolved inline `HostBody` or, before the
-    # compiler's body-file resolver runs, an unresolved `HostBodyFile`.
-    bodies: list["HostBody | HostBodyFile"]
+    # item 396: a body element is a resolved inline `HostBody`; before the
+    # compiler's body-file resolver runs, an unresolved `HostBodyFile` (option A,
+    # replaced by a `HostBody`); or a `HostRef` (option B), which flows through
+    # unchanged into the `refs` IR key.
+    bodies: list["HostBody | HostBodyFile | HostRef"]
     public: bool
     line: int
     # capability scope of a boundary-crossing extern (docs/design/243-witnessed-externs.md):
@@ -1314,7 +1342,7 @@ class Parser:
         config: list[ConfigField] = []
         if self.at("kw", "config"):
             config = self.config_block()
-        bodies: list[HostBody | HostBodyFile] = []
+        bodies: list[HostBody | HostBodyFile | HostRef] = []
         while self.at("="):
             self.next()
             if self.at("hostbody"):
@@ -1322,31 +1350,52 @@ class Parser:
                 backend, text = host_tok.value
                 bodies.append(HostBody(backend, text, host_tok.line))
             elif self.at("@"):
-                # item 396 option A: the external-file body form,
-                # `= @backend file "path"`. When `@py` is NOT followed by `{`,
-                # the lexer emits a plain `@` token and re-lexes the backend word
-                # as an ordinary identifier (lexer.py:322-324), so this spelling
-                # needs ZERO lexer change. `file` is a CONTEXTUAL keyword
-                # recognised only in this slot (the discipline `witnessed`/
-                # `deferred`/`confined` use), so the KEYWORDS set is untouched and
-                # no program using `file` as a name is broken. The parser stays
-                # IO-free: it records the path and the compiler reads it, jailed.
+                # item 396: the two file/module body forms. When `@py` is NOT
+                # followed by `{`, the lexer emits a plain `@` token and re-lexes
+                # the backend word as an ordinary identifier (lexer.py:322-324),
+                # so both spellings need ZERO lexer change. `file`/`ref`/`from`
+                # are CONTEXTUAL keywords recognised only in this slot (the
+                # discipline `witnessed`/`deferred`/`confined` use), so the
+                # KEYWORDS set is untouched and no program using them as names is
+                # broken. The parser stays IO-free: it records the path (and, for
+                # a ref, the symbol) and the compiler reads it, jailed.
                 at_line = self.next().line
                 backend = self.expect(
-                    "ident", what="a backend name after `@` (e.g. `@py file ...`)").value
-                self.expect(
-                    "ident", "file",
-                    what='`file` — the external host-body form `@backend file '
-                         '"path"` (item 396)')
-                path_tok = self.expect("string",
-                                       what="a host-body file path string")
-                bodies.append(HostBodyFile(backend, path_tok.value, at_line))
+                    "ident",
+                    what="a backend name after `@` (e.g. `@py file ...` or "
+                         "`@py ref sym from ...`)").value
+                if self.at("ident", "ref"):
+                    # option B: `= @backend ref sym from "path"`
+                    self.next()
+                    sym_tok = self.expect(
+                        "ident",
+                        what="a host symbol name after `ref` (the identifier to "
+                             "import from the referenced module, item 396)")
+                    self.expect(
+                        "ident", "from",
+                        what='`from` — the host-import form `@backend ref sym '
+                             'from "path"` (item 396)')
+                    path_tok = self.expect(
+                        "string", what="a host-module file path string")
+                    bodies.append(HostRef(backend, sym_tok.value,
+                                          path_tok.value, at_line))
+                else:
+                    # option A: `= @backend file "path"`
+                    self.expect(
+                        "ident", "file",
+                        what='`file` — the external host-body form `@backend '
+                             'file "path"`, or `ref sym from "path"` — the '
+                             'host-import form (item 396)')
+                    path_tok = self.expect("string",
+                                           what="a host-body file path string")
+                    bodies.append(HostBodyFile(backend, path_tok.value, at_line))
             else:
                 tok = self.peek()
                 raise self.err(
                     tok.line,
-                    f"expected a `@backend {{ ... }}` host body or a `@backend "
-                    f'file "path"` reference after `=`, found {tok.value!r}')
+                    f"expected a `@backend {{ ... }}` host body, a `@backend "
+                    f'file "path"` reference, or a `@backend ref sym from '
+                    f'"path"` import after `=`, found {tok.value!r}')
         if not bodies:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,

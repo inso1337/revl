@@ -321,6 +321,23 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
                  "`revl verify` could not reproduce it. Inline the body "
                  "(`= @backend { ... }`) to bundle for now; carrying body files "
                  "through the bundle is the item 396 stage 4 follow-up.")
+    # item 396 option B (interim clean refusal, same stage-4 gap): a host-module
+    # ref names a root-relative file that the flat basename copy would not carry,
+    # so a bundled ref program could not resolve or re-hash the module at verify.
+    # Refuse cleanly naming the gap rather than emit a bundle that cannot verify.
+    ref_externs = sorted(
+        e.get("name") for e in (ir.get("externs") or []) if e.get("refs"))
+    if ref_externs:
+        raise RevlError(
+            sources[0], 0,
+            "cannot bundle a composition whose extern references an external "
+            "host module (`= @backend ref sym from \"path\"`): "
+            f"{', '.join(ref_externs)}",
+            hint="`revl bundle` copies sources flat by basename, so a "
+                 "root-relative ref'd module would not travel with the bundle "
+                 "and `revl verify` could not reproduce it. Inline the body "
+                 "(`= @backend { ... }`) to bundle for now; carrying ref files "
+                 "through the bundle is the item 396 stage 4 follow-up.")
 
     norm_ir = _canonical_ir(ir)
     ir_text = _ir_text(norm_ir)
