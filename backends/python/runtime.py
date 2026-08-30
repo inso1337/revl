@@ -1352,8 +1352,21 @@ class Frame:
         # (mutation persists, witness GC'd); on an abort each replays (reverts).
         # They are not cordis disposers, so this is their sole disposal — no
         # double-free with the fiber's own unwind.
+        #
+        # item 369: replay in reverse INVOCATION order (LIFO), NOT registration
+        # order. `_deferred_transactional` is appended newest-last as each
+        # provide-method fires (`transactional_method`), so it must be drained
+        # newest-FIRST — exactly like the activation-body path, where cordis
+        # unwinds its disposer stack LIFO, and like `_dispose_adopted` below
+        # (`reversed(adopted)`). On a COMMIT order is immaterial (every entry
+        # no-op discharges), but on an ABORT two inverses whose paths OVERLAP
+        # must undo newest-first or the guarantee 243/246 sell is violated:
+        # every stdlib/fs.rvl inverse is idempotent-and-total, so a FIFO replay
+        # runs the oldest inverse first, finds nothing, silently no-ops, and the
+        # newer inverse then undoes into the hole — residue or DESTROYED
+        # pre-session data with `noResidue: true` still reported (G7, 243 §2).
         deferred, self._deferred_transactional = self._deferred_transactional, []
-        for entry in deferred:
+        for entry in reversed(deferred):
             entry()
         return self._dispose_adopted()
 

@@ -52,16 +52,44 @@ extern witnessed[fs] fn stash_path(p: Str) -> Result[Stash, FsError] undo unstas
 	return RevlOk[Stash, FsError]{Value: Stash{Path: p, Bak: bak}}
 }
 
-// The service method declares the fs capability (`emission fn`), so the
-// per-call witnessed crossing stays visible to a consumer of `Ops`.
+// item 369: a `move` witnessed mutation + its inverse, so a test can fire two
+// OVERLAPPING per-call ops (`mv a b ; mv b c`) whose inverses touch a shared
+// path — the case that distinguishes a LIFO abort drain (lands on `a`) from a
+// FIFO one (lands on the wrong `b`). `unmove` is idempotent-and-total (243 rule
+// 5), which is exactly what turns a wrong replay ORDER into a silent wrong
+// RESULT rather than an error.
+type Move = { from: Str, to: Str }
+
+extern pure fn unmove(w: Move) -> Unit = @go {
+	//revl:import os
+	if _, err := os.Stat(w.To); err == nil {
+		_ = os.Rename(w.To, w.From)
+	}
+	return
+}
+
+extern witnessed[fs] fn move_e(a: Str, b: Str) -> Result[Move, FsError] undo unmove(result) = @go {
+	//revl:import os
+	if err := os.Rename(a, b); err != nil {
+		return RevlErr[Move, FsError]{Value: FsError{Code: err.Error()}}
+	}
+	return RevlOk[Move, FsError]{Value: Move{From: a, To: b}}
+}
+
+// The service methods declare the fs capability (`emission fn`), so the
+// per-call witnessed crossings stay visible to a consumer of `Ops`.
 service Ops {
   emission fn touch(p: Str)
+  emission fn mv(a: Str, b: Str)
 }
 
 component Agent provides ops: Ops {
   provide ops {
     fn touch(p) {
       effect stash_path(p)
+    }
+    fn mv(a, b) {
+      effect move_e(a, b)
     }
   }
 }
