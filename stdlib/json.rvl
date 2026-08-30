@@ -209,3 +209,24 @@ pub extern pure fn json_try_parse(s: Str) -> Result[Any, Str]
       return { kind: "Err", value: e instanceof Error ? e.message : String(e) };
     }
   }
+  = @rs {
+    // `Result[Any, Str]` is native `Result<Value, String>`. The Ok payload is
+    // the same boxed `serde_json::Value` json_parse produces; the decode error
+    // is stringified into the Err channel instead of collapsed to Null.
+    match serde_json::from_str::<serde_json::Value>(&s) {
+        Ok(j) => Ok(Value::new(j)),
+        Err(e) => Err(e.to_string()),
+    }
+  }
+  = @go {
+    //revl:import encoding/json
+    // `Result[Any, Str]` lowers to the sealed interface `RevlResult[any,
+    // string]`, built by the `RevlOk`/`RevlErr` case structs. A decode error
+    // routes into the Err channel rather than being swallowed to nil as
+    // json_parse's @go body does.
+    var v any
+    if err := json.Unmarshal([]byte(s), &v); err != nil {
+        return RevlErr[any, string]{Value: err.Error()}
+    }
+    return RevlOk[any, string]{Value: v}
+  }
