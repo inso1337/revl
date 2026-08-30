@@ -270,6 +270,32 @@ class _ComponentEmitter:
         # (key, op) -> (param wasm types, result wasm type or None) — the
         # coeffect import's ABI, one width per declared param/return.
         self.imports: dict[tuple[str, str], tuple[list[str | None], str | None]] = {}
+        # item 173: per-tier emitted-body routing. A routed require (item 162's
+        # `routes` IR: key -> {"realms": [...], "strategy": ...}) fans a key out
+        # across N NAMED worker realms. This tier is FIRST-PARTY — the runtime
+        # liveness primitive lives in cordis-wasm's substrate (`route:<key>`), so
+        # the emitted body routes on wasm exactly like py/ts/rust. A routed key
+        # is NOT a plain `coeffect:<key>` import (it has no single-realm
+        # provider); its calls go through generated selector + dispatch helpers
+        # that re-resolve the live per-realm handle on every call (reactive
+        # failover from the emitted body). Empty for every routes-less program,
+        # so such a program emits BYTE-IDENTICALLY to before this item.
+        self.routes: dict[str, dict] = component.get("routes") or {}
+        for key, route in self.routes.items():
+            if key not in self.requires:
+                raise EmitError(
+                    f"{self.name}: routed key {key!r} is not a requirement")
+            realms = route.get("realms") or []
+            if not realms:
+                raise EmitError(
+                    f"{self.name}: routed key {key!r} names no realms")
+        # routed (key, op) -> (param wasm types, result wasm type or None): the
+        # `route:<key>.<op>` dispatch ABI, kept out of `self.imports` so no plain
+        # coeffect import is emitted for a routed key.
+        self.route_imports: dict[tuple[str, str], tuple[list[str | None], str | None]] = {}
+        # routed key -> ordered ops its body calls (drives helper + import gen);
+        # only keys actually called emit any route machinery.
+        self.route_ops: dict[str, list[str]] = {}
         self.globals: list[tuple[str, str]] = []   # (name, wasm type)
         self.uses_job = False
         # job name -> interned i32 id (see _job_id)
@@ -345,6 +371,16 @@ class _ComponentEmitter:
         if self.intercept:
             payload = _wat_string(json.dumps(self.intercept, sort_keys=True))
             lines.append(f'  (@custom "revl:intercept" "{payload}")')
+        # item 173: the routed-require map the substrate reads at plug/spawn to
+        # resolve `route:<key>.<op>(index, …)` -> `realms[index] + "/" + key`
+        # strictly in that one realm. Only the ordered realm labels are load-
+        # bearing for the runtime (strategy is the emitted body's own concern),
+        # but the whole entry is carried so the section is self-describing.
+        # Emitted only when the component actually routes, so a routes-less
+        # program's custom sections are byte-identical to before.
+        if self.routes:
+            payload = _wat_string(json.dumps(self.routes, sort_keys=True))
+            lines.append(f'  (@custom "revl:routes" "{payload}")')
         return lines
 
     def _teardown_section(self, abort_chain: list[dict[str, Any]],
@@ -449,6 +485,125 @@ class _ComponentEmitter:
         self.imports[(key, op)] = (param_wtys, result_wty)
         return param_types, return_type
 
+    def _route_op_spec(self, key: str, op: str, where: str) -> tuple[list[str | None], str | None]:
+        """Resolve a routed coeffect op (item 173), registering its `route:`
+        dispatch ABI instead of a plain `coeffect:` import.
+
+        A routed require carries no single-realm provider, so its op resolves
+        strictly per named realm through the substrate's `route:<key>` primitive.
+        Only SCALAR (Int/Bool) params/returns cross this tier's routed boundary:
+        a Str/List/record pointer is an offset into the CALLER's linear memory,
+        which the provider in another realm (another instance, another memory)
+        cannot read — the same physical boundary the scalar coeffect boundary
+        already draws, tightened here because the two sides never share memory.
+        """
+        service_name = self.requires.get(key)
+        service = self.services.get(service_name)
+        if service is None:
+            raise EmitError(f"{where}: req {key!r} is not declared in requires")
+        spec = (service.get("methods") or {}).get(op)
+        if spec is None:
+            raise EmitError(f"{where}: {key}.{op} is not a method of {service_name}")
+        param_types = [param.get("type") for param in spec.get("params") or []]
+        return_type = spec.get("returns")
+        for i, pty in enumerate(param_types):
+            if not _is_scalar_type(pty):
+                raise EmitError(
+                    f"{where}: routed op {key}.{op} param {i} is {pty!r} — only "
+                    f"scalar (Int/Bool) values cross a routed require on this "
+                    f"tier; a pointer would name the caller's memory, not the "
+                    f"cross-realm provider's (use a hosted backend)")
+        if return_type is not None and not _is_scalar_type(return_type):
+            raise EmitError(
+                f"{where}: routed op {key}.{op} returns {return_type!r} — only "
+                f"scalar (Int/Bool) values cross a routed require on this tier "
+                f"(use a hosted backend for a compound routed result)")
+        param_wtys = [_wasm_ty(pty) for pty in param_types]
+        result_wty = _wasm_ty(return_type) if return_type is not None else None
+        self.route_imports[(key, op)] = (param_wtys, result_wty)
+        if op not in self.route_ops.setdefault(key, []):
+            self.route_ops[key].append(op)
+        return param_types, return_type
+
+    def _route_helpers(self) -> list[str]:
+        """item 173: the emitted realization of a routed require on cordis-wasm,
+        mirroring src/revl/run.py::_Router and the rust `_emit_router_struct`.
+
+        Per routed key actually called: a `$route_select_<key>` that picks a
+        LIVE realm index by the recorded strategy (re-checking liveness through
+        the substrate's `route:<key>.live` on every call, so a withdrawn realm
+        drops out — reactive failover), and a `$route_<key>_<op>` dispatch
+        wrapper per op that forwards strictly to that one realm's provider via
+        `route:<key>.<op>(index, args…)`. The wrapper holds no handle; the
+        re-resolution IS the failover. Emits nothing for a routes-less program.
+        """
+        funcs: list[str] = []
+        for key in sorted(self.route_ops):
+            realms = self.routes[key].get("realms") or []
+            n = len(realms)
+            strategy = self.routes[key].get("strategy") or "round_robin"
+            live = f"$route_live_{key}"
+            if strategy == "least_loaded":
+                for i in range(n):
+                    self.globals.append((f"$route_served_{key}_{i}", "i32"))
+                sel = [
+                    f"  (func $route_select_{key} (result i32)"
+                    f" (local $best i32) (local $bc i32) (local $c i32)",
+                    "    (local.set $best (i32.const -1))",
+                ]
+                for i in range(n):
+                    served = f"$route_served_{key}_{i}"
+                    sel.append(
+                        f"    (if (call {live} (i32.const {i})) (then\n"
+                        f"      (local.set $c (global.get {served}))\n"
+                        f"      (if (i32.or (i32.eq (local.get $best) (i32.const -1))"
+                        f" (i32.lt_u (local.get $c) (local.get $bc)))\n"
+                        f"        (then (local.set $best (i32.const {i}))"
+                        f" (local.set $bc (local.get $c))))))")
+                sel.append("    (if (i32.eq (local.get $best) (i32.const -1)) (then (unreachable)))")
+                for i in range(n):
+                    served = f"$route_served_{key}_{i}"
+                    sel.append(
+                        f"    (if (i32.eq (local.get $best) (i32.const {i}))"
+                        f" (then (global.set {served}"
+                        f" (i32.add (global.get {served}) (i32.const 1)))))")
+                sel.append("    (local.get $best))")
+                funcs.append("\n".join(sel))
+            else:  # round_robin (the default when strategy is omitted)
+                cursor = f"$route_cursor_{key}"
+                self.globals.append((cursor, "i32"))
+                funcs.append("\n".join([
+                    f"  (func $route_select_{key} (result i32)"
+                    f" (local $off i32) (local $cand i32)",
+                    "    (local.set $off (i32.const 0))",
+                    "    (loop $scan",
+                    f"      (local.set $cand (i32.rem_u"
+                    f" (i32.add (global.get {cursor}) (local.get $off))"
+                    f" (i32.const {n})))",
+                    f"      (if (i32.eq (call {live} (local.get $cand)) (i32.const 1)) (then",
+                    f"        (global.set {cursor} (i32.rem_u"
+                    f" (i32.add (local.get $cand) (i32.const 1)) (i32.const {n})))",
+                    "        (return (local.get $cand))))",
+                    "      (local.set $off (i32.add (local.get $off) (i32.const 1)))",
+                    f"      (br_if $scan (i32.lt_u (local.get $off) (i32.const {n}))))",
+                    "    (unreachable))",
+                ]))
+            for op in self.route_ops[key]:
+                param_wtys, result_wty = self.route_imports[(key, op)]
+                decl = " ".join(f"(param $p{i} {w})" for i, w in enumerate(param_wtys))
+                head = f"  (func $route_{key}_{op}"
+                if decl:
+                    head += f" {decl}"
+                if result_wty:
+                    head += f" (result {result_wty})"
+                fwd_args = " ".join(f"(local.get $p{i})" for i in range(len(param_wtys)))
+                disp = f"$route_disp_{key}_{op}"
+                inner = (f"(call {disp} (call $route_select_{key}) {fwd_args})"
+                         if fwd_args else
+                         f"(call {disp} (call $route_select_{key}))")
+                funcs.append(f"{head}\n    {inner})")
+        return funcs
+
     # -- expressions ---------------------------------------------------------
 
     #: kinds the component path lowers itself, straight to i32 instructions.
@@ -533,7 +688,13 @@ class _ComponentEmitter:
                 )
             key = _ident(target.get("name"), f"{where}: req")
             op = _ident(node.get("method"), f"{where}: method")
-            param_types, return_type = self._op_spec(key, op, where)
+            # item 173: a routed require resolves per named realm through the
+            # generated selector + `route:<key>` dispatch, never a single
+            # `coeffect:<key>` handle.
+            routed = key in self.routes
+            param_types, return_type = (
+                self._route_op_spec(key, op, where) if routed
+                else self._op_spec(key, op, where))
             args = node.get("args") or []
             if len(args) != len(param_types):
                 raise EmitError(f"{where}: {key}.{op} takes {len(param_types)} argument(s)")
@@ -553,6 +714,16 @@ class _ComponentEmitter:
                         f"{ptype!r}; keep compound values inside the module"
                     )
                 parts.append(value.wat)
+            if routed:
+                # the selector picks a live realm index (round-robin cursor /
+                # least-loaded served count), then the dispatch import forwards
+                # `op` strictly to that one realm's provider. Selection is the
+                # FIRST operand so its cursor/served side effect runs before the
+                # args, matching the single-shot select rust does per call.
+                fn = f"$route_{key}_{op}"
+                call = (f"(call {fn} {' '.join(parts)})" if parts
+                        else f"(call {fn})")
+                return _E(call, return_type)
             call = f"(call $req_{key}_{op} {' '.join(parts)})" if parts else f"(call $req_{key}_{op})"
             return _E(call, return_type)
         if kind == "config":
@@ -1154,6 +1325,11 @@ class _ComponentEmitter:
             # inverse (i32, the default `_local_decl` width). Only present when
             # the component actually has a method-body witnessed effect.
             self.activation_locals.append("__mw_dcell")
+        # item 173: the routed-require selector + dispatch helpers, appended as
+        # ordinary internal funcs. Populates `self.globals` (route cursor /
+        # served counts), which `_module` renders below — so it must run before
+        # it. Empty (no funcs, no globals) for a routes-less program.
+        provide_funcs.extend(self._route_helpers())
         return self._module(segments, entries, provide_funcs)
 
     def _witnessed_effect_step(self, index: int, acquire: Any, ext: dict,
@@ -1639,6 +1815,24 @@ class _ComponentEmitter:
             result = f" (result {result_wty})" if result_wty else ""
             sig = f" {params}" if params else ""
             lines.append(f'  (import "{self._import_module(key)}" "{op}" (func $req_{key}_{op}{sig}{result}))')
+        # item 173: the routed-require ABI. Per routed key called: a `live`
+        # probe (`route:<key>.live(index) -> i32`, 1 iff that one realm has an
+        # ACTIVE provider — the strict, no-parent-fallback liveness the emitted
+        # selector polls) and one strict dispatch per op (`route:<key>.<op>`,
+        # whose leading i32 param is the realm index the selector chose). A
+        # routed key is deliberately NOT a `coeffect:<key>` import — it has no
+        # single-realm provider — so it never enters the instantiation inject
+        # set and the Router activates without waiting on a bare provider.
+        for key in sorted(self.route_ops):
+            lines.append(f'  (import "route:{key}" "live" '
+                         f'(func $route_live_{key} (param i32) (result i32)))')
+            for op in self.route_ops[key]:
+                param_wtys, result_wty = self.route_imports[(key, op)]
+                params = " ".join(f"(param {w})" for w in param_wtys)
+                result = f" (result {result_wty})" if result_wty else ""
+                sig = f" {params}" if params else ""
+                lines.append(f'  (import "route:{key}" "{op}" '
+                             f'(func $route_disp_{key}_{op} (param i32){sig}{result}))')
         if self._needs_record_import:
             # item 322 Slice 2: the durable-WAL framing channel. `record` takes
             # (seq, receiver_ptr, method_ptr, witness_ptr) — the runtime values

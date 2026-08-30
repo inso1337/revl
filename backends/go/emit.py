@@ -1243,6 +1243,111 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
         out.append("")
 
 
+def _emit_go_router_struct(cname, key, service_name, route, services, out):
+    """item 173: the emitted realization of a routed require on cordis-go,
+    mirroring src/revl/run.py::_Router and the rust `_emit_router_struct`.
+
+    A per-(component, key) struct implementing the required service interface.
+    It holds no worker handle — every method re-resolves the live per-realm
+    handle off the strict, single-realm liveness-checked read the stc-go fork
+    adds (`stc.ServiceInRealm[Svc](ctx, key, _revlRealm(realm))`, which returns
+    ok=false for a realm with no ACTIVE provider and — unlike plain resolve —
+    never falls back up the realm chain to the router's own root provision). So
+    a withdrawn worker realm drops out of the live set and its calls go to the
+    survivors — reactive failover from the emitted body. The struct is wired as
+    the component's handle for the routed key, so a provide-method's
+    `<key>.<op>(..)` forwards straight through it (G2: one provider downstream).
+    """
+    struct = "revlRouter%s%s" % (cname, _camel(key))
+    ctor = "newRevlRouter%s%s" % (cname, _camel(key))
+    svc = _camel(service_name)
+    realms = list(route.get("realms") or [])
+    strategy = route.get("strategy") or "round_robin"
+    realm_lits = ", ".join(_go_string(r) for r in realms)
+    realm_fn = _realm_helper_name()
+    methods = (services.get(service_name, {}) or {}).get("methods", {}) or {}
+
+    out.append("type %s struct {" % struct)
+    out.append("\tctx      *stc.Context")
+    out.append("\tkey      stc.Key")
+    out.append("\trealms   []string")
+    out.append("\tstrategy string")
+    out.append("\tmu       sync.Mutex")
+    out.append("\tcursor   int")
+    out.append("\tserved   map[string]uint64")
+    out.append("}")
+    out.append("")
+    out.append("func %s(ctx *stc.Context) *%s {" % (ctor, struct))
+    out.append("\treturn &%s{" % struct)
+    out.append("\t\tctx:      ctx,")
+    out.append("\t\tkey:      %s," % _key_var(key))
+    out.append("\t\trealms:   []string{%s}," % realm_lits)
+    out.append("\t\tstrategy: %s," % _go_string(strategy))
+    out.append("\t\tserved:   map[string]uint64{},")
+    out.append("\t}")
+    out.append("}")
+    out.append("")
+    # live: strict per-realm resolution; a withdrawn realm is simply absent.
+    out.append(f"func (r *{struct}) _revlLive() ([]string, map[string]{svc}) {{")
+    out.append("\tlabels := []string{}")
+    out.append(f"\thandles := map[string]{svc}{{}}")
+    out.append("\tfor _, realm := range r.realms {")
+    out.append(f"\t\tif h, ok := stc.ServiceInRealm[{svc}](r.ctx, r.key, {realm_fn}(realm)); ok {{")
+    out.append("\t\t\tlabels = append(labels, realm)")
+    out.append("\t\t\thandles[realm] = h")
+    out.append("\t\t}")
+    out.append("\t}")
+    out.append("\treturn labels, handles")
+    out.append("}")
+    out.append("")
+    # select: strategy over the live set, re-checked every call (failover).
+    out.append(f"func (r *{struct}) _revlSelect() {svc} {{")
+    out.append("\tlabels, handles := r._revlLive()")
+    out.append("\tif len(labels) == 0 {")
+    out.append("\t\tpanic(fmt.Sprintf(\"revl: router for %s has no live worker "
+               "(realms %v all withdrawn)\", r.key, r.realms))")
+    out.append("\t}")
+    out.append("\tr.mu.Lock()")
+    out.append("\tdefer r.mu.Unlock()")
+    out.append("\tif r.strategy == \"least_loaded\" {")
+    out.append("\t\tbest := labels[0]")
+    out.append("\t\tfor _, l := range labels[1:] {")
+    out.append("\t\t\tif r.served[l] < r.served[best] {")
+    out.append("\t\t\t\tbest = l")
+    out.append("\t\t\t}")
+    out.append("\t\t}")
+    out.append("\t\tr.served[best]++")
+    out.append("\t\treturn handles[best]")
+    out.append("\t}")
+    out.append("\tn := len(r.realms)")
+    out.append("\tfor off := 0; off < n; off++ {")
+    out.append("\t\tcand := r.realms[(r.cursor+off)%n]")
+    out.append("\t\tif h, ok := handles[cand]; ok {")
+    out.append("\t\t\tr.cursor = (r.cursor + off + 1) % n")
+    out.append("\t\t\tr.served[cand]++")
+    out.append("\t\t\treturn h")
+    out.append("\t\t}")
+    out.append("\t}")
+    out.append("\tpanic(\"revl: router selection unreachable\")")
+    out.append("}")
+    out.append("")
+    # the service interface, forwarding each op through a fresh selection.
+    for mname, decl in methods.items():
+        params_decl = decl.get("params", []) or []
+        ret = _go_return(decl.get("returns"))
+        go_params = ", ".join("%s %s" % (_safe_local(p["name"]), _go_type(p["type"]))
+                              for p in params_decl)
+        sig = "func (r *%s) %s(%s)" % (struct, _camel(mname), go_params)
+        if ret:
+            sig += " " + ret
+        out.append(sig + " {")
+        args = ", ".join(_safe_local(p["name"]) for p in params_decl)
+        call = "r._revlSelect().%s(%s)" % (_camel(mname), args)
+        out.append(("\treturn %s" if ret else "\t%s") % call)
+        out.append("}")
+        out.append("")
+
+
 def _config_fields_flag(has_config):
     # placeholder: config field membership isn't needed for ref detection,
     # config refs are explicit ('config' kind). Return empty set.
@@ -1590,6 +1695,12 @@ def _emit_component(comp, services, out):
 
     binds = [s["bind"] for s in body if s.get("step") == "let-effect"]
     reqs = list(requires.keys())
+    # item 173: a routed require (item 162 `routes` IR) has no single-realm
+    # provider — it resolves per named realm through the emitted router struct,
+    # never a `stc.Service`/`Inject` single handle. Empty for every routes-less
+    # component, so such a component emits byte-identically to before.
+    routes = comp.get("routes") or {}
+    reqs_gated = [r for r in reqs if r not in routes]
     has_config = bool(comp.get("config"))
 
     # config struct
@@ -1602,8 +1713,8 @@ def _emit_component(comp, services, out):
         out.append("func %s() stc.Component {" % cname)
     out.append("\treturn stc.Component{")
     out.append("\t\tName: %s," % _go_string(name))
-    if reqs:
-        out.append("\t\tInject: []stc.Key{%s}," % ", ".join(_key_var(r) for r in reqs))
+    if reqs_gated:
+        out.append("\t\tInject: []stc.Key{%s}," % ", ".join(_key_var(r) for r in reqs_gated))
     if provides:
         out.append("\t\tProvide: []stc.Key{%s}," % ", ".join(_key_var(p) for p in provides))
     out.append("\t\tApply: func(ctx *stc.Context) (stc.Inverse, error) {")
@@ -1631,8 +1742,14 @@ def _emit_component(comp, services, out):
 
     env = _Env(binds, reqs, set(), receiver="")
 
-    # requires -> Service resolution
+    # requires -> Service resolution. A routed key gets a router value (its
+    # emitted body re-resolves live per-realm handles per call) instead of a
+    # single `stc.Service` handle.
     for rname, svc in requires.items():
+        if rname in routes:
+            out.append("\t\t\t%s := newRevlRouter%s%s(ctx)" %
+                        (_req_field(rname), cname, _camel(rname)))
+            continue
         out.append("\t\t\t%s, err := stc.Service[%s](ctx, %s)" %
                     (_req_field(rname), _camel(svc), _key_var(rname)))
         out.append("\t\t\tif err != nil {")
@@ -1677,6 +1794,11 @@ def _emit_component(comp, services, out):
             svc = step["service"]
             _emit_provide_impl(cname, step["name"], svc, step.get("methods", []),
                                services, binds, reqs, has_config, out)
+
+    # item 173: one router struct per routed require, implementing the required
+    # service interface by strict per-realm resolution + strategy + failover.
+    for rkey, route in routes.items():
+        _emit_go_router_struct(cname, rkey, requires[rkey], route, services, out)
 
 
 def _collect_host_calls(node, acc):
@@ -2182,8 +2304,9 @@ def _emit_keys(ir, out):
 
 
 def _emit_realm_helper(ir, out):
-    # emit only if any component isolates a key
-    if not any(c.get("isolate") for c in ir.get("components", [])):
+    # emit only if any component isolates a key or routes one (item 173: a
+    # router resolves its worker realms by label through this same interner).
+    if not any(c.get("isolate") or c.get("routes") for c in ir.get("components", [])):
         return
     out.append("var (")
     out.append("\t_revlRealmMu sync.Mutex")
