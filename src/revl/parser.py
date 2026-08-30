@@ -378,6 +378,18 @@ class ExternDecl:
     # drops it). Validity (emission-only, Unit-returning, no compensate, not
     # async) is checked in lower, not the parser.
     deferred: bool = False
+    # item 388: the caller-decided colour marker, spelled `fn|async` in the
+    # `async`/`deferred` slot (`extern emission fn|async engine_run(...)`). A poly
+    # extern fixes NO colour at its declaration: one authored host body serves a
+    # sync `def`/`function` clone at a sync call site and an `async def`/`async
+    # function` clone at an async call site, monomorphized per call-site colour
+    # (the EXTERN analog of item 342's arrow monomorphization,
+    # docs/design/388-caller-decided-extern-colour.md, option a). Validity
+    # (emission-only, not `deferred`, not combined with a fixed `async`, no
+    # `compensate`, and the per-backend `await`-keyword lint) is checked in lower,
+    # not the parser. `False` for every extern, so a non-poly extern is
+    # byte-identical.
+    colour_poly: bool = False
     # item 246: the declaration-owned `requires approval` clause, for first-party
     # code that knows its boundary is sensitive: `extern emission[production.payment]
     # fn charge(...) requires approval`. A crossing that reaches this extern must
@@ -1194,6 +1206,19 @@ class Parser:
             else:
                 break
         self.expect("kw", "fn")
+        # item 388: the caller-decided colour marker `fn|async`. It sits right
+        # after `fn` (not in the pre-`fn` modifier slot) and reads as "either
+        # colour": one authored body, colour decided at each call site. `async`
+        # is a reserved keyword, so the lexer needs no change; a bare `fn` is
+        # byte-identical. Validity (emission-only, not `deferred`, not also a
+        # fixed `async`) is enforced in lower with honest messages.
+        colour_poly = False
+        if self.at("|"):
+            self.next()
+            self.expect("kw", "async",
+                        what="`async` after `fn|` — the caller-decided colour "
+                             "marker `fn|async` (item 388)")
+            colour_poly = True
         name = self.expect("ident").value
         type_params = self._type_param_list()
         self.expect("(")
@@ -1247,7 +1272,7 @@ class Parser:
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
                           capabilities=capabilities, type_params=type_params, async_=async_,
                           deferred=deferred, requires_approval=requires_approval,
-                          reach=reach, config=config)
+                          reach=reach, config=config, colour_poly=colour_poly)
 
     def _reach_clause(self) -> tuple[str, str]:
         """`(confined: <param>)` after an emission classification — item 373.
