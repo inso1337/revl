@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import keyword
+import os
 
 from . import holes
 from .errors import RevlError, RevlErrors
@@ -1008,6 +1009,46 @@ def _check_returns_on_every_path(decl: FnDecl, filename: str) -> None:
     )
 
 
+def _same_file_two_copies(a: str, b: str) -> bool:
+    """True when `a` and `b` are distinct paths to a byte-identical file with
+    the same basename — the "two copies of one module" case (roadmap 394)."""
+    if os.path.basename(a) != os.path.basename(b):
+        return False
+    if os.path.abspath(a) == os.path.abspath(b):
+        return False
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
+
+
+def _duplicate_symbol_message(kind: str, name: str,
+                              first_file: str, second_file: str) -> str:
+    """A duplicate-symbol message that names BOTH declaring files by absolute
+    path (roadmap 394, revl-harness F-H39.3).
+
+    The two files that declare `name` are frequently the same module reached
+    under two `use` spellings — a search-path spelling (`use "stdlib/str.rvl"`)
+    and a vendored byte-identical copy (`use "../../stdlib/str.rvl"`). Naming
+    only one path reads as a bug in revl's own stdlib; naming both — and, when
+    they are byte-identical copies of one file, saying so — makes "you have two
+    copies of the same module" self-evident.
+    """
+    a = os.path.abspath(first_file)
+    b = os.path.abspath(second_file)
+    msg = (f"duplicate {kind} `{name}` — declared in both\n"
+           f"    {a}\n"
+           f"  and\n"
+           f"    {b}")
+    if _same_file_two_copies(a, b):
+        msg += ("\n  these are byte-identical copies of the same file under two "
+                "paths: you have two copies of one module (often a vendored "
+                "copy reached under two `use` spellings) — delete one copy, or "
+                "`use` a single shared path so it loads as one module")
+    return msg
+
+
 def _lower_fns(program: Program, filename: str, types: dict | None = None) -> list:
     _check_verified_totality(program, filename)
     types = types or {}
@@ -1019,7 +1060,10 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         | {ext.name for ext in program.externs}
     )
     fns: list[dict] = []
-    seen: set[str] = set()
+    # name -> the file that first declared it, so a duplicate names BOTH files
+    # (roadmap 394): a same-named fn reached under two `use` spellings loads as
+    # two modules, and the diagnostic must show both resolved paths.
+    seen: dict[str, str] = {}
     # Install the block-arm lift sink for the duration of fn-body lowering: a
     # statement-block match arm is lambda-lifted into a synthetic helper fn
     # (`_lift_block_arm`) collected here, then appended to `fns` below. `taken`
@@ -1039,8 +1083,18 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         # its diagnostics must name that file, not paths[0] (roadmap 312).
         decl_file = decl.source or filename
         if decl.name in seen:
-            raise RevlError(decl_file, decl.line, f"duplicate function `{decl.name}`")
-        seen.add(decl.name)
+            first_file = seen[decl.name]
+            if os.path.abspath(first_file) == os.path.abspath(decl_file):
+                # two fns of one name in ONE file: the terse message already
+                # points at the sole file, so keep it byte-identical (roadmap
+                # 394 only widens the CROSS-FILE case).
+                raise RevlError(decl_file, decl.line,
+                                f"duplicate function `{decl.name}`")
+            raise RevlError(
+                decl_file, decl.line,
+                _duplicate_symbol_message("function", decl.name,
+                                          first_file, decl_file))
+        seen[decl.name] = decl_file
         # the body sees the *marked* signature: this fn's own type parameters
         # are wildcards inside it (they are universally quantified there), while
         # a one-letter nominal type stays checked
@@ -1871,7 +1925,10 @@ def _refuse_witnessed_outside_effect_position(program: Program, filename: str) -
 
 def _lower_externs(program: Program, filename: str, types: dict) -> list:
     externs: list[dict] = []
-    seen: set[str] = set()
+    # name -> first declaring file, so a cross-module duplicate names BOTH files
+    # (roadmap 394), same as `_lower_fns`. Externs carry provenance in
+    # `program.decl_files` (they have no `.source` field of their own).
+    seen: dict[str, str] = {}
     # classification of every extern by name, so a declared inverse can be held
     # to the "non-emission AND non-witnessed" rule (docs/design/243 rule 3): an
     # inverse that itself emits crosses a one-way boundary in teardown (G5), and
@@ -1883,9 +1940,18 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
     # declared later in the file is still caught).
     _check_deferred_not_in_teardown(program, filename)
     for decl in program.externs:
+        decl_file = program.decl_files.get(id(decl), filename)
         if decl.name in seen:
-            raise RevlError(filename, decl.line, f"duplicate extern `{decl.name}`")
-        seen.add(decl.name)
+            first_file = seen[decl.name]
+            if os.path.abspath(first_file) == os.path.abspath(decl_file):
+                # a same-file re-declaration: keep the terse single-file message
+                raise RevlError(decl_file, decl.line,
+                                f"duplicate extern `{decl.name}`")
+            raise RevlError(
+                decl_file, decl.line,
+                _duplicate_symbol_message("extern", decl.name,
+                                          first_file, decl_file))
+        seen[decl.name] = decl_file
         if decl.classification == "acquire" and decl.undo is None:
             raise RevlError(
                 filename, decl.line,

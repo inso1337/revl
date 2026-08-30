@@ -413,6 +413,61 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     return document
 
 
+def _extern_signature(ext) -> str:
+    """A compact `(P, Q) -> R` rendering of an extern's signature, for the
+    duplicate-extern collision message (roadmap 393)."""
+    params = ", ".join(p.type or "?" for p in ext.params)
+    return f"({params}) -> {ext.returns or '()'}"
+
+
+def _reject_clashing_private_externs(included: list[_LoadedModule]) -> None:
+    """Refuse two modules that each privately declare the same extern name with
+    DIFFERENT signatures (roadmap 393, revl-harness F-H39.2).
+
+    Unlike a private fn — which carries its own body and so may be renamed apart
+    invisibly — an extern names a host requirement by its bare name. Two modules
+    privately declaring `si_now_ms` with `() -> Str` and `() -> Int` is a real
+    collision; the private-namespace rename would only hide it and let a caller
+    of the bare name fall through to the misleading `is not a declared
+    requirement of <Component>` G1 error. Report it here as what it is.
+
+    Identical-signature private externs stay renamed-apart (harmless, and this
+    keeps the pass a no-op for every composition that compiles today).
+    """
+    by_name: dict[str, list[tuple[_LoadedModule, object]]] = {}
+    for module in included:
+        for ext in module.program.externs:
+            if not ext.public:
+                by_name.setdefault(ext.name, []).append((module, ext))
+
+    for name, decls in by_name.items():
+        if len({id(m) for m, _ in decls}) < 2:
+            continue  # a single module re-declaring is caught as `duplicate extern`
+        # name the first pair whose signatures actually differ.
+        for i in range(len(decls)):
+            for j in range(i + 1, len(decls)):
+                m_a, ext_a = decls[i]
+                m_b, ext_b = decls[j]
+                if id(m_a) == id(m_b):
+                    continue
+                sig_a = _extern_signature(ext_a)
+                sig_b = _extern_signature(ext_b)
+                if sig_a == sig_b:
+                    continue
+                path_a = os.path.abspath(m_a.path)
+                path_b = os.path.abspath(m_b.path)
+                raise RevlError(
+                    path_a, ext_a.line,
+                    f"duplicate extern `{name}` declared in {path_a} and "
+                    f"{path_b} (signatures differ: `{sig_a}` vs `{sig_b}`)",
+                    hint="an extern names a host requirement by its bare name, "
+                         "so unlike a private `fn` it cannot be renamed apart "
+                         "per module — give the two host functions distinct "
+                         "names, or `pub` one and `use` it from the other module "
+                         "so a single declaration is shared",
+                )
+
+
 def _apply_module_privacy(included: list[_LoadedModule]) -> None:
     """Namespace every module-private top-level declaration (roadmap 228).
 
@@ -435,6 +490,20 @@ def _apply_module_privacy(included: list[_LoadedModule]) -> None:
     for this purpose; types are a separate namespace. `pub` duplicates stay a
     hard error because neither side is a private and so neither is renamed.
     """
+    # roadmap 393 (revl-harness F-H39.2): a clashing private EXTERN is not a
+    # genuinely-local helper the way a private fn is. A private fn has its own
+    # body in each module, so renaming the two apart is invisible; an extern has
+    # no body of its own — it names a HOST requirement by its bare name. Two
+    # modules privately declaring the same extern name with DIFFERENT signatures
+    # is therefore a real collision, and the rename below only papers over it:
+    # it leaves any component/pure body that calls the bare `si_now_ms`
+    # resolving to nothing, which surfaces downstream as the misleading
+    # `si_now_ms is not a declared requirement of <Component>` (G1) error —
+    # sending the author to add a `requires` clause for something that is not a
+    # service. Catch the collision HERE, before the rename, and report it AS a
+    # duplicate that names both declaring files and the signature mismatch.
+    _reject_clashing_private_externs(included)
+
     val_owners: dict[str, set[int]] = {}   # fn/extern name -> {id(module)}
     type_owners: dict[str, set[int]] = {}   # type name      -> {id(module)}
     for module in included:
