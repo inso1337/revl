@@ -3689,6 +3689,11 @@ class _V3Emitter:
             if target_ty not in ("Str", "Bytes"):
                 raise EmitError("charCodeAt is only lowerable on Str/Bytes values")
             return "Int"
+        # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at).
+        if method == "codepoint_at":
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError("codepoint_at is only lowerable on Str/Bytes values")
+            return "Int"
         if method == "to_str":
             if target_ty != "Int":
                 raise EmitError("to_str is only lowerable on Int values")
@@ -4177,6 +4182,16 @@ class _V3Emitter:
             arg = self._expr(args[0], scope, where, "Int")
             # Str decodes the UTF-8 scalar value at a code-point index; Bytes
             # reads the raw byte (docs/strings.md).
+            helper = "$str_cp_char_code_at" if target_ty == "Str" else "$str_char_code_at"
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Int")
+        # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+        # the Unicode scalar at code-point index i, via the same UTF-8-decoding
+        # helper as charCodeAt.
+        if method == "codepoint_at":
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError(f"{where}: codepoint_at is only lowerable on Str/Bytes")
+            target = self._expr(target_node, scope, where, target_ty)
+            arg = self._expr(args[0], scope, where, "Int")
             helper = "$str_cp_char_code_at" if target_ty == "Str" else "$str_char_code_at"
             return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Int")
         if method in ("div_trunc", "div_floor", "div_euclid", "mod"):
