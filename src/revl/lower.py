@@ -4177,6 +4177,31 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         if inst is not None:
             return _lower_instance_get(lowered_target, expr.name, line, inst, env)
         target_type = infer_ir(lowered_target, env.type_env, env.types, env.services)
+        # item 392: the provide-method / component-body twin of the item 380(2)
+        # refusal in `infer_ast`. A field read off a value whose static type is
+        # `Any`/`Value` (the erased-dynamic types — a `json_parse` result) is the
+        # 279/299 silent-divergence class: py raises `KeyError` on an absent key,
+        # ts yields `undefined`, and neither is a defensible total answer for a
+        # field the author declared present. `infer_ast` (stratum 1 — fn/test/
+        # module-fn bodies) already refuses it, and the component-setup sweep
+        # reaches the same refusal in `infer_ir`; but a `provide` method body and
+        # a component pure-expression position lower through here WITHOUT a
+        # filename-carrying sweep, so the same expression compiled clean — the
+        # same context-scoping gap as the `.length`-in-provide-method case marked
+        # just below. Refuse it here with the identical diagnostic so the
+        # divergence is a compile error on every tier, wherever the read sits.
+        _thead, _ = parse_type(target_type)
+        if filename and _thead in ("Any", "Value"):
+            raise RevlError(
+                filename, line,
+                f"field read `.{expr.name}` on a value of type "
+                f"`{render_type(target_type)}` — an erased value has no known fields",
+                hint=("bind it to a record type first "
+                      f"(`let e: SomeRecord = …; e.{expr.name}` — an `Opt[T]` "
+                      "field then reads back the empty Opt on absence), or walk "
+                      "it with stdlib/value.rvl (`value_is_object(v)`, "
+                      f"`value_opt(v, \"{expr.name}\")`, `value_field_or`)"),
+                code="T1", category="type-mismatch")
         node = {"kind": "field", "target": lowered_target, "name": expr.name}
         # item 104 (cross-tier): the property form `.length` in a COMPONENT
         # position stays a `field` node (the fn-body form is a `len` node — that
