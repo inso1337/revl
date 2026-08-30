@@ -57,11 +57,19 @@ def crossings(audit: dict) -> set[str]:
     """The enumerable set of boundary crossings in an audit, as ack tokens.
 
     A crossing token is stable across generations for the same reach, so set
-    difference is the whole diff. Two kinds, both drawn from the per-component
-    G8 boundary table:
+    difference is the whole diff. Four kinds, all drawn from the per-component
+    G8 boundary table (the last two only when item 249 taint is in play):
 
-        emit:<component>:<label>   an emission call site
-        host:<component>:<name>    a reached host extern
+        emit:<component>:<label>          an emission call site
+        host:<component>:<name>           a reached host extern
+        taint:<component>:<origin>        a value of <origin> reaches an emission here
+        declassify:<component>:<origin>   an untrusted value of <origin> is declassified here
+
+    The two taint tokens flow through `diff_crossings`/`evaluate` unchanged, so a
+    newly-appearing `taint:` (web content newly routed into a send) or
+    `declassify:` (a newly-added `endorse`) is a *widening* that fails the drift
+    gate — the same mechanism that already catches "one more emission" now
+    catching "one more declassification" (item 249, Decision 5).
     """
     out: set[str] = set()
     for component, stats in (audit.get("boundary") or {}).items():
@@ -69,6 +77,11 @@ def crossings(audit: dict) -> set[str]:
             out.add(f"emit:{component}:{label}")
         for extern in stats.get("externs") or []:
             out.add(f"host:{component}:{extern['name']}")
+        taint = stats.get("taint") or {}
+        for origin in taint.get("reaches") or []:
+            out.add(f"taint:{component}:{origin}")
+        for origin in taint.get("declassify") or []:
+            out.add(f"declassify:{component}:{origin}")
     return out
 
 
