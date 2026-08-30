@@ -38,10 +38,15 @@ that uses no qualifier. Only the taint verdict is new.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .errors import RevlError
 from .typecheck import parse_type, format_type, FN_HEAD
+
+# a qualifier head standing on its own (not the tail of a longer identifier such
+# as a user type `MyTrusted[T]`), used only as the byte-identity fast-path guard
+_QUALIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])(?:Untrusted|Trusted)\[")
 
 # The two qualifier heads. Orthogonal to the base type (open question 2).
 _QUALIFIERS = ("Untrusted", "Trusted")
@@ -61,7 +66,11 @@ def strip_qualifiers(type_name: str | None) -> str | None:
     `Result[Trusted[Int], Str]` -> `Result[Int, Str]`. Idempotent, and a no-op
     on any type that carries no qualifier (byte-identity for existing programs).
     """
-    if not type_name:
+    if not type_name or not _has_qualifier(type_name):
+        # No qualifier anywhere: return the string VERBATIM. Never round-trip a
+        # qualifier-free type through parse_type/format_type — that would
+        # renormalise spacing (`Map[Str,Int]` -> `Map[Str, Int]`) and break
+        # byte-identity for programs that use no taint annotation.
         return type_name
     head, args = parse_type(type_name)
     if head in _QUALIFIERS and len(args) == 1:
@@ -72,6 +81,13 @@ def strip_qualifiers(type_name: str | None) -> str | None:
     if head == FN_HEAD:
         return format_type(FN_HEAD, stripped)
     return format_type(head, stripped)
+
+
+def _has_qualifier(type_name: str | None) -> bool:
+    """Whether any `Untrusted[...]`/`Trusted[...]` qualifier head appears, as a
+    standalone head. The byte-identity fast path: a type with none is returned
+    verbatim, never round-tripped through parse_type/format_type."""
+    return bool(type_name) and _QUALIFIER_RE.search(type_name) is not None
 
 
 def top_qualifier(type_name: str | None) -> str | None:
