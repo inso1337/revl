@@ -322,6 +322,15 @@ def lex(source: str, filename: str) -> list[Token]:
         elif c in SYMBOLS or c in SINGLE_OPERATORS:
             tokens.append(Token(c, c, line))
             i += 1
+        elif c == "#":
+            # item 384: `#` is the Python/shell line-comment lead-in — revl
+            # comments are `//` (line 242). Redirect instead of the opaque
+            # `unexpected character '#'`.
+            raise RevlError(
+                filename, line,
+                "revl has no `#` comments",
+                hint="a line comment is `// ...` (syntax-2.0 §3.2)",
+            )
         else:
             raise RevlError(filename, line, f"unexpected character {c!r}")
     tokens.append(Token("eof", None, line))

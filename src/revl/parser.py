@@ -840,6 +840,31 @@ class Program:
 # carries the triple form
 _CANONICAL_OPS = {"===": "==", "!==": "!="}
 
+# item 384: foreign statement/declaration keywords that LEX as identifiers
+# (none is a revl keyword) and so land in a statement- or declaration-dispatch
+# position where they are already an error — but a cryptic one (`expected a
+# top-level declaration, found 'def'`). Redirected to the revl spelling. The
+# check runs only at those error sites, which no valid program reaches with
+# these spellings, so it is false-positive-free (a fn/binding legitimately
+# NAMED `def`/`throw` is parsed in name position, never reaching the dispatch).
+# (message, hint) pairs; kept in sync with lower._FOREIGN_NAME_REDIRECTS.
+_FOREIGN_STMT_KEYWORDS = {
+    "def": ("revl has no `def`",
+            "a function is declared with `fn` (syntax-2.0 §3.1)"),
+    "throw": ("revl has no `throw`",
+              "a pure function returns a `Result`; a component activation body "
+              "signals failure with `fail` (syntax-2.0 §3.3, §4b.5)"),
+    "elif": ("revl has no `elif`",
+             "chain conditionals with `else if` (syntax-2.0 §3.2)"),
+    "lambda": ("revl has no `lambda`",
+               "an anonymous function is an arrow `x => …` (syntax-2.0 §3.2)"),
+    "const": ("revl has no `const`",
+              "use `let` (single-assignment) or `var` (mutable) (syntax-2.0 §3.5)"),
+    "print": ("revl has no `print`",
+              "pure code has no I/O — emit output through a service effect "
+              "(syntax-2.0 §4)"),
+}
+
 
 # ---------------------------------------------------------------- parser
 
@@ -1068,6 +1093,7 @@ class Parser:
                 program.tests.append(self.test_decl(lifecycle=True))
             else:
                 tok = self.peek()
+                self._reject_foreign_keyword(tok)  # item 384
                 raise self.err(tok.line, f"expected a top-level declaration, found {tok.value!r}")
         return program
 
@@ -1739,6 +1765,7 @@ class Parser:
             if in_method:
                 raise self.err(tok.line, "`provide` is not allowed inside a method body")
             return self.provide()
+        self._reject_foreign_keyword(tok)  # item 384
         raise self.err(
             tok.line,
             f"expected a statement (`let`, `effect`, `emit`, `fail`, `if`{', `return`' if in_method else ', `provide`'}), found {tok.value!r}",
@@ -2691,7 +2718,37 @@ class Parser:
     def for_stmt(self) -> ForStmt:
         line = self.expect("kw", "for").line
         self.expect("(")
+        # item 384 (pairs with 379): revl's only loop header is the TS for-of
+        # `for (x of xs)`. A C-style `for (let i = 0; i < n; i += 1)` opens
+        # with a `let`/`var` keyword (or a bare `i = …`/`;`) where the bind
+        # name is expected, and used to report the cryptic `expected ident,
+        # found 'let'`. Redirect to for-of / `while` instead.
+        if self.at("kw", "let") or self.at("kw", "var"):
+            raise self.err(
+                self.peek().line,
+                "revl has no C-style `for (init; cond; step)` loop",
+                hint="iterate with `for (x of xs)`, or count with a `var` and a "
+                     "`while (cond)` loop (syntax-2.0 §3.5)",
+            )
         bind = self.expect("ident").value
+        # A bare C-style header without `let` (`for (i = 0; …)`) reaches here
+        # with `=`/`;` where `of` is expected — same redirect.
+        if self.at("=") or self.at(";"):
+            raise self.err(
+                self.peek().line,
+                "revl has no C-style `for (init; cond; step)` loop",
+                hint="iterate with `for (x of xs)`, or count with a `var` and a "
+                     "`while (cond)` loop (syntax-2.0 §3.5)",
+            )
+        # `for (x in xs)` (Python / JS enumerate-keys) walks the wrong thing;
+        # revl's `of` walks elements. Redirect the `in` keyword to `of`.
+        if self.at("kw", "in"):
+            raise self.err(
+                self.peek().line,
+                "revl iterates elements with `for (x of xs)`, not `for (x in xs)`",
+                hint="`of` binds each element; revl has no key-enumerating "
+                     "`in` loop (syntax-2.0 §3.5)",
+            )
         self.expect("kw", "of")
         iterable = self.pure_expr()
         self.expect(")")
@@ -2704,6 +2761,16 @@ class Parser:
         cond = self.pure_expr()
         self.expect(")")
         then = self.block() if self.at("{") else [self.fn_stmt()]
+        # item 384: `elif` (Python) lexes as an identifier, so after the `then`
+        # block it lands as a bare call-expression statement and reports a
+        # cryptic error deep in the following `{...}`. Catch it at the natural
+        # `else`-position and redirect to `else if`.
+        if self.at("ident", "elif"):
+            raise self.err(
+                self.peek().line,
+                "revl has no `elif`",
+                hint="chain conditionals with `else if` (syntax-2.0 §3.2)",
+            )
         otherwise = None
         if self.at("kw", "else"):
             self.next()
@@ -2755,6 +2822,22 @@ class Parser:
             self.expect(":")
             otherwise = self._ternary()
             return ExprIf(cond, then, otherwise, cond.line)
+        # item 384: `a if c else b` is the Python conditional expression. An
+        # `if` immediately following a parsed expression is never valid revl
+        # (its `if` *statement* always opens `if (`), so an `if` here that is
+        # NOT followed by `(` is the Python postfix-if. Redirect to `c ? a : b`
+        # instead of the cryptic `expected (, found '<cond>'`. The `(`
+        # exclusion keeps a real `if` statement on the next line — reached as a
+        # separate statement, not within this expression — untouched.
+        if (self.at("kw", "if")
+                and self.pos + 1 < len(self.toks)
+                and self.toks[self.pos + 1].kind != "("):
+            raise self.err(
+                self.peek().line,
+                "revl has no Python-style `a if c else b` conditional expression",
+                hint="revl's conditional expression is `c ? a : b` — the "
+                     "condition comes first (syntax-2.0 §3.2)",
+            )
         return cond
 
     def _or(self):
@@ -2930,6 +3013,16 @@ class Parser:
                 args = []
                 while not self.at(")"):
                     args.append(self.pure_expr())
+                    # item 384: `f(k=v)` is a Python keyword argument — revl
+                    # calls are positional. Redirect before the stray `=`
+                    # reports `expected ), found '='`.
+                    if self.at("="):
+                        raise self.err(
+                            self.peek().line,
+                            "revl has no keyword arguments — `f(k=v)` is not a call",
+                            hint="pass arguments positionally, e.g. `f(v)` "
+                                 "(syntax-2.0 §3.1)",
+                        )
                     if self.at(","):
                         self.next()
                 self.expect(")")
@@ -2939,6 +3032,16 @@ class Parser:
                     raise self._optional_chain_error()
                 self.next()
                 index = self.pure_expr()
+                # item 384: `xs[a:b]` is Python slice syntax — revl indexes a
+                # single element and slices with a method. Redirect the `:`
+                # before it reports `expected ], found ':'`.
+                if self.at(":"):
+                    raise self.err(
+                        self.peek().line,
+                        "revl has no slice syntax `xs[a:b]`",
+                        hint="take a sublist with `xs.slice(a, b)`; `[i]` indexes "
+                             "one element (docs/stdlib-2.0.md)",
+                    )
                 self.expect("]")
                 node = ExprIndex(node, index, node.line)
             else:
@@ -3141,6 +3244,22 @@ class Parser:
         if tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             return ExprLit({"true": True, "false": False, "null": None}[tok.value], tok.line)
+        # item 384: a Python `lambda x: …` lexes as the identifier `lambda`
+        # juxtaposed with a param name (or a bare `:`), a shape revl never has
+        # (no two identifiers abut, and `:` cannot follow an expression here).
+        # Redirect to the arrow `x => …` before the `:` reports the cryptic
+        # `expected an expression, found ':'`. Guarded on the juxtaposition so
+        # a value legitimately referenced as `lambda` (never followed by an
+        # ident or `:` in expression position) is untouched.
+        if (tok.kind == "ident" and tok.value == "lambda"
+                and self.pos + 1 < len(self.toks)
+                and self.toks[self.pos + 1].kind in ("ident", ":")):
+            raise self.err(
+                tok.line,
+                "revl has no `lambda`",
+                hint="an anonymous function is an arrow `x => …` "
+                     "(e.g. `xs.map(x => x + 1)`) (syntax-2.0 §3.2)",
+            )
         if self._is_name_tok(tok):
             # item 158: a variable *reference* is a name position too — a param
             # (or record field) named with a contextual noun must be usable, and
@@ -3182,6 +3301,17 @@ class Parser:
                 return ExprArrow(params, self._arrow_body(), tok.line, param_types)
             self.next()
             node = self.pure_expr()
+            # item 384: `(a, b)` is a Python/JS tuple — revl has no tuple type.
+            # (An arrow's `(x, y) => …` param list was already dispatched by
+            # `_arrow_params_ahead`, so a comma here is a value tuple.) Redirect
+            # to a named record instead of the cryptic `expected ), found ','`.
+            if self.at(","):
+                raise self.err(
+                    self.peek().line,
+                    "revl has no tuples — `(a, b)` is not a value",
+                    hint="group values in a record with named fields, e.g. "
+                         "`{ first: a, second: b }` (syntax-2.0 §2)",
+                )
             self.expect(")")
             # mark the group so `??`/`&&`/`||` mixing checks treat it as
             # explicitly parenthesized (e.g. `(a ?? b) || c` is allowed)
@@ -3212,6 +3342,18 @@ class Parser:
             self.next()
             fields = []
             while not self.at("}"):
+                # item 384: a string-keyed literal `{"k": v}` is a Python/JS
+                # dict; revl records take bare identifier keys. Redirect to
+                # ident keys or `Map` instead of `expected ident, found 'k'`.
+                if self.at("string"):
+                    raise self.err(
+                        self.peek().line,
+                        "revl records use identifier keys, not string keys "
+                        "like `{\"k\": v}`",
+                        hint="write `{ k: v }` with a bare-identifier key, or use "
+                             "`Map.new()` for dynamic string keys (docs/records.md, "
+                             "docs/stdlib-2.0.md)",
+                    )
                 fname = self._record_key_name()
                 self.expect(":")
                 fexpr = self.pure_expr()
@@ -3247,6 +3389,16 @@ class Parser:
             return self._if_expr()
         self._reject_incr_decr(tok)  # item 384 / syntax-2.0 §3.3
         raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
+
+    def _reject_foreign_keyword(self, tok) -> None:
+        """item 384: a known-foreign statement/declaration keyword (`def`,
+        `throw`, `elif`, `lambda`, `const`, `print`) lexes as an identifier and
+        reaches a statement/declaration dispatch as an error. Redirect it to
+        the revl spelling instead of the cryptic `expected a … found '<kw>'`."""
+        if tok.kind == "ident":
+            hit = _FOREIGN_STMT_KEYWORDS.get(tok.value)
+            if hit is not None:
+                raise self.err(tok.line, hit[0], hint=hit[1])
 
     def _reject_incr_decr(self, tok) -> None:
         """item 384 / syntax-2.0 §3.3: `i++` / `i--` lex as two adjacent

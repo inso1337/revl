@@ -91,6 +91,17 @@ REJECTIONS = {
     "foreign_throw.rvl": "revl has no `throw`",
     "foreign_increment.rvl": "revl has no `++` increment operator",
     "foreign_decrement.rvl": "revl has no `--` decrement operator",
+    "foreign_cstyle_for.rvl": "revl has no C-style `for (init; cond; step)` loop",
+    "foreign_for_in.rvl": "not `for (x in xs)`",
+    "foreign_def.rvl": "revl has no `def`",
+    "foreign_elif.rvl": "revl has no `elif`",
+    "foreign_lambda.rvl": "revl has no `lambda`",
+    "foreign_python_ternary.rvl": "revl has no Python-style `a if c else b`",
+    "foreign_tuple.rvl": "revl has no tuples",
+    "foreign_string_dict.rvl": "revl records use identifier keys",
+    "foreign_slice.rvl": "revl has no slice syntax `xs[a:b]`",
+    "foreign_kwargs.rvl": "revl has no keyword arguments",
+    "foreign_hash_comment.rvl": "revl has no `#` comments",
     "a1_await_in_method.rvl": "`await` is only allowed in a component body",
     # roadmap item 80: a sync provide method that reaches an `async` extern is
     # refused with the twin of the emission-propagation diagnostic (async-
