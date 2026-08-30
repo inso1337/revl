@@ -126,6 +126,10 @@ _PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"witnessed extern .* cannot be called in "), "G4", "witnessed"),
     (re.compile(r"inverse of witnessed extern|witnessed extern .* must (return|declare)"
                 r"|witness .* is a host object"), "G4", "witnessed"),
+    # items 399/400: the acquire-with-`undo` and `deferred`-emission fn-body
+    # refusals carry explicit codes too, classified here for the message-only path.
+    (re.compile(r"`acquire` extern .* cannot be called in "), "G4", "acquire"),
+    (re.compile(r"`deferred` emission extern .* cannot be called in "), "G4", "deferred"),
     (re.compile(r"unclassified extern"), "G8", "boundary"),
     (re.compile(r"expected .*, found "), "SYNTAX", "parse"),
     (re.compile(r"unexpected character|unterminated string"), "SYNTAX", "lex"),
