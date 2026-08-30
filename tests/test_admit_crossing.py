@@ -20,8 +20,6 @@ from pathlib import Path
 
 import pytest
 
-from revl import AdmissionProfile, compile_source
-
 _ROOT = Path(__file__).resolve().parents[1]
 _BACKEND = _ROOT / "backends" / "python"
 if str(_BACKEND) not in sys.path:
