@@ -130,6 +130,20 @@ def _spec(ir: dict, config: dict, files, module: str) -> dict:
         "proxies": {},
         "probe": [],
         "once": True,
+        # item 396 option B: the ts thunk resolves a `@ts ref` file at call time
+        # through a root the RUNNER provides (so the artifact text is
+        # machine-independent). The root is the root compile file's directory,
+        # exactly as the py driver's appended sys.path entry; the runner joins it
+        # with the recorded relative path and hash-checks the file before any
+        # host code runs. Present always (harmless when no ref); `refs` is the
+        # list the runner hash-checks.
+        "refRoot": (os.path.dirname(os.path.abspath(str(files[0])))
+                    if files else ""),
+        "refs": [
+            {"extern": e.get("name"), "path": r["path"], "sha256": r["sha256"]}
+            for e in ir.get("externs") or []
+            for r in [(e.get("refs") or {}).get("ts")] if r is not None
+        ],
     }
 
 

@@ -643,6 +643,10 @@ def _check_host_verb(family: str, verb: str, argc: int,
 # because that tier would emit the body with `_revl_config` unbound — a late,
 # mis-attributed runtime failure. The key is the @-body spelling (`py`/`ts`/…).
 _CONFIG_INJECTION_TIERS = {"py"}
+# item 396 option B: the tiers on which a host-module `ref` is native (py, ts).
+# Imported from `hostref` so the compile-time gate and the resolver agree; a ref
+# on go/rust/java/wasm is refused in `_lower_externs`.
+from .hostref import EXTERN_REF_TIERS as _EXTERN_REF_TIERS  # noqa: E402
 # Opt/Result constructors, recognized so `Some(x)`/`Ok(r)` resolve (syntax-2.0 §2)
 _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 # taint declassifier operators (roadmap item 249, Decision 3.2): `endorse(v)` is
@@ -2408,6 +2412,24 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
         # host body is refused. This is a LINT, not a proof — colour-agnosticism
         # is unprovable inside opaque host text (G8, item 24) — but it catches the
         # common authoring mistake at compile time.
+        # item 396 option B: a `HostRef` body has no author-written TEXT, so the
+        # colour-poly await-lint (which scans body text) and 388's clone
+        # synthesis (which deep-copies `bodies`, not `refs`) do not cover it.
+        # Rather than risk a silently-dropped ref clone, refuse the poly+ref
+        # combination outright with a clear redirect (the decision recorded for
+        # item 388 composition). Fixed-colour refs compose freely.
+        from .parser import HostRef as _HostRef  # noqa: PLC0415
+        if decl.colour_poly and any(isinstance(b, _HostRef) for b in decl.bodies):
+            offender = next(b for b in decl.bodies if isinstance(b, _HostRef))
+            raise RevlError(
+                filename, offender.line,
+                f"a `fn|async` (caller-decided-colour) extern cannot use a "
+                f"host-module ref; `{decl.name}` declares both",
+                hint="a poly extern is cloned per call-site colour, and one host "
+                     "symbol cannot be both a coroutine and a plain callable, so "
+                     "a ref cannot serve both clones. Fix the colour "
+                     "(`async fn`/`fn`) and ref a matching sync-or-async symbol, "
+                     "or use an inline body (item 396 option B / 388)")
         if decl.colour_poly:
             _check_poly_extern(decl, filename)
         # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
@@ -2442,8 +2464,25 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
         # redirecting to option (c). Gated on `decl.config`, so a non-config
         # extern with any host body is untouched (byte-identical). Ordered by the
         # author's @-body spelling for a deterministic first offender.
+        from .parser import HostBodyFile, HostRef  # noqa: PLC0415
         if decl.config:
             for body in decl.bodies:
+                # item 396 option B: a `config` extern binds `_revl_config` as
+                # the first line of the emitted BODY for that text to read; a ref
+                # has no author-written body, so binding it inside the thunk would
+                # bind a name the referenced host symbol cannot see. Refuse
+                # config+ref with a redirect to an inline body that forwards it.
+                if isinstance(body, HostRef):
+                    raise RevlError(
+                        decl_file, body.line,
+                        f"a config extern cannot use a host-module ref; "
+                        f"`{decl.name}` declares both",
+                        hint="`config` binds `_revl_config` inside the emitted "
+                             "body for the body text to read, but a ref has no "
+                             "body text — the referenced host symbol never sees "
+                             "the name. Use an inline `= @backend { ... }` body "
+                             "that reads `_revl_config` and forwards it to the "
+                             "host call (item 396 option B).")
                 if body.backend not in _CONFIG_INJECTION_TIERS:
                     raise RevlError(
                         decl_file, body.line,
@@ -2457,7 +2496,6 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                             f"`requires` the service "
                             f"(docs/design/378-sync-extern-service-reach.md)."),
                     )
-        from .parser import HostBodyFile  # noqa: PLC0415
         bodies: dict[str, str] = {}
         # item 396: provenance for a body SPLICED from an external file. Absent
         # unless the file form is used, so every existing extern's IR is
@@ -2465,6 +2503,12 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
         # file bytes so two compiles are byte-comparable and `revl verify` can
         # re-hash the file.
         body_files: dict[str, dict] = {}
+        # item 396 option B: a per-tier host-MODULE ref (symbol + root-relative
+        # path + pinned content hash). Additive next to `bodies`; a backend key
+        # may appear in `bodies` OR `refs` but never both (the duplicate-body
+        # refusal, extended). Absent unless a ref is used, so every existing IR
+        # is byte-identical.
+        refs: dict[str, dict] = {}
         for body in decl.bodies:
             if isinstance(body, HostBodyFile):
                 # The compiler's body-file resolver replaces every HostBodyFile
@@ -2475,7 +2519,39 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                     filename, body.line,
                     f"internal: unresolved @{body.backend} host-body file for "
                     f"extern `{decl.name}` reached lowering (item 396)")
-            if body.backend in bodies:
+            if isinstance(body, HostRef):
+                # tier gate (mirrors the config-injection gate): "import a symbol
+                # from a checked file" is native on py and ts only; go/rust/java
+                # lack a file-addressable module primitive and wasm cannot import
+                # a file. Refuse the others at compile, naming the tier — never a
+                # broken artifact. A tier joins EXTERN_REF_TIERS only behind its
+                # own design note, not by analogy.
+                if body.backend not in _EXTERN_REF_TIERS:
+                    raise RevlError(
+                        filename, body.line,
+                        f"a host-module ref (`= @{body.backend} ref ...`) is not "
+                        f"supported on the @{body.backend} tier (extern "
+                        f"`{decl.name}`)",
+                        hint="`ref` imports a symbol from a file-addressable host "
+                             "module, which is native on @py and @ts only. go/"
+                             "rust/java have no file-addressable import primitive "
+                             "and wasm cannot import a file — each needs its own "
+                             "design. Use an inline `= @backend { ... }` body or "
+                             "a `= @backend file` splice on this tier "
+                             "(item 396 option B).")
+                if body.rel_path is None:
+                    raise RevlError(
+                        filename, body.line,
+                        f"internal: unresolved @{body.backend} host-module ref "
+                        f"for extern `{decl.name}` reached lowering (item 396)")
+                if body.backend in bodies or body.backend in refs:
+                    raise RevlError(filename, body.line,
+                                    f"duplicate @{body.backend} body for extern `{decl.name}`")
+                refs[body.backend] = {"symbol": body.symbol,
+                                      "path": body.rel_path,
+                                      "sha256": body.sha256}
+                continue
+            if body.backend in bodies or body.backend in refs:
                 raise RevlError(filename, body.line,
                                 f"duplicate @{body.backend} body for extern `{decl.name}`")
             bodies[body.backend] = body.text
@@ -2492,6 +2568,11 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             # `= @backend file` body was used (additive: every existing IR is
             # byte-identical without it).
             **({"body_files": body_files} if body_files else {}),
+            # item 396 option B: host-module refs (symbol + root-relative path +
+            # pinned content hash), present only when a `= @backend ref` body was
+            # used. The py/ts emitters generate a lazy import thunk from it and
+            # the py driver hash-checks the file at plug (additive).
+            **({"refs": refs} if refs else {}),
             # additive async flag (docs/design/async-extern.md §4), mirroring
             # the service-method spelling at lower.py:2583. Absent means sync;
             # `ir_version` stays 3 (confirmed human decision, §4).
