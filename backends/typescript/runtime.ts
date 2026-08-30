@@ -561,6 +561,22 @@ export class MapHandle {
     this.data.set(key, value)
   }
 
+  insert_if_absent(key: any, value: any): boolean {
+    // item 397: the atomic compare-and-set. Node runs one event loop, so this
+    // synchronous method (no await) is atomic by run-to-completion: no task can
+    // interleave between the membership test and the insert. Returns whether it
+    // inserted; a `false` (key already present) leaves the existing value
+    // untouched.
+    this.assertLive('insert_if_absent')
+    if (this.data.has(key)) {
+      record(`${this.label}.insert_if_absent(${key}) -> false`)
+      return false
+    }
+    this.data.set(key, value)
+    record(`${this.label}.insert_if_absent(${key}) -> true`)
+    return true
+  }
+
   remove(key: any): void {
     this.assertLive('remove')
     record(`${this.label}.remove(${key})`)
