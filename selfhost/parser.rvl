@@ -262,20 +262,29 @@ fn p_type_tail(ts: List[Token], i: Int, rendered: Str) -> TyR {
 // `??` may not sit next to an unparenthesised `&&`/`||`, and vice versa —
 // TS makes the unparenthesised form a syntax error and §0 forbids a
 // silently different meaning.
-fn unparen_bin_in(e: Expr, ops: Str) -> Bool {
+// Is `e` an UNparenthesised binary whose operator is exactly `op`? Operators
+// must be compared exactly, not by substring: since item 366 the bitwise `|`
+// and `&` are operators too, and a flat-string `indexOf` over "&&"/"||" would
+// wrongly match a bare `|`/`&` bin (parser.py compares against the `("&&",
+// "||")` tuple by membership).
+fn unparen_op(e: Expr, op: Str) -> Bool {
   return match e {
-    Bin(b) => !b.paren && ops.indexOf(b.op) != 0 - 1,
+    Bin(b) => !b.paren && b.op == op,
     _ => false,
   }
 }
 
+fn unparen_logical(e: Expr) -> Bool {
+  return unparen_op(e, "&&") || unparen_op(e, "||")
+}
+
 fn mixes(op: Str, l: Expr, r: Expr) -> Bool {
   if (op == "??") {
-    if (unparen_bin_in(l, "&&|||")) { return true }
-    return unparen_bin_in(r, "&&|||")
+    if (unparen_logical(l)) { return true }
+    return unparen_logical(r)
   }
-  if (unparen_bin_in(l, "??")) { return true }
-  return unparen_bin_in(r, "??")
+  if (unparen_op(l, "??")) { return true }
+  return unparen_op(r, "??")
 }
 
 fn mk_bin(op: Str, l: Expr, r: Expr) -> Expr {
@@ -330,13 +339,51 @@ fn p_nullish(ts: List[Token], i: Int) -> PR {
 }
 
 fn p_and(ts: List[Token], i: Int) -> PR {
-  var acc = p_eq(ts, i)
+  var acc = p_bor(ts, i)
   if (is_bad(acc.e)) { return acc }
   while (at(ts, acc.i, "&&")) {
-    let r = p_eq(ts, acc.i + 1)
+    let r = p_bor(ts, acc.i + 1)
     if (is_bad(r.e)) { return r }
     if (mixes("&&", acc.e, r.e)) { return bad("&& mixed with ??") }
     acc = { i: r.i, e: mk_bin("&&", acc.e, r.e) }
+  }
+  return acc
+}
+
+// Bitwise `| ^ &` sit between `&&` and equality, in C/TypeScript order
+// (loosest `|`, then `^`, then `&`), so `a & b == c` parses as `a & (b == c)`
+// exactly as TS parses it (item 366, docs/arithmetic.md). This parser has no
+// record-update base form, so a top-level `|` is always the operator (no
+// `_suppress_bor` counterpart is needed).
+fn p_bor(ts: List[Token], i: Int) -> PR {
+  var acc = p_bxor(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  while (at(ts, acc.i, "|")) {
+    let r = p_bxor(ts, acc.i + 1)
+    if (is_bad(r.e)) { return r }
+    acc = { i: r.i, e: mk_bin("|", acc.e, r.e) }
+  }
+  return acc
+}
+
+fn p_bxor(ts: List[Token], i: Int) -> PR {
+  var acc = p_band(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  while (at(ts, acc.i, "^")) {
+    let r = p_band(ts, acc.i + 1)
+    if (is_bad(r.e)) { return r }
+    acc = { i: r.i, e: mk_bin("^", acc.e, r.e) }
+  }
+  return acc
+}
+
+fn p_band(ts: List[Token], i: Int) -> PR {
+  var acc = p_eq(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  while (at(ts, acc.i, "&")) {
+    let r = p_eq(ts, acc.i + 1)
+    if (is_bad(r.e)) { return r }
+    acc = { i: r.i, e: mk_bin("&", acc.e, r.e) }
   }
   return acc
 }
@@ -374,11 +421,35 @@ fn cmp_op(ts: List[Token], i: Int) -> Str {
 }
 
 fn p_cmp(ts: List[Token], i: Int) -> PR {
-  var acc = p_add(ts, i)
+  var acc = p_shift(ts, i)
   if (is_bad(acc.e)) { return acc }
   var go = true
   while (go) {
     let op = cmp_op(ts, acc.i)
+    if (op == "") { go = false }
+    if (op != "") {
+      let r = p_shift(ts, acc.i + 1)
+      if (is_bad(r.e)) { return r }
+      acc = { i: r.i, e: mk_bin(op, acc.e, r.e) }
+    }
+  }
+  return acc
+}
+
+fn shift_op(ts: List[Token], i: Int) -> Str {
+  if (at(ts, i, "<<")) { return "<<" }
+  if (at(ts, i, ">>")) { return ">>" }
+  return ""
+}
+
+// The Int32 shifts bind tighter than the relational operators and looser than
+// additive — C/TypeScript order, so `a + b << c` is `(a + b) << c` (item 366).
+fn p_shift(ts: List[Token], i: Int) -> PR {
+  var acc = p_add(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  var go = true
+  while (go) {
+    let op = shift_op(ts, acc.i)
     if (op == "") { go = false }
     if (op != "") {
       let r = p_add(ts, acc.i + 1)
@@ -435,7 +506,9 @@ fn p_mul(ts: List[Token], i: Int) -> PR {
 }
 
 fn p_unary(ts: List[Token], i: Int) -> PR {
-  if (at(ts, i, "!") || at(ts, i, "-")) {
+  // `~` is the Int32 bitwise complement, grouped with the other prefix
+  // unaries `!`/`-` (item 366, docs/arithmetic.md).
+  if (at(ts, i, "!") || at(ts, i, "-") || at(ts, i, "~")) {
     let op = tk(ts, i).kind
     let r = p_unary(ts, i + 1)
     if (is_bad(r.e)) { return r }
@@ -539,6 +612,26 @@ fn arrow_ahead(ts: List[Token], i: Int) -> Bool {
       depth -= 1
       if (depth == 0) { return tk(ts, j + 1).kind == "=>" }
     }
+    j += 1
+  }
+  return false
+}
+
+// Current token is `{` — is this `{base | f = e, …}` (functional record update)
+// rather than a record literal? A record literal's top level can never contain
+// a bare `|` (field values are bracket-balanced), so a depth-1 `|` before the
+// matching `}` settles it (parser.py `_record_update_ahead`, item 366).
+fn record_update_ahead(ts: List[Token], i: Int) -> Bool {
+  var j = i + 1
+  var depth = 1
+  while (!at(ts, j, "eof")) {
+    let k = tk(ts, j).kind
+    if (k == "{" || k == "(" || k == "[") { depth += 1 }
+    if (k == "}" || k == ")" || k == "]") {
+      depth -= 1
+      if (depth == 0) { return false }
+    }
+    if (k == "|" && depth == 1) { return true }
     j += 1
   }
   return false
@@ -757,6 +850,18 @@ fn p_primary(ts: List[Token], i: Int) -> PR {
     return { i: inner.i + 1, e: mark_paren(inner.e) }
   }
   if (t.kind == "{") {
+    // A record LITERAL's top level can never hold a bare `|`: the reference
+    // reads a depth-1 `|` as the functional record-update separator
+    // `{base | f = e}` (parser.py `_record_update_ahead`), item 366. This
+    // self-host expression parser does not implement record-update (a separate
+    // feature), so mirror the reference's disambiguation and REFUSE the form
+    // rather than mis-parse the `|` as a bitwise-OR record value. Every such
+    // form the oracle presents is one the reference also rejects (its fuzz/
+    // corpus record fields use `:`, never the update `=`); a parenthesised `|`
+    // stays at depth > 1 and still lexes as bitwise OR inside a record value.
+    if (record_update_ahead(ts, i)) {
+      return bad("record update `{base | f = e}` is not supported here")
+    }
     let fs = p_inits(ts, i + 1)
     if (!fs.ok) { return bad("bad record field") }
     return { i: fs.i, e: Rec({ fields: fs.xs }) }

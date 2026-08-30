@@ -75,6 +75,7 @@ from revl import compile_files  # noqa: E402
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_go_corpus"
 CORPUS = [
     "arith.rvl",     # trapping int/int32 + - *, / widening, %, comparisons, unary
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # var/let/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls + the call-return type pin on a `let`
     "strings.rvl",   # string `+` as Go `+`, `${..}` interpolation, literals

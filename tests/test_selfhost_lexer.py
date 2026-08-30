@@ -220,3 +220,25 @@ def test_selfhosted_lexer_literal_forms_match_reference(lex_src, src):
     got = _canon_emitted(lex_src(src))
     assert "error" not in {k for k, _, _ in got}, got
     assert got == _canon_reference(reference_lex(src, "literal_form_case.rvl"))
+
+
+# The Int32 bitwise operators (item 366): the two-char shifts `<<`/`>>` and the
+# single-char `&`/`^`/`~` — tokens the reference lexer produces but no corpus
+# file exercised, so the differential lexer oracle stayed green while the
+# self-host lexer lacked them (the same blind-spot family as `hole` above). `|`
+# already lexed (the variant separator), so it is covered by the corpus; the
+# combinations below pin that `<<`/`>>` win over `<`/`>`, that `&&`/`||` still
+# lex before a lone `&`/`|`, and that `~` lexes as its own prefix token.
+BITWISE_CASES = [
+    "a & b", "a | b", "a ^ b", "a << b", "a >> b", "~a",
+    "a & b | c ^ d", "a << b >> c", "a << b + c", "a | b & c",
+    "~a & ~b", "a && b & c", "a || b | c", "x & 0xFF", "1 << 8",
+    "flags & MASK | BIT", "a >> 2 << 1", "~ ~ a", "a<<b", "a>>b>=c",
+]
+
+
+@pytest.mark.parametrize("src", BITWISE_CASES)
+def test_selfhosted_lexer_bitwise_match_reference(lex_src, src):
+    got = _canon_emitted(lex_src(src))
+    assert "error" not in {k for k, _, _ in got}, got
+    assert got == _canon_reference(reference_lex(src, "bitwise_case.rvl"))

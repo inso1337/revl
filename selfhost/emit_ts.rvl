@@ -442,6 +442,16 @@ fn ts_bin_op(op: Str) -> Str {
   if (op == "%") { return "%" }
   if (op == "&&") { return "&&" }
   if (op == "||") { return "||" }
+  // Int32 bitwise operators (item 366, docs/arithmetic.md). Int32 is a JS
+  // `number`, and JS's `& | ^ << >>` coerce to a signed 32-bit int, mask a
+  // shift count to its low 5 bits (mod 32), and return a signed i32 `number` —
+  // exactly the Int32 semantics, so no `revlI32` re-wrap is needed. `>>` is the
+  // arithmetic (sign-propagating) shift (`>>>` would be logical).
+  if (op == "&") { return "&" }
+  if (op == "|") { return "|" }
+  if (op == "^") { return "^" }
+  if (op == "<<") { return "<<" }
+  if (op == ">>") { return ">>" }
   return ""
 }
 
@@ -743,6 +753,11 @@ fn render_un(node: Any, counter: Int, acx: ACx) -> Rendered {
   let r = expr(value_field(node, "operand"), counter, acx)
   let op = node_op(node)
   if (op == "!") { return { text: `(!${r.text})`, counter: r.counter } }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): JS `~` returns a signed i32
+    // `number`, so it needs no re-wrap and never traps.
+    return { text: `(~${r.text})`, counter: r.counter }
+  }
   if (op == "-") {
     let opnd = node_operands(node)
     if (opnd == "Int") { return { text: `revlI64(-${r.text})`, counter: r.counter } }

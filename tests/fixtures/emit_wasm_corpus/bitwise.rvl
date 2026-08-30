@@ -1,0 +1,8 @@
+fn band(a: Int32, b: Int32) -> Int32 { return a & b }
+fn bor(a: Int32, b: Int32) -> Int32 { return a | b }
+fn bxor(a: Int32, b: Int32) -> Int32 { return a ^ b }
+fn shl(a: Int32, b: Int32) -> Int32 { return a << b }
+fn shr(a: Int32, b: Int32) -> Int32 { return a >> b }
+fn bnot(a: Int32) -> Int32 { return ~a }
+fn prec(a: Int32, b: Int32, c: Int32) -> Int32 { return a | b & c ^ a }
+fn shiftsum(a: Int32, b: Int32, c: Int32) -> Int32 { return a << b >> c }

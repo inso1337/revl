@@ -124,6 +124,7 @@ CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_java_corpus"
 CORPUS = [
     # slice 1 (item 199) — functions-only base surface
     "arith.rvl",     # bounded int/int32, /, %, comparisons, ==/!=, unary, ??
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # let/var/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls
     "strings.rvl",   # string `+`, `${..}` interpolation, literals
