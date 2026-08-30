@@ -1704,8 +1704,26 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
         keys = ", ".join(_string(k) for k in provides)
         lines.append(f"  provide: [{keys}],")
 
+    # item 131: a body containing an `await` step (or an async-flagged
+    # `effect`/`let-effect`/`emit` — an awaited acquisition or emission) compiles
+    # to an async generator, whose awaited acquisitions land on LATER microtask
+    # turns, AFTER a synchronous `apply` would already have returned. `apply`
+    # must therefore be `async` and `await` that effect (see the `await
+    # ctx.effect(...)` site below) so the fiber only reaches ACTIVE — and
+    # `fiber.await()` only resolves — once the awaited acquisition has landed,
+    # exactly as the py tier's await-to-ACTIVE waits for it. Timer steps are
+    # excluded: a timer's async flag colors its OWN runtime-awaited firing (item
+    # 170), not the activation body generator.
+    is_async = any(
+        step.get("step") == "await"
+        or (step.get("step") in ("effect", "let-effect", "emit")
+            and step.get("async"))
+        for step in component.get("body") or []
+    )
+    apply_kw = "async apply" if is_async else "apply"
+
     if fields:
-        lines.append(f"  apply(ctx: Context, rawConfig: {name}Config) {{")
+        lines.append(f"  {apply_kw}(ctx: Context, rawConfig: {name}Config) {{")
         spec_parts = []
         for field in fields:
             fname = field["name"]
@@ -1721,7 +1739,7 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
             f"rawConfig, {{ {spec} }}) as Required<{name}Config>"
         )
     else:
-        lines.append("  apply(ctx: Context) {")
+        lines.append(f"  {apply_kw}(ctx: Context) {{")
 
     # item 243 Slice 2b: the activation's teardown accumulator for its
     # transactional (witnessed) and compensation entries — the ONLY two entry
@@ -1752,19 +1770,30 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     # One generator per body: cordis runs disposers of a single effect
     # strictly sequentially (LIFO); top-level fiber effects would be
     # disposed concurrently (see REPORT.md, finding 1). A body containing
-    # an `await` step compiles to an async generator (v1/A1). item 131: an
-    # async-flagged `effect`/`let-effect`/`emit` step (an awaited acquisition or
-    # emission) is likewise a suspension in the body and forces the async
-    # generator. Timer steps are excluded: a timer's async flag colors its OWN
-    # runtime-awaited firing (item 170), not the activation body generator.
-    is_async = any(
-        step.get("step") == "await"
-        or (step.get("step") in ("effect", "let-effect", "emit")
-            and step.get("async"))
-        for step in component.get("body") or []
-    )
+    # an `await` step compiles to an async generator (v1/A1) — see the
+    # `is_async` computation above the `apply` signature (item 131), which also
+    # made `apply` `async`.
     generator = "async function*" if is_async else "function*"
-    lines.append(f"    ctx.effect({generator} () {{")
+    # item 131: an async body's `ctx.effect(async function* ...)` drives its
+    # awaited acquisitions on LATER microtask turns, so the acquisitions
+    # themselves (ACQ B in async_effect_composition) and the disposers the
+    # generator yields land AFTER a synchronous `apply` would have returned.
+    # `ctx.effect(...)` returns a thenable wrapper whose `.then` resolves only
+    # once that async generator has run to completion — but the wrapper is a
+    # FUNCTION, so returning it from `apply` makes cordis' fiber-body runner
+    # collect it as a plain disposer (`_execute`, `typeof effect === "function"`,
+    # node_modules/cordis:809) and never await it. So `await` the wrapper inside
+    # an `async apply`: `apply` then returns a real Promise, which `_execute`
+    # DOES chain onto (`"then" in effect`, :814), so `_reload` (and thus
+    # `fiber.await()`) resolves only after the awaited acquisition has landed —
+    # exactly as the py tier's await-to-ACTIVE waits for it. The wrapper is
+    # already registered for disposal by the `ctx.effect` call itself
+    # (node_modules/cordis:892), so awaiting its VALUE does not dispose it; LIFO
+    # teardown across the suspension is unchanged. A SYNC body's generator runs
+    # to completion synchronously inside `ctx.effect`, so it stays a bare,
+    # non-awaited statement (unchanged, byte-identical for every prior program).
+    effect_stmt = "await " if is_async else ""
+    lines.append(f"    {effect_stmt}ctx.effect({generator} () {{")
     # item 243 Slice 2b: two sentinel yields bracket the ordinary steps, ONLY
     # when this component needs `Frame` at all (see above). `begin` yielded
     # FIRST -> disposed LAST (cordis LIFO): on abort it is the Phase-2
