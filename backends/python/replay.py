@@ -1384,6 +1384,19 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_approval_revoked(self, request_id: str) -> dict:
+        """Append the ``approval-revoked`` record when an operator retires a
+        session-scoped standing grant EARLY (roadmap item 379), before its TTL or
+        uses lapse. Names the grant's ``requestId`` so the audit reads the grant's
+        whole life — granted, the crossings it auto-approved (each an
+        ``approval-consumed`` on the same id), and this revoke — and can tell a
+        grant that lapsed on its own from one an operator cut short. Consumes no
+        seq: like ``approval-granted`` it names a consent fact, it is not an
+        effect."""
+        record = {"record": "approval-revoked", "requestId": request_id}
+        self._write(record)
+        return record
+
     def record_approval_emission(self, request_id: str, capability: str,
                                  component: str) -> dict:
         """Append the ``approval-emission`` record AFTER a typed-approval crossing
