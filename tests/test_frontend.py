@@ -91,6 +91,11 @@ REJECTIONS = {
     # ternary arm) — the blind spot the name-based reach left open — is refused
     # with the A1 diagnostic, the expression-position complement of item 141.
     "a1_async_op_sync_ternary.rvl": "`Runner.route` is declared sync, but this implementation reaches async operation `model.complete` — a sync method has no in-flight window (A1)",
+    # roadmap item 131: a component ACTIVATION body whose bare `emit` step
+    # reaches a required async op is one of the four admitted-but-silently-
+    # wrong shapes item 131 flips to a compile error (py builds an unawaited
+    # coroutine; ts fires a floating Promise). The fix is `await emit ...`.
+    "a1_async_emit_step_not_awaited.rvl": "`emit` step reaches async operation `model.complete` but the emission is not awaited",
     "v2_async_signature_mismatch.rvl": "method `stats` of provision `db` is not async but service Database declares it async",
     "v2_same_realm_conflict.rvl": "provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)",
     "v2_dynamic_realm.rvl": "dynamic realm labels are not supported",
