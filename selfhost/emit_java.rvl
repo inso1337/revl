@@ -861,6 +861,9 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, counter: Int) -> Sout {
     let r = render_expr(value_field(node, "expr"), ctx, counter)
     return { lines: [pad.concat(`if (!(${r.text})) throw new AssertionError("assertion failed");`)], counter: r.counter }
   }
+  // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
+  if (step == "break") { return { lines: [pad.concat("break;")], counter: counter } }
+  if (step == "continue") { return { lines: [pad.concat("continue;")], counter: counter } }
   return { lines: [pad.concat(`<<UNSUPPORTED-STEP:${step}>>`)], counter: counter }
 }
 

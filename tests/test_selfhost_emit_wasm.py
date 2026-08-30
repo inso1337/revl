@@ -119,6 +119,10 @@ CORPUS = [
                     # to_int/to_int32 widths, the four int divisions, to_str /
                     # Str.to_int, push/concat/slice/charAt/charCodeAt/startsWith/
                     # endsWith over Str and List
+    "loopctrl.rvl", # item 379 / 391: break/continue via named labels
+                    # ($revl_brk_N/$revl_top_N, inner $revl_cnt_N so `for`'s
+                    # continue still runs idx++), nested-if/nested-loop targeting,
+                    # and the break-aware while(true) terminates-check (C4)
 ]
 
 
