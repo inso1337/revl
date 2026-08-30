@@ -42,6 +42,57 @@ else
     PYTEST=""
 fi
 
+# --affected: the FAST inner-loop gate. Runs ONLY the pre-merge targets that
+# tools/affected_tests.py selects for the current diff (base = merge-base with
+# origin/main by default; override with --base=<ref>). This is NOT a replacement
+# for the full `make pre-merge` — that stays the release/CI gate. The selector
+# fails SAFE: any change to a core/compile-reachable frontend file, or any file
+# it cannot map, falls back to the full gate here.
+AFF=0
+AFF_BASE=""
+for arg in "$@"; do
+    case "$arg" in
+        --affected) AFF=1 ;;
+        --base=*) AFF_BASE="${arg#--base=}" ;;
+        *) ;;
+    esac
+done
+
+# Selection defaults ARE the full gate, so with AFF=0 (plain `make pre-merge`)
+# every step runs exactly as before. `want` short-circuits to true whenever
+# RUN_ALL=1, which is the case for the full gate and for a FULL selection.
+RUN_ALL=1
+SEL_PYTEST="tests/"
+SEL_BACKENDS="python go rust wasm java"
+SEL_GATES="conformance site-wheel ruff"
+
+if [ "$AFF" -eq 1 ]; then
+    PY=$(command -v python3 || command -v python || true)
+    if [ -z "$PY" ]; then
+        echo "pre-merge --affected: no python3 to run the selector -> running FULL gate."
+    else
+        base_arg=""
+        [ -n "$AFF_BASE" ] && base_arg="--base $AFF_BASE"
+        SEL_OUT=$("$PY" tools/affected_tests.py --root "$root" --format machine $base_arg 2>/dev/null)
+        SEL_FULL=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^FULL //p')
+        SEL_REASON=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^REASON //p')
+        if [ -z "$SEL_OUT" ] || [ -z "$SEL_FULL" ]; then
+            echo "pre-merge --affected: selector produced no usable output -> running FULL gate."
+        elif [ "$SEL_FULL" = "1" ]; then
+            echo "pre-merge --affected: ${SEL_REASON:-full}"
+            echo "pre-merge --affected: selection is the FULL gate (nothing skipped)."
+        else
+            RUN_ALL=0
+            SEL_PYTEST=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^PYTEST //p')
+            SEL_BACKENDS=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^BACKENDS //p')
+            SEL_GATES=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^GATES //p')
+            echo "pre-merge --affected: ${SEL_REASON:-targeted}"
+            echo "pre-merge --affected: pytest $(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ') node(s) | backends [${SEL_BACKENDS:-none}] | gates [${SEL_GATES:-none}]"
+            echo "pre-merge --affected: inner-loop gate only; full \`make pre-merge\` still required at release/CI."
+        fi
+    fi
+fi
+
 fail=0
 ran=0
 skipped=0
@@ -67,6 +118,33 @@ step() {
 skip() {
     printf '  %-42s%s\n' "$1" "SKIPPED ($2)"
     skipped=$((skipped + 1))
+}
+
+# want "<kind>" "<name>" : is this target in the current selection? Always true
+# for the full gate (RUN_ALL=1), so plain `make pre-merge` is unchanged.
+want() {
+    [ "$RUN_ALL" -eq 1 ] && return 0
+    case "$1" in
+        frontend) [ -n "$SEL_PYTEST" ] && return 0 ;;
+        backend)  case " $SEL_BACKENDS " in *" $2 "*) return 0 ;; esac ;;
+        gate)     case " $SEL_GATES " in *" $2 "*) return 0 ;; esac ;;
+    esac
+    return 1
+}
+
+# note "<label>" : a step the affected selection did not pick (neither ran nor a
+# toolchain skip — just out of scope for this diff).
+note() { printf '  %-42s%s\n' "$1" "not selected (affected mode)"; }
+
+# gemit "<tier>" "<label>" <files...> : emit_step guarded by the selection.
+gemit() {
+    tier=$1
+    shift
+    if want backend "$tier"; then
+        emit_step "$@"
+    else
+        note "$1"
+    fi
 }
 
 # The per-backend emit/golden suites (rust, java, wasm) live in ONE file each
@@ -103,12 +181,20 @@ emit_step() {
     step "$label_full" env PATH="$EMIT_PATH" "$PYTEST" "$@" -q -rs -p no:cacheprovider
 }
 
-echo "pre-merge:"
+if [ "$RUN_ALL" -eq 1 ]; then
+    echo "pre-merge:"
+else
+    echo "pre-merge (affected):"
+fi
 
 # 1. Frontend suite + emitted-code validation (tests/test_conformance_validate.py
 #    hands each tier's output to its real compiler where present). The core gate.
-if [ -n "$PYTEST" ]; then
-    step "frontend  (pytest tests/)" "$PYTEST" tests/ -q -p no:cacheprovider
+if ! want frontend; then
+    note "frontend  (pytest)"
+elif [ -n "$PYTEST" ]; then
+    if [ "$RUN_ALL" -eq 1 ]; then flabel="frontend  (pytest tests/)";
+    else flabel="frontend  (pytest, $(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ') node(s))"; fi
+    step "$flabel" "$PYTEST" $SEL_PYTEST -q -p no:cacheprovider
 else
     skip "frontend  (pytest tests/)" "no pytest on PATH or in .venv"
 fi
@@ -116,7 +202,9 @@ fi
 # 2. The python backend semantics + golden suite — the suite item 247's respec
 #    left stale. Its cordis-py venv is built by `sh backends/python/setup.sh`;
 #    absent it loud-skips (never a silent green).
-if [ -x backends/python/.venv/bin/pytest ]; then
+if ! want backend python; then
+    note "backend-python (.venv pytest)"
+elif [ -x backends/python/.venv/bin/pytest ]; then
     step "backend-python (.venv pytest)" \
         sh -c 'cd backends/python && .venv/bin/pytest -q'
 else
@@ -126,14 +214,16 @@ fi
 # 3. The tier emit/golden suites. go's suite is toolchain-light (sub-second) and
 #    needs `go` on PATH for its generated-current check, so it runs with the real
 #    PATH; the other three run emit-only with compilers hidden (see emit_step).
-if command -v go >/dev/null 2>&1; then
+if ! want backend go; then
+    note "backend-go  (emit goldens)"
+elif command -v go >/dev/null 2>&1; then
     step "backend-go  (emit goldens)" "$PYTEST" backends/go/test_emit_go.py -q -p no:cacheprovider
 else
     skip "backend-go  (emit goldens)" "no go toolchain"
 fi
-emit_step "backend-rust (emit goldens)" backends/rust/test_emit_rust.py
-emit_step "backend-wasm (emit goldens)" backends/wasm/test_v3_emit.py backends/wasm/test_canonical_abi.py
-emit_step "backend-java (emit goldens)" backends/java/test_emit_java.py
+gemit rust "backend-rust (emit goldens)" backends/rust/test_emit_rust.py
+gemit wasm "backend-wasm (emit goldens)" backends/wasm/test_v3_emit.py backends/wasm/test_canonical_abi.py
+gemit java "backend-java (emit goldens)" backends/java/test_emit_java.py
 
 # NOTE the typescript backend suite (npx vitest / tsc) is deliberately NOT in
 # this fast gate — it needs backends/typescript/node_modules and is heavy. Run it
@@ -142,12 +232,22 @@ emit_step "backend-java (emit goldens)" backends/java/test_emit_java.py
 # 4. Generated-artifact gates (pure Python, always run): the README conformance
 #    matrix and the site/playground wheel must match a fresh generation, the same
 #    contract the frontend CI job enforces.
-step "conformance matrix (--check-readme)" python3 tools/conformance.py --check-readme
-step "site wheel freshness"                python3 tools/check_site_wheel.py
+if want gate conformance; then
+    step "conformance matrix (--check-readme)" python3 tools/conformance.py --check-readme
+else
+    note "conformance matrix (--check-readme)"
+fi
+if want gate site-wheel; then
+    step "site wheel freshness"                python3 tools/check_site_wheel.py
+else
+    note "site wheel freshness"
+fi
 
 # 5. Lint (the CI `lint` job): ruff at the pinned version. Prefer a ruff already
 #    on PATH; else fetch the pinned one with uvx; else loud-skip.
-if command -v ruff >/dev/null 2>&1; then
+if ! want gate ruff; then
+    note "ruff check"
+elif command -v ruff >/dev/null 2>&1; then
     step "ruff check" ruff check
 elif command -v uvx >/dev/null 2>&1; then
     step "ruff check (uvx pinned)" uvx --from ruff==0.16.4 ruff check .
@@ -168,4 +268,9 @@ if [ "$skipped" -ne 0 ]; then
     echo "pre-merge: green for what ran. $skipped step(s) skipped for a missing toolchain —"
     echo "           those are covered by CI's per-backend jobs, which are the real gate for them."
 fi
-echo "pre-merge: ok"
+if [ "$RUN_ALL" -eq 0 ]; then
+    echo "pre-merge (affected): ok for the selected targets — NOT the full gate."
+    echo "           Run \`make pre-merge\` (full) before release / on CI."
+else
+    echo "pre-merge: ok"
+fi
