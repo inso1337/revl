@@ -2917,7 +2917,23 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
                 _emit_step(nested, env, out, indent + 1)
         out.append(f"{pad}}}")
     elif kind == "await":
-        out.append(f"{pad}{_expr(step['expr'], env)}.await;")
+        # item 131 repair: rust erases method async-ness (async-extern.md §2
+        # family 2), so a req-target async op or an async-colored fn returns a
+        # plain value here, not a future — a blanket `.await` is a rustc error
+        # on it (`heat()` yields `String`, not `impl Future`). Only the host
+        # async seam (`Job.run`, which cordis-rs drives as a real future via
+        # `plugin_async`) takes `.await`; every other awaitable erases to a plain
+        # blocking call, matching the go/java erasure. The A1 ordering boundary
+        # is the statement position, preserved either way. This is the latent
+        # tier bug item 131's widened await-step admission would otherwise make
+        # live (design §5, the rust slice).
+        expr = step.get("expr")
+        rendered = _expr(expr, env)
+        if isinstance(expr, dict) and expr.get("kind") == "host" \
+                and expr.get("fn") == "Job.run":
+            out.append(f"{pad}{rendered}.await;")
+        else:
+            out.append(f"{pad}{rendered};")
     elif kind == "provide":
         key = step.get("name")
         service = step.get("service")
