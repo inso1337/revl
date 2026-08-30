@@ -114,6 +114,7 @@ from revl import compile_files  # noqa: E402
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_rust_corpus"
 CORPUS = [
     "arith.rvl",     # bounded int/int32, / widening, %, comparisons, unary, ??
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # let/var/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls + the by-value clone / Copy-scalar split
     "strings.rvl",   # string `+` via format!, `${..}` interpolation, literals

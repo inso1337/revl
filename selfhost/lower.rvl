@@ -4164,8 +4164,15 @@ fn lir_rhs(ts: List[Token], j: Int, env: List[Bind]) -> RhsR {
     if (close != 0 - 1) {
       let pipe = top_pipe(ts, j + 1, close - 1)
       if (pipe != 0 - 1) {
-        let base = expr_at(ts, j + 1)
-        if (!is_bad(base.e) && base.i == pipe) {
+        // Parse the base over the tokens BEFORE the separator `|` only. Since
+        // item 366 made `|` the bitwise-OR operator, parsing from `j + 1` over
+        // the full token stream would swallow the `|` (and the update fields)
+        // as a bitwise-OR expression; bounding the slice to `[j+1, pipe)` keeps
+        // the update separator out of the base, mirroring the reference's
+        // `_suppress_bor` (which suppresses exactly this leading top-level `|`).
+        let sub = ts.slice(j + 1, pipe)
+        let base = expr_at(sub, 0)
+        if (!is_bad(base.e) && base.i == sub.length()) {
           let ups = lir_updates(ts, pipe + 1, close - 1, env)
           if (ups.ok) {
             let js = "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(base.e, env))

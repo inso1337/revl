@@ -159,6 +159,13 @@ ACCEPTED = [
     "1 + 2 * 3", "1 * 2 + 3", "(1 + 2) * 3", "a - b - c", "a - (b - c)",
     "a / b % c", "-x", "!ok", "!!ok", "- - 1",
     "a < b == c > d", "a <= b != c >= d", "a === b", "a !== b",
+    # Int32 bitwise operators (item 366): the `| ^ &` and shift precedence
+    # ladder, unary `~`, and the cross-family precedence the reference fixes
+    # (`&` looser than `==`, shifts tighter than `<`, `+` tighter than `<<`).
+    "a & b", "a | b", "a ^ b", "a << b", "a >> b", "~a", "~ ~a",
+    "a | b & c", "a & b | c", "a ^ b & c | d", "a << b + c", "a + b << c",
+    "a << b >> c", "a & b == c", "a | b && c", "a && b | c",
+    "~a & b", "a & ~b", "a << b < c", "1 & 2 | 3 ^ 4",
     "a && b || c", "a || b && c", "a ?? b ?? c", "(a ?? b) || c",
     "a || (b ?? c)", "a ? b : c", "a ? b : c ? d : e", "a ? b ? c : d : e",
     "f()", "f(1)", "f(1, 2)", "f(1,)", "f(g(h(1)))",
@@ -219,7 +226,7 @@ ATOMS = [
     "`${a || b}`", "`100%`", "`a|b`",
 ]
 BINOPS = ["+", "-", "*", "/", "%", "<", ">", "<=", ">=", "==", "===",
-          "!=", "!==", "&&", "||", "??"]
+          "!=", "!==", "&&", "||", "??", "&", "|", "^", "<<", ">>"]
 
 
 def _gen(rng: random.Random, depth: int) -> str:
@@ -235,7 +242,7 @@ def _gen(rng: random.Random, depth: int) -> str:
     if roll < 0.40:
         return f"({g()})"
     if roll < 0.47:
-        return f"{rng.choice(['!', '-'])}{g()}"
+        return f"{rng.choice(['!', '-', '~'])}{g()}"
     if roll < 0.55:
         return f"{g()} ? {g()} : {g()}"
     if roll < 0.62:

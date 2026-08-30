@@ -92,7 +92,10 @@ def check_src(ns):
 # ------------------------------------------------- reference inferencer
 
 # Mirrored by base_env() in selfhost/checker.rvl. Keep the two in lockstep.
-ENV = {"x": "Int", "y": "Int", "f": "Float", "s": "Str", "flag": "Bool"}
+# `m` is Int32 — the one operand type the bitwise operators accept (item 366);
+# without it the positive bitwise path (`m & m` -> Int32) could not be exercised.
+ENV = {"x": "Int", "y": "Int", "f": "Float", "s": "Str", "flag": "Bool",
+       "m": "Int32"}
 
 
 def _ref_parse(src: str):
@@ -145,6 +148,13 @@ ACCEPTED = [
     # nesting across the families
     "1 + 2 < 4", "x < y == true", "(x == y) == (flag == false)",
     "1 < 2 == s < s",
+    # Int32 bitwise operators (item 366): Int32-only, result Int32. An unknown
+    # operand (`q`) stays on the gradual frontier — the reference skips it — so
+    # `m & q` still types Int32; unary `~` mirrors the binary Int32-only rule.
+    "m & m", "m | m", "m ^ m", "m << m", "m >> m", "~m", "~ ~m",
+    "m & m | m", "m << m >> m", "(m & m) | (m ^ m)", "~m & m", "m & ~m",
+    "m & q", "q & m", "q & q", "~q",
+    "m == m", "m != m",  # equality over Int32 (compatible), not ordering
 ]
 
 REJECTED = [
@@ -159,6 +169,13 @@ REJECTED = [
     "x == s", "s == x", "flag == x", "1 == flag", "s != 2",
     # null has no type (absence is Opt[T])
     "null", "null + 1", "1 + null", "null == null",
+    # Int32 bitwise operators are Int32-only (item 366): Int (incl. literals),
+    # Float, Str and Bool operands are all refused, and so is any mix with a
+    # non-Int32 side (the shift count must be Int32 too). Unary `~` mirrors it.
+    "x & y", "x & m", "m & x", "1 & 2", "m & 1", "m | 2.5",
+    "f & f", "s & s", "flag & flag", "x | y", "x ^ y",
+    "m << x", "x << m", "m >> y", "x << 1",
+    "~x", "~f", "~s", "~flag", "~1", "~y",
 ]
 
 
@@ -205,6 +222,42 @@ def test_generated_expressions_agree(infer_src, seed):
     rng = random.Random(seed)
     for _ in range(60):
         _agree(infer_src, _gen(rng, rng.randint(1, 4)))
+
+
+# Bitwise-only generator (item 366): the operators are all Int32-only, so a
+# subtree that mixes `m` (Int32) with any of `x/y/f/s/flag/1` (non-Int32) must
+# be refused by BOTH checkers, while an all-Int32 (or unknown-`q`) subtree types
+# Int32. Deliberately kept to the bitwise operators + unary `~`: the checker
+# slice models Int32 for bitwise typing only, not for Int32 arithmetic/ordering
+# (a separate slice), so mixing in `+`/`<` here would compare a rule this port
+# does not claim to mirror.
+BIT_ATOMS = ["m", "x", "y", "f", "s", "flag", "q", "1", "0", "true"]
+BIT_BINOPS = ["&", "|", "^", "<<", ">>"]
+
+
+def _gen_bit(rng: random.Random, depth: int) -> str:
+    if depth <= 0:
+        return rng.choice(BIT_ATOMS)
+    roll = rng.random()
+
+    def g():
+        return _gen_bit(rng, depth - 1)
+
+    if roll < 0.60:
+        return f"{g()} {rng.choice(BIT_BINOPS)} {g()}"
+    if roll < 0.75:
+        return f"~{g()}"
+    return f"({g()})"
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_generated_bitwise_expressions_agree(infer_src, seed):
+    """Random bitwise expressions over the Int32-only operator family. The two
+    checkers are each other's oracle: an Int32/unknown subtree types Int32,
+    any non-Int32 operand refuses, and both must agree on verdict AND type."""
+    rng = random.Random(1000 + seed)
+    for _ in range(60):
+        _agree(infer_src, _gen_bit(rng, rng.randint(1, 4)))
 
 
 

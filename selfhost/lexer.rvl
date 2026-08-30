@@ -76,10 +76,13 @@ fn keywords() -> List[Str] {
 fn ops3() -> List[Str] { return ["===", "!=="] }
 
 fn ops2() -> List[Str] {
-  return ["=>", "?.", "??", "<=", ">=", "==", "!=", "&&", "||", "->"]
+  return ["=>", "?.", "??", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "->"]
 }
 
-fn singles() -> Str { return "{}()[],:=.+-*/%<>!?;|@" }
+// `&`, `^` and `~` are the Int32 bitwise AND/XOR/NOT (item 366); `&&`/`||`
+// above are matched first, so a lone `&` still reaches here. `|` (already
+// present) doubles as bitwise OR — the parser tells them apart by position.
+fn singles() -> Str { return "{}()[],:=.+-*/%<>!?;|@&^~" }
 
 // Longest-match operator at position i; "" when none.
 fn op_at(source: Str, i: Int) -> Str {

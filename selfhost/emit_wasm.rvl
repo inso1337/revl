@@ -154,6 +154,13 @@ fn bin_instr(op: Str, opnd: Str) -> Str {
     return "i32.".concat(suf)
   }
   if (opnd == "Int32") {
+    // Int32 bitwise operators (item 366): each is one native i32 instruction;
+    // the shifts self-mask the count to mod 32. `>>` is `shr_s` (arithmetic).
+    if (op == "&") { return "i32.and" }
+    if (op == "|") { return "i32.or" }
+    if (op == "^") { return "i32.xor" }
+    if (op == "<<") { return "i32.shl" }
+    if (op == ">>") { return "i32.shr_s" }
     if (op == "+") { return `call $int32_add` }
     if (op == "-") { return `call $int32_sub` }
     if (op == "*") { return `call $int32_mul` }
@@ -185,12 +192,17 @@ fn infer_ty(node: Any, sty: Map[Str, Str]) -> Str {
     let op = node_op(node)
     if (is_comparison(op)) { return "Bool" }
     if (node_operands(node) == "Float") { return "Float" }
+    // Bitwise ops are Int32-only regardless of the (absent) operands annotation
+    // (item 366, docs/arithmetic.md).
+    if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") { return "Int32" }
     if (node_operands(node) == "Int32") { return "Int32" }
     return "Int"
   }
   if (k == "un") {
     let op = node_op(node)
     if (op == "!") { return "Bool" }
+    // Bitwise complement is Int32-only (item 366).
+    if (op == "~") { return "Int32" }
     if (op == "-") { if (node_operands(node) == "Int32") { return "Int32" } return "Int" }
     return ""
   }
@@ -676,6 +688,13 @@ fn render_un(node: Any, s: Scope, depth: Int) -> E {
   if (op == "!") {
     return { wat: `${operand.wat}
       (i32.eqz)`, ty: "Bool" }
+  }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): xor with -1. A bit op, so it never
+    // traps; the operand is Int32 (the checker guarantees it).
+    return { wat: `${operand.wat}
+      (i32.const -1)
+      (i32.xor)`, ty: "Int32" }
   }
   // `-`: a checked subtract-from-zero at the operand's width (`0 - MIN` traps).
   if (operand.ty == "Int32") {

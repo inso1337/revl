@@ -105,6 +105,7 @@ CORPUS = [
     # function-only documents (slice 1); still byte-exact after the value_*
     # navigation rewrite (slice 2, item 185) — the refactor's own proof
     "arith.rvl",       # bounded int/int32, division/modulo, comparisons, unary
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow
     "records.rvl",     # record literal, functional record update, list literal
