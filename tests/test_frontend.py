@@ -96,6 +96,15 @@ REJECTIONS = {
     # wrong shapes item 131 flips to a compile error (py builds an unawaited
     # coroutine; ts fires a floating Promise). The fix is `await emit ...`.
     "a1_async_emit_step_not_awaited.rvl": "`emit` step reaches async operation `model.complete` but the emission is not awaited",
+    # roadmap item 131 refusal sweep (§6 exit test 5): the four
+    # admitted-but-silently-wrong async shapes flipped to compile errors, plus
+    # the exact-pairing (rule 2) and block-effect (fence) refusals.
+    "a1_async_effect_not_awaited.rvl": "component `A` acquires through async operation `open_conn` but the effect is not awaited",
+    "a1_async_undo_suspends.rvl": "`undo` reaches async operation `w.heat`, but teardown is synchronous on every tier",
+    "a1_async_compensate_suspends.rvl": "`compensate` reaches async operation `model.record`, but teardown is synchronous on every tier",
+    "a1_await_emit_sync.rvl": "`await emit` on an emission that reaches nothing async — an `await` in an activation body is a real divert window",
+    "a1_effect_await_sync.rvl": "`effect await` on an acquisition that reaches nothing async — an `await` in an activation body is a real divert window",
+    "a1_effect_await_block.rvl": "the block effect form does not take `await`",
     "v2_async_signature_mismatch.rvl": "method `stats` of provision `db` is not async but service Database declares it async",
     "v2_same_realm_conflict.rvl": "provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)",
     "v2_dynamic_realm.rvl": "dynamic realm labels are not supported",

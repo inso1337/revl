@@ -1,0 +1,16 @@
+// REJECTED — A1 (roadmap item 131), rule 2 (exact pairing, both directions):
+// `await emit` on a SYNC emission op. Nothing here suspends, so the `await` is
+// decoration — and an `await` in an activation body is a real divert window,
+// never decoration. Refusing it keeps the marker meaningful (design §3.2, the
+// same asymmetry `compatible` enforces for `Async[T]` types).
+//
+// expected error:
+//   `await emit` on an emission that reaches nothing async — an `await` in an
+//   activation body is a real divert window
+
+service Log { emission fn note(m: Str) -> Int }
+service Db { fn go() -> Str }
+component A requires log: Log provides db: Db {
+  await emit log.note("x")
+  provide db { fn go() { return "ok" } }
+}
