@@ -742,6 +742,14 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value in
+            # a component position (the frontend keeps it a `field` node here and
+            # marks it, since this emitter has no static type at the field site).
+            # It is the code-point/element count, not a record member read — the
+            # same `revlLen` the `len` node routes through (code points for a
+            # `Str`, not UTF-16 units).
+            return f"revlLen({target})"
         return _member(target, node.get("name"), "field")
 
     if kind == "index":
@@ -2662,6 +2670,11 @@ def _uses_str_methods(node) -> bool:
     at runtime; it is emitted only where one of these forms appears."""
     if isinstance(node, dict):
         if node.get("kind") == "len":
+            return True
+        # item 104: a component-position sized `.length` stays a `field` node
+        # marked `sized_length` and emits `revlLen(...)`, so the helper must be
+        # emitted for it too (else `revlLen` is undefined at runtime).
+        if node.get("kind") == "field" and node.get("sized_length"):
             return True
         if node.get("kind") == "builtin" and node.get("method") in _STR_METHOD_NAMES:
             return True

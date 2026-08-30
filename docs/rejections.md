@@ -471,6 +471,43 @@ component C provides c: Cache {
 The obligations are severity `obligation`, not `error` — an agent should
 treat the list as remaining work, not as a rejection. Fix: fill the hole in.
 
+## T4 — no field read off an erased value (`Any` / `Value`)
+
+An erased value — a `json_parse` result, any `Any` or `Value` — has no known
+fields, so a plain field read on it (`v.kind`) is the silent-divergence class
+items 279/299 chased: the py tier raises `KeyError` on an absent key, the ts
+tier yields `undefined`, and neither is a defensible total answer for a field
+the author spelled as present. The frontend refuses it, uniformly, before any
+tier emits.
+
+```revl reject T1
+pub extern pure fn jp(s: Str) -> Any
+  = @py { import json; return json.loads(s) }
+  = @ts { return JSON.parse(s) }
+
+fn read_kind(s: Str) -> Str {
+  let v: Any = jp(s)
+  return v.kind
+}
+```
+
+```
+field read `.kind` on a value of type `Any` — an erased value has no known fields
+  bind it to a record type first (`let e: SomeRecord = …; e.kind` — an `Opt[T]` field then reads back the empty Opt on absence), or walk it with stdlib/value.rvl (`value_is_object(v)`, `value_opt(v, "kind")`, `value_field_or`)
+```
+
+Fix, two designed surfaces (roadmap item 380):
+
+* bind the value to a **record type** and read the field there. A field whose
+  declared type is `Opt[T]` then reads TOTAL on every tier — absent is the
+  empty Opt, never a raise or a stray `undefined` — so `e.kind ?? "<none>"` is
+  the one spelling for "may be absent" and it means the same everywhere;
+* walk the erased value with the total **shape accessors** in `stdlib/value.rvl`
+  — `value_is_object(v)` / `value_is_list(v)` / `value_is_scalar(v)` discriminate
+  the shape, and `value_opt(v, "kind")` / `value_has(v, "kind")` /
+  `value_field_or(v, "kind", d)` read a field tolerantly by string key (which
+  also sidesteps the reserved-word-key mangle that started items 279/299).
+
 ## Everything else
 
 Rejections that enforce no guarantee code exist too, and follow the same
