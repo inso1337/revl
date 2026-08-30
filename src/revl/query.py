@@ -65,6 +65,17 @@ _STEP_EFFECT = "effect"
 _STEP_COMPENSATION = "compensation"
 _STEP_BOUNDARY = "boundary"
 
+# item 247 gap 2 (docs/design/247-compensate.md, Decision 2): the THREE audit
+# states a boundary crossing can be in, on the same G8 audit surface that today
+# tags a crossing compensated-vs-bare. `unresolved` is the third — a
+# compensation that was attached AND attempted AND did not land (the runtime's
+# `compensation-residue`). "Never silently swallowed" means this state is
+# enumerable here, not merely a growing in-memory list.
+STATE_BARE = "bare"                 # nothing attached — an honest irreversible crossing
+STATE_COMPENSATED = "compensated"   # an offset was attached and ran clean
+STATE_UNRESOLVED = "unresolved"     # an offset was attached, attempted, and failed
+COMPENSATION_STATES = (STATE_BARE, STATE_COMPENSATED, STATE_UNRESOLVED)
+
 _ASSUMPTION_EXTERN = (
     "extern host bodies are opaque: a `pure` or `acquire` extern whose host "
     "code actually crosses the boundary is invisible here. The compiler "
@@ -871,6 +882,120 @@ def emitted_between(timeline, frm: int, to: int, component: str = None) -> dict:
         stepsInWindow=windowSteps,
         components=sorted({c["component"] for c in crossings if c["component"]}),
         uncompensated=[c for c in crossings if not c["compensated"]],
+    )
+
+
+def classify_compensation(crossings: list, residue: list = None) -> dict:
+    """Partition boundary crossings into the three audit states (item 247 gap 2,
+    docs/design/247-compensate.md Decision 2), overlaying the runtime's
+    compensation residue on the static/recorded compensated-vs-bare tag.
+
+    `crossings` — dicts each with a `component` and a `compensated` bool (an
+    offset was ATTACHED at compile time / in the recording). `residue` — the
+    `compensation-residue` records from an abort or `revl recover` (each names
+    its `component`; a best-effort offset that raised or was skipped).
+
+    A crossing is:
+
+      * ``bare`` — no offset attached (an honest irreversible crossing);
+      * ``compensated`` — an offset attached and no residue accounts for it;
+      * ``unresolved`` — an offset attached but a residue record shows it did
+        not land.
+
+    Residue is correlated to a compensated crossing by ``component`` (the
+    granularity the runtime residue and the crossing record share — the residue
+    names the OFFSET call, the crossing names the EMISSION, so a per-crossing
+    identity join is not available without threading the WAL seq through the
+    recording; that is left as a follow-up). Within a component the residue
+    records absorb its compensated crossings newest-first (Phase-2 LIFO). Any
+    residue with no compensated crossing to attach to — the common case when the
+    caller passes residue without a recording — is surfaced as a standalone
+    ``unresolved`` fact, so an operator always SEES it and it is never dropped.
+
+    Pure and byte-inert when ``residue`` is empty: every compensated crossing
+    stays ``compensated`` and the ``unresolved`` list is empty."""
+    residue = list(residue or [])
+    by_component: dict = {}
+    for record in residue:
+        by_component.setdefault(record.get("component"), []).append(record)
+
+    bare, compensated, unresolved = [], [], []
+    for crossing in crossings:
+        if not crossing.get("compensated"):
+            bare.append({**crossing, "residueState": STATE_BARE})
+            continue
+        pending = by_component.get(crossing.get("component"))
+        if pending:
+            record = pending.pop(0)
+            unresolved.append({**crossing, "residueState": STATE_UNRESOLVED,
+                               "residue": record})
+        else:
+            compensated.append({**crossing, "residueState": STATE_COMPENSATED})
+
+    # residue with no compensated crossing to attach to — still enumerated, so
+    # nothing is silently swallowed (the residue-only surfacing path).
+    unattached = [r for group in by_component.values() for r in group]
+    for record in unattached:
+        unresolved.append({"component": record.get("component"),
+                           "compensated": True, "residueState": STATE_UNRESOLVED,
+                           "residue": record, "crossing": None})
+    return {
+        "bare": bare,
+        "compensated": compensated,
+        "unresolved": unresolved,
+        "states": {STATE_BARE: len(bare),
+                   STATE_COMPENSATED: len(compensated),
+                   STATE_UNRESOLVED: len(unresolved)},
+    }
+
+
+def compensation_audit(timeline=None, residue: list = None,
+                       component: str = None) -> dict:
+    """The three-state compensation audit (item 247 gap 2). Enumerates every
+    recorded emission crossing as ``bare`` / ``compensated`` / ``unresolved``,
+    overlaying the runtime `compensation-residue` an abort (or `revl recover`)
+    produced. The one place an operator/harness asks "did every offset I owed
+    actually land?" — and the `unresolved` list answers when one did not.
+
+    `timeline` is an optional replay recording (as `emitted_between` reads);
+    `residue` is the `compensationResidue` list off a session-boundary report.
+    Either may be omitted: with only residue, this is the standalone
+    unresolved-fact surface (still complete — nothing is swallowed); with only a
+    timeline, it degrades to the pre-247 compensated-vs-bare split with an empty
+    `unresolved`."""
+    crossings = []
+    for tl in _timelines_of(timeline):
+        name = tl.get("component")
+        if component is not None and name != component:
+            continue
+        for step in tl.get("steps") or []:
+            if step.get("kind") != _STEP_EMISSION:
+                continue
+            detail = step.get("detail") or {}
+            crossings.append({
+                "component": name, "step": step.get("index"),
+                "label": step.get("label"),
+                "key": detail.get("key"), "method": detail.get("method"),
+                "compensatedBy": step.get("compensatedBy"),
+                "compensated": step.get("compensatedBy") is not None,
+            })
+    partition = classify_compensation(crossings, residue)
+    return _result(
+        "compensation-audit",
+        "which boundary crossings are bare, compensated, or left unresolved?",
+        EXACT,
+        "a crossing is bare (no offset), compensated (an offset attached and "
+        "ran clean), or unresolved (an offset attached but a best-effort "
+        "residue shows it did not land). Compensation is not inversion (paper "
+        "§6.1): even a compensated crossing already left the system, and an "
+        "unresolved one is still out there — this enumerates it so it is never "
+        "silently swallowed.",
+        [_ASSUMPTION_RECORDED, _ASSUMPTION_RECORDING_SCOPE],
+        mode=MODE_HISTORICAL,
+        component=component,
+        **partition,
+        crossings=len(crossings),
+        residueCount=partition["states"][STATE_UNRESOLVED],
     )
 
 
