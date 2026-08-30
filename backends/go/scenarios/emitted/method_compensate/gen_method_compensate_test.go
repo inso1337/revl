@@ -112,7 +112,7 @@ func (m *Map[V]) Insert(k string, v V) {
 
 // InsertIfAbsent is the atomic compare-and-set (item 397). The per-op mutex is
 // held across BOTH the membership test AND the insert, so the whole CAS is one
-// critical section — no goroutine can witness the probe and the write as
+// critical section: no concurrent caller can witness the probe and the write as
 // separable steps. Returns whether it inserted; a false (key already present)
 // leaves the existing value untouched. Under N concurrent callers on one map,
 // exactly one receives true.
