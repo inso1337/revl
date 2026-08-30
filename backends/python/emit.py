@@ -2089,6 +2089,16 @@ def _emit_functions(functions: list) -> "_Lines":
 
 def _emit_externs(externs: list) -> "_Lines":
     out = _Lines()
+    # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md: the
+    # composition config map for document-global config externs, keyed by extern
+    # name. The driver (src/revl/run.py) resolves each config extern's schema
+    # once at plug time and installs the resolved dict here, exactly as it
+    # supplies a component's config at plug. Emitted ONLY when some extern
+    # carries a `config` schema, so a program with no config extern is
+    # byte-identical.
+    if any(ext.get("config") for ext in externs):
+        out.add(0, "_REVL_EXTERN_CONFIG = {}")
+        out.add(0)
     for ext in externs:
         name = _ident(ext["name"], "extern name")
         params = ", ".join(_ident(p["name"], "extern parameter name") for p in ext["params"])
@@ -2104,11 +2114,21 @@ def _emit_externs(externs: list) -> "_Lines":
         # A non-async extern stays a blocking `def`, unchanged.
         kw = "async def" if ext.get("async") else "def"
         out.add(0, f"{kw} {name}({params}):")
+        # item 379: a config extern binds `_revl_config` in its body scope as the
+        # first local, mirroring how a component method binds it (emit.py:1425,
+        # read at emit.py:734). The verbatim @py body then reads typed config
+        # (`_revl_config["provider"]`) instead of `os.environ`. The dict is the
+        # composition value the driver resolved once at plug; a bare import with
+        # no driver falls back to an empty dict, and required-ness is enforced at
+        # the driver preflight, not here. Emitted only for a config extern, so a
+        # no-config extern's `def`/body is byte-identical.
+        if ext.get("config"):
+            out.add(1, f"_revl_config = _REVL_EXTERN_CONFIG.get({name!r}) or {{}}")
         body = textwrap.dedent(bodies["py"].strip("\n"))
         if body:
             for line in body.splitlines() or [""]:
                 out.add(1, line)
-        else:
+        elif not ext.get("config"):
             out.add(1, "pass")
         out.add(0)
     return out
