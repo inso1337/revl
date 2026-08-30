@@ -558,3 +558,47 @@ Docs:
   roadmap entry should say so rather than carry an unverified speedup.
 - Labeled `break` is explicitly out of scope; the refusal message should not
   promise it.
+
+## Fable review corrections
+
+An adversarial review of this note found four issues. They are authoritative
+and override the body above where they differ; the implementation lands them.
+
+- **C1 (correctness, must-fix).** A `break`/`continue` inside a `match`-BLOCK
+  ARM inside a loop must be REFUSED. A block arm is lambda-lifted into a
+  separate helper `fn` during lowering (`src/revl/lower.py`, `_lift_block_arm`),
+  so a `break` written there would land in a function with no loop and emit
+  broken artifacts on every tier — the same reason the codebase already refuses
+  `return` in a block arm. The parser resets its loop-depth context to 0 on
+  entering `_match_block_arm` (so the counter cannot see an enclosing loop
+  through the lift) and refuses `break`/`continue` there in the block-arm voice.
+  A loop written *inside* the arm restores a positive depth for its own `break`.
+  Covered by an exit test.
+- **C2 (enforcement).** The no-loop-scoped-registration invariant is enforced
+  as a WHOLE-IR VALIDATION PASS (`_validate_no_loop_scoped_registration`,
+  `src/revl/lower.py`), run once over the lowered IR: no registering step kind
+  (`effect`/`let-effect`, `emit`/compensate, `timer`, `approval`, `spawn`) may
+  appear inside any `while`/`for` body, and — the same invariant read the other
+  way — no `while`/`for` step may appear in a component activation, provide-
+  method, or setup body. A parse-time loop-depth counter or a single
+  `_lower_pure_stmt`-local assert is not enough: the java emitter's
+  `_emit_setup_stmt` already emits loop steps in activation-body position, so a
+  leak on that path would compile silently on one tier. Each emitter's loop case
+  also carries a cheap belt-and-suspenders guard.
+- **C3 (premise reword).** The theorem's premise "the only scope that acquires
+  is the activation" is false — a bare `acquire`+`undo` extern is callable from
+  a fn loop today (separately filed as bug item 399, out of scope here). The
+  premise is reworded to **"the only scope that REGISTERS teardown is the
+  activation."** Frame-neutrality is unaffected: a bare `acquire` from a fn loop
+  registers nothing, so an early loop exit still runs no teardown.
+- **C4 (couples bug 398, wasm terminates-check).** The wasm `_diverges`
+  (`backends/wasm/emit.py`) handled only `return`/`if` and lacked a
+  `while (true)` case, while the frontend `_definitely_returns` treated
+  `while (true)` as terminating, so a declared-return fn ending in
+  `while (true)` emitted wasm wasmtime rejects ("nothing on stack"). Filed as
+  bug 398 but coupled here: the wasm terminates-check is made BREAK-AWARE and
+  the missing `while (true)` case is added to `_diverges` at the same time, so
+  both judgments agree — a `while (true)` with no reachable `break` diverges
+  (terminates the fn); one with a reachable `break` does not. A wasmtime-
+  validated exit test covers a declared-return fn ending in `while (true)` both
+  with and without a break.

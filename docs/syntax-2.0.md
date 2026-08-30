@@ -207,6 +207,28 @@ Rules that keep this honest:
   `examples/rejections/g6_closure_mutates_capture.rvl`.
 - `for (x of xs)` and `while` — TS syntax verbatim; both total-checked only
   in `verified` contexts (§7), unrestricted elsewhere.
+- `break` and `continue` — bare loop control (no label, no value), valid only
+  inside a `while`/`for` body, and TS-verbatim like the loops themselves
+  (item 379, [docs/design/379-break-continue.md](design/379-break-continue.md)).
+  `break` leaves the innermost enclosing loop; `continue` skips to its next
+  iteration. In a `while`, `continue` re-tests the condition **without** running
+  anything after it — a trailing `i += 1` in the loop body is skipped, exactly
+  as every C-family language does, so a `while` that mutates its own index
+  should advance it before the `continue`. Both are frame-neutral: a loop is
+  never a teardown boundary, so an early loop exit runs no disposer that a
+  header-flag exit would not (Decision 1 of the design note).
+
+```revl
+fn first_gap(xs: List[Int]) -> Int {
+  var i = 0
+  for (x of xs) {
+    if (x == 0) { i += 1  continue }   // skip zeros, but still advance i
+    if (x < 0) { break }               // stop at the first negative
+    i += 1
+  }
+  return i
+}
+```
 
 ## 4. Components and effects (unchanged core, new block forms)
 
