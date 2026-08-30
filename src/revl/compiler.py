@@ -8,10 +8,13 @@ from dataclasses import dataclass, field
 from . import parser as _ast
 from ._paths import stdlib_root
 from .admit_profile import AdmissionProfile
+from .admit_profile import check_no_extern as _check_no_extern
 from .admit_profile import enforce_document as _enforce_document
 from .admit_profile import enforce_source as _enforce_source
 from .errors import RevlError
 from .holes import refuse_admission
+from .hostfile import program_has_body_file as _program_has_body_file
+from .hostfile import resolve_body_files as _resolve_body_files
 from .lower import check_and_lower
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
 from .typecheck import format_type, parse_type
@@ -65,13 +68,26 @@ class _ModuleLoader:
     the string; everything else is read from the filesystem as usual.
     """
 
-    def __init__(self, sources: dict[str, str] | None = None) -> None:
+    def __init__(self, sources: dict[str, str] | None = None,
+                 profile: AdmissionProfile | None = None) -> None:
         self._cache: dict[str, _LoadedModule] = {}
         self._stack: list[str] = []
         self._sources = sources or {}
         # roadmap 319: REVL_IMPORT_PATH + the revl stdlib, read fresh per
         # loader so a test's `monkeypatch.setenv` takes effect.
         self._search_path = _default_search_path()
+        # item 396: the untrusted-author profile and the set of ROOT module
+        # abspaths. The no-extern refusal and the body-file resolution/read skip
+        # are ROOT-scoped (re-review F4): an imported (`use`d) module resolves
+        # its body files normally, so a pre-granted module may declare externs.
+        self._profile = profile
+        self._root_paths: set[str] = set()
+
+    def mark_roots(self, abs_paths) -> None:
+        """Record the composition's root module abspaths BEFORE any load, so a
+        root that is also reached as another root's `use` dependency is still
+        recognised as a root when it is loaded (item 396 ordering)."""
+        self._root_paths.update(abs_paths)
 
     def has_source(self, path: str) -> bool:
         return os.path.abspath(path) in self._sources
@@ -124,6 +140,22 @@ class _ModuleLoader:
             virtual = self._sources.get(abs_path)
             program = (Parser(virtual, abs_path).parse() if virtual is not None
                        else parse_file(abs_path))
+            # item 396: for a ROOT module under a no-extern profile, refuse
+            # BEFORE any body file is resolved, read, or stat'd, so the refusal
+            # is byte-identical whether or not the named file exists (no
+            # existence oracle, re-review F4). Root-scoped: an imported module
+            # is a pre-granted dependency and may declare externs. The
+            # whole-graph enforcement in compile_files stays as the backstop.
+            is_root = abs_path in self._root_paths
+            if (is_root and self._profile is not None
+                    and self._profile.no_extern):
+                _check_no_extern([program], self._profile)
+            # item 396: resolve external host-body files under the jail,
+            # replacing each HostBodyFile node with a spliced HostBody. A
+            # virtual (in-memory) module resolves ONLY through the sources map
+            # (no disk fallback, re-review F5).
+            _resolve_body_files(program, os.path.dirname(abs_path),
+                                self._sources, virtual is not None)
             module = _LoadedModule(abs_path, os.path.dirname(abs_path), program)
             for fn in program.fn_decls:
                 if fn.public:
@@ -219,7 +251,25 @@ def compile_source(source: str, filename: str = "<string>",
                             "compile_files with a real source path",
                             hint="a bare source string has no module directory from which "
                                  "to resolve the import")
+        # no-extern refusal first (structural, no IO), so an untrusted author's
+        # refusal is unchanged and precedes any body-file concern (item 396).
         _enforce_source([program], profile)
+        # item 396: a bare in-memory source has no module directory and no
+        # sources map, so a body file cannot resolve without opening disk, which
+        # the `compile_source` contract forbids. Refuse structurally (no IO),
+        # mirroring the `use` refusal above (re-review F5).
+        if _program_has_body_file(program):
+            line = next(
+                body.line for ext in program.externs for body in ext.bodies
+                if isinstance(body, _ast.HostBodyFile))
+            raise RevlError(
+                filename, line,
+                "an extern host-body file (`= @backend file \"path\"`) needs "
+                "`modules=` (in-memory sources) or `compile_files` with a real "
+                "source path",
+                hint="a bare source string has no module directory from which to "
+                     "resolve the file, and `compile_source` reads nothing from "
+                     "disk (item 396)")
         document = check_and_lower(program)
         _enforce_document(document, profile)
         return document
@@ -249,7 +299,11 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     The returned document's `components` are only the newly compiled ones;
     its `manifest` describes the whole resulting composition.
     """
-    loader = _ModuleLoader(sources)
+    loader = _ModuleLoader(sources, profile)
+    # item 396: mark every root abspath before loading, so the root-scoped
+    # no-extern check and body-file resolution skip apply even to a root that is
+    # reached as another root's `use` dependency.
+    loader.mark_roots(os.path.abspath(p) for p in paths)
     root_modules = [_load_root(loader, path) for path in paths]
 
     merged = Program(filename=paths[0] if paths else "<none>")

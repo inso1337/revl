@@ -2362,18 +2362,41 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                             f"`requires` the service "
                             f"(docs/design/378-sync-extern-service-reach.md)."),
                     )
+        from .parser import HostBodyFile  # noqa: PLC0415
         bodies: dict[str, str] = {}
+        # item 396: provenance for a body SPLICED from an external file. Absent
+        # unless the file form is used, so every existing extern's IR is
+        # byte-identical. Records the written path and the sha256 of the raw
+        # file bytes so two compiles are byte-comparable and `revl verify` can
+        # re-hash the file.
+        body_files: dict[str, dict] = {}
         for body in decl.bodies:
+            if isinstance(body, HostBodyFile):
+                # The compiler's body-file resolver replaces every HostBodyFile
+                # with a resolved HostBody before lowering; reaching here means
+                # the resolution seam was skipped (an internal error, not an
+                # author error).
+                raise RevlError(
+                    filename, body.line,
+                    f"internal: unresolved @{body.backend} host-body file for "
+                    f"extern `{decl.name}` reached lowering (item 396)")
             if body.backend in bodies:
                 raise RevlError(filename, body.line,
                                 f"duplicate @{body.backend} body for extern `{decl.name}`")
             bodies[body.backend] = body.text
+            if body.source_path is not None:
+                body_files[body.backend] = {"path": body.source_path,
+                                            "sha256": body.sha256}
         entry: dict = {
             "name": decl.name,
             "class": decl.classification,
             "params": [{"name": p.name, "type": p.type} for p in decl.params],
             "returns": decl.returns,
             "bodies": bodies,
+            # item 396 option A: file-splice provenance, present only when a
+            # `= @backend file` body was used (additive: every existing IR is
+            # byte-identical without it).
+            **({"body_files": body_files} if body_files else {}),
             # additive async flag (docs/design/async-extern.md §4), mirroring
             # the service-method spelling at lower.py:2583. Absent means sync;
             # `ir_version` stays 3 (confirmed human decision, §4).
