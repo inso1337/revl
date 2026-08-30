@@ -854,6 +854,22 @@ class Frame:
         # `_Compensation.__call__`) and drained by `_drain_phase2` after
         # `install`'s `ctx.effect(...)` call re-raises the body's failure.
         self._compensations: list = []
+        # item 247 (method-body compensate remainder) (docs/design/teardown-contract.md): the compensation entries
+        # a PROVIDE-METHOD registered (`emit ... compensate ...` in a method
+        # body), the compensation analog of `_deferred_transactional` above. Like
+        # a method-registered transactional inverse, a method-body compensation
+        # has NO body generator to yield its `_Compensation` disposer into, and
+        # adopting it as a sibling `ctx.effect` is UNSOUND: cordis disposes an
+        # adopted effect BEFORE the body's `drain`, so the bare disposer would
+        # run on a CLEAN unload — firing the offset after a successful commit and
+        # destroying the deliverable the emission was (the item 247 bug this
+        # closes, left in place for the method-body site). So the entry is parked
+        # here and disposed by `drain` once `_committed`/`_aborting` is settled:
+        # DISCHARGED on commit, ENQUEUED for Phase 2 on abort (drained after every
+        # proof inverse, exactly as the activation-body compensation is). Each
+        # entry also joins `_compensations` above so the WAL discharge record and
+        # residue introspection cover it uniformly.
+        self._deferred_compensations: list = []
         self._pending_compensations: list = []
         # Phase-2 residue (teardown-contract.md's `compensation-residue`):
         # one record per compensation that raised or was skipped past the
@@ -1192,6 +1208,70 @@ class Frame:
             entry.seq = record["seq"]
         return entry
 
+    def compensation_method(self, fn: Callable[[], Any]) -> "_Compensation":
+        """Register a PROVIDE-METHOD `emit ... compensate ...` step's offsetting
+        call as a COMPENSATION entry on THIS component's activation frame (the
+        item-247 method-body compensate remainder, docs/design/teardown-contract.md).
+        This is the compensation analog
+        of `transactional_method` (item 318): a per-tool-call emission fires from
+        a provide-method, and its offset must outlive the method call — the method
+        returns, but the offset is owed only if the component/session ABORTS, and
+        must never fire on a clean commit (the emission was the deliverable).
+
+        Unlike `compensation` (yielded by the activation body's generator into
+        cordis's LIFO disposer stack), a method body has no generator to yield
+        into. Adopting the `_Compensation` as a sibling `ctx.effect` is UNSOUND —
+        cordis disposes an adopted effect BEFORE the body's `drain`, so the
+        disposer would run on a CLEAN unload and fire the offset after a
+        successful commit (the exact placeholder-lowering bug this closes). So
+        the entry is parked in `_deferred_compensations` and disposed by `drain`
+        (commit → discharge; abort → enqueue for Phase 2), where the commit-vs-
+        abort bit is already settled. The entry still joins `_compensations` so
+        the WAL discharge record and residue introspection cover it exactly like
+        an activation-body one.
+
+        Registration is unconditional here, matching the activation-body
+        `compensation` and the existing `emit ... compensate ...` surface: the
+        call site yields this right after the emission, unconditionally. Bridge
+        slice: the WAL discharge-descriptor is written at registration, durably
+        ahead of the fate decision, `entry="compensation"`, `origin.phase="call"`
+        (a per-tool-call crossing, as opposed to the activation-body's
+        `"activation"`), so `revl recover` reconstructs and re-issues it through
+        recovery's `apply_compensation` path (teardown-contract.md's "WAL
+        descriptor").
+
+        Recorder seam: under `--record`, the offset must still surface as a
+        `compensation` step in the step-back timeline. The pre-fix placeholder
+        lowering got that for free — it `yield`ed the bare offset lambda into a
+        recorded effect generator, where `Timeline.record_yield` classified it by
+        SOURCE ADJACENCY to the just-recorded emission. Routing through the frame
+        bypasses that generator, so this records the step explicitly (same
+        classifier) and adopts the ONCE-wrapped disposer `record_yield` returns as
+        the entry's `fn` — so a step-back run and the live Phase-2 drain share one
+        guard and never double-fire the offset. A plain run carries no timeline
+        (its `ctx` has no `_revl_timeline`), so this is a no-op there, byte-inert.
+        The discharge-descriptor's `method` is read from the ORIGINAL `fn` before
+        wrapping, so the WAL names the real offsetting call, not the wrapper."""
+        method_name = _named_call_method(fn)
+        timeline = getattr(self.ctx, "_revl_timeline", None)
+        if timeline is not None:
+            _step, fn = timeline.record_yield(fn, f"{self.name}/compensate")
+        entry = _Compensation(self, fn)
+        self._compensations.append(entry)
+        self._deferred_compensations.append(entry)
+        wal = self._wal()
+        if wal is not None:
+            record = wal.record_discharge_descriptor(
+                "compensation",
+                receiver=self.name,
+                method=method_name,
+                args=[],
+                origin={"phase": "call", "key": self.name},
+                witness=None,
+            )
+            entry.seq = record["seq"]
+        return entry
+
     def enqueue_deferred(self, receiver: str, method: str, args: list,
                          fire: Callable[[], Any]) -> None:
         """Enqueue a class-(b) deferred emission onto the session's deferral
@@ -1330,6 +1410,14 @@ class Frame:
                 self._owner.escrow(entry)
                 entry._escrowed = True
             self._deferred_transactional = []
+            # item 247 (method-body compensate remainder): the method-registered compensations escrow the same way;
+            # `finalize_abort` runs their Phase-2 offset (after the escrowed
+            # transactional inverses), and a session commit discharges them by
+            # omission — byte-for-byte the `_deferred_transactional` discipline.
+            for entry in self._deferred_compensations:
+                self._owner.escrow(entry)
+                entry._escrowed = True
+            self._deferred_compensations = []
             return self._dispose_adopted()
 
         if not self._aborting:
@@ -1368,7 +1456,35 @@ class Frame:
         deferred, self._deferred_transactional = self._deferred_transactional, []
         for entry in reversed(deferred):
             entry()
-        return self._dispose_adopted()
+        # item 247 (method-body compensate remainder): dispose the method-registered COMPENSATION entries, now that
+        # the commit-vs-abort bit is settled — the compensation analog of the
+        # `_deferred_transactional` disposal above, and the method-body analog of
+        # the activation-body `emit ... compensate ...` (item 247). On a COMMIT
+        # each `__call__` DISCHARGES (the offset never runs — the emission was the
+        # deliverable, best-effort cleanup on success would be wrong); on an ABORT
+        # each ENQUEUES onto `_pending_compensations` (never fired inline during
+        # Phase 1, so a raising offset can never interrupt a proof inverse).
+        # Newest-first, so Phase 2 runs the newest compensation first, matching
+        # the activation-body path (cordis unwinds its disposer stack LIFO).
+        deferred_comp, self._deferred_compensations = self._deferred_compensations, []
+        for entry in reversed(deferred_comp):
+            entry()
+        adopted = self._dispose_adopted()
+        # item 247 (method-body compensate remainder): Phase 2 — actually invoke the enqueued compensations, guarded
+        # and residue-collected (`_drain_phase2`), only AFTER every proof inverse
+        # in this activation has completed: the transactional replay above AND the
+        # adopted bracket disposal. This is the two-phase ordering item 247's
+        # activation-body path gets from `install`'s post-unwind hook; a method
+        # body has no such generator, so `drain` sequences the phases itself.
+        # `_drain_phase2` is a no-op when nothing was enqueued (a commit, or a
+        # compensation-free activation), so this is byte-inert for those.
+        if adopted is not None:
+            async def _drain_after(_co=adopted):
+                await _co
+                self._drain_phase2()
+            return _drain_after()
+        self._drain_phase2()
+        return None
 
     def _dispose_adopted(self) -> Any:
         adopted, self._adopted = self._adopted, []

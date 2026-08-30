@@ -1210,16 +1210,21 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
     svc = services.get(service_name, {})
     svc_methods = svc.get("methods", {})
 
-    # item 318: a provide block whose method registers a witnessed effect holds
-    # the enclosing component's activation frame, so the per-tool-call inverse
-    # can be parked on it (`registerMethodWitnessed`). Only such a block gains
-    # the field, so every other provide impl stays byte-identical.
-    has_method_witnessed = any(_method_body_has_witnessed(m.get("body")) for m in methods)
+    # item 318 / item-247 method-body remainder: a provide block whose method
+    # registers a per-tool-call frame entry — a witnessed effect
+    # (`registerMethodWitnessed`) or an `emit ... compensate ...`
+    # (`registerMethodCompensation`) — holds the enclosing component's activation
+    # frame so that entry can be parked on it. Only such a block gains the field,
+    # so every other provide impl stays byte-identical.
+    has_method_frame = any(
+        _method_body_has_witnessed(m.get("body"))
+        or _method_body_has_compensate(m.get("body"))
+        for m in methods)
 
     # struct fields: ctx + config + every bind + every req (over-capture ok).
     out.append("type %s struct {" % struct)
     out.append("\tctx *stc.Context")
-    if has_method_witnessed:
+    if has_method_frame:
         out.append("\trevlFrame *RevlFrame")
     if has_config:
         out.append("\tcfg %sConfig" % _camel(comp_name))
@@ -1395,7 +1400,31 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             else:
                 _emit_effect_step(step, env, out, indent)
         elif s == "emit":
+            # item-247 method-body remainder: a method-body `emit ... compensate
+            # ...` is a first-class COMPENSATION on the component's activation
+            # frame, NOT a plain call that drops the offset (the silent-wrong
+            # placeholder this fixes) and NOT a `ctx.Effect` bracket (which stc-go
+            # disposes at the wrong time — the disposal-ordering hazard the
+            # method-witnessed seam avoids). Fire the emission inline, then park
+            # the offset via `registerMethodCompensation`: discharged on a clean
+            # commit (the emission was the deliverable), enqueued for Phase 2 on
+            # abort (fired after every proof inverse, guarded, residue-collected).
+            # The frame is reached the same way as the witnessed seam
+            # (`receiver.revlFrame`, wired at provide construction).
+            comp_node = step.get("compensate")
             out.append("%s%s" % (pad, _expr(step["expr"], env)))
+            if comp_node is not None:
+                compensate_call = _expr(comp_node, env)
+                key, method = _call_descriptor(comp_node)
+                frame = "%s.revlFrame" % env.receiver
+                out.append("%s%s.registerMethodCompensation(%s, %s, func() error { %s; return nil })" %
+                           (pad, frame, _go_string(key), _go_string(method), compensate_call))
+                global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
+                _COMP_NEEDS_TEARDOWN = True
+                # the EXT frame (deferred slice, Abort, the registerMethod* seam)
+                # is what a method-registered entry parks onto — the same
+                # apparatus the method-witnessed path needs.
+                _COMP_NEEDS_METHOD_WITNESSED = True
         elif s == "let-effect":
             raise EmitError("let-effect not allowed inside a provide method")
         else:
@@ -1882,11 +1911,28 @@ def _method_body_has_witnessed(body) -> bool:
     return False
 
 
-def _provide_has_method_witnessed(provide_step) -> bool:
-    """True iff any method of a `provide` step registers a witnessed effect
-    (item 318): the provide block whose impl struct needs a `revlFrame` field
-    and whose method bodies register into the component's activation frame."""
+def _method_body_has_compensate(body) -> bool:
+    """True iff a provide-METHOD body carries an `emit ... compensate ...` step
+    (the item-247 method-body compensate remainder). Its compensation is parked
+    on the component's activation frame (`registerMethodCompensation`), so the
+    provide impl needs the `revlFrame` field exactly like a method-witnessed one.
+    Unlike the activation-body site, a method-body compensation must NOT be a
+    plain `ctx.Effect` disposer (it would fire on a clean unload — the item-247
+    soundness bug this closes on go); the frame seam is what makes it abort-only,
+    Phase-2, and discharged on commit."""
+    for step in body or []:
+        if step.get("step") == "emit" and step.get("compensate") is not None:
+            return True
+    return False
+
+
+def _provide_has_method_frame(provide_step) -> bool:
+    """True iff any method of a `provide` step registers a per-tool-call entry
+    onto the component activation frame — a witnessed effect (item 318) or an
+    `emit ... compensate ...` (item-247 method-body remainder). Either makes the
+    provide impl struct need a `revlFrame` field and the frame be handed to it."""
     return any(_method_body_has_witnessed(m.get("body"))
+               or _method_body_has_compensate(m.get("body"))
                for m in provide_step.get("methods", []) or [])
 
 
@@ -1902,7 +1948,7 @@ def _body_needs_frame(steps) -> bool:
             return True
         if kind == "emit" and step.get("compensate") is not None:
             return True
-        if kind == "provide" and _provide_has_method_witnessed(step):
+        if kind == "provide" and _provide_has_method_frame(step):
             return True
         if kind == "if":
             if _body_needs_frame(step.get("then")) or _body_needs_frame(step.get("else")):
@@ -2280,7 +2326,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # item 318: hand the frame to a provide block whose method registers a
         # witnessed effect (the `_revlFrame` local exists — a method-witnessed
         # component always needs the frame, see `_body_needs_frame`).
-        if _provide_has_method_witnessed(step):
+        if _provide_has_method_frame(step):
             fields.append("revlFrame: _revlFrame")
         if comp.get("config"):
             fields.append("cfg: cfg")
@@ -4653,6 +4699,32 @@ func (f *RevlFrame) Abort() {
 func (f *RevlFrame) registerMethodWitnessed(run func() error) {
 	f.mu.Lock()
 	f.deferred = append(f.deferred, run)
+	f.mu.Unlock()
+}
+
+// registerMethodCompensation parks one provide-method `emit ... compensate ...`
+// offset (the item-247 method-body remainder): the compensation analog of
+// registerMethodWitnessed, and the method-body analog of the activation-body
+// `emit ... compensate ...` (item 247). A method body runs AFTER activation, so
+// the offset must outlive the method call and is owed ONLY on an abort, never on
+// a clean commit (the emission it offsets was the deliverable). It is NOT a
+// stc-go disposer (see commit() for the disposal-ordering hazard); commit()
+// disposes the parked closure once the commit-vs-abort bit is settled. On a
+// COMMIT the closure discharges (never runs). On an ABORT it hands the offset to
+// `enqueue`, so runCompensationPhase (registered first, hence run LAST on the
+// unwind) fires it in Phase 2 — after every bracket/transactional/method-
+// witnessed inverse in this activation has completed, guarded and residue-
+// collected. `key`/`method` are the offsetting call's descriptor for the WAL and
+// residue, captured here at registration (the "no data hazard" rule).
+func (f *RevlFrame) registerMethodCompensation(key, method string, run func() error) {
+	f.mu.Lock()
+	f.deferred = append(f.deferred, func() error {
+		if f.committed {
+			return nil // discharge — the emission was the deliverable
+		}
+		f.enqueue(key, method, run) // abort: defer to Phase 2
+		return nil
+	})
 	f.mu.Unlock()
 }'''
 

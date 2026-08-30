@@ -977,14 +977,19 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
   }
   if (kind == "emit") {
     if (!value_is_null(value_field(step, "compensate"))) {
-      let fname = `_emit_${counter}`
-      var out = [line(indent, `def ${fname}():`)]
-      out = out.push(line(indent + 1, cexpr(value_field(step, "expr"))))
-      out = out.push(line(indent + 1, `yield lambda: ${cexpr(value_field(step, "compensate"))}`))
-      let c = counter + 1
-      let label = `${comp_name}.${provide_name}.${method_name}#${c}`
-      out = out.push(line(indent, `_revl_frame.adopt(_revl_ctx.effect(${fname}, ${py_repr(label)}))`))
-      return { lines: out, counter: c }
+      // item 247 (method-body compensate remainder) (docs/design/teardown-contract.md): a method-body
+      // `emit ... compensate ...` is a first-class COMPENSATION on the
+      // activation frame (`_revl_frame.compensation_method`), the compensation
+      // analog of item 318's method-witnessed wiring — NOT a bare
+      // `yield lambda: <offset>` adopted as a sibling effect. A bare adopted
+      // disposer is a bracket: it fires the offset on a CLEAN commit (destroying
+      // the deliverable), interleaves with proof inverses, and is unguarded.
+      // Routing through `compensation_method` makes it abort-only: discharged on
+      // commit, drained in Phase 2 after every proof inverse, guarded and
+      // residue-collected. Mirrors the reference emit.py's `_method_step`.
+      var out = [line(indent, cexpr(value_field(step, "expr")))]
+      out = out.push(line(indent, `_revl_frame.compensation_method(lambda: ${cexpr(value_field(step, "compensate"))})`))
+      return { lines: out, counter: counter }
     }
     var out = [line(indent, cexpr(value_field(step, "expr")))]
     return { lines: out, counter: counter }

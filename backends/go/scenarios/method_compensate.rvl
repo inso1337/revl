@@ -1,0 +1,62 @@
+// The method-body-compensation proof on the go tier — the item-247 method-body
+// compensate REMAINDER (item 247 landed the ACTIVATION-body compensation; the
+// per-tool-call METHOD-body site was left silently dropping the compensate
+// clause on go). The go mirror of tests/test_provide_method_compensate.py and
+// backends/typescript/tests/method_compensate.test.ts.
+//
+// A per-tool-call method body carries BOTH entry kinds in one call: a witnessed
+// `stash` (a transactional Phase-1 proof inverse) and an `emit note compensate
+// offset` (a compensation). Routed through the activation frame
+// (`RevlFrame.registerMethodCompensation`), the offset DISCHARGES on a clean
+// commit (never runs — the emission was the deliverable) and FIRES only on an
+// abort, in PHASE 2, after every proof inverse. Every forward/inverse call
+// records through the host trace (`hostRecord`) so exec_test.go can assert both
+// WHICH calls ran and their ORDER.
+//
+// The commit/abort proof is driven directly from exec_test.go (the go
+// lifecycle-test DSL has no per-tool-call / abort assertion). The `lifecycle
+// test` below is the smoke path that keeps this document on emit()'s live
+// stc-go component path (a v3 document with top-level externs but no lifecycle
+// test routes to the PURE typed-core path, which drops the component).
+
+type Stash = { path: Str, bak: Str }
+type FsError = { code: Str }
+
+extern pure fn unstash(w: Stash) -> Unit = @go {
+	hostRecord("unstash")
+	return
+}
+
+extern witnessed[fs] fn stash(p: Str) -> Result[Stash, FsError] undo unstash(result) = @go {
+	hostRecord("stash")
+	return RevlOk[Stash, FsError]{Value: Stash{Path: p, Bak: p + ".bak"}}
+}
+
+extern emission fn note(msg: Str) -> Unit = @go {
+	hostRecord("note " + msg)
+	return
+}
+
+extern pure fn offset(msg: Str) -> Unit = @go {
+	hostRecord("compensate " + msg)
+	return
+}
+
+service Ops {
+  emission fn run(p: Str, msg: Str)
+}
+
+component Agent provides ops: Ops {
+  provide ops {
+    fn run(p, msg) {
+      effect stash(p)
+      emit note(msg) compensate offset(msg)
+    }
+  }
+}
+
+lifecycle test "clean unload of an un-called agent leaves no residue" {
+  load Agent
+  unload Agent
+  assert no_residue
+}
