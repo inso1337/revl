@@ -410,6 +410,11 @@ _JAVA_V3_BIN_OPS = {
     "<": "<", ">": ">", "<=": "<=", ">=": ">=",
     "+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
     "&&": "&&", "||": "||",
+    # Int32 bitwise operators (item 366, docs/arithmetic.md). All native on a
+    # Java `int` and none trap: `& | ^` are the bit ops; a `<<`/`>>` on `int`
+    # masks the shift count to its low 5 bits (JLS 15.19), which is exactly the
+    # spec's mod-32 rule, and `>>` is the arithmetic (sign-extending) shift.
+    "&": "&", "|": "|", "^": "^", "<<": "<<", ">>": ">>",
 }
 
 _V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
@@ -1296,6 +1301,10 @@ def _expr(
         operand = _expr(node.get("operand"), ctx, rename, env)
         if node.get("op") == "!":
             return f"(!{operand})"
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): Java's `~` on an `int`. A bit
+            # op, so it never traps.
+            return f"(~{operand})"
         if node.get("op") == "-":
             if node.get("operands") in ("Int", "Int32"):
                 # negating Long.MIN / Integer.MIN_VALUE overflows; Math.negateExact
