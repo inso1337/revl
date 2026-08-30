@@ -10,6 +10,6 @@
 
 service Db { fn go() -> Str }
 component A provides db: Db {
-  let c = effect await Map.new() undo c.clear()
+  let c = effect await Map.new() undo c.drop()
   provide db { fn go() { return "ok" } }
 }

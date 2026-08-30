@@ -35,6 +35,7 @@ from .typecheck import (
     compatible,
     format_type,
     host_check,
+    _HOST_FAMILIES,
     infer_ast,
     infer_ir,
     mismatch,
@@ -502,11 +503,16 @@ class Env:
         self.params: dict[str, str] = {}
         self._taken: set[str] = set()
         # host provenance (docs/stdlib-2.0.md §Map): component locals bound to
-        # a host acquisition (`let store = effect Map.new()`). Their method
-        # calls belong to the host stub surface and stay verbatim — checked
-        # BEFORE the stdlib builtin table, so a value-type method that shares
-        # a spelling with a host verb (`remove`) cannot capture them.
-        self.host_locals: set[str] = set()
+        # a host acquisition (`let store = effect Map.new()`), mapping the
+        # host-safe IR name to the host family it belongs to (`Map`/`Pool`/
+        # `Job`). Their method calls belong to the host stub surface and stay
+        # verbatim — checked BEFORE the stdlib builtin table, so a value-type
+        # method that shares a spelling with a host verb (`remove`) cannot
+        # capture them, and checked AGAINST that family surface so an unknown
+        # verb (`store.frobnicate(k)`) is refused here rather than compiled as
+        # a pass-through that only fails at the host runtime (item 401, the
+        # item-84 crash shape).
+        self.host_locals: dict[str, str] = {}
 
     def bind_local(self, name: str, line: int) -> str:
         if name in self.locals or name in self.requires or name in self.params:
@@ -539,6 +545,70 @@ _BUILTIN_NONRECORD = {"Str", "Int", "Int32", "Bool", "Float", "Bytes", "Unit",
 
 # host roots a pure fn may call without an explicit binding (DESIGN §7 builtins)
 _HOST_CALLABLES = {"Map", "Pool", "Job"}
+
+# The host-Map iteration surface (items 84/86/88, docs/stdlib-2.0.md §Map).
+# `size`/`keys` are backed by EVERY tier's host Map runtime (py runtime.py
+# `Map.size`/`Map.keys`, ts `MapHandle.size`/`keys`, and their go/rust/java
+# mirrors), so they are legal verbs on a host-provenance local — but they
+# share a spelling with the VALUE-Map builtins and so live in
+# `_BUILTIN_METHODS`, not `_HOST_ARG_SIG` (whose names must stay disjoint from
+# the builtin table — the disjointness check at import time enforces it). On a
+# host local they dispatch as host verbs (a plain `call` node, selected by
+# receiver kind), the same dual dispatch the sanctioned `remove` overlap rides.
+# Kept beside `_HOST_CALLABLES` so the host-Map surface — `_HOST_FAMILIES`'s
+# `Map` row plus this — is enumerable in one place; maps verb -> arity.
+_HOST_MAP_ITER_VERBS: dict[str, int] = {"size": 0, "keys": 0}
+
+
+def _check_host_verb(family: str, verb: str, argc: int,
+                     filename: str | None, line: int) -> None:
+    """Admit a verb call on a host-provenance local (item 401).
+
+    The known surface is the family's stub verbs (`_HOST_FAMILIES`, derived
+    from `_HOST_ARG_SIG`) plus, for a host Map, the iteration verbs
+    (`_HOST_MAP_ITER_VERBS`). A verb in neither is refused with the same named
+    HOST-METHOD diagnostic the constructor-tracked receiver path uses, naming
+    the FULL surface — so a typo or a value-Map method wrongly aimed at a host
+    Map (`store.lookup(k)`, which no host runtime backs) is a compile error
+    here rather than an unchecked pass-through that only crashes at the host
+    runtime (the item-84 shape).
+
+    Only the VERB NAME and ARITY are checked, never the argument TYPES: a host
+    Map's key and value are generically typed on the tiers that genericized it
+    (`Map[V]`; items 113/176), the checker's `["Str","Str"]` row is the known
+    frontier/emitter disagreement the host boundary already carries opaquely
+    (`_HOST_ARG_SIG` header; docs/design/397-insert-if-absent.md), and the
+    pre-item-401 pass-through type-checked nothing here. Enforcing the row's
+    `Str` would reject valid programs (`m.insert(k, double(v))` with a non-Str
+    value/key), which is a separate frontier decision, not item 401's.
+    """
+    family_surface = _HOST_FAMILIES.get(family, {})
+    iter_verbs = _HOST_MAP_ITER_VERBS if family == "Map" else {}
+    if verb in family_surface:
+        arity = len(family_surface[verb])
+    elif verb in iter_verbs:
+        arity = iter_verbs[verb]
+    else:
+        if filename:
+            surface = ", ".join(sorted(set(family_surface) | set(iter_verbs)))
+            raise RevlError(
+                filename, line,
+                f"`{family}` has no method `{verb}` (its surface: {surface})",
+                hint="host objects are checked against the stub surface spelled "
+                     "in docs/stdlib-2.0.md — a misspelled method compiles on "
+                     "every tier and only fails at the host runtime",
+                code="HOST-METHOD", category="host-boundary")
+        return
+    if filename and argc != arity:
+        raise RevlError(
+            filename, line,
+            f"host `{family}.{verb}` takes {arity} argument"
+            f"{'' if arity == 1 else 's'}, got {argc}",
+            hint=f"the signature is `.{verb}("
+                 f"{', '.join(family_surface.get(verb, [])) if verb in family_surface else ''})`",
+            code="HOST-ARITY", category="host-boundary")
+
+
 # item 395 / Stage 5 gate of docs/design/378-sync-extern-service-reach.md: the
 # backend tiers whose emitter HAS the extern config-injection seam (binds
 # `_revl_config` in the extern body from the plug-time composition config map).
@@ -4738,8 +4808,15 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             # host provenance (docs/stdlib-2.0.md §Map): a local bound to a
             # host acquisition keeps its stub verb surface verbatim — checked
             # BEFORE the builtin table so the sanctioned `remove` overlap
-            # dispatches by receiver kind, never by name alone.
+            # dispatches by receiver kind, never by name alone. The verb is
+            # checked against the acquisition's family surface (item 401): an
+            # unknown verb (`store.frobnicate(k)`) is refused here (HOST-METHOD)
+            # instead of compiling as a pass-through that only crashes at the
+            # host runtime, the item-84 shape.
             if scope.get(root) in env.host_locals:
+                _check_host_verb(
+                    env.host_locals[scope[root]], method, len(args),
+                    filename, line)
                 return {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
                         "method": method, "args": args}
@@ -6000,9 +6077,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             safe = env.bind_local(stmt.bind, stmt.line)
             # host provenance: an effect-acquired HOST object (`Map.new()`)
             # keeps its verb surface verbatim, exempt from the stdlib table —
-            # see Env.host_locals.
+            # see Env.host_locals. Record the acquisition's family (`Map` from
+            # `Map.new`) so later method calls are checked against that family's
+            # verb surface (item 401).
             if acquire.get("kind") == "host":
-                env.host_locals.add(safe)
+                env.host_locals[safe] = str(acquire["fn"]).partition(".")[0]
             acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
             if acquired_type is not None:
                 env.type_env[safe] = acquired_type
@@ -7188,11 +7267,23 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                                    ptype, actual)
             node = {"kind": "call", "target": node, "method": op.name, "args": lowered}
             continue
+        # host provenance (docs/stdlib-2.0.md §Map): a verb call on a local
+        # bound to a host acquisition (`effect store.insert(k, v)` in an
+        # activation or provide-method body) is checked against that family's
+        # surface (item 401). An unknown verb is refused here (HOST-METHOD)
+        # instead of lowering to a call that only crashes at the host runtime,
+        # the item-84 shape. Only the FIRST verb off the host local is checked;
+        # a host verb's RESULT is opaque, so a chained call reads no family.
+        host_args = [_lower_expr(a, env, mode) for a in op.args]
+        if node.get("kind") == "name" and node.get("id") in env.host_locals:
+            _check_host_verb(
+                env.host_locals[node["id"]], op.name, len(host_args),
+                env.filename, op.line)
         node = {
             "kind": "call",
             "target": node,
             "method": op.name,
-            "args": [_lower_expr(a, env, mode) for a in op.args],
+            "args": host_args,
         }
     return node
 
