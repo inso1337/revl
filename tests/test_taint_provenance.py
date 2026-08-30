@@ -126,6 +126,53 @@ def test_taint_propagates_through_a_pure_call():
     assert classify(excinfo.value)["code"] == "G9"
 
 
+def test_verified_parser_result_composes_with_match_and_flows_clean():
+    """The strongest declassifier composes with `match`: a `verified fn`
+    returning `Result[Trusted[Int], E]`, matched and unwrapped, flows into an
+    `Int` sink with no refusal (Decision 3.1)."""
+    src = (
+        "extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py { return \"\" }\n"
+        "extern emission[shell] fn run_int(n: Trusted[Int]) = @py { return }\n"
+        "verified fn parse(s: Untrusted[Str]) -> Result[Trusted[Int], Str] { return Ok(0) }\n"
+        "service Ops { emission fn go(url: Str) }\n"
+        "component Agent provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(url) {\n"
+        "      let page = emit fetch(url)\n"
+        "      let r = parse(page)\n"
+        "      let out = match r { Ok(n) => n, Err(e) => 0 }\n"
+        "      emit run_int(out)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    compile_source(src, "match_declassify.rvl")  # must not raise
+
+
+def test_taint_survives_a_non_declassifying_match():
+    """Taint never disappears by pattern-matching: a `match` whose scrutinee is
+    untrusted carries the taint into its result, so the sink still refuses."""
+    src = (
+        "extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py { return \"\" }\n"
+        "extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }\n"
+        "extern pure fn wrap(s: Str) -> Result[Str, Str] = @py { return }\n"
+        "service Ops { emission fn go(url: Str) }\n"
+        "component Agent provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(url) {\n"
+        "      let page = emit fetch(url)\n"
+        "      let r = wrap(page)\n"
+        "      let out = match r { Ok(v) => v, Err(e) => e }\n"
+        "      emit run(out)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "nondeclassify_match.rvl")
+    assert classify(excinfo.value)["code"] == "G9"
+
+
 def test_a_plain_fn_returning_trusted_does_not_launder():
     """Only a `verified fn` (total, G7) may declassify by construction. A plain
     `fn` that declares a `Trusted[T]` return while taking untrusted input is not
