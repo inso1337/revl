@@ -46,6 +46,7 @@ from .typecheck import (
 )
 from .parser import (
     _describe_expr,
+    AbortStmt,
     AdvanceStmt,
     AssertStmt,
     AssignStmt,
@@ -2275,6 +2276,28 @@ def _lower_lifecycle_body(decl: TestDecl, program: Program, services: dict, file
             # in a lifecycle test moves the clock, so this is what makes a
             # timer's firing an assertable timeline step.
             body.append({"step": "advance", "ms": stmt.ms})
+        elif isinstance(stmt, AbortStmt):
+            # item 377 (F-H1.7): drive the enclosing session frame's 245 abort —
+            # mark every live frame aborting, replay the witnessed inverses LIFO,
+            # drop the deferral queue. Like `Session.abort`, it tears the live
+            # composition down, so nothing is loaded afterwards. Refuse an abort
+            # with nothing loaded: there is no session frame to abort, exactly as
+            # `Session.abort` needs an owner (it would be a vacuous no-op).
+            if not loaded:
+                raise RevlError(
+                    filename, stmt.line,
+                    "`abort` has nothing to abort — no component is loaded at "
+                    "this point",
+                    hint="`abort` reverts the witnessed effects of the live "
+                         "composition; `load` a component and drive it first "
+                         "(item 377, docs/design/245-session-commit.md)")
+            body.append({"step": "abort"})
+            # the abort tears the composition down (session-abort semantics), so
+            # the checker's model of what is live returns to empty — a later
+            # `unload X` correctly reads as "not loaded", and a later `call`
+            # against a since-torn-down key is refused at compile time.
+            loaded.clear()
+            provided.clear()
         elif isinstance(stmt, ResidueStmt):
             body.append({"step": "assert_no_residue"})
         elif isinstance(stmt, AssertStmt):
