@@ -68,7 +68,11 @@ def test_map_surface_is_exactly_the_spec():
     assert _BUILTIN_SIG["has"] == ("Map", ["Str"], "Bool")
     # The iteration/remove step (docs/stdlib-2.0.md §Map).
     assert _BUILTIN_SIG["size"] == ("Map", [], "Int")
-    assert _BUILTIN_SIG["keys"] == ("Map", [], "List[Str]")
+    # `keys` is a multi-receiver builtin (roadmap item 189): the Map key set
+    # AND the Value record-key enumeration (`value_keys` dot-form). The Map row
+    # is unchanged — it is selected by the receiver head, like `to_int`.
+    assert _BUILTIN_SIG["keys"]["Map"] == ("Map", [], "List[Str]")
+    assert _BUILTIN_SIG["keys"]["Value"] == ("Value", [], "List[Str]")
     assert _BUILTIN_SIG["remove"] == ("Map", ["Str"], "@self")
 
 
