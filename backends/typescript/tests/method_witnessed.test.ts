@@ -215,3 +215,55 @@ describe('per-tool-call H1 — disposal-ordering hazard', () => {
     expect(PATHS.every((p) => mutated(p)), 'the deliverable was reverted on a clean unload — the sibling-effect hazard').toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// 5. item 369: OVERLAPPING per-tool-call ops must replay LIFO on abort.
+//    The suites above use DISJOINT paths, so FIFO and LIFO drain are
+//    indistinguishable — which is exactly how the bug hid. Two per-call `mv`
+//    ops on a shared path expose it: `mv a b ; mv b c ; abort` must land on
+//    `a` (LIFO: unmove(c->b) then unmove(b->a)). A FIFO drain replays
+//    unmove(b->a) first (a no-op — `b` is absent), then unmove(c->b), leaving
+//    the WRONG `b`. `frame.abort()` replays through the deferred-drain, the
+//    exact seam item 369 fixed (`deferredList` drained newest-first).
+// ---------------------------------------------------------------------------
+
+describe('item 369 — overlapping per-tool-call ops replay LIFO on abort', () => {
+  it('mv a b ; mv b c ; abort lands on the ORIGINAL name (not the FIFO intermediate)', async () => {
+    const w = world()
+    w['/a'] = 'A'
+
+    const { ctx, fiber } = await activate()
+    const frame = frameForCtx(fiber.ctx)!
+
+    ;(ctx as any).ops.mv('/a', '/b')
+    ;(ctx as any).ops.mv('/b', '/c')
+    expect(w['/c']).toBe('A')
+
+    frame.abort()
+    await fiber.dispose()
+
+    expect(w['/a'], 'abort landed on the wrong name (FIFO deferred replay)').toBe('A')
+    expect(w['/b']).toBeUndefined()
+    expect(w['/c']).toBeUndefined()
+    expect(frame.report().clean, 'abort left teardown residue').toBe(true)
+  })
+
+  it('a deeper overlapping chain (a->b->c->d) reverts to the original on abort', async () => {
+    const w = world()
+    w['/a'] = 'DEEP'
+
+    const { ctx, fiber } = await activate()
+    const frame = frameForCtx(fiber.ctx)!
+
+    ;(ctx as any).ops.mv('/a', '/b')
+    ;(ctx as any).ops.mv('/b', '/c')
+    ;(ctx as any).ops.mv('/c', '/d')
+
+    frame.abort()
+    await fiber.dispose()
+
+    expect(w['/a']).toBe('DEEP')
+    for (const p of ['/b', '/c', '/d']) expect(w[p]).toBeUndefined()
+    expect(frame.report().clean).toBe(true)
+  })
+})

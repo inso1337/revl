@@ -1095,7 +1095,18 @@ export class Frame {
     // Phase-1 restore failure is caught and recorded (`restore-residue`),
     // never thrown into the disposer chain — same continue-and-record rule as
     // the activation-body transactional inverse.
-    const deferred = this.deferredList
+    //
+    // item 369: replay in reverse INVOCATION order (LIFO), NOT registration
+    // order. `deferredList` is pushed newest-last as each provide-method fires
+    // (`transactionalMethod`), so it must be drained newest-FIRST — exactly
+    // like the activation-body path, where cordis unwinds its disposer stack
+    // LIFO. On a COMMIT order is immaterial (every entry no-op discharges);
+    // on an ABORT two inverses whose
+    // paths OVERLAP must undo newest-first or a FIFO replay leaves residue or
+    // DESTROYS pre-session data — every stdlib/fs.rvl inverse is idempotent-
+    // and-total, so the oldest inverse runs first, no-ops, and the newer one
+    // undoes into the hole (G7, 243 §2). Mirrors backends/python/runtime.py.
+    const deferred = [...this.deferredList].reverse()
     this.deferredList = []
     for (const entry of deferred) {
       if (this.committed) {

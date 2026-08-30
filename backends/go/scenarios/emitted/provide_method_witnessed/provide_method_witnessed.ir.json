@@ -12,6 +12,20 @@
           ],
           "returns": null,
           "emission": true
+        },
+        "mv": {
+          "params": [
+            {
+              "name": "a",
+              "type": "Str"
+            },
+            {
+              "name": "b",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
         }
       }
     }
@@ -46,6 +60,32 @@
                       {
                         "kind": "name",
                         "id": "p"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "mv",
+              "params": [
+                "a",
+                "b"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "fn",
+                    "name": "move_e",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "a"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "b"
                       }
                     ]
                   }
@@ -86,6 +126,14 @@
       "kind": "record",
       "fields": {
         "code": "Str"
+      }
+    },
+    "Move": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "from": "Str",
+        "to": "Str"
       }
     }
   },
@@ -129,6 +177,58 @@
         "callee": {
           "kind": "var",
           "name": "unstash"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unmove",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "Move"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\t//revl:import os\n\tif _, err := os.Stat(w.To); err == nil {\n\t\t_ = os.Rename(w.To, w.From)\n\t}\n\treturn\n"
+      }
+    },
+    {
+      "name": "move_e",
+      "class": "witnessed",
+      "params": [
+        {
+          "name": "a",
+          "type": "Str"
+        },
+        {
+          "name": "b",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Move, FsError]",
+      "bodies": {
+        "go": "\n\t//revl:import os\n\tif err := os.Rename(a, b); err != nil {\n\t\treturn RevlErr[Move, FsError]{Value: FsError{Code: err.Error()}}\n\t}\n\treturn RevlOk[Move, FsError]{Value: Move{From: a, To: b}}\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "Move",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unmove"
         },
         "args": [
           {

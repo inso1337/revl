@@ -53,13 +53,38 @@ _SOURCE = (
     "  record('stash ' + p)\n"
     "  return { kind: 'Ok', value: { path: p, bak } }\n"
     "}\n"
-    # the service method declares the fs capability (`emission fn`), so the
-    # per-call witnessed crossing stays visible to a consumer of `Ops`.
-    "service Ops { emission fn touch(p: Str) }\n"
+    # item 369: a `move` method, so a test can fire two OVERLAPPING per-call
+    # ops (`mv a b ; mv b c`) whose inverses touch a shared path — the case that
+    # distinguishes a LIFO abort drain (lands on `a`) from a FIFO one (lands on
+    # the wrong `b`). `unmove` is idempotent-and-total (243 rule 5), which is
+    # exactly what turns a wrong ORDER into a silent wrong RESULT.
+    "type Move = { from: Str, to: Str }\n"
+    "extern pure fn unmove(w: Move) -> Unit = @ts {\n"
+    "  const world = (globalThis as any).__revlFsWorld\n"
+    "  if (world[w.to] !== undefined) {\n"
+    "    world[w.from] = world[w.to]\n"
+    "    delete world[w.to]\n"
+    "  }\n"
+    "  record('unmove ' + w.from + '<-' + w.to)\n"
+    "}\n"
+    "extern witnessed[fs] fn move_e(a: Str, b: Str) -> Result[Move, FsError]"
+    " undo unmove(result) = @ts {\n"
+    "  const world = (globalThis as any).__revlFsWorld\n"
+    "  world[b] = world[a]\n"
+    "  delete world[a]\n"
+    "  record('move ' + a + '->' + b)\n"
+    "  return { kind: 'Ok', value: { from: a, to: b } }\n"
+    "}\n"
+    # the service methods declare the fs capability (`emission fn`), so the
+    # per-call witnessed crossings stay visible to a consumer of `Ops`.
+    "service Ops { emission fn touch(p: Str) emission fn mv(a: Str, b: Str) }\n"
     "component Agent provides ops: Ops {\n"
     "  provide ops {\n"
     "    fn touch(p) {\n"
     "      effect stash_path(p)\n"
+    "    }\n"
+    "    fn mv(a, b) {\n"
+    "      effect move_e(a, b)\n"
     "    }\n"
     "  }\n"
     "}\n"
