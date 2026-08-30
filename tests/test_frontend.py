@@ -121,6 +121,12 @@ REJECTIONS = {
     # Bitwise operators are Int32-only (item 366): Int/Float have no uniform
     # bitwise meaning across the six tiers, so `& | ^ ~ << >>` are restricted.
     "t28_bitwise_non_int32.rvl": "`|` requires `Int32` operands, got `Float`",
+    # item 380(2): a field read off a value whose static type is `Any`/`Value`
+    # (the erased-dynamic types) is the 279/299 silent-divergence class — py
+    # raises, ts yields `undefined`. Refused at the frontend so the author is
+    # pushed to a record cast (Opt fields then read TOTAL) or the value.rvl
+    # shape accessors.
+    "t29_field_read_on_any.rvl": "field read `.kind` on a value of type `Any` — an erased value has no known fields",
     # errata harvest, checker side (docs/v2.0-roadmap.md 75(b)(c)):
     # 75(b) a stdlib-named method on a receiver whose provenance no
     #       constructor pins used to lower as that builtin and misdispatch at

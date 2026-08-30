@@ -39,6 +39,7 @@ from .typecheck import (
     pin_hole,
     null_error,
     parse_type,
+    structural_fields,
     substitute,
     unify,
     _is_wildcard,
@@ -1133,6 +1134,36 @@ def _expr_static_type(expr, type_env: dict, types: dict) -> str | None:
     """
     # delegated to the bidirectional checker's inference (non-raising form)
     return infer_ast(expr, type_env, types)
+
+
+def _field_declared_type(target_type: str | None, field_name: str,
+                         types: dict) -> str | None:
+    """The DECLARED type of ``target_type.field_name`` when the target resolves
+    to a record (structural or nominal), else ``None``.
+
+    Used to decide whether a field read is TOTAL: a field whose declared type is
+    ``Opt[T]`` reads back the empty Opt on absence rather than raising, so the
+    designed spelling `e.kind ?? default` means the same on every tier (item
+    380). A structural literal record binding is checked first (item 71 keeps
+    those field-checkable), then the nominal record table.
+    """
+    if not target_type:
+        return None
+    struct = structural_fields(target_type)
+    if struct is not None:
+        return struct.get(field_name)
+    head, _ = parse_type(target_type)
+    spec = types.get(head or "")
+    if spec is not None and spec.get("kind") == "record":
+        return (spec.get("fields") or {}).get(field_name)
+    return None
+
+
+def _field_is_opt(target_type: str | None, field_name: str, types: dict) -> bool:
+    """Whether ``target_type.field_name`` is declared ``Opt[...]`` — the trigger
+    for a TOTAL field read (item 380)."""
+    declared = _field_declared_type(target_type, field_name, types)
+    return bool(declared) and parse_type(declared)[0] == "Opt"
 
 
 def _type_arg(type_name: str | None, base: str) -> str | None:
@@ -3035,8 +3066,15 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         if expr.name == "length" and _is_sized_type(target_type):
             return {"kind": "len",
                     "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types)}
-        return {"kind": "field", "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
+        node = {"kind": "field",
+                "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
                 "name": expr.name}
+        # item 380: a field whose declared type is `Opt[T]` reads TOTAL — absent
+        # yields the empty Opt, never a raise (py) or a `??`-outliving `undefined`
+        # (ts) — so `e.kind ?? default` means the same on every tier.
+        if _field_is_opt(target_type, expr.name, types):
+            node["opt"] = True
+        return node
     if isinstance(expr, ExprIndex):
         return {"kind": "index", "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
                 "index": _lower_pure_expr(expr.index, scope, callables, alias_fns, filename, type_env, types)}
@@ -3838,7 +3876,25 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         inst = _instance_handle_component(lowered_target, env)
         if inst is not None:
             return _lower_instance_get(lowered_target, expr.name, line, inst, env)
-        return {"kind": "field", "target": lowered_target, "name": expr.name}
+        target_type = infer_ir(lowered_target, env.type_env, env.types, env.services)
+        node = {"kind": "field", "target": lowered_target, "name": expr.name}
+        # item 104 (cross-tier): the property form `.length` in a COMPONENT
+        # position stays a `field` node (the fn-body form is a `len` node — that
+        # split is deliberate). But `.length` on a sized value (Str/Bytes/List)
+        # is the code-point/element count, not a record slot: each tier's field
+        # emitter reads a record field by `getattr`/member, which raises on a
+        # `Str`. The component emitters carry no static type at the field site
+        # (unlike the typed wasm/rust emitters), so the frontend marks the node
+        # here — with the SAME `_is_sized_type` check — and the field handlers
+        # honour the mark, rendering the code-point path. Gated on a sized type,
+        # so a record whose field is literally named `length` still reads its
+        # slot.
+        if expr.name == "length" and _is_sized_type(target_type):
+            node["sized_length"] = True
+        # item 380: an `Opt[T]`-declared field reads TOTAL on every tier.
+        elif _field_is_opt(target_type, expr.name, env.types):
+            node["opt"] = True
+        return node
     if isinstance(expr, ExprCall):
         args = [_lower_component_pure_expr(a, env, scope, callables, pure_only)
                 for a in expr.args]

@@ -3715,6 +3715,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         target = _render_expr(target_node, ctx, rename)
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value in
+            # a component position — the code-point (Str) / element (List) count
+            # via the helper trait (`String::len` is bytes), the same as the
+            # `len` node, NOT a struct field access.
+            return f"{target}.revl_length()"
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":
@@ -5399,7 +5405,11 @@ def _revl_record_preamble() -> list[str]:
 
 
 def _uses_stdlib(ir: dict) -> bool:
-    """True when any builtin/len node appears anywhere in the document."""
+    """True when any builtin/len node appears anywhere in the document — or a
+    sized `.length` field (item 104): a component-position property-form
+    `.length` stays a `field` node marked `sized_length`, and its emit routes
+    through the `revl_length` helper trait, so the trait must be emitted for it
+    too (else `String::revl_length` is an undefined method, E0599)."""
     found = False
 
     def walk(node) -> None:
@@ -5407,7 +5417,8 @@ def _uses_stdlib(ir: dict) -> bool:
         if found:
             return
         if isinstance(node, dict):
-            if node.get("kind") in ("builtin", "len"):
+            if node.get("kind") in ("builtin", "len") or (
+                    node.get("kind") == "field" and node.get("sized_length")):
                 found = True
                 return
             for value in node.values():
