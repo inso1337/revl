@@ -1928,6 +1928,11 @@ class _Env:
         self.name = component["name"]
         self.reqs: dict[str, str] = dict(component.get("requires") or {})
         self.provides: dict[str, str] = dict(component.get("provides") or {})
+        # item 173: routed requires (item 162 `routes` IR): key -> {"realms":
+        # [...], "strategy": ...}. A routed key resolves per named realm through
+        # an emitted router class, never a single `ctx.get(...)` handle. Empty
+        # for every routes-less component.
+        self.routes: dict[str, dict] = dict(component.get("routes") or {})
 
 
 def _format_java(template: str, args: list[str]) -> str:
@@ -2627,6 +2632,12 @@ def _contains_expr(node: object) -> bool:
 
 def _component_needs_modern(component: dict) -> bool:
     if component.get("isolate") or component.get("intercept"):
+        return True
+    # item 173: a routed require needs the modern path — its emitted router
+    # class and the per-realm resolution live there. (A routed component's
+    # provide method already calls the routed service, so it reaches modern via
+    # `_contains_expr` anyway; this makes the routing dependence explicit.)
+    if component.get("routes"):
         return True
     for step in component.get("body") or []:
         if step.get("setup"):
@@ -3564,6 +3575,79 @@ def _await_join(node: dict, env: _Env, v3_ctx: _V3Ctx | None = None) -> str:
     return rendered
 
 
+def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str,
+                            route: dict, services: dict, render_type, out: list[str]) -> None:
+    """item 173: the emitted realization of a routed require on cordis4j,
+    mirroring src/revl/run.py::_Router and the go/rust backends.
+
+    A per-(component, key) class implementing the required service interface. It
+    holds no worker handle — every method re-resolves the live per-realm handle
+    off the cordis4j fork's strict single-realm liveness-checked read
+    (`ctx.serviceInRealm(<Svc>.class, realm)`, which returns an empty Optional
+    for a realm with no ACTIVE provider and — unlike `ctx.get` — never falls
+    back to a parent realm). So a withdrawn worker realm drops out of the live
+    set and its calls go to the survivors — reactive failover from the emitted
+    body. Wired as the component's handle for the routed key, so a provide
+    method's `<key>.<op>(..)` forwards through it (G2: one provider downstream).
+    """
+    struct = f"RevlRouter{cname}{_camel(key)}"
+    realms = list(route.get("realms") or [])
+    strategy = route.get("strategy") or "round_robin"
+    realm_lits = ", ".join(_string(r) for r in realms)
+    methods = (services.get(service_name, {}) or {}).get("methods", {}) or {}
+
+    out.append(f"public static final class {struct} implements {service_name} {{")
+    out.append("    private final Context ctx;")
+    out.append(f"    private final String[] realms = {{{realm_lits}}};")
+    out.append(f"    private final String strategy = {_string(strategy)};")
+    out.append("    private int cursor = 0;")
+    out.append("    private final java.util.Map<String, Long> served = new java.util.HashMap<>();")
+    out.append(f"    {struct}(Context ctx) {{ this.ctx = ctx; }}")
+    out.append("    private java.util.List<String> revlLive() {")
+    out.append("        java.util.List<String> out = new java.util.ArrayList<>();")
+    out.append("        for (String r : realms) {")
+    out.append(f"            if (ctx.serviceInRealm({service_name}.class, r).isPresent()) out.add(r);")
+    out.append("        }")
+    out.append("        return out;")
+    out.append("    }")
+    out.append(f"    private {service_name} revlSelect() {{")
+    out.append("        java.util.List<String> live = revlLive();")
+    out.append("        if (live.isEmpty()) throw new CordisException("
+               "\"revl: router for " + key + " has no live worker (all realms withdrawn)\");")
+    out.append("        if (strategy.equals(\"least_loaded\")) {")
+    out.append("            String best = live.get(0);")
+    out.append("            for (String l : live) {")
+    out.append("                if (served.getOrDefault(l, 0L) < served.getOrDefault(best, 0L)) best = l;")
+    out.append("            }")
+    out.append("            served.merge(best, 1L, Long::sum);")
+    out.append(f"            return ctx.serviceInRealm({service_name}.class, best).get();")
+    out.append("        }")
+    out.append("        int n = realms.length;")
+    out.append("        for (int off = 0; off < n; off++) {")
+    out.append("            String cand = realms[(cursor + off) % n];")
+    out.append("            if (live.contains(cand)) {")
+    out.append("                cursor = (cursor + off + 1) % n;")
+    out.append("                served.merge(cand, 1L, Long::sum);")
+    out.append(f"                return ctx.serviceInRealm({service_name}.class, cand).get();")
+    out.append("            }")
+    out.append("        }")
+    out.append("        throw new CordisException(\"revl: router selection unreachable\");")
+    out.append("    }")
+    for mname, decl in methods.items():
+        jname = _ident(mname, "method")
+        params_decl = decl.get("params", []) or []
+        params = ", ".join(f"{render_type(p.get('type'))} {_ident(p.get('name'), 'parameter')}"
+                           for p in params_decl)
+        ret = render_type(decl.get("returns")) if decl.get("returns") else "void"
+        args = ", ".join(_ident(p.get("name"), "parameter") for p in params_decl)
+        out.append(f"    public {ret} {jname}({params}) {{")
+        call = f"revlSelect().{jname}({args})"
+        out.append(f"        {'return ' if ret != 'void' else ''}{call};")
+        out.append("    }")
+    out.append("}")
+    out.append("")
+
+
 def _emit_component_modern(
     component: dict,
     services: dict,
@@ -3697,6 +3781,12 @@ def _emit_component_modern(
         # registration below shares the same commit/abort discriminator.
         out.append("        RevlFrame frame = new RevlFrame();")
     for local, service in env.reqs.items():
+        if local in env.routes:
+            # item 173: a routed require resolves per named realm through the
+            # emitted router, never a single committed-view `ctx.get`.
+            out.append(f"        {service} {local} = "
+                       f"new RevlRouter{cname}{_camel(local)}(ctx);")
+            continue
         out.append(f"        {service} {local} = ctx.get({service}.class);")
     # A8 self-revert: cordis4j's ctx.effect() scope is NOT owned by the
     # fiber until apply returns it, so a failing activation must dispose
@@ -3746,6 +3836,12 @@ def _emit_component_modern(
     out.append("    }")
     out.append("}")
     out.append("")
+
+    # item 173: one router class per routed require, implementing the required
+    # service interface by strict per-realm resolution + strategy + failover.
+    for rkey, route in env.routes.items():
+        _emit_java_router_class(
+            env, cname, rkey, env.reqs[rkey], route, services, render_type, out)
     return out
 
 

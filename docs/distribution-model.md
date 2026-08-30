@@ -4,8 +4,9 @@
 today from primitives that already ship (spawn, realms, reactive coeffects,
 peer-death, TCP+mTLS), and the *stdlib components* that package it (the `Router`
 and the multi-realm `require` syntax) have **shipped** (roadmap items 161 and
-162). Emitted-body routing runs on py/ts/rust (item 167); go/java/wasm still
-need a runtime liveness primitive (item 173). This document exists so that no
+162). Emitted-body routing runs on py/ts/rust (item 167) and, via item 173, on
+wasm (first-party) and go (through a stc-go fork); java has the emitter and
+awaits an upstream cordis4j release. This document exists so that no
 future contributor, reaching for the obvious-looking shortcut, quietly breaks
 the guarantee that makes revl worth using.
 
@@ -114,7 +115,7 @@ since shipped.
 | **TCP + mTLS** | workers on other machines / other tiers; both ends present a certificate | **Built**, with a scope note: the mTLS **listener** currently ships on the **py** runner; **consumers** dial from rust/go/java | docs/network-path.md; docs/network-placement.md |
 | **Capability attenuation on spawn** | a spawned worker's capability set is a *checked subset* of the parent's, a pool worker cannot hold more authority than the router handed it | **Built** | roadmap item 66 (v2.0-roadmap.md) |
 | **Router lifecycle verification** | the router is a component; its own acquire/route/dispose is checked by **G7** (LIFO-complete derived teardown) and **A8** (mid-body acquire-failure reverts accumulated effects, lands FAILED, siblings unaffected) | **Built** (the guarantees, and the `Router` that uses them, item 161) | DESIGN.md §4 (G7); docs/backend-ir-v1.md §A8 |
-| **stdlib `Router` / `RoundRobin`** | the packaged component: `spawn_pool(n, factory)` with `undo dispose_pool`, provides the key by routing | **Built (item 161)**; emitted-body routing on py/ts/rust (item 167), go/java/wasm pending a runtime primitive (item 173) | v2.0-roadmap.md item 161 |
+| **stdlib `Router` / `RoundRobin`** | the packaged component: `spawn_pool(n, factory)` with `undo dispose_pool`, provides the key by routing | **Built (item 161)**; emitted-body routing on py/ts/rust (item 167) and wasm + go (item 173); java emitter routes, runtime pending upstream cordis4j | v2.0-roadmap.md item 161 |
 | **Multi-realm `require` syntax** | `requires db in realms("w1","w2","w3") strategy(round_robin)`, bind all N realms at once | **Built (item 162)** (frontend + IR; the Router consumes it) | v2.0-roadmap.md item 162 |
 
 The honest summary: the *model* is fully expressible from shipped primitives,
@@ -189,42 +190,49 @@ new subsystem.
 |---|---|---|
 | **Instances / horizontal copies** | `spawn` (all 6 tiers) | Built |
 | **Sharding** | named realms (`realm("shard_k")`) | Built |
-| **Load balancing** | router + spawned pool (one provider per worker realm; router provides the key in the parent realm) | Built (stdlib `Router`, item 161; per-tier routing py/ts/rust, go/java/wasm pending item 173) |
+| **Load balancing** | router + spawned pool (one provider per worker realm; router provides the key in the parent realm) | Built (stdlib `Router`, item 161; per-tier emitted routing py/ts/rust/wasm/go via item 173; java emitter routes, runtime pending upstream) |
 | **Failover** | reactive coeffects (R2/R3), a withdrawn worker's route suspends, survivors continue | Built |
 | **Remote / cross-machine** | TCP + mTLS network seam (listener on py; consumers on rust/go/java) | Built (with the listener-tier scope note) |
 | **Circuit-breaking** | the quarantine tier, a suspect candidate proves itself in the wasm sandbox before it is admitted | Built (v1: `revl_quarantine`, swap admission hook) |
 | **Registry / multi-resolution** | `revl_resolve`, find an admission-compatible provider instead of hand-wiring | Built (`revl_resolve` MCP verb + CLI) |
 
-### Known limitation (v3): emitted-body routing is py/ts/rust only
+### Emitted-body routing: per-tier status (item 173)
 
-Multi-realm routing works as a normal emitted component on three of the six
-tiers. Item 161 realized it in the py driver, and item 167 landed the
-emitted-body form on **py, ts, and rust**: a `Router` compiled to those tiers
-fans out on its own, with per-realm handle resolution, a liveness-checking
-selector, and re-resolve-on-call failover.
+Multi-realm routing works as a normal emitted component on **five of the six
+tiers**, and the sixth (java) has the emitter but awaits an upstream runtime
+release. Item 161 realized routing in the py driver; item 167 landed the
+emitted-body form on **py, ts, and rust**; item 173 added the runtime liveness
+primitive each remaining tier needed:
 
-**go, java, and wasm cannot route as an emitted component yet, and the block
-is upstream of revl's emitter, not in it (item 173).** The emitters for these
-three are byte-identical to the routing-capable ones; what is missing is a
-runtime primitive the emitter cannot synthesize:
+- **wasm — routes first-party.** wasm is revl's own runtime, so the primitive
+  was built directly into the substrate (`cordis-wasm`'s `route:<key>` host op:
+  a strict, single-realm, liveness-checked read plus a `live` probe, no
+  parent-chain fallback). The emitter lowers a routed require into a selector +
+  strict dispatch that consume it. Round-robin, failover, re-entry and G2 are
+  proven by running on the real Python + wasmtime host
+  (`backends/wasm/test_router_exec.py`).
+- **go — routes via an emitted router struct + upstream fork.** stc-go's plain
+  resolve walks the realm chain to the root (where the Router provides the key,
+  G2), so a withdrawn worker's read fell back to the Router instead of dropping
+  out. The fix is `ServiceInRealm` — a strict single-realm liveness-checked read
+  with no parent fallback — added in a fork of stc-go (`forks/stc-go`, PR spec
+  in its `REVL-FORK.md`). The emitter lowers a routed require into a
+  `revlRouter<Comp><Key>` struct that re-resolves live per-realm handles every
+  call. Built and passing at runtime against the fork with go1.26.5
+  (`backends/go/test_router_exec.py`); the upstream PR is pending, after which
+  the pin drops the local `replace`.
+- **java — emitter routes; runtime primitive pending upstream.** The cordis4j
+  emitter lowers a routed require into a `RevlRouter<Comp><Key>` class that
+  consumes `ctx.serviceInRealm(...)` (the same strict, no-fallback read). The
+  primitive is delivered as a cordis4j fork PR spec plus a realm-aware reference
+  implementation in the in-repo stub (`forks/cordis4j/REVL-FORK.md`). It could
+  not be built or run here — this environment has no Java Runtime — so java is
+  the one tier whose routing awaits the upstream cordis4j release + a JRE.
 
-- **go** (stc-go): no strict, single-realm, liveness-checked read. `Dispose()`
-  is async, so a stale worker value keeps resolving, and realm resolution
-  walks the parent chain to the root where the Router provides the key (G2), so
-  a withdrawn worker's read falls back to the Router instead of dropping out.
-  It needs a strict single-realm liveness-checked read exposed by stc-go
-  (upstream fork plus PR).
-- **java**: no real cordis4j runtime in-repo (the stub's `isolate` returns
-  `this`, and `get` has no liveness or realm resolution). It needs a real
-  cordis4j and a JRE to verify.
-- **wasm**: the substrate has no realm registry or reactive liveness. Realms
-  are advisory on this tier.
-
-So today: reach for a routed pool on py, ts, or rust. On go, java, or wasm,
-run the Router from the py driver rather than as an emitted body. This is a
-runtime gap, tracked as item 173, and it coordinates with the runtime-ownership
-split (go and java are upstream, wasm is revl's first-party runtime). The
-routing model itself is unchanged; see `docs/router.md` for the shape.
+Every routes-less program on all three touched tiers emits byte-identically
+(the routing paths are gated strictly on a non-empty `routes`), verified by the
+tier golden oracles. The routing model itself is unchanged; see `docs/router.md`
+for the shape.
 
 ---
 

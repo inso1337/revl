@@ -1,0 +1,24 @@
+// item 173 routed-require scenario for the cordis-wasm backend: three worker
+// realms behind one Router. The Router `requires worker in realms(...)` and
+// `provides worker`; its EMITTED body fans each call out across the worker
+// realms through the substrate's `route:<key>` primitive and fails over when a
+// realm withdraws (mirror of src/revl/run.py::_Router and the rust backend's
+// _emit_router_struct). This tier is FIRST-PARTY: the runtime liveness
+// primitive lives in cordis-wasm/runtime.py (route:<key>.live / dispatch).
+service Worker { fn call(request: Int) -> Int }
+component W1 provides worker: Worker {
+  isolate worker in realm("w1")
+  provide worker { fn call(request) = request + 100 }
+}
+component W2 provides worker: Worker {
+  isolate worker in realm("w2")
+  provide worker { fn call(request) = request + 200 }
+}
+component W3 provides worker: Worker {
+  isolate worker in realm("w3")
+  provide worker { fn call(request) = request + 300 }
+}
+component Router requires worker: Worker provides worker: Worker {
+  isolate worker in realms("w1", "w2", "w3") strategy(round_robin)
+  provide worker { fn call(request) = worker.call(request) }
+}
