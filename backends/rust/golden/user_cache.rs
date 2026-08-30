@@ -46,6 +46,18 @@ impl<V> Map<V> {
     pub fn insert(&self, key: String, value: V) {
         self.inner.lock().unwrap().insert(key, value);
     }
+    // The atomic compare-and-set (item 397). ONE `lock()` spans the
+    // membership test AND the insert via the entry API, so no thread
+    // can witness the probe and the write as separable steps. Returns
+    // whether it inserted; a `false` (key present) leaves the existing
+    // value untouched. Under N concurrent callers, exactly one `true`.
+    pub fn insert_if_absent(&self, key: String, value: V) -> bool {
+        use std::collections::hash_map::Entry;
+        match self.inner.lock().unwrap().entry(key) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(e) => { e.insert(value); true }
+        }
+    }
     pub fn remove(&self, key: &String) {
         self.inner.lock().unwrap().remove(key);
     }
