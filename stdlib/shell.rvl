@@ -55,10 +55,15 @@
 // property the classifier need not (and, being pure, cannot) reason about.
 //
 // ------------------------------------------------------------------ tier status
-// py tier (the H1 reference), matching stdlib/fs.rvl. The `sh` + `classify`
-// bodies delegate to backends/python/revl_shell_host.py and
-// backends/python/revl_shell_classify.py; other tiers get their bodies when the
-// fs catalog's Slice 2b lands theirs.
+// py + ts tiers (the H1 reference on each), matching stdlib/fs.rvl. The py `sh`
+// + `classify` bodies delegate to backends/python/revl_shell_host.py and
+// backends/python/revl_shell_classify.py; the ts bodies delegate to
+// backends/typescript/revl_shell_ts.ts (node opaque `sh`) and
+// backends/typescript/revl_shell_classify_ts.ts (the pure classifier port),
+// reached via globalThis.__revlShell (item 369). The classifier is pure and
+// tier-agnostic, so py and ts return byte-identical plans (proven over the full
+// corpus in tests/test_ts_witnessed_parity.py). rs / go / java / wasm bodies
+// get theirs when the fs catalog's Slice 2b lands theirs.
 //
 // The recognized ops execute through the fs catalog directly — a consumer that
 // dispatches a witnessed plan imports the catalog and calls the op the plan

@@ -54,9 +54,15 @@
 // See docs/witnessed-fs.md for the full discussion.
 //
 // ------------------------------------------------------------------ tier status
-// py tier only (the H1 reference). The `@py` bodies + the inverses' `@py`
-// bodies + backends/python/revl_fs_workspace.py are this slice; ts / rs / go /
-// java / wasm bodies are Slice 2b.
+// py + ts tiers (the H1 reference on each). The `@py` bodies + the inverses'
+// `@py` bodies + backends/python/revl_fs_workspace.py are the py slice; the
+// `@ts` bodies + backends/typescript/revl_fs_ts.ts (the node host, reached via
+// globalThis.__revlFs) are the ts peer (item 369) — semantically mirroring the
+// py behavior: real inverses, garbage-dir park for delete, and correct
+// persist-on-commit / revert-residue-free-on-abort through the same witnessed
+// transactional frame (backends/typescript/runtime.ts `Frame.transactional`),
+// with LIFO abort replay proven in ts_witnessed_fs.test.ts. rs / go / java /
+// wasm bodies remain Slice 2b.
 //
 // Import the mutations with a named `use` (the inverses are auto-registered by
 // the accumulator — a consumer never names them):
