@@ -147,6 +147,19 @@ def _required_config_problem(ir: dict, config: dict) -> str | None:
                     f'{name} is missing required config "{field["name"]}"'
                     f" ({field.get('type') or '?'})"
                 )
+    # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md: a
+    # config extern is a document-global mechanism configured through the SAME
+    # --config seam a component is, keyed by extern name. Preflight its required
+    # fields (IR `config` with `default: null`) here, so a missing one fails
+    # loudly at admission — never as a runtime KeyError inside the host body.
+    for ext in _config_externs(ir):
+        supplied = config.get(ext["name"]) or {}
+        for field in ext.get("config") or []:
+            if field.get("default") is None and field["name"] not in supplied:
+                missing.append(
+                    f'extern {ext["name"]} is missing required config "{field["name"]}"'
+                    f" ({field.get('type') or '?'})"
+                )
     if not missing:
         return None
     rendered = "\n".join(f"  - {entry}" for entry in missing)
@@ -156,6 +169,34 @@ def _required_config_problem(ir: dict, config: dict) -> str | None:
         "  components are declarations — supply their config with "
         "--config <file>."
     )
+
+
+def _config_externs(ir: dict) -> list[dict]:
+    """The document-global externs that declare a typed `config` schema
+    (item 379). Absent/empty for every composition that uses none, so the
+    driver's config path is byte-identical there."""
+    return [e for e in (ir.get("externs") or []) if e.get("config")]
+
+
+def _resolve_extern_config(ir: dict, config: dict) -> dict:
+    """Resolve each config extern's schema once, from the composition config
+    map (item 379), merging supplied values over the declared defaults. This is
+    the plug-time seam: the value is fixed here, then installed into the emitted
+    module's `_REVL_EXTERN_CONFIG` for the host body to read as `_revl_config`.
+
+    Required-ness was already preflighted by :func:`_required_config_problem`;
+    this only materializes the resolved dicts (defaults + supplied)."""
+    resolved: dict[str, dict] = {}
+    for ext in _config_externs(ir):
+        supplied = config.get(ext["name"]) or {}
+        merged = {
+            field["name"]: field.get("default")
+            for field in ext.get("config") or []
+            if field.get("default") is not None
+        }
+        merged.update(supplied)
+        resolved[ext["name"]] = merged
+    return resolved
 
 
 def _load_order(ir: dict) -> list[str]:
@@ -184,6 +225,13 @@ def _print_plan(ir: dict, config: dict, backend: str) -> None:
         print(f"\ncomponent {name}")
         print(f"  requires: {requires}")
         print(f"  provides: {provides}")
+        print(f"  config:   {cfg if cfg else '(none)'}")
+    # item 379: document-global config externs are configured at the same seam,
+    # so list them alongside components when a composition declares any.
+    for ext in _config_externs(ir):
+        cfg = config.get(ext["name"])
+        fields = ", ".join(f["name"] for f in ext.get("config") or [])
+        print(f"\nextern {ext['name']} (config: {fields})")
         print(f"  config:   {cfg if cfg else '(none)'}")
     keys = _key_to_service(ir)
     services = ir.get("services") or {}
@@ -523,6 +571,15 @@ class _Driver:
         # dataclasses resolves fields via sys.modules[cls.__module__]
         sys.modules[module.__name__] = module
         exec(compile(source, filename, "exec"), module.__dict__)
+        # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
+        # install the resolved config for each document-global config extern into
+        # the module's `_REVL_EXTERN_CONFIG` map, so a host body reads typed
+        # `_revl_config` at the sanctioned plug seam — resolved ONCE here, not per
+        # call. A composition with no config extern leaves the map (which the
+        # emitter only defines when one exists) untouched.
+        extern_config = _resolve_extern_config(ir, self.config)
+        if extern_config and hasattr(module, "_REVL_EXTERN_CONFIG"):
+            module._REVL_EXTERN_CONFIG.update(extern_config)
         if self.recorder is not None:
             # between emit and plugin: recording replaces each component's
             # `apply`, and the fiber's context chain is fixed at plugin time
