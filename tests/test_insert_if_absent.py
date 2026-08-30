@@ -91,6 +91,8 @@ def test_sequential_cas_is_deterministic_cross_tier(tier):
 # guarded on the bound Bool (the identity inverse on `false`).
 def test_result_guarded_undo_runtime_leaves_the_winner_untouched():
     status, message = RUNNERS["py"](compile_source(_SEQUENTIAL, "iia.rvl"))
+    if status == "skip":
+        pytest.skip(f"py: {message}")  # cordis-py runtime absent on this interpreter
     assert status == "pass", message
 
 
