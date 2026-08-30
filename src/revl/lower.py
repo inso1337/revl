@@ -2037,6 +2037,75 @@ def _refuse_witnessed_outside_effect_position(program: Program, filename: str) -
             _walk(stmt, f"the body of test `{test.name}`")
 
 
+def _refuse_teardown_bound_externs_in_fn_body(program: Program, filename: str) -> None:
+    """Items 399 and 400: the acquire-with-`undo` and `deferred`-emission twins
+    of the witnessed rule-1 refusal above. Each carries effect machinery that
+    exists only in effect position, so a bare call from a plain `fn`/`test` body
+    would silently drop it:
+
+    * item 399: an `acquire` extern that declares an `undo` has no teardown
+      accumulator to auto-register that `undo` in a fn/test body, so the teardown
+      is dropped on every path and the acquisition is silently irreversible.
+    * item 400: a `deferred` emission has no session commit in a fn/test body to
+      defer to, so it fires immediately (once per loop iteration), bypassing the
+      commit queue that `deferred` exists to feed (item 245: deferred emissions
+      fire at commit, an abort drops the queue).
+
+    An `acquire` with NO `undo`, and a non-deferred emission, are unaffected;
+    both stay callable from a fn/test body. Checked over the author's AST, beside
+    the witnessed refusal, where the call site still has a line."""
+    from .parser import ExprCall, ExprVar
+
+    acquire_undo = {
+        ext.name for ext in program.externs
+        if ext.classification == "acquire" and ext.undo is not None}
+    deferred = {ext.name for ext in program.externs if ext.deferred}
+    if not acquire_undo and not deferred:
+        return
+
+    def _walk(node, where: str):
+        if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
+            name = node.callee.name
+            if name in acquire_undo:
+                raise RevlError(
+                    filename, node.line,
+                    f"`acquire` extern `{name}` cannot be called in {where}; its "
+                    f"declared `undo` teardown would be dropped, leaving the "
+                    f"acquisition irreversible (G4)",
+                    hint="an `acquire` extern's `undo` is auto-registered by the "
+                         "teardown accumulator, which exists only in a component "
+                         "activation or provide-method body; call it from there so "
+                         "the teardown can run (docs/design/243-witnessed-"
+                         "externs.md)",
+                    code="G4", category="acquire",
+                )
+            if name in deferred:
+                raise RevlError(
+                    filename, node.line,
+                    f"`deferred` emission extern `{name}` cannot be called in "
+                    f"{where}; a fn/test body has no session commit for the "
+                    f"deferral to fire at (G4)",
+                    hint="a deferred emission enqueues onto the session deferral "
+                         "queue and fires at commit; that queue exists only inside "
+                         "a component activation or provide-method body, so call it "
+                         "from there (docs/design/245-session-commit.md)",
+                    code="G4", category="deferred",
+                )
+        if hasattr(node, "__dataclass_fields__"):
+            for f in type(node).__dataclass_fields__:
+                _walk(getattr(node, f), where)
+        elif isinstance(node, (list, tuple)):
+            for x in node:
+                _walk(x, where)
+
+    for fn in program.fn_decls:
+        for stmt in fn.body:
+            _walk(stmt, f"the body of fn `{fn.name}`")
+    for test in program.tests:
+        for stmt in test.body:
+            _walk(stmt, f"the body of test `{test.name}`")
+
+
 def _lower_externs(program: Program, filename: str, types: dict) -> list:
     externs: list[dict] = []
     # name -> first declaring file, so a cross-module duplicate names BOTH files
@@ -3929,6 +3998,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # a fn/test body has no teardown accumulator, so the auto-registered inverse
     # would be dropped and the mutation would be silently irreversible.
     _refuse_witnessed_outside_effect_position(program, program.filename)
+    # items 399/400: the acquire-with-`undo` and `deferred`-emission twins of the
+    # witnessed rule-1 refusal. A fn/test body has no teardown accumulator and no
+    # session commit, so a bare call would drop the declared `undo` (399) or fire
+    # the deferred emission immediately, bypassing the commit queue (400).
+    _refuse_teardown_bound_externs_in_fn_body(program, program.filename)
     # Slice 2: the set every component's effect-position lowering consults to
     # tell a witnessed acquisition from an ordinary one (docs/design/243-
     # witnessed-externs.md). Computed once — every component shares the same
