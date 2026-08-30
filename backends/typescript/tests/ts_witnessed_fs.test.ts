@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto'
 // side effect: installs globalThis.__revlFs, the host the @ts fs bodies reach
 // (the ts analog of `backends/python` being on sys.path for the @py bodies).
 import '../revl_fs_ts.ts'
-import { FsCommit, FsAbort } from './generated/ts_witnessed_fs.ts'
+import { FsCommit, FsAbort, FsAbortSamePath } from './generated/ts_witnessed_fs.ts'
 
 let ws: string
 
@@ -138,6 +138,35 @@ describe('item 369 — witnessed fs on ts: revert residue-free on abort (H1 flag
 
     // residue-free: every snapshot + parked file the mutations created is gone,
     // and the whole-workspace content hash matches the pristine state exactly.
+    expectMachineryEmpty()
+    expect(hashTree(ws)).toBe(before)
+  })
+})
+
+describe('item 369 — witnessed fs on ts: multi-op-same-path abort replays LIFO', () => {
+  // The ordering hazard the py-side item-369 bug gets wrong: inverses MUST
+  // replay in strict LIFO (reverse-registration) order, not registration order,
+  // or an abort over repeated writes to one path restores the WRONG preimage
+  // (data corruption) or leaves a created file behind. The ts tier replays the
+  // transactional inverses through cordis' disposer chain, which is LIFO by
+  // construction — this proves it end to end.
+  it('restores the ORIGINAL content of an overwritten path, and deletes a created-then-overwritten one', async () => {
+    fs.writeFileSync(abs('A.txt'), 'orig') // A pre-exists; B does not
+    const before = hashTree(ws)
+
+    const ctx = new Context()
+    const fiber = ctx.plugin(FsAbortSamePath)
+    await fiber.await().catch(() => undefined)
+    expect(fiber.state).toBe(FiberState.FAILED)
+
+    // A.txt: orig -> v1 -> v2, abort. LIFO restores v2->v1->orig. Registration
+    // order would leave "v1" — the item-369 data-corruption failure.
+    expect(read('A.txt')).toBe('orig')
+    // B.txt: absent -> b1(create) -> b2(overwrite), abort. LIFO restores the
+    // overwrite (b2->b1) THEN deletes the created file -> absent. Registration
+    // order would delete first, then a stale restore would resurrect "b1".
+    expect(present('B.txt')).toBe(false)
+
     expectMachineryEmpty()
     expect(hashTree(ws)).toBe(before)
   })

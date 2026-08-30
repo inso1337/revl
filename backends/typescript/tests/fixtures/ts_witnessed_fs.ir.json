@@ -180,6 +180,90 @@
           }
         }
       ]
+    },
+    {
+      "name": "FsAbortSamePath",
+      "source": "fs.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "fn",
+            "name": "write",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "A.txt"
+              },
+              {
+                "kind": "lit",
+                "value": "v1"
+              }
+            ]
+          }
+        },
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "fn",
+            "name": "write",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "A.txt"
+              },
+              {
+                "kind": "lit",
+                "value": "v2"
+              }
+            ]
+          }
+        },
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "fn",
+            "name": "write",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "B.txt"
+              },
+              {
+                "kind": "lit",
+                "value": "b1"
+              }
+            ]
+          }
+        },
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "fn",
+            "name": "write",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "B.txt"
+              },
+              {
+                "kind": "lit",
+                "value": "b2"
+              }
+            ]
+          }
+        },
+        {
+          "step": "fail",
+          "message": {
+            "kind": "lit",
+            "value": "boom"
+          }
+        }
+      ]
     }
   ],
   "manifest": {

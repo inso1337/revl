@@ -68,11 +68,35 @@ def _component(name: str, abort: bool) -> dict:
             "requires": {}, "provides": {}, "body": body}
 
 
+# Multi-op-on-the-SAME-path, to exercise the LIFO replay ordering an abort MUST
+# honour (item 369's py bug: replaying inverses in REGISTRATION order instead of
+# LIFO corrupts/loses data). Two independent same-path stacks:
+#   A.txt: exists "orig" -> overwrite "v1" -> overwrite "v2".  Correct LIFO abort
+#          restores v2->v1->orig == "orig"; registration order would leave "v1".
+#   B.txt: absent -> create "b1" -> overwrite "b2".  Correct LIFO abort restores
+#          the overwrite (b2->b1) THEN deletes the created file == absent;
+#          registration order would delete first then restore, leaving "b1".
+_SAME_PATH = [
+    _effect("write", "A.txt", "v1"),
+    _effect("write", "A.txt", "v2"),
+    _effect("write", "B.txt", "b1"),
+    _effect("write", "B.txt", "b2"),
+]
+
+
+def _samepath_component() -> dict:
+    body = list(_SAME_PATH)
+    body.append({"step": "fail", "message": _lit("boom")})
+    return {"name": "FsAbortSamePath", "source": "fs.rvl", "config": [],
+            "requires": {}, "provides": {}, "body": body}
+
+
 def build() -> dict:
     ir = copy.deepcopy(_BASE)
     ir["components"] = [
         _component("FsCommit", abort=False),
         _component("FsAbort", abort=True),
+        _samepath_component(),
     ]
     return ir
 
