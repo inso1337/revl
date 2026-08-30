@@ -314,6 +314,28 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
 _TPARAM = "?"
 
 
+# item 386, Stage 2: the poison sentinel. When a component-body statement's
+# type-check raises a definite mismatch (T1/T2), the statement-boundary recovery
+# in `lower.py` records that ONE diagnostic and, for a binding form, binds the
+# failed value to `POISON` in the type environment before resuming at the next
+# statement. `POISON` is ABSORBING (every algebra operation treats it as a
+# wildcard, so a type derived from it stays unknown) and SILENT (it is
+# compatible with everything in both directions, so no later use of the poisoned
+# binding raises a second, fabricated mismatch). A diagnostic is emitted only
+# where poison is BORN — the failing statement — never where it PROPAGATES,
+# which is exactly what stops one real mismatch from spawning N cascades at every
+# later use of the poisoned binding. Like `_TPARAM` and `FN_HEAD`, the spelling
+# uses characters no identifier or declared type may contain, so it can never
+# collide with a user type and never has to be stripped from a rendered
+# diagnostic (poison is silent, so it never reaches one).
+POISON = "!poison"
+
+
+def is_poison(type_name: str | None) -> bool:
+    """Is this the Stage-2 poison sentinel (item 386)?"""
+    return type_name == POISON
+
+
 def is_tparam_name(name: str, declared: dict) -> bool:
     """Would `name`, written in a fn signature, be an implicit type parameter?"""
     return len(name) == 1 and name.isupper() and name not in declared
@@ -463,6 +485,7 @@ def _is_wildcard(name: str | None) -> bool:
     return (
         name is None
         or name in ("Any", "Never")
+        or name == POISON            # item 386 Stage 2: absorbing + silent
         or name.startswith(_TPARAM)  # implicit fn type parameter
     )
 
@@ -971,6 +994,15 @@ def host_family_check(family: str, method: str, arg_types: list,
 def builtin_check(method: str, target_type: str | None, arg_types: list,
                   filename: str | None, line: int) -> str | None:
     """Type a stdlib method call; raises on definite mismatches."""
+    # item 386, Stage 2: a poisoned receiver (a binding whose initializer was a
+    # recovered type error) is folded to the unknown receiver here, so the
+    # receiver-family refusals below stay silent — `compatible` already treats
+    # POISON as a wildcard, but the family checks compare type heads directly,
+    # and re-reporting a mismatch at every later use of the poisoned binding is
+    # exactly the cascade the sentinel exists to prevent. The diagnostic was
+    # already emitted where the poison was born.
+    if is_poison(target_type):
+        target_type = None
     # a method call on a constructor-tracked host receiver (`store.get(k)`
     # where `store = Map.new()`): checked against the family surface, result
     # opaque (see _HOST_FAMILIES)
