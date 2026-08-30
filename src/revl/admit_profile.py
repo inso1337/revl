@@ -1,0 +1,167 @@
+"""The untrusted-author admission profile (roadmap item 329).
+
+The composition gate already refuses a turn that reaches an *undeclared*
+service (G1) and holds an ungranted `requires` inert against a granted-only
+provider set (R2). That is enough for capability composition, but it BREAKS on
+host blocks: a model-authored
+
+    extern pure fn exfil(t: Str) -> Str = @py { import os; ... }
+
+ADMITS and RUNS arbitrary host code, because G8's boundary is "verbatim host
+code — unchecked inside" (item 24: "the gate does not sandbox host code"). When
+the AUTHOR of the source is untrusted — the lighthouse code-mode direction,
+where a model emits an arbitrary revl program every turn — that is an injection
+hole: the turn is composed against a granted tool surface, but nothing stops it
+from declaring its own escape hatch.
+
+This module is the CHEAPEST-FIRST cut item 329 names, a *compile refusal* (not a
+runtime policy check):
+
+  (a) `no_extern` — the admitted source may not DECLARE new `extern`/host-block
+      declarations. The untrusted author may only COMPOSE pre-granted services;
+      it cannot smuggle verbatim host code past the boundary. Refused
+      structurally, before any host body could run.
+
+  (b) `granted` — an allowlist of the service NAMES the admitted program may
+      reach. Even a *declared* service is refused unless it is in the granted
+      set (or provided internally by the same turn). This closes the gap where
+      an admitted turn, wired against a running composition, could reach ANY
+      ambient service; the profile restricts it to an explicit subset.
+
+Deferred (item 45, the fuller answer): compiling the turn to the wasm substrate
+with the granted tools wired in as host imports, so confinement is *physical*
+and even an admitted host body cannot escape its linear memory. That path is a
+larger change (see `docs/design/329-untrusted-author-profile.md` and the TODO in
+`quarantine.py`); the no-extern + allowlist cut here is item 329's deliverable
+and is sufficient to make "model-emitted revl, admitted through the gate"
+injection-resistant for BOTH capability reach and smuggled host code.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from .errors import RevlError
+from .parser import Program
+
+
+@dataclass(frozen=True)
+class AdmissionProfile:
+    """How much to trust the AUTHOR of the source being admitted.
+
+    `no_extern`  — forbid new `extern`/host-block declarations in the admitted
+                   source (the untrusted author may only compose, not declare
+                   host code).
+    `granted`    — the allowlist of service names the admitted program may
+                   reach. `None` means the allowlist is OFF (unrestricted, the
+                   trusted-author default); a set — even the empty set — turns it
+                   ON and every externally-reached service must be a member.
+
+    The default `AdmissionProfile()` is inert: no_extern off, allowlist off, so
+    a caller that passes no profile compiles exactly as before.
+    """
+
+    no_extern: bool = False
+    granted: frozenset[str] | None = None
+
+    @staticmethod
+    def untrusted_author(granted) -> "AdmissionProfile":
+        """The profile for a model-authored per-turn source: no new host code,
+        and reach bounded to an explicit granted service set."""
+        return AdmissionProfile(no_extern=True,
+                                granted=frozenset(granted or ()))
+
+    @property
+    def active(self) -> bool:
+        return self.no_extern or self.granted is not None
+
+
+def check_no_extern(root_programs: list[Program], profile: AdmissionProfile) -> None:
+    """(a) Refuse if the untrusted-authored source declares any `extern`.
+
+    The check is scoped to the ROOT programs — the source actually being
+    admitted — not the imported closure: a pre-granted module the turn `use`s is
+    trusted host code that was granted deliberately, but an `extern` written in
+    the admitted source itself is exactly the escape hatch this forbids. It is a
+    purely structural check on the parsed AST, so it fires BEFORE any host body
+    is lowered or run — a compile refusal, per the item.
+    """
+    if not profile.no_extern:
+        return
+    for program in root_programs:
+        if program.externs:
+            decl = program.externs[0]
+            has_body = bool(decl.bodies)
+            what = (f"host-block extern `{decl.name}` (@"
+                    f"{decl.bodies[0].backend} body)" if has_body
+                    else f"extern `{decl.name}`")
+            raise RevlError(
+                program.filename, decl.line,
+                f"admission refused: the untrusted-author profile forbids new "
+                f"`extern`/host-block declarations, but this source declares "
+                f"{what}",
+                hint="verbatim host code is unchecked inside the boundary (G8, "
+                     "item 24: the gate does not sandbox host code). An untrusted "
+                     "author may only COMPOSE pre-granted services, never declare "
+                     "its own host code — remove the extern and reach a granted "
+                     "service instead",
+                code="G8", category="admission",
+            )
+
+
+def check_allowlist(document: dict, profile: AdmissionProfile) -> None:
+    """(b) Refuse if the admitted program reaches a service outside `granted`.
+
+    A component "reaches" a service by `requires`-ing it. A service the turn's
+    own components also PROVIDE is internal wiring, not an outward reach, so it
+    is exempt; every other required service must be in the granted allowlist.
+    This is what bounds an admitted turn to a subset of a running composition's
+    ambient services instead of all of them.
+    """
+    if profile.granted is None:
+        return
+    granted = profile.granted
+    components = document.get("components") or []
+    provided_internally: set[str] = set()
+    for comp in components:
+        provides = comp.get("provides")
+        if isinstance(provides, dict):
+            provided_internally.update(provides.values())
+    for comp in components:
+        requires = comp.get("requires") or {}
+        for key, service in requires.items():
+            if service in granted or service in provided_internally:
+                continue
+            allowed = ", ".join(f"`{s}`" for s in sorted(granted)) or "<nothing>"
+            raise RevlError(
+                comp.get("source") or document.get("filename") or "<candidate>",
+                0,
+                f"admission refused: component `{comp.get('name')}` reaches "
+                f"service `{service}` (via `requires {key}`), which is not in the "
+                f"granted set",
+                hint=f"the untrusted-author profile grants [{allowed}] and "
+                     f"nothing else; an admitted turn may only reach a granted "
+                     f"service or one it provides itself (item 329 allowlist)",
+                code="R2", category="admission",
+            )
+
+
+def enforce_source(root_programs: list[Program],
+                   profile: AdmissionProfile | None) -> None:
+    """Pre-lowering half of the profile: the structural no-extern check on the
+    parsed source. Runs BEFORE lowering, so an untrusted `extern` is refused
+    with the profile's own message before any host body is even lowered — never
+    a runtime check. A `None`/inert profile is a no-op."""
+    if profile is None or not profile.no_extern:
+        return
+    check_no_extern(root_programs, profile)
+
+
+def enforce_document(document: dict, profile: AdmissionProfile | None) -> None:
+    """Post-lowering half of the profile: the granted-allowlist check on the
+    lowered document (it needs the resolved `requires`/`provides`). A
+    `None`/inert profile is a no-op, so a trusted-author compile is
+    byte-identical."""
+    if profile is None or profile.granted is None:
+        return
+    check_allowlist(document, profile)
