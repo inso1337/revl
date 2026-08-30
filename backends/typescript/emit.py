@@ -1979,6 +1979,11 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
         return f"revlCharAt({target}, {args[0]})"
     if method == "charCodeAt":
         return f"revlCharCodeAt({target}, {args[0]})"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at index i, via the same astral-aware helper as
+    # charCodeAt (JS `.charCodeAt` would answer a lone surrogate).
+    if method == "codepoint_at":
+        return f"revlCharCodeAt({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). JS `/` is true division
     # and `%` takes the dividend's sign, so every one of these is built rather
     # than inherited — through helpers, so the divisor is evaluated once and a
@@ -2296,8 +2301,8 @@ _TS_CHECKED_DIV = {
 # a `number`. `_ts_builtin` spells each conversion out per method; these tables
 # are the same facts in the form the `?.` path needs.
 _TS_INT_ARG_BUILTINS = {"slice": (0, 1), "charAt": (0,), "charCodeAt": (0,),
-                        "repeat": (0,)}
-_TS_INT_RESULT_BUILTINS = {"length", "indexOf", "charCodeAt"}
+                        "codepoint_at": (0,), "repeat": (0,)}
+_TS_INT_RESULT_BUILTINS = {"length", "indexOf", "charCodeAt", "codepoint_at"}
 
 # Int is 64-bit two's complement and overflow traps (docs/arithmetic.md).
 # BigInt is arbitrary precision, so this tier imposes the bound the way python
@@ -2635,7 +2640,8 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
   return BigInt(x.indexOf(v))
 }"""
 
-_STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "indexOf"}
+_STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "codepoint_at",
+                     "indexOf"}
 
 
 # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the ASCII digits

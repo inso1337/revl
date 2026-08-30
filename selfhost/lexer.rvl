@@ -21,6 +21,10 @@ service TokenStream {
   fn lex(source: Str) -> List[Token]
 }
 
+// A code point that tolerates an empty receiver (returns -1). Since item 276
+// the in-bounds hot-path sites read `source.codepoint_at(j)` directly; code0
+// remains only for the clamped-slice probes (is_triple_at, scan_triple's
+// leading-newline check, is_space) where `slice` may hand back "" past the end.
 fn code0(c: Str) -> Int {
   if (c == "") { return 0 - 1 }
   return c.charCodeAt(0)
@@ -115,8 +119,10 @@ fn scan_string(source: Str, i: Int) -> Scan {
   let n = source.length()
   var out = ""
   while (j < n) {
+    // j < n, so the code point exists: read it directly (item 276). `c` is
+    // kept for the out.concat below.
     let c = source.charAt(j)
-    let cc = code0(c)
+    let cc = source.codepoint_at(j)
     if (cc == 34) {
       let jj = j
       let text = out
@@ -170,7 +176,7 @@ fn scan_triple(source: Str, i: Int) -> Scan {
       return { j: jj + 3, out: text, nl: lines }
     }
     let c = source.charAt(j)
-    if (code0(c) == 10) { nl += 1 }
+    if (source.codepoint_at(j) == 10) { nl += 1 }
     out = out.concat(c)
     j += 1
   }
@@ -216,8 +222,7 @@ fn scan_interp(source: Str, i: Int) -> Scan {
   var depth = 1
   var nl = 0
   while (j < n) {
-    let c = source.charAt(j)
-    let cc = code0(c)
+    let cc = source.codepoint_at(j)
     if (cc == 123) { depth += 1 }
     if (cc == 125) {
       depth -= 1
@@ -244,8 +249,9 @@ fn scan_template(source: Str, i: Int) -> Scan {
   var buf = ""
   var nl = 0
   while (j < n) {
+    // `c` is kept for the buf.concat in the literal-text branch below.
     let c = source.charAt(j)
-    let cc = code0(c)
+    let cc = source.codepoint_at(j)
     if (cc == 96) {
       if (buf != "") { parts = parts.push("t:".concat(esc(buf))) }
       let jj = j
@@ -288,7 +294,7 @@ fn scan_template(source: Str, i: Int) -> Scan {
 fn scan_comment(source: Str, i: Int) -> Scan {
   var j = i
   let n = source.length()
-  while (j < n && code0(source.charAt(j)) != 10) { j += 1 }
+  while (j < n && source.codepoint_at(j) != 10) { j += 1 }
   let jj = j
   return { j: jj, out: "", nl: 0 }
 }
@@ -299,7 +305,7 @@ fn count_nl(s: Str) -> Int {
   var i = 0
   let n = s.length()
   while (i < n) {
-    if (code0(s.charAt(i)) == 10) { c += 1 }
+    if (s.codepoint_at(i) == 10) { c += 1 }
     i += 1
   }
   return c
@@ -317,7 +323,7 @@ fn scan_host_body(source: Str, k: Int) -> Scan {
   let n = source.length()
   var depth = 1
   while (j < n) {
-    let cc = code0(source.charAt(j))
+    let cc = source.codepoint_at(j)
     if (cc == 123) { depth += 1 }
     if (cc == 125) {
       depth -= 1
@@ -335,8 +341,10 @@ fn scan_host_body(source: Str, k: Int) -> Scan {
 // (kind "" means this step produced no token).
 fn step(source: Str, i: Int, line: Int) -> Step {
   let none = { kind: "", text: "", line: line }
+  // i < source.length() (the lex_src loop guard), so read the code point
+  // directly (item 276). `c` stays the token text / classifier receiver below.
   let c = source.charAt(i)
-  let cc = code0(c)
+  let cc = source.codepoint_at(i)
   if (cc == 10) { return { i: i + 1, line: line + 1, tok: none } }
   // c is not newline here (the cc == 10 case returned), so the classifier
   // builtin is exactly is_space(c) — call it directly, skipping the fn call.
@@ -425,9 +433,9 @@ fn step(source: Str, i: Int, line: Int) -> Step {
       while (jb < n1 && (source.charAt(jb).is_alnum() || source.charAt(jb) == "_")) { jb += 1 }
       let backend = source.slice(i + 1, jb)
       var kb = jb
-      while (kb < n1 && code0(source.charAt(kb)) != 10 && source.charAt(kb).is_space()) { kb += 1 }
+      while (kb < n1 && source.codepoint_at(kb) != 10 && source.charAt(kb).is_space()) { kb += 1 }
       // whitespace before `{` may include a newline
-      while (kb < n1 && code0(source.charAt(kb)) == 10) { kb += 1 }
+      while (kb < n1 && source.codepoint_at(kb) == 10) { kb += 1 }
       if (kb < n1 && source.charAt(kb) == "{") {
         let hb = scan_host_body(source, kb)
         if (hb.j == 0 - 1) {

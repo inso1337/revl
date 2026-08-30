@@ -732,6 +732,12 @@ _BUILTIN_SIG = {
     "slice": ("sized", ["Int", "Int"], "@self"),
     "charAt": ("Str", ["Int"], "Str"),
     "charCodeAt": ("Str", ["Int"], "Int"),
+    # Codepoint-at-index scan (roadmap item 276, docs/stdlib-2.0.md
+    # §Str.codepoint_at): the Unicode scalar at code-point index i, returned
+    # directly so the self-host lexer's per-byte hot path stops spelling it as
+    # `code0(source.charAt(j))` (a 1-char Str alloc + a revl-fn round-trip).
+    # Str receiver, one Int index, Int result — the family of charCodeAt.
+    "codepoint_at": ("Str", ["Int"], "Int"),
     "concat": ("sized", ["@self"], "@self"),
     "indexOf": ("sized", ["@member"], "Int"),
     "split": ("Str", ["Str"], "List[Str]"),

@@ -116,7 +116,7 @@ IR_VERSION = 1
 # stub objects (open/close/query/execute/new/get/insert/remove/drop).
 _BUILTIN_METHODS = {
     "length": 0, "push": 1, "slice": 2, "charAt": 1,
-    "charCodeAt": 1, "indexOf": 1, "concat": 1,
+    "charCodeAt": 1, "codepoint_at": 1, "indexOf": 1, "concat": 1,
     "split": 1, "join": 1, "repeat": 1,
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
     # Str-only, one Str argument.
