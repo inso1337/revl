@@ -273,6 +273,11 @@ class _FlowChecker:
         self.model = model
         self.filename = filename
         self.line = line
+        # provenance for the G8 audit surface (Decision 5): the origins that
+        # reach an emission here, and the origins declassified here. Populated as
+        # the walk proceeds; folded onto the component's IR entry by the caller.
+        self.reaches: set[str] = set()
+        self.declassified: set[str] = set()
 
     # -- callee-name extraction across the two IR dialects ---------------------
     @staticmethod
@@ -387,8 +392,12 @@ class _FlowChecker:
             origin = self.model.sources[callee]
             return Taint(frozenset({origin}), (f"{callee}()",))
 
-        # a declassifier (verified-fn parser, or the `endorse` builtin): clean
+        # a declassifier (verified-fn parser, or the `endorse` builtin): clean.
+        # Record the origins it downgrades onto the audit surface (Decision 5) —
+        # a `declassify:` token an auditor and `revl audit --diff` can see.
         if callee in self.model.declassifiers or callee == "endorse":
+            for t in arg_taints:
+                self.declassified |= t.origins
             return CLEAN
 
         # an ordinary call propagates: the result is tainted iff any argument is
@@ -420,7 +429,13 @@ class _FlowChecker:
             env[stmt["name"]] = self.taint_of(stmt.get("value"), env)
             return
         if step in ("return", "emit", "expr", "fail"):
-            self.taint_of(stmt.get("expr") or stmt.get("value"), env)
+            result = self.taint_of(stmt.get("expr") or stmt.get("value"), env)
+            if step == "emit" and result.dirty:
+                # a value of these origins reaches an emission here (Decision 5).
+                # An *absolute-refusal* sink already raised above; what remains is
+                # the policy-gated tier (e.g. web-taint into `send.*`) — recorded,
+                # so `audit --diff` sees a newly-routed exfiltration edge widen.
+                self.reaches |= result.origins
             return
         # any other statement shape: walk every child so nested calls (and their
         # sink checks) are visited, and any nested block threads the same env.
@@ -458,7 +473,16 @@ def check_taint(program, fns, components, model: TaintModel,
     # component provide-method bodies (lowered IR)
     for comp in components:
         source = comp.get("source") or filename
-        _walk_component_methods(comp.get("body") or [], model, source)
+        reaches, declassified = _walk_component_methods(
+            comp.get("body") or [], model, source)
+        # fold the per-component provenance onto the IR entry (Decision 5), so
+        # `_boundary` can emit `taint:`/`declassify:` tokens. Additive: absent
+        # when the component touches no taint, so its IR stays byte-identical.
+        if reaches or declassified:
+            comp["taint"] = {
+                "reaches": sorted(reaches),
+                "declassify": sorted(declassified),
+            }
 
 
 def splice_declassifiers(node):
@@ -487,7 +511,10 @@ def splice_declassifiers(node):
     return {key: splice_declassifiers(value) for key, value in node.items()}
 
 
-def _walk_component_methods(body, model: TaintModel, source: str) -> None:
+def _walk_component_methods(body, model: TaintModel,
+                            source: str) -> tuple[set, set]:
+    reaches: set = set()
+    declassified: set = set()
     for step in body:
         if not isinstance(step, dict):
             continue
@@ -500,3 +527,6 @@ def _walk_component_methods(body, model: TaintModel, source: str) -> None:
                     if i in seeded:
                         env[pname] = Taint(frozenset({seeded[i]}), (pname,))
                 checker.run(method.get("body") or [], env)
+                reaches |= checker.reaches
+                declassified |= checker.declassified
+    return reaches, declassified
