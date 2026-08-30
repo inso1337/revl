@@ -65,6 +65,17 @@ report, never a raised error and never a touched running system.
 
 from __future__ import annotations
 
+# TODO(item 329/330 — the deferred wasm-import path): the untrusted-author
+# admission profile (`revl.admit_profile`) delivers the cheapest-first cut —
+# `no_extern` + a granted allowlist, refusing a per-turn source that declares
+# host code or reaches outside its grant. The fuller answer is to ALLOW a
+# per-turn host body but compile the turn to THIS substrate with the granted
+# tools wired in as host imports, so confinement is physical (an escape is a
+# trap) instead of a compile refusal — reusing the canonical ABI below, but as a
+# per-turn admit-into-a-live-composition path rather than a standalone grading
+# battery, and threading the granted-tool calls back onto the enclosing 245
+# frame. See docs/design/329-untrusted-author-profile.md for the concrete TODO.
+
 import importlib.util
 import pathlib
 import tempfile
