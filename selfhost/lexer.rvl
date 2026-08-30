@@ -21,6 +21,10 @@ service TokenStream {
   fn lex(source: Str) -> List[Token]
 }
 
+// A code point that tolerates an empty receiver (returns -1). Since item 276
+// the in-bounds hot-path sites read `source.codepoint_at(j)` directly; code0
+// remains only for the clamped-slice probes (is_triple_at, scan_triple's
+// leading-newline check, is_space) where `slice` may hand back "" past the end.
 fn code0(c: Str) -> Int {
   if (c == "") { return 0 - 1 }
   return c.charCodeAt(0)
@@ -115,9 +119,8 @@ fn scan_string(source: Str, i: Int) -> Scan {
   let n = source.length()
   var out = ""
   while (j < n) {
-    // j < n holds, so the code point at j exists: fetch it directly (item 276)
-    // rather than allocating a 1-char Str via charAt to feed code0. `c` is
-    // still needed for the out.concat below.
+    // j < n, so the code point exists: read it directly (item 276). `c` is
+    // kept for the out.concat below.
     let c = source.charAt(j)
     let cc = source.codepoint_at(j)
     if (cc == 34) {
@@ -172,7 +175,6 @@ fn scan_triple(source: Str, i: Int) -> Scan {
       let lines = nl
       return { j: jj + 3, out: text, nl: lines }
     }
-    // j < n holds here (loop guard); read the code point directly (item 276).
     let c = source.charAt(j)
     if (source.codepoint_at(j) == 10) { nl += 1 }
     out = out.concat(c)
@@ -220,8 +222,6 @@ fn scan_interp(source: Str, i: Int) -> Scan {
   var depth = 1
   var nl = 0
   while (j < n) {
-    // The code point at j is all this scan needs (no concat), so read it
-    // directly (item 276) — no 1-char Str allocated per byte.
     let cc = source.codepoint_at(j)
     if (cc == 123) { depth += 1 }
     if (cc == 125) {
@@ -249,8 +249,7 @@ fn scan_template(source: Str, i: Int) -> Scan {
   var buf = ""
   var nl = 0
   while (j < n) {
-    // j < n holds; read the code point directly (item 276). `c` is still
-    // needed for the buf.concat in the default (literal-text) branch below.
+    // `c` is kept for the buf.concat in the literal-text branch below.
     let c = source.charAt(j)
     let cc = source.codepoint_at(j)
     if (cc == 96) {
@@ -342,9 +341,8 @@ fn scan_host_body(source: Str, k: Int) -> Scan {
 // (kind "" means this step produced no token).
 fn step(source: Str, i: Int, line: Int) -> Step {
   let none = { kind: "", text: "", line: line }
-  // step is only called with i < source.length() (the lex_src loop guard), so
-  // the code point at i exists: read it directly (item 276). `c` is still used
-  // as the token text / classifier receiver in the branches below.
+  // i < source.length() (the lex_src loop guard), so read the code point
+  // directly (item 276). `c` stays the token text / classifier receiver below.
   let c = source.charAt(i)
   let cc = source.codepoint_at(i)
   if (cc == 10) { return { i: i + 1, line: line + 1, tok: none } }
