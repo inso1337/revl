@@ -537,6 +537,18 @@ def _expr(node, env: _Env, expected=None) -> str:
             "functional record update `{r | f = e}` is not emitted by the go "
             "backend yet (implemented tiers: python, typescript) - see "
             "docs/records.md §6; lift it into a helper fn instead")
+    if kind == "len":
+        # item 104 (cross-tier): the property form `.length` on a sized value
+        # lowers to a `len` node in component/provide positions too (lower.py),
+        # matching the pure-fn body. Route it through the same code-point length
+        # helpers the field-`length` branch above uses (`revlStrLen` counts
+        # runes, not bytes). `_COMP_NEEDS_STDLIB` is already declared `global`
+        # for this function by that branch, so the assignment lands on it.
+        _COMP_NEEDS_STDLIB = True  # noqa: F841 — function-global (see field branch)
+        target_node = node.get("target")
+        target = _expr(target_node, env)
+        rt = _comp_infer(target_node, env)
+        return ("revlStrLen(%s)" if rt == "Str" else "revlListLen(%s)") % target
     raise EmitError("unsupported expr kind: %r" % (kind,))
 
 

@@ -208,11 +208,10 @@ use "stdlib/value.rvl" { value_is_object, value_is_list, value_is_scalar,
 // "obj|list|scalar|null:<has-kind>:<lookup-kind>"
 pub fn shape_of(body: Str) -> Str {
   let v = json_parse(body)
-  let tag =
-    if value_is_object(v) { "obj" }
-    else { if value_is_list(v) { "list" }
-           else { if value_is_scalar(v) { "scalar" } else { "null" } } }
-  let has = if value_has(v, "kind") { "Y" } else { "N" }
+  let tag = value_is_object(v) ? "obj"
+          : (value_is_list(v) ? "list"
+          : (value_is_scalar(v) ? "scalar" : "null"))
+  let has = value_has(v, "kind") ? "Y" : "N"
   let look = value_str(value_opt(v, "kind") ?? "-")
   return `${tag}:${has}:${look}`
 }
@@ -272,7 +271,7 @@ pub fn parse_envelope(wire: Str) -> Str {
   }
 }
 fn decode(v: Any) -> Str {
-  if !value_is_object(v) { return "ERR" }
+  if (!value_is_object(v)) { return "ERR" }
   let e: Envelope = v
   let id = e.id ?? "?"
   let reasoning =
@@ -314,3 +313,101 @@ def test_ts_parse_envelope_matches_py(envelope_ir, case):
         envelope_ir,
         f"console.log(JSON.stringify(parse_envelope({json.dumps(wire)})));")
     assert py_out == ts_out == expected
+
+
+# ======================== item 104 cross-tier: `.length` property form in a
+# ======================== PROVIDE method (folded in with the field-read work;
+# ======================== it hits the SAME per-tier field-access emitters).
+
+# A provide-method body reaching a multibyte `Str` literal's `.length`. In a fn
+# body `.length` folds to a `len` node; in a component/provide body the frontend
+# used to spell it as a `field` node (name="length"), which each tier's
+# field-access emitter had no case for — so `"café".length` raised at emit/
+# runtime (py/java: AttributeError/EmitError) or would have counted UTF-8 BYTES
+# rather than CODE POINTS. The frontend now folds the component-position form to
+# the same `len` node, so every tier routes it through its established
+# code-point length path. These three multibyte strings each have a code-point
+# count that differs from their UTF-8 byte count, so a byte-length regression
+# would be caught.
+_LEN_STRINGS = {
+    "cafe":     ("café",   4),   # é: 1 code point, 2 UTF-8 bytes
+    "japanese": ("日本語", 3),   # 3 code points, 9 UTF-8 bytes
+    "naive":    ("naïve",  5),   # ï: 1 code point, 2 UTF-8 bytes
+}
+
+_LEN_BACKENDS = ("python", "typescript", "go", "rust", "java", "wasm")
+
+
+def _length_component_src(literal: str) -> str:
+    # the literal is embedded RAW (not json.dumps) so the multibyte code points
+    # reach the revl string literal directly — none of these contain a quote or
+    # backslash, so no escaping is needed.
+    assert '"' not in literal and "\\" not in literal
+    return (
+        "service Greeter {\n  fn hello() -> Int\n}\n"
+        "component G provides greeter: Greeter {\n"
+        "  provide greeter {\n"
+        f'    fn hello() = "{literal}".length\n'
+        "  }\n"
+        "}\n"
+    )
+
+
+def _compile_src(src: str) -> dict:
+    d = Path(tempfile.mkdtemp())
+    (d / "consumer.rvl").write_text(src, encoding="utf-8")
+    return compile_files([str(d / "consumer.rvl")])
+
+
+def _find_nodes(ir, kind: str):
+    found = []
+    def walk(o):
+        if isinstance(o, dict):
+            if o.get("kind") == kind:
+                found.append(o)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(ir)
+    return found
+
+
+@pytest.mark.parametrize("case", list(_LEN_STRINGS))
+def test_component_length_lowers_to_len_not_field(case):
+    literal, _ = _LEN_STRINGS[case]
+    ir = _compile_src(_length_component_src(literal))
+    # the fix: a `len` node, and NO record-field read named "length"
+    assert _find_nodes(ir, "len"), "component-position .length must lower to a len node"
+    assert not [n for n in _find_nodes(ir, "field") if n.get("name") == "length"], \
+        "no `field` node named length should survive lowering"
+
+
+@pytest.mark.parametrize("case", list(_LEN_STRINGS))
+def test_component_length_emits_on_every_tier(case):
+    """Every one of the six field-access emitters renders the property-form
+    `.length` in a provide method (no EmitError). This is the cross-tier half of
+    item 104: wasm landed in 8d75a73, py/ts/go/rust/java are folded in here."""
+    literal, _ = _LEN_STRINGS[case]
+    ir = _compile_src(_length_component_src(literal))
+    for backend in _LEN_BACKENDS:
+        code = _emit(backend, ir)  # raises EmitError on regression
+        assert code, f"{backend} produced empty output"
+
+
+@pytest.mark.parametrize("case", list(_LEN_STRINGS))
+def test_component_length_code_point_count_py(case):
+    """The py tier's emitted provide method counts CODE POINTS. The emitted
+    provide method is `return len(<literal>)` (the emitter escapes non-ASCII as
+    ASCII-safe `\\uXXXX`, still a valid python str literal); python's `len` on a
+    str is the code-point count, so evaluating that exact emitted expression
+    reproduces the provide method's result."""
+    literal, expected = _LEN_STRINGS[case]
+    ir = _compile_src(_length_component_src(literal))
+    code = _emit("python", ir)
+    ret = next(line.strip()[len("return "):]
+               for line in code.splitlines()
+               if line.strip().startswith("return len("))
+    assert eval(ret) == expected  # noqa: S307 — the emitter's own `len(<literal>)`
+

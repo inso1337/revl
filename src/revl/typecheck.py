@@ -1174,6 +1174,27 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                                    alt=f"?.{expr.name}")
         if expr.name == "length" and (thead in _SIZED_HEADS):
             return "Int"
+        # item 379: a field read off a value whose static type is `Any`/`Value`
+        # (the erased-dynamic types — a parsed JSON body, `json_parse`'s result)
+        # is the 279/299 silent-divergence class: py raises `KeyError` on an
+        # absent key, ts yields `undefined`, and neither is a defensible total
+        # answer for a field the author declared present. REFUSE it here so the
+        # divergence is a compile error, not a runtime surprise, and point the
+        # author at the two designed surfaces: cast to a record (an `Opt[T]`
+        # field then reads TOTAL — `let e: E = v; e.kind ?? default`), or walk
+        # the erased value with the total shape accessors (stdlib/value.rvl:
+        # `value_is_object` / `value_opt` / `value_field_or`).
+        if filename and thead in ("Any", "Value"):
+            raise RevlError(
+                filename, line,
+                f"field read `.{expr.name}` on a value of type "
+                f"`{render_type(target)}` — an erased value has no known fields",
+                hint=("bind it to a record type first "
+                      f"(`let e: SomeRecord = …; e.{expr.name}` — an `Opt[T]` "
+                      "field then reads back the empty Opt on absence), or walk "
+                      "it with stdlib/value.rvl (`value_is_object(v)`, "
+                      f"`value_opt(v, \"{expr.name}\")`, `value_field_or`)"),
+                code="T1", category="type-mismatch")
         struct = structural_fields(target)
         if struct is not None:
             # a read through an anonymous record binding is checked too (item 71)

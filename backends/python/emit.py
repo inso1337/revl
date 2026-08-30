@@ -364,6 +364,19 @@ def _uses_true_division(node) -> bool:
     return False
 
 
+def _uses_opt_field(node) -> bool:
+    """Does any field read carry the item-379 `opt` flag (an `Opt[T]`-declared
+    field, read TOTAL)? The `_revl_opt_field` helper is emitted only then, so a
+    module with no optional-field read stays byte-identical."""
+    if isinstance(node, dict):
+        if node.get("kind") == "field" and node.get("opt"):
+            return True
+        return any(_uses_opt_field(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_opt_field(v) for v in node)
+    return False
+
+
 def _uses_float_interp(node) -> bool:
     """Does any `${…}` template interpolate a provably-`Float` expression?
     The canonical `Float -> Str` helper is emitted only then, so modules
@@ -828,10 +841,19 @@ class _ComponentEmitter:
             if not isinstance(name, str) or not name.isidentifier():
                 raise EmitError(f"{where}: bad field name {name!r}")
             # record literals are dicts; ADT payloads are objects — the
-            # preamble helper reads either shape
-            return f"_revl_field({self._expr(expr.get('target'), where)}, {name!r})"
+            # preamble helper reads either shape. An `Opt[T]`-declared field
+            # reads TOTAL (item 379): absent -> None, the Opt's empty case.
+            helper = "_revl_opt_field" if expr.get("opt") else "_revl_field"
+            return f"{helper}({self._expr(expr.get('target'), where)}, {name!r})"
         if kind == "index":
             return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
+        if kind == "len":
+            # item 104 (cross-tier): the property form `.length` on a sized
+            # value lowers to a `len` node in component/provide positions too
+            # (lower.py), so the component emitter must render it — python's
+            # `len` counts code points, matching `.length()` and the `len` node
+            # in fn bodies.
+            return f"len({self._expr(expr.get('target'), where)})"
         if kind == "bin":
             if expr.get("op") == "??":
                 lhs = self._expr(expr.get("left"), where)
@@ -1850,8 +1872,10 @@ def _expr(node: dict) -> str:
         return call
     if kind == "field":
         # record literals are dicts; ADT payloads are objects — the preamble
-        # helper reads either shape
-        return f"_revl_field({_expr(node['target'])}, {node['name']!r})"
+        # helper reads either shape. An `Opt[T]`-declared field reads TOTAL
+        # (item 379): absent -> None, the Opt's empty case.
+        helper = "_revl_opt_field" if node.get("opt") else "_revl_field"
+        return f"{helper}({_expr(node['target'])}, {node['name']!r})"
     if kind == "index":
         return f"{_expr(node['target'])}[{_expr(node['index'])}]"
     if kind == "if":
@@ -2942,6 +2966,15 @@ def emit(ir: dict) -> str:
     out.add(0, '    """Record literals are dicts, ADT payloads are objects."""')
     out.add(0, "    return v[name] if isinstance(v, dict) else getattr(v, name)")
     out.add(0)
+    if _uses_opt_field(ir):
+        # item 379: an `Opt[T]`-declared field reads TOTAL — an absent key (or a
+        # non-record receiver) is the Opt's empty case (`None`), never a raise.
+        # This is what makes `e.kind ?? default` mean the same on every tier
+        # (py's `_revl_field` raises `KeyError` here; ts is total by JS accident).
+        out.add(0, "def _revl_opt_field(v, name):")
+        out.add(0, '    """An `Opt[T]`-declared field: absent -> None, never a raise."""')
+        out.add(0, "    return v.get(name) if isinstance(v, dict) else getattr(v, name, None)")
+        out.add(0)
     # built-in Result is a tagged ADT (so `match` can discriminate Ok/Err),
     # unless a user type shadows the name. Opt stays host-None, so it needs
     # no class. Emitted only when the IR actually uses Result — an unused
