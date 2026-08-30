@@ -200,19 +200,26 @@ def plan(source: str | None = None, files: list[str] | None = None,
         real gate. A `standalone` failure comes from re-compiling the
         candidate *without* the running composition in scope, so it can name
         an ambient service as unknown — an artifact of the fallback, not a
-        problem with the candidate. Labelling beats hiding."""
-        record = classify(error)
-        # the same rejection reaches us under two filenames (the gate
-        # abspaths, the standalone compile does not) — compare on the rest
-        if any(d["code"] == record["code"] and d["line"] == record["line"]
-               and d["message"] == record["message"] for d in diagnostics):
-            return
-        record["from"] = origin
-        if origin == "standalone":
-            record["note"] = ("seen while compiling the candidate on its own, "
-                              "without the running composition's services in "
-                              "scope — it may not be a real defect")
-        diagnostics.append(record)
+        problem with the candidate. Labelling beats hiding.
+
+        A multi-refusal compile raises a `RevlErrors` carrier (item 386); its
+        `.errors` list is iterated so `plan()` on a candidate with several
+        independent defects surfaces all of them, not just the first. The dedup
+        key here EXCLUDES filename by design (the gate abspaths, the standalone
+        compile does not — same rejection, two filenames), so it stays as-is."""
+        for one in (getattr(error, "errors", None) or [error]):
+            record = classify(one)
+            # the same rejection reaches us under two filenames (the gate
+            # abspaths, the standalone compile does not) — compare on the rest
+            if any(d["code"] == record["code"] and d["line"] == record["line"]
+                   and d["message"] == record["message"] for d in diagnostics):
+                continue
+            record["from"] = origin
+            if origin == "standalone":
+                record["note"] = ("seen while compiling the candidate on its own, "
+                                  "without the running composition's services in "
+                                  "scope — it may not be a real defect")
+            diagnostics.append(record)
 
     try:
         candidate_ir = _compile(source, files, modules, manifest=running_ir,
