@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 
 from . import parser as _ast
 from ._paths import stdlib_root
+from .admit_profile import AdmissionProfile
+from .admit_profile import enforce_document as _enforce_document
+from .admit_profile import enforce_source as _enforce_source
 from .errors import RevlError
 from .holes import refuse_admission
 from .lower import check_and_lower
@@ -191,7 +194,8 @@ class _ModuleLoader:
 def compile_source(source: str, filename: str = "<string>",
                    manifest: dict | None = None,
                    replacing: tuple[str, ...] = (),
-                   modules: dict[str, str] | None = None) -> dict:
+                   modules: dict[str, str] | None = None,
+                   profile: AdmissionProfile | None = None) -> dict:
     """Compile source text. Nothing is read from or written to the disk.
 
     `manifest` is the runtime-admission gate (see compile_files); `modules`
@@ -199,6 +203,12 @@ def compile_source(source: str, filename: str = "<string>",
     import names. Together they let a caller — an AI agent iterating on a
     candidate component, typically — check, admit and load code that has
     never existed as a file.
+
+    `profile` (roadmap item 329) is the untrusted-author admission profile:
+    when the AUTHOR of `source` is untrusted (the lighthouse code-mode
+    direction), it forbids new `extern`/host-block declarations and bounds the
+    services the turn may reach to an explicit granted set. A refusal is a
+    compile error, not a runtime check. `None` = trusted author, unchanged.
     """
     if manifest is None and not modules:
         program = Parser(source, filename).parse()
@@ -209,18 +219,22 @@ def compile_source(source: str, filename: str = "<string>",
                             "compile_files with a real source path",
                             hint="a bare source string has no module directory from which "
                                  "to resolve the import")
-        return check_and_lower(program)
+        _enforce_source([program], profile)
+        document = check_and_lower(program)
+        _enforce_document(document, profile)
+        return document
 
     virtual = {os.path.abspath(filename): source}
     for path, text in (modules or {}).items():
         virtual[os.path.abspath(path)] = text
     return compile_files([filename], manifest=manifest, replacing=replacing,
-                         sources=virtual)
+                         sources=virtual, profile=profile)
 
 
 def compile_files(paths: list[str], manifest: dict | None = None,
                   replacing: tuple[str, ...] = (),
-                  sources: dict[str, str] | None = None) -> dict:
+                  sources: dict[str, str] | None = None,
+                  profile: AdmissionProfile | None = None) -> dict:
     """Compile a composition: all services and components across the files
     are checked and linked together (the composition manifest, DESIGN §4).
 
@@ -380,7 +394,16 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             # compares the replacement's *accepted* shape against them.
             "handoffs": _running_handoffs(manifest),
         }
+    # roadmap item 329: the untrusted-author profile, no-extern half — refuse a
+    # new extern/host-block in the admitted source BEFORE lowering it, scoped to
+    # the root modules (the source actually being admitted, not the pre-granted
+    # imported closure). Inert without a profile, so a trusted compile is
+    # byte-identical.
+    _enforce_source([m.program for m in root_modules], profile)
     document = check_and_lower(merged, ambient)
+    # the allowlist half — refuse a reach outside the granted service set, on the
+    # lowered document's resolved requires/provides.
+    _enforce_document(document, profile)
     if manifest is not None:
         # The admission gate. Compiling a draft is fine — that is how an
         # agent gets a verdict on the parts it has written — but admitting
