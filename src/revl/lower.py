@@ -40,6 +40,7 @@ from .typecheck import (
     pin_hole,
     null_error,
     parse_type,
+    POISON,
     structural_fields,
     substitute,
     unify,
@@ -3831,7 +3832,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                                             component_callables, types, emitting_fns,
                                             emitting_caps, emission_evidence, spawn_reg,
                                             async_colored, witnessed_externs,
-                                            colour_polymorphic, sync_monomorphs)
+                                            colour_polymorphic, sync_monomorphs,
+                                            errors=errors)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
             # async coloring (docs/design/async-extern.md §3, "Component
@@ -3839,8 +3841,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
             # `await` step) may not reach an async callable — an async extern
             # *or* a phase-2 colored fn — because divert/inertia semantics are
             # out of scope for v1. Provide-method bodies are checked at their
-            # own site above, so they are pruned here.
-            if async_colored:
+            # own site above, so they are pruned here. A component that recovered
+            # past a refused statement (item 386, Stage 2) has a partial body and
+            # is already failing, so skip the reach sweep — walking its poisoned
+            # body could fabricate or crash, and its diagnostics are collected.
+            if async_colored and not lowered_comp.get("poisoned"):
                 _reached: set = set()
                 _async_reached_outside_provide(lowered_comp, async_colored, _reached)
                 if _reached:
@@ -5389,6 +5394,31 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
     return step
 
 
+def _poison_failed_binding(stmt, env: "Env") -> None:
+    """Bind a recovered binding-statement's name to the poison sentinel so its
+    later uses stay silent (item 386, Stage 2).
+
+    When a `let`-binding component statement refuses (its initializer was a type
+    error), the name may be UNBOUND — the refusal fired before `bind_local` ran —
+    or bound with a now-stale type. Either way, rebinding it to `POISON` (an
+    absorbing, silent wildcard) is what stops the downstream statements that read
+    it from each fabricating a second diagnostic: without a binding at all, every
+    later reference would raise an undefined-name cascade; with a concrete stale
+    type, a type cascade. A non-binding action (an `effect`/`emit`/`fail` with no
+    handle) introduces no reusable name, so there is nothing to poison and this
+    is a no-op."""
+    bind = getattr(stmt, "bind", None)
+    if not bind:
+        return
+    safe = env.locals.get(bind)
+    if safe is None:
+        try:
+            safe = env.bind_local(bind, getattr(stmt, "line", 0))
+        except RevlError:
+            return  # the name was already bound (e.g. a duplicate-name refusal)
+    env.type_env[safe] = POISON
+
+
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None,
                      emitting_fns: set | None = None,
@@ -5398,7 +5428,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      async_colored: set | None = None,
                      witnessed_externs: set | None = None,
                      colour_polymorphic: set | None = None,
-                     sync_monomorphs: dict | None = None) -> dict:
+                     sync_monomorphs: dict | None = None,
+                     errors: list | None = None) -> dict:
     env = Env(comp, services, filename, types)
     env.emitting_fns = emitting_fns or set()
     env.emitting_caps = emitting_caps or {}
@@ -5448,6 +5479,129 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     routes: dict[str, dict] = {}
     handoff: dict | None = None
     action_seen = False
+    # item 386, Stage 2: set when a statement's type-check refused and was
+    # recovered past (statement-boundary synchronization). A component with any
+    # recovered statement is marked `poisoned` below, exactly like a Stage-1
+    # header-abort stub, so the body-walking post-passes skip its partial body.
+    recovered = False
+
+    def _dispatch_action(stmt, provide_seen_line):
+        """Lower one *action* statement (effect/emit/fail/if/provide/…),
+        appending its step(s) to `body`, and return the (possibly updated)
+        `provide_seen_line`. Factored out of the body loop so the loop can wrap
+        it in the Stage-2 statement-boundary recovery (item 386): a `RevlError`
+        raised here is caught one frame out, recorded, and the walk resumes at
+        the next statement. It closes over the component's lowering state
+        (`env`, `body`, `provides`, `provided_keys`, `filename`, `callables`)."""
+        if isinstance(stmt, (LetEffect, EffectStmt, TimerStmt)) and provide_seen_line is not None:
+            raise RevlError(
+                filename, stmt.line,
+                "acquisition after `provide` — an effect acquired after a provision "
+                "would be reverted while dependents can still call the service",
+                hint="move acquisitions above the `provide` block (linker rule A2). "
+                     "A timer is an acquisition too: its schedule is armed at "
+                     "activation and cancelled on teardown (docs/time-coeffect.md)"
+                     if isinstance(stmt, TimerStmt) else
+                     "move acquisitions above the `provide` block (linker rule A2)",
+            )
+        if isinstance(stmt, EffectStmt) and isinstance(stmt.acquire, SpawnExpr):
+            # a spawn's inverse is the instance's own teardown, which needs a
+            # handle to name — so a spawn must be bound (decision 2)
+            raise RevlError(
+                filename, stmt.line,
+                "`spawn` must be bound to a handle: "
+                f"`let s = effect spawn {stmt.acquire.component} … undo s.dispose()`",
+            )
+        if isinstance(stmt, LetEffect):
+            if stmt.setup:
+                saved_locals = dict(env.locals)
+                saved_taken = set(env._taken)
+                saved_type_env = dict(env.type_env)
+                setup_steps: list[dict] = []
+                scope = _component_scope(env)
+                mutables: set[str] = set()
+                for setup_stmt in stmt.setup:
+                    _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
+                                                mutables, setup_steps)
+                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
+                env.locals = saved_locals
+                env._taken = saved_taken
+                # setup-let types are block-scoped; drop them so a recycled safe
+                # name (env._taken is restored above) can't read a stale type
+                env.type_env = saved_type_env
+            else:
+                setup_steps = []
+                acquire = _lower_expr(stmt.acquire, env, mode="setup")
+            safe = env.bind_local(stmt.bind, stmt.line)
+            # host provenance: an effect-acquired HOST object (`Map.new()`)
+            # keeps its verb surface verbatim, exempt from the stdlib table —
+            # see Env.host_locals.
+            if acquire.get("kind") == "host":
+                env.host_locals.add(safe)
+            acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
+            if acquired_type is not None:
+                env.type_env[safe] = acquired_type
+            step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
+                                      bind=safe, raw_acquire=stmt.acquire)
+            if setup_steps:
+                step["setup"] = setup_steps
+            if getattr(stmt, "verified", False):
+                step["verified"] = True
+            _admit_effect_async(stmt, step, env, filename)
+            body.append(step)
+        elif isinstance(stmt, EffectStmt):
+            if stmt.setup:
+                saved_locals = dict(env.locals)
+                saved_taken = set(env._taken)
+                saved_type_env = dict(env.type_env)
+                setup_steps = []
+                scope = _component_scope(env)
+                mutables = set()
+                for setup_stmt in stmt.setup:
+                    _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
+                                                mutables, setup_steps)
+                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
+                env.locals = saved_locals
+                env._taken = saved_taken
+                env.type_env = saved_type_env
+            else:
+                setup_steps = []
+                acquire = _lower_expr(stmt.acquire, env, mode="setup")
+            step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
+                                      bind=None, raw_acquire=stmt.acquire)
+            if setup_steps:
+                step["setup"] = setup_steps
+            if getattr(stmt, "verified", False):
+                step["verified"] = True
+            _admit_effect_async(stmt, step, env, filename)
+            body.append(step)
+        elif isinstance(stmt, FailStmt):
+            body.append({
+                "step": "fail",
+                "message": _lower_component_pure_expr(
+                    stmt.message, env, _component_scope(env), callables or set(),
+                    pure_only=True,
+                ),
+            })
+        elif isinstance(stmt, IfStmt):
+            body.append(_lower_component_if(stmt, env, callables or set()))
+        elif isinstance(stmt, LetApprovalStmt):
+            body.append(_lower_let_approval(stmt, env))
+        elif isinstance(stmt, EmitStmt):
+            emit_step = _lower_emit_step(stmt, env)
+            _admit_emit_async(stmt, emit_step, env, filename)
+            body.append(emit_step)
+        elif isinstance(stmt, TimerStmt):
+            body.append(_lower_timer_step(stmt, env))
+        elif isinstance(stmt, AwaitStmt):
+            body.append({"step": "await", "expr": _lower_expr(stmt.expr, env, mode="setup")})
+        elif isinstance(stmt, ProvideStmt):
+            provide_seen_line = stmt.line
+            body.append(_lower_provide(stmt, provides, provided_keys, env))
+        else:  # pragma: no cover — grammar prevents it
+            raise RevlError(filename, stmt.line, "unexpected statement in component body")
+        return provide_seen_line
+
     for stmt in comp.body:
         if isinstance(stmt, HandoffStmt):
             # `handoff <key>: <Type>` (roadmap item 53): the verified state
@@ -5592,113 +5746,26 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 intercept[stmt.key] = stmt.metadata
             continue
         action_seen = True
-        if isinstance(stmt, (LetEffect, EffectStmt, TimerStmt)) and provide_seen_line is not None:
-            raise RevlError(
-                filename, stmt.line,
-                "acquisition after `provide` — an effect acquired after a provision "
-                "would be reverted while dependents can still call the service",
-                hint="move acquisitions above the `provide` block (linker rule A2). "
-                     "A timer is an acquisition too: its schedule is armed at "
-                     "activation and cancelled on teardown (docs/time-coeffect.md)"
-                     if isinstance(stmt, TimerStmt) else
-                     "move acquisitions above the `provide` block (linker rule A2)",
-            )
-        if isinstance(stmt, EffectStmt) and isinstance(stmt.acquire, SpawnExpr):
-            # a spawn's inverse is the instance's own teardown, which needs a
-            # handle to name — so a spawn must be bound (decision 2)
-            raise RevlError(
-                filename, stmt.line,
-                "`spawn` must be bound to a handle: "
-                f"`let s = effect spawn {stmt.acquire.component} … undo s.dispose()`",
-            )
-        if isinstance(stmt, LetEffect):
-            if stmt.setup:
-                saved_locals = dict(env.locals)
-                saved_taken = set(env._taken)
-                saved_type_env = dict(env.type_env)
-                setup_steps: list[dict] = []
-                scope = _component_scope(env)
-                mutables: set[str] = set()
-                for setup_stmt in stmt.setup:
-                    _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
-                                                mutables, setup_steps)
-                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
-                env.locals = saved_locals
-                env._taken = saved_taken
-                # setup-let types are block-scoped; drop them so a recycled safe
-                # name (env._taken is restored above) can't read a stale type
-                env.type_env = saved_type_env
-            else:
-                setup_steps = []
-                acquire = _lower_expr(stmt.acquire, env, mode="setup")
-            safe = env.bind_local(stmt.bind, stmt.line)
-            # host provenance: an effect-acquired HOST object (`Map.new()`)
-            # keeps its verb surface verbatim, exempt from the stdlib table —
-            # see Env.host_locals.
-            if acquire.get("kind") == "host":
-                env.host_locals.add(safe)
-            acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
-            if acquired_type is not None:
-                env.type_env[safe] = acquired_type
-            step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
-                                      bind=safe, raw_acquire=stmt.acquire)
-            if setup_steps:
-                step["setup"] = setup_steps
-            if getattr(stmt, "verified", False):
-                step["verified"] = True
-            _admit_effect_async(stmt, step, env, filename)
-            body.append(step)
-        elif isinstance(stmt, EffectStmt):
-            if stmt.setup:
-                saved_locals = dict(env.locals)
-                saved_taken = set(env._taken)
-                saved_type_env = dict(env.type_env)
-                setup_steps = []
-                scope = _component_scope(env)
-                mutables = set()
-                for setup_stmt in stmt.setup:
-                    _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
-                                                mutables, setup_steps)
-                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
-                env.locals = saved_locals
-                env._taken = saved_taken
-                env.type_env = saved_type_env
-            else:
-                setup_steps = []
-                acquire = _lower_expr(stmt.acquire, env, mode="setup")
-            step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
-                                      bind=None, raw_acquire=stmt.acquire)
-            if setup_steps:
-                step["setup"] = setup_steps
-            if getattr(stmt, "verified", False):
-                step["verified"] = True
-            _admit_effect_async(stmt, step, env, filename)
-            body.append(step)
-        elif isinstance(stmt, FailStmt):
-            body.append({
-                "step": "fail",
-                "message": _lower_component_pure_expr(
-                    stmt.message, env, _component_scope(env), callables or set(),
-                    pure_only=True,
-                ),
-            })
-        elif isinstance(stmt, IfStmt):
-            body.append(_lower_component_if(stmt, env, callables or set()))
-        elif isinstance(stmt, LetApprovalStmt):
-            body.append(_lower_let_approval(stmt, env))
-        elif isinstance(stmt, EmitStmt):
-            emit_step = _lower_emit_step(stmt, env)
-            _admit_emit_async(stmt, emit_step, env, filename)
-            body.append(emit_step)
-        elif isinstance(stmt, TimerStmt):
-            body.append(_lower_timer_step(stmt, env))
-        elif isinstance(stmt, AwaitStmt):
-            body.append({"step": "await", "expr": _lower_expr(stmt.expr, env, mode="setup")})
-        elif isinstance(stmt, ProvideStmt):
-            provide_seen_line = stmt.line
-            body.append(_lower_provide(stmt, provides, provided_keys, env))
-        else:  # pragma: no cover — grammar prevents it
-            raise RevlError(filename, stmt.line, "unexpected statement in component body")
+        try:
+            provide_seen_line = _dispatch_action(stmt, provide_seen_line)
+        except RevlError as stmt_error:
+            # item 386, Stage 2: statement-boundary synchronization. This
+            # statement's type-check (or a per-statement structural rule) refused.
+            # With a collect-all sink, record that ONE diagnostic and resume at
+            # the NEXT statement, so several independent bad statements in one
+            # component are all reported in a single pass. A binding form still
+            # binds its name — to POISON — so the later statements that USE it read
+            # a silent wildcard instead of fabricating a second mismatch at every
+            # use (the sentinel is emitted where poison is BORN, here, never where
+            # it propagates). With no sink (a direct/legacy caller, or a nested
+            # lowering re-entering the spine) the refusal propagates to the
+            # component boundary, byte-identical to Stage 1.
+            if errors is None:
+                raise
+            errors.append(stmt_error)
+            _poison_failed_binding(stmt, env)
+            recovered = True
+            continue
 
     lowered = {
         "name": comp.name,
@@ -5725,6 +5792,17 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # byte-identical to before. `ir_version` stays 3.
     if handoff is not None:
         lowered["handoff"] = handoff
+    # item 386, Stage 2: a component that recovered past a refused statement has
+    # a partial, untrustworthy body. Mark it `poisoned` — exactly like a Stage-1
+    # header-abort stub — so the body-walking post-passes (taint, spawn
+    # bounds/attenuation, holes) skip it while `_link` still sees its complete
+    # header topology (provides/requires) and reports real G2/G3 on its keys.
+    # The compile is already failing (its refusals are in `errors`), so this
+    # partial IR is never emitted; the raise in `check_and_lower` precedes IR
+    # assembly. A clean component never sets `recovered`, so its IR is
+    # byte-identical to before.
+    if recovered:
+        lowered["poisoned"] = True
     return lowered
 
 
