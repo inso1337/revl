@@ -1,0 +1,10 @@
+// REJECTED — revl has no `throw` (item 384). A pure function returns a
+// `Result`; a component activation body signals failure with `fail`. `throw`
+// lexes as an undeclared identifier in a pure body.
+//
+// expected error:
+//   revl has no `throw`
+
+fn f(n: Int) -> Int {
+  throw n
+}
