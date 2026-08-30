@@ -52,7 +52,8 @@ def test_value_and_host_method_namespaces_are_disjoint():
     for methods in _HOST_FAMILIES.values():
         host_verbs |= set(methods)
     assert host_verbs == {"open", "close", "query", "execute", "new",
-                          "drop", "insert", "remove", "get", "run"}
+                          "drop", "insert", "insert_if_absent", "remove",
+                          "get", "run"}
     # `remove` is the ONE sanctioned overlap (docs/stdlib-2.0.md §Map): the
     # persistent Map value operation shares a spelling with the v1 host stub
     # verb. Safe because dispatch is by receiver kind — a constructor-tracked
