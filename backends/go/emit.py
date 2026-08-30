@@ -380,6 +380,12 @@ def _expr(node, env: _Env, expected=None) -> str:
             right = _expr(node["right"], env, _comp_infer(node.get("right"), env))
             return ("func() %s { _v, _ok := %s; if _ok { return _v }; "
                     "return %s }()" % (gt, left, right))
+        if op in ("<<", ">>"):
+            # Int32 shift: mask the count to 0..31 unsigned (Go neither masks
+            # the count nor accepts a negative signed one), matching the v3
+            # path and wasm/JS (docs/arithmetic.md, item 366).
+            return "(%s %s (uint32(%s) & 31))" % (
+                _expr(node["left"], env), op, _expr(node["right"], env))
         go_op = _V3_GO_BIN_OPS.get(op)
         if go_op is None:
             raise EmitError("unsupported binary operator: %r" % (op,))
@@ -389,6 +395,9 @@ def _expr(node, env: _Env, expected=None) -> str:
         operand = _expr(node.get("operand"), env)
         if node.get("op") == "!":
             return "(!%s)" % operand
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): Go's unary `^`.
+            return "(^%s)" % operand
         if node.get("op") == "-":
             if node.get("operands") == "Int":
                 # `-x` is `0 - x`; negating Int.MIN overflows, so it traps
@@ -3151,6 +3160,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
             return "Bool"
         if node.get("operands") == "Int32" and op in ("+", "-", "*"):
             return "Int32"  # Int32 arithmetic stays Int32 (docs/arithmetic.md)
+        if op in ("&", "|", "^", "<<", ">>"):
+            return "Int32"  # bitwise ops are Int32-only (docs/arithmetic.md)
         if op == "+":
             lt = _go_v3_infer_type(node.get("left"), ctx)
             rt = _go_v3_infer_type(node.get("right"), ctx)
@@ -3165,6 +3176,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
     if kind == "un":
         if node.get("op") == "!":
             return "Bool"
+        if node.get("op") == "~":
+            return "Int32"  # bitwise complement is Int32-only (docs/arithmetic.md)
         return _go_v3_infer_type(node.get("operand"), ctx)
     if kind == "if":
         return (_go_v3_infer_type(node.get("then"), ctx)
@@ -3199,6 +3212,12 @@ _V3_GO_BIN_OPS = {
     "==": "==", "===": "==", "!=": "!=", "!==": "!=",
     "<": "<", ">": ">", "<=": "<=", ">=": ">=",
     "+": "+", "-": "-", "*": "*", "/": "/", "%": "%", "&&": "&&", "||": "||",
+    # Int32 bitwise operators (item 366, docs/arithmetic.md). `& | ^` are native
+    # on int32. The shifts are rendered specially (`_go_v3_expr`): Go does NOT
+    # mask the shift count (`1 << 32` is 0, not 1) and panics on a negative
+    # signed count, so the count is taken as `uint32(n) & 31` to match the
+    # spec's mod-32 rule and wasm/JS.
+    "&": "&", "|": "|", "^": "^", "<<": "<<", ">>": ">>",
 }
 
 _V3_GO_ATOMIC = {"var", "name", "lit", "call", "field", "index", "builtin"}
@@ -3428,12 +3447,22 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             if node.get("operands") in ("Int", "Int32"):
                 return f"revlDiv(float64({left}), float64({right}))"
             return f"revlDiv({left}, {right})"
+        if op in ("<<", ">>"):
+            # Int32 shift: mask the count to 0..31 as an unsigned value, because
+            # Go neither masks the count nor accepts a negative signed one. `<<`
+            # drops the high bits (int32 two's complement); `>>` on the signed
+            # int32 is arithmetic (docs/arithmetic.md, item 366).
+            return f"({left} {op} (uint32({right}) & 31))"
         return f"({left} {go_op} {right})"
 
     if kind == "un":
         operand = _go_v3_expr(node.get("operand"), ctx)
         if node.get("op") == "!":
             return f"(!{operand})"
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): Go spells bitwise NOT as the
+            # unary `^`. A bit op, so it never traps.
+            return f"(^{operand})"
         if node.get("op") == "-":
             if node.get("operands") == "Int":
                 ctx.needs_overflow = True

@@ -3558,6 +3558,17 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # over the emitted code — docs/conformance.md.)
             return (f'format!("{{}}{{}}", {_render_expr(node["left"], ctx, rename)}, '
                     f'{_render_expr(node["right"], ctx, rename)})')
+        if node.get("op") in ("&", "|", "^", "<<", ">>"):
+            # Int32 bitwise operators (item 366, docs/arithmetic.md). `& | ^`
+            # are native on i32 and never trap. Shifts mask the count to 0..31
+            # (mod 32): rust panics on a shift amount >= 32, so masking keeps
+            # `<<`/`>>` panic-free, and it matches wasm/JS. `<<` drops the high
+            # bits (i32 two's complement); `>>` on the signed i32 is arithmetic.
+            left = _render_expr(node["left"], ctx, rename)
+            right = _render_expr(node["right"], ctx, rename)
+            if node["op"] in ("&", "|", "^"):
+                return f"({left} {node['op']} {right})"
+            return f"({left} {node['op']} (({right}) & 31))"
         op = _V3_BIN_OPS.get(node.get("op"))
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
@@ -3587,6 +3598,11 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
     if kind == "un":
         operand = _render_expr(node.get("operand"), ctx, rename)
         if node.get("op") == "!":
+            return f"(!{operand})"
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): rust spells bitwise NOT on
+            # an integer as `!` (the same token it uses for logical not on
+            # bool). A bit op, so it never traps.
             return f"(!{operand})"
         if node.get("op") == "-":
             return f"(-{operand})"
