@@ -177,3 +177,35 @@ def test_selfhosted_lexer_numbers_match_reference(lex_src, src):
     got = _canon_emitted(lex_src(src))
     assert "error" not in {k for k, _, _ in got}, got
     assert got == _canon_reference(reference_lex(src, "number_case.rvl"))
+
+
+# Non-decimal integer prefixes (item 381) and `_` digit-group separators
+# (item 381), plus single-quoted string literals (item 382) — three lexer-local
+# forms the reference lexer accepts that no corpus file exercises, so the
+# differential oracle stayed green while the self-host lexer lacked them (the
+# same blind-spot family as `hole`, `${a || b}`, and the float cases above).
+# The reference normalizes a non-decimal / underscored int to its parsed value
+# (`str(int(digits, base))`), so the token TEXT the two lexers must agree on is
+# the decimal spelling: `0xFF` -> `255`, `1_000` -> `1000`, not the raw slice.
+LITERAL_FORM_CASES = [
+    # hex / binary / octal integers, either case for the prefix and a-f digits
+    "0xFF", "0xff", "0XFF", "0x0", "0xdead_beef", "0b1010", "0B1010",
+    "0o755", "0O17", "0x1_00", "let mask = 0xFF_FF",
+    # decimal underscore separators
+    "1_000", "1_000_000", "0_0", "1_2_3", "let n = 10_000 + 1",
+    # underscores inside a float's parts (int part, fraction, exponent)
+    "1_000.5", "3.14_15", "1_0e1_0",
+    # single-quoted string literals (same token kind + escapes as `"..."`)
+    "'a'", "'hello'", "''", "'a b c'",
+    r"'it\'s'",       # \' escapes the closing quote
+    r"'back\\slash'",  # \\ is a literal backslash
+    r"'not\nnewline'",  # \n is a literal backslash + n (no escape processing)
+    "let s = 'x' + 'y'",
+]
+
+
+@pytest.mark.parametrize("src", LITERAL_FORM_CASES)
+def test_selfhosted_lexer_literal_forms_match_reference(lex_src, src):
+    got = _canon_emitted(lex_src(src))
+    assert "error" not in {k for k, _, _ in got}, got
+    assert got == _canon_reference(reference_lex(src, "literal_form_case.rvl"))
