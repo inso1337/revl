@@ -41,4 +41,34 @@ def test_return_a_function_value_where_str_is_declared_is_refused():
     # the function itself; returning it where `Str` is declared must be a
     # type-mismatch, not a silent miscompile to exit 0.
     err = _err("fn f() -> Str { return f }\n")
-    assert "Str" in err
+    assert "expects `Str`" in err and "() -> Str" in err
+
+
+def test_return_a_named_fn_where_str_is_declared_is_refused():
+    # the same hole with a distinct name and a parameter, so the message names
+    # the real function type of the returned value.
+    err = _err("fn inc(n: Int) -> Int { return n + 1 }\n"
+               "fn g() -> Str { return inc }\n")
+    assert "expects `Str`" in err and "(Int) -> Int" in err
+
+
+def test_passing_a_wrong_signature_fn_by_name_is_refused():
+    # the SAME root cause on the argument path: a bare fn name passed where a
+    # function type is expected was never checked (its inferred type was None).
+    err = _err("fn apply(g: (Int) -> Int, x: Int) -> Int { return g(x) }\n"
+               "fn wrong(s: Str) -> Str { return s }\n"
+               "fn demo(n: Int) -> Int { return apply(wrong, n) }\n")
+    assert "(Int) -> Int" in err and "(Str) -> Str" in err
+
+
+def test_returning_a_correctly_function_typed_fn_still_compiles():
+    # item 92/342: a bare fn name whose type MATCHES the declared function
+    # return type must still compile — the fix refuses mismatches, not returns.
+    compile_source("fn inc(n: Int) -> Int { return n + 1 }\n"
+                   "fn get_inc() -> (Int) -> Int { return inc }\n", "t.rvl")
+
+
+def test_passing_a_correctly_typed_fn_by_name_still_compiles():
+    compile_source("fn apply(g: (Int) -> Int, x: Int) -> Int { return g(x) }\n"
+                   "fn inc(n: Int) -> Int { return n + 1 }\n"
+                   "fn demo(n: Int) -> Int { return apply(inc, n) }\n", "t.rvl")
