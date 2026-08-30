@@ -30,6 +30,55 @@ class SessionError(RuntimeError):
     """The session cannot do what was asked (no runtime, nothing loaded…)."""
 
 
+class AdmitVerdict:
+    """The outcome of an in-language `admit(source, granted)` crossing (roadmap
+    item 330). The verdict IS the permission decision: the type judgment the
+    admit gate made, handed back to the composition as data rather than raised.
+
+    A REFUSED verdict (`admitted` False) carries the compile refusal as
+    `message` — the repair signal a code-mode agent reads to fix its turn and
+    try again — and never touches the running system. An ADMITTED verdict
+    carries a `handle` whose crossings register into the ENCLOSING session's 245
+    frame, so 245's commit/abort and 246's class→approval policy govern them
+    uniformly with every other crossing in the session.
+    """
+
+    __slots__ = ("admitted", "message", "handle", "keys", "code")
+
+    def __init__(self, admitted: bool, *, message: str | None = None,
+                 handle: "AdmitHandle | None" = None,
+                 keys: tuple[str, ...] = (), code: str | None = None) -> None:
+        self.admitted = admitted
+        self.message = message
+        self.handle = handle
+        self.keys = tuple(keys)
+        self.code = code
+
+    def as_dict(self) -> dict:
+        return {"admitted": self.admitted, "message": self.message,
+                "keys": list(self.keys), "code": self.code}
+
+
+class AdmitHandle:
+    """A callable handle onto an admitted per-turn composition (roadmap item
+    330). Its `call` runs the turn's provided operations through the SAME path a
+    top-level `call` takes, so a granted-emission or witnessed-fs crossing the
+    turn makes registers into the enclosing session's 245 frame — the whole
+    point of the crossing: the per-turn actions are governed by the session's
+    commit/abort, not a separate lifecycle the turn could escape into."""
+
+    def __init__(self, session: "Session", keys: tuple[str, ...]) -> None:
+        self._session = session
+        self.keys = tuple(keys)
+
+    def call(self, key: str, method: str, args: list | None = None) -> dict:
+        if key not in self.keys:
+            raise SessionError(
+                f"key {key!r} is not one the admitted turn provides "
+                f"(provides: {', '.join(self.keys) or 'none'})")
+        return self._session.call(key, method, args)
+
+
 # How many generations the undo history retains (roadmap item 65,
 # docs/generation-history.md). Every admitted change appends one snapshot; the
 # oldest age out past this bound, so `undo --to` below the floor is refused
@@ -219,6 +268,12 @@ class Session:
         # the operator/test before load to control the location.
         self._wal_path: str | None = None
         self._clock_ms = None   # injectable ms clock (invariant 3); None = wall
+        # roadmap item 330: per-turn sources admitted THROUGH the in-language
+        # crossing while a call is driving the loop, queued for wiring the moment
+        # that call returns (a turn is never wired mid-call, exactly as the
+        # self-evolution loop never swaps synchronously). Empty in every session
+        # that does not admit, so nothing changes for one that does not.
+        self._pending_admits: list[dict] = []
 
     # -- plumbing ----------------------------------------------------------
 
@@ -288,6 +343,13 @@ class Session:
         self.ir = ir
         self.origin = origin
         self.draft = None
+        # roadmap item 330: bind this session as the live target of the classified
+        # in-language `admit` crossing (stdlib/admit.rvl), so a composition that
+        # `use`s it admits per-turn sources against THIS running session. Bound
+        # here — before any activation body runs — so the crossing is live from
+        # the first call. A no-op import cost for a composition that never admits.
+        from . import admit_bridge as _admit_bridge  # noqa: PLC0415
+        _admit_bridge.bind(self)
         self.recorder = replay_module().Recorder(ir) if record else None
         self._generation = 1
         self._history = []
@@ -1300,6 +1362,11 @@ class Session:
     def _reset(self) -> None:
         if self._driver is not None:
             self._driver.runtime.clear_session_owner()
+        # item 330: drop the admit-crossing binding so a torn-down session is
+        # never reachable through `stdlib/admit.rvl` (only the live one is).
+        from . import admit_bridge as _admit_bridge  # noqa: PLC0415
+        if _admit_bridge.current() is self:
+            _admit_bridge.bind(None)
         self._driver = None
         self._owner = None
         self.ir = None
@@ -1319,6 +1386,130 @@ class Session:
         self._ledger = []
         self._grants = []
         self._grants_consumed = 0
+
+    # -- the per-turn admit+run crossing (roadmap item 330) ----------------
+
+    def admit(self, source: str, granted=None, *,
+              filename: str = "<turn>.rvl",
+              modules: dict[str, str] | None = None) -> AdmitVerdict:
+        """Admit and wire a per-turn source into the RUNNING composition — the
+        first-class admit+run crossing (roadmap item 330).
+
+        This is the host target of the classified in-language `admit` crossing
+        (stdlib/admit.rvl + revl.mcp.admit_bridge, docs/mcp-bridge.md): a running
+        composition hands a model-authored per-turn `source` and the set of
+        service names it is `granted` to reach, and gets back an `AdmitVerdict`.
+        The verdict is the type judgment that IS the permission decision — a
+        REFUSAL is the repair signal handed back as data, never a raised error
+        the turn cannot catch — plus, on admission, a handle whose crossings
+        register into THIS session's 245 frame.
+
+        The decision applies the item-329 untrusted-author profile: the turn may
+        declare no new `extern`/host-block (no smuggled host code, G8) and may
+        reach no service outside `granted` (the allowlist). And it is ADDITIVE
+        only — a turn that would replace a running component is refused, because
+        an untrusted turn composes granted providers, it never swaps them.
+        """
+        from ..admit_profile import AdmissionProfile  # noqa: PLC0415
+        from ..compiler import compile_source  # noqa: PLC0415
+        from ..errors import RevlError  # noqa: PLC0415
+
+        self._require()
+        if self._owner is None:
+            raise SessionError(
+                "admit needs a running session owner (item 245) — load a "
+                "composition first, so the turn's crossings have a frame to "
+                "register into")
+        profile = AdmissionProfile.untrusted_author(granted or ())
+        try:
+            turn_doc = compile_source(source, filename, manifest=self.ir,
+                                      modules=modules, profile=profile)
+        except RevlError as error:
+            # the refusal is the repair signal — returned as a verdict, the
+            # running composition untouched, never raised into the turn.
+            return AdmitVerdict(False, message=str(error),
+                                code=getattr(error, "code", None))
+
+        running = {c["name"] for c in (self.ir or {}).get("components") or []}
+        clash = sorted(c["name"] for c in turn_doc["components"]
+                       if c["name"] in running)
+        if clash:
+            return AdmitVerdict(False, code="G2", message=(
+                f"admission refused: the per-turn source would replace running "
+                f"component(s) {', '.join(clash)}. An admitted turn composes "
+                f"granted providers into the running composition; it does not "
+                f"swap them (item 330 is additive-only — hot-swap is `revl_swap`, "
+                f"a separate, operator-gated verb)."))
+
+        keys = tuple(k for c in turn_doc["components"]
+                     for k in (c.get("provides") or {}))
+        # WIRING vs DECISION. Admitting is the decision; wiring the turn into the
+        # live driver needs the event loop, which may already be running when the
+        # admit arrives THROUGH the in-language crossing (that call is itself
+        # driving the loop). So, exactly as the self-evolution loop never swaps
+        # synchronously (`demo/evolve_bridge.propose`), a turn admitted from
+        # inside a live call is QUEUED and wired the moment that call returns; a
+        # turn admitted directly (no loop in flight) wires now.
+        if self._loop is not None and self._loop.is_running():
+            self._pending_admits.append(turn_doc)
+        else:
+            self._wire_turn(turn_doc)
+        return AdmitVerdict(True, handle=AdmitHandle(self, keys), keys=keys)
+
+    def _wire_turn(self, turn_doc: dict) -> tuple[str, ...]:
+        """Plug an admitted turn's components into the LIVE driver with the
+        session owner active — so every frame the turn builds joins the same
+        live-frame registry the enclosing session's commit/abort iterate — then
+        adopt the turn into the live composition ir so `call`, commit and abort
+        span it. Returns the turn's provided keys.
+
+        Under the item-329 no-extern profile the turn holds no host code of its
+        own; its granted-emission and witnessed-fs crossings execute in the
+        granted PROVIDERS' frames (already in the owner registry). Plugging the
+        turn is what makes those providers reachable from the turn and its own
+        provided keys callable, all inside the one 245 frame."""
+        driver = self._driver
+        runtime_mod = driver.runtime
+        module = self._prepare_module(turn_doc)
+        turn_components = list(turn_doc["components"])
+
+        async def _plug() -> None:
+            for comp in turn_components:
+                name = comp["name"]
+                fiber = runtime_mod.plug(driver.root, getattr(module, name),
+                                         driver.config.get(name, {}))
+                driver.fibers[name] = fiber
+                await driver._flush()
+                if fiber.state == driver.FiberState.LOADING:
+                    # an async activation body in flight — settle it exactly as
+                    # `_Driver._load` does, so a PENDING/LOADING race cannot leave
+                    # the turn half-wired.
+                    await asyncio.wait_for(asyncio.shield(fiber), 2)
+            await driver._flush()
+
+        # the owner must be the process-global session owner while the turn's
+        # frames are BUILT, so each `Frame.__init__` joins its registry; cleared
+        # after, exactly as `load` scopes it, so no later stray frame joins.
+        runtime_mod.set_session_owner(self._owner)
+        try:
+            self._run(_plug())
+        finally:
+            runtime_mod.clear_session_owner()
+
+        # adopt the turn into the live composition: `turn_doc["manifest"]`
+        # already describes the WHOLE resulting composition (base + turn), so
+        # `_dispose_all`/`_namespace`/load order span both and teardown is
+        # residue-free over the union.
+        self.ir["components"].extend(turn_components)
+        for name, spec in turn_doc["services"].items():
+            self.ir["services"].setdefault(name, spec)
+        self.ir["manifest"] = turn_doc["manifest"]
+        driver.ir = self.ir
+
+        keys: list[str] = []
+        for comp in turn_components:
+            keys.extend((comp.get("provides") or {}).keys())
+        return tuple(keys)
 
     # -- interaction -------------------------------------------------------
 
@@ -1363,7 +1554,22 @@ class Session:
         finally:
             if self.recorder is not None:
                 self.recorder.activation_origin()
+        # item 330: a per-turn source admitted through the in-language crossing
+        # DURING this call was queued (the loop was busy); wire it now the call
+        # has returned and the loop is free — the turn's keys become callable and
+        # its crossings are already governed by this session's 245 frame.
+        self._drain_pending_admits()
         return {"result": _plain(result), "trace": driver.drain_events()}
+
+    def _drain_pending_admits(self) -> None:
+        """Wire every turn admitted (and queued) during the call that just
+        returned. Kept off the hot path: a session that never admits has an empty
+        queue and pays nothing."""
+        if not self._pending_admits:
+            return
+        pending, self._pending_admits = self._pending_admits, []
+        for turn_doc in pending:
+            self._wire_turn(turn_doc)
 
     # -- the auto-approve policy (roadmap item 246) ------------------------
 
