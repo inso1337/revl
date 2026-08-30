@@ -535,6 +535,42 @@ class ExprList:
     line: int
 
 
+# ------------------------------------------------------ item 383: list transforms
+# The receiver-first functional transforms `xs.map(f)` / `xs.filter(p)` /
+# `xs.reduce(init, f)` are PURE SUGAR for the generic free functions
+# `list_map` / `list_filter` / `list_reduce` in stdlib/list.rvl — the same
+# desugar-to-a-plain-CALL shape as item 189's Value dot-accessors, except the
+# free function is generic and takes a function-value argument (items 92/342).
+#
+# The redirect happens BEFORE typing and lowering (`desugar_list_transform` is
+# called from typecheck.py and lower.py at the method-call site), so the
+# existing generic-call + arrow-argument inference does all the work. This is
+# deliberately NOT a `_BUILTIN_SIG` row: no builtin-method signature can express
+# `map`'s result `List[<f's return>]` (the return type must be solved from the
+# arrow), so the sugar is a syntactic redirect to a real generic `fn`, not a
+# builtin. Receiver-first: the receiver becomes the leading argument, preserving
+# the written argument order (`xs.reduce(init, f)` -> `list_reduce(xs, init, f)`).
+LIST_TRANSFORMS = {
+    "map": "list_map",
+    "filter": "list_filter",
+    "reduce": "list_reduce",
+}
+
+
+def desugar_list_transform(expr):
+    """If `expr` is a `recv.map(...)` / `.filter(...)` / `.reduce(...)` call,
+    return the equivalent `list_map(recv, ...)` free-function ExprCall; else
+    return None. The receiver is threaded in as the leading argument."""
+    callee = expr.callee
+    if not isinstance(callee, ExprField):
+        return None
+    free = LIST_TRANSFORMS.get(callee.name)
+    if free is None:
+        return None
+    return ExprCall(ExprVar(free, callee.line),
+                    [callee.target, *expr.args], expr.line)
+
+
 @dataclass
 class ExprArrow:
     params: list[str]
@@ -3135,6 +3171,18 @@ class Parser:
             items = []
             while not self.at("]"):
                 items.append(self.pure_expr())
+                # item 383: `[x for x in xs]` is a comprehension — a shape revl
+                # does not have. Without this the loop re-enters `pure_expr` on
+                # the `for` keyword and reports the cryptic `expected an
+                # expression, found 'for'`; redirect to the spelling that works.
+                if self.at("kw", "for"):
+                    raise self.err(
+                        self.peek().line,
+                        "revl has no list comprehensions",
+                        hint="use `xs.map(x => …)` / `xs.filter(x => …)` "
+                             "(with `use \"stdlib/list.rvl\"`), or a "
+                             "`for (x of xs) { … }` loop that pushes onto a "
+                             "`var` list")
                 if self.at(","):
                     self.next()
             self.expect("]")

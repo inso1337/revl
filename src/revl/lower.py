@@ -105,6 +105,8 @@ from .parser import (
     TypeDecl,
     UnloadStmt,
     WhileStmt,
+    LIST_TRANSFORMS,
+    desugar_list_transform,
 )
 
 IR_VERSION = 1
@@ -3071,6 +3073,15 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         )
         if isinstance(expr.callee, ExprField) and not _host_receiver:
             method = expr.callee.name
+            # item 383: receiver-first list transforms (`xs.map(f)` etc.) are
+            # SUGAR for their generic free function; desugar to the plain call
+            # here (the checker already typed the desugared form) so the
+            # existing generic-call path lowers it. Pure syntactic redirect —
+            # no builtin-method row, so no new per-backend branch.
+            if method in LIST_TRANSFORMS:
+                return _lower_pure_expr(desugar_list_transform(expr), scope,
+                                        callables, alias_fns, filename,
+                                        type_env, types)
             arity = _BUILTIN_METHODS.get(method)
             if arity is None:
                 raise RevlError(

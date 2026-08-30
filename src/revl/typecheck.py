@@ -1120,7 +1120,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         ExprArrow, ExprBin, ExprBlockArm, ExprCall, ExprField, ExprHole,
         ExprIf, ExprIndex, ExprList, ExprLit, ExprMatch, ExprOptCall,
         ExprOptField, ExprRecord, ExprRecordUpdate, ExprUn, ExprVar, Interp,
-        Lit,
+        Lit, LIST_TRANSFORMS, desugar_list_transform,
     )
 
     line = getattr(expr, "line", 0)
@@ -1515,6 +1515,15 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                     host_check(dotted, arg_types, filename, line)
                     return expr.callee.target.name
             target_t = infer_ast(expr.callee.target, tenv, types, filename)
+            # item 383: receiver-first list transforms (`xs.map(f)` etc.)
+            # desugar to their generic free function so the existing
+            # generic-call + arrow-argument inference types them; a builtin
+            # sig cannot express `map`'s result `List[<f's return>]`. Skipped
+            # for a host-family receiver — that stays on the host stub surface.
+            if (expr.callee.name in LIST_TRANSFORMS
+                    and target_t not in _HOST_FAMILIES):
+                return infer_ast(desugar_list_transform(expr), tenv, types,
+                                 filename)
             return builtin_check(expr.callee.name, target_t, arg_types, filename, line)
         # any other callee expression: an arrow applied in place, a function
         # value read out of a `let` chain, …
