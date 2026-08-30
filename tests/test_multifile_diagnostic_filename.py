@@ -129,7 +129,12 @@ def test_duplicate_top_level_fn_names_the_later_file(tmp_path, monkeypatch):
         compile_files([str(first), str(second)])
 
     error = excinfo.value
-    assert error.message == "duplicate function `shared`"
+    # roadmap 394: a cross-file duplicate now names BOTH declaring files by
+    # absolute path (so a two-copies-of-one-module situation is self-evident);
+    # the diagnostic is still *located* on the second file's declaration.
+    assert error.message.startswith("duplicate function `shared`")
+    assert str(first.resolve()) in error.message, error.message
+    assert str(second.resolve()) in error.message, error.message
     assert error.filename.endswith("second.rvl"), error.filename
     assert error.line == 4
     assert len(first.read_text().splitlines()) < error.line
