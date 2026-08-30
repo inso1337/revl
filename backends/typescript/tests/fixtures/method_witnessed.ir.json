@@ -12,6 +12,20 @@
           ],
           "returns": null,
           "emission": true
+        },
+        "mv": {
+          "params": [
+            {
+              "name": "a",
+              "type": "Str"
+            },
+            {
+              "name": "b",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
         }
       }
     }
@@ -46,6 +60,32 @@
                       {
                         "kind": "name",
                         "id": "p"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "mv",
+              "params": [
+                "a",
+                "b"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "fn",
+                    "name": "move_e",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "a"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "b"
                       }
                     ]
                   }
@@ -86,6 +126,14 @@
       "kind": "record",
       "fields": {
         "code": "Str"
+      }
+    },
+    "Move": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "from": "Str",
+        "to": "Str"
       }
     }
   },
@@ -129,6 +177,58 @@
         "callee": {
           "kind": "var",
           "name": "unstash"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unmove",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "Move"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  const world = (globalThis as any).__revlFsWorld\n  if (world[w.to] !== undefined) {\n    world[w.from] = world[w.to]\n    delete world[w.to]\n  }\n  record('unmove ' + w.from + '<-' + w.to)\n"
+      }
+    },
+    {
+      "name": "move_e",
+      "class": "witnessed",
+      "params": [
+        {
+          "name": "a",
+          "type": "Str"
+        },
+        {
+          "name": "b",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Move, FsError]",
+      "bodies": {
+        "ts": "\n  const world = (globalThis as any).__revlFsWorld\n  world[b] = world[a]\n  delete world[a]\n  record('move ' + a + '->' + b)\n  return { kind: 'Ok', value: { from: a, to: b } }\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "Move",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unmove"
         },
         "args": [
           {
