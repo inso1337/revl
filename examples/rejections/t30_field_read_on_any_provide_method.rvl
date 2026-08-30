@@ -1,0 +1,34 @@
+// REJECTED — the provide-method twin of t29_field_read_on_any (roadmap item
+// 392). A field read off a value whose static type is `Any` is the 279/299
+// silent-divergence class (py raises `KeyError`, ts yields `undefined`); item
+// 380(2) refuses it in a bare `fn`/`test`/module-`fn` body, but the SAME
+// expression inside a `provide` method body was typed through a different
+// stratum (`infer_ir`, the lowered component-body path) that never reached the
+// refusal, so it compiled clean — the same context-scoping class as the earlier
+// `.length`-in-provide-method gap. The check is now applied uniformly, so the
+// divergence is a compile error on every tier regardless of where the read sits.
+//
+// Legal spellings (identical to t29): bind to a record type first (an `Opt[T]`
+// field then reads TOTAL), or walk the erased value with stdlib/value.rvl
+// (`value_is_object`, `value_opt`, `value_field_or`).
+//
+// expected error:
+//   field read `.kind` on a value of type `Any` — an erased value has no known
+//   fields
+
+pub extern pure fn jp(s: Str) -> Any
+  = @py { import json; return json.loads(s) }
+  = @ts { return JSON.parse(s) }
+
+service Reader {
+  fn read(s: Str) -> Str
+}
+
+component Parser provides reader: Reader {
+  provide reader {
+    fn read(s) {
+      let v: Any = jp(s)
+      return v.kind
+    }
+  }
+}
