@@ -209,6 +209,15 @@ fn java_bin_ops(op: Str) -> Str {
   if (op == "%") { return "%" }
   if (op == "&&") { return "&&" }
   if (op == "||") { return "||" }
+  // Int32 bitwise operators (item 366, docs/arithmetic.md). All native on a
+  // Java `int` and none trap: `& | ^` are the bit ops; a `<<`/`>>` on `int`
+  // masks the shift count to its low 5 bits (JLS 15.19), exactly the spec's
+  // mod-32 rule, and `>>` is the arithmetic (sign-extending) shift.
+  if (op == "&") { return "&" }
+  if (op == "|") { return "|" }
+  if (op == "^") { return "^" }
+  if (op == "<<") { return "<<" }
+  if (op == ">>") { return ">>" }
   return ""
 }
 fn exact_method(op: Str) -> Str {
@@ -433,6 +442,10 @@ fn render_un(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let op = node_op(node)
   let r = render_expr(value_field(node, "operand"), ctx, counter)
   if (op == "!") { return { text: `(!${r.text})`, counter: r.counter } }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): Java's `~` on an `int`. Never traps.
+    return { text: `(~${r.text})`, counter: r.counter }
+  }
   if (op == "-") {
     if (is_int_operand(node_operands(node))) { return { text: `Math.negateExact(${r.text})`, counter: r.counter } }
     return { text: `(-${r.text})`, counter: r.counter }
