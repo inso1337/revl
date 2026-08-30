@@ -840,6 +840,14 @@ class _ComponentEmitter:
             name = expr.get("name")
             if not isinstance(name, str) or not name.isidentifier():
                 raise EmitError(f"{where}: bad field name {name!r}")
+            if expr.get("sized_length"):
+                # item 104 (cross-tier): property-form `.length` on a sized value
+                # in a component position — the code-point (Str) / element (List)
+                # count, NOT a record `getattr` (which raises on a str). python's
+                # `len` counts code points, matching `.length()` and the fn-body
+                # `len` node. The frontend marks this only on a sized target, so
+                # a record field literally named `length` still reads its slot.
+                return f"len({self._expr(expr.get('target'), where)})"
             # record literals are dicts; ADT payloads are objects — the
             # preamble helper reads either shape. An `Opt[T]`-declared field
             # reads TOTAL (item 379): absent -> None, the Opt's empty case.
@@ -847,13 +855,6 @@ class _ComponentEmitter:
             return f"{helper}({self._expr(expr.get('target'), where)}, {name!r})"
         if kind == "index":
             return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
-        if kind == "len":
-            # item 104 (cross-tier): the property form `.length` on a sized
-            # value lowers to a `len` node in component/provide positions too
-            # (lower.py), so the component emitter must render it — python's
-            # `len` counts code points, matching `.length()` and the `len` node
-            # in fn bodies.
-            return f"len({self._expr(expr.get('target'), where)})"
         if kind == "bin":
             if expr.get("op") == "??":
                 lhs = self._expr(expr.get("left"), where)
@@ -1871,6 +1872,11 @@ def _expr(node: dict) -> str:
             return f"(await {call})"
         return call
     if kind == "field":
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value —
+            # the code-point/element count, not a record `getattr`. python's
+            # `len` counts code points.
+            return f"len({_expr(node['target'])})"
         # record literals are dicts; ADT payloads are objects — the preamble
         # helper reads either shape. An `Opt[T]`-declared field reads TOTAL
         # (item 379): absent -> None, the Opt's empty case.

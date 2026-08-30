@@ -742,6 +742,14 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value in
+            # a component position (the frontend keeps it a `field` node here and
+            # marks it, since this emitter has no static type at the field site).
+            # It is the code-point/element count, not a record member read — the
+            # same `revlLen` the `len` node routes through (code points for a
+            # `Str`, not UTF-16 units).
+            return f"revlLen({target})"
         return _member(target, node.get("name"), "field")
 
     if kind == "index":

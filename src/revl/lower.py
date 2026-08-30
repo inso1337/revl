@@ -3877,19 +3877,22 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         if inst is not None:
             return _lower_instance_get(lowered_target, expr.name, line, inst, env)
         target_type = infer_ir(lowered_target, env.type_env, env.types, env.services)
-        # item 104 (cross-tier): the property form `.length` on a sized value
-        # (Str/Bytes/List) is a `len`, not a record field. `_lower_pure_expr`
-        # already folds it to a `len` node in fn bodies; the COMPONENT/provide
-        # path was missing the symmetric case, so `"café".length` in a provide
-        # method reached each tier's field emitter (no `length` case) and raised
-        # at emit/runtime instead of counting code points. Gated on a sized
-        # type so a record whose field is literally named `length` still reads
-        # its slot.
-        if expr.name == "length" and _is_sized_type(target_type):
-            return {"kind": "len", "target": lowered_target}
         node = {"kind": "field", "target": lowered_target, "name": expr.name}
+        # item 104 (cross-tier): the property form `.length` in a COMPONENT
+        # position stays a `field` node (the fn-body form is a `len` node — that
+        # split is deliberate). But `.length` on a sized value (Str/Bytes/List)
+        # is the code-point/element count, not a record slot: each tier's field
+        # emitter reads a record field by `getattr`/member, which raises on a
+        # `Str`. The component emitters carry no static type at the field site
+        # (unlike the typed wasm/rust emitters), so the frontend marks the node
+        # here — with the SAME `_is_sized_type` check — and the field handlers
+        # honour the mark, rendering the code-point path. Gated on a sized type,
+        # so a record whose field is literally named `length` still reads its
+        # slot.
+        if expr.name == "length" and _is_sized_type(target_type):
+            node["sized_length"] = True
         # item 379: an `Opt[T]`-declared field reads TOTAL on every tier.
-        if _field_is_opt(target_type, expr.name, env.types):
+        elif _field_is_opt(target_type, expr.name, env.types):
             node["opt"] = True
         return node
     if isinstance(expr, ExprCall):
