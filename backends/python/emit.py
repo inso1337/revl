@@ -775,6 +775,24 @@ class _ComponentEmitter:
                                    self._expr(arm.get("body"), where))}
                                 for arm in arms],
                                awaited=awaited)
+        if kind == "do":
+            # a statement-block match arm lowered inline (item 361): each `let`
+            # becomes a walrus bind carried by a `(<binds>, <tail>)[-1]` tuple,
+            # so an `await` in a value or the tail lands in the enclosing
+            # `async def` frame — the match holding this arm renders its awaited
+            # (walrus) form when the arm reaches a coroutine, never a sync
+            # lambda (item 263).
+            binds = []
+            for st in expr.get("stmts") or []:
+                if st.get("step") != "let":
+                    raise EmitError(
+                        f"{where}: unsupported step in a block arm: {st.get('step')!r}")
+                nm = _ident(st.get("name"), f"{where}: block-arm binding")
+                binds.append(f"({nm} := {self._expr(st.get('value'), where)})")
+            tail = self._expr(expr.get("tail"), where)
+            if binds:
+                return f"({', '.join(binds)}, {tail})[-1]"
+            return f"({tail})"
         if kind == "adt":
             case = _ident(expr.get("case"), f"{where}: adt case")
             args = ", ".join(self._expr(a, where) for a in expr.get("args") or [])

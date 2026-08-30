@@ -3566,6 +3566,74 @@ def _component_req_call(env: Env, root: str, method: str, args: list, line: int)
             "method": method, "args": args}
 
 
+def _refuse_block_arm_stmt(stmt, filename: str):
+    """A provide-method match block arm lowers only `let` bindings + a final
+    expression (roadmap item 361): that is the shape BOTH tiers emit as an
+    expression (an awaited walrus sequence on the expression-only python tier,
+    an IIFE on ts). A loop / reassignment / destructuring is refused with a
+    clear message rather than mis-compiled — the sound residual, narrower than
+    the former blanket "not lowerable here" refusal."""
+    desc = {
+        AssignStmt: "a reassignment",
+        WhileStmt: "a `while` loop",
+        ForStmt: "a `for` loop",
+        IfStmt: "a statement `if`",
+        LetPatternStmt: "a destructuring `let`",
+    }.get(type(stmt), "this statement")
+    raise RevlError(
+        filename, getattr(stmt, "line", 0),
+        f"{desc} is not lowered inside a provide-method match block arm",
+        hint="a block arm here supports `let` bindings and a final expression "
+             "(the shape both tiers emit as an expression); lift a loop or "
+             "reassignment into a module `fn`, or rewrite it with `let` / an "
+             "`if`-expression (docs/records.md §6)",
+        code="G6", category="block-arm",
+    )
+
+
+def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
+                               callables: set, pure_only: bool = False) -> dict:
+    """Lower a statement-block match arm (`=> { let x = …; expr }`) inside a
+    component / provide-method body (roadmap item 361).
+
+    A module-fn block arm is lambda-lifted into a synthetic helper `fn`
+    (`_lift_block_arm`), but a provide-method block arm may read component
+    `config` or a required service, which a module `fn` cannot hold — so it is
+    lowered *inline* as a `do` expression (a `let`-sequence + a final value).
+    The emitters render it as an IIFE (ts) / an awaited walrus sequence (py),
+    so an async extern reached in the block is awaited within the method's
+    in-flight window. The async-coloring fixed point and the A1 refusals are
+    left untouched: they walk the lowered body (`_calls_in`), see the async
+    callable inside the `do` node, and still refuse a *sync* method reaching
+    it — only an `async` method admits and awaits it."""
+    filename = env.filename
+    inner = dict(scope)
+    taken = set(inner.values())
+    saved_tenv = dict(env.type_env)
+    stmts: list[dict] = []
+    try:
+        for st in expr.stmts:
+            if not isinstance(st, LetStmt):
+                _refuse_block_arm_stmt(st, filename)
+            value = _lower_component_pure_expr(st.value, env, inner, callables, pure_only)
+            safe = _safe_name(st.name, taken)
+            taken.add(safe)
+            inner[st.name] = safe
+            if st.type is not None:
+                check_type_wellformed(filename, st.line, st.type)
+                env.type_env[safe] = st.type
+            else:
+                inferred = infer_ir(value, env.type_env, env.types, env.services)
+                if inferred is not None:
+                    env.type_env[safe] = inferred
+            stmts.append({"step": "let", "name": safe, "value": value,
+                          "mutable": bool(st.mutable)})
+        tail = _lower_component_pure_expr(expr.tail, env, inner, callables, pure_only)
+    finally:
+        env.type_env = saved_tenv
+    return {"kind": "do", "stmts": stmts, "tail": tail}
+
+
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
                                pure_only: bool = False) -> dict:
     filename = env.filename
@@ -3874,7 +3942,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                                                               pure_only)]
                             for name, e in expr.updates]}
     if isinstance(expr, ExprBlockArm):
-        raise _block_arm_unimplemented(filename, expr.line)
+        return _lower_component_block_arm(expr, env, scope, callables, pure_only)
     if isinstance(expr, ExprList):
         return {"kind": "list",
                 "items": [_lower_component_pure_expr(e, env, scope, callables, pure_only)
