@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
 from revl import fault as fault_mod  # noqa: E402
+from revl.run_rust import rust_runtime_reason  # noqa: E402
 
 EXAMPLES = ROOT / "examples"
 
@@ -239,6 +240,14 @@ needs_cordis = pytest.mark.skipif(
     reason="cordis-py runtime not installed (sh backends/python/setup.sh)")
 needs_go = pytest.mark.skipif(shutil.which("go") is None, reason="go not installed")
 
+# The rust `--once` runner needs cargo on PATH and cordis-rs resolvable; the
+# same gate the runner itself applies (fault_mod.rust_runtime_reason). Probed
+# once at collection so the reason is carried into the skip message.
+_RUST_REASON = rust_runtime_reason()
+needs_rust = pytest.mark.skipif(
+    _RUST_REASON is not None,
+    reason=f"cordis-rs runtime not available: {_RUST_REASON}")
+
 
 @needs_cordis
 def test_py_reference_tier_sweeps_the_two_phase_composition_residue_free():
@@ -275,6 +284,39 @@ def test_the_two_phase_abort_is_exercised_on_the_reference_tier(capsys):
     assert "compensate" in out
     assert "compensation is not inversion" in out
     assert "0 failed" in out
+
+
+@needs_rust
+def test_rust_once_runner_sweeps_the_two_phase_composition_residue_free():
+    # roadmap item 340 (found by the item-125 cross-tier sweep): a mid-body
+    # `fail`/L-Raise used to make the rust `--once` runner unwrap a faulting
+    # `Ready` and PANIC (exit 101), so rust loud-skipped as a capability gap.
+    # The runner now unwinds the teardown accumulator LIFO and prints the
+    # no-residue proof, so rust EXECUTES the sweep, residue-free at every fault
+    # point (bring-up, provision, mid-life effect, and the compensating emit).
+    record = fault_mod._compiled_tier_sweep("rust", _two_phase(), {}, [], cap=None)
+    assert record["status"] == "executed", record["reason"]
+    assert len(record["points"]) == 4
+    assert all(p["status"] == "clean" for p in record["points"]), record["points"]
+
+
+@needs_rust
+@needs_go
+def test_rust_joins_the_cross_tier_fault_sweep_agreement():
+    # the payoff of item 340: rust now JOINS the cross-tier agreement set — it
+    # sweeps the same fault points as another executing tier (go here) and
+    # reaches the same residue-free verdict at each. Restricted to the two
+    # compiled tiers so a heavy per-point emit+build stays laptop-runnable.
+    failures, dossier = fault_mod.cross_tier_sweep(
+        _two_phase(), tiers=("go", "rust"), out=lambda _line: None)
+    assert failures == 0, dossier["agreement"]
+    executed = dossier["agreement"]["executed"]
+    assert "rust" in executed and "go" in executed, dossier["agreement"]
+    # same fault-point set on both, residue-free on both -> genuine agreement
+    assert dossier["agree"] is True
+    assert dossier["agreement"]["points"] == 4
+    assert dossier["agreement"]["crossChecked"] == 4
+    assert dossier["counts"]["disagreements"] == 0
 
 
 def test_absent_compiled_toolchains_loud_skip_and_never_count_as_executed(
