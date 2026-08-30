@@ -1,0 +1,11 @@
+// REJECTED — `xs[a:b]` is Python slice syntax; revl indexes a single element
+// with `[i]` and slices with the method `xs.slice(a, b)` (item 384). The `:`
+// used to report `expected ], found ':'`.
+//
+// expected error:
+//   revl has no slice syntax `xs[a:b]`
+
+fn f(xs: List[Int]) -> Int {
+  let s = xs[0:2]
+  return 0
+}
