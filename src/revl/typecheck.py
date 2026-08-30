@@ -811,7 +811,33 @@ _BUILTIN_SIG = {
     # per tier by tests. remove() is persistent (new map) and TOTAL: an
     # absent key is a no-op returning an equal map, never an error.
     "size": ("Map", [], "Int"),
-    "keys": ("Map", [], "List[Str]"),
+    # `keys` is spelled for two receiver families: the Map key set (above) AND
+    # the Value record-key enumeration (roadmap item 189 — the dot-method form
+    # of stdlib/value.rvl's `value_keys`). Select the row by the receiver head,
+    # exactly as `to_int` does (Int32-widen vs Str-parse). The Value row is one
+    # of the four Value dot-accessors (`.field`/`.str`/`.list`/`.keys`); each
+    # lowers to a plain call of its `value_*` free function, so the dot form is
+    # PURE SUGAR that emits byte-identically to the nested free-function form.
+    "keys": {
+        "Map": ("Map", [], "List[Str]"),
+        "Value": ("Value", [], "List[Str]"),
+    },
+    # ------------------------------------------------------------- Value access
+    # The Value dot-method accessors (roadmap item 189, DECIDED option A):
+    # receiver-first sugar for stdlib/value.rvl's `value_*` free functions, so
+    # `node.field("callee").field("name").str()` reads left-to-right instead of
+    # the inside-out `value_str(value_field(value_field(node, "callee"),
+    # "name"))`. Registered here (and in lower._BUILTIN_METHODS) as builtin
+    # methods like `.charAt()` — NO new IR expr-kind. Each lowers to a plain
+    # CALL of its `value_*` equivalent (value_field/value_str/value_list, and
+    # `keys` above), so the emitted code is byte-identical to the free-function
+    # spelling on every tier value.rvl runs on. `.keys()` shares its name with
+    # `Map.keys()` above, hence the multi-receiver dict row. Total accessors:
+    # a shape mismatch reads back a typed default (never a fault), inherited
+    # verbatim from the free-function bodies (docs/stdlib-value.md).
+    "field": ("Value", ["Str"], "Value"),
+    "str": ("Value", [], "Str"),
+    "list": ("Value", [], "List[Value]"),
     "remove": ("Map", ["Str"], "@self"),
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): decimal
     # spelling, total over the whole i64 range including Int.MIN. A method
@@ -979,7 +1005,7 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
         if family == "sized" and thead not in _SIZED_HEADS:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`")
-        if family in ("List", "Str", "Int", "Int32", "Map") and thead != family:
+        if family in ("List", "Str", "Int", "Int32", "Map", "Value") and thead != family:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a {family} receiver, got `{render_type(target_type)}`")
     # `@elem` is the element/value parameter: a List's single argument for
