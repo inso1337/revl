@@ -1235,6 +1235,20 @@ class _ComponentEmitter:
 
         for step in self.ir.get("body") or []:
             kind = step.get("step")
+            if kind in ("let-effect", "effect", "emit") and step.get("async"):
+                # item 131: the awaited effect-composition spellings (`effect
+                # await …`, `await emit …`) suspend a fiber. This tier awaits
+                # only the `Job.run` host op (see the `await` branch below);
+                # there is no async host seam for an acquisition or an emission
+                # here, so silently erasing the marker would drop the suspension
+                # semantics. Refuse honestly, matching the await-step refusal.
+                spelling = "await emit" if kind == "emit" else "effect await"
+                verb = "emit" if kind == "emit" else "effect"
+                raise EmitError(
+                    f"{where}: `{spelling}` suspends a fiber, but this tier "
+                    f"awaits only `Job.run(name)` (the runtime's async host op); "
+                    f"an awaited {verb} step lives on the hosted backends (py/ts)"
+                )
             if kind in ("let-effect", "effect"):
                 seg = []
                 wit = self._witnessed_extern(step.get("acquire"))

@@ -4399,18 +4399,30 @@ from .emission_analysis import (  # noqa: E402,F401
 
 
 def _async_reached_outside_provide(node, async_names: set, acc: set) -> None:
-    """Async extern names a lowered component body reaches, *excluding*
-    provide-method and timer bodies (those get their own in-flight window —
-    async-extern.md §3, item 170). Mirrors `_calls_in`'s call/value detection
-    but prunes provide steps and timer steps.
+    """Async extern names a lowered component body reaches, *excluding* the
+    positions that carry their own in-flight window or admission gate. Mirrors
+    `_calls_in`'s call/value detection but prunes provide steps, timer steps,
+    and — since item 131 — the `effect`/`let-effect`/`emit`/`await` steps.
 
     A `timer` body (item 57) reaching an async op is no longer refused here: a
     timer is a spawned in-flight handle (item 106's `Async[T]` window), so it is
     coloured async in `_lower_timer_step` and its firing is awaited/cancelled by
     the runtime, exactly like a provide method's own async reach is admitted at
-    its site above (docs/time-coeffect.md §async)."""
+    its site above (docs/time-coeffect.md §async).
+
+    Item 131: the `await` step is pruned (its suspension is admitted, widened to
+    async externs/colored fns), and an AWAIT-MARKED effect/emit step is pruned
+    (an awaited async acquisition/emission is admitted). A NON-await effect/emit
+    step is still walked, so an async-callable reached without `await` keeps this
+    legacy "reaches async … in a setup/activation body" refusal — the message
+    the self-hosted admission gate mirrors. The req-op family that gate is blind
+    to is caught instead by `_admit_effect_async`/`_admit_emit_async` (rule 1),
+    which run during lowering and set the `async` flag this prune reads."""
     if isinstance(node, dict):
-        if node.get("step") in ("provide", "timer"):
+        step = node.get("step")
+        if step in ("provide", "timer", "await"):
+            return
+        if step in ("effect", "let-effect", "emit") and node.get("async"):
             return
         kind = node.get("kind")
         if kind == "fn" and node.get("name") in async_names:
@@ -4472,6 +4484,154 @@ def _reached_async_req_ops(node, env, acc: list) -> None:
     elif isinstance(node, list):
         for value in node:
             _reached_async_req_ops(value, env, acc)
+
+
+def _first_suspension(node, env) -> str | None:
+    """The first suspension source a lowered ACTIVATION-body expression reaches,
+    named for a diagnostic, or None (item 131). A suspension source is either a
+    req-target `async fn` service operation (rule 3 of the item-92 async-reach,
+    the blind spot the name-based walk misses) or an async-colored callable — an
+    `async` extern or a phase-2 colored fn (rule 1). Nested arrows are pruned:
+    an arrow value's color is its own concern, refused by `_refuse_leaky_arrow`.
+
+    This is the shared predicate behind the four admission rules of item 131 §3.
+    It looks past the name-based `_async_reached_outside_provide` walk precisely
+    where that walk is blind — a req-target async op — closing the two silent
+    `effect`/`emit` leaks and the two silent teardown leaks the probe table
+    named."""
+    reached: list = []
+    _reached_async_req_ops(node, env, reached)
+    if reached:
+        req_name, method, _op = reached[0]
+        return f"{req_name}.{method}"
+    called: set = set()
+    _calls_in(node, called, stop_async_arrows=True)
+    hit = sorted(called & (getattr(env, "async_callables", None) or set()))
+    if hit:
+        return hit[0]
+    return None
+
+
+def _first_reqop_suspension(node, env) -> str | None:
+    """The first REQ-TARGET async service op a lowered expression reaches (rule
+    3 of the item-92 async-reach), or None. This is the family the name-based
+    `_async_reached_outside_provide` fence is blind to — the two silent leaks of
+    item 131's probe table. An async-colored callable (an async extern or a
+    phase-2 colored fn) is deliberately NOT reported here: that family is still
+    refused by the name-based fence with its legacy "reaches async … in a
+    setup/activation body" diagnostic (which the self-hosted gate mirrors), so
+    the effect-composition rule-1 refusal owns only the req-op family it is the
+    first to name."""
+    reached: list = []
+    _reached_async_req_ops(node, env, reached)
+    if reached:
+        req_name, method, _op = reached[0]
+        return f"{req_name}.{method}"
+    return None
+
+
+def _admit_effect_async(stmt, step: dict, env: "Env", filename: str) -> None:
+    """Enforce the exact `await`/async pairing on an `effect`/`let-effect`
+    acquisition and refuse a suspending teardown (item 131 §3, rules 1-3).
+
+    The acquisition (and any pure `setup`) is a FORWARD-path position: it may
+    reach a suspension iff the surface spelled `effect await`. The `undo` is a
+    TEARDOWN position: it may never reach one, because the two-phase abort loop
+    is synchronous on every tier (docs/design/teardown-contract.md). Sets the
+    additive IR `async` flag on the step whose surface carried `await`; a sync
+    acquisition carries no key and lowers byte-identically to before."""
+    is_async = getattr(stmt, "is_async", False)
+    # Rule 1 (async without `await`) fires here only for the REQ-OP family — the
+    # silent leak. The async-callable family (extern / colored fn) in a non-await
+    # acquisition is still refused by the name-based `_async_reached_outside_
+    # provide` fence with its legacy message, which the self-hosted gate mirrors.
+    reqop = _first_reqop_suspension(step.get("acquire"), env)
+    if reqop is None and step.get("setup"):
+        reqop = _first_reqop_suspension(step["setup"], env)
+    # Rule 2 (await without async) reads the FULL suspension surface (either
+    # family): an `await` marker must name a real divert window of any kind.
+    reach = _first_suspension(step.get("acquire"), env)
+    if reach is None and step.get("setup"):
+        reach = _first_suspension(step["setup"], env)
+    if reqop is not None and not is_async:
+        # Rule 1: async without `await`.
+        raise RevlError(
+            filename, stmt.line,
+            f"component `{env.component.name}` acquires through async operation "
+            f"`{reqop}` but the effect is not awaited; the binding would hold "
+            f"the in-flight value, not the result (A1)",
+            hint=f"write `effect await {reqop.split('.')[-1]}(...) undo ...`; the "
+                 "await is a divert boundary (paper §4.3.2), so it is spelled, "
+                 "never inserted",
+            code="A1", category="async-propagation")
+    if is_async and reach is None:
+        # Rule 2: `await` without async — the marker must name a real divert
+        # window, never decoration (exact pairing, both directions).
+        raise RevlError(
+            filename, stmt.line,
+            "`effect await` on an acquisition that reaches nothing async — an "
+            "`await` in an activation body is a real divert window (A1)",
+            hint="nothing here suspends; drop `await` and write `effect <expr> "
+                 "undo ...`",
+            code="A1", category="async-propagation")
+    if is_async:
+        step["async"] = True
+    undo_reach = _first_suspension(step.get("undo"), env)
+    if undo_reach is not None:
+        # Rule 3: teardown never suspends.
+        raise RevlError(
+            filename, stmt.line,
+            f"`undo` reaches async operation `{undo_reach}`, but teardown is "
+            "synchronous on every tier — a suspension there would be a teardown "
+            "that can hang or silently no-op (A1)",
+            hint="the two-phase abort loop does not await "
+                 "(docs/design/teardown-contract.md, the bound rule); keep the "
+                 "inverse a synchronous call",
+            code="A1", category="async-propagation")
+
+
+def _admit_emit_async(stmt, step: dict, env: "Env", filename: str) -> None:
+    """Enforce the `await`/async pairing on an `emit` step and refuse a
+    suspending `compensate` (item 131 §3, rules 1-3). The emission expression is
+    forward-path (awaited iff the surface spelled `await emit`); the
+    `compensate` slot is teardown-position and may never suspend."""
+    is_async = getattr(stmt, "is_async", False)
+    # Rule 1 fires here only for the REQ-OP family (the silent leak); an
+    # async-callable emission in a non-await step stays with the legacy fence.
+    reqop = _first_reqop_suspension(step.get("expr"), env)
+    reach = _first_suspension(step.get("expr"), env)
+    if reqop is not None and not is_async:
+        # Rule 1: async without `await`.
+        raise RevlError(
+            filename, stmt.line,
+            f"`emit` step reaches async operation `{reqop}` but the emission is "
+            "not awaited; py would build a coroutine it never awaits (the "
+            "emission never fires) and ts a floating unordered Promise (A1)",
+            hint=f"write `await emit {reqop.split('.')[-1]}(...)`; the await is a "
+                 "divert boundary (paper §4.3.2), so it is spelled, never inserted",
+            code="A1", category="async-propagation")
+    if is_async and reach is None:
+        # Rule 2: `await` without async.
+        raise RevlError(
+            filename, stmt.line,
+            "`await emit` on an emission that reaches nothing async — an `await` "
+            "in an activation body is a real divert window (A1)",
+            hint="nothing here suspends; drop `await` and write `emit <expr>`",
+            code="A1", category="async-propagation")
+    if is_async:
+        step["async"] = True
+    comp_reach = _first_suspension(step.get("compensate"), env)
+    if comp_reach is not None:
+        # Rule 3: teardown never suspends.
+        raise RevlError(
+            filename, stmt.line,
+            f"`compensate` reaches async operation `{comp_reach}`, but teardown "
+            "is synchronous on every tier — a suspension there would be a "
+            "compensation that can hang or silently no-op (A1)",
+            hint="the two-phase abort loop does not await "
+                 "(docs/design/teardown-contract.md, the bound rule); keep the "
+                 "compensation a synchronous call",
+            code="A1", category="async-propagation")
 
 
 def _arrow_reaches_async(body, env) -> bool:
@@ -5015,6 +5175,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 step["setup"] = setup_steps
             if getattr(stmt, "verified", False):
                 step["verified"] = True
+            _admit_effect_async(stmt, step, env, filename)
             body.append(step)
         elif isinstance(stmt, EffectStmt):
             if stmt.setup:
@@ -5040,6 +5201,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 step["setup"] = setup_steps
             if getattr(stmt, "verified", False):
                 step["verified"] = True
+            _admit_effect_async(stmt, step, env, filename)
             body.append(step)
         elif isinstance(stmt, FailStmt):
             body.append({
@@ -5054,7 +5216,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         elif isinstance(stmt, LetApprovalStmt):
             body.append(_lower_let_approval(stmt, env))
         elif isinstance(stmt, EmitStmt):
-            body.append(_lower_emit_step(stmt, env))
+            emit_step = _lower_emit_step(stmt, env)
+            _admit_emit_async(stmt, emit_step, env, filename)
+            body.append(emit_step)
         elif isinstance(stmt, TimerStmt):
             body.append(_lower_timer_step(stmt, env))
         elif isinstance(stmt, AwaitStmt):

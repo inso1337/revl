@@ -1004,7 +1004,12 @@ class _ComponentEmitter:
                                      bind=_ident(step.get("bind"), f"{where}: bind"))
             else:
                 bind = _ident(step.get("bind"), f"{where}: bind")
-                out.add(indent, f"{bind} = {self._expr(step.get('acquire'), where)}")
+                # item 131: an async-flagged acquisition awaits its landed
+                # result, THEN registers the inverse — the inverse yield is the
+                # next action in the same generator step, so registration is
+                # boundary-atomic with the acquisition (design §4 clause 1).
+                aw = "await " if step.get("async") else ""
+                out.add(indent, f"{bind} = {aw}{self._expr(step.get('acquire'), where)}")
                 out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
         elif kind == "effect":
             if step.get("setup"):
@@ -1014,7 +1019,10 @@ class _ComponentEmitter:
             if wit is not None:
                 self._witnessed_step(out, indent, step, wit, where, bind=None)
             else:
-                out.add(indent, self._expr(step.get("acquire"), where))
+                # item 131: an unbound async acquisition awaits before the
+                # inverse yield, same boundary-atomic shape as the bound form.
+                aw = "await " if step.get("async") else ""
+                out.add(indent, f"{aw}{self._expr(step.get('acquire'), where)}")
                 out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
         elif kind == "fail":
             out.add(indent, f"raise RuntimeError({self._expr(step.get('message'), where)})")
@@ -1032,7 +1040,12 @@ class _ComponentEmitter:
                 self._deferred_step(out, indent, step, deferred, where)
                 out.add(0)
                 return
-            out.add(indent, self._emit_fire(step, where))
+            # item 131: `await emit …` awaits the boundary crossing so the
+            # emission actually fires (a bare async emit builds a coroutine that
+            # never runs). The compensation registers AFTER, exactly as the sync
+            # spelling registers after the fire (design §4 clause 1).
+            aw = "await " if step.get("async") else ""
+            out.add(indent, f"{aw}{self._emit_fire(step, where)}")
             if step.get("compensate") is not None:
                 # item 247 (docs/design/teardown-contract.md): a compensation
                 # is a first-class COMPENSATION entry on the frame's shared
@@ -1425,8 +1438,17 @@ class _ComponentEmitter:
 
         # A1: a body containing an `await` step compiles to an async
         # generator; the runtime treats each yield as an iteration boundary
-        # and the await as an in-flight iteration (paper §4.3.2-3)
-        is_async = any(step.get("step") == "await" for step in self.ir.get("body") or [])
+        # and the await as an in-flight iteration (paper §4.3.2-3). item 131:
+        # an async-flagged `effect`/`let-effect`/`emit` step (an awaited
+        # acquisition or emission) is likewise a suspension in the body and
+        # forces the `async def` generator. Timer steps are excluded: a timer's
+        # `async` flag (item 170) colors its OWN runtime-awaited firing, not the
+        # activation body generator, so it must not flip the body to async here.
+        is_async = any(
+            step.get("step") == "await"
+            or (step.get("step") in ("effect", "let-effect", "emit")
+                and step.get("async"))
+            for step in self.ir.get("body") or [])
 
         out.add(0, f"def _{self.snake}_apply(_revl_ctx, _revl_config):")
         out.add(1, f"_revl_frame = {_runtime_ref('Frame')}(_revl_ctx, {self.name!r})")

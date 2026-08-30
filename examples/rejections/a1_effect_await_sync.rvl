@@ -1,0 +1,15 @@
+// REJECTED — A1 (roadmap item 131), rule 2 (exact pairing, both directions):
+// `effect await` on a SYNC acquisition. `Map.new()` is a host acquisition that
+// suspends nothing, so the `await` marks a divert window that does not exist.
+// Strict pairing (design judgment call 3): the marker names a real suspension
+// or it is refused.
+//
+// expected error:
+//   `effect await` on an acquisition that reaches nothing async — an `await`
+//   in an activation body is a real divert window
+
+service Db { fn go() -> Str }
+component A provides db: Db {
+  let c = effect await Map.new() undo c.clear()
+  provide db { fn go() { return "ok" } }
+}
