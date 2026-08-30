@@ -101,7 +101,10 @@ REJECTIONS = {
     "foreign_string_dict.rvl": "revl records use identifier keys",
     "foreign_slice.rvl": "revl has no slice syntax `xs[a:b]`",
     "foreign_kwargs.rvl": "revl has no keyword arguments",
-    "foreign_hash_comment.rvl": "revl has no `#` comments",
+    # `#` (item 384) is NOT a corpus rejection fixture: unlike every other
+    # foreign construct it is un-TOKENIZABLE, so the formatter's token-stream
+    # gate (test_fmt) cannot round-trip a `#` file. Its redirect is proven by
+    # test_foreign_hash_comment_redirects below instead.
     "a1_await_in_method.rvl": "`await` is only allowed in a component body",
     # roadmap item 80: a sync provide method that reaches an `async` extern is
     # refused with the twin of the emission-propagation diagnostic (async-
@@ -362,6 +365,20 @@ def test_a3_host_colliding_names_are_renamed():
     binds = [step["bind"] for step in body]
     assert binds == ["frame_", "class_"], "host-reserved names must be renamed (A3)"
     assert body[0]["undo"]["target"]["id"] == "frame_"
+
+
+def test_foreign_hash_comment_redirects():
+    """item 384: `#` (Python/shell line comment) is redirected to `//` at the
+    lexer. It cannot be a corpus rejection fixture because `#` is
+    un-tokenizable, so the formatter's token-stream gate could not round-trip
+    it (test_fmt); proven here directly instead."""
+    from revl import compile_source
+
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("fn f() -> Int {\n  # a comment\n  return 0\n}\n")
+    msg = str(excinfo.value)
+    assert "revl has no `#` comments" in msg
+    assert "// ..." in msg  # the redirect names the revl spelling
 
 
 def test_a4_literal_dollars_are_escaped():
