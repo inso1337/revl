@@ -44,7 +44,7 @@ from .typecheck import (
     _is_wildcard,
     _check_method_namespace_disjoint,
 )
-from .taint import extract_and_normalize, check_taint
+from .taint import extract_and_normalize, check_taint, splice_declassifiers
 from .parser import (
     _describe_expr,
     AbortStmt,
@@ -456,6 +456,12 @@ _BUILTIN_NONRECORD = {"Str", "Int", "Int32", "Bool", "Float", "Bytes", "Unit",
 _HOST_CALLABLES = {"Map", "Pool", "Job"}
 # Opt/Result constructors, recognized so `Some(x)`/`Ok(r)` resolve (syntax-2.0 §2)
 _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
+# taint declassifier operators (roadmap item 249, Decision 3.2): `endorse(v)` is
+# the audited downgrade of an `Untrusted[T]` to a `Trusted[T]`. It is recognized
+# as a callable so it lowers through the ordinary call machinery; it is identity
+# on its argument's base type (typed and unwrapped as such), so after the taint
+# verdict runs it is spliced out of the IR and no emitter ever sees it.
+_DECLASSIFY_BUILTINS = {"endorse"}
 
 
 # Builtin heads a `type X = Y` right-hand side may name. `Any`/`Never` are the
@@ -928,6 +934,7 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
     default_callables = (
         _HOST_CALLABLES
         | _BUILTIN_CONSTRUCTORS
+        | _DECLASSIFY_BUILTINS
         | {fn.name for fn in program.fn_decls}
         | {ext.name for ext in program.externs}
     )
@@ -969,7 +976,7 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
             scope[param.name] = False
             type_env[param.name] = marked
         module_callables = program.fn_scopes.get(id(decl), default_callables)
-        callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | set(module_callables) | {ext.name for ext in program.externs}
+        callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS | set(module_callables) | {ext.name for ext in program.externs}
         alias_fns = program.fn_alias_scopes.get(id(decl), {})
         body: list[dict] = []
         for stmt in decl.body:
@@ -1985,7 +1992,7 @@ def _lower_tests(program: Program, filename: str, types: dict,
     # Without the externs an in-module `extern pure fn` visible to fn bodies was
     # invisible inside a `test`, forcing every extern-backed helper to be
     # wrapped in a `fn` just to be unit-tested in-file (roadmap item 182).
-    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS
+    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
                  | {fn.name for fn in program.fn_decls}
                  | {ext.name for ext in program.externs})
     tests: list[dict] = []
@@ -2094,7 +2101,7 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
     """Lower `prop test` blocks to IR prop units (docs/prop-test.md)."""
     if not program.prop_tests:
         return []
-    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS
+    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
                  | {fn.name for fn in program.fn_decls}
                  | {ext.name for ext in program.externs})
     units: list[dict] = []
@@ -3277,6 +3284,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     component_callables = (
         _HOST_CALLABLES
         | _BUILTIN_CONSTRUCTORS
+        | _DECLASSIFY_BUILTINS
         | {fn.name for fn in program.fn_decls}
         | {ext.name for ext in program.externs}
     )
@@ -3587,6 +3595,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         result["fault_tests"] = fault_tests
     if prop_tests:
         result["prop_tests"] = prop_tests
+    # item 249: the taint verdict has run, so `endorse(v)` — identity on the base
+    # type — is spliced out of the IR here; no emitter or golden sees it. A
+    # program with no `endorse` is rebuilt identically (byte-identity).
+    if taint_model.active:
+        result = splice_declassifiers(result)
     return result
 
 
