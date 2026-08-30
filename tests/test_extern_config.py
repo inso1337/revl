@@ -122,3 +122,43 @@ def test_py_emitted_config_extern_reads_injected_config():
         "provider": "anthropic", "endpoint": "https://api", "model": "opus",
     }
     assert ns["raw_model_post"]("hi") == "anthropic|https://api|opus|hi"
+
+
+# -- Stage 4: driver resolution at plug -------------------------------------
+
+def test_driver_preflight_refuses_missing_required_extern_config():
+    from revl.run import _required_config_problem  # noqa: PLC0415
+
+    ir = compile_source(_RAW_MODEL_POST)
+    # provider + endpoint are required (no default); model has a default.
+    problem = _required_config_problem(ir, {})
+    assert problem is not None
+    assert 'extern raw_model_post is missing required config "provider"' in problem
+    assert 'extern raw_model_post is missing required config "endpoint"' in problem
+    # the defaulted field is never "missing"
+    assert '"model"' not in problem
+
+
+def test_driver_preflight_passes_when_required_extern_config_supplied():
+    from revl.run import _required_config_problem  # noqa: PLC0415
+
+    ir = compile_source(_RAW_MODEL_POST)
+    problem = _required_config_problem(
+        ir, {"raw_model_post": {"provider": "p", "endpoint": "e"}})
+    assert problem is None, problem
+
+
+def test_driver_resolves_extern_config_merging_defaults():
+    from revl.run import _resolve_extern_config  # noqa: PLC0415
+
+    ir = compile_source(_RAW_MODEL_POST)
+    resolved = _resolve_extern_config(ir, {"raw_model_post": {"provider": "p", "endpoint": "e"}})
+    # supplied values win; the defaulted field is materialized from the schema
+    assert resolved["raw_model_post"] == {"provider": "p", "endpoint": "e", "model": "default"}
+
+
+def test_driver_no_config_extern_resolves_to_empty():
+    from revl.run import _resolve_extern_config  # noqa: PLC0415
+
+    ir = compile_source('extern emission fn f(x: Str) -> Str = @py { return x }')
+    assert _resolve_extern_config(ir, {}) == {}
