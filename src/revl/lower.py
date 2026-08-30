@@ -1144,7 +1144,7 @@ def _field_declared_type(target_type: str | None, field_name: str,
     Used to decide whether a field read is TOTAL: a field whose declared type is
     ``Opt[T]`` reads back the empty Opt on absence rather than raising, so the
     designed spelling `e.kind ?? default` means the same on every tier (item
-    379). A structural literal record binding is checked first (item 71 keeps
+    380). A structural literal record binding is checked first (item 71 keeps
     those field-checkable), then the nominal record table.
     """
     if not target_type:
@@ -1161,7 +1161,7 @@ def _field_declared_type(target_type: str | None, field_name: str,
 
 def _field_is_opt(target_type: str | None, field_name: str, types: dict) -> bool:
     """Whether ``target_type.field_name`` is declared ``Opt[...]`` — the trigger
-    for a TOTAL field read (item 379)."""
+    for a TOTAL field read (item 380)."""
     declared = _field_declared_type(target_type, field_name, types)
     return bool(declared) and parse_type(declared)[0] == "Opt"
 
@@ -3069,7 +3069,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         node = {"kind": "field",
                 "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
                 "name": expr.name}
-        # item 379: a field whose declared type is `Opt[T]` reads TOTAL — absent
+        # item 380: a field whose declared type is `Opt[T]` reads TOTAL — absent
         # yields the empty Opt, never a raise (py) or a `??`-outliving `undefined`
         # (ts) — so `e.kind ?? default` means the same on every tier.
         if _field_is_opt(target_type, expr.name, types):
@@ -3891,7 +3891,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         # slot.
         if expr.name == "length" and _is_sized_type(target_type):
             node["sized_length"] = True
-        # item 379: an `Opt[T]`-declared field reads TOTAL on every tier.
+        # item 380: an `Opt[T]`-declared field reads TOTAL on every tier.
         elif _field_is_opt(target_type, expr.name, env.types):
             node["opt"] = True
         return node

@@ -831,7 +831,10 @@ def _emit_stdlib_helpers() -> list[str]:
 
 
 def _uses_stdlib(ir: dict) -> bool:
-    """True when any builtin/len node appears anywhere in the document."""
+    """True when any builtin/len node appears anywhere in the document — or a
+    sized `.length` field (item 104): a component-position property-form
+    `.length` stays a `field` node marked `sized_length` and emits
+    `revlLength(...)`, so that helper must be emitted for it too."""
     found = False
 
     def walk(node) -> None:
@@ -839,7 +842,8 @@ def _uses_stdlib(ir: dict) -> bool:
         if found:
             return
         if isinstance(node, dict):
-            if node.get("kind") in ("builtin", "len"):
+            if node.get("kind") in ("builtin", "len") or (
+                    node.get("kind") == "field" and node.get("sized_length")):
                 found = True
                 return
             for value in node.values():

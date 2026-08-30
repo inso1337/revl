@@ -1,4 +1,4 @@
-"""The TOTAL FIELD READ *surface* — roadmap item 379 (revl-harness lane H24).
+"""The TOTAL FIELD READ *surface* — roadmap item 380 (revl-harness lane H24).
 
 Item 367 landed the pure-revl accessor `value_field_or(v, name, default)`, a
 tolerant field read spelled as a FUNCTION CALL. That is not the surface the
@@ -329,13 +329,27 @@ def test_ts_parse_envelope_matches_py(envelope_ir, case):
 # code-point length path. These three multibyte strings each have a code-point
 # count that differs from their UTF-8 byte count, so a byte-length regression
 # would be caught.
+# café -> 4 code points / 5 UTF-8 bytes; 日本語 -> 3 / 9; naïve -> 5 / 6;
+# abc -> 3 / 3 (ASCII: byte == code point, pins that the fix does not break the
+# equal case). The multibyte rows each differ from their byte count, so a
+# byte-length regression is unmistakable.
 _LEN_STRINGS = {
-    "cafe":     ("café",   4),   # é: 1 code point, 2 UTF-8 bytes
-    "japanese": ("日本語", 3),   # 3 code points, 9 UTF-8 bytes
-    "naive":    ("naïve",  5),   # ï: 1 code point, 2 UTF-8 bytes
+    "cafe":     ("café",   4, 5),
+    "japanese": ("日本語", 3, 9),
+    "naive":    ("naïve",  5, 6),
+    "abc":      ("abc",    3, 3),
 }
 
-_LEN_BACKENDS = ("python", "typescript", "go", "rust", "java", "wasm")
+# The code-point-length marker each tier's field handler routes a sized
+# `.length` through — NOT a record `getattr`/member read, NOT a UTF-8 byte load.
+_LEN_MARKERS = {
+    "python":     "len(",
+    "typescript": "revlLen",
+    "go":         "revlStrLen",
+    "rust":       "revl_length",
+    "java":       "revlLength",
+    "wasm":       "str_cp_length",
+}
 
 
 def _length_component_src(literal: str) -> str:
@@ -349,6 +363,19 @@ def _length_component_src(literal: str) -> str:
         "  provide greeter {\n"
         f'    fn hello() = "{literal}".length\n'
         "  }\n"
+        "}\n"
+    )
+
+
+def _length_lifecycle_src(literal: str, expected: int) -> str:
+    # the provide-method `.length` driven by a lifecycle test — loaded, called,
+    # and asserted on the tier's live runtime (the RUNNERS exec path).
+    return _length_component_src(literal) + (
+        f'lifecycle test "len_{expected}" {{\n'
+        "  load G\n"
+        "  let n = call greeter.hello()\n"
+        f"  assert n == {expected}\n"
+        "  unload G\n"
         "}\n"
     )
 
@@ -375,39 +402,71 @@ def _find_nodes(ir, kind: str):
 
 
 @pytest.mark.parametrize("case", list(_LEN_STRINGS))
-def test_component_length_lowers_to_len_not_field(case):
-    literal, _ = _LEN_STRINGS[case]
+def test_component_length_stays_a_marked_field_node(case):
+    """The property form `.length` in a COMPONENT position stays a `field` node
+    (the fn-body form is a `len` node — that split is deliberate, lower.py),
+    marked `sized_length` so each tier's field handler renders the code-point
+    count rather than a record slot."""
+    literal, _, _ = _LEN_STRINGS[case]
     ir = _compile_src(_length_component_src(literal))
-    # the fix: a `len` node, and NO record-field read named "length"
-    assert _find_nodes(ir, "len"), "component-position .length must lower to a len node"
-    assert not [n for n in _find_nodes(ir, "field") if n.get("name") == "length"], \
-        "no `field` node named length should survive lowering"
+    length_fields = [n for n in _find_nodes(ir, "field") if n.get("name") == "length"]
+    assert length_fields, "component-position .length must stay a `field` node"
+    assert all(n.get("sized_length") for n in length_fields), \
+        "a sized `.length` field must carry the sized_length mark"
+    # the split is preserved: no `len` node materialised in the component body
+    assert not _find_nodes(ir, "len")
+
+
+@pytest.mark.parametrize("backend", list(_LEN_MARKERS))
+@pytest.mark.parametrize("case", list(_LEN_STRINGS))
+def test_component_length_emits_code_point_path_per_tier(backend, case):
+    """Golden (toolchain-free) per-tier guard: the provide method's `.length`
+    emits the tier's code-point/element-length construct — never a record-field
+    getattr/member (which raises on a `Str`) or a UTF-8 byte-length read."""
+    literal, _, _ = _LEN_STRINGS[case]
+    ir = _compile_src(_length_component_src(literal))
+    code = _emit(backend, ir)  # raises EmitError on regression
+    assert _LEN_MARKERS[backend] in code, (
+        f"{backend}: sized `.length` did not route through "
+        f"{_LEN_MARKERS[backend]!r}")
 
 
 @pytest.mark.parametrize("case", list(_LEN_STRINGS))
-def test_component_length_emits_on_every_tier(case):
-    """Every one of the six field-access emitters renders the property-form
-    `.length` in a provide method (no EmitError). This is the cross-tier half of
-    item 104: wasm landed in 8d75a73, py/ts/go/rust/java are folded in here."""
-    literal, _ = _LEN_STRINGS[case]
-    ir = _compile_src(_length_component_src(literal))
-    for backend in _LEN_BACKENDS:
-        code = _emit(backend, ir)  # raises EmitError on regression
-        assert code, f"{backend} produced empty output"
-
-
-@pytest.mark.parametrize("case", list(_LEN_STRINGS))
-def test_component_length_code_point_count_py(case):
-    """The py tier's emitted provide method counts CODE POINTS. The emitted
-    provide method is `return len(<literal>)` (the emitter escapes non-ASCII as
-    ASCII-safe `\\uXXXX`, still a valid python str literal); python's `len` on a
-    str is the code-point count, so evaluating that exact emitted expression
-    reproduces the provide method's result."""
-    literal, expected = _LEN_STRINGS[case]
+def test_component_length_code_point_count_py_emit(case):
+    """The py tier's emitted provide method counts CODE POINTS. The emitted body
+    is `return len(<literal>)` (the emitter escapes non-ASCII as ASCII-safe
+    `\\uXXXX`, still a valid python str literal); python's `len` on a str is the
+    code-point count, so evaluating that exact emitted expression reproduces the
+    provide method's result — and is never the UTF-8 byte count."""
+    literal, expected, byte_len = _LEN_STRINGS[case]
     ir = _compile_src(_length_component_src(literal))
     code = _emit("python", ir)
     ret = next(line.strip()[len("return "):]
                for line in code.splitlines()
                if line.strip().startswith("return len("))
-    assert eval(ret) == expected  # noqa: S307 — the emitter's own `len(<literal>)`
+    got = eval(ret)  # noqa: S307 — the emitter's own `len(<literal>)`
+    assert got == expected
+    if byte_len != expected:
+        assert got != byte_len, "py folded to the UTF-8 byte count (item 104)"
+
+
+# The EXECUTED guard, mirroring backends/wasm/test_str_literal_length_exec.py in
+# a cross-tier shape: the provide-method `.length` is driven by a `lifecycle
+# test` (load / call / assert / unload) and RUN on each tier's live runtime.
+# RUNNERS returns ("skip", reason) where a tier's runtime/toolchain is absent —
+# the same skip-when-absent contract the wasm exec test uses — so this never
+# reds for an environment without cordis-py / node / cargo / javac / wasmtime,
+# and runs for real wherever the toolchain is present (CI runs the full matrix).
+@pytest.mark.parametrize("tier", ["py", "ts", "go", "rust", "java", "wasm"])
+@pytest.mark.parametrize("case", list(_LEN_STRINGS))
+def test_component_length_executes_to_code_points_per_tier(tier, case):
+    from revl.test import RUNNERS  # noqa: PLC0415
+    literal, expected, _ = _LEN_STRINGS[case]
+    ir = _compile_src(_length_lifecycle_src(literal, expected))
+    outcome, message = RUNNERS[tier](ir)
+    if outcome == "skip":
+        pytest.skip(f"{tier} runtime/toolchain absent: {message.splitlines()[0]}")
+    assert outcome == "pass", (
+        f'{tier}: "{literal}".length in a provide method executed to a wrong '
+        f"value (expected {expected} code points): {message}")
 
