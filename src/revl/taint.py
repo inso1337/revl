@@ -445,6 +445,32 @@ def check_taint(program, fns, components, model: TaintModel,
         _walk_component_methods(comp.get("body") or [], model, source)
 
 
+def splice_declassifiers(node):
+    """Replace every `endorse(v)` call node with its argument `v`, everywhere in
+    the IR. `endorse` is identity on the base type (its whole job is the taint
+    downgrade, which the verdict has already consumed), so after `check_taint`
+    runs it is spliced out and no emitter or golden ever sees a call to it.
+
+    Runs over the whole document, so a program with no `endorse` is rebuilt
+    identically (byte-identity). Returns the transformed node."""
+    if isinstance(node, list):
+        return [splice_declassifiers(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    name = None
+    if node.get("kind") == "fn":
+        name = node.get("name")
+    elif node.get("kind") == "call":
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var":
+            name = callee.get("name")
+    if name == "endorse":
+        args = node.get("args") or []
+        if args:
+            return splice_declassifiers(args[0])
+    return {key: splice_declassifiers(value) for key, value in node.items()}
+
+
 def _walk_component_methods(body, model: TaintModel, source: str) -> None:
     for step in body:
         if not isinstance(step, dict):
