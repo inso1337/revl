@@ -169,6 +169,13 @@ REJECTIONS = {
     # pushed to a record cast (Opt fields then read TOTAL) or the value.rvl
     # shape accessors.
     "t29_field_read_on_any.rvl": "field read `.kind` on a value of type `Any` — an erased value has no known fields",
+    # item 392: the provide-method twin of 380(2). A field read off `Any` fired
+    # the refusal in a bare `fn`/`test`/module-`fn` body (stratum 1, `infer_ast`)
+    # but NOT inside a `provide` method body, which is typed through the lowered
+    # component-body path (stratum 3, `infer_ir`) that never reached the check —
+    # the same context-scoping gap as the earlier `.length`-in-provide-method
+    # bug. The refusal is now applied uniformly in `infer_ir`'s field case.
+    "t30_field_read_on_any_provide_method.rvl": "field read `.kind` on a value of type `Any` — an erased value has no known fields",
     # errata harvest, checker side (docs/v2.0-roadmap.md 75(b)(c)):
     # 75(b) a stdlib-named method on a receiver whose provenance no
     #       constructor pins used to lower as that builtin and misdispatch at
