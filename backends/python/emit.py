@@ -530,6 +530,12 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
         return f"{target}[{args[0]}]"
     if method == "charCodeAt":
         return f"ord({target}[{args[0]}])"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at index i, returned directly. `ord(s[i])` allocates
+    # only the transient 1-char slice `ord` consumes — no persistent 1-char Str
+    # the self-host lexer would otherwise index a second time via `code0`.
+    if method == "codepoint_at":
+        return f"ord({target}[{args[0]}])"
     if method == "concat":
         return f"({target} + {args[0]})"
     if method == "indexOf":

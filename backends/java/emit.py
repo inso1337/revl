@@ -637,6 +637,11 @@ def _v3_builtin(method: object, target: str, args: list[str],
         return f"revlCharAt(String.valueOf({target}), {args[0]})"
     if method == "charCodeAt":
         return f"revlCharCodeAt(String.valueOf({target}), {args[0]})"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at code-point index i, via the same code-point-indexed
+    # helper as charCodeAt.
+    if method == "codepoint_at":
+        return f"revlCharCodeAt(String.valueOf({target}), {args[0]})"
     if method == "concat":
         return f"revlConcat({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). Java `/` truncates and
@@ -2371,7 +2376,8 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
             elem = _map_value_expr_type(args[0], var_types, env, functions, v3_ctx)
             if elem is not None:
                 return f"List[{elem}]"
-        if method in ("length", "charCodeAt", "indexOf", "to_int"):
+        if method in ("length", "charCodeAt", "codepoint_at", "indexOf",
+                      "to_int"):
             return "Int"
         if method in ("charAt", "join", "repeat", "to_str", "slice"):
             return "Str"
