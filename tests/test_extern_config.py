@@ -92,3 +92,33 @@ def test_lower_refuses_duplicate_config_field():
             '  config { n: Int, n: Str }\n'
             '  = @py { return x }\n'
         )
+
+
+# -- Stage 3: py emitter ----------------------------------------------------
+
+def test_py_emit_binds_revl_config_for_config_extern():
+    src = emit.emit(compile_source(_RAW_MODEL_POST))
+    assert "_REVL_EXTERN_CONFIG = {}" in src
+    assert "def raw_model_post(body):" in src
+    assert "_revl_config = _REVL_EXTERN_CONFIG.get('raw_model_post') or {}" in src
+
+
+def test_py_emit_no_config_extern_is_byte_identical():
+    # byte-identity: an extern with no config clause must emit exactly as it did
+    # before item 379 — no config map, no `_revl_config` line.
+    src = emit.emit(compile_source(
+        'extern emission fn f(x: Str) -> Str = @py { return x }'))
+    assert "_REVL_EXTERN_CONFIG" not in src
+    assert "_revl_config" not in src
+    assert "def f(x):\n    return x" in src
+
+
+def test_py_emitted_config_extern_reads_injected_config():
+    src = emit.emit(compile_source(_RAW_MODEL_POST))
+    ns = {}
+    exec(compile(src, "emitted_extern_config.py", "exec"), ns)
+    # driver-style injection at the composition config map, resolved once
+    ns["_REVL_EXTERN_CONFIG"]["raw_model_post"] = {
+        "provider": "anthropic", "endpoint": "https://api", "model": "opus",
+    }
+    assert ns["raw_model_post"]("hi") == "anthropic|https://api|opus|hi"
