@@ -2177,6 +2177,68 @@ def _emit_functions(functions: list) -> "_Lines":
     return out
 
 
+def _ref_dotted(rel_path: str) -> str:
+    """`src/host/engine.py` -> `src.host.engine`, the py import specifier derived
+    from the IR ref's root-relative path. Self-contained (the backend has no
+    `revl` import); mirrors `revl.hostref.dotted_module`."""
+    stem = rel_path[:-3] if rel_path.endswith(".py") else rel_path
+    return stem.replace("/", ".")
+
+
+def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines":
+    """item 396 option B: the lazy import thunk for a `@py ref` extern.
+
+    Sync and async share one shape (host execution at first call, symbol cached
+    in `_REVL_REFS`, the resolved symbol carrying the declared colour). The
+    colour claim is unverifiable at compile (G8), so it is asserted HOST-NATIVELY
+    at first call — the earliest gate this design owns:
+
+    - A declared-SYNC ref whose symbol is a plain `async def` catches on
+      `inspect.iscoroutinefunction`, and a value-level `inspect.isawaitable`
+      guard on the result closes the wrapper/callable-instance shapes the
+      function-object check cannot see (a plain `def` returning a coroutine).
+      This makes a ref STRICTER than an inline body for an extern that
+      intentionally returns an awaitable handle — a stated, deliberate trade.
+      Neither check is a proof: `iscoroutinefunction` sees only the plain
+      `async def` shape (design re-review #3).
+    - A declared-ASYNC ref is NOT hard-refused when the symbol is not an
+      `iscoroutinefunction` (that would falsely refuse an lru_cache-wrapped
+      async fn or a callable instance whose `__call__` is async). `await _f(...)`
+      is loud-wrong at worst if the symbol returns a non-awaitable — never
+      silent — so the async direction stays awaited-by-name.
+    """
+    dotted = _ref_dotted(ref["path"])
+    symbol = _ident(ref["symbol"], "ref symbol")
+    where = f"{dotted}.{symbol}"
+    out = _Lines()
+    is_async = bool(ext.get("async"))
+    out.add(0, f"{'async def' if is_async else 'def'} {name}({params}):")
+    out.add(1, f"_f = _REVL_REFS.get({name!r})")
+    out.add(1, "if _f is None:")
+    out.add(2, f"from {dotted} import {symbol} as _f")
+    if not is_async:
+        out.add(2, "if _inspect.iscoroutinefunction(_f):")
+        out.add(3, "raise TypeError(")
+        out.add(4, f"\"revl extern `{name}` is declared sync but "
+                   f"{where} is a coroutine \"")
+        out.add(4, "\"function; declare the extern `async` or ref a sync symbol\")")
+    out.add(2, f"_REVL_REFS[{name!r}] = _f")
+    call_args = params
+    if is_async:
+        out.add(1, f"return await _f({call_args})")
+    else:
+        out.add(1, f"_r = _f({call_args})")
+        out.add(1, "if _inspect.isawaitable(_r):")
+        out.add(2, "raise TypeError(")
+        out.add(3, f"\"revl extern `{name}` is declared sync but "
+                   f"{where} returned \"")
+        out.add(3, "\"an awaitable; declare the extern `async` or ref a sync "
+                   "symbol\")")
+        out.add(1, "return _r")
+    out.add(0)
+    return out
+
+
 def _emit_externs(externs: list) -> "_Lines":
     out = _Lines()
     # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md: the
@@ -2220,10 +2282,20 @@ def _emit_externs(externs: list) -> "_Lines":
         name = _ident(ext["name"], "extern name")
         params = ", ".join(_ident(p["name"], "extern parameter name") for p in ext["params"])
         bodies = ext.get("bodies") or {}
+        refs = ext.get("refs") or {}
+        # item 396 option B: a `@py ref sym from "module.py"` extern emits a LAZY
+        # import THUNK — never a body — that imports the host symbol at the
+        # extern's FIRST CALL, inside the extern frame, and caches it. A module-
+        # top import would run the referenced module at artifact LOAD, outside
+        # every classification/approval/witness gate; the thunk keeps host
+        # execution where an inline body's execution is (design §"Emit, py").
+        if "py" in refs and "py" not in bodies:
+            out.extend(_emit_py_ref_thunk(name, params, ext, refs["py"]))
+            continue
         if "py" not in bodies:
             raise EmitError(
                 f"extern `{name}` has no @py body — not portable to this backend "
-                f"(available: {', '.join(sorted(bodies)) or 'none'})"
+                f"(available: {', '.join(sorted(set(bodies) | set(refs))) or 'none'})"
             )
         # item 115 (async-extern.md §8): an async extern emits an `async def`
         # so its verbatim @py body may `await` a host operation; every admitted
@@ -3043,6 +3115,15 @@ def emit(ir: dict) -> str:
             for name in uses
         )
         out.add(0, f"from runtime import {imported}")
+        out.add(0)
+    # item 396 option B: a `@py ref` extern emits a lazy import thunk that caches
+    # the resolved host symbol in this module-level dict and asserts its colour
+    # via `inspect`. `import inspect` is stdlib (no USER code runs at load — the
+    # host module is imported only inside the thunk, at first call). Emitted only
+    # when some extern carries a ref, so a ref-free module is byte-identical.
+    if any(ext.get("refs") for ext in externs):
+        out.add(0, "import inspect as _inspect")
+        out.add(0, "_REVL_REFS = {}")
         out.add(0)
     if lifecycle or uses_async_timer:
         # the lifecycle driver runs under `asyncio.run`, and (item 170) an

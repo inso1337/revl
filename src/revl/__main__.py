@@ -208,7 +208,14 @@ def _boundary(ir: dict) -> dict:
                 if name == _UNKNOWN_DISPATCH else
                 {"name": name,
                  "class": extern_class.get(name, {}).get("class"),
-                 "backends": sorted((extern_class.get(name, {}).get("bodies") or {}).keys())}
+                 # item 396: union ref tiers so a ref-only extern shows its tier
+                 # (not "no bodies"), and carry the ref provenance for the render.
+                 "backends": sorted(
+                     set(extern_class.get(name, {}).get("bodies") or {})
+                     | set(extern_class.get(name, {}).get("refs") or {})),
+                 **({"refs": {tier: f"{r['path']}#{r['symbol']}" for tier, r in
+                              (extern_class.get(name, {}).get("refs") or {}).items()}}
+                    if extern_class.get(name, {}).get("refs") else {})}
                 for name in sorted(host)
             ],
             # taint provenance (item 249, Decision 5): origins that reach an
@@ -311,11 +318,21 @@ def _run_audit(args, ir: dict) -> int:
     manifest = ir.get("manifest") or {}
     declared_externs = [
         {"name": ext["name"], "class": ext.get("class"),
-         "backends": sorted((ext.get("bodies") or {}).keys()),
+         # item 396: a ref-only extern has no `bodies` key but DOES cross on its
+         # ref tier, so union the ref backends in — otherwise a ref-only extern
+         # would audit as "no bodies" while emitting fine.
+         "backends": sorted(set(ext.get("bodies") or {})
+                            | set(ext.get("refs") or {})),
          # item 373: carry the reach onto the audit extern entry so the surface
          # can name what a crossing is bounded to. Absent unless declared, so the
          # `--json` audit of every existing composition is byte-identical.
-         **({"reach": ext["reach"]} if ext.get("reach") else {})}
+         **({"reach": ext["reach"]} if ext.get("reach") else {}),
+         # item 396 option B: the ref provenance (`tier: "path#symbol"`), so a
+         # review can see WHERE a crossing's implementation lives when it moved
+         # out of the audited document. Absent unless a ref is used.
+         **({"refs": {tier: f"{r['path']}#{r['symbol']}"
+                      for tier, r in (ext.get("refs") or {}).items()}}
+            if ext.get("refs") else {})}
         for ext in ir.get("externs") or []
     ]
     if args.json:
@@ -367,12 +384,23 @@ def _run_audit(args, ir: dict) -> int:
             if stats["awaits"]:
                 detail.append(f"iteration boundaries: {stats['awaits']}")
             if host:
-                rendered = ", ".join(
-                    f"{e['name']} (reached through first-class function "
-                    "dispatch — what runs is not statically boundable)"
-                    if e.get("class") == "first-class dispatch" else
-                    f"{e['name']} ({e['class']}, {'+'.join(e['backends']) or 'no bodies'})"
-                    for e in host)
+                def _host_extern(e: dict) -> str:
+                    if e.get("class") == "first-class dispatch":
+                        return (f"{e['name']} (reached through first-class "
+                                "function dispatch — what runs is not statically "
+                                "boundable)")
+                    base = (f"{e['name']} ({e['class']}, "
+                            f"{'+'.join(e['backends']) or 'no bodies'})")
+                    # item 396 option B: name WHERE a ref crossing's host code
+                    # lives, so a review sees the implementation moved out of the
+                    # audited document.
+                    if e.get("refs"):
+                        prov = ", ".join(f"@{tier} ref {loc}"
+                                         for tier, loc in sorted(e["refs"].items()))
+                        base += f" [{prov}]"
+                    return base
+
+                rendered = ", ".join(_host_extern(e) for e in host)
                 detail.append(f"host code: {rendered}")
             print(f"  boundary: {'; '.join(detail)}")
         else:

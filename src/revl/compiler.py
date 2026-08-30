@@ -15,6 +15,8 @@ from .errors import RevlError
 from .holes import refuse_admission
 from .hostfile import program_has_body_file as _program_has_body_file
 from .hostfile import resolve_body_files as _resolve_body_files
+from .hostref import program_has_ref as _program_has_ref
+from .hostref import resolve_refs as _resolve_refs
 from .lower import check_and_lower
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
 from .typecheck import format_type, parse_type
@@ -89,6 +91,13 @@ class _ModuleLoader:
         recognised as a root when it is loaded (item 396 ordering)."""
         self._root_paths.update(abs_paths)
 
+    def _root_dirs(self) -> list[str]:
+        """The directory trees a `ref` (item 396 option B) may resolve inside:
+        the directories of the composition's root compile files. The deploy-time
+        import root (the py driver's appended `sys.path` entry) is derived the
+        same way, so a compiled ref specifier and the driver agree."""
+        return sorted({os.path.dirname(p) for p in self._root_paths})
+
     def has_source(self, path: str) -> bool:
         return os.path.abspath(path) in self._sources
 
@@ -156,6 +165,14 @@ class _ModuleLoader:
             # (no disk fallback, re-review F5).
             _resolve_body_files(program, os.path.dirname(abs_path),
                                 self._sources, virtual is not None)
+            # item 396 option B: resolve external host-MODULE refs against the
+            # ROOT-tree jail (a different root than A's per-module jail: B's file
+            # must be reachable at deploy time through one import root). A ref
+            # resolving outside every root tree is refused; an imported module
+            # inside the tree resolves normally. The pinned rel-path + hash flow
+            # through lower into the additive `refs` IR key.
+            _resolve_refs(program, os.path.dirname(abs_path),
+                          self._root_dirs(), self._sources, virtual is not None)
             module = _LoadedModule(abs_path, os.path.dirname(abs_path), program)
             for fn in program.fn_decls:
                 if fn.public:
@@ -270,6 +287,21 @@ def compile_source(source: str, filename: str = "<string>",
                 hint="a bare source string has no module directory from which to "
                      "resolve the file, and `compile_source` reads nothing from "
                      "disk (item 396)")
+        # item 396 option B: a ref needs a root tree to jail against and a
+        # module directory to resolve relative to; a bare source string has
+        # neither. Refuse structurally (no IO), mirroring the body-file refusal.
+        if _program_has_ref(program):
+            line = next(
+                body.line for ext in program.externs for body in ext.bodies
+                if isinstance(body, _ast.HostRef))
+            raise RevlError(
+                filename, line,
+                "an extern host-module ref (`= @backend ref sym from \"path\"`) "
+                "needs `modules=` (in-memory sources) or `compile_files` with a "
+                "real source path",
+                hint="a bare source string has no root compile tree to jail the "
+                     "ref against, and `compile_source` reads nothing from disk "
+                     "(item 396 option B)")
         document = check_and_lower(program)
         _enforce_document(document, profile)
         return document
