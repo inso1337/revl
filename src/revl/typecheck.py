@@ -2000,14 +2000,37 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
     if kind == "field":
         target = infer_ir(node.get("target"), tenv, types, services, filename, line)
         thead, targs = parse_type(target)
+        name = node.get("name")
         if filename and thead == "Opt":
             raise opt_escape_error(filename, line,
-                                   f"field access `.{node.get('name')}`", target,
+                                   f"field access `.{name}`", target,
                                    targs[0] if targs else None,
-                                   alt=f"?.{node.get('name')}")
+                                   alt=f"?.{name}")
+        # item 392: the provide-method twin of the item 380(2) refusal in
+        # `infer_ast`. A field read off a value whose static type is
+        # `Any`/`Value` (the erased-dynamic types — a `json_parse` result) is
+        # the 279/299 silent-divergence class: py raises `KeyError` on an absent
+        # key, ts yields `undefined`, and neither is a defensible total answer.
+        # `infer_ast` (stratum 1 — fn/test/module-fn bodies) already refuses it;
+        # component-body typing runs through this lowered path (stratum 3), which
+        # bypassed the check, so the SAME expression compiled clean inside a
+        # `provide` method body — the same context-scoping gap as the earlier
+        # `.length`-in-provide-method bug. Apply the identical refusal here so the
+        # divergence is a compile error on every tier, wherever the read sits.
+        if filename and thead in ("Any", "Value"):
+            raise RevlError(
+                filename, line,
+                f"field read `.{name}` on a value of type "
+                f"`{render_type(target)}` — an erased value has no known fields",
+                hint=("bind it to a record type first "
+                      f"(`let e: SomeRecord = …; e.{name}` — an `Opt[T]` "
+                      "field then reads back the empty Opt on absence), or walk "
+                      "it with stdlib/value.rvl (`value_is_object(v)`, "
+                      f"`value_opt(v, \"{name}\")`, `value_field_or`)"),
+                code="T1", category="type-mismatch")
         spec = types.get(target or "")
         if spec is not None and spec.get("kind") == "record":
-            return spec.get("fields", {}).get(node.get("name"))
+            return spec.get("fields", {}).get(name)
         return None
     if kind == "index":
         target = infer_ir(node.get("target"), tenv, types, services, filename, line)
