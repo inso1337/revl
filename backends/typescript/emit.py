@@ -853,6 +853,9 @@ def _expr(node: object, ctx: "_Ctx") -> str:
     if kind == "match":
         return _v3_match_expr(node, ctx)
 
+    if kind == "do":
+        return _v3_do_expr(node, ctx)
+
     if kind == "interp":
         parts = node.get("parts") or []
         segs = ["`"]
@@ -2053,6 +2056,32 @@ def _v3_arm_body(arm: dict, ctx: "_Ctx") -> str:
     # match-temp counter, so a nested match inside the arm keeps unique temps.
     arm_scope.locals.add(_ident(bind, "match bind"))
     return _expr(arm.get("body"), ctx.with_scope(arm_scope))
+
+
+def _v3_do_expr(node: dict, ctx: "_Ctx") -> str:
+    """A statement-block match arm (`=> { let x = …; expr }`) lowered inline in
+    a provide-method body (roadmap item 361): an immediately-invoked arrow so
+    the block's `let` bindings and final value live in their own scope. In an
+    async method the arrow is `async` and its invocation awaited, so an async
+    extern reached in the block is awaited within the method's in-flight
+    window (the same async-shape the match IIFE uses for its arm arrows)."""
+    if ctx.component_scope is None:
+        raise EmitError("a `do` block arm requires a component/method body")
+    inner = ctx.component_scope.child()
+    body_ctx = ctx.with_scope(inner)
+    lines: list[str] = []
+    for st in node.get("stmts") or []:
+        if st.get("step") != "let":
+            raise EmitError(f"unsupported step in a `do` block arm: {st.get('step')!r}")
+        value = _expr(st.get("value"), body_ctx)
+        name = inner.bind(st.get("name"))
+        keyword = "let" if st.get("mutable") else "const"
+        lines.append(f"{keyword} {name} = {value};")
+    lines.append(f"return {_expr(node.get('tail'), body_ctx)};")
+    a = "async " if ctx.in_async else ""
+    body = " ".join(lines)
+    call = f"({a}() => {{ {body} }})()"
+    return f"(await {call})" if ctx.in_async else call
 
 
 def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
