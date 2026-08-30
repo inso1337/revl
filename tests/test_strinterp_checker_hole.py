@@ -72,3 +72,52 @@ def test_passing_a_correctly_typed_fn_by_name_still_compiles():
     compile_source("fn apply(g: (Int) -> Int, x: Int) -> Int { return g(x) }\n"
                    "fn inc(n: Int) -> Int { return n + 1 }\n"
                    "fn demo(n: Int) -> Int { return apply(inc, n) }\n", "t.rvl")
+
+
+# -- (B) the interpolation diagnostic ---------------------------------------
+
+def test_dollar_brace_in_a_plain_string_is_redirected_to_a_template():
+    # `"hi ${name}"` compiled clean and emitted the LITERAL `${name}`. It is
+    # now a diagnostic that redirects to a backtick template.
+    err = _err('fn greet(name: Str) -> Str { return "hi ${name}" }\n')
+    assert "does not interpolate" in err
+    assert "backtick template" in err and "`hi ${name}`" in err
+
+
+def test_f_string_prefix_is_redirected_to_a_template():
+    # `f"hi {name}"` parsed as `return f` plus a dead string; with an `f` in
+    # scope it silently miscompiled. It is now a diagnostic.
+    err = _err('fn greet(name: Str) -> Str { return f"hi {name}" }\n')
+    assert "f-string" in err
+    assert "backtick template" in err and "`hi ${name}`" in err
+
+
+def test_f_string_is_caught_even_when_an_f_is_in_scope():
+    # the exact soundness scenario from the roadmap: an `f` in scope made the
+    # f-string parse-and-typecheck clean. The lexer diagnostic fires first, so
+    # it can never reach that miscompile.
+    err = _err("fn f(name: Str) -> Str { return f\"hi {name}\" }\n")
+    assert "f-string" in err
+
+
+def test_backtick_template_still_compiles():
+    # the redirect target must actually be valid revl.
+    compile_source("fn greet(name: Str) -> Str { return `hi ${name}` }\n", "t.rvl")
+
+
+def test_a_plain_string_quoting_a_template_as_data_is_not_flagged():
+    # a plain string that carries a backtick is deliberately quoting template
+    # source as DATA (the selfhost lexer/parser fixtures) — not a mistake.
+    compile_source('fn t() -> Str { return "`hi ${name}!`" }\n', "t.rvl")
+
+
+def test_a_dollar_brace_fragment_without_a_close_brace_is_not_flagged():
+    # the ts emitter assembles template literals from fragments like `"${"`;
+    # an incomplete `${` shape is not a mistaken interpolation.
+    compile_source('fn t() -> Str { return "${" }\n', "t.rvl")
+
+
+def test_literal_braces_in_a_plain_string_are_not_flagged():
+    # `{}` / `{value}` as literal text (JSON, emit placeholders) must survive.
+    compile_source('fn t() -> Str { return "{value}L" }\n', "t.rvl")
+    compile_source('fn t() -> Str { return "{}" }\n', "t.rvl")
