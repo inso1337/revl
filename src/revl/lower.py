@@ -147,6 +147,24 @@ _BUILTIN_METHODS = {
     "size": 0, "keys": 0, "remove": 1,
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str).
     "to_str": 0,
+    # The Value dot-method accessors (roadmap item 189): receiver-first sugar
+    # for stdlib/value.rvl's `value_*` free functions. `.field(k)` takes one
+    # Str; `.str()`/`.list()`/`.keys()` take none (`keys` arity already set by
+    # the Map row above — the two share the name, disambiguated by the receiver
+    # type at lower time). Each is rewritten to a plain CALL of its `value_*`
+    # equivalent below (`_VALUE_ACCESSORS`), so it emits byte-identically to the
+    # nested free-function form and needs NO new IR expr-kind.
+    "field": 1, "str": 0, "list": 0,
+}
+
+# The Value dot-accessor method -> the `value_*` free function it desugars to
+# (roadmap item 189, stdlib/value.rvl). `node.field("k").str()` lowers to the
+# SAME call IR as `value_str(value_field(node, "k"))`, so it is pure sugar: the
+# emitted code is byte-identical on every tier value.rvl runs on, with zero
+# per-backend work (the existing call-rendering path handles all six tiers).
+_VALUE_ACCESSORS = {
+    "field": "value_field", "str": "value_str",
+    "list": "value_list", "keys": "value_keys",
 }
 
 # The disjointness this comment block promises is a *checked* claim, enforced
@@ -3080,6 +3098,22 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                                 f"builtin `{method}` takes {arity} argument(s), "
                                 f"{len(expr.args)} given")
             _refuse_zero_divisor(method, expr.args, filename, expr.line)
+            # Value dot-accessors (roadmap item 189): a `Value` receiver's
+            # `.field`/`.str`/`.list`/`.keys` is receiver-first SUGAR for the
+            # `value_*` free function — it desugars here to the SAME call IR
+            # `value_str(value_field(...))` lowers to, so the emitted code is
+            # byte-identical on every tier and no backend needs a new branch.
+            # Gated on a proven `Value` receiver: `.keys()` also names a Map
+            # builtin, which keeps the generic path below (recv head != Value).
+            # `.field`/`.str`/`.list` are Value-only, so the checker already
+            # proved the receiver is `Value` by the time lowering runs.
+            if method in _VALUE_ACCESSORS and parse_type(recv_t)[0] == "Value":
+                return {
+                    "kind": "call",
+                    "callee": {"kind": "var", "name": _VALUE_ACCESSORS[method]},
+                    "args": [_lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types)]
+                    + [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args],
+                }
             node: dict = {"kind": "builtin", "method": method,
                           "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
                           "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}

@@ -79,6 +79,27 @@ def test_dot_form_parses_and_lowers(tmp_path_factory):
     assert {f["name"] for f in ir["functions"]} >= {"deep", "kids", "names"}
 
 
+def test_value_only_accessor_rejects_wrong_receiver(tmp_path_factory):
+    # `.str`/`.field`/`.list` are Value-only: a non-Value receiver is a real
+    # diagnostic, not a silent misdispatch (the family guard in builtin_check).
+    from revl.errors import RevlError
+    for src in (
+        "fn f(x: Int) -> Str { return x.str() }\n",
+        'fn f(x: Int) -> Int { return x.field("a") }\n',
+    ):
+        with pytest.raises(RevlError, match="needs a Value receiver"):
+            _compile(src, tmp_path_factory)
+
+
+def test_map_keys_is_unaffected(tmp_path_factory):
+    # `.keys()` names both `Map.keys` and the Value accessor; the Map receiver
+    # keeps the Map builtin (byte-identical to a program without item 189).
+    ir = _compile(
+        "fn f(m: Map[Str, Int]) -> List[Str] { return m.keys() }\n",
+        tmp_path_factory)
+    assert {f["name"] for f in ir["functions"]} >= {"f"}
+
+
 @pytest.mark.parametrize("backend", ["python", "typescript"])
 def test_dot_form_byte_identical_to_free_function(backend, tmp_path_factory):
     dot = _emit(backend, _compile(DOT_FORM, tmp_path_factory))
