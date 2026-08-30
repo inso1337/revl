@@ -1,0 +1,271 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Ops": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "p",
+              "type": "Str"
+            },
+            {
+              "name": "msg",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        },
+        "run_fails": {
+          "params": [
+            {
+              "name": "p",
+              "type": "Str"
+            },
+            {
+              "name": "msg",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Agent",
+      "source": "method_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "ops": "Ops"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "ops",
+          "service": "Ops",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "p",
+                "msg"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "fn",
+                    "name": "stash_path",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "p"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "note",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "msg"
+                      }
+                    ]
+                  },
+                  "compensate": {
+                    "kind": "fn",
+                    "name": "offset",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "msg"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run_fails",
+              "params": [
+                "p",
+                "msg"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "fn",
+                    "name": "stash_path",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "p"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "note",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "msg"
+                      }
+                    ]
+                  },
+                  "compensate": {
+                    "kind": "fn",
+                    "name": "offset_fails",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "msg"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Agent",
+        "file": "method_compensate.rvl",
+        "inject": [],
+        "provides": [
+          "ops"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Agent"
+    ]
+  },
+  "types": {
+    "Stash": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "path": "Str",
+        "bak": "Str"
+      }
+    },
+    "FsError": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "code": "Str"
+      }
+    }
+  },
+  "externs": [
+    {
+      "name": "unstash",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "Stash"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  const world = (globalThis as any).__revlFsWorld\n  record('unstash')\n  if (world[w.bak] !== undefined) {\n    world[w.path] = world[w.bak]\n    delete world[w.bak]\n  }\n"
+      }
+    },
+    {
+      "name": "stash_path",
+      "class": "witnessed",
+      "params": [
+        {
+          "name": "p",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Stash, FsError]",
+      "bodies": {
+        "ts": "\n  const world = (globalThis as any).__revlFsWorld\n  const bak = p + '.bak'\n  world[bak] = world[p]\n  delete world[p]\n  return { kind: 'Ok', value: { path: p, bak } }\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "Stash",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unstash"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    },
+    {
+      "name": "note",
+      "class": "emission",
+      "params": [
+        {
+          "name": "msg",
+          "type": "Str"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "ts": " return "
+      }
+    },
+    {
+      "name": "offset",
+      "class": "pure",
+      "params": [
+        {
+          "name": "msg",
+          "type": "Str"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('compensate:' + msg)\n"
+      }
+    },
+    {
+      "name": "offset_fails",
+      "class": "pure",
+      "params": [
+        {
+          "name": "msg",
+          "type": "Str"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('compensate:' + msg)\n  throw new Error('offset boom')\n"
+      }
+    }
+  ]
+}
