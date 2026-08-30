@@ -535,6 +535,15 @@ _BUILTIN_NONRECORD = {"Str", "Int", "Int32", "Bool", "Float", "Bytes", "Unit",
 
 # host roots a pure fn may call without an explicit binding (DESIGN §7 builtins)
 _HOST_CALLABLES = {"Map", "Pool", "Job"}
+# item 395 / Stage 5 gate of docs/design/378-sync-extern-service-reach.md: the
+# backend tiers whose emitter HAS the extern config-injection seam (binds
+# `_revl_config` in the extern body from the plug-time composition config map).
+# Item 378 landed option (b) py-ONLY, so this is `{"py"}` today; ts/go/rust/java/
+# wasm gain a key here as each grows the seam. A config extern that carries a
+# host body for a tier NOT in this set is refused at compile (`_lower_externs`),
+# because that tier would emit the body with `_revl_config` unbound — a late,
+# mis-attributed runtime failure. The key is the @-body spelling (`py`/`ts`/…).
+_CONFIG_INJECTION_TIERS = {"py"}
 # Opt/Result constructors, recognized so `Some(x)`/`Ok(r)` resolve (syntax-2.0 §2)
 _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 # taint declassifier operators (roadmap item 249, Decision 3.2): `endorse(v)` is
@@ -2138,6 +2147,32 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                 raise mismatch(filename, cfg.line,
                                f"config field `{cfg.name}` default of extern `{decl.name}`",
                                cfg.type, lit_type)
+        # item 395 / Stage-5 TIER GATE (Fable review, before ts/go/rust/java
+        # config injection): option (b)'s config coeffect binds `_revl_config` in
+        # the extern body ONLY on a tier whose emitter has the injection seam
+        # (`_CONFIG_INJECTION_TIERS`, py-only today). A config extern that carries
+        # a host body for a seam-less tier would emit that body with `_revl_config`
+        # UNBOUND — a late, mis-attributed failure (runtime ReferenceError on ts;
+        # a compile error of the emitted artifact on go/rust/java). Refuse the
+        # whole hazard class HERE, at compile, naming the offending tier and
+        # redirecting to option (c). Gated on `decl.config`, so a non-config
+        # extern with any host body is untouched (byte-identical). Ordered by the
+        # author's @-body spelling for a deterministic first offender.
+        if decl.config:
+            for body in decl.bodies:
+                if body.backend not in _CONFIG_INJECTION_TIERS:
+                    raise RevlError(
+                        decl_file, body.line,
+                        f"extern config is not yet supported on the @{body.backend} "
+                        f"tier (config extern `{decl.name}`)",
+                        hint=(
+                            f"only the @py emitter binds `_revl_config` from the "
+                            f"plug-time config map today; a @{body.backend} body "
+                            f"would emit with `_revl_config` unbound. Use option "
+                            f"(c): give the mechanism a home component that "
+                            f"`requires` the service "
+                            f"(docs/design/378-sync-extern-service-reach.md)."),
+                    )
         bodies: dict[str, str] = {}
         for body in decl.bodies:
             if body.backend in bodies:
