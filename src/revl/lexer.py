@@ -273,6 +273,22 @@ def lex(source: str, filename: str) -> list[Token]:
             while j < n and (source[j].isalnum() or source[j] == "_"):
                 j += 1
             word = source[i:j]
+            # Item 380: a leading `f"..."` (a Python f-string by muscle memory)
+            # is not revl syntax — `f` lexes as an identifier and `"..."` as a
+            # separate string, so `return f"hi {name}"` silently parses as
+            # `return f` (the identifier) plus a dead string statement, and
+            # with an `f` in scope it type-checks unchecked. The `f`/`F` glued
+            # directly to a `"` (no space) is unambiguous — revl has no
+            # construct where an identifier abuts a string literal — so redirect
+            # to a backtick template rather than let it miscompile.
+            if word in ("f", "F") and j < n and source[j] == '"':
+                raise RevlError(
+                    filename, line,
+                    f"`{word}\"...\"` is not a revl string — revl has no "
+                    "f-string prefix",
+                    hint="interpolation needs a backtick template: write "
+                         "`` `hi ${name}` `` (docs/strings.md)",
+                )
             tokens.append(Token("kw" if word in KEYWORDS else "ident", word, line))
             i = j
         elif c.isdigit():
@@ -431,12 +447,40 @@ def _lex_string(source: str, i: int, line: int, filename: str, quote: str = '"')
             i += 2
             continue
         if c == quote:
-            return i + 1, "".join(buf)
+            text = "".join(buf)
+            if quote == '"':
+                _reject_dollar_interpolation(text, line, filename)
+            return i + 1, text
         if c == "\n":
             raise RevlError(filename, line, "unterminated string literal")
         buf.append(c)
         i += 1
     raise RevlError(filename, line, "unterminated string literal")
+
+
+def _reject_dollar_interpolation(text: str, line: int, filename: str) -> None:
+    """Item 380: a `${...}` inside a plain `"..."` string is a silent-wrong
+    interpolation — 2.0 interpolation lives ONLY in backtick templates, so the
+    `${...}` is emitted as LITERAL text (`"hi ${name}"` compiled clean and
+    produced the literal `${name}`). Redirect to a backtick template instead of
+    silently accepting it (§0/§10 exclusion-diagnostic philosophy).
+
+    Precise, not eager: fires only on a *complete* `${...}` shape (a closing
+    brace after the `${`), and never when the string carries a backtick — a
+    plain string that contains a backtick is deliberately quoting template or
+    shell source as DATA (the selfhost lexer/parser fixtures `"`hi ${name}!`"`,
+    and the ts emitter's fragment `"${"` which has no closing brace), not a
+    mistaken interpolation."""
+    at = text.find("${")
+    if at == -1 or "`" in text or "}" not in text[at + 2:]:
+        return
+    raise RevlError(
+        filename, line,
+        'a plain `"..."` string does not interpolate — the `${...}` is emitted '
+        "as literal text",
+        hint="interpolation needs a backtick template: write "
+             "`` `hi ${name}` `` (docs/strings.md)",
+    )
 
 
 def _lex_triple_string(source: str, i: int, line: int, filename: str):
