@@ -982,6 +982,9 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     out = out.push(line(indent, "}"))
     return { lines: out, ctx: ctx }
   }
+  // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
+  if (step == "break") { return { lines: [line(indent, "break")], ctx: ctx } }
+  if (step == "continue") { return { lines: [line(indent, "continue")], ctx: ctx } }
   return { lines: [line(indent, `<<UNSUPPORTED-STEP:${step}>>`)], ctx: ctx }
 }
 

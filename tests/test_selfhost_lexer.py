@@ -132,13 +132,11 @@ def test_selfhosted_keyword_set_matches_reference():
 
     # Keywords the reference frontend has gained but whose self-host port is a
     # separately-tracked follow-up slice, so `selfhost/lexer.rvl` does not carry
-    # them yet. `break`/`continue` land in the reference at item 379
-    # (docs/design/379-break-continue.md); the self-host port is item 391. The
-    # corpus uses neither word, so the differential lexer oracle above stays
-    # green regardless; this set-equality check is the one that would otherwise
-    # flag the deliberate, staged gap. Drop an entry from here as its 391 port
-    # lands.
-    PENDING_SELFHOST_PORT = {"break", "continue"}
+    # them yet. `break`/`continue` landed in the reference at item 379
+    # (docs/design/379-break-continue.md) and their self-host port is item 391,
+    # done here, so they are no longer pending. Drop an entry from here as its
+    # 391 port lands.
+    PENDING_SELFHOST_PORT = set()
     expected = set(KEYWORDS) - PENDING_SELFHOST_PORT
 
     emitted = set(_exec_emitted("kw")["keywords"]())
@@ -242,3 +240,23 @@ def test_selfhosted_lexer_bitwise_match_reference(lex_src, src):
     got = _canon_emitted(lex_src(src))
     assert "error" not in {k for k, _, _ in got}, got
     assert got == _canon_reference(reference_lex(src, "bitwise_case.rvl"))
+
+
+# The loop-control keywords `break`/`continue` (item 379, self-host port item
+# 391): now that they are keywords on both sides, each must lex as a `kw` token
+# (not `ident`), including when adjacent to punctuation, so a `break;` or a
+# `continue }` in a loop body streams the same tokens on both lexers.
+LOOP_CONTROL_CASES = [
+    "break", "continue", "break;", "continue;",
+    "while (c) { break }", "for (x of xs) { continue }",
+    "if (c) { break } else { continue }",
+    "while (true) { if (x) { break }; i += 1 }",
+    "for (x of xs) { if (x < 0) { continue }; total += x }",
+]
+
+
+@pytest.mark.parametrize("src", LOOP_CONTROL_CASES)
+def test_selfhosted_lexer_loop_control_match_reference(lex_src, src):
+    got = _canon_emitted(lex_src(src))
+    assert "error" not in {k for k, _, _ in got}, got
+    assert got == _canon_reference(reference_lex(src, "loop_control_case.rvl"))
