@@ -293,7 +293,10 @@ pub extern emission fn random_token(n: Int) -> Str
   = @ts {
     // getRandomValues is a synchronous WHATWG global (browser + modern Node),
     // so the draw needs no host import and no `await`.
-    const buf = new Uint8Array(n);
+    // Number(n): revl `Int` maps to a JS `bigint` on the ts backend, and
+    // `new Uint8Array(bigint)` throws (TypeError: Cannot convert a BigInt value
+    // to a number) — the Uint8Array length must be a JS number.
+    const buf = new Uint8Array(Number(n));
     globalThis.crypto.getRandomValues(buf);
     let hex = "";
     for (const x of buf) hex += x.toString(16).padStart(2, "0");
