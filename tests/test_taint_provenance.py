@@ -149,6 +149,29 @@ def test_a_plain_fn_returning_trusted_does_not_launder():
     assert classify(excinfo.value)["code"] == "G9"
 
 
+def test_taint_reaching_a_service_method_sink_is_refused():
+    """A `Trusted[T]` parameter on a *service operation* is a sink too: an
+    untrusted value reaching it through a required key (`emit s.run(page)`) is
+    refused, not only a direct extern sink."""
+    src = (
+        "extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py { return \"\" }\n"
+        "service Sink { emission fn run(cmd: Trusted[Str]) }\n"
+        "service Ops { emission fn go(url: Str) }\n"
+        "component Backend provides s: Sink { provide s { fn run(cmd) { } } }\n"
+        "component Agent requires s: Sink provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(url) {\n"
+        "      let page = emit fetch(url)\n"
+        "      emit s.run(page)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "method_sink.rvl")
+    assert classify(excinfo.value)["code"] == "G9"
+
+
 # --- 4. byte-identity: the qualifier is stripped, no runtime feature -----------
 
 def test_program_without_qualifiers_is_untouched():
