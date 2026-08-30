@@ -1,0 +1,10 @@
+// REJECTED — Python's `len(xs)` is not a revl builtin (item 384). A list's
+// length is the method `xs.length()`. `len` lexes as an undeclared call
+// target and used to hit the misleading G1.
+//
+// expected error:
+//   revl has no `len(...)`
+
+fn f(xs: List[Int]) -> Int {
+  return len(xs)
+}
