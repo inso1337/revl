@@ -144,6 +144,18 @@ def test_go_emits_the_canonical_bytes_on_supported_shapes(name, decl, expected):
     assert status == "pass", f"go drifted on {name!r}: {message}"
 
 
+def test_go_record_now_stringifies_canonically():
+    """Item 390: after the go-emitter fix (exported struct fields + json tags),
+    a record stringifies to the canonical bytes on go, byte-identical to py/ts —
+    NOT `{}`. Fails until backends/go/emit.py exports record fields."""
+    status, message = _run("go", 'type Rec = { name: Str, n: Int }\n'
+                                 'fn v() -> Rec { return { name: "x", n: 1 } }',
+                           r'{"name":"x","n":1}')
+    if status == "skip":
+        pytest.skip(f"go: {message}")
+    assert status == "pass", f"go record did not stringify canonically: {message}"
+
+
 def test_go_record_is_the_known_separate_defect():
     """CHARACTERIZATION of the go-emitter defect that json.rvl's @go body cannot
     fix (see the module header): a revl record lowers to a Go struct with
