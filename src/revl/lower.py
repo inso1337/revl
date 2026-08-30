@@ -21,6 +21,7 @@ from .errors import RevlError
 from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
     CASES_KEY,
+    FN_HEAD,
     FNS_KEY,
     _SIZED_HEADS,
     check_ast,
@@ -3318,6 +3319,35 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         if name in async_colored:
             entry["async"] = True
 
+    # sync/async arrow polymorphism (roadmap item 342, the dual of item 92).
+    # A fn colored async *solely* because it calls its own async-typed callback
+    # parameter — and reaching no other suspension — is "colour-polymorphic":
+    # its async-ness is contingent on the arrow actually passed. When a sync
+    # caller hands it a genuinely-sync arrow (a value that trivially lifts into
+    # a completed async, item 92 §2), that call site does not suspend, so the
+    # fn is monomorphized to a SYNC clone there — one source loop serves an
+    # async evolve path and a sync tool-call path with no duplicated twin.
+    #
+    # The condition is exactly "the fn's only async reach is its own async
+    # params": it has an async fn-typed parameter, it is colored, and its body
+    # calls no name in `async_colored` (an async extern or another colored fn).
+    # That guarantees the sync clone — params de-async'd, `async` dropped — has
+    # no residual suspension, so no `await` ever lands in the sync-emitted body.
+    colour_polymorphic: set = set()
+    for entry in fns:
+        if entry["name"] not in async_colored:
+            continue
+        if not any(_is_async_fn_type(p.get("type"))
+                   for p in entry.get("params") or []):
+            continue
+        reached: set = set()
+        _calls_in(entry.get("body") or [], reached, stop_async_arrows=True)
+        if not (reached & async_colored):
+            colour_polymorphic.add(entry["name"])
+    # Filled by the sync call sites during component lowering: monomorph-name ->
+    # origin fn name. Synthesized into `fns` after every component is lowered.
+    sync_monomorphs: dict[str, str] = {}
+
     # instance-parametric components: one registry shared across the lowering
     # of every component, so `spawn C` can resolve C's config/provisions and
     # the linker can learn which components are runtime templates and what the
@@ -3345,7 +3375,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                                         comp.source or program.filename,
                                         component_callables, types, emitting_fns,
                                         emitting_caps, emission_evidence, spawn_reg,
-                                        async_colored, witnessed_externs)
+                                        async_colored, witnessed_externs,
+                                        colour_polymorphic, sync_monomorphs)
         if comp.source:
             _retarget_holes(lowered_comp, comp.source)
         # async coloring (docs/design/async-extern.md §3, "Component bodies"):
@@ -3372,6 +3403,12 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                     code="A1", category="async-propagation",
                 )
         components.append(lowered_comp)
+
+    # sync/async arrow polymorphism (item 342): materialize the sync clones the
+    # sync call sites above requested. Additive — a program with no lifted call
+    # site registers none, so `fns` (and every downstream section) is
+    # byte-identical to before.
+    _synthesize_sync_monomorphs(fns, sync_monomorphs)
 
     # state hand-off admission (roadmap item 53): a candidate provider that
     # *accepts* a `handoff` on a key some running provider *exports* must accept
@@ -4304,6 +4341,105 @@ def _coerce_async_args(callee_name, args, env, line):
     return out
 
 
+def _sync_monomorph_name(origin: str, env) -> str:
+    """A collision-free identifier for `origin`'s sync clone (item 342). Every
+    call site for the same origin computes the same name: it depends only on the
+    stable `env.callables` and the shared, converging `env.sync_monomorphs`."""
+    name = f"{origin}_revl_sync"
+    while name in (env.callables or set()) or (
+            name in env.sync_monomorphs and env.sync_monomorphs[name] != origin):
+        name += "_"
+    return name
+
+
+def _monomorphize_sync_callback_calls(node, env) -> None:
+    """Sync/async arrow polymorphism at a sync-method call site (item 342).
+
+    A sync provide method that calls a colour-polymorphic fn (one async solely
+    by its own callback parameter) with a genuinely-sync arrow does not suspend:
+    the arrow trivially lifts into a completed async. Instead of forcing the
+    method async (A1) or authoring a duplicate sync loop, the call is redirected
+    to a SYNC monomorph of the fn — `async` dropped, the callback de-async'd —
+    and the arrow is un-stamped back to a plain sync value. `env.sync_monomorphs`
+    records the request; the clone is synthesized once, after every component.
+
+    Only fires when EVERY async-typed-param argument is a genuinely-sync arrow.
+    If any such arrow reaches a real suspension, the call is left untouched: the
+    A1 admission then refuses it, because a sync method truly cannot await it."""
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and node.get("name") in env.colour_polymorphic:
+            origin = node["name"]
+            sig = (env.types.get(FNS_KEY) or {}).get(origin) or {}
+            params = sig.get("params") or []
+            args = node.get("args") or []
+            async_arrows: list = []
+            liftable = True
+            for i, ptype in enumerate(params):
+                if not _is_async_fn_type(ptype):
+                    continue
+                arg = args[i] if i < len(args) else None
+                if (isinstance(arg, dict) and arg.get("kind") == "arrow"
+                        and not _arrow_reaches_async(arg.get("body"), env)):
+                    async_arrows.append((arg, ptype))
+                else:
+                    # a genuinely-async arrow (or a non-arrow) — not liftable;
+                    # leave the async loop in place for the A1 admission to judge
+                    liftable = False
+                    break
+            if liftable and async_arrows:
+                mono = _sync_monomorph_name(origin, env)
+                env.sync_monomorphs[mono] = origin
+                node["name"] = mono
+                for arg, ptype in async_arrows:
+                    arg.pop("async", None)
+                    inner = parse_type(ptype)[1][-1]          # Async[T]
+                    unwrapped = parse_type(inner)[1]
+                    arg["returns"] = render_type(unwrapped[0]) if unwrapped else None
+        for value in node.values():
+            _monomorphize_sync_callback_calls(value, env)
+    elif isinstance(node, list):
+        for value in node:
+            _monomorphize_sync_callback_calls(value, env)
+
+
+def _synthesize_sync_monomorphs(fns: list, sync_monomorphs: dict) -> None:
+    """Materialize the sync clones requested by item-342 call sites, appending
+    each to `fns`. A clone is the origin fn with `async` dropped and every
+    async-typed callback parameter de-async'd (`(A) -> Async[T]` -> `(A) -> T`),
+    so both emitters render it as a plain sync fn awaiting nothing — the body is
+    byte-identical, only the header and the callback's colour differ."""
+    import copy
+
+    by_name = {f["name"]: f for f in fns}
+    for mono, origin in sorted(sync_monomorphs.items()):
+        if mono in by_name:            # already synthesized (shared clone)
+            continue
+        src = by_name.get(origin)
+        if src is None:                # origin vanished — nothing to clone
+            continue
+        clone = copy.deepcopy(src)
+        clone["name"] = mono
+        clone.pop("async", None)
+        for p in clone.get("params") or []:
+            if _is_async_fn_type(p.get("type")):
+                p["type"] = _strip_async_fn_return(p["type"])
+        fns.append(clone)
+        by_name[mono] = clone
+
+
+def _strip_async_fn_return(fn_type: str) -> str:
+    """`(A, B) -> Async[T]` -> `(A, B) -> T`: the sync reading of an async
+    callback type (item 342). A non-async fn type is returned unchanged."""
+    head, args = parse_type(fn_type)
+    if head != FN_HEAD or not args:
+        return fn_type
+    ret_head, ret_args = parse_type(args[-1])
+    if ret_head != "Async" or not ret_args:
+        return fn_type
+    parts = list(args[:-1]) + [ret_args[0]]
+    return f"({', '.join(render_type(p) for p in parts[:-1])}) -> {render_type(parts[-1])}"
+
+
 def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
     """The module-fn twin of `_refuse_leaky_arrow`: a sync-typed arrow whose
     body reaches an async callable (a colored name — pure fns have no req keys)
@@ -4400,7 +4536,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      emission_evidence: "_EmissionEvidence | None" = None,
                      spawn_reg: dict | None = None,
                      async_colored: set | None = None,
-                     witnessed_externs: set | None = None) -> dict:
+                     witnessed_externs: set | None = None,
+                     colour_polymorphic: set | None = None,
+                     sync_monomorphs: dict | None = None) -> dict:
     env = Env(comp, services, filename, types)
     env.emitting_fns = emitting_fns or set()
     env.emitting_caps = emitting_caps or {}
@@ -4414,6 +4552,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # alone when the fixed point was not supplied (older callers/tests).
     env.async_callables = set(async_colored) if async_colored is not None \
         else set(env.async_externs)
+    # sync/async arrow polymorphism (item 342): the colour-polymorphic fns
+    # (async solely by their own callback param) and the shared registry the
+    # sync call sites fill with monomorph requests (monomorph-name -> origin).
+    env.colour_polymorphic = set(colour_polymorphic) if colour_polymorphic else set()
+    env.sync_monomorphs = sync_monomorphs if sync_monomorphs is not None else {}
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
     # instance-parametric components: the registry of spawn targets, edges,
     # templates and G4 spawn-boundary sites (docs/design-v2-instances.md)
@@ -5046,6 +5189,15 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                                           decl.capabilities, extra),
                     code="G4", category="emission-capability",
                 )
+
+        # sync/async arrow polymorphism (item 342): in a SYNC method, redirect
+        # each call of a colour-polymorphic fn that receives only genuinely-sync
+        # arrows to a sync monomorph, so the call no longer reaches an async
+        # callable. Runs before the A1 admission below, whose `async_callables`
+        # membership it thereby clears for the lifted case. An async method is
+        # left untouched — item 92's coercion (loop stays async) is unchanged.
+        if not decl.async_ and env.colour_polymorphic:
+            _monomorphize_sync_callback_calls(mbody, env)
 
         # async coloring (docs/design/async-extern.md §3): an async call is
         # admitted only inside a provide method whose service operation is
