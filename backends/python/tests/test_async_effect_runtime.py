@@ -36,7 +36,7 @@ _SRC = pathlib.Path(__file__).resolve().parents[3] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from revl import RevlError, compile_source  # noqa: E402
+from revl import compile_source  # noqa: E402
 
 
 def _module(src: str, name: str) -> types.ModuleType:
