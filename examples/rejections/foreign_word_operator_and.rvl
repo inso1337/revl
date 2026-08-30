@@ -1,0 +1,13 @@
+// REJECTED — the Python/English word operator `and` is not revl syntax
+// (item 384; syntax-2.0 §0/§3.3 exclusion diagnostics). `and` lexes as an
+// ordinary identifier, so without a redirect it falls through to the generic
+// G1 "`and` is not declared … declare it with `let`" — which actively
+// misleads (it tells the author to declare a variable when the real fix is a
+// different operator). The redirect names the idiom and the revl spelling.
+//
+// expected error:
+//   use `&&`
+
+fn f(a: Bool, b: Bool) -> Bool {
+  return a and b
+}

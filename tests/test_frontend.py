@@ -77,6 +77,10 @@ def test_end_to_end_java_golden():
 # ---------------------------------------------------------------- rejections
 
 REJECTIONS = {
+    # item 384: foreign-construct redirect table — a known-foreign idiom that
+    # lexes as an undeclared identifier (or produces a cryptic parse error) is
+    # redirected to its revl spelling instead of the misleading generic G1.
+    "foreign_word_operator_and.rvl": "use `&&`",
     "a1_await_in_method.rvl": "`await` is only allowed in a component body",
     # roadmap item 80: a sync provide method that reaches an `async` extern is
     # refused with the twin of the emission-propagation diagnostic (async-
