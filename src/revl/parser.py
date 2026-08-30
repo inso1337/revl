@@ -343,6 +343,30 @@ class HostBody:
     backend: str
     text: str
     line: int
+    # item 396 option A: provenance when this body was SPLICED from an external
+    # host-code file (`= @backend file "path"`). Both stay `None` for an inline
+    # `@backend { ... }` body, so a program that uses no file form lowers to a
+    # byte-identical IR. Set by the compiler's body-file resolver, which reads
+    # the file under the jail and replaces the HostBodyFile node below with a
+    # resolved HostBody carrying the spliced (normalized) text plus these:
+    #   source_path — the root-relative path as written, for `revl audit`
+    #   sha256      — sha256 of the RAW file bytes read, so two compiles of the
+    #                 same tree are byte-comparable and `revl verify` can re-hash
+    source_path: str | None = None
+    sha256: str | None = None
+
+
+@dataclass
+class HostBodyFile:
+    """item 396 option A: an extern body that references an external host-code
+    file, `= @backend file "path"`. The parser is IO-free and records only this
+    node; the compiler layer (`_ModuleLoader`) resolves and reads the file under
+    the jail right after parse, then REPLACES this node with a resolved
+    `HostBody`, so nothing downstream (lower, emit, audit) ever sees this shape.
+    """
+    backend: str
+    path: str   # the path string exactly as written, resolved by the compiler
+    line: int
 
 
 @dataclass
@@ -353,7 +377,9 @@ class ExternDecl:
     returns: str | None
     undo: object | None
     compensate: object | None
-    bodies: list[HostBody]
+    # item 396: a body element is a resolved inline `HostBody` or, before the
+    # compiler's body-file resolver runs, an unresolved `HostBodyFile`.
+    bodies: list["HostBody | HostBodyFile"]
     public: bool
     line: int
     # capability scope of a boundary-crossing extern (docs/design/243-witnessed-externs.md):
@@ -1288,12 +1314,39 @@ class Parser:
         config: list[ConfigField] = []
         if self.at("kw", "config"):
             config = self.config_block()
-        bodies: list[HostBody] = []
+        bodies: list[HostBody | HostBodyFile] = []
         while self.at("="):
             self.next()
-            host_tok = self.expect("hostbody", what="`@backend { ... }` host body")
-            backend, text = host_tok.value
-            bodies.append(HostBody(backend, text, host_tok.line))
+            if self.at("hostbody"):
+                host_tok = self.next()
+                backend, text = host_tok.value
+                bodies.append(HostBody(backend, text, host_tok.line))
+            elif self.at("@"):
+                # item 396 option A: the external-file body form,
+                # `= @backend file "path"`. When `@py` is NOT followed by `{`,
+                # the lexer emits a plain `@` token and re-lexes the backend word
+                # as an ordinary identifier (lexer.py:322-324), so this spelling
+                # needs ZERO lexer change. `file` is a CONTEXTUAL keyword
+                # recognised only in this slot (the discipline `witnessed`/
+                # `deferred`/`confined` use), so the KEYWORDS set is untouched and
+                # no program using `file` as a name is broken. The parser stays
+                # IO-free: it records the path and the compiler reads it, jailed.
+                at_line = self.next().line
+                backend = self.expect(
+                    "ident", what="a backend name after `@` (e.g. `@py file ...`)").value
+                self.expect(
+                    "ident", "file",
+                    what='`file` — the external host-body form `@backend file '
+                         '"path"` (item 396)')
+                path_tok = self.expect("string",
+                                       what="a host-body file path string")
+                bodies.append(HostBodyFile(backend, path_tok.value, at_line))
+            else:
+                tok = self.peek()
+                raise self.err(
+                    tok.line,
+                    f"expected a `@backend {{ ... }}` host body or a `@backend "
+                    f'file "path"` reference after `=`, found {tok.value!r}')
         if not bodies:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
