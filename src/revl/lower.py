@@ -4002,16 +4002,6 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # byte-identical to before.
     _collect(_synthesize_sync_monomorphs, fns, sync_monomorphs)
 
-    # item 388: caller-decided extern colour. Now that every provide method has
-    # recorded which colours its poly-extern call sites requested, split each
-    # pre-seeded poly extern into its concrete sync/async clones and PRUNE the
-    # colour no call site used (the eager-expand-and-prune resolution of the
-    # ordering wrinkle). Additive — no poly extern means `poly_extern_names` is
-    # empty and `externs` is byte-identical.
-    if poly_extern_names:
-        _collect(_finalize_poly_externs, externs, poly_extern_names,
-                 extern_colour_instances)
-
     # Taint/provenance verdict (item 249, Slice A): refuse any untrusted-origin
     # value that reaches a `Trusted[T]` sink without a declassifier on its path
     # (G9). No-op and byte-identical when the program declared no qualifier.
@@ -4071,6 +4061,23 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                  colour_polymorphic, types, sync_monomorphs, component_callables,
                  program.filename)
         _synthesize_sync_monomorphs(fns, sync_monomorphs)
+
+    # item 388: caller-decided extern colour — split and prune, run LAST so every
+    # section that can name an extern (fns, components, tests, prop tests) has
+    # been lowered. Each provide method has recorded which colours its poly-extern
+    # call sites requested (`extern_colour_instances`); the sync PROVIDE-method
+    # calls have already been rewritten to the `_revl_sync` clone. Materialize the
+    # concrete clones and PRUNE the colour no call site used (the eager-expand-
+    # and-prune resolution of the ordering wrinkle). The async clone additionally
+    # survives whenever the ORIGINAL name is still referenced anywhere — an async
+    # method, a module `fn`, or a `test` — so no such call dangles. Additive: no
+    # poly extern means `poly_extern_names` is empty and `externs` is unchanged.
+    if poly_extern_names:
+        poly_referenced: set = set()
+        for _section in (fns, live_components, tests, prop_tests):
+            _calls_in(_section or [], poly_referenced)
+        _collect(_finalize_poly_externs, externs, poly_extern_names,
+                 extern_colour_instances, poly_referenced)
 
     # item 386: every recoverable refusal is now collected. Raise them together
     # as a `RevlErrors` carrier BEFORE building the IR — the result dict reads
@@ -5312,7 +5319,7 @@ def _resolve_poly_extern_calls(node, env, is_async: bool) -> None:
 
 
 def _finalize_poly_externs(externs: list, poly_names: set,
-                           instances: dict) -> None:
+                           instances: dict, referenced: set) -> None:
     """Materialize and prune the concrete clones of every poly extern (item 388,
     stage 4 — the EXTERN analog of `_synthesize_sync_monomorphs`, plus the
     eager-expand-and-PRUNE resolution of the ordering wrinkle).
@@ -5345,7 +5352,13 @@ def _finalize_poly_externs(externs: list, poly_names: set,
         preseed.pop("colour_poly", None)
         inst = instances.get(name) or {}
         replacement: list = []
-        if inst.get("async"):
+        # keep the async clone if an async provide method requested it OR the
+        # original (async) name still appears anywhere in the final IR — a call
+        # from an async method, a module `fn`, or a `test` that was never
+        # monomorphized to the sync clone (only sync PROVIDE methods rewrite their
+        # calls). Without this second condition such a residual reference would
+        # dangle after the async clone was pruned.
+        if inst.get("async") or name in referenced:
             replacement.append(preseed)          # keep as the async clone
         if inst.get("sync"):
             clone = copy.deepcopy(preseed)
