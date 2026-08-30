@@ -1,0 +1,43 @@
+// The in-language per-turn admit+run crossing — roadmap item 330.
+//
+// This is the language surface that lets a RUNNING composition admit an
+// arbitrary model-authored per-turn source against its own granted tool
+// surface, in-language, instead of the harness reaching into `compile_source`
+// through undeclared host py. The admit-decision — the type judgment that IS
+// the permission decision — is a CLASSIFIED crossing here (`host_admit`, an
+// `emission`), so it rides the enclosing session's 245 commit/abort frame and
+// shows up on the G8 audit surface like every other host boundary.
+//
+// `admit(source, granted)` returns a JSON verdict `Str`:
+//   {"admitted": true,  "keys": ["turn", ...], "message": null,  "code": null}
+//   {"admitted": false, "keys": [],            "message": "...refusal...", "code": "G8"|"R2"|...}
+// A REFUSAL is the repair signal — handed back as data, never raised — and the
+// running composition is untouched. On admission the turn's handle stays on the
+// session and its provided keys are callable in the enclosing composition; its
+// granted-emission and witnessed crossings register into the SAME 245 frame, so
+// a commit persists them and an abort reverts them residue-free.
+//
+// The admit-decision applies the item-329 untrusted-author profile: the per-turn
+// `source` may declare no new `extern`/host-block (no smuggled host code) and
+// may reach no service outside the `granted` set.
+
+service Admission {
+  // admitting a per-turn source CHANGES what will run: the canonical emission,
+  // so `emit` is forced at every call site (a consumer of `Admission` sees from
+  // the declaration alone that calling it can alter the running world).
+  emission fn admit(source: Str, granted: List[Str]) -> Str
+}
+
+// The single classified host body behind the crossing (revl.mcp.admit_bridge).
+// It is opaque to revl and therefore enumerated on the G8 audit surface — the
+// honest place for "this component can admit and run new code".
+extern emission fn host_admit(source: Str, granted: List[Str]) -> Str
+  = @py { from revl.mcp.admit_bridge import admit; return admit(source, granted) }
+
+// Compose this file as a ROOT module of the composition (components are never
+// `use`-imported): `compile_files(["your_base.rvl", "stdlib/admit.rvl"])`.
+component AdmitGate provides admission: Admission {
+  provide admission {
+    fn admit(source, granted) = emit host_admit(source, granted)
+  }
+}
