@@ -1319,6 +1319,12 @@ def _expr(
         target = _expr(target_node, ctx, rename, env)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value in
+            # a component position — the code-point (Str) / element (List) count
+            # via `_v3_len`, the same as the `len` node, NOT a record member
+            # access (which would not resolve on a `String`).
+            return _v3_len(target)
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":

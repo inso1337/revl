@@ -3715,6 +3715,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         target = _render_expr(target_node, ctx, rename)
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value in
+            # a component position — the code-point (Str) / element (List) count
+            # via the helper trait (`String::len` is bytes), the same as the
+            # `len` node, NOT a struct field access.
+            return f"{target}.revl_length()"
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":
