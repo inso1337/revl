@@ -722,6 +722,10 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         operand = _expr(node.get("operand"), ctx)
         if node.get("op") == "!":
             return f"(!{operand})"
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): JS `~` returns a signed i32
+            # `number`, so it needs no re-wrap and never traps.
+            return f"(~{operand})"
         if node.get("op") == "-":
             if node.get("operands") == "Int":
                 # BigInt negation is unbounded; re-impose the i64 bound so
@@ -1750,6 +1754,12 @@ _TS_V3_BIN_OPS = {
     "<": "<", ">": ">", "<=": "<=", ">=": ">=",
     "+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
     "&&": "&&", "||": "||",
+    # Int32 bitwise operators (item 366, docs/arithmetic.md). Int32 is a JS
+    # `number`, and JS's `& | ^ << >>` all coerce to a signed 32-bit int, mask a
+    # shift count to its low 5 bits (mod 32), and return a signed i32 `number` —
+    # which is exactly the Int32 semantics, so no `revlI32` re-wrap is needed.
+    # `>>` is the arithmetic (sign-propagating) shift (`>>>` would be logical).
+    "&": "&", "|": "|", "^": "^", "<<": "<<", ">>": ">>",
 }
 
 _HOST_ROOTS = {"Pool", "Map", "Job"}

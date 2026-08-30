@@ -335,6 +335,20 @@ def _uses_bounded_int32(node) -> bool:
     return False
 
 
+def _uses_i32_shl(node) -> bool:
+    """Does this IR do an Int32 `<<`? Left shift is the one bitwise op whose
+    result can leave the 32-bit range (a bit op, not a trap), so python
+    re-wraps it through `_revl_i32_wrap`; `&`/`|`/`^`/`>>`/`~` all stay in
+    range for in-range operands and need no helper (docs/arithmetic.md)."""
+    if isinstance(node, dict):
+        if node.get("kind") == "bin" and node.get("op") == "<<":
+            return True
+        return any(_uses_i32_shl(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_i32_shl(v) for v in node)
+    return False
+
+
 def _uses_true_division(node) -> bool:
     """Does anything in this IR divide with `/`? The IEEE helper is emitted
     only where it is used, so modules that never divide stay unchanged."""
@@ -1771,6 +1785,25 @@ def _expr(node: dict) -> str:
             lhs, rhs = _expr(node["left"]), _expr(node["right"])
             return (f"(lambda _a, _b: abs(_a) % abs(_b) if _a >= 0 "
                     f"else -(abs(_a) % abs(_b)))({lhs}, {rhs})")
+        if node["op"] in ("&", "|", "^"):
+            # Int32 bitwise AND/OR/XOR (item 366). These are bit patterns, not
+            # arithmetic, so they never trap. python's ints are signed and, for
+            # two operands already in i32 range, `&`/`|`/`^` produce a result
+            # that is also in i32 range — the sign bit propagates consistently
+            # in python's two's-complement view — so no re-wrap is needed.
+            return (f"({_expr(node['left'])} {node['op']} "
+                    f"{_expr(node['right'])})")
+        if node["op"] == ">>":
+            # Arithmetic (sign-extending) right shift; the count is taken mod
+            # 32 (`& 31`), matching wasm/JS. python `>>` is arithmetic and the
+            # magnitude only shrinks, so the result stays in i32 range.
+            return (f"({_expr(node['left'])} >> "
+                    f"({_expr(node['right'])} & 31))")
+        if node["op"] == "<<":
+            # Left shift wraps into 32-bit two's complement (a bit op, no
+            # trap): the count is taken mod 32 and the result is re-wrapped.
+            return (f"_revl_i32_wrap({_expr(node['left'])} << "
+                    f"({_expr(node['right'])} & 31))")
         op = _PY_BIN_OPS.get(node["op"])
         if op is None:
             raise EmitError(f"unsupported binary operator {node['op']!r}")
@@ -1778,6 +1811,10 @@ def _expr(node: dict) -> str:
     if kind == "un":
         if node["op"] == "!":
             return f"(not {_expr(node['operand'])})"
+        if node["op"] == "~":
+            # Int32 bitwise complement (item 366): `~x == -x - 1`, which stays
+            # in i32 range for any in-range `x`, so no re-wrap is needed.
+            return f"(~{_expr(node['operand'])})"
         if node["op"] == "-":
             if node.get("operands") == "Int":
                 # Negation is `0 - x`, and `0 - Int.MIN` overflows: it goes
@@ -2821,6 +2858,13 @@ def emit(ir: dict) -> str:
         out.add(0, "    if v < _REVL_I32_MIN or v > _REVL_I32_MAX:")
         out.add(0, "        raise OverflowError('revl: Int32 overflow')")
         out.add(0, "    return v")
+        out.add(0)
+    if _uses_i32_shl(ir):
+        out.add(0, "def _revl_i32_wrap(v):")
+        out.add(0, '    """Wrap an Int32 `<<` result into 32-bit two\'s '
+                   'complement (docs/arithmetic.md)."""')
+        out.add(0, "    v &= 0xFFFFFFFF")
+        out.add(0, "    return v - 0x100000000 if v & 0x80000000 else v")
         out.add(0)
     if _uses_true_division(ir):
         # `/` is IEEE true division (docs/arithmetic.md): a zero divisor gives
