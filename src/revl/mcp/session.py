@@ -179,6 +179,27 @@ class Session:
         # single-use. Persists across swaps (the candidate-hash check invalidates a
         # stale entry, so no revocation bookkeeping exists to forget).
         self._ledger: list = []
+        # roadmap item 344 (fork b of the 246 open question 2 / 251 distillation
+        # target, one item early): SESSION-SCOPED STANDING GRANTS an operator
+        # mints once against a CAPABILITY (not one ticket hash) and per-call
+        # class-(c) crossings consume against — decrementing `remainingUses`,
+        # checked against `expiresAt` — instead of prompting single-use. Each
+        # entry is keyed by (capability, reach-closure candidateHash, component,
+        # session), so it takes the shell-escape shape (n repeat class-(c) calls
+        # to the same capability, differing args) from n prompts to one mint.
+        # Every Slice-1 invariant is preserved: hash-bound to the capability's
+        # semantic identity, expiring (injectable clock, checked at the
+        # crossing), single-session, and consumed durably via the same
+        # consume-before-fire `approval-consumed` WAL. Persists across a swap
+        # (the candidateHash check invalidates a stale grant, exactly as
+        # `_ledger` does); reset per session (invariant 5).
+        self._grants: list = []
+        # how many per-call class-(c) crossings auto-approved against a standing
+        # grant this session — the grant-consumed half of the metrics the 344
+        # measurement reads beside prompts-per-session (Decision 6). Off-policy
+        # this is never surfaced (`approval_metrics` returns None), so the
+        # manifest and `state()` stay byte-identical.
+        self._grants_consumed: int = 0
         # item 246, Slice 2/3: granted typed `Approval[C]` entries (the language
         # surface, `await approval` / `with`). Distinct from `_ledger` (the
         # operator-layer ticket path): each carries a single `capability`, its
@@ -1296,6 +1317,8 @@ class Session:
         self._class_map = None
         self._tickets = {}
         self._ledger = []
+        self._grants = []
+        self._grants_consumed = 0
 
     # -- interaction -------------------------------------------------------
 
@@ -1431,6 +1454,14 @@ class Session:
         if standing is not None:
             self._consume_approval(standing)   # durable spend before the fire
             return
+        # item 344: a session-scoped standing grant keyed by the capability's
+        # semantic identity covers ANY class-(c) call reaching it (differing
+        # args included), so the shell-escape shape auto-approves against one
+        # mint instead of prompting per call.
+        grant = self._find_standing_grant(ticket)
+        if grant is not None:
+            self._consume_grant(grant)         # durable spend before the fire
+            return
         self._tickets[ticket["hash"]] = ticket
         if self._owner is not None:
             self._owner.prompts["perCall"] += 1
@@ -1454,6 +1485,10 @@ class Session:
             standing = self._find_standing_approval(ticket)
             if standing is not None:
                 self._consume_approval(standing)
+                continue
+            grant = self._find_standing_grant(ticket)   # item 344
+            if grant is not None:
+                self._consume_grant(grant)
                 continue
             self._tickets[ticket["hash"]] = ticket
             if self._owner is not None:
@@ -1521,6 +1556,191 @@ class Session:
                 "method": ticket.get("method"), "kind": ticket.get("kind"),
                 "candidateHash": ticket["candidateHash"]}
 
+    # -- item 344: session-scoped standing capability grants ----------------
+
+    def _find_standing_grant(self, ticket: dict):
+        """The first LIVE standing grant covering this class-(c) ticket: the
+        grant's capability is in the ticket's reach capability set, the reach-
+        closure candidate hash matches the LIVE generation, the component and
+        session match, it is unexpired (clock checked HERE, not at mint), and it
+        has uses remaining. None when nothing covers it — the crossing then
+        prompts single-use exactly as before (fail-closed). A swap that changed
+        the closure recomputes a different candidate hash, so a stale grant fails
+        here with no revocation bookkeeping (invariant 4, the same trick as the
+        Slice-1 token)."""
+        now = self._now_ms()
+        for g in self._grants:
+            if g["consumed"]:
+                continue
+            if g["component"] != ticket["component"]:
+                continue                 # invariant 5: minted for another deputy
+            if g["candidateHash"] != ticket["candidateHash"]:
+                continue                 # invariant 4: the closure changed under it
+            if g["session"] != self._session_id:
+                continue                 # invariant 5: cross-session replay
+            if g["capability"] not in (ticket.get("capabilities") or []):
+                continue                 # a grant for A does not cover B
+            exp = g.get("expiresAt")
+            if exp is not None and now > exp:
+                continue                 # invariant 3: expired at the crossing
+            remaining = g.get("remainingUses")
+            if remaining is not None and remaining <= 0:
+                continue                 # uses exhausted
+            return g
+        return None
+
+    def _consume_grant(self, grant: dict) -> None:
+        """Spend one use of a standing grant durably BEFORE the crossing fires
+        (Decision 3, consume-before-fire — the Slice-2 WAL ordering still
+        applies). Decrements `remainingUses`; a grant whose uses hit zero is
+        marked `consumed` so it never covers again. A crash between this
+        `approval-consumed` record and the fire leaves consumed-but-unfired —
+        fail-closed, exactly as for a single-use token."""
+        remaining = grant.get("remainingUses")
+        if remaining is not None:
+            grant["remainingUses"] = remaining - 1
+            if grant["remainingUses"] <= 0:
+                grant["consumed"] = True
+        self._grants_consumed += 1
+        wal = self._approval_wal()
+        if wal is not None:
+            wal.record_approval_consumed(grant["requestId"])
+
+    def mint_standing_grant(self, *, ticket_hash: str | None = None,
+                            capability: str | None = None,
+                            uses: int | None = None,
+                            ttl_ms: int | None = None) -> dict:
+        """Mint a SESSION-SCOPED STANDING GRANT (roadmap item 344, fork b).
+
+        Unlike `approve_ticket` — which binds ONE ticket hash single-use, so it
+        covers only the identical call — a standing grant is keyed by a
+        CAPABILITY and its reach-closure candidate hash, so it covers every
+        class-(c) call reaching that capability under the same closure (differing
+        args included) until its uses are exhausted or its TTL lapses. This is
+        the missing shape the harness measurement found: the shell-escape session
+        (n repeat `term.shell` crossings) mints one grant and auto-approves the
+        rest instead of prompting per call.
+
+        Two ways to name what is granted, both resolving to the same key:
+
+          * from an OUTSTANDING TICKET (`ticket_hash`): the ticket already
+            carries the resolved capabilities, the component, and the candidate
+            hash. When the ticket reaches exactly one capability it is used; when
+            it reaches several, `capability` must name which to widen.
+          * PROACTIVELY against a `capability` (no ticket): the live class map
+            resolves it to its class-(c) crossing target. An unknown capability,
+            or one reachable via more than one distinct closure, is refused
+            rather than minting an under- or over-scoped grant.
+
+        Bounded by construction: at least one of `uses`, `ttl_ms`, or a policy
+        `requires approval ttl` rule must bound the grant — an unbounded standing
+        grant is refused. Gated (in the mcp verb dispatch) by the `approve`
+        operator verb, exactly as `approve_ticket`."""
+        if uses is not None:
+            if not isinstance(uses, int) or isinstance(uses, bool) or uses < 1:
+                raise SessionError(
+                    "`uses` must be a positive integer — the number of class-(c) "
+                    "crossings this standing grant may auto-approve")
+        if ttl_ms is not None and (not isinstance(ttl_ms, int)
+                                   or isinstance(ttl_ms, bool) or ttl_ms < 1):
+            raise SessionError(
+                "`ttlMs` must be a positive integer (milliseconds) — the window "
+                "over which this standing grant stays live")
+
+        component: str | None = None
+        candidate_hash: str | None = None
+        policy_ttl: int | None = None
+
+        if ticket_hash is not None:
+            ticket = self._tickets.get(ticket_hash)
+            if ticket is None:
+                raise SessionError(
+                    f"unknown ticket hash {ticket_hash!r} — the server never "
+                    f"issued it (or the generation changed and the outstanding-"
+                    f"ticket table was replaced). Re-issue the call for a fresh "
+                    f"ticket, then mint the grant against that (item 246, the "
+                    f"outstanding-ticket table)")
+            caps = ticket.get("capabilities") or []
+            if capability is None:
+                if len(caps) != 1:
+                    raise SessionError(
+                        f"this ticket reaches {len(caps)} capabilities "
+                        f"({', '.join(caps) or 'none'}) — name which one to "
+                        f"widen into a standing grant via `capability`")
+                capability = caps[0]
+            elif capability not in caps:
+                raise SessionError(
+                    f"capability {capability!r} is not on this ticket's reach "
+                    f"({', '.join(caps) or 'none'}) — a grant may only widen a "
+                    f"capability the crossing actually reaches")
+            component = ticket["component"]
+            candidate_hash = ticket["candidateHash"]
+            policy_ttl = self._ticket_ttl_ms(ticket)
+        elif capability is not None:
+            if self._class_map is None:
+                raise SessionError(
+                    "no approval policy is active, so there is no class map to "
+                    "resolve a capability grant against — load under "
+                    "`--approval-policy`")
+            targets = self._class_map.crossings_for_capability(capability)
+            if not targets:
+                raise SessionError(
+                    f"capability {capability!r} is not a live class-(c) crossing "
+                    f"in this generation — nothing to grant (a witnessed or "
+                    f"deferred capability never prompts, so it needs no grant)")
+            if len(targets) > 1:
+                comps = sorted({t["component"] for t in targets})
+                raise SessionError(
+                    f"capability {capability!r} is reachable via {len(targets)} "
+                    f"distinct closures (components {', '.join(comps)}) — mint "
+                    f"from an outstanding ticket to bind the exact crossing "
+                    f"rather than an ambiguous proactive grant")
+            component = targets[0]["component"]
+            candidate_hash = targets[0]["candidateHash"]
+        else:
+            raise SessionError(
+                "provide a `capability` (+ `uses`/`ttlMs`) to mint a standing "
+                "grant, or a ticket `hash` to mint one from an outstanding "
+                "class-(c) ticket")
+
+        effective_ttl = ttl_ms if ttl_ms is not None else policy_ttl
+        if uses is None and effective_ttl is None:
+            raise SessionError(
+                "a standing grant must be bounded — give `uses`, `ttlMs`, or "
+                "load a policy with a `requires approval ttl` rule for this "
+                "capability. An unbounded standing grant is refused (item 344 "
+                "keeps consent bounded)")
+
+        now = self._now_ms()
+        request_id = ("grant:" + str(len(self._grants) + 1) + ":" + capability)
+        entry = {
+            "requestId": request_id,
+            "kind": "standing-grant",
+            "capability": capability,
+            "candidateHash": candidate_hash,
+            "component": component,
+            "session": self._session_id,   # invariant 5: session-bound
+            "grantedAt": now,
+            "expiresAt": (now + effective_ttl) if effective_ttl is not None
+            else None,
+            "remainingUses": uses,          # None = bounded only by TTL/session
+            "consumed": False,
+        }
+        self._grants.append(entry)
+        wal = self._approval_wal()
+        if wal is not None:
+            wal.record_approval_granted({
+                "requestId": entry["requestId"], "kind": entry["kind"],
+                "capability": entry["capability"],
+                "candidateHash": entry["candidateHash"],
+                "component": entry["component"], "session": entry["session"],
+                "expiresAt": entry["expiresAt"],
+                "remainingUses": entry["remainingUses"]})
+        return {"granted": True, "kind": "standing-grant",
+                "requestId": entry["requestId"], "capability": capability,
+                "component": component, "candidateHash": candidate_hash,
+                "remainingUses": uses, "expiresAt": entry["expiresAt"]}
+
     def approval_metrics(self) -> dict | None:
         """The auto-approve headline numbers for `session.state()` (Decision 6):
         the posture tally, percent auto-approved-with-proof, prompts-per-session,
@@ -1540,6 +1760,17 @@ class Session:
             "promptsPerSession": sum(prompts.values()) if prompts else 0,
             "prompts": prompts,
             "outstandingTickets": sorted(self._tickets),
+            # item 344: the grant-consumed half of the picture — per-call
+            # class-(c) crossings that auto-approved against a standing grant
+            # instead of prompting, and the grants currently live. This is what
+            # takes prompts-per-session below the single-use floor for a
+            # repeat-shaped session.
+            "grantsConsumed": self._grants_consumed,
+            "standingGrants": [
+                {"capability": g["capability"], "component": g["component"],
+                 "remainingUses": g.get("remainingUses"),
+                 "expiresAt": g.get("expiresAt"), "consumed": g["consumed"]}
+                for g in self._grants],
         }
 
     # -- backwards replay (docs/replay.md) ---------------------------------
