@@ -1255,7 +1255,13 @@ fn map_runtime() -> List[Str] {
   o = o.push("// The value type is generic — each site's `Map.create()` pins `V`")
   o = o.push("// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).")
   o = o.push("public static final class Map<V> {")
-  o = o.push("    private final java.util.HashMap<String, V> values = new java.util.HashMap<>();")
+  o = o.push("    // item 397: a ConcurrentHashMap, not a bare HashMap. The tier's")
+  o = o.push("    // placement runner serves each bridge connection on its own thread,")
+  o = o.push("    // so the former unsynchronized HashMap was not memory-safe under")
+  o = o.push("    // concurrent put; migrating the backing class makes insert/remove/get")
+  o = o.push("    // thread-safe AND gives insert_if_absent an atomic putIfAbsent.")
+  o = o.push("    private final java.util.concurrent.ConcurrentHashMap<String, V> values =")
+  o = o.push("        new java.util.concurrent.ConcurrentHashMap<>();")
   o = o.push("    private Map() {}")
   o = o.push("    // revl `Map.new()` — renamed: `new` is a Java reserved word.")
   o = o.push("    public static <V> Map<V> create() {")
@@ -1266,6 +1272,15 @@ fn map_runtime() -> List[Str] {
   o = o.push("    }")
   o = o.push("    public void insert(String key, V value) {")
   o = o.push("        values.put(key, value);")
+  o = o.push("    }")
+  o = o.push("    // The atomic compare-and-set (item 397): ConcurrentHashMap.putIfAbsent")
+  o = o.push("    // is a single atomic operation over the test AND the insert. It returns")
+  o = o.push("    // the previous value (null when absent), so a null return means this")
+  o = o.push("    // call inserted. Under N concurrent callers, exactly one sees null.")
+  o = o.push("    // (ConcurrentHashMap forbids null values; revl host inserts never pass")
+  o = o.push("    // null, and `get` already wraps absence in Optional.)")
+  o = o.push("    public boolean insert_if_absent(String key, V value) {")
+  o = o.push("        return values.putIfAbsent(key, value) == null;")
   o = o.push("    }")
   o = o.push("    public void remove(String key) {")
   o = o.push("        values.remove(key);")
@@ -1485,8 +1500,16 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
   }
   return ""
 }
-// `_map_expr_inserts`: collect candidate value types from `bind.insert(k, v)`
-// anywhere in an expression (both call shapes), recursing into subexpressions.
+// `_is_map_value_writer`: a Map verb that writes a value at arg[1]; each pins
+// the host Map's value type V. Inferring V from ANY writer (not the literal
+// name "insert") lets a CAS-only writer (`insert_if_absent`, item 397) pin a
+// concrete V instead of the Str default (item 402).
+fn is_map_value_writer(method: Str) -> Bool {
+  return method == "insert" || method == "insert_if_absent"
+}
+// `_map_expr_inserts`: collect candidate value types from any map value-writing
+// call (`insert`, `insert_if_absent`, ...) on `bind` anywhere in an expression
+// (both call shapes), recursing into subexpressions.
 fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, services: Any,
                     functions: List[Any], ctx: Ctx, types: Any, cands: List[Str]) -> List[Str] {
   if (value_kind(node) != "record") { return cands }
@@ -1495,7 +1518,7 @@ fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, s
     let target = value_field(node, "target")
     let tk = value_str(value_field(target, "kind"))
     if ((tk == "name" || tk == "var") && node_ref_name(target) == bind
-        && value_str(value_field(node, "method")) == "insert") {
+        && is_map_value_writer(value_str(value_field(node, "method")))) {
       let args = value_list(value_field(node, "args"))
       if (args.length() >= 2) {
         let t = map_value_expr_type(args[1], var_types, comp, services, functions, ctx, types)
@@ -1507,7 +1530,7 @@ fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, s
       let ct = value_field(callee, "target")
       let ctk = value_str(value_field(ct, "kind"))
       if ((ctk == "name" || ctk == "var") && node_ref_name(ct) == bind
-          && value_str(value_field(callee, "name")) == "insert") {
+          && is_map_value_writer(value_str(value_field(callee, "name")))) {
         let args = value_list(value_field(node, "args"))
         if (args.length() >= 2) {
           let t = map_value_expr_type(args[1], var_types, comp, services, functions, ctx, types)

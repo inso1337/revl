@@ -36,6 +36,7 @@ from .typecheck import (
     format_type,
     host_check,
     _HOST_FAMILIES,
+    _HOST_RESULT_SIG,
     infer_ast,
     infer_ir,
     mismatch,
@@ -558,6 +559,30 @@ _HOST_CALLABLES = {"Map", "Pool", "Job"}
 # Kept beside `_HOST_CALLABLES` so the host-Map surface — `_HOST_FAMILIES`'s
 # `Map` row plus this — is enumerable in one place; maps verb -> arity.
 _HOST_MAP_ITER_VERBS: dict[str, int] = {"size": 0, "keys": 0}
+
+
+def _host_result_type(acquire: dict, env: "Env") -> str | None:
+    """The declared RESULT type of a result-declared host verb call on a host
+    local, or `None` when `acquire` is not such a call (item 397).
+
+    The host frontier types arguments and deliberately not results, except for
+    the one-verb-wide result column `_HOST_RESULT_SIG` (today: `Map.
+    insert_if_absent -> Bool`). A lowered host-verb call is
+    `{"kind": "call", "target": {"kind": "name", "id": <safe>}, "method": ...}`
+    where the target names a host local (its family lives in `env.host_locals`).
+    This is the compare-and-set (CAS) shape whose Bool the program consumes with
+    a pure `if` — the classification is a host verb in the effect stratum,
+    spelled as an acquisition, whose let-effect binding is TYPED
+    (docs/design/397-insert-if-absent.md §Classification)."""
+    if not isinstance(acquire, dict) or acquire.get("kind") != "call":
+        return None
+    target = acquire.get("target")
+    if not isinstance(target, dict) or target.get("kind") != "name":
+        return None
+    family = env.host_locals.get(target.get("id"))
+    if family is None:
+        return None
+    return _HOST_RESULT_SIG.get(f"{family}.{acquire.get('method')}")
 
 
 def _check_host_verb(family: str, verb: str, argc: int,
@@ -5896,6 +5921,23 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
     `raw_acquire` (the original AST expression) is needed only to render that
     message the same way `_describe_expr` always has."""
     step_kind = "let-effect" if bind is not None else "effect"
+    # item 397: the unbound statement form of a result-declared host verb (a
+    # CAS like `insert_if_absent`) is refused. A CAS whose Bool nobody reads is
+    # a plain `insert` with extra steps, and its site-spelled `undo` would be
+    # registered unconditionally — removing the WINNER's entry on a `false`
+    # CAS at teardown, exactly the corruption single-use exists to prevent
+    # (docs/design/397-insert-if-absent.md §Classification, two sharp edges).
+    if bind is None and _host_result_type(acquire, env) is not None:
+        verb = str(acquire.get("method"))
+        raise RevlError(
+            filename, line,
+            f"`{verb}` returns a value and must be bound: "
+            f"`let ok = effect <map>.{verb}(k, v) undo <map>.remove(k)`",
+            hint="a compare-and-set reports whether it inserted; discarding "
+                 "that Bool makes its `undo` unsound (it would remove the "
+                 "winning claimant's entry on a `false`). Bind the result, or "
+                 "use `insert` for an unconditional overwrite",
+            code="G4", category="host-boundary")
     wit_name = acquire.get("name") if acquire.get("kind") == "fn" else None
     if wit_name is not None and wit_name in env.witnessed_externs:
         if undo_expr is not None:
@@ -6083,6 +6125,12 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             if acquire.get("kind") == "host":
                 env.host_locals[safe] = str(acquire["fn"]).partition(".")[0]
             acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
+            # item 397: a result-declared host verb (a Bool CAS like
+            # `insert_if_absent`) types its bind from the frontier's result
+            # column. `infer_ir` cannot see host-local provenance (it takes no
+            # `host_locals`), so the type is resolved here where it is known.
+            if acquired_type is None:
+                acquired_type = _host_result_type(acquire, env)
             if acquired_type is not None:
                 env.type_env[safe] = acquired_type
             step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
@@ -6443,20 +6491,51 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                          "down; a provide-method effect runs per request and has no such "
                          "window (docs/verified-effect.md). Drop `verified`, or move the "
                          "effect to the activation body.")
-            if isinstance(mstmt, LetEffect):
+            if isinstance(mstmt, LetEffect) and not isinstance(mstmt.acquire, SpawnExpr):
+                # item 397: the NARROW lift of the phase-1 spawn-only rule. A
+                # let-effect in a provide-method body is additionally admitted
+                # when its acquire is a result-declared host verb (today:
+                # exactly `insert_if_absent`) on an existing host local. The
+                # bind names a checked VALUE (`Bool`), not a request-scoped
+                # instance: there is no handle and no nested teardown scope, so
+                # the effect-and-undo pair joins the activation frame's teardown
+                # accumulator exactly as the unbound method-time `insert` does
+                # today (demo/components/user_cache.rvl) — only the result gains
+                # a (typed) name. The general method-body acquisition stays
+                # deferred (docs/design/397-insert-if-absent.md §The one grammar
+                # extension).
+                acquire = _lower_expr(mstmt.acquire, env, mode="setup")
+                result_type = _host_result_type(acquire, env)
+                if result_type is None:
+                    raise RevlError(
+                        filename, mstmt.line,
+                        "only `spawn` may be acquired inside a provide-method body",
+                        hint="a request-scoped instance gets a nested teardown "
+                             "scope; other acquisitions belong in the activation "
+                             "body (docs/design-v2-instances.md). A result-declared "
+                             "host verb (a Bool compare-and-set like "
+                             "`insert_if_absent`) may be bound here")
+                if mstmt.bind in env.params or mstmt.bind in method_locals:
+                    raise RevlError(filename, mstmt.line,
+                                    f"`{mstmt.bind}` is already bound in `{method.name}`")
+                safe = _safe_name(mstmt.bind,
+                                  set(env.params.values()) | set(method_locals.values()))
+                method_locals[mstmt.bind] = safe
+                env.params[mstmt.bind] = safe  # visible to later statements
+                # a checked Bool value, NOT a host receiver: entered in the
+                # type env so a pure `if`/ternary on it typechecks, and kept
+                # OUT of host_locals (it has no verb surface).
+                env.type_env[safe] = result_type
+                mbody.append(_lower_effect_step(
+                    acquire, mstmt.undo, env, filename, mstmt.line,
+                    bind=safe, raw_acquire=mstmt.acquire))
+            elif isinstance(mstmt, LetEffect):
                 # item zero (docs/design-v2-instances.md): a spawn inside a
                 # provide-method is a request-scoped instance. It gets its own
                 # nested teardown scope (its child fiber), so `s.dispose()`
                 # reclaims it when the instance dies, not when the component
                 # tears down. Only `spawn` may be acquired here in phase 1 —
                 # a general method-body acquisition is a separate feature.
-                if not isinstance(mstmt.acquire, SpawnExpr):
-                    raise RevlError(
-                        filename, mstmt.line,
-                        "only `spawn` may be acquired inside a provide-method body",
-                        hint="a request-scoped instance gets a nested teardown "
-                             "scope; other acquisitions belong in the activation "
-                             "body (docs/design-v2-instances.md)")
                 if mstmt.bind in env.params or mstmt.bind in method_locals:
                     raise RevlError(filename, mstmt.line,
                                     f"`{mstmt.bind}` is already bound in `{method.name}`")

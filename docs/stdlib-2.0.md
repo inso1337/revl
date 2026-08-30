@@ -126,7 +126,17 @@ tiers would otherwise diverge for free.
 ### Coexistence with the host `Map.new()`
 
 The v1 host stub object (`let store = Map.new()`, methods
-`insert/remove/get/drop`) keeps its exact existing surface. The two
+`insert/insert_if_absent/remove/get/drop`) keeps its exact existing surface.
+`insert_if_absent(k, v) -> Bool` (item 397) is the atomic compare-and-set: it
+inserts and returns `true` only when the key was absent, otherwise it leaves
+the existing value untouched and returns `false`, and its result is the first
+host-verb result the frontend types (a `Bool`, so a claim can branch on it).
+It is spelled as a bound acquisition, `let fresh = effect
+store.insert_if_absent(k, v) undo store.remove(k)`, and the undo is
+result-guarded (a `false` CAS registers no inverse). Per tier the test and the
+insert are one atomic step: a lock spanning both on go/rust, ConcurrentHashMap
+`putIfAbsent` on java, run-to-completion of a synchronous op on py/ts. See
+docs/design/397-insert-if-absent.md. The two
 namespaces stay collision-free **by construction**: every new value-side
 name (`empty`, `set`, `lookup`, `has`) was chosen disjoint from the host
 verb set (`open/close/query/execute/new/get/insert/remove/drop/run`; `run`

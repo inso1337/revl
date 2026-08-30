@@ -700,7 +700,8 @@ fn f() {
   m.putt("k", "v")
 }""")
     assert "`Map` has no method `putt`" in err
-    assert "drop, get, insert, new, remove" in err  # the real surface, named
+    # the real surface, named (item 397 added the CAS verb insert_if_absent)
+    assert "drop, get, insert, insert_if_absent, new, remove" in err
 
 
 def test_host_method_wrong_arity_is_refused():
@@ -745,7 +746,7 @@ component C provides cache: Cache {
     assert "`Map` has no method `frobnicate`" in err
     # the FULL host-Map surface is named: the stub verbs plus the item-84/86/88
     # iteration verbs (`size`/`keys`), which are legal on a host local
-    assert "drop, get, insert, keys, new, remove, size" in err
+    assert "drop, get, insert, insert_if_absent, keys, new, remove, size" in err
 
 
 def test_401_unknown_verb_in_provide_method_effect_statement_is_refused():

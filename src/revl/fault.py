@@ -1225,6 +1225,8 @@ def _outstanding(events: list) -> dict:
         "<tag>.new" / "<tag>.drop"                 a Map came into / left being
         "<tag>.open <url>" / "<tag>.close <url>"    a Pool opened / closed
         "<tag>.insert <key>" / "<tag>.remove <key>" a Map key set / cleared
+        "<tag>.insert_if_absent <key> -> true|false" a CAS: true set the key,
+                                                    false changed nothing (397)
         "<tag>.acquire conn=<k> …" / ".release …"   a Pool connection checked out
 
     Anything the ledger does not carry (an aliased reference, an emission that
@@ -1251,6 +1253,15 @@ def _outstanding(events: list) -> dict:
         elif verb == "insert":
             if tag in keys:
                 keys[tag].add(rest)
+        elif verb == "insert_if_absent":
+            # item 397: the record is "<key> -> true|false". A `true` CAS set
+            # the key (fold it in exactly as `insert`); a `false` CAS changed
+            # nothing (the key was already outstanding for its own claimant),
+            # so it counts as no residue here — or the fingerprint would
+            # over-count a key this call never owned.
+            key_part, _, outcome = rest.rpartition(" -> ")
+            if outcome == "true" and tag in keys:
+                keys[tag].add(key_part)
         elif verb == "remove":
             if tag in keys:
                 keys[tag].discard(rest)

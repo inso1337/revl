@@ -2635,6 +2635,24 @@ class Map(_Closable):
         self.data[key] = value
         _record(f"{self._tag}.insert {key}")
 
+    def insert_if_absent(self, key: Any, value: Any) -> bool:
+        # item 397: the atomic compare-and-set. On this tier the whole method
+        # is one synchronous, suspension-free step (no await), so it is atomic
+        # by construction under the reference runtime's run-to-completion model
+        # (backends/python/runtime.py `.. _pool-job-semantics:`): no task can
+        # interleave between the membership test and the insert. Returns whether
+        # it inserted; a `false` (key already present) leaves the existing value
+        # untouched. The trace records the outcome so the residue prover can
+        # fold it into the outstanding-key fingerprint (a `true` counts the key
+        # as set, a `false` counts nothing).
+        self._check_open("insert_if_absent")
+        if key in self.data:
+            _record(f"{self._tag}.insert_if_absent {key} -> false")
+            return False
+        self.data[key] = value
+        _record(f"{self._tag}.insert_if_absent {key} -> true")
+        return True
+
     def remove(self, key: Any) -> None:
         self._check_open("remove")
         self.data.pop(key, None)
