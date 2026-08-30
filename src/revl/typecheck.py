@@ -639,6 +639,28 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
                 code="T1", category="type-mismatch",
             )
         return lt or rt
+    if op in ("&", "|", "^", "<<", ">>"):
+        # Bitwise operators are Int32-only (item 366, docs/arithmetic.md).
+        # Int (64-bit) is deliberately excluded: `<<` grows without bound on
+        # the arbitrary-precision hosts (python `int`, ts `BigInt`), so a
+        # uniform 64-bit two's-complement shift would need a re-imposed wrap on
+        # exactly those tiers — a per-tier divergence, the kind the sized-int
+        # design avoids. Int32 has a fixed hardware width everywhere, so the
+        # lowering is uniform. Bitwise ops do NOT trap (bit patterns, not
+        # arithmetic); `>>` is the arithmetic (sign-extending) shift and the
+        # shift count is taken mod 32. For a shift, both operands are Int32
+        # (the count too) and the result is Int32.
+        for t in (lt, rt):
+            if filename and t and parse_type(t)[0] != "Int32":
+                is_int = parse_type(t)[0] == "Int"
+                raise RevlError(
+                    filename, line,
+                    f"`{op}` requires `Int32` operands, got `{render_type(t)}`",
+                    hint=("bitwise operators are Int32-only — narrow with "
+                          "`.to_int32()` (docs/arithmetic.md)") if is_int else
+                         "bitwise operators are Int32-only (docs/arithmetic.md)",
+                    code="T1", category="type-mismatch")
+        return "Int32"
     if op == "+":
         if lt == "Str" or rt == "Str":
             if filename and (
@@ -1126,6 +1148,20 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             if filename and t and t != "Bool":
                 raise mismatch(filename, line, "operand of `!`", "Bool", t)
             return "Bool"
+        if expr.op == "~":
+            # Bitwise complement is Int32-only (item 366), matching the binary
+            # bitwise operators; it does not trap. `~x == -x - 1` within the
+            # 32-bit range.
+            if filename and t and parse_type(t)[0] != "Int32":
+                is_int = parse_type(t)[0] == "Int"
+                raise RevlError(
+                    filename, line,
+                    f"`~` requires an `Int32` operand, got `{render_type(t)}`",
+                    hint=("bitwise `~` is Int32-only — narrow with `.to_int32()` "
+                          "(docs/arithmetic.md)") if is_int else
+                         "bitwise `~` is Int32-only (docs/arithmetic.md)",
+                    code="T1", category="type-mismatch")
+            return "Int32"
         if filename and t and t not in _NUMERIC:
             raise mismatch(filename, line, "operand of unary `-`", "Int", t)
         return t
