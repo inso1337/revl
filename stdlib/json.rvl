@@ -2,12 +2,14 @@
 //
 // Real tool calls carry structured args (DSH tools take JSON); before this
 // module the harness's mock wire protocol had to be flattened to
-// `TOOL_CALL name arg1 arg2` and parsed by hand. These two externs give a
+// `TOOL_CALL name arg1 arg2` and parsed by hand. These externs give a
 // component the JSON story the harness needs, scoped to the value types
 // revl already carries (Str/Int/Bool/Float/List/Opt/records): `parse` turns
 // a Str into a revl value (`Any` — the wildcard the type algebra uses for
 // values whose static type only the runtime knows), `stringify` turns one
-// back into a Str.
+// back into a Str, and `try_parse` is the TOTAL (never-raising) parse that
+// returns a `Result[Any, Str]` so a JSONL stream can be walked tolerantly in
+// pure revl (item 362) — see `json_try_parse` below.
 //
 // Each tier's implementation is the `@<backend>` body beside the signature
 // (the extern-body mechanism, docs/syntax-2.0.md §extern). Import with a
@@ -167,4 +169,43 @@ pub extern pure fn json_stringify(v: Any) -> Str
     //revl:import encoding/json
     b, _ := json.Marshal(v)
     return string(b)
+  }
+
+// A TOTAL (never-raising) parse: the same decode as `json_parse`, but the
+// parse error is returned as the `Err` channel of a `Result[Any, Str]`
+// instead of raised (item 362). `Ok(v)` carries the identical value a
+// successful `json_parse(s)` produces — this body *calls* `json_parse`, so
+// the success path is byte-for-byte the raising parse; only the failure path
+// is new. revl has no try/catch (docs/syntax-2.0.md §3.2: "failure is
+// `Result` in pure code"), so this is what lets a component walk a JSONL
+// stream tolerantly IN REVL — `match json_try_parse(line) { Ok(v) => …,
+// Err(_) => skip }` — with no classified host extern for the parse itself:
+//
+//     use "stdlib/json.rvl" { json_try_parse }
+//     match json_try_parse(line) {
+//       Ok(rec) => keep(rec.field),   // typed access off the parsed record
+//       Err(_)  => skip,              // a malformed line is skipped, not fatal
+//     }
+//
+// Tiers: py and ts — the two tiers where `json_parse` RAISES on invalid input
+// and so need the tolerant wrapper. The rs and go `json_parse` bodies are
+// already total (they decode a bad document to `null` rather than raising), so
+// a distinct tolerant primitive would carry no information there; a tier
+// without a body refuses honestly if `json_try_parse` is used on it.
+pub extern pure fn json_try_parse(s: Str) -> Result[Any, Str]
+  = @py {
+    try:
+        return Ok(json_parse(s))
+    except Exception as e:
+        return Err(str(e))
+  }
+  = @ts {
+    // json_parse throws a SyntaxError on invalid input; catch it and route the
+    // message into the Err channel. The Ok value is exactly json_parse's, so
+    // the success path is byte-identical to the raising parse.
+    try {
+      return { kind: "Ok", value: json_parse(s) };
+    } catch (e) {
+      return { kind: "Err", value: e instanceof Error ? e.message : String(e) };
+    }
   }
