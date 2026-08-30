@@ -42,7 +42,10 @@ def audit_report(ir: dict) -> dict:
     manifest = ir.get("manifest") or {}
     declared_externs = [
         {"name": ext["name"], "class": ext.get("class"),
-         "backends": sorted((ext.get("bodies") or {}).keys())}
+         "backends": sorted((ext.get("bodies") or {}).keys()),
+         # item 373: carry the reach so the drift gate can read it. Absent unless
+         # declared — a bare emission's audit entry is byte-identical to today's.
+         **({"reach": ext["reach"]} if ext.get("reach") else {})}
         for ext in ir.get("externs") or []
     ]
     return {
@@ -85,10 +88,58 @@ def crossings(audit: dict) -> set[str]:
     return out
 
 
+def _reach_map(audit: dict) -> dict[str, dict | None]:
+    """Extern name -> its reach dict (`{"kind","target"}`) or None (unconfined).
+
+    The reach is a property of the EXTERN, not of a per-component crossing, so it
+    is read from the audit's flat `externs` list rather than the boundary table.
+    A bare emission has no `reach` key, which reads here as None = unconfined.
+    """
+    return {ext["name"]: ext.get("reach")
+            for ext in (audit.get("externs") or [])}
+
+
+def diff_reach(prev: dict, new: dict) -> dict:
+    """Diff the REACH of every extern present in BOTH audits (item 373).
+
+    The reach names what an irreversible crossing is bounded to. Adding/removing
+    a crossing is already handled by `diff_crossings`; this catches the drift a
+    crossing-set diff cannot see — an extern that STAYS but loosens its bound:
+
+        confined(T) -> unconfined         WEAKENING (a removed bound)
+        confined(a) -> confined(b)        WEAKENING (bound moved; b need not ⊇ a)
+        unconfined  -> confined(T)        tightening (safe — a bound gained)
+        unchanged                         stable
+
+    A weakening is the dangerous direction — the same shape as a new crossing —
+    so its token feeds `evaluate`'s `unacknowledged`. Only externs in both audits
+    are compared: a newly-added confined extern is already flagged by its
+    `host:` crossing, and a removed one gave up its authority entirely.
+    """
+    prev_reach = _reach_map(prev)
+    new_reach = _reach_map(new)
+    weakened: list[str] = []
+    tightened: list[str] = []
+    for name in prev_reach.keys() & new_reach.keys():
+        before, after = prev_reach[name], new_reach[name]
+        if before == after:
+            continue
+        if before is None:
+            # unconfined -> confined: a bound was gained. Safe.
+            tightened.append(f"reach-tightened:{name}")
+        else:
+            # confined -> unconfined, or confined -> a different bound. Both
+            # loosen or move what the crossing is bounded to — reviewable.
+            weakened.append(f"reach-weakened:{name}")
+    return {"reach_weakened": sorted(weakened),
+            "reach_tightened": sorted(tightened)}
+
+
 def diff_crossings(prev: dict, new: dict) -> dict:
     """Compare two audits over their G8 boundary surfaces.
 
-    Returns sorted `added` / `removed` / `unchanged` crossing-token lists.
+    Returns sorted `added` / `removed` / `unchanged` crossing-token lists, plus
+    the reach drift (`reach_weakened` / `reach_tightened`, item 373).
     """
     prev_set = crossings(prev)
     new_set = crossings(new)
@@ -96,6 +147,7 @@ def diff_crossings(prev: dict, new: dict) -> dict:
         "added": sorted(new_set - prev_set),
         "removed": sorted(prev_set - new_set),
         "unchanged": sorted(new_set & prev_set),
+        **diff_reach(prev, new),
     }
 
 
@@ -108,15 +160,22 @@ def evaluate(prev: dict, new: dict, accepted: set[str] | None = None,
     """
     accepted = accepted or set()
     delta = diff_crossings(prev, new)
+    # item 373: a reach WEAKENING fails the gate the same way a new crossing
+    # does — it is the authority axis loosening without a new token appearing.
+    # Its `reach-weakened:<name>` token is acknowledged through the same
+    # `--accept`/`--accept-all` path as an added crossing.
+    gated = delta["added"] + delta["reach_weakened"]
     if accept_all:
         unacknowledged: list[str] = []
     else:
-        unacknowledged = [c for c in delta["added"] if c not in accepted]
+        unacknowledged = [c for c in gated if c not in accepted]
     return {
         "added": delta["added"],
         "removed": delta["removed"],
         "unchanged": delta["unchanged"],
-        "acknowledged": sorted(c for c in delta["added"]
+        "reach_weakened": delta["reach_weakened"],
+        "reach_tightened": delta["reach_tightened"],
+        "acknowledged": sorted(c for c in gated
                                if accept_all or c in accepted),
         "unacknowledged": unacknowledged,
         "widened": bool(unacknowledged),
@@ -127,12 +186,14 @@ def render(result: dict, prev_label: str) -> str:
     """Human-readable report of an `evaluate` result."""
     lines: list[str] = []
     added = result["added"]
-    if not added and not result["removed"]:
+    weakened = result.get("reach_weakened") or []
+    tightened = result.get("reach_tightened") or []
+    if not added and not result["removed"] and not weakened and not tightened:
         return (f"authority-drift: clean — the G8 boundary surface is "
                 f"unchanged from {prev_label}.")
 
+    acked = set(result["acknowledged"])
     if added:
-        acked = set(result["acknowledged"])
         lines.append(
             f"authority-drift: {len(added)} new boundary crossing(s) added "
             f"since {prev_label}:")
@@ -142,7 +203,7 @@ def render(result: dict, prev_label: str) -> str:
             suffix = "  (acknowledged)" if crossing in acked else ""
             lines.append(f"{mark}{crossing}{suffix}")
         lines.append("")
-        if result["unacknowledged"]:
+        if any(c in result["unacknowledged"] for c in added):
             lines.append(
                 "These WIDEN what the composition reaches outside the system.")
             lines.append(
@@ -152,6 +213,30 @@ def render(result: dict, prev_label: str) -> str:
             lines.append("All additions acknowledged.")
     else:
         lines.append(f"authority-drift: no new crossings since {prev_label}.")
+
+    # item 373: a reach weakening is a loosened bound on a crossing that STAYS —
+    # confined -> unconfined, or a bound that moved. It fails the gate like an
+    # addition, and is acknowledged through the same `--accept` token.
+    if weakened:
+        lines.append("")
+        lines.append(
+            f"reach WEAKENED (a crossing loosened what it is bounded to): "
+            f"{len(weakened)}")
+        for token in weakened:
+            mark = "  ~ " if token in acked else "  + "
+            suffix = "  (acknowledged)" if token in acked else ""
+            lines.append(f"{mark}{token}{suffix}")
+        if any(t in result["unacknowledged"] for t in weakened):
+            lines.append(
+                "A weakened reach is a widening — acknowledge with "
+                "--accept <token> or --accept-all.")
+
+    if tightened:
+        lines.append("")
+        lines.append(
+            f"reach tightened (safe — a bound gained): {len(tightened)}")
+        for token in tightened:
+            lines.append(f"  - {token}")
 
     if result["removed"]:
         lines.append("")
