@@ -320,6 +320,25 @@ sensitive, as a clause in the extern/method modifier position:
     extern emission[production.payment] fn charge(card: Str, amount: Int)
         requires approval
 
+> **Shipped reality (item 343).** The dotted `production.payment` tokens
+> above, and the `emission[production.payment]` scope, presume the
+> realm-style scoped-emission capability that is the pending FEATURE half of
+> roadmap item 343. In the shipped compiler an `emission` extern takes no
+> `[caps]` scope — the parser refuses one (only `witnessed[caps]` is
+> capability-scoped) — and an emission's capability token IS its extern name:
+> the class map does `caps.add(name)`
+> (`revl.mcp.approval.ClassMap._classify_direct`). So today a policy rule
+> targets an emission by name and the declaration-side clause carries no
+> bracket:
+>
+>     capability charge requires approval
+>     extern emission fn charge(card: Str, amount: Int) requires approval
+>
+> (`tests/test_approval_typed.py` drives exactly this shape.) See
+> docs/design/245-session-commit.md Decision 2 for the name-is-the-capability
+> rule. The dotted spelling is kept in this section to show the grammar the
+> 343 feature is meant to unlock.
+
 The two compose as floor and acknowledgment: policy-imposed requirements
 cannot be loosened from source, and a source-declared requirement holds
 even with no policy file.
