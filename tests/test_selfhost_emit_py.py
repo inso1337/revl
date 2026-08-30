@@ -125,6 +125,10 @@ CORPUS = [
     "externs.rvl",              # `_emit_externs`: verbatim `@py` body via stdlib/str.rvl::dedent (item 193) + splitlines
     "services_config.rvl",      # component `config`/`ConfigSchema`: schema block, ConfigSchema-first import, `Config` key, `config.<field>` read
     "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
+    # item 383 / 391 (self-host port) — the `.map`/`.filter`/`.reduce` transforms
+    # desugar (frontend) to `list_map`/`list_filter`/`list_reduce` free calls; the
+    # py tier lowers the function-value params, arrow args, and `f(x)` calls.
+    "transforms.rvl",
 ]
 
 

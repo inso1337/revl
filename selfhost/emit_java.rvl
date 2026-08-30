@@ -326,6 +326,15 @@ fn java_v3_type(tv: Any, boxed: Bool) -> Str {
   if (raw == "Unit") { return "void" }
   let name = trim(raw)
   if (name == "") { return "Object" }
+  // item 383 (self-host port): a declared function type `(P, ..) -> R` is NOT
+  // lowerable on the Java tier — a Java lambda needs a nominal target type and
+  // the JDK's functional interfaces are neither generic over arity nor usable
+  // with primitives without boxing (the reference's `_reject_fn_type`, which
+  // RAISES). A pure emitter fn cannot `fail`, so the refusal surfaces as a loud
+  // out-of-subset `<<DEFER-fn-type>>` marker, keeping a byte diff from silently
+  // mangling the type. `.map`/`.filter`/`.reduce` reach here through their
+  // `list_map`/`list_filter`/`list_reduce` function-value parameters.
+  if (name.startsWith("(")) { return "<<DEFER-fn-type>>" }
   let tm = type_map(name)
   if (tm != "") { return box(tm, boxed) }
   if (name.indexOf("[") >= 0) {
