@@ -24,14 +24,17 @@ docs/stdlib-json.md):
   * key order = record declaration / insertion order (py dict, ts object)
   * booleans/null spelled `true`/`false`/`null`; ints exact (i64, incl. > 2^53)
 
-GO CAVEAT (a SEPARATE, deeper defect, not fixable in json.rvl's @go body —
-see the module header and the report for item 385): a revl RECORD lowers to a
-Go struct whose fields are UNEXPORTED (lowercase) with no `json:` tags, so
-`encoding/json` cannot see them and `json.Marshal` drops every field — a record
-stringifies to `{}` on go regardless of separators. go is therefore proven here
-only on the shapes it renders correctly (scalars, strings, lists); the record
-`{}` behavior is pinned by `test_go_record_is_the_known_separate_defect` so a
-future go-emitter fix trips this file loudly.
+GO RECORDS (item 390 — the go-emitter fix that folded records into this proof):
+a revl RECORD used to lower to a Go struct whose fields were UNEXPORTED with no
+`json:` tags, so `encoding/json` dropped every field and a record stringified to
+`{}` on go regardless of separators. The go emitter now emits record struct
+fields EXPORTED (UpperCamel) with a `json:"<revl-name>"` tag preserving the
+source field name, and remaps every field read/write/construction to the
+exported identifier — so a record stringifies to the SAME canonical bytes as
+py/ts. Records are therefore part of the three-tier corpus below (GO_CORPUS is
+now the full CORPUS), and the former pin
+(`test_go_record_is_the_known_separate_defect`) has flipped to a positive
+(`test_go_record_now_stringifies_canonically`).
 """
 
 import sys
@@ -95,10 +98,9 @@ CORPUS = [
     ("null", 'fn v() -> Any { return json_parse("null") }', r'null'),
 ]
 
-#: names go renders byte-identically; the objects are excluded by the struct
-#: caveat documented in the module header (records marshal to `{}` on go)
-GO_UNSUPPORTED = {"record", "nested_object"}
-GO_CORPUS = [c for c in CORPUS if c[0] not in GO_UNSUPPORTED]
+#: go now renders every shape byte-identically, records included (item 390:
+#: exported json-tagged struct fields). GO_CORPUS is the full corpus.
+GO_CORPUS = list(CORPUS)
 
 
 def _run(tier: str, decl: str, expected: str) -> tuple[str, str]:
@@ -134,28 +136,38 @@ def test_py_and_ts_emit_the_canonical_bytes(tier, name, decl, expected):
 @pytest.mark.parametrize("name,decl,expected", GO_CORPUS,
                          ids=[c[0] for c in GO_CORPUS])
 def test_go_emits_the_canonical_bytes_on_supported_shapes(name, decl, expected):
-    """go joins the byte-equality proof for the shapes it renders correctly —
-    scalars, strings (escapes/unicode/`<>&`), and arrays — so the three-tier
-    agreement is real, not a py/ts pair. Objects are covered by the caveat test
-    below."""
+    """go joins the byte-equality proof for EVERY shape — scalars, strings
+    (escapes/unicode/`<>&`), arrays, AND records/nested objects (item 390) — so
+    the three-tier agreement is real and complete, not a py/ts pair."""
     status, message = _run("go", decl, expected)
     if status == "skip":
         pytest.skip(f"go: {message}")
     assert status == "pass", f"go drifted on {name!r}: {message}"
 
 
-def test_go_record_is_the_known_separate_defect():
-    """CHARACTERIZATION of the go-emitter defect that json.rvl's @go body cannot
-    fix (see the module header): a revl record lowers to a Go struct with
-    UNEXPORTED fields and no `json:` tags, so `json.Marshal` drops them and the
-    record stringifies to `{}`. This is pinned so a future go-emitter fix (export
-    fields + tags, remap field access) trips here and gets folded into the
-    cross-tier corpus above."""
+def test_go_record_now_stringifies_canonically():
+    """Item 390: after the go-emitter fix (exported struct fields + json tags),
+    a record stringifies to the canonical bytes on go, byte-identical to py/ts —
+    NOT `{}`. Fails until backends/go/emit.py exports record fields."""
     status, message = _run("go", 'type Rec = { name: Str, n: Int }\n'
                                  'fn v() -> Rec { return { name: "x", n: 1 } }',
-                           r'{}')
+                           r'{"name":"x","n":1}')
     if status == "skip":
         pytest.skip(f"go: {message}")
-    assert status == "pass", (
-        "go no longer stringifies a record to '{}' — the struct-field defect "
-        f"may be fixed; move records into the cross-tier corpus. ({message})")
+    assert status == "pass", f"go record did not stringify canonically: {message}"
+
+
+def test_go_record_round_trips_after_construct():
+    """The go-emitter fix (item 390) exports struct fields AND remaps every field
+    read/write to the exported identifier, so a record still round-trips: a field
+    read after construction returns the value it was built with. (Guards against
+    a half-fix that exported the declaration but left an access site spelling the
+    old unexported name — which would fail to compile.)"""
+    status, message = _run(
+        "go",
+        'type Rec = { name: Str, n: Int }\n'
+        'fn v() -> Str { let r = { name: "x", n: 1 }\n return r.name }',
+        r'"x"')
+    if status == "skip":
+        pytest.skip(f"go: {message}")
+    assert status == "pass", f"go record round-trip broke: {message}"

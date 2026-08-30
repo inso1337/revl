@@ -36,8 +36,9 @@
 //     if/else, while, for (the `for _, x := range …` form with its `_ = x`),
 //     the bare-expr `_ = …`, and assert (`if !(…) { t.Fatalf(…) }`).
 //   * the v3 TYPED-CORE (item 209) — user `type` decls (`_emit_v3_go_types`): a
-//     record as a Go `struct` (pure tier: unexported source-spelled fields, no
-//     json tags), a variant as a sealed interface (`isX()` seal) plus one struct
+//     record as a Go `struct` with EXPORTED, `json:"<source>"`-tagged fields
+//     (item 390 — so a record marshals through `encoding/json`), a variant as a
+//     sealed interface (`isX()` seal) plus one struct
 //     per case; record literals (`Struct{f: v, ..}`) and field access (`r.f`);
 //     ADT construction (nullary `<Variant><Case>{}` / payload `{Value: arg}`);
 //     `match` over user variants as a Go type switch IIFE; user record/variant
@@ -175,6 +176,25 @@ fn is_go_reserved(name: Str) -> Bool {
   if (name == "var" || name == "nil" || name == "true" || name == "false" || name == "iota") { return true }
   return false
 }
+
+// `_camel` verbatim (item 390): snake_or_lower / `-` -> UpperCamel, keeping the
+// tail of each part as-is. This is the reference `_camel` byte-for-byte
+// (`p[:1].upper() + p[1:]`, NOT `.capitalize()`, which would lowercase the tail
+// and diverge on a lowerCamel field name).
+extern pure fn camel(name: Str) -> Str = @py {
+    return "".join(p[:1].upper() + p[1:] for p in str(name).replace("-", "_").split("_") if p)
+}
+
+// `_v3_field_ident`: a record struct field name, EXPORTED (UpperCamel) on every
+// path (item 390) so `encoding/json` marshals it — an unexported field made
+// `json_stringify(record)` return `{}` on go. Paired with `json_tag` below,
+// which pins the wire key to the source field name. Used at EVERY field site
+// (struct decl, literal construction, field read) so records round-trip.
+fn v3_field_ident(field: Str) -> Str { return camel(field) }
+
+// The struct tag ``json:"<field>"`` (a backtick-delimited Go raw string). Built
+// with double-quoted literals because a template `..` cannot embed a backtick.
+fn json_tag(field: Str) -> Str { return "`json:\"".concat(field).concat("\"`") }
 
 // `_V3_GO_ATOMIC`: a postfix-safe primary appends `.field`/`[i]`/`(…)` without a
 // wrapping paren.
@@ -712,13 +732,13 @@ fn render_construct(ctx: Ctx, case: Str, args: List[Str]) -> Str {
 
 // `_go_v3_expr` field branch: a record field access. A non-atomic receiver is
 // parenthesised so the `.field` selector binds correctly; the field name is the
-// source spelling on the pure tier (`_v3_field_ident` with `_V3_TYPED_COMPONENTS`
-// off = `_v3_ident`, no camel/json).
+// EXPORTED spelling (`_v3_field_ident` = `_camel`, item 390) — the same spelling
+// the struct decl and literal use, so the read resolves the exported field.
 fn render_field(node: Any, ctx: Ctx) -> Str {
   let tn = value_field(node, "target")
   var target = render_expr(tn, ctx, "")
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
-  return `${target}.${v3_ident(value_str(value_field(node, "name")))}`
+  return `${target}.${v3_field_ident(value_str(value_field(node, "name")))}`
 }
 
 // `_go_v3_expr` record branch: a nominal `Struct{f: v, ..}` literal. Go copies by
@@ -734,7 +754,7 @@ fn render_record(node: Any, ctx: Ctx) -> Str {
   for (f of fields) {
     let k = value_str(value_at(f, 0))
     let vnode = value_at(f, 1)
-    body = body.push(`${v3_ident(k)}: ${render_expr(vnode, ctx, "")}`)
+    body = body.push(`${v3_field_ident(k)}: ${render_expr(vnode, ctx, "")}`)
   }
   return `${tn}{${body.join(", ")}}`
 }
@@ -946,10 +966,12 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
 }
 
 // `_emit_v3_go_types`: user `type` decls as Go items. A record is a `struct`
-// (pure tier: unexported source-spelled fields, no json tags — `_V3_TYPED_COMPONENTS`
-// is off); a variant is a sealed interface (`isX()` seal) plus one struct per case
-// (nullary `struct{}`, payload `struct { Value T }`) with the seal method. Each
-// decl is followed by a blank line, exactly as the reference does.
+// whose fields are EXPORTED + json-tagged (item 390: `_v3_field_ident` = camel,
+// plus `json:"<source>"` — `encoding/json` ignores unexported fields, so this is
+// what makes `json_stringify(record)` non-empty and byte-identical to py/ts); a
+// variant is a sealed interface (`isX()` seal) plus one struct per case (nullary
+// `struct{}`, payload `struct { Value T }`) with the seal method. Each decl is
+// followed by a blank line, exactly as the reference does.
 fn emit_v3_types(types: Any) -> List[Str] {
   var out = []
   for (name of value_keys(types)) {
@@ -960,7 +982,7 @@ fn emit_v3_types(types: Any) -> List[Str] {
       out = out.push(`type ${gname} struct {`)
       let fields = value_field(spec, "fields")
       for (field of value_keys(fields)) {
-        out = out.push(line(1, `${v3_ident(field)} ${go_type(value_field(fields, field))}`))
+        out = out.push(line(1, `${v3_field_ident(field)} ${go_type(value_field(fields, field))} ${json_tag(field)}`))
       }
       out = out.push("}")
       out = out.push("")
