@@ -1938,6 +1938,14 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             entry["witness"] = witness_type
             if decl.capabilities:
                 entry["capabilities"] = list(decl.capabilities)
+        if decl.classification == "emission" and decl.capabilities:
+            # item 343: a capability-scoped `emission[gateway.send]` records its
+            # declared TOKEN in the IR, exactly as a witnessed extern does. The
+            # 246 class->approval classifier and 344 standing grants read this to
+            # key the crossing on the token instead of the extern name. Absent
+            # (a bare `emission`) means no key is written, so every existing
+            # emission extern's IR stays byte-identical (name-as-capability).
+            entry["capabilities"] = list(decl.capabilities)
         if decl.undo is not None:
             # An acquire binds its declared return as `result`; a witnessed
             # extern binds the `Ok` witness (the Result's success payload), which
