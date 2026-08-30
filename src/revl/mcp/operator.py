@@ -71,6 +71,13 @@ TOOL_VERB = {
     # scoped `may approve on payments` grant is usable while other components are
     # live.
     "revl_approve": "approve",
+    # item 379: revoking a standing grant early is the mirror of granting it —
+    # withdrawing consent is the SAME authority as saying yes, so `revl_revoke`
+    # gates under the same `approve` verb. Its `_approve_targets` branch resolves
+    # the revoke's `capability` (or the grant's `requestId`) to the crossing
+    # component, so a subject-scoped `may approve on payments` grant governs who
+    # may take a grant BACK exactly as it governs who may mint one.
+    "revl_revoke": "approve",
 }
 
 # friendly verb aliases the profile author may write (canonical on the right)
@@ -422,9 +429,18 @@ def _approve_targets(session, arguments: dict) \
     name = None
     if ticket is not None:
         name = ticket.get("component")
+    elif arguments.get("requestId") is not None:
+        # item 379: a revoke naming one grant by id — scope to that grant's
+        # component (the same subject-scoped gating a mint got), resolved off the
+        # session's grant store without running anything. An unknown id defers.
+        for g in getattr(session, "_grants", None) or []:
+            if g.get("requestId") == arguments["requestId"]:
+                name = g.get("component")
+                break
     elif arguments.get("capability") is not None:
-        # item 344: a proactive capability grant — scope to its crossing
-        # component when the capability resolves to exactly one, else defer.
+        # item 344/379: a proactive capability grant or a capability-wide revoke —
+        # scope to the crossing component when the capability resolves to exactly
+        # one, else defer.
         class_map = getattr(session, "_class_map", None)
         if class_map is not None:
             resolved = class_map.crossings_for_capability(arguments["capability"])
@@ -432,7 +448,7 @@ def _approve_targets(session, arguments: dict) \
             if len(components) == 1:
                 name = next(iter(components))
     if name is None:
-        return None  # unknown hash / ambiguous capability — handler refuses it
+        return None  # unknown hash/id / ambiguous capability — handler refuses it
     manifest = (session.ir or {}).get("manifest") or {}
     realms = component_realms(manifest, name)
     return [(name or WHOLE, frozenset({name or WHOLE}) | frozenset(realms))]

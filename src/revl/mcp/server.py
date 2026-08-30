@@ -499,6 +499,29 @@ def _tool_approve(arguments: dict) -> dict:
         return _session_error(str(error))
 
 
+def _tool_revoke(arguments: dict) -> dict:
+    """Retire a session-scoped standing grant EARLY (roadmap item 379), the
+    symmetric partner of `revl_approve`'s item-344 standing-grant mint. Withdraw
+    consent BEFORE the grant's TTL/uses lapse, so the next class-(c) crossing it
+    covered prompts again:
+
+      * `capability` revokes EVERY live standing grant for that capability (the
+        same key `revl_approve` mints against — a token when scoped by item 343,
+        the extern name otherwise);
+      * `requestId` revokes one specific grant (the id the mint returned).
+
+    Revoking a capability/id with no live grant is a clean typed no-op
+    (`count: 0`), not an error — idempotent. Gated by the `approve` operator verb
+    (item 55): withdrawing consent is the same authority as granting it."""
+    capability = arguments.get("capability")
+    request_id = arguments.get("requestId")
+    try:
+        return {"ok": True, **SESSION.revoke_standing_grant(
+            capability=capability, request_id=request_id)}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
 def _tool_abort(_arguments: dict) -> dict:
     """Abort the session (item 245): drop the deferral queue (never fired),
     replay the witnessed inverses, prove a clean world."""
@@ -1471,6 +1494,42 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_approve,
+    },
+    {
+        "name": "revl_revoke",
+        "description": "Retire a SESSION-SCOPED STANDING GRANT early (item 379), "
+                       "the symmetric partner of revl_approve's item-344 standing "
+                       "grant. A grant minted by revl_approve (`capability` + "
+                       "`uses`/`ttlMs`) auto-approves repeat class-(c) crossings "
+                       "until its uses run out, its TTL lapses, or the session "
+                       "ends. This withdraws it BEFORE any of those, effective "
+                       "immediately and mid-session: the NEXT class-(c) crossing "
+                       "the grant would have covered prompts again (fail-closed). "
+                       "Target the SAME key revl_approve minted against — pass "
+                       "`capability` to revoke EVERY live grant for it (a token "
+                       "like `gateway.send` when the emission is item-343 scoped, "
+                       "the extern name otherwise), or `requestId` (the id the "
+                       "mint returned) to revoke one specific grant. Revoking a "
+                       "capability or id with no live grant is a clean no-op "
+                       "(`count: 0`), never an error — idempotent, so a double "
+                       "revoke or a stale id is harmless. Gated by the `approve` "
+                       "operator verb (item 55): withdrawing consent is the same "
+                       "authority as granting it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "capability": {"type": "string",
+                               "description": "revoke every live standing grant "
+                                              "for this capability (the same "
+                                              "token/name key revl_approve mints "
+                                              "against)"},
+                "requestId": {"type": "string",
+                              "description": "revoke one specific grant by the "
+                                             "id revl_approve's standing-grant "
+                                             "mint returned"}},
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_revoke,
     },
     {
         "name": "revl_state",

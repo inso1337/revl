@@ -1965,6 +1965,7 @@ class Session:
             else None,
             "remainingUses": uses,          # None = bounded only by TTL/session
             "consumed": False,
+            "revoked": False,               # item 379: set by an early revoke
         }
         self._grants.append(entry)
         wal = self._approval_wal()
@@ -1980,6 +1981,70 @@ class Session:
                 "requestId": entry["requestId"], "capability": capability,
                 "component": component, "candidateHash": candidate_hash,
                 "remainingUses": uses, "expiresAt": entry["expiresAt"]}
+
+    def revoke_standing_grant(self, *, capability: str | None = None,
+                              request_id: str | None = None) -> dict:
+        """Retire a SESSION-SCOPED STANDING GRANT EARLY (roadmap item 379).
+
+        The symmetric partner of `mint_standing_grant` (item 344). A grant lapses
+        on its own at its TTL, when its uses run out, or at session end; this is
+        the only way to retire one BEFORE any of those, effective immediately and
+        mid-session. Once revoked, the next class-(c) crossing the grant WOULD
+        have covered prompts again (fail-closed) — the grant no longer
+        auto-approves anything.
+
+        Targeted by the SAME key `revl_approve` mints against, so revoke composes
+        with a token-keyed (item 343) grant exactly as mint does:
+
+          * a CAPABILITY (the default, capability-keyed shape) revokes EVERY live
+            standing grant for that capability in this session — the token
+            `emission[gateway.send]` declares when scoped (item 343), the extern
+            name otherwise. This mirrors `mint_standing_grant(capability=...)`,
+            which is also capability-keyed;
+          * a `request_id` (the id `mint_standing_grant` returns) revokes exactly
+            the one grant it names — the precise shape for retiring one of several
+            grants held for the same capability.
+
+        Revoking a capability (or id) with no LIVE grant is a clean no-op: a typed
+        `{"revoked": True, "count": 0, ...}`, never a crash — idempotent, so a
+        double-revoke or a stale id is harmless. Each retired grant is marked
+        `revoked` (and `consumed`, so `_find_standing_grant` skips it with no new
+        branch on the hot path) and gets a durable `approval-revoked` WAL record,
+        so the audit can tell an operator's early cut from a natural lapse.
+
+        Gated (in the mcp verb dispatch) by the `approve` operator verb, exactly
+        as `revl_approve` — deciding to withdraw consent is the same authority as
+        granting it."""
+        if capability is None and request_id is None:
+            raise SessionError(
+                "provide a `capability` to revoke every standing grant for it, "
+                "or a `requestId` (the id the mint returned) to revoke one "
+                "specific grant (item 379)")
+
+        revoked_ids: list[str] = []
+        for g in self._grants:
+            if g.get("revoked") or g["consumed"]:
+                continue                     # already retired or spent to zero
+            if g["session"] != self._session_id:
+                continue                     # invariant 5: this session's grants
+            if request_id is not None and g["requestId"] != request_id:
+                continue
+            if capability is not None and g["capability"] != capability:
+                continue
+            g["revoked"] = True
+            g["consumed"] = True             # so _find_standing_grant skips it
+            revoked_ids.append(g["requestId"])
+            wal = self._approval_wal()
+            if wal is not None:
+                wal.record_approval_revoked(g["requestId"])
+
+        out = {"revoked": True, "count": len(revoked_ids),
+               "requestIds": revoked_ids}
+        if capability is not None:
+            out["capability"] = capability
+        if request_id is not None:
+            out["requestId"] = request_id
+        return out
 
     def approval_metrics(self) -> dict | None:
         """The auto-approve headline numbers for `session.state()` (Decision 6):
@@ -2009,7 +2074,11 @@ class Session:
             "standingGrants": [
                 {"capability": g["capability"], "component": g["component"],
                  "remainingUses": g.get("remainingUses"),
-                 "expiresAt": g.get("expiresAt"), "consumed": g["consumed"]}
+                 "expiresAt": g.get("expiresAt"), "consumed": g["consumed"],
+                 # item 379: True when an operator retired the grant EARLY (as
+                 # opposed to it lapsing on uses/TTL). Both leave it out of the
+                 # live set; this bit distinguishes them for the audit.
+                 "revoked": g.get("revoked", False)}
                 for g in self._grants],
         }
 
