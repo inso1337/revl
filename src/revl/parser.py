@@ -381,6 +381,13 @@ class ExternDecl:
     # (both checked in lower) — so a weakened reach (confined -> unconfined) is a
     # reviewable diff, not a buried host-body comment.
     reach: tuple[str, str] | None = None
+    # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md: a
+    # typed `config { field: T = default, ... }` block, the same shape a
+    # `ComponentDecl` carries (parser.py:284), letting a document-global extern
+    # read STATIC configuration resolved once at plug time instead of ambient
+    # env vars. Empty for every extern that declares no `config` clause, so
+    # their parse/IR/goldens stay byte-identical.
+    config: list[ConfigField] = field(default_factory=list)
 
 
 @dataclass
@@ -1144,6 +1151,15 @@ class Parser:
             self.expect("ident", "approval",
                         what="`approval` after `requires` (item 246)")
             requires_approval = True
+        # item 379: an optional typed `config { ... }` block, reusing the same
+        # `config_block()` a component uses (parser.py:1352-1365). It sits after
+        # the teardown/approval clauses and before the `= @backend` bodies, the
+        # last declaration-level clause. `config` is already a reserved keyword
+        # (recognised in `component`), so the lexer needs no change and an
+        # extern with no block is byte-identical.
+        config: list[ConfigField] = []
+        if self.at("kw", "config"):
+            config = self.config_block()
         bodies: list[HostBody] = []
         while self.at("="):
             self.next()
@@ -1154,7 +1170,8 @@ class Parser:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
                           capabilities=capabilities, type_params=type_params, async_=async_,
-                          deferred=deferred, requires_approval=requires_approval, reach=reach)
+                          deferred=deferred, requires_approval=requires_approval,
+                          reach=reach, config=config)
 
     def _reach_clause(self) -> tuple[str, str]:
         """`(confined: <param>)` after an emission classification — item 373.
