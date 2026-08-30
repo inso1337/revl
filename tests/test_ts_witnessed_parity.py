@@ -158,12 +158,15 @@ def _run_ts_classify(commands: list[str]) -> list[dict]:
         encoding="utf-8",
     )
 
-    proc = subprocess.run(
-        ["node", str(harness), cmds_path],
-        capture_output=True,
-        text=True,
-        cwd=str(_BACKEND_TS),
-    )
+    try:
+        proc = subprocess.run(
+            ["node", str(harness), cmds_path],
+            capture_output=True,
+            text=True,
+            cwd=str(_BACKEND_TS),
+        )
+    finally:
+        Path(cmds_path).unlink(missing_ok=True)
     if proc.returncode != 0:
         raise AssertionError(f"ts classify harness failed:\n{proc.stderr}")
     return json.loads(proc.stdout)
