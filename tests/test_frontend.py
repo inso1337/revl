@@ -99,7 +99,7 @@ REJECTIONS = {
     # roadmap item 131 refusal sweep (§6 exit test 5): the four
     # admitted-but-silently-wrong async shapes flipped to compile errors, plus
     # the exact-pairing (rule 2) and block-effect (fence) refusals.
-    "a1_async_effect_not_awaited.rvl": "component `A` acquires through async operation `open_conn` but the effect is not awaited",
+    "a1_async_effect_not_awaited.rvl": "component `A` acquires through async operation `p.open` but the effect is not awaited",
     "a1_async_undo_suspends.rvl": "`undo` reaches async operation `w.heat`, but teardown is synchronous on every tier",
     "a1_async_compensate_suspends.rvl": "`compensate` reaches async operation `model.record`, but teardown is synchronous on every tier",
     "a1_await_emit_sync.rvl": "`await emit` on an emission that reaches nothing async — an `await` in an activation body is a real divert window",

@@ -1,24 +1,22 @@
 // REJECTED — A1 (roadmap item 131): silent leak #1. An `effect` acquisition
-// whose acquire reaches an async operation, with no `await` marker.
+// whose acquire reaches a req-target async service operation, with no `await`.
 //
-// `open_conn` is an async-colored module fn (item 90: it reaches the async
-// emission extern `ho`). A bare `let c = effect open_conn(...) undo ...` binds
-// the IN-FLIGHT value, not the landed result: py would bind the coroutine
-// object and register the inverse against it, ts the Promise. This is one of
-// the four admitted-but-silently-wrong shapes item 131 flips to a compile
-// error. The one-token fix is `effect await`.
+// `p.open` is a required async service op — a suspension source reached
+// through a required key (rule 3 of the item-92 async-reach), the family the
+// name-based async fence is blind to. A bare `let c = effect p.open(...) undo
+// p.close(c)` binds the IN-FLIGHT value, not the landed result: py binds the
+// coroutine object and registers the inverse against it; ts binds the Promise.
+// One of the four admitted-but-silently-wrong shapes item 131 flips to a
+// compile error. The one-token fix is `effect await`.
 //
 // expected error:
-//   component `A` acquires through async operation `open_conn` but the effect
-//   is not awaited; the binding would hold the in-flight value, not the result
+//   component `A` acquires through async operation `p.open` but the effect is
+//   not awaited; the binding would hold the in-flight value, not the result
 
-extern emission async fn ho(u: Str) -> Str = @py { return u }
-fn open_conn(u: Str) -> Str { return ho(u) }
-extern pure fn hc(c: Str) -> Int = @py { return 0 }
-fn close_conn(c: Str) -> Int { return hc(c) }
+service Pool { async fn open(u: Str) -> Str  fn close(c: Str) -> Int }
 service Db { fn go() -> Str }
-component A provides db: Db {
+component A requires p: Pool provides db: Db {
   config { u: Str }
-  let c = effect open_conn(config.u) undo close_conn(c)
+  let c = effect p.open(config.u) undo p.close(c)
   provide db { fn go() { return c } }
 }
