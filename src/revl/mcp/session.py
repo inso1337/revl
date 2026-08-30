@@ -1294,9 +1294,10 @@ class Session:
         self._run(driver._dispose_all(self.ir))
         if owner is not None and not aborting:
             owner.finalize_commit()   # the consolidated commit proof
+        residue = self._surface_compensation_residue(owner)
         report = self._teardown_report(driver)
         self._reset()
-        return {"unloaded": True, **report}
+        return {"unloaded": True, "compensationResidue": residue, **report}
 
     # -- the session commit protocol (roadmap item 245) --------------------
 
@@ -1333,12 +1334,13 @@ class Session:
         self._run(driver._dispose_all(self.ir))
         discharged = owner.finalize_commit()       # one discharge record
         self._commit_wal(driver)                   # activation-complete + close
+        residue = self._surface_compensation_residue(owner)
         report = self._teardown_report(driver)
         prompts = dict(owner.prompts)
         self._reset()
         return {"committed": True, "flushed": flush["fired"],
                 "flushResidue": flush["flushResidue"], "discharged": discharged,
-                "prompts": prompts, **report}
+                "prompts": prompts, "compensationResidue": residue, **report}
 
     def abort(self) -> dict:
         """Abort the session (Decision 5): mark every live frame aborting BEFORE
@@ -1352,16 +1354,35 @@ class Session:
             raise SessionError("no session owner is registered — nothing to abort")
         dropped = len(owner._queue)
         owner.begin_abort()                        # mark frames abort, drop queue
-        self._run(driver._dispose_all(self.ir))    # replay inverses
-        result = owner.finalize_abort()            # aborted record
+        self._run(driver._dispose_all(self.ir))    # replay inverses (+ Phase 2)
+        result = owner.finalize_abort()            # aborted record (+ escrow Phase 2)
         self._close_wal()
+        residue = self._surface_compensation_residue(owner)
         report = self._teardown_report(driver)
         prompts = dict(owner.prompts)
         self._reset()
         return {"aborted": True, "replayed": result["replayed"],
-                "droppedDeferred": dropped, "prompts": prompts, **report}
+                "droppedDeferred": dropped, "prompts": prompts,
+                "compensationResidue": residue, **report}
 
     # -- teardown plumbing -------------------------------------------------
+
+    def _surface_compensation_residue(self, owner) -> list:
+        """Collect the session's unresolved compensation residue at the teardown
+        boundary (item 247 gap 2, design Decision 2 / Slice 3) and count each as
+        a residue prompt (the same `prompts["residue"]` channel a flush-residue
+        uses — item 246, so prompts-per-session reflects an offset that did not
+        land). Returns the residue records for the boundary report. Empty and
+        prompt-neutral when nothing was owed (a clean or compensation-free
+        session), so the report and metrics stay byte-identical there.
+
+        Called BEFORE the `prompts` snapshot and `_reset`, once the frames'
+        Phase-2 drain and the owner's `finalize_abort` have run."""
+        if owner is None:
+            return []
+        residue = owner.collect_compensation_residue()
+        owner.prompts["residue"] += len(residue)
+        return residue
 
     def _teardown_report(self, driver) -> dict:
         """The R4 residue checks after a teardown, and the drained trace."""
