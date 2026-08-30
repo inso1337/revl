@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check demo pre-merge
+.PHONY: matrix matrix-check demo pre-merge pre-merge-affected
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -13,6 +13,14 @@
 # CONTRIBUTING.md "The pre-merge gate".
 pre-merge:
 	sh tools/pre_merge.sh
+
+# FAST inner-loop gate: run ONLY the pre-merge targets that tools/affected_tests.py
+# selects for the current diff (base = merge-base with origin/main). A sound
+# conservative superset — any core/compile-reachable or unmapped change falls back
+# to the full gate. NOT a replacement for `make pre-merge`, which remains the
+# release/CI gate. Override the base with: make pre-merge-affected BASE=<ref>
+pre-merge-affected:
+	sh tools/pre_merge.sh --affected $(if $(BASE),--base=$(BASE),)
 
 # Regenerate the docs/conformance.md conformance + performance matrix in place.
 matrix:
