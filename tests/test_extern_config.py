@@ -52,3 +52,43 @@ def test_parser_extern_without_config_has_empty_config():
         'extern emission fn f(x: Str) -> Str = @py { return x }', "t.rvl"
     ).parse()
     assert prog.externs[0].config == []
+
+
+# -- Stage 2: lower + typecheck ---------------------------------------------
+
+def _extern_ir(ir, name):
+    return next(e for e in ir["externs"] if e["name"] == name)
+
+
+def test_lower_carries_config_schema_on_extern_ir():
+    ir = compile_source(_RAW_MODEL_POST)
+    ext = _extern_ir(ir, "raw_model_post")
+    assert ext["config"] == [
+        {"name": "provider", "type": "Str", "default": None},
+        {"name": "endpoint", "type": "Str", "default": None},
+        {"name": "model", "type": "Str", "default": "default"},
+    ]
+
+
+def test_lower_no_config_extern_has_no_config_key():
+    # byte-identity: the IR entry must not grow a `config` key at all.
+    ir = compile_source('extern emission fn f(x: Str) -> Str = @py { return x }')
+    assert "config" not in _extern_ir(ir, "f")
+
+
+def test_lower_refuses_default_type_mismatch():
+    with pytest.raises(RevlError, match="config field `n` default"):
+        compile_source(
+            'extern emission fn f(x: Str) -> Str\n'
+            '  config { n: Int = "not-an-int" }\n'
+            '  = @py { return x }\n'
+        )
+
+
+def test_lower_refuses_duplicate_config_field():
+    with pytest.raises(RevlError, match="duplicate config field `n`"):
+        compile_source(
+            'extern emission fn f(x: Str) -> Str\n'
+            '  config { n: Int, n: Str }\n'
+            '  = @py { return x }\n'
+        )

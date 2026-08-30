@@ -1972,6 +1972,27 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
         # enforced here, before the flag reaches the IR.
         if decl.deferred:
             _check_deferred_extern(decl, filename)
+        # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
+        # validate the typed `config` schema the same way a component's config is
+        # validated (lower.py:4681 default-type compatibility). Config is STATIC
+        # data resolved once at plug, so there is no service reach and no async
+        # op: A1 and the capability gate are untouched (design "(b)"). Duplicate
+        # field names are refused, and a non-`null` default must fit its declared
+        # field type. The schema reaches the IR below only when non-empty, so an
+        # extern with no `config` block is byte-identical.
+        seen_cfg: set[str] = set()
+        for cfg in decl.config:
+            if cfg.name in seen_cfg:
+                raise RevlError(filename, cfg.line,
+                                f"duplicate config field `{cfg.name}` in extern `{decl.name}`")
+            seen_cfg.add(cfg.name)
+            if cfg.default is None:
+                continue
+            lit_type = _config_default_type(cfg.default)
+            if lit_type is not None and not compatible(cfg.type, lit_type):
+                raise mismatch(filename, cfg.line,
+                               f"config field `{cfg.name}` default of extern `{decl.name}`",
+                               cfg.type, lit_type)
         bodies: dict[str, str] = {}
         for body in decl.bodies:
             if body.backend in bodies:
@@ -2004,6 +2025,13 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             # audit` prints it and `audit --diff` reads it to flag a weakening.
             **({"reach": {"kind": decl.reach[0], "target": decl.reach[1]}}
                if decl.reach is not None else {}),
+            # item 379: the typed config schema, in the SAME shape a component
+            # carries it (lower.py:4956 `[{"name","type","default"}]`), so the
+            # emitter and driver reuse the component config path verbatim. Absent
+            # unless the author wrote a `config` block, so every existing extern's
+            # IR is byte-identical.
+            **({"config": [{"name": f.name, "type": f.type, "default": f.default}
+                           for f in decl.config]} if decl.config else {}),
         }
         if decl.classification == "witnessed":
             # The witnessed descriptor the Slice-2 runtime teardown loop reads
