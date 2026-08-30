@@ -157,7 +157,7 @@ looks like a small surface change but is a large and leaky semantic one.
 Surface: an extern declares a typed `config` block, the same shape a component
 already has (`parser.py:283-285`), and the composition supplies it at plug time.
 
-```revl sketch
+```revl
 extern emission fn author_model_complete(msgs: List[Msg]) -> Str
     config { provider: Str, endpoint: Str, model: Str }
     = @py {
@@ -165,6 +165,9 @@ extern emission fn author_model_complete(msgs: List[Msg]) -> Str
         ...
     }
 ```
+
+(Promoted from `sketch` to a worked example when option (b) landed as roadmap
+item 379: the exit test below anticipated exactly this.)
 
 Typing: the config schema is checked like a component config schema; the
 composition must supply every non-defaulted field, refused at load if missing
