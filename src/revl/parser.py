@@ -764,6 +764,12 @@ class Parser:
         self.filename = filename
         self.toks = lex(source, filename)
         self.pos = 0
+        # When set, the next `_bor` call does not consume a top-level `|` — it
+        # is the functional-record-update separator `{base | f = e}`, not the
+        # bitwise-OR operator (item 366). The flag is cleared the moment it is
+        # read so a *parenthesised* `(a | b)` inside the base still lexes as
+        # bitwise OR.
+        self._suppress_bor = False
 
     # -- token helpers
 
@@ -2602,13 +2608,38 @@ class Parser:
             )
 
     def _and(self):
-        return self._bin(self._eq, ("&&",))
+        return self._bin(self._bor, ("&&",))
+
+    # Bitwise `| ^ &` sit between `&&` and equality, in C/TypeScript order
+    # (loosest `|`, then `^`, then `&`), so `a & b == c` parses as
+    # `a & (b == c)` exactly as it does in TS — §0 keeps shared syntax meaning
+    # what TS means by it (item 366, docs/arithmetic.md).
+    def _bor(self):
+        # `_suppress_bor` marks the one context where a top-level `|` is a
+        # record-update separator, not the operator; clear it on read so it
+        # suppresses only this leftmost `|` and nested `(a | b)` still parse.
+        if self._suppress_bor:
+            self._suppress_bor = False
+            return self._bxor()
+        return self._bin(self._bxor, ("|",))
+
+    def _bxor(self):
+        return self._bin(self._band, ("^",))
+
+    def _band(self):
+        return self._bin(self._eq, ("&",))
 
     def _eq(self):
         return self._bin(self._cmp, ("==", "===", "!=", "!=="))
 
     def _cmp(self):
-        return self._bin(self._add, ("<", ">", "<=", ">="))
+        return self._bin(self._shift, ("<", ">", "<=", ">="))
+
+    # The Int32 shifts bind tighter than the relational operators and looser
+    # than additive — C/TypeScript order, so `a + b << c` is `(a + b) << c`
+    # (item 366).
+    def _shift(self):
+        return self._bin(self._add, ("<<", ">>"))
 
     def _add(self):
         return self._bin(self._mul, ("+", "-"))
@@ -2639,7 +2670,9 @@ class Parser:
 
     def _unary(self):
         tok = self.peek()
-        if tok.kind in ("!", "-"):
+        if tok.kind in ("!", "-", "~"):
+            # `~` is the Int32 bitwise complement, grouped with the other
+            # prefix unaries (item 366, docs/arithmetic.md).
             self.next()
             return ExprUn(tok.kind, self._unary(), tok.line)
         if tok.kind == "kw" and tok.value == "emit":
@@ -2970,7 +3003,12 @@ class Parser:
         if tok.kind == "{":
             if self._record_update_ahead():
                 self.next()
+                # The top-level `|` here separates base from updates; suppress
+                # its reading as bitwise OR (item 366). A parenthesised `|`
+                # inside the base is unaffected — `_bor` clears the flag on read.
+                self._suppress_bor = True
                 base = self.pure_expr()
+                self._suppress_bor = False
                 self.expect("|")
                 updates = []
                 while not self.at("}"):

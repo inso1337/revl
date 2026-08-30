@@ -37,10 +37,17 @@ KEYWORDS = {
 SYMBOLS = {"{", "}", "(", ")", "[", "]", ",", ":", "=", "."}
 
 # Multi-character operators, longest first so `===` lexes before `==`.
-OPERATORS = ("===", "!==", "=>", "?.", "??", "<=", ">=", "==", "!=", "&&", "||", "->")
+# `<<`/`>>` are the Int32 bitwise shifts (docs/arithmetic.md, item 366); they
+# precede `<`/`>` so a doubled angle lexes as one shift token, and revl spells
+# generics with `[]` (never `<>`), so there is no `List<T>` ambiguity for `>>`.
+OPERATORS = ("===", "!==", "=>", "?.", "??", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "->")
 
-# Single-character operator tokens (checked after OPERATORS).
-SINGLE_OPERATORS = "+-*/%<>!?;|@"
+# Single-character operator tokens (checked after OPERATORS). `&`, `^` and `~`
+# are the Int32 bitwise AND/XOR/NOT (item 366); `&&`/`||` in OPERATORS above are
+# matched first, so a lone `&` still reaches here. `|` (already present) doubles
+# as bitwise OR and the variant/record-update separator — the parser tells them
+# apart by grammar position (docs/arithmetic.md).
+SINGLE_OPERATORS = "+-*/%<>!?;|@&^~"
 
 
 # --- string/comment-aware raw-brace balancing --------------------------------
