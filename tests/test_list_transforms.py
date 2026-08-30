@@ -19,7 +19,6 @@ function value) — an honestly-scoped subset, verified per tier below.
 """
 
 import importlib.util
-import json
 import shutil
 import subprocess
 import sys
