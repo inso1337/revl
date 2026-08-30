@@ -48,11 +48,10 @@ _IR = {
 }
 
 
-def _deferred_module(gate, *, raise_in_body=False):
+def _deferred_module(gate):
     """A component whose ASYNC activation body defers its `provide` past an
     event-loop await — exactly the `_LazyTask`/`async fn` shape Cam hit. The
-    provide does not run until `gate` is set; if `raise_in_body` it raises after
-    the gate instead of providing."""
+    provide does not run until `gate` is set."""
     from runtime import Frame  # noqa: PLC0415 — backend path set by _backend()
 
     def _apply(ctx, config):
@@ -60,8 +59,6 @@ def _deferred_module(gate, *, raise_in_body=False):
 
         async def _body():
             await gate.wait()
-            if raise_in_body:
-                raise RuntimeError("activation blew up")
             yield ctx.provide("widget")
             ctx.set("widget", object())
             yield frame.drain
@@ -137,18 +134,20 @@ def test_deferred_activation_that_completes_is_loaded_for_real():
 
 
 @needs_runtime
-def test_activation_that_raises_fails_loudly_naming_the_key():
-    """A deferred activation that RAISES must surface a real, typed diagnostic
-    naming the component/key — never a silent empty-string CancelledError, and
-    never a key left listed loaded."""
+def test_activation_that_never_publishes_fails_loudly_naming_the_key():
+    """A deferred activation that settles ACTIVE without ever publishing its
+    provision is the false-loaded contradiction: load must FAIL LOUDLY with a
+    typed diagnostic naming the component/key, and the key must not be listed
+    loaded — never a fiber reported ACTIVE over a provision ROOT lacks."""
+    from revl.run import ActivationError  # noqa: PLC0415
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        gate = asyncio.Event()
-        gate.set()
+        gate = asyncio.Event()  # never opened: the provide is never reached
         driver = _make_driver()
-        module = _deferred_module(gate, raise_in_body=True)
-        with pytest.raises(Exception) as excinfo:  # noqa: PT011 — asserted below
+        module = _deferred_module(gate)
+        with pytest.raises(ActivationError) as excinfo:
             loop.run_until_complete(driver._load(_IR, module))
     finally:
         loop.close()
@@ -156,5 +155,36 @@ def test_activation_that_raises_fails_loudly_naming_the_key():
 
     message = str(excinfo.value)
     assert message.strip(), "the failure must not be a silent empty string"
-    assert "Deferred" in message or "widget" in message
+    assert "Deferred" in message and "widget" in message
     assert "widget" not in _loaded_keys(driver)
+
+
+@needs_runtime
+def test_a_cancelled_activation_is_named_never_a_silent_empty_string():
+    """`str(CancelledError)` is the empty string — the exact silence Cam hit.
+    When the deferred activation is cancelled (the offloaded/closing loop), the
+    driver converts it into a typed, NON-EMPTY `ActivationError` naming the
+    component, so the failure can never be a silent empty diagnostic."""
+    from revl.run import ActivationError  # noqa: PLC0415
+
+    async def _cancel_during_settle(_fiber, _comp, _provided):
+        raise asyncio.CancelledError()  # stand in for the loop closing underneath
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        gate = asyncio.Event()
+        gate.set()
+        driver = _make_driver()
+        driver._settle = _cancel_during_settle
+        module = _deferred_module(gate)
+        with pytest.raises(ActivationError) as excinfo:
+            loop.run_until_complete(driver._load(_IR, module))
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+    message = str(excinfo.value)
+    assert message.strip(), "a cancelled activation must not be a silent empty string"
+    assert "Deferred" in message
+    assert "cancel" in message.lower() or "closed" in message.lower()

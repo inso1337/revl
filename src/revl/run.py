@@ -604,7 +604,7 @@ class _Driver:
         """
         provided = list((comp.get("provides") or {}).keys())
         try:
-            await self._settle(fiber, provided)
+            await self._settle(fiber, comp, provided)
         except asyncio.CancelledError as exc:
             # the offloaded/closing loop cancelled the deferred activation.
             # `str(CancelledError)` is empty — name it instead of losing it.
@@ -612,56 +612,87 @@ class _Driver:
                 name, provided,
                 "the event loop closed or the activation was cancelled before "
                 "it completed") from exc
-        except ActivationError:
-            raise
-        except BaseException as exc:  # a real activation failure — surface it
-            raise ActivationError(
-                name, provided,
-                f"activation raised {type(exc).__name__}: {exc}") from exc
         if fiber.state == self.FiberState.PENDING:
             # legitimately not up yet: its injected requirement has no provider.
             # It publishes nothing, so there is no false-loaded key to guard.
             self._log("note", name, f"PENDING — unmet requirement ({requires})")
             return
-        missing = [key for key in provided if self.root.get(key) is None]
-        if missing:
-            raise ActivationError(
-                name, missing,
-                "activation settled without publishing its provision(s) into "
-                "ROOT — 'loaded' would be a lie for "
-                f"{', '.join(missing)}")
+        # A FAILED activation is an honest, observable loaded-state: its `provide`
+        # never ran, so its keys are simply absent from `resolved_keys()` — the
+        # fiber is reported FAILED, not as a provider of a key ROOT lacks. That is
+        # NOT the false-loaded bug and must not abort the load (the replay
+        # mid-body-failure contract). The contradiction item 372 forbids is a
+        # fiber that reports ACTIVE while its provision never landed:
+        if fiber.state == self.FiberState.ACTIVE:
+            isolate = comp.get("isolate") or {}
+            missing = [key for key in provided
+                       if self._resolve_provision(key, isolate.get(key)) is None]
+            if missing:
+                raise ActivationError(
+                    name, missing,
+                    "the fiber is ACTIVE but its provision(s) never landed in "
+                    f"ROOT — 'loaded' would be a lie for {', '.join(missing)}")
 
-    async def _settle(self, fiber, provided: list) -> None:
+    async def _settle(self, fiber, comp: dict, provided: list) -> None:
         """Drive a fiber's deferred activation to a settled state.
 
-        `fiber.await_()` waits the fiber's `inertia` (its `_LazyTask` reload) to
-        `None` and re-raises any `_error` the activation recorded. A provision
-        published by a *synchronous* body is already in ROOT once that returns;
-        an *asynchronous* body publishes from a detached effect task, so pump a
-        bounded number of loop turns until the keys resolve. The bound is a
-        safety net, not a timeout: a well-behaved body resolves in the first
-        turn (or zero, for a sync body), and one that never resolves falls
-        through to the loud FIBERS/ROOT consistency check in the caller rather
-        than being silently counted loaded."""
-        await fiber.await_()
+        Mirrors cordis's own `fiber.await_()` — pump the fiber's `inertia` (its
+        `_LazyTask` reload) to `None` — but WITHOUT re-raising the fiber's own
+        `_error`: a mid-body activation failure lands the fiber FAILED, an
+        honest observable state the replay recorder and `revl run` both surface,
+        not a reason to abort the load. A provision published by a *synchronous*
+        body is in ROOT once the reload settles; an *asynchronous* body
+        publishes from a detached effect task, so pump a bounded number of loop
+        turns until the keys resolve. The bound is a safety net, not a timeout —
+        a well-behaved body resolves in the first turn (zero for a sync body),
+        and one that never resolves falls through to the loud FIBERS/ROOT
+        consistency check in the caller. A `CancelledError` (the loop closing
+        underneath the deferred task) propagates to be named there."""
+        while getattr(fiber, "inertia", None) is not None:
+            await fiber.inertia
         if not provided:
             return
+        isolate = comp.get("isolate") or {}
         for _ in range(1000):
-            if all(self.root.get(key) is not None for key in provided):
+            if all(self._resolve_provision(key, isolate.get(key)) is not None
+                   for key in provided):
                 return
             await asyncio.sleep(0)
 
+    def _resolve_provision(self, key: str, realm):
+        """Resolve one provided key the way the composition publishes it: an
+        isolated key lives in its placement realm (a worker's provision lands in
+        `realm(w)`, not the shared root realm), so it is read through
+        `root.isolate(key, realm(w)).reflect.get(key)` — exactly how `_Router`
+        and the emitted routed-require resolve it. `realm` is the providing
+        component's own placement for `key` (`None` = the shared root realm), so
+        the SAME key provided by different workers in different realms resolves
+        per provider. Returns `None` when no live provider has published it."""
+        if realm is None:
+            return self.root.get(key)
+        return self.root.isolate(
+            key, self.runtime.realm_label(realm)).reflect.get(key)
+
     def resolved_keys(self) -> set:
         """The keys this composition actually provides — those with a live
-        provider in ROOT (roadmap item 372).
+        provider (roadmap item 372), resolved in each provider's placement realm.
 
-        The FIBERS/ROOT consistency surface: a key appears here IFF
-        ``root.get(key)`` resolves, so a fiber that reports ACTIVE while its
-        deferred activation never published its provision can never be reported
-        as providing that key. `state()`'s `providedKeys` derives from this, so
-        "listed loaded but ROOT is None" is unreachable through the report."""
-        return {key for key in _key_to_service(self.ir)
-                if self.root.get(key) is not None}
+        The FIBERS/ROOT consistency surface: a key appears here IFF it actually
+        resolves to a live provider (in root, or in the realm a worker was
+        isolated into), so a fiber that reports ACTIVE — or was left so by a
+        cancelled deferred activation — while its provision never landed can
+        never be reported as providing that key. `state()`'s `providedKeys`
+        derives from this, so "listed loaded but ROOT is None" is unreachable
+        through the report."""
+        resolved: set = set()
+        for comp in _components(self.ir or {}):
+            isolate = comp.get("isolate") or {}
+            for key in (comp.get("provides") or {}):
+                if key in resolved:
+                    continue
+                if self._resolve_provision(key, isolate.get(key)) is not None:
+                    resolved.add(key)
+        return resolved
 
     def _install_router(self, name: str, comp: dict) -> None:
         """Realize a router component's ``routes`` IR: for each routed key, build
