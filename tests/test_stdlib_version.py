@@ -170,6 +170,25 @@ def test_doctor_warns_on_drifted_vendored_stdlib(tmp_path, monkeypatch):
     assert check.version == EXPECTED_STDLIB_VERSION
 
 
+def test_doctor_warns_on_unstamped_vendored_stdlib(tmp_path, monkeypatch):
+    # The precise item-104 shape: a vendored stdlib holding real modules
+    # (value.rvl) that was copied BEFORE the stamp existed, so it has no
+    # version.rvl. This must NOT silently resolve to the bundled stamp and read
+    # OK — the resolver picks the partial vendored root and the drift check
+    # flags the missing stamp.
+    from revl.doctor import check_stdlib_version, WARN
+    tree = tmp_path / "vendored" / "stdlib"
+    tree.mkdir(parents=True)
+    (tree / "value.rvl").write_text(
+        "pub fn value_kind() -> Str { return \"record\" }\n", encoding="utf-8")
+    # deliberately NO version.rvl
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(tmp_path / "vendored"))
+    assert resolve_loaded_stdlib_dir() == tree
+    check = check_stdlib_version(prober=None)
+    assert check.status == WARN
+    assert "no version stamp" in check.detail
+
+
 # --------------------------------------------------------- cross-tier execution
 
 _STAMP_PROBE = (
