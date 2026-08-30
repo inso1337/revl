@@ -653,6 +653,20 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     raise EmitError(f"unknown builtin method {method!r}")
 
 
+# item 397: a compare-and-set host verb (`insert_if_absent`) whose site-spelled
+# `undo` must be RESULT-GUARDED — registered only when the CAS actually
+# inserted. A `false` CAS (key already present) inserted nothing, so its
+# inverse is the identity; replaying `remove(k)` at teardown would delete the
+# WINNING claimant's entry, the exact corruption single-use exists to prevent.
+_MAP_CAS_VERBS = frozenset({"insert_if_absent"})
+
+
+def _is_map_cas(acquire: Any) -> bool:
+    """Whether an acquisition node is a result-guarded map CAS (item 397)."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, externs: list | None = None) -> None:
         self.ir = component
@@ -1010,7 +1024,13 @@ class _ComponentEmitter:
                 # boundary-atomic with the acquisition (design §4 clause 1).
                 aw = "await " if step.get("async") else ""
                 out.add(indent, f"{bind} = {aw}{self._expr(step.get('acquire'), where)}")
-                out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
+                undo = self._expr(step.get('undo'), where)
+                if _is_map_cas(step.get("acquire")):
+                    # result-guarded undo (item 397): identity inverse on a
+                    # `false` CAS, so teardown never removes the winner's entry.
+                    out.add(indent, f"yield lambda: ({undo} if {bind} else None)")
+                else:
+                    out.add(indent, f"yield lambda: {undo}")
         elif kind == "effect":
             if step.get("setup"):
                 for setup in step["setup"]:
@@ -1388,10 +1408,17 @@ class _ComponentEmitter:
                 bind = _ident(step.get("bind"), f"{where}: bind")
                 acquire = self._expr(step.get("acquire"), where)
                 undo = self._expr(step.get("undo"), where)
+                if _is_map_cas(step.get("acquire")):
+                    # result-guarded undo (item 397): the accumulator entry
+                    # receives the bound Bool; on a `false` CAS the inverse is
+                    # the identity, so teardown leaves the winner's entry alone.
+                    undo_fn = f"lambda {bind}: ({undo} if {bind} else None)"
+                else:
+                    undo_fn = f"lambda {bind}: {undo}"
                 out.add(
                     indent,
                     f"{bind} = _revl_frame.acquire({self._label(label)!r}, "
-                    f"lambda: {acquire}, lambda {bind}: {undo})",
+                    f"lambda: {acquire}, {undo_fn})",
                 )
         elif kind == "emit":
             deferred = self._deferred_extern(step.get("expr"))

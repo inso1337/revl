@@ -1207,6 +1207,18 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "    pub fn insert(&self, key: String, value: V) {",
                 "        self.inner.lock().unwrap().insert(key, value);",
                 "    }",
+                "    // The atomic compare-and-set (item 397). ONE `lock()` spans the",
+                "    // membership test AND the insert via the entry API, so no thread",
+                "    // can witness the probe and the write as separable steps. Returns",
+                "    // whether it inserted; a `false` (key present) leaves the existing",
+                "    // value untouched. Under N concurrent callers, exactly one `true`.",
+                "    pub fn insert_if_absent(&self, key: String, value: V) -> bool {",
+                "        use std::collections::hash_map::Entry;",
+                "        match self.inner.lock().unwrap().entry(key) {",
+                "            Entry::Occupied(_) => false,",
+                "            Entry::Vacant(e) => { e.insert(value); true }",
+                "        }",
+                "    }",
                 "    pub fn remove(&self, key: &String) {",
                 "        self.inner.lock().unwrap().remove(key);",
                 "    }",
@@ -1668,16 +1680,35 @@ def _map_value_expr_type(node: dict, var_types: dict, env: _Env) -> str | None:
     return None
 
 
+# Map verbs that write a value at arg[1]; each pins the host Map's value type V.
+# Inferring V from ANY writer (not the literal name "insert") lets a CAS-only
+# writer (`insert_if_absent`, item 397) pin a concrete V instead of the String
+# default (item 402).
+_MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+# item 397: the compare-and-set host verb whose bound result is a `bool` and
+# whose site-spelled undo is registered only when the CAS actually inserted.
+_MAP_CAS_VERBS = ("insert_if_absent",)
+
+
+def _is_map_cas(acquire) -> bool:
+    """Whether a lowered acquisition node is a result-guarded map CAS."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 def _map_expr_inserts(node, bind: str, var_types: dict, env: _Env,
                       candidates: list[str]) -> None:
-    """Collect candidate value types from `bind.insert(k, v)` anywhere in an
-    expression; recurses into sub-expressions."""
+    """Collect candidate value types from any map value-writing call
+    (`insert`, `insert_if_absent`, ...) on `bind` anywhere in an expression;
+    recurses into sub-expressions."""
     if not isinstance(node, dict):
         return
     if node.get("kind") == "call":
         target = node.get("target")
         if (isinstance(target, dict) and target.get("kind") == "name"
-                and target.get("id") == bind and node.get("method") == "insert"):
+                and target.get("id") == bind
+                and node.get("method") in _MAP_VALUE_WRITERS):
             args = node.get("args") or []
             if len(args) >= 2:
                 t = _map_value_expr_type(args[1], var_types, env)
@@ -1835,7 +1866,9 @@ def _component_has_effectful_methods(component: dict) -> bool:
             continue
         for method in step.get("methods") or []:
             for body_step in method.get("body") or []:
-                if body_step.get("step") in ("effect", "emit"):
+                # `let-effect` (item 397: a method-body host CAS) is effectful
+                # too — it registers a guarded inverse on the activation frame.
+                if body_step.get("step") in ("effect", "emit", "let-effect"):
                     return True
     return False
 
@@ -1905,7 +1938,7 @@ def _emit_config_application(component: dict, config_ty: str, indent: int) -> li
 
 def _method_has_effectful_steps(method: dict) -> bool:
     return any(
-        body_step.get("step") in ("effect", "emit")
+        body_step.get("step") in ("effect", "emit", "let-effect")
         for body_step in method.get("body") or []
     )
 
@@ -2130,6 +2163,38 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 env.v3_ctx().var_types[step.get("name")] = inferred
             if kind == "let" and step.get("name") is not None:
                 body_locals.add(step.get("name"))
+        elif kind == "let-effect":
+            # item 397: the only let-effect admitted in a provide-method body is
+            # a result-declared host CAS (`insert_if_absent`). Mirror the bare
+            # `effect` bracket, but BIND the acquire's `bool` result and guard
+            # the site-spelled undo on it — a `false` CAS's inverse is the
+            # identity, so teardown never removes the winner's entry.
+            if not _is_map_cas(step.get("acquire")):
+                raise EmitError(
+                    "let-effect not allowed inside a provide method "
+                    "(Rust backend)")
+            bind = _ident(step["bind"], "binding")
+            undo_rename = _method_undo_rename(env, method)
+            acquire_rename = dict(rename)
+            for param in method.get("params") or []:
+                acquire_rename[param] = f"{param}.clone()"
+            label = _string(f"{env.name}.{method.get('name')}.let-effect.{index}")
+            undo_node = step.get("undo")
+            acquire_node = step.get("acquire")
+            _method_undo_clones(env, method, out, indent)
+            for local in sorted(_undo_reclone_locals(
+                    acquire_node, undo_node, body_locals, env.v3_ctx())):
+                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                undo_rename[local] = f"{local}_undo"
+            acquire = _expr(acquire_node, env, acquire_rename)
+            out.append(f"{pad}let {bind} = {acquire};")
+            env.v3_ctx().var_types[step.get("bind")] = "Bool"
+            body_locals.add(step.get("bind"))
+            undo = _expr(undo_node, env, undo_rename)
+            out.append(
+                f"{pad}let _ = self.ctx.effect({label}, "
+                f"move || {{ if {bind} {{ {undo}; }} Ok(()) }});"
+            )
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
         else:

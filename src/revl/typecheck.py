@@ -884,6 +884,7 @@ _HOST_ARG_SIG: dict[str, list[str]] = {
     "Map.new": [],
     "Map.drop": [],
     "Map.insert": ["Str", "Str"],
+    "Map.insert_if_absent": ["Str", "Str"],
     "Map.remove": ["Str"],
     "Map.get": ["Str"],
     "Pool.open": ["Str", "Int"],
@@ -891,6 +892,20 @@ _HOST_ARG_SIG: dict[str, list[str]] = {
     "Pool.query": ["Str"],
     "Pool.execute": ["Str"],
     "Job.run": ["Str"],
+}
+
+
+# Host builtin *results* (item 397). The frontier deliberately types arguments
+# and not results — a host stub returns a host-valued object the frontend does
+# not model (see the _HOST_ARG_SIG header). `insert_if_absent` is the first
+# host verb whose result the program MUST consume in checked code: the atomic
+# CAS returns a `Bool` the caller branches on with a pure `if`. So the frontier
+# gains a result column for exactly the verbs that declare one; every other
+# host verb's result stays opaque (`builtin_check` returns None below). This is
+# a deliberate one-verb breach of the opaque-result frontier, not a policy
+# change (docs/design/397-insert-if-absent.md §The result type).
+_HOST_RESULT_SIG: dict[str, str] = {
+    "Map.insert_if_absent": "Bool",
 }
 
 
@@ -1008,7 +1023,10 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
     # opaque (see _HOST_FAMILIES)
     if target_type in _HOST_FAMILIES:
         host_family_check(target_type, method, arg_types, filename, line)
-        return None
+        # A result-declared host verb (item 397: `insert_if_absent -> Bool`)
+        # returns its declared type instead of the opaque `None`; every other
+        # host verb's result stays on the G8 audit surface.
+        return _HOST_RESULT_SIG.get(f"{target_type}.{method}")
     sig = _BUILTIN_SIG.get(method)
     if sig is None:
         return None

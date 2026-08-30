@@ -1430,7 +1430,28 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
                 # apparatus the method-witnessed path needs.
                 _COMP_NEEDS_METHOD_WITNESSED = True
         elif s == "let-effect":
-            raise EmitError("let-effect not allowed inside a provide method")
+            # item 397: the ONLY let-effect admitted in a provide-method body is
+            # a result-declared host CAS (`insert_if_absent`). The bind is a
+            # local `bool`; the site-spelled undo is registered on the same
+            # per-activation accumulator as the bare method-body effect
+            # (`r.ctx.Effect`), guarded on the result so a `false` CAS's inverse
+            # is the identity.
+            if not _is_map_cas(step.get("acquire")):
+                raise EmitError("let-effect not allowed inside a provide method")
+            bind = _safe_local(step["bind"])
+            acquire = _expr(step["acquire"], env)
+            undo = step.get("undo")
+            ctx = env.ctx_ref()
+            out.append("%svar %s bool" % (pad, bind))
+            out.append("%s%s.Effect(func() stc.Inverse {" % (pad, ctx))
+            out.append("%s\t%s = %s" % (pad, bind, acquire))
+            if undo is not None:
+                out.append("%s\treturn func() error { if %s { %s }; return nil }"
+                           % (pad, bind, _expr(undo, env)))
+            else:
+                out.append("%s\treturn nil" % pad)
+            out.append("%s})" % pad)
+            out.append("%s_ = %s" % (pad, bind))
         else:
             raise EmitError("unsupported method step: %r" % (s,))
 
@@ -1579,13 +1600,37 @@ def _acquire_value_go_type(acquire, services, requires) -> str:
 # — the surface type of the value argument, then mapped to a Go type. No site
 # pinning a concrete type falls back to `string` (the historical surface, and
 # what a write-free / read-only Map keeps).
+#
+# The value type is learned from ANY map value-writing verb, not the literal
+# name "insert": a CAS-only writer (`insert_if_absent`, item 397) must pin `V`
+# just as `insert` does, or the Map would emit with the string default and
+# mistype (item 402). Every value-writer takes the value as arg[1].
 # --------------------------------------------------------------------------
 
+# Map verbs that write a value at arg[1]; each pins the host Map's value type V.
+_MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+# item 397: the compare-and-set host verb whose bound result is a `bool` and
+# whose site-spelled `undo` must be RESULT-GUARDED (registered only when the CAS
+# actually inserted — a `false` CAS's inverse is the identity, so teardown never
+# removes the winning claimant's entry).
+_MAP_CAS_VERBS = ("insert_if_absent",)
+
+
+def _is_map_cas(acquire) -> bool:
+    """Whether a lowered acquisition node is a result-guarded map CAS."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 def _map_insert_value_types(node, bind, env, out):
-    """Collect the surface types of the value argument at every
-    `bind.insert(k, v)` call inside an expression node (recurses)."""
+    """Collect the surface types of the value argument at every map
+    value-writing call (`insert`, `insert_if_absent`, ...) on `bind` inside an
+    expression node (recurses). The value type `V` is inferred structurally
+    from the value argument of ANY writer, never by matching a single verb
+    name, so a CAS-only writer still pins a concrete `V` (item 402)."""
     if isinstance(node, dict):
-        if node.get("kind") == "call" and node.get("method") == "insert":
+        if node.get("kind") == "call" and node.get("method") in _MAP_VALUE_WRITERS:
             target = node.get("target")
             if (isinstance(target, dict)
                     and (target.get("id") or target.get("name")) == bind):
@@ -1725,7 +1770,11 @@ def _emit_component(comp, services, out):
             # not compile when the acquisition returns a value type (e.g.
             # `let lock = effect db.query(..)` where `query` returns
             # `List[Row]`: `var lock *any` cannot hold `[]Row`).
-            if akind in ("host", "spawn"):
+            if _is_map_cas(acquire):
+                # item 397: a CAS binds a checked `bool`, not a host pointer.
+                host = "bool"
+                _BIND_IS_PTR[bind] = False
+            elif akind in ("host", "spawn"):
                 host = _host_type_of_acquire(acquire)
                 # item 113 (FR-4): the host Map is generic over its value type.
                 # Pin `V` from the component's `insert` sites so every reference
@@ -2211,7 +2260,12 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             for setup_step in step.get("setup") or []:
                 _emit_method_body([setup_step], env, out, indent + 1)
             out.append("%s%s = %s" % (inner, _bind_field(bind), acquire))
-            if undo is not None:
+            if undo is not None and _is_map_cas(step["acquire"]):
+                # item 397: result-guarded undo — identity inverse on a `false`
+                # CAS, so teardown never removes the winner's entry.
+                out.append("%sreturn func() error { if %s { %s }; return nil }"
+                           % (inner, _bind_field(bind), _expr(undo, env)))
+            elif undo is not None:
                 out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
             else:
                 out.append("%sreturn nil" % inner)
@@ -2968,6 +3022,22 @@ func (m *Map[V]) Insert(k string, v V) {
 	m.mu.Lock()
 	m.m[k] = v
 	m.mu.Unlock()
+}
+
+// InsertIfAbsent is the atomic compare-and-set (item 397). The per-op mutex is
+// held across BOTH the membership test AND the insert, so the whole CAS is one
+// critical section: no concurrent caller can witness the probe and the write as
+// separable steps. Returns whether it inserted; a false (key already present)
+// leaves the existing value untouched. Under N concurrent callers on one map,
+// exactly one receives true.
+func (m *Map[V]) InsertIfAbsent(k string, v V) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.m[k]; ok {
+		return false
+	}
+	m.m[k] = v
+	return true
 }
 func (m *Map[V]) Remove(k string) {
 	m.mu.Lock()
