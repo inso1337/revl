@@ -716,6 +716,22 @@ class AssertStmt:
     line: int
 
 
+@dataclass
+class BreakStmt:
+    """`break` — leave the innermost enclosing `while`/`for` (item 379,
+    docs/design/379-break-continue.md). Bare, no label, no value; valid only
+    inside a loop body in the fn statement grammar."""
+    line: int
+
+
+@dataclass
+class ContinueStmt:
+    """`continue` — skip to the innermost enclosing loop's next iteration
+    (item 379). Bare, no label, no value; valid only inside a loop body in
+    the fn statement grammar."""
+    line: int
+
+
 # --- v2.0 §7.1: lifecycle test statements ---------------------------------
 # Stratum-3 statements, legal only inside a `lifecycle test` body. They are a
 # script over a live composition, not pure code, so they are their own node
@@ -891,6 +907,17 @@ class Parser:
         # read so a *parenthesised* `(a | b)` inside the base still lexes as
         # bitwise OR.
         self._suppress_bor = False
+        # item 379: bare `break`/`continue` are valid only inside a `while`/`for`
+        # body. `_loop_depth` counts the enclosing loops of the statement being
+        # parsed (parse-state, like `_suppress_bor`), incremented around each
+        # loop's body parse. A match block arm is lambda-lifted into a separate
+        # helper fn at lowering (src/revl/lower.py `_lift_block_arm`), so a
+        # `break` written there would land in a fn with no loop; entering an arm
+        # resets the depth to 0 so such a `break` is refused, and `_in_block_arm`
+        # switches the refusal to the block-arm voice (C1,
+        # docs/design/379-break-continue.md).
+        self._loop_depth = 0
+        self._in_block_arm = False
 
     # -- token helpers
 
@@ -1790,6 +1817,18 @@ class Parser:
             if in_method:
                 raise self.err(tok.line, "`provide` is not allowed inside a method body")
             return self.provide()
+        if tok.kind == "kw" and tok.value in ("break", "continue"):
+            # item 379: `break`/`continue` are loop control, and the
+            # activation/provide-method grammar has no loop form (loops live
+            # only in the fn statement grammar). Redirect in the block-arm
+            # voice `_refuse_block_arm_stmt` uses for loops themselves.
+            raise self.err(
+                tok.line,
+                f"`{tok.value}` is not valid here: activation and provide-method "
+                "bodies have no loops",
+                hint="iterate in a module `fn` (the only grammar with `while`/"
+                     "`for`, and thus `break`/`continue`) and call it from here",
+            )
         self._reject_foreign_keyword(tok)  # item 384
         raise self.err(
             tok.line,
@@ -2677,6 +2716,8 @@ class Parser:
         if tok.kind == "kw" and tok.value == "assert":
             self.next()
             return AssertStmt(self.pure_expr(), tok.line)
+        if tok.kind == "kw" and tok.value in ("break", "continue"):
+            return self._loop_control_stmt(tok)
         if tok.kind == "ident" and self._assign_ahead():
             self.next()
             op = "="
@@ -2687,6 +2728,36 @@ class Parser:
                 self.next()
             return AssignStmt(tok.value, self.pure_expr(), tok.line, op)
         return ExprStmt(self.pure_expr(), tok.line)
+
+    def _loop_control_stmt(self, tok):
+        """`break` / `continue` — bare loop control (item 379). Valid only
+        inside a `while`/`for` body (`_loop_depth > 0`). Outside a loop it
+        replaces today's misleading G1 "`break` is not declared" with a
+        redirect in the item-384 voice; inside a match block arm (where the
+        depth has been reset to 0) it names the lambda-lift that makes the
+        `break` unlandable (C1, docs/design/379-break-continue.md)."""
+        self.next()
+        if self._loop_depth == 0:
+            if self._in_block_arm:
+                raise self.err(
+                    tok.line,
+                    f"`{tok.value}` cannot leave a match block arm "
+                    "(docs/records.md §4)",
+                    hint=f"a block arm is lifted into its own function, so a "
+                         f"`{tok.value}` here has no enclosing loop to target; "
+                         f"put the loop and its `{tok.value}` in a module `fn` "
+                         f"the arm calls",
+                )
+            raise self.err(
+                tok.line,
+                f"`{tok.value}` is only valid inside a `while` or `for` body",
+                hint=("return early or restructure the loop"
+                      if tok.value == "break"
+                      else "move the skip into the loop's header condition, or "
+                           "restructure the loop"),
+            )
+        return (BreakStmt(tok.line) if tok.value == "break"
+                else ContinueStmt(tok.line))
 
     def _assign_ahead(self) -> bool:
         """True when the token after the current identifier starts `=` or a
@@ -2737,7 +2808,11 @@ class Parser:
         self.expect("(")
         cond = self.pure_expr()
         self.expect(")")
-        body = self.block() if self.at("{") else [self.fn_stmt()]
+        self._loop_depth += 1
+        try:
+            body = self.block() if self.at("{") else [self.fn_stmt()]
+        finally:
+            self._loop_depth -= 1
         return WhileStmt(cond, body, line)
 
     def for_stmt(self) -> ForStmt:
@@ -2777,7 +2852,11 @@ class Parser:
         self.expect("kw", "of")
         iterable = self.pure_expr()
         self.expect(")")
-        body = self.block() if self.at("{") else [self.fn_stmt()]
+        self._loop_depth += 1
+        try:
+            body = self.block() if self.at("{") else [self.fn_stmt()]
+        finally:
+            self._loop_depth -= 1
         return ForStmt(bind, iterable, body, line)
 
     def if_stmt(self) -> IfStmt:
@@ -3217,12 +3296,23 @@ class Parser:
         silently mean something else (early return from the helper, not the
         enclosing function)."""
         self.expect("{")
+        # C1 (item 379): the block is lambda-lifted into a helper fn at
+        # lowering, so a `break`/`continue` targeting a loop *outside* the arm
+        # would land in a loopless fn. Reset the loop-depth context to 0 for the
+        # arm body so such a jump is refused at parse time (in the block-arm
+        # voice); a loop written *inside* the arm restores a positive depth for
+        # its own `break` (docs/design/379-break-continue.md).
+        saved_depth, saved_in_arm = self._loop_depth, self._in_block_arm
+        self._loop_depth, self._in_block_arm = 0, True
         stmts = []
-        while True:
-            self._skip_semis()
-            if self.at("}"):
-                break
-            stmts.append(self.fn_stmt())
+        try:
+            while True:
+                self._skip_semis()
+                if self.at("}"):
+                    break
+                stmts.append(self.fn_stmt())
+        finally:
+            self._loop_depth, self._in_block_arm = saved_depth, saved_in_arm
         self.expect("}")
         if not stmts:
             raise self.err(line,

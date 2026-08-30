@@ -4329,6 +4329,21 @@ def _v3_self_append_inplace(target_name, recv: str, value_node,
     return _v3_inplace_persistent(method, recv, rendered)
 
 
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is
+# enforced whole-IR in the frontend; this is the cheap per-emitter guard.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
@@ -4391,11 +4406,13 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "while":
+        _guard_frame_neutral_loop(node.get("body"))
         out.append(f"{pad}while {_render_expr(node['cond'], ctx)} {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "for":
+        _guard_frame_neutral_loop(node.get("body"))
         bind = _ident(node.get("bind"), "loop binding")
         # `for x in v` consumes `v` via `.into_iter()`; a reused non-Copy Vec
         # binding iterated twice (`for ln in lines { .. } .. for ln in lines`)
@@ -4408,6 +4425,10 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
+    elif step == "break":
+        out.append(f"{pad}break;")
+    elif step == "continue":
+        out.append(f"{pad}continue;")
     elif step == "let_pattern":
         _v3_let_pattern(node, ctx, out, indent)
     elif step == "expr":

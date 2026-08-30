@@ -2303,6 +2303,21 @@ def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
 
 
 
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is
+# enforced whole-IR in the frontend; this is the cheap per-emitter guard.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: bool) -> None:
     step = node.get("step")
     if step in ("let", "assign"):
@@ -2328,16 +2343,22 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{'  ' * indent}}}")
     elif step == "while":
+        _guard_frame_neutral_loop(node.get("body"))
         out.append(f"{'  ' * indent}while ({_expr(node['cond'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{'  ' * indent}}}")
     elif step == "for":
+        _guard_frame_neutral_loop(node.get("body"))
         bind = _ident(node.get("bind"), "loop binding")
         out.append(f"{'  ' * indent}for (const {bind} of {_expr(node['iterable'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{'  ' * indent}}}")
+    elif step == "break":
+        out.append(f"{'  ' * indent}break")
+    elif step == "continue":
+        out.append(f"{'  ' * indent}continue")
     elif step == "let_pattern":
         value = _expr(node.get("value"), ctx)
         names = [_ident(n, "binding") for n in node.get("names") or []]
