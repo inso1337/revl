@@ -1,0 +1,47 @@
+// The in-language reflection query `resolved_keys()` — roadmap item 403.
+//
+// This is the UN-privileged counterpart to the admit crossing (stdlib/admit.rvl):
+// a RUNNING composition asks what keys it itself provides/resolves, in-language,
+// instead of the harness reaching into the runtime through a CLASSIFIED host
+// escape hatch. revl already knows the resolved key set — the linker records
+// every provision (lower._link) and the runtime resolves each one in its
+// placement realm (run._Driver.resolved_keys) — this simply exposes it without a
+// privileged crossing.
+//
+// Reading what you provide changes NOTHING: no emission, no 245 frame, no
+// approval. So `resolved_keys` is a plain (non-`emission`) service method backed
+// by a `pure` host body. Where admit is an `emission fn` that can alter the
+// running world, this is a bare `fn` that only observes it. It shows on the G8
+// audit surface as an ordinary PURE host read, not a classified crossing —
+// landing this REMOVES a privileged crossing rather than adding one.
+//
+// `resolved_keys()` returns the deterministic, SORTED set of provision/
+// resolution keys of the running composition: a key appears IFF it has a live
+// provider (the same FIBERS/ROOT-consistent set `state()`'s providedKeys derives
+// from, roadmap item 372), so a fiber left ACTIVE with no provision in ROOT never
+// reports a key it does not actually provide.
+//
+// Scope: py-runtime-only, mirroring admit's scope — the resolved-key set is a
+// property of the live py driver (run._Driver), so the host body is `@py` only.
+// A composition that composes this file therefore runs on the python tier.
+
+service Reflection {
+  // a pure read: no `emission` keyword, so a consumer sees from the declaration
+  // alone that asking what the composition provides cannot alter the running
+  // world (contrast Admission.admit, which is forced `emission`).
+  fn resolved_keys() -> List[Str]
+}
+
+// The single pure host body behind the query (revl.mcp.reflect_bridge). It is
+// opaque to revl and so enumerated on the G8 audit surface as a PURE host read —
+// the honest, un-privileged place for "this component can ask what it runs".
+extern pure fn host_resolved_keys() -> List[Str]
+  = @py { from revl.mcp.reflect_bridge import resolved_keys; return resolved_keys() }
+
+// Compose this file as a ROOT module of the composition (components are never
+// `use`-imported): `compile_files(["your_base.rvl", "stdlib/reflect.rvl"])`.
+component ReflectGate provides reflection: Reflection {
+  provide reflection {
+    fn resolved_keys() = host_resolved_keys()
+  }
+}
