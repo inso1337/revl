@@ -992,6 +992,11 @@ def _comp_builtin(method, recv_surface, target, args):
         return "revlStrCharAt(%s, %s)" % (target, args[0])
     if method == "charCodeAt":
         return "revlStrCharCodeAt(%s, %s)" % (target, args[0])
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at code-point index i, via the same rune-indexed
+    # helper as charCodeAt.
+    if method == "codepoint_at":
+        return "revlStrCharCodeAt(%s, %s)" % (target, args[0])
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
     if method == "startsWith":
         return "strings.HasPrefix(%s, %s)" % (target, args[0])
@@ -3168,7 +3173,7 @@ _GO_DIV_ZERO_MSG = "revl: division by zero"
 
 
 def _v3_builtin_ret_type(method, recv_type):
-    if method in ("length", "indexOf", "charCodeAt",
+    if method in ("length", "indexOf", "charCodeAt", "codepoint_at",
                   "div_trunc", "div_floor", "div_euclid", "mod"):
         return "Int"
     # `to_int` is BOTH the Int32 widen and the Str parse (FR-9): the result
@@ -3813,6 +3818,11 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     if method == "charAt":
         return f"revlStrCharAt({target}, {args[0]})"
     if method == "charCodeAt":
+        return f"revlStrCharCodeAt({target}, {args[0]})"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at code-point index i, via the same rune-indexed
+    # helper as charCodeAt.
+    if method == "codepoint_at":
         return f"revlStrCharCodeAt({target}, {args[0]})"
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
     # HasPrefix/HasSuffix compare bytes, and a code-point prefix of a UTF-8

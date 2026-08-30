@@ -1620,7 +1620,8 @@ def _map_value_expr_type(node: dict, var_types: dict, env: _Env) -> str | None:
             elem = _map_value_expr_type(args[0], var_types, env)
             if elem is not None:
                 return f"List[{elem}]"
-        if method in ("length", "charCodeAt", "indexOf", "to_int"):
+        if method in ("length", "charCodeAt", "codepoint_at", "indexOf",
+                      "to_int"):
             return "Int"
         if method in ("charAt", "join", "repeat", "to_str", "slice"):
             return "Str"
@@ -3969,6 +3970,12 @@ def _v3_builtin(method: str, target: str, args: list[str],
     if method == "charAt":
         return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap().to_string() }}"
     if method == "charCodeAt":
+        return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap() as u32 as i64 }}"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at code-point index i. Same char-indexed lowering as
+    # charCodeAt on this tier (the O(n)-per-access cost is item 277/282's
+    # separate concern — byte-identical to charCodeAt's shape here).
+    if method == "codepoint_at":
         return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap() as u32 as i64 }}"
     if method == "indexOf":
         return f"{target}.revl_index_of(&{args[0]})"

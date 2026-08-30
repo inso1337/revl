@@ -16,6 +16,7 @@ revl refuses.)
 | `slice(a, b)` | 2 | Str, List | half-open sub-range | `x[a:b]` | `x.slice(a, b)` |
 | `charAt(i)` | 1 | Str | 1-char string | `x[i]` | `x.charAt(i)` |
 | `charCodeAt(i)` | 1 | Str | code point at i | `ord(x[i])` | `x.charCodeAt(i)` |
+| `codepoint_at(i)` | 1 | Str | code point at i, returned directly (item 276) | `ord(x[i])` | `x.charCodeAt(i)` |
 | `indexOf(v)` | 1 | Str, List | first index, `-1` if absent | inline dispatch helper | `x.indexOf(v)` |
 | `concat(y)` | 1 | Str, List | joined copy | `x + y` | `x.concat(y)` |
 | `split(sep)` | 1 | Str | pieces between separators; `""` → 1-char strings; trailing empties kept | inline dispatch | `x.split(sep)` |
@@ -338,6 +339,32 @@ outside `selfhost/lexer.rvl` — which is only ever emitted through the python
 backend — uses these builtins yet, so no other backend is exercised with them.
 A tier that later adopts them lowers to its own ASCII test (`char::is_ascii_*`
 on rust, a range compare elsewhere).
+
+### `Str.codepoint_at(i)`: codepoint-at-index scan (item 276)
+
+`codepoint_at(i)` returns the Unicode scalar value at code-point index `i` as an
+`Int`, **directly** — no intermediate 1-char `Str`. It is the codepoint-domain
+partner of `charAt` (which returns the 1-char string), and semantically it
+matches `charCodeAt(i)`; the point of the separate name is the **self-host
+lexer's hot path**, which previously spelled the code point at `j` as
+`code0(source.charAt(j))` — a `charAt` that allocates a 1-char `Str`, then a
+revl-fn call that indexes it a second time to reach `charCodeAt(0)`. Reading
+`source.codepoint_at(j)` drops the fn call and the second index. Like
+`charAt`/`charCodeAt`, the index is assumed **in bounds** (`0 <= i < length()`);
+the lexer only reads a position it has already guarded with `j < n`. For a
+position that may be past the end, `slice`-then-guard is still the total form
+(the lexer keeps its `code0` helper, which returns `-1` on an empty clamped
+slice, for exactly those probes).
+
+**Lowering per tier.** py `ord(x[i])`; ts/go/java via the same astral-aware
+`charCodeAt` helper (a lone JS surrogate would otherwise leak through
+`String.charCodeAt`); rust `x.chars().nth(i).unwrap() as u32 as i64`; wasm the
+UTF-8-decoding `$str_cp_char_code_at` helper. On the **py tier** the win is
+small — CPython caches 1-char Latin-1 strings, so the `charAt` "allocation" was
+already near-free and only the fn call is reclaimed — but on the **native tiers**
+`charAt`'s lowering allocates a heap `String` (`…to_string()` on rust) per byte,
+which `codepoint_at` avoids entirely. That is the residual-lexer perf lever the
+item-231a finding pointed at. See `docs/bench-selfhost.md` for the before→after.
 
 ### `Str.to_int()`: the parsing builtin (FR-9)
 
