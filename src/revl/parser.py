@@ -104,6 +104,11 @@ class LetEffect:
     line: int
     setup: list = field(default_factory=list)
     verified: bool = False
+    # item 131: the surface carried `effect await …` — the acquisition suspends
+    # a fiber and its landed result (not the in-flight value) is bound. The
+    # admission pass (lower.py) proves the acquire actually reaches a suspension
+    # source; the emitters prefix the acquisition with the tier's await marker.
+    is_async: bool = False
 
 
 @dataclass
@@ -113,6 +118,8 @@ class EffectStmt:
     line: int
     setup: list = field(default_factory=list)
     verified: bool = False
+    # item 131: the surface carried `effect await …` (see LetEffect.is_async).
+    is_async: bool = False
 
 
 @dataclass
@@ -153,6 +160,13 @@ class EmitStmt:
     # `Approval[C']`; the checker (lower._lower_provide) proves `C` is within
     # `C'`'s scope. None when the crossing carries no approval edge.
     approval: object | None = None
+    # item 131: the surface carried `await emit …` — the emission crosses the
+    # boundary through a suspending (async) operation and the step awaits it.
+    # The boundary marker sits outermost (`await emit`, not `emit await`) because
+    # the step is an iteration boundary whose payload is an emission (design §2).
+    # Kept last so the positional `EmitStmt(expr, line, compensate, approval)`
+    # construction is unchanged.
+    is_async: bool = False
 
 
 @dataclass
@@ -1532,8 +1546,9 @@ class Parser:
                              "revl does not model (see the frontier in "
                              "src/revl/typecheck.py); drop the annotation",
                     )
-                acquire, undo, line, setup = self.effect_form(tok.line)
-                return LetEffect(bind, acquire, undo, line, setup, verified_effect)
+                acquire, undo, line, setup, is_async = self.effect_form(tok.line)
+                return LetEffect(bind, acquire, undo, line, setup, verified_effect,
+                                 is_async)
             # item 246: `let a = await approval[C] { fields }` — an acquisition-
             # shaped suspension that yields an `Approval[C]`. Allowed in the
             # activation body exactly where `let x = effect …` is (both bind a
@@ -1587,11 +1602,12 @@ class Parser:
                                f"expected `effect` after `verified`, found {tok2.value!r}",
                                hint="inside a body, `verified` marks an effect for inverse "
                                     "round-trip testing: `verified effect … undo …`")
-            acquire, undo, line, setup = self.effect_form(tok.line)
-            return EffectStmt(acquire, undo, line, setup, verified=True)
+            acquire, undo, line, setup, is_async = self.effect_form(tok.line)
+            return EffectStmt(acquire, undo, line, setup, verified=True,
+                              is_async=is_async)
         if tok.kind == "kw" and tok.value == "effect":
-            acquire, undo, line, setup = self.effect_form(tok.line)
-            return EffectStmt(acquire, undo, line, setup)
+            acquire, undo, line, setup, is_async = self.effect_form(tok.line)
+            return EffectStmt(acquire, undo, line, setup, is_async=is_async)
         if tok.kind == "kw" and tok.value in ("every", "after"):
             if in_method:
                 raise self.err(
@@ -1623,19 +1639,7 @@ class Parser:
             return self.component_if()
         if tok.kind == "kw" and tok.value == "emit":
             self.next()
-            expr = self.pure_expr()
-            compensate = None
-            if self.at("kw", "compensate"):
-                self.next()
-                compensate = self.pure_expr()
-            # item 246: `emit <call> with <e>` threads an `Approval[C]` to the
-            # crossing. The clause is the explicit dataflow that turns
-            # "unreachable without approval" into a type check (Decision 3).
-            approval = None
-            if self.at("kw", "with"):
-                self.next()
-                approval = self.pure_expr()
-            return EmitStmt(expr, tok.line, compensate, approval)
+            return self._emit_stmt(tok.line, is_async=False)
         if tok.kind == "kw" and tok.value == "await":
             if in_method and not in_async_method:
                 raise self.err(
@@ -1647,6 +1651,14 @@ class Parser:
                          "a provide method (services 2.0, §5)",
                 )
             self.next()
+            # item 131: `await emit <call> [compensate <e>]` — an AWAITED
+            # emission step. The boundary marker sits outermost (design §2):
+            # the step is an iteration boundary whose payload is an emission.
+            # `await` on a provide-method emission is not this form — that path
+            # is refused above unless the method is `async fn`.
+            if not in_method and self.at("kw", "emit"):
+                self.next()
+                return self._emit_stmt(tok.line, is_async=True)
             return AwaitStmt(self.pure_expr(), tok.line)
         if tok.kind == "kw" and tok.value == "return":
             if not in_method:
@@ -1697,8 +1709,50 @@ class Parser:
             hint="revl bodies contain only effect forms — plain expressions have no effect to record (G6)",
         )
 
+    def _emit_stmt(self, line: int, *, is_async: bool) -> "EmitStmt":
+        """Parse an `emit` statement body (the `emit` keyword already consumed).
+
+        Shared by the plain `emit <call> [compensate …] [with …]` step and the
+        item-131 awaited `await emit <call> [compensate …]` step; `is_async`
+        records which spelling headed it so the admission pass (lower.py) can
+        enforce the exact `await`/async pairing and the emitters can prefix the
+        tier's await marker."""
+        expr = self.pure_expr()
+        compensate = None
+        if self.at("kw", "compensate"):
+            self.next()
+            compensate = self.pure_expr()
+        # item 246: `emit <call> with <e>` threads an `Approval[C]` to the
+        # crossing. The clause is the explicit dataflow that turns
+        # "unreachable without approval" into a type check (Decision 3).
+        approval = None
+        if self.at("kw", "with"):
+            self.next()
+            approval = self.pure_expr()
+        return EmitStmt(expr, line, compensate, approval, is_async)
+
     def effect_form(self, line: int):
         self.expect("kw", "effect")
+        # item 131: `effect await <expr> undo <expr>` — an ASYNC acquisition.
+        # The `await` is a divert boundary (paper §4.3.2): the fiber suspends
+        # during the call and the LANDED result is bound, not the in-flight
+        # value. The block form `effect { …setup…; acq }` keeps its stratum-1
+        # interior and does NOT take `await` (design §2 fence) — hoist the
+        # preparation into a module fn, which async-colors under item 90, and
+        # write `effect await prepped_open(cfg) undo …`.
+        is_async = False
+        if self.at("kw", "await"):
+            self.next()
+            is_async = True
+            if self.at("{"):
+                raise self.err(
+                    line,
+                    "`effect await { … }` — the block effect form does not take "
+                    "`await` (item 131)",
+                    hint="hoist the preparation into a module fn (it async-colors "
+                         "under item 90) and write `effect await prepped_open(cfg) "
+                         "undo …`; awaits interleaved with pure setup steps reopen "
+                         "the acquisition-atomicity argument (design §4 clause 1)")
         # instance-parametric components: `effect spawn C with {..} undo …`.
         # `spawn` is the one new acquisition form (docs/design-v2-instances.md);
         # its inverse is the instance's own teardown, so an `undo` is required
@@ -1715,7 +1769,7 @@ class Parser:
                 )
             self.next()
             undo = self.pure_expr()
-            return acquire, undo, line, []
+            return acquire, undo, line, [], is_async
         setup: list = []
         if self.at("{"):
             self.next()
@@ -1766,7 +1820,7 @@ class Parser:
             # exactly as before — no import can turn `Pool.open(...)` into a
             # witnessed call, so there is nothing to defer.
             if isinstance(acquire, ExprCall) and isinstance(acquire.callee, ExprVar):
-                return acquire, None, line, setup
+                return acquire, None, line, setup, is_async
             head = _describe_expr(acquire)
             raise self.err(
                 line,
@@ -1775,7 +1829,7 @@ class Parser:
             )
         self.next()
         undo = self.pure_expr()
-        return acquire, undo, line, setup
+        return acquire, undo, line, setup, is_async
 
     # duration units -> milliseconds. `ms` before `m` and `s` in the lexer's
     # eyes is moot — the unit is a whole ident token here, matched verbatim.
