@@ -55,10 +55,15 @@
 // property the classifier need not (and, being pure, cannot) reason about.
 //
 // ------------------------------------------------------------------ tier status
-// py tier (the H1 reference), matching stdlib/fs.rvl. The `sh` + `classify`
-// bodies delegate to backends/python/revl_shell_host.py and
-// backends/python/revl_shell_classify.py; other tiers get their bodies when the
-// fs catalog's Slice 2b lands theirs.
+// py + ts tiers (the H1 reference on each), matching stdlib/fs.rvl. The py `sh`
+// + `classify` bodies delegate to backends/python/revl_shell_host.py and
+// backends/python/revl_shell_classify.py; the ts bodies delegate to
+// backends/typescript/revl_shell_ts.ts (node opaque `sh`) and
+// backends/typescript/revl_shell_classify_ts.ts (the pure classifier port),
+// reached via globalThis.__revlShell (item 369). The classifier is pure and
+// tier-agnostic, so py and ts return byte-identical plans (proven over the full
+// corpus in tests/test_ts_witnessed_parity.py). rs / go / java / wasm bodies
+// get theirs when the fs catalog's Slice 2b lands theirs.
 //
 // The recognized ops execute through the fs catalog directly — a consumer that
 // dispatches a witnessed plan imports the catalog and calls the op the plan
@@ -72,6 +77,7 @@
 // residue item 252 leaves — the commands the classifier could not lower.
 pub extern emission fn sh(cmd: Str) -> Str
   = @py { import revl_shell_host; return revl_shell_host.run_opaque(cmd) }
+  = @ts { return (globalThis as any).__revlShell.runOpaque(cmd) }
 
 // ------------------------------------------------------------------------ the classifier
 // The pure verdict. `Any` is the plan record — inspect it with the accessors
@@ -80,6 +86,7 @@ pub extern emission fn sh(cmd: Str) -> Str
 // tool's reversibility decision is a pure, testable function of the command text.
 pub extern pure fn classify(cmd: Str) -> Any
   = @py { import revl_shell_classify; return revl_shell_classify.classify(cmd) }
+  = @ts { return (globalThis as any).__revlShell.classify(cmd) }
 
 // --------------------------------------------------------------- plan accessors
 // Thin, total, pure readers over a plan, so a consumer can branch on the verdict
@@ -88,18 +95,22 @@ pub extern pure fn classify(cmd: Str) -> Any
 // The verdict tag: "witnessed" (lowerable) or "emission" (stays one prompt).
 pub extern pure fn plan_verdict(plan: Any) -> Str
   = @py { return plan.get("verdict", "emission") }
+  = @ts { return plan.verdict ?? 'emission' }
 
 // True iff the command lowers onto the witnessed catalog. The consumer's branch:
 // true -> execute the ops through stdlib/fs.rvl (real inverses); false -> `sh`.
 pub extern pure fn plan_is_witnessed(plan: Any) -> Bool
   = @py { return plan.get("verdict") == "witnessed" }
+  = @ts { return plan.verdict === 'witnessed' }
 
 // The human reason a command stayed an emission (empty for a witnessed plan) —
 // for the audit surface: WHY the terminal still had to prompt.
 pub extern pure fn plan_reason(plan: Any) -> Str
   = @py { return plan.get("reason", "") }
+  = @ts { return plan.reason ?? '' }
 
 // How many witnessed catalog ops the command lowered to (0 for an emission
 // verdict). A single `mv` is 1; `rm a b c` is 3; a pipeline is 0.
 pub extern pure fn plan_op_count(plan: Any) -> Int
   = @py { return len(plan.get("ops", [])) }
+  = @ts { return BigInt((plan.ops ?? []).length) }
