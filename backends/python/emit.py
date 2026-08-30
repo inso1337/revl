@@ -1398,11 +1398,23 @@ class _ComponentEmitter:
             if deferred is not None:
                 self._deferred_step(out, indent, step, deferred, where)
             elif step.get("compensate") is not None:
-                fn = f"_emit_{self._counter}"
-                out.add(indent, f"def {fn}():")
-                out.add(indent + 1, self._emit_fire(step, where))
-                out.add(indent + 1, f"yield lambda: {self._expr(step.get('compensate'), where)}")
-                out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
+                # item 247 (method-body compensate remainder) (docs/design/teardown-contract.md): a method-body
+                # `emit ... compensate ...` is a first-class COMPENSATION on the
+                # component's activation frame, exactly as the activation-body
+                # site is (item 247) — NOT a bare `yield lambda: <offset>` adopted
+                # as a sibling effect. A bare adopted disposer is a BRACKET: cordis
+                # disposes it before the body drain, so it fires the offset on a
+                # CLEAN commit (destroying the deliverable), interleaves with the
+                # proof inverses, and is unguarded. Routing through
+                # `Frame.compensation_method` (the compensation analog of item
+                # 318's `transactional_method`) makes it abort-only: discharged on
+                # a clean commit, drained in Phase 2 after every proof inverse,
+                # guarded and residue-collected. Fire the emission first, then
+                # register — the sync spelling of the activation body's
+                # `<fire>; yield _revl_frame.compensation(...)`.
+                out.add(indent, self._emit_fire(step, where))
+                out.add(indent, "_revl_frame.compensation_method(lambda: "
+                                f"{self._expr(step.get('compensate'), where)})")
             else:
                 out.add(indent, self._emit_fire(step, where))
         elif kind == "return":
