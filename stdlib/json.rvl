@@ -151,7 +151,15 @@ pub extern pure fn json_parse(s: Str) -> Any
   }
 
 pub extern pure fn json_stringify(v: Any) -> Str
-  = @py { import json; return json.dumps(v) }
+  = @py {
+    # CANONICAL FORM (item 385): compact separators (no space after ':' or
+    # ',') + ensure_ascii=False (non-ASCII stays raw UTF-8). The py default
+    # json.dumps(v) inserts ', '/': ' and escapes non-ASCII, both of which
+    # diverge from ts/go byte-for-byte. See the canonical-form contract in
+    # this file's header. (Comments here are '#': a @py body is real Python.)
+    import json
+    return json.dumps(v, separators=(",", ":"), ensure_ascii=False)
+  }
   = @ts {
     // `Int` maps to JS `bigint` (TYPE_MAP), which `JSON.stringify` refuses
     // ("Do not know how to serialize a BigInt"). A replacer parks each bigint
@@ -167,8 +175,20 @@ pub extern pure fn json_stringify(v: Any) -> Str
   = @rs { v.downcast::<serde_json::Value>().map(|j| serde_json::to_string(&*j).unwrap_or_default()).unwrap_or_default() }
   = @go {
     //revl:import encoding/json
-    b, _ := json.Marshal(v)
-    return string(b)
+    //revl:import bytes
+    // CANONICAL FORM (item 385): compact, and — unlike the default
+    // `json.Marshal`, which HTML-escapes `<`, `>`, `&` to `<>&`
+    // — `SetEscapeHTML(false)` so those bytes stay raw, matching py
+    // (`ensure_ascii=False`) and ts (`JSON.stringify`). `Encoder.Encode`
+    // appends a trailing '\n'; trim it so the bytes match the other tiers.
+    // (Go map keys marshal in ascending byte order; a scalar/list/string
+    // value is byte-identical to py/ts. See the canonical-form contract in
+    // this file's header for the go record caveat.)
+    var buf bytes.Buffer
+    enc := json.NewEncoder(&buf)
+    enc.SetEscapeHTML(false)
+    _ = enc.Encode(v)
+    return string(bytes.TrimRight(buf.Bytes(), "\n"))
   }
 
 // A TOTAL (never-raising) parse: the same decode as `json_parse`, but the
