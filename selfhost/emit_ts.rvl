@@ -54,8 +54,9 @@
 //     awaited wherever it lands (return / let / a nested ternary arm), gated on
 //     `in_async && !in_arrow` and a per-component `ops` membership test;
 //   * the ASYNC-GENERATOR body — a component body with an `await` step renders
-//     `ctx.effect(async function* () {` (`component_lines`/`body_has_await`), and
-//     the `await` step lands + `yield () => {}` iteration boundary (A1).
+//     `async apply` + `await ctx.effect(async function* () {` (`component_lines`/
+//     `body_is_async`), and the `await` step itself where it lands + the
+//     `yield () => {}` iteration boundary (A1).
 // The async-colouring state (`in_async`/`in_arrow`/`ops`) is threaded EXPLICITLY
 // down the expr tree as an `ACx` — revl has no shared render context — like the
 // `$revl_match_N` counter (relates to the state-threading tax, item 195).
@@ -1764,9 +1765,18 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
 
 // The activation body is an async generator when any TOP-LEVEL step is an
 // `await` (v1/A1) — mirrors the reference's `any(step == "await" …)`.
-fn body_has_await(steps: List[Any]) -> Bool {
+// `is_async` (item 131): a body containing an `await` step (or an async-flagged
+// `effect`/`let-effect`/`emit` — an awaited acquisition or emission) compiles to
+// an async generator whose awaited acquisitions land on LATER microtask turns,
+// AFTER a synchronous `apply` would already have returned. Such a body colors
+// `apply` `async` and `await`s its `ctx.effect(...)` so the fiber reaches ACTIVE
+// only once the acquisition has landed. A timer step is excluded: its async flag
+// colors its OWN runtime-awaited firing (item 170), not the activation body.
+fn body_is_async(steps: List[Any]) -> Bool {
   for (step of steps) {
-    if (value_str(value_field(step, "step")) == "await") { return true }
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "await") { return true }
+    if ((kind == "effect" || kind == "let-effect" || kind == "emit") && value_bool(value_field(step, "async"))) { return true }
   }
   return false
 }
@@ -1825,9 +1835,16 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
     for (k of provide_keys) { pk = pk.push(json_dumps(k)) }
     out = out.push(`  provide: [${pk.join(", ")}],`)
   }
+  // item 131: an async body colors `apply` `async` (and `await`s its
+  // `ctx.effect` below) so the fiber reaches ACTIVE only after the awaited
+  // acquisition lands. A sync body keeps the bare `apply`, byte-identical.
+  let body = value_list(value_field(comp, "body"))
+  let is_async = body_is_async(body)
+  var apply_kw = "apply"
+  if (is_async) { apply_kw = "async apply" }
   let fields = value_list(value_field(comp, "config"))
   if (fields.length() > 0) {
-    out = out.push(`  apply(ctx: Context, rawConfig: ${name}Config) {`)
+    out = out.push(`  ${apply_kw}(ctx: Context, rawConfig: ${name}Config) {`)
     var spec_parts = []
     for (field of fields) {
       let fname = value_str(value_field(field, "name"))
@@ -1840,7 +1857,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
     }
     out = out.push(`    const config = host.applyConfigDefaults(${json_dumps(name)}, rawConfig, { ${spec_parts.join(", ")} }) as Required<${name}Config>`)
   } else {
-    out = out.push("  apply(ctx: Context) {")
+    out = out.push(`  ${apply_kw}(ctx: Context) {`)
   }
   // item 243 Slice 2b: the activation's teardown accumulator, built ONLY when
   // this component registers a compensation entry (`_needs_frame`). A
@@ -1854,13 +1871,20 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
     frame_var = "$revl_frame"
     out = out.push(`    const ${frame_var} = new Frame(ctx, ${json_dumps(name)})`)
   }
-  // One generator per body (LIFO teardown). A body with an `await` step is an
-  // async generator (v1/A1). `ops` = the async operations reachable through this
-  // component's requirement keys, threaded to the provide-method await-seed.
-  let body = value_list(value_field(comp, "body"))
+  // One generator per body (LIFO teardown). An async body compiles to an async
+  // generator (v1/A1) and its `ctx.effect(...)` is `await`ed inside the `async
+  // apply` (item 131): the wrapper is a thenable, so awaiting it makes `apply`
+  // return a real Promise that cordis' `_execute` chains onto, so `fiber.await()`
+  // resolves only after the awaited acquisition has landed. A sync body's
+  // generator runs to completion synchronously, so its `ctx.effect(...)` stays a
+  // bare, non-awaited statement, byte-identical for every prior program. `ops` =
+  // the async operations reachable through this component's requirement keys,
+  // threaded to the provide-method await-seed.
   var gen = "function*"
-  if (body_has_await(body)) { gen = "async function*" }
-  out = out.push(`    ctx.effect(${gen} () {`)
+  if (is_async) { gen = "async function*" }
+  var effect_stmt = ""
+  if (is_async) { effect_stmt = "await " }
+  out = out.push(`    ${effect_stmt}ctx.effect(${gen} () {`)
   // Slice 2b: two sentinel yields bracket the ordinary steps when a `Frame` is
   // built. `begin` yielded FIRST -> disposed LAST (LIFO): the Phase-2 post-unwind
   // hook on abort. `drain` yielded LAST -> disposed FIRST: the commit signal every
