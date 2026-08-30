@@ -258,6 +258,13 @@ def lex(source: str, filename: str) -> list[Token]:
         elif c == '"':
             i, value = _lex_string(source, i + 1, line, filename)
             tokens.append(Token("string", value, line))
+        elif c == "'":
+            # Single-quoted string (item 382). revl has no char type, so `'a'`
+            # / `'hello'` lex as a `Str`, identical in token kind and escape
+            # handling to `"..."` — the same dual-spelling muscle-memory ergonomic
+            # revl already grants with `==`/`===`. Only `\'` and `\\` are escapes.
+            i, value = _lex_string(source, i + 1, line, filename, quote="'")
+            tokens.append(Token("string", value, line))
         elif c == '`':
             i, parts, line = _lex_template(source, i + 1, line, filename)
             tokens.append(Token("template", parts, line))
@@ -269,34 +276,8 @@ def lex(source: str, filename: str) -> list[Token]:
             tokens.append(Token("kw" if word in KEYWORDS else "ident", word, line))
             i = j
         elif c.isdigit():
-            j = i
-            while j < n and source[j].isdigit():
-                j += 1
-            # A float needs a fraction or an exponent. `.` only starts one when
-            # a digit follows, so `7.div_trunc(2)` stays an Int and a method
-            # call; `1e10` only lexes as a float when real digits follow the
-            # exponent marker, so `1e` is an Int beside an ident, not an error.
-            is_float = False
-            if j < n and source[j] == "." and j + 1 < n and source[j + 1].isdigit():
-                j += 1
-                while j < n and source[j].isdigit():
-                    j += 1
-                is_float = True
-            if j < n and source[j] in "eE":
-                k = j + 1
-                if k < n and source[k] in "+-":
-                    k += 1
-                if k < n and source[k].isdigit():
-                    while k < n and source[k].isdigit():
-                        k += 1
-                    j = k
-                    is_float = True
-            text = source[i:j]
-            if is_float:
-                tokens.append(Token("float", float(text), line))
-            else:
-                tokens.append(Token("int", int(text), line))
-            i = j
+            i, tok = _lex_number(source, i, line, filename)
+            tokens.append(tok)
         elif c == "@" and i + 1 < n and (source[i + 1].isalpha() or source[i + 1] == "_"):
             # Host block: `@backend { <verbatim, brace-balanced> }`.
             # The body is host text, not revl, so it is consumed here by
@@ -331,8 +312,93 @@ def lex(source: str, filename: str) -> list[Token]:
     return tokens
 
 
-def _lex_string(source: str, i: int, line: int, filename: str):
-    """Plain double-quoted string.
+# Non-decimal integer prefixes (item 381): the letter after a leading `0`
+# selects the radix. The prefix letter and the a-f hex digits may be either
+# case, matching Python/JS so a model's `0XFF` or `0xff` both lex.
+_RADIX_PREFIX = {
+    "x": (16, "hexadecimal", "0123456789abcdefABCDEF"),
+    "b": (2, "binary", "01"),
+    "o": (8, "octal", "01234567"),
+}
+
+
+def _scan_grouped_digits(source, i, line, filename, valid, what):
+    """Scan a run of `valid` digits with `_` group separators (item 381).
+
+    `_` is a separator only: it may not lead, trail, or double, and there must
+    be at least one digit. Returns (index-after-run, digits-without-separators).
+    """
+    n = len(source)
+    buf: list[str] = []
+    prev_underscore = False
+    while i < n:
+        c = source[i]
+        if c == "_":
+            if not buf or prev_underscore:
+                raise RevlError(
+                    filename, line,
+                    f"'_' in {what} literal must appear between digits",
+                )
+            prev_underscore = True
+            i += 1
+        elif c in valid:
+            buf.append(c)
+            prev_underscore = False
+            i += 1
+        else:
+            break
+    if not buf:
+        raise RevlError(filename, line, f"{what} literal requires at least one digit")
+    if prev_underscore:
+        raise RevlError(
+            filename, line,
+            f"'_' in {what} literal must appear between digits",
+        )
+    return i, "".join(buf)
+
+
+def _lex_number(source: str, i: int, line: int, filename: str):
+    """Number literal: decimal int/float plus the item-381 additions —
+    `0x`/`0b`/`0o` non-decimal integers and `_` digit-group separators.
+
+    Decimal behavior is byte-identical to before for any input without a `_`:
+    a float needs a fraction or exponent; `.` only starts a fraction when a
+    digit follows (so `7.foo()` stays an int + method call), and `1e` with no
+    exponent digits stays an int beside an ident. Non-decimal literals are
+    always ints (no fraction/exponent). Returns (index-after-number, Token).
+    """
+    n = len(source)
+    # Non-decimal: a leading `0` followed by a radix letter.
+    if source[i] == "0" and i + 1 < n and source[i + 1] in "xXbBoO":
+        base, what, valid = _RADIX_PREFIX[source[i + 1].lower()]
+        i, digits = _scan_grouped_digits(source, i + 2, line, filename, valid, what)
+        return i, Token("int", int(digits, base), line)
+
+    # Decimal integer part (the caller guarantees source[i] is a digit).
+    i, int_digits = _scan_grouped_digits(source, i, line, filename, "0123456789", "number")
+    num = int_digits
+    is_float = False
+    if i < n and source[i] == "." and i + 1 < n and source[i + 1].isdigit():
+        i, frac = _scan_grouped_digits(source, i + 1, line, filename, "0123456789", "number")
+        num += "." + frac
+        is_float = True
+    if i < n and source[i] in "eE":
+        k = i + 1
+        sign = ""
+        if k < n and source[k] in "+-":
+            sign = source[k]
+            k += 1
+        if k < n and source[k].isdigit():
+            i, exp = _scan_grouped_digits(source, k, line, filename, "0123456789", "number")
+            num += "e" + sign + exp
+            is_float = True
+    if is_float:
+        return i, Token("float", float(num), line)
+    return i, Token("int", int(num), line)
+
+
+def _lex_string(source: str, i: int, line: int, filename: str, quote: str = '"'):
+    """Plain quoted string (`quote` is the closing delimiter, `"` or `'`).
 
     The escape set is deliberately minimal: `\\"` yields a literal `"` and
     `\\\\` a literal `\\`, so a string may contain either (item 183). Every
@@ -357,14 +423,14 @@ def _lex_string(source: str, i: int, line: int, filename: str):
     n = len(source)
     while i < n:
         c = source[i]
-        if c == "\\" and i + 1 < n and source[i + 1] in ('"', "\\"):
-            # `\"` and `\\` are the only escapes: emit the escaped character
-            # and consume both. A `\` before anything else is a literal
+        if c == "\\" and i + 1 < n and source[i + 1] in (quote, "\\"):
+            # `\<quote>` and `\\` are the only escapes: emit the escaped
+            # character and consume both. A `\` before anything else is a literal
             # backslash (so `\n` stays two characters — no escape processing).
             buf.append(source[i + 1])
             i += 2
             continue
-        if c == '"':
+        if c == quote:
             return i + 1, "".join(buf)
         if c == "\n":
             raise RevlError(filename, line, "unterminated string literal")
