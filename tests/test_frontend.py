@@ -77,6 +77,34 @@ def test_end_to_end_java_golden():
 # ---------------------------------------------------------------- rejections
 
 REJECTIONS = {
+    # item 384: foreign-construct redirect table — a known-foreign idiom that
+    # lexes as an undeclared identifier (or produces a cryptic parse error) is
+    # redirected to its revl spelling instead of the misleading generic G1.
+    "foreign_word_operator_and.rvl": "use `&&`",
+    "foreign_word_operator_or.rvl": "use `||`",
+    "foreign_word_operator_not.rvl": "use the prefix `!`",
+    "foreign_bool_true.rvl": "use `true`, not `True`",
+    "foreign_bool_false.rvl": "use `false`, not `False`",
+    "foreign_const.rvl": "revl has no `const`",
+    "foreign_len_builtin.rvl": "revl has no `len(...)`",
+    "foreign_print_builtin.rvl": "revl has no `print`",
+    "foreign_throw.rvl": "revl has no `throw`",
+    "foreign_increment.rvl": "revl has no `++` increment operator",
+    "foreign_decrement.rvl": "revl has no `--` decrement operator",
+    "foreign_cstyle_for.rvl": "revl has no C-style `for (init; cond; step)` loop",
+    "foreign_for_in.rvl": "not `for (x in xs)`",
+    "foreign_def.rvl": "revl has no `def`",
+    "foreign_elif.rvl": "revl has no `elif`",
+    "foreign_lambda.rvl": "revl has no `lambda`",
+    "foreign_python_ternary.rvl": "revl has no Python-style `a if c else b`",
+    "foreign_tuple.rvl": "revl has no tuples",
+    "foreign_string_dict.rvl": "revl records use identifier keys",
+    "foreign_slice.rvl": "revl has no slice syntax `xs[a:b]`",
+    "foreign_kwargs.rvl": "revl has no keyword arguments",
+    # `#` (item 384) is NOT a corpus rejection fixture: unlike every other
+    # foreign construct it is un-TOKENIZABLE, so the formatter's token-stream
+    # gate (test_fmt) cannot round-trip a `#` file. Its redirect is proven by
+    # test_foreign_hash_comment_redirects below instead.
     "a1_await_in_method.rvl": "`await` is only allowed in a component body",
     # roadmap item 80: a sync provide method that reaches an `async` extern is
     # refused with the twin of the emission-propagation diagnostic (async-
@@ -337,6 +365,20 @@ def test_a3_host_colliding_names_are_renamed():
     binds = [step["bind"] for step in body]
     assert binds == ["frame_", "class_"], "host-reserved names must be renamed (A3)"
     assert body[0]["undo"]["target"]["id"] == "frame_"
+
+
+def test_foreign_hash_comment_redirects():
+    """item 384: `#` (Python/shell line comment) is redirected to `//` at the
+    lexer. It cannot be a corpus rejection fixture because `#` is
+    un-tokenizable, so the formatter's token-stream gate could not round-trip
+    it (test_fmt); proven here directly instead."""
+    from revl import compile_source
+
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("fn f() -> Int {\n  # a comment\n  return 0\n}\n")
+    msg = str(excinfo.value)
+    assert "revl has no `#` comments" in msg
+    assert "// ..." in msg  # the redirect names the revl spelling
 
 
 def test_a4_literal_dollars_are_escaped():
