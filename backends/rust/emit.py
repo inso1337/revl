@@ -1668,16 +1668,25 @@ def _map_value_expr_type(node: dict, var_types: dict, env: _Env) -> str | None:
     return None
 
 
+# Map verbs that write a value at arg[1]; each pins the host Map's value type V.
+# Inferring V from ANY writer (not the literal name "insert") lets a CAS-only
+# writer (`insert_if_absent`, item 397) pin a concrete V instead of the String
+# default (item 402).
+_MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+
 def _map_expr_inserts(node, bind: str, var_types: dict, env: _Env,
                       candidates: list[str]) -> None:
-    """Collect candidate value types from `bind.insert(k, v)` anywhere in an
-    expression; recurses into sub-expressions."""
+    """Collect candidate value types from any map value-writing call
+    (`insert`, `insert_if_absent`, ...) on `bind` anywhere in an expression;
+    recurses into sub-expressions."""
     if not isinstance(node, dict):
         return
     if node.get("kind") == "call":
         target = node.get("target")
         if (isinstance(target, dict) and target.get("kind") == "name"
-                and target.get("id") == bind and node.get("method") == "insert"):
+                and target.get("id") == bind
+                and node.get("method") in _MAP_VALUE_WRITERS):
             args = node.get("args") or []
             if len(args) >= 2:
                 t = _map_value_expr_type(args[1], var_types, env)
