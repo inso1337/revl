@@ -4365,17 +4365,19 @@ def _async_reached_outside_provide(node, async_names: set, acc: set) -> None:
     the runtime, exactly like a provide method's own async reach is admitted at
     its site above (docs/time-coeffect.md §async).
 
-    Item 131 gives the effect-composition steps their own exact-pairing gate
-    (`_admit_effect_async`/`_admit_emit_async`), which is *not* name-based and so
-    also catches the req-target async ops this walk is blind to. Those steps are
-    pruned here so an awaited async acquisition/emission is admitted rather than
-    caught by this name-based fence — the two gates agree on the non-await case
-    (both refuse), and only the new gate admits the awaited spelling. What
-    remains for this walk is the genuinely-unawaitable positions: an `if`-guard
-    condition and a `fail` message, where no `await` marker can be spelled."""
+    Item 131: the `await` step is pruned (its suspension is admitted, widened to
+    async externs/colored fns), and an AWAIT-MARKED effect/emit step is pruned
+    (an awaited async acquisition/emission is admitted). A NON-await effect/emit
+    step is still walked, so an async-callable reached without `await` keeps this
+    legacy "reaches async … in a setup/activation body" refusal — the message
+    the self-hosted admission gate mirrors. The req-op family that gate is blind
+    to is caught instead by `_admit_effect_async`/`_admit_emit_async` (rule 1),
+    which run during lowering and set the `async` flag this prune reads."""
     if isinstance(node, dict):
-        if node.get("step") in ("provide", "timer", "effect", "let-effect",
-                                 "emit", "await"):
+        step = node.get("step")
+        if step in ("provide", "timer", "await"):
+            return
+        if step in ("effect", "let-effect", "emit") and node.get("async"):
             return
         kind = node.get("kind")
         if kind == "fn" and node.get("name") in async_names:
@@ -4465,6 +4467,24 @@ def _first_suspension(node, env) -> str | None:
     return None
 
 
+def _first_reqop_suspension(node, env) -> str | None:
+    """The first REQ-TARGET async service op a lowered expression reaches (rule
+    3 of the item-92 async-reach), or None. This is the family the name-based
+    `_async_reached_outside_provide` fence is blind to — the two silent leaks of
+    item 131's probe table. An async-colored callable (an async extern or a
+    phase-2 colored fn) is deliberately NOT reported here: that family is still
+    refused by the name-based fence with its legacy "reaches async … in a
+    setup/activation body" diagnostic (which the self-hosted gate mirrors), so
+    the effect-composition rule-1 refusal owns only the req-op family it is the
+    first to name."""
+    reached: list = []
+    _reached_async_req_ops(node, env, reached)
+    if reached:
+        req_name, method, _op = reached[0]
+        return f"{req_name}.{method}"
+    return None
+
+
 def _admit_effect_async(stmt, step: dict, env: "Env", filename: str) -> None:
     """Enforce the exact `await`/async pairing on an `effect`/`let-effect`
     acquisition and refuse a suspending teardown (item 131 §3, rules 1-3).
@@ -4476,17 +4496,26 @@ def _admit_effect_async(stmt, step: dict, env: "Env", filename: str) -> None:
     additive IR `async` flag on the step whose surface carried `await`; a sync
     acquisition carries no key and lowers byte-identically to before."""
     is_async = getattr(stmt, "is_async", False)
+    # Rule 1 (async without `await`) fires here only for the REQ-OP family — the
+    # silent leak. The async-callable family (extern / colored fn) in a non-await
+    # acquisition is still refused by the name-based `_async_reached_outside_
+    # provide` fence with its legacy message, which the self-hosted gate mirrors.
+    reqop = _first_reqop_suspension(step.get("acquire"), env)
+    if reqop is None and step.get("setup"):
+        reqop = _first_reqop_suspension(step["setup"], env)
+    # Rule 2 (await without async) reads the FULL suspension surface (either
+    # family): an `await` marker must name a real divert window of any kind.
     reach = _first_suspension(step.get("acquire"), env)
     if reach is None and step.get("setup"):
         reach = _first_suspension(step["setup"], env)
-    if reach is not None and not is_async:
+    if reqop is not None and not is_async:
         # Rule 1: async without `await`.
         raise RevlError(
             filename, stmt.line,
             f"component `{env.component.name}` acquires through async operation "
-            f"`{reach}` but the effect is not awaited; the binding would hold "
+            f"`{reqop}` but the effect is not awaited; the binding would hold "
             f"the in-flight value, not the result (A1)",
-            hint=f"write `effect await {reach.split('.')[-1]}(...) undo ...`; the "
+            hint=f"write `effect await {reqop.split('.')[-1]}(...) undo ...`; the "
                  "await is a divert boundary (paper §4.3.2), so it is spelled, "
                  "never inserted",
             code="A1", category="async-propagation")
@@ -4522,15 +4551,18 @@ def _admit_emit_async(stmt, step: dict, env: "Env", filename: str) -> None:
     forward-path (awaited iff the surface spelled `await emit`); the
     `compensate` slot is teardown-position and may never suspend."""
     is_async = getattr(stmt, "is_async", False)
+    # Rule 1 fires here only for the REQ-OP family (the silent leak); an
+    # async-callable emission in a non-await step stays with the legacy fence.
+    reqop = _first_reqop_suspension(step.get("expr"), env)
     reach = _first_suspension(step.get("expr"), env)
-    if reach is not None and not is_async:
+    if reqop is not None and not is_async:
         # Rule 1: async without `await`.
         raise RevlError(
             filename, stmt.line,
-            f"`emit` step reaches async operation `{reach}` but the emission is "
+            f"`emit` step reaches async operation `{reqop}` but the emission is "
             "not awaited; py would build a coroutine it never awaits (the "
             "emission never fires) and ts a floating unordered Promise (A1)",
-            hint=f"write `await emit {reach.split('.')[-1]}(...)`; the await is a "
+            hint=f"write `await emit {reqop.split('.')[-1]}(...)`; the await is a "
                  "divert boundary (paper §4.3.2), so it is spelled, never inserted",
             code="A1", category="async-propagation")
     if is_async and reach is None:
