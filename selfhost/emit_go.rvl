@@ -225,6 +225,15 @@ fn go_bin_op(op: Str) -> Str {
   if (op == "%") { return "%" }
   if (op == "&&") { return "&&" }
   if (op == "||") { return "||" }
+  // Int32 bitwise operators (item 366, docs/arithmetic.md). `& | ^` are native
+  // on int32. The shifts are rendered specially (render_bin): Go does not mask
+  // the shift count and panics on a negative signed one, so the count is taken
+  // as `uint32(n) & 31` to match the spec's mod-32 rule and wasm/JS.
+  if (op == "&") { return "&" }
+  if (op == "|") { return "|" }
+  if (op == "^") { return "^" }
+  if (op == "<<") { return "<<" }
+  if (op == ">>") { return ">>" }
   return ""
 }
 
@@ -589,6 +598,13 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
     }
     return `revlDiv(${left}, ${right})`
   }
+  if (op == "<<" || op == ">>") {
+    // Int32 shift: mask the count to 0..31 as an unsigned value, because Go
+    // neither masks the count nor accepts a negative signed one. `<<` drops the
+    // high bits (int32 two's complement); `>>` on the signed int32 is
+    // arithmetic (docs/arithmetic.md, item 366).
+    return `(${left} ${goop} (uint32(${right}) & 31))`
+  }
   return `(${left} ${goop} ${right})`
 }
 
@@ -596,6 +612,10 @@ fn render_un(node: Any, ctx: Ctx) -> Str {
   let op = node_op(node)
   let operand = render_expr(value_field(node, "operand"), ctx, "")
   if (op == "!") { return `(!${operand})` }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): Go spells bitwise NOT as unary `^`.
+    return `(^${operand})`
+  }
   if (op == "-") {
     let opnd = node_operands(node)
     if (opnd == "Int") { return `revlSub(0, ${operand})` }

@@ -64,6 +64,7 @@ pub fn base_env() -> List[Bind] {
     { name: "f", ty: "Float" },
     { name: "s", ty: "Str" },
     { name: "flag", ty: "Bool" },
+    { name: "m", ty: "Int32" },
   ]
 }
 
@@ -143,6 +144,20 @@ fn binop_type(op: Str, lt: Str, rt: Str) -> Infer {
     }
     return ok_ty("Bool")
   }
+  if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
+    // Bitwise operators are Int32-only (item 366, docs/arithmetic.md); Int
+    // (64-bit) is deliberately excluded. An unknown operand ("") stays on the
+    // gradual frontier — the reference skips the check for a None type — but
+    // any KNOWN non-Int32 operand is refused. For a shift the count is Int32
+    // too, and the result is Int32.
+    if (lt != "" && ty_head(lt) != "Int32") {
+      return refuse("`".concat(op).concat("` requires `Int32` operands"))
+    }
+    if (rt != "" && ty_head(rt) != "Int32") {
+      return refuse("`".concat(op).concat("` requires `Int32` operands"))
+    }
+    return ok_ty("Int32")
+  }
   if (op == "+") {
     if (lt == "Str" || rt == "Str") {
       // string concatenation path: the other side must be Str or numeric;
@@ -196,10 +211,36 @@ fn infer_t(e: Expr, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
     NullLit    => refuse("`null` has no type in revl — absence is Opt[T]"),
     Var(n)     => infer_var_t(n, env, tt, ct),
     Bin(b)     => infer_bin_t(b.op, b.l, b.r, env, tt, ct),
+    Un(u)      => infer_un_t(u.op, u.e, env, tt, ct),
     Field(fd)  => infer_field_t(fd, env, tt, ct),
     Call(c)    => infer_call_t(c, env, tt, ct),
     _          => ok_ty(""),   // outside the slice: walked, not typed
   }
+}
+
+// Port of typecheck.infer_ast's ExprUn arm: `!` is Bool-only -> Bool; `~` is
+// the Int32-only bitwise complement -> Int32 (item 366); unary `-` requires a
+// numeric operand and returns that operand's type. An unknown operand ("")
+// stays on the gradual frontier, exactly as the reference skips a None type.
+fn infer_un_t(op: Str, operand: Expr, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
+  let o = infer_t(operand, env, tt, ct)
+  if (!o.ok) { return o }
+  let t = o.ty
+  if (op == "!") {
+    if (t != "" && t != "Bool") { return refuse("operand of `!`") }
+    return ok_ty("Bool")
+  }
+  if (op == "~") {
+    if (t != "" && ty_head(t) != "Int32") {
+      return refuse("`~` requires an `Int32` operand")
+    }
+    return ok_ty("Int32")
+  }
+  // unary `-`: numeric operand (Int / Float / Int32), result is that type.
+  if (t != "" && t != "Int" && t != "Float" && t != "Int32") {
+    return refuse("operand of unary `-`")
+  }
+  return ok_ty(t)
 }
 
 // A bare name first resolves in the environment; failing that, a nullary ADT

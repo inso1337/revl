@@ -233,6 +233,14 @@ fn v3_bin_ops(op: Str) -> Str {
   if (op == "%") { return "%" }
   if (op == "&&") { return "&&" }
   if (op == "||") { return "||" }
+  // Int32 bitwise operators (item 366, docs/arithmetic.md). `& | ^` are native
+  // on i32 and never trap. The shifts are rendered specially (render_bin) to
+  // mask the count to 0..31, since rust panics on a shift amount >= 32.
+  if (op == "&") { return "&" }
+  if (op == "|") { return "|" }
+  if (op == "^") { return "^" }
+  if (op == "<<") { return "<<" }
+  if (op == ">>") { return ">>" }
   return ""
 }
 
@@ -579,6 +587,13 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
   if (op == "/" && (opnd == "Int" || opnd == "Int32")) {
     return `((${left}) as f64 / (${right}) as f64)`
   }
+  if (op == "<<" || op == ">>") {
+    // Int32 shift: mask the count to 0..31 (mod 32) so `<<`/`>>` stay panic-
+    // free (rust panics on a shift amount >= 32) and match wasm/JS. `<<` drops
+    // the high bits (i32 two's complement); `>>` on the signed i32 is
+    // arithmetic (docs/arithmetic.md, item 366).
+    return `(${left} ${opr} ((${right}) & 31))`
+  }
   return `(${left} ${opr} ${right})`
 }
 
@@ -586,6 +601,11 @@ fn render_un(node: Any, ctx: Ctx) -> Str {
   let op = node_op(node)
   let operand = render_expr(value_field(node, "operand"), ctx)
   if (op == "!") { return `(!${operand})` }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): rust spells bitwise NOT on an
+    // integer as `!` (the same token as logical not on bool). Never traps.
+    return `(!${operand})`
+  }
   if (op == "-") { return `(-${operand})` }
   return `<<UNSUPPORTED-UN:${op}>>`
 }
