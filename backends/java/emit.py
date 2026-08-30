@@ -3528,6 +3528,15 @@ def _emit_component_stmts(
             out.append(
                 f"{pad}throw new CordisException(String.valueOf({message}));"
             )
+            # A `fail` lowers to an unconditional `throw`, so every sibling
+            # step after it in THIS block never runs. Unlike go/rust/py —
+            # whose targets tolerate dead code after a return/panic/raise —
+            # javac hard-rejects an unreachable statement, so drop the
+            # post-fail tail rather than emitting it. Nested blocks (an
+            # `if`-branch) recurse through their own call, so this only prunes
+            # the failing block's own tail, never a sibling branch that is
+            # still reachable. (roadmap item 341 / fault-sweep item 125)
+            return
         elif kind == "await":
             out.append(f"{pad}{_await_join(step['expr'], env, v3_ctx)};")
         elif kind == "return":
@@ -3562,6 +3571,8 @@ def _emit_component_modern(
     functions: list | None = None,
     externs: list | None = None,
     components: list | None = None,
+    *,
+    render_type=_java_type,
 ) -> list[str]:
     env = _Env(component, services)
     v3_ctx = _V3Ctx(types or {}, functions or [], externs or [], components or [])
@@ -3631,11 +3642,24 @@ def _emit_component_modern(
         )
         for method in provide.get("methods") or []:
             mname = _ident(method.get("name"), "method")
+            # Provider-method signatures MUST render with the SAME renderer as
+            # the service interface this class implements (`render_type`:
+            # `_java_type` for IR v1/v2, `_java_v3_type` for v3) — the exact
+            # `f(R)`-implemented-by-`f(Object)` contract `_emit_component`
+            # documents. The modern path used to hardcode `_java_v3_type`, so a
+            # v1/v2 component forced onto this path by a `fail`/`if`/`await`
+            # (e.g. the 125 fault sweep injecting a `fail`) rendered an
+            # undeclared v1 type literally (`List<Row>`) while its interface
+            # erased it to `List<Object>` — a javac "cannot find symbol" (Row)
+            # and a signature mismatch. Threading `render_type` here erases it
+            # consistently. Byte-identical for v3 (`render_type` IS
+            # `_java_v3_type`) and for any v1/v2 program using only declared
+            # types (both renderers agree via TYPE_MAP).
             params = ", ".join(
-                f"{_java_v3_type(_param_type(env, key, mname, p))} {p}"
+                f"{render_type(_param_type(env, key, mname, p))} {p}"
                 for p in method.get("params") or []
             )
-            ret = _java_v3_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
+            ret = render_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
             out.append(f"    public {ret} {mname}({params}) {{")
             for line in _method_body_lines(
                 env, method, v3_ctx, returns_void=ret == "void", frame_expr=frame_expr,
@@ -3686,9 +3710,14 @@ def _emit_component_modern(
     )
     out.extend(body_lines)
     body_steps = component.get("body") or []
-    if not (body_steps and body_steps[-1].get("step") == "fail"):
-        # An unconditional trailing `fail` lowers to a throw; Java treats a
-        # statement after it as a hard "unreachable statement" error.
+    if not any(s.get("step") == "fail" for s in body_steps):
+        # An unconditional top-level `fail` lowers to a throw; Java treats any
+        # statement after it (here the commit/return tail) as a hard
+        # "unreachable statement" error. A `fail` anywhere at the top level of
+        # the body — not only as the last step (item 341 / fault-sweep item
+        # 125) — makes this tail unreachable, so skip it whenever one is
+        # present. A `fail` nested inside an `if`-branch is conditional and
+        # does not reach here.
         if needs_frame:
             # Commit path (docs/design/teardown-contract.md): flip the
             # discriminator BEFORE any disposal can occur — activation
@@ -3740,7 +3769,8 @@ def _emit_component(
     """
     if _component_needs_modern(component):
         return _emit_component_modern(
-            component, services, types, functions, externs, components)
+            component, services, types, functions, externs, components,
+            render_type=render_type)
     env = _Env(component, services)
     # FR-4: bind -> revl surface value type for each host Map binding (the
     # legacy path builds its own lightweight v3 context when the document
