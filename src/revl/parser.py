@@ -1052,6 +1052,55 @@ class Parser:
     # -- productions
 
     def parse(self) -> Program:
+        try:
+            return self._parse_program()
+        except RevlError as e:
+            better = self._maybe_stray_backtick_error(e)
+            if better is not None:
+                raise better from None
+            raise
+
+    def _maybe_stray_backtick_error(self, e: RevlError) -> "RevlError | None":
+        """Item 365: a stray backtick inside a host `//`/`/*` comment closes a
+        backtick template early; the template's tail then reparses as revl and
+        the raw parse error names whatever identifier the tail happens to hold,
+        far from the real mistake. When the lexer flagged such a close (see
+        `lexer._closing_backtick_is_stray`) at or before the failing line, point
+        the diagnostic back at the template boundary instead — the item-70 move
+        of naming the construct that swallowed the tokens.
+
+        Only ever called AFTER a parse has already failed, so it can reword a
+        genuine error but never reject accepted source (additivity)."""
+        best = None
+        for tok in self.toks:
+            if tok.kind != "template":
+                continue
+            span = getattr(tok, "stray_backtick", None)
+            if span is None:
+                continue
+            start_line, close_line = span
+            # nearest suspect template whose stray close is at or before the
+            # point the parse gave out.
+            if e.line is not None and close_line > e.line:
+                continue
+            if best is None or close_line > best[1]:
+                best = span
+        if best is None:
+            return None
+        start_line, close_line = best
+        opened = (f"opened on line {start_line}"
+                  if start_line != close_line else "on this line")
+        return RevlError(
+            self.filename, close_line,
+            f"a stray backtick closed the template {opened} early: this "
+            "backtick sits inside the host comment or string but revl read it "
+            "as the template's end",
+            hint="revl templates have no backtick escape; embed a literal "
+                 "backtick with an interpolation, `` ${\"`\"} ``, or move the "
+                 "template's closing backtick to where the template really ends",
+        )
+
+    def _parse_program(self) -> Program:
         program = Program(self.filename)
         while True:
             self._skip_semis()
