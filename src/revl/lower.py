@@ -3671,6 +3671,35 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # colored. `async_witness` records the shortest derivation for diagnostics.
     async_witness: dict[str, str] = {}
     async_colored = _async_callables(fns, externs, async_witness)
+
+    # sync/async arrow polymorphism (roadmap item 342, the dual of item 92).
+    # A fn colored async *solely* because it calls its own async-typed callback
+    # parameter — and reaching no other suspension — is "colour-polymorphic":
+    # its async-ness is contingent on the arrow actually passed. When a sync
+    # caller hands it a genuinely-sync arrow (a value that trivially lifts into
+    # a completed async, item 92 §2), that call site does not suspend, so the
+    # fn is monomorphized to a SYNC clone there — one source loop serves an
+    # async evolve path and a sync tool-call path with no duplicated twin.
+    colour_polymorphic: set = _colour_polymorphic_fns(fns, async_colored)
+    # Filled by the sync call sites (provide methods, module fns, and — below —
+    # `test` bodies): monomorph-name -> origin fn name. Synthesized into `fns`
+    # once every call site has registered.
+    sync_monomorphs: dict[str, str] = {}
+
+    # item 387 (finishing item 342 phase 2): 342 hooked its monomorphization
+    # into `_lower_provide` alone, so a module `fn` reaching a colour-polymorphic
+    # loop only through genuinely-sync arrows was auto-colored async here instead
+    # of kept sync — and a sync context calling it then diverged (py ran to a
+    # bare coroutine, ts refused at emit, H29). Redirect those free-fn call
+    # sites to the sync monomorph and recolor, so a free fn whose only async
+    # reach was such a call is sync on BOTH tiers. No-op (and `async_colored`
+    # byte-identical) when no such call exists.
+    if colour_polymorphic:
+        async_colored = _monomorphize_free_fn_calls(
+            fns, externs, colour_polymorphic, async_colored, types,
+            sync_monomorphs, component_callables, async_witness)
+        colour_polymorphic = _colour_polymorphic_fns(fns, async_colored)
+
     # Stamp `"async": True` on every colored fn entry (the emitters read it
     # with `.get("async")`, needing no reachability analysis of their own),
     # mirroring the extern spelling in `_lower_externs`. And refuse first-class
@@ -3707,35 +3736,6 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                                  _fn_decls_by_name.get(name), program.filename)
         if name in async_colored:
             entry["async"] = True
-
-    # sync/async arrow polymorphism (roadmap item 342, the dual of item 92).
-    # A fn colored async *solely* because it calls its own async-typed callback
-    # parameter — and reaching no other suspension — is "colour-polymorphic":
-    # its async-ness is contingent on the arrow actually passed. When a sync
-    # caller hands it a genuinely-sync arrow (a value that trivially lifts into
-    # a completed async, item 92 §2), that call site does not suspend, so the
-    # fn is monomorphized to a SYNC clone there — one source loop serves an
-    # async evolve path and a sync tool-call path with no duplicated twin.
-    #
-    # The condition is exactly "the fn's only async reach is its own async
-    # params": it has an async fn-typed parameter, it is colored, and its body
-    # calls no name in `async_colored` (an async extern or another colored fn).
-    # That guarantees the sync clone — params de-async'd, `async` dropped — has
-    # no residual suspension, so no `await` ever lands in the sync-emitted body.
-    colour_polymorphic: set = set()
-    for entry in fns:
-        if entry["name"] not in async_colored:
-            continue
-        if not any(_is_async_fn_type(p.get("type"))
-                   for p in entry.get("params") or []):
-            continue
-        reached: set = set()
-        _calls_in(entry.get("body") or [], reached, stop_async_arrows=True)
-        if not (reached & async_colored):
-            colour_polymorphic.add(entry["name"])
-    # Filled by the sync call sites during component lowering: monomorph-name ->
-    # origin fn name. Synthesized into `fns` after every component is lowered.
-    sync_monomorphs: dict[str, str] = {}
 
     # instance-parametric components: one registry shared across the lowering
     # of every component, so `spawn C` can resolve C's config/provisions and
@@ -3890,6 +3890,20 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # declarations, so a broken component must report itself first
     tests = _collect(_lower_tests, program, program.filename, types, services)
     prop_tests = _collect(_lower_prop_tests, program, program.filename, types, services)
+
+    # item 387: a plain `test`/`prop test` body is a pure SYNC context. Finish
+    # item 342 there — monomorphize each colour-polymorphic call handed only
+    # genuinely-sync arrows to its sync clone, and refuse (A1) any residual reach
+    # of an async callable — so a test never emits a bare, un-awaited call to an
+    # async callable (py) that the ts emitter would refuse (the H29 divergence).
+    # Then re-run the sync-clone synthesis to materialize any clone a test body
+    # was the sole caller of. Both are no-ops (IR byte-identical) when no async
+    # callable and no colour-polymorphic fn exist.
+    if async_colored or colour_polymorphic:
+        _collect(_admit_sync_test_bodies, tests, prop_tests, async_colored,
+                 colour_polymorphic, types, sync_monomorphs, component_callables,
+                 program.filename)
+        _synthesize_sync_monomorphs(fns, sync_monomorphs)
 
     # item 386: every recoverable refusal is now collected. Raise them together
     # as a `RevlErrors` carrier BEFORE building the IR — the result dict reads
@@ -5018,23 +5032,44 @@ def _sync_monomorph_name(origin: str, env) -> str:
     return name
 
 
-def _monomorphize_sync_callback_calls(node, env) -> None:
-    """Sync/async arrow polymorphism at a sync-method call site (item 342).
+def _monomorph_callee(node):
+    """The colour-polymorphic callee name of a lowered call, and a setter that
+    rewrites it, for BOTH lowered call shapes: a component body's `{kind: fn,
+    name}` and a module-`fn`/`test` body's `{kind: call, callee: {kind: var,
+    name}}` (item 387 — 342 originally saw only the former). Returns
+    `(origin, set_name)` or `(None, None)`."""
+    if node.get("kind") == "fn" and isinstance(node.get("name"), str):
+        def _set(m, _n=node):
+            _n["name"] = m
+        return node["name"], _set
+    if node.get("kind") == "call":
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var" \
+                and isinstance(callee.get("name"), str):
+            def _set(m, _c=callee):
+                _c["name"] = m
+            return callee["name"], _set
+    return None, None
 
-    A sync provide method that calls a colour-polymorphic fn (one async solely
-    by its own callback parameter) with a genuinely-sync arrow does not suspend:
-    the arrow trivially lifts into a completed async. Instead of forcing the
-    method async (A1) or authoring a duplicate sync loop, the call is redirected
-    to a SYNC monomorph of the fn — `async` dropped, the callback de-async'd —
-    and the arrow is un-stamped back to a plain sync value. `env.sync_monomorphs`
-    records the request; the clone is synthesized once, after every component.
+
+def _monomorphize_sync_callback_calls(node, env) -> None:
+    """Sync/async arrow polymorphism at a sync call site (item 342 + item 387).
+
+    A sync context (a provide method — item 342; or a module `fn`/`test` body —
+    item 387) that calls a colour-polymorphic fn (one async solely by its own
+    callback parameter) with a genuinely-sync arrow does not suspend: the arrow
+    trivially lifts into a completed async. Instead of forcing the context async
+    (A1) or authoring a duplicate sync loop, the call is redirected to a SYNC
+    monomorph of the fn — `async` dropped, the callback de-async'd — and the
+    arrow is un-stamped back to a plain sync value. `env.sync_monomorphs` records
+    the request; the clone is synthesized once, after every call site is seen.
 
     Only fires when EVERY async-typed-param argument is a genuinely-sync arrow.
     If any such arrow reaches a real suspension, the call is left untouched: the
-    A1 admission then refuses it, because a sync method truly cannot await it."""
+    A1 admission then refuses it, because a sync context truly cannot await it."""
     if isinstance(node, dict):
-        if node.get("kind") == "fn" and node.get("name") in env.colour_polymorphic:
-            origin = node["name"]
+        origin, set_name = _monomorph_callee(node)
+        if origin is not None and origin in env.colour_polymorphic:
             sig = (env.types.get(FNS_KEY) or {}).get(origin) or {}
             params = sig.get("params") or []
             args = node.get("args") or []
@@ -5055,7 +5090,7 @@ def _monomorphize_sync_callback_calls(node, env) -> None:
             if liftable and async_arrows:
                 mono = _sync_monomorph_name(origin, env)
                 env.sync_monomorphs[mono] = origin
-                node["name"] = mono
+                set_name(mono)
                 for arg, ptype in async_arrows:
                     arg.pop("async", None)
                     inner = parse_type(ptype)[1][-1]          # Async[T]
@@ -5104,6 +5139,130 @@ def _strip_async_fn_return(fn_type: str) -> str:
         return fn_type
     parts = list(args[:-1]) + [ret_args[0]]
     return f"({', '.join(render_type(p) for p in parts[:-1])}) -> {render_type(parts[-1])}"
+
+
+class _FreeFnMonoEnv:
+    """A lightweight `env` shim exposing exactly the attributes the item-342
+    monomorphization walk reads, so `_monomorphize_sync_callback_calls` and
+    `_arrow_reaches_async` can run over a module `fn` body or a `test`/`prop
+    test` body — none of which has a component `Env`. Such a body binds no
+    required key, so `services`/`requires` are empty and `_req_op_is_async` is
+    always False (rule 3 is component-only)."""
+
+    def __init__(self, colour_polymorphic, types, sync_monomorphs, callables,
+                 async_callables):
+        self.colour_polymorphic = colour_polymorphic
+        self.types = types
+        self.sync_monomorphs = sync_monomorphs
+        self.callables = callables
+        self.async_callables = async_callables
+        self.services: dict = {}
+        self.requires: dict = {}
+
+
+def _colour_polymorphic_fns(fns: list, async_colored: set) -> set:
+    """The item-342 colour-polymorphic set: a fn colored async SOLELY because it
+    calls its own async-typed callback parameter — it has such a param, it is
+    colored, and its body reaches no OTHER async name (`stop_async_arrows` prunes
+    a nested async arrow, whose suspension is its own value). Its async-ness is
+    contingent on the arrow actually passed: a genuinely-sync arrow lifts the fn
+    to a sync clone (`_monomorphize_sync_callback_calls`)."""
+    poly: set = set()
+    for entry in fns:
+        if entry["name"] not in async_colored:
+            continue
+        if not any(_is_async_fn_type(p.get("type"))
+                   for p in entry.get("params") or []):
+            continue
+        reached: set = set()
+        _calls_in(entry.get("body") or [], reached, stop_async_arrows=True)
+        if not (reached & async_colored):
+            poly.add(entry["name"])
+    return poly
+
+
+def _monomorphize_free_fn_calls(fns, externs, colour_polymorphic, preliminary,
+                                types, sync_monomorphs, callables,
+                                async_witness) -> set:
+    """Complete item-342 at MODULE-`fn` call sites (item 387).
+
+    342 hooked its sync monomorphization into `_lower_provide` alone, so a free
+    `fn` that reaches a colour-polymorphic loop ONLY by handing it genuinely-sync
+    arrows was auto-colored async by the phase-2 fixed point instead of being
+    kept sync. A sync context then calling that fn (a `test` block, a sync
+    provide method) diverged: py emitted a bare, un-awaited call yielding a
+    coroutine while ts refused at emit, naming this very frontend hole (H29).
+    Here such a fn is kept sync and its call redirected to the sync monomorph,
+    exactly as a sync provide method's call is.
+
+    An async caller is left untouched (item-92 coercion, the loop stays async):
+    `genuinely_async` is the colour of the call graph once EVERY liftable
+    polymorphic call is made sync, so a fn still colored there reaches a real
+    suspension on its own account (a real async extern, or a genuinely-async
+    arrow into the loop) and keeps its async loop. Returns the final
+    `async_colored` after the rewrite (== `genuinely_async` by construction)."""
+    import copy
+
+    # 1) genuinely-async fns: recolor a throwaway copy in which every liftable
+    #    polymorphic call is already synced. A fn still colored there is async on
+    #    its own account, independent of the arrows a caller happens to pass.
+    probe = copy.deepcopy(fns)
+    probe_env = _FreeFnMonoEnv(colour_polymorphic, types, {}, callables, preliminary)
+    for f in probe:
+        _monomorphize_sync_callback_calls(f.get("body") or [], probe_env)
+    genuinely_async = _async_callables(probe, externs)
+
+    # 2) rewrite the REAL bodies of the fns that end up sync. A genuinely-async
+    #    fn is skipped so its loop stays async — item 92's coercion, unchanged.
+    real_env = _FreeFnMonoEnv(colour_polymorphic, types, sync_monomorphs,
+                              callables, preliminary)
+    for f in fns:
+        if f["name"] in genuinely_async:
+            continue
+        _monomorphize_sync_callback_calls(f.get("body") or [], real_env)
+
+    # 3) recolor for the final verdict over the rewritten bodies.
+    async_witness.clear()
+    return _async_callables(fns, externs, async_witness)
+
+
+def _admit_sync_test_bodies(tests, prop_tests, async_colored, colour_polymorphic,
+                            types, sync_monomorphs, callables, filename) -> None:
+    """A plain `test`/`prop test` body is a pure SYNC context — it cannot await.
+    Complete item-342 there too (item 387): monomorphize each colour-polymorphic
+    call handed only genuinely-sync arrows to its sync clone, then refuse (A1)
+    any residual reach of an async callable. Without this a test calling an async
+    callable diverged — py emitted a bare, un-awaited call yielding a coroutine
+    while ts refused at emit, naming this frontend hole (H29). A `lifecycle test`
+    is untouched: it drives a live composition and awaits through the runtime."""
+    env = _FreeFnMonoEnv(colour_polymorphic, types, sync_monomorphs, callables,
+                         async_colored)
+    for unit in list(tests or []) + list(prop_tests or []):
+        if unit.get("lifecycle"):
+            continue
+        body = unit.get("body")
+        if not body:
+            continue
+        if colour_polymorphic:
+            _monomorphize_sync_callback_calls(body, env)
+        # residual reach of an async callable — a genuinely-async callee a sync
+        # test cannot await, or one passed as a value. Both tiers must refuse.
+        called: set = set()
+        values: set = set()
+        _calls_in(body, called, values=values)
+        hit = sorted((called | values) & (async_colored or set()))
+        if hit:
+            raise RevlError(
+                filename, 0,
+                f"test `{unit.get('name')}` reaches async callable `{hit[0]}`, "
+                f"but a `test` body is a synchronous context with no in-flight "
+                f"window to await it (A1)",
+                hint="drive the async operation from a `lifecycle test` (which "
+                     "runs a live composition and can await it through a provide "
+                     "method), or reach it only from an `async fn` service "
+                     "operation (docs/design/async-extern.md §3)",
+                code="A1", category="async-propagation",
+            )
 
 
 def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
