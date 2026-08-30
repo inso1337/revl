@@ -364,17 +364,11 @@ class Session:
         self._history = []
         # item 245: register the session commit-state owner before the
         # composition loads, so every activation frame joins its live-frame
-        # registry (the commit verb's gate target). The WAL getter reads the
-        # recorder's log lazily — it is opened during load, after this point.
-        self._owner = runtime_mod.SessionOwner(
-            wal_getter=lambda: self.recorder.wal if self.recorder else None)
-        # item 246, Slice 3: seed the SessionOwner with the typed-approval state
-        # BEFORE the activation body runs, so a `with a` crossing in the activation
-        # body checks and consumes its token against the live ledger (the runtime
-        # frame check). No-op unless the program uses the surface, so a session
-        # without typed approvals is byte-identical.
-        self._configure_owner_approvals(ir)
-        runtime_mod.set_session_owner(self._owner)
+        # registry (the commit verb's gate target). Installed through the shared
+        # helper `swap` and `_abort_swap` also use, so no generation's load can
+        # drift out of owner scope (the successor frames would otherwise capture a
+        # cleared ambient owner and take the pre-245 implicit-commit path).
+        self._install_session_owner(ir)
         try:
             self._run(self._driver._load(ir, self._prepare_module(ir)))
         except _activation_error() as exc:
@@ -427,6 +421,33 @@ class Session:
                        else {name})
             out[name] = cm.candidate_hash(closure)
         return out
+
+    def _install_session_owner(self, ir: dict) -> None:
+        """Create a FRESH session commit-state owner for the generation about to
+        load, seed its typed-approval state, and make it the process-global owner
+        (item 245) BEFORE any activation Frame is built.
+
+        Every path that loads a generation — `load`, `swap`'s successor, and
+        `_abort_swap`'s reloaded predecessor — installs the owner this way, so the
+        generation's frames all capture a live `_SESSION_OWNER` at `Frame.__init__`
+        and join its live-frame registry (the commit/abort gate target). Without
+        it, a successor generation's frames capture a cleared ambient owner (None),
+        never `register_frame`, and take the pre-245 implicit-commit path at
+        teardown — so a later session abort restores nothing. One owner per
+        generation matches `load` (each `load` builds a fresh owner) and the swap
+        lifecycle (the previous generation's frames were disposed at `swap`'s
+        `_dispose_all` before the successor loads). The caller guarantees
+        `clear_session_owner()` in a finally that covers the load."""
+        runtime_mod = self._driver.runtime
+        self._owner = runtime_mod.SessionOwner(
+            wal_getter=lambda: self.recorder.wal if self.recorder else None)
+        # item 246, Slice 3: seed the SessionOwner with the typed-approval state
+        # BEFORE the activation body runs, so a `with a` crossing in the activation
+        # body checks and consumes its token against the live ledger (the runtime
+        # frame check). No-op unless the program uses the surface, so a session
+        # without typed approvals is byte-identical.
+        self._configure_owner_approvals(ir)
+        runtime_mod.set_session_owner(self._owner)
 
     def _configure_owner_approvals(self, ir: dict) -> None:
         """Push the session's typed-approval state onto the SessionOwner so the
@@ -604,6 +625,13 @@ class Session:
         self.origin = origin
         self.draft = None  # a new generation makes any uncommitted edit stale
         self._generation += 1
+        # item 245: install a fresh owner for the successor generation BEFORE its
+        # load, exactly as `load` does, so every frame the successor builds joins
+        # this generation's live-frame registry. Without this the successor's
+        # frames captured the cleared ambient owner (None) and took the pre-245
+        # implicit-commit path, so a post-swap witnessed mutation could never be
+        # aborted (it was made permanent — the swap-owner-scoping data-loss bug).
+        self._install_session_owner(ir)
         try:
             self._run(driver._load(ir, self._prepare_module(ir)))
         except _activation_error() as exc:
@@ -611,6 +639,7 @@ class Session:
             # whole swap back to the predecessor (which activated cleanly) so the
             # running system keeps serving, and surface the loud diagnostic
             # rather than leaving a half-loaded generation reporting loaded.
+            # `_abort_swap` reinstalls the owner around the predecessor reload.
             self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
                              handoff_pre)
             self._record_generation()
@@ -618,6 +647,10 @@ class Session:
                 f"swap rejected: {exc}. The running composition is untouched "
                 f"(rolled back to the previous generation)."
             ) from None
+        finally:
+            # frames are built during the successor load; stop capturing so a
+            # later, unrelated Frame does not join this generation's registry.
+            driver.runtime.clear_session_owner()
         migration = None
         handoff = None
         if pre:
@@ -735,7 +768,15 @@ class Session:
         self.origin = self.previous_origin
         self.previous, self.previous_origin = saved_previous, saved_previous_origin
         self._generation += 1
-        self._run(driver._load(old_ir, self._prepare_module(old_ir)))
+        # item 245: the reloaded predecessor is a fresh generation — install its
+        # owner so its frames join the live-frame registry (else a subsequent
+        # abort of the rolled-back session would restore nothing, the same bug the
+        # swap successor had). Cleared once the reload's frames are all built.
+        self._install_session_owner(old_ir)
+        try:
+            self._run(driver._load(old_ir, self._prepare_module(old_ir)))
+        finally:
+            driver.runtime.clear_session_owner()
         for name, info in pre.items():
             for handle, cap in zip(driver.runtime.live_instances(name),
                                    info["captured"]):
