@@ -9,6 +9,7 @@
 //
 // Output is line-prefixed `[name]` so the conductor can interleave processes.
 
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -20,6 +21,28 @@ import { assertNoResidue, snapshotRuntime } from './runtime.ts'
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const name: string = spec.name
+
+// item 396 option B: a `@ts ref` thunk resolves its host module at call time
+// through `globalThis.__REVL_REF_ROOT__` joined with the recorded relative path
+// (so the emitted artifact carries no machine path). Set it BEFORE the module is
+// imported, and HASH-CHECK each ref's file against the IR pin before any host
+// code can run — the ts twin of the py driver's plug-time refusal.
+;(globalThis as any).__REVL_REF_ROOT__ = spec.refRoot ?? ''
+for (const ref of (spec.refs || []) as Array<{ extern: string; path: string; sha256: string }>) {
+  const abs = path.resolve(spec.refRoot ?? '', ref.path)
+  let got: string
+  try {
+    got = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex')
+  } catch (e) {
+    throw new Error(`revl @ts ref for extern \`${ref.extern}\`: cannot read ${abs} (${e})`)
+  }
+  if (got !== ref.sha256)
+    throw new Error(
+      `revl @ts host-module ref for extern \`${ref.extern}\` does not match the ` +
+      `file pinned at compile: expected sha256 ${ref.sha256} for ${ref.path}, ` +
+      `but ${abs} hashes ${got} (item 396 option B deploy contract)`,
+    )
+}
 
 const STATE: Record<number, string> = {
   [FiberState.PENDING]: 'PENDING',

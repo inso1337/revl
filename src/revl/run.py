@@ -31,12 +31,14 @@ from __future__ import annotations
 import asyncio
 import builtins
 import json
+import os
 import signal
 import sys
 import time
 import types
 from pathlib import Path
 
+from . import hostref as _hostref
 from ._paths import backends_root
 from .compiler import compile_files
 from .holes import refuse_admission
@@ -414,10 +416,17 @@ class _Driver:
 
     def __init__(self, ir, config, emit, runtime_mod, Context, FiberState,
                  record: bool = False, trace_path: str | None = None,
-                 withdraw: str | None = None, wal_path: str | None = None):
+                 withdraw: str | None = None, wal_path: str | None = None,
+                 root_dirs: list | None = None):
         self.ir = ir
         self.config = config
         self.emit = emit
+        # item 396 option B: the composition's root compile directories, the
+        # import roots a `= @py ref` file must be reachable through at deploy.
+        # `_emit_module` APPENDS them to sys.path (never prepends) and hash-checks
+        # each ref, only when the IR carries refs — a ref-free run never touches
+        # sys.path (byte-identical driver behaviour).
+        self.root_dirs = list(root_dirs or [])
         self.runtime = runtime_mod
         self.FiberState = FiberState
         self.root = Context()
@@ -567,6 +576,13 @@ class _Driver:
         # kept so a replay recorder can quote the emitted line a step came
         # from — exec'd modules are invisible to linecache
         self.emitted = (filename, source)
+        # item 396 option B: at plug of a ref-carrying IR, prepare the host-import
+        # boundary BEFORE the module executes any extern — append the import
+        # root(s) to sys.path (append-only, so a project file cannot shadow a
+        # trusted runtime module), hash-check each ref's file against the IR pin
+        # (refuse a swap/shadow), and evict stale sys.modules entries so a replug
+        # runs the NEW code. No-op (and no sys.path touch) when the IR has no ref.
+        _hostref.plug_refs(ir, self.root_dirs)
         # register before exec: emitted record types are @dataclass, and
         # dataclasses resolves fields via sys.modules[cls.__module__]
         sys.modules[module.__name__] = module
@@ -1172,11 +1188,17 @@ def run_command(args) -> int:
         return 3
 
     withdraw = getattr(args, "withdraw", None)
+    # item 396 option B: the import roots a `@py ref` file resolves through are
+    # the root compile files' own directories (the deploy contract's "import
+    # root is the root compile file's directory"). The driver appends them only
+    # when the IR carries refs.
+    root_dirs = [os.path.dirname(os.path.abspath(f)) for f in args.files]
     driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState,
                      record=bool(getattr(args, "record", False)),
                      trace_path=getattr(args, "trace", None),
                      withdraw=withdraw,
-                     wal_path=getattr(args, "wal", None))
+                     wal_path=getattr(args, "wal", None),
+                     root_dirs=root_dirs)
     try:
         if withdraw is not None:
             return asyncio.run(driver.withdraw_once())

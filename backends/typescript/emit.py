@@ -2926,6 +2926,75 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
     return lines
 
 
+def _emit_ts_ref_runtime() -> list[str]:
+    """item 396 option B: the module-level ref machinery. `_revl_ref_path` joins
+    a root the RUNNER provides at run time (`globalThis.__REVL_REF_ROOT__`, set
+    from the spec `run_ts` writes) with the recorded root-relative path — so the
+    emitted text carries no machine-specific path. `_revl_require` loads a
+    synchronous ESM graph for a sync ref (node's require(esm) support)."""
+    return [
+        "const _REVL_REFS = new Map<string, any>()",
+        "const _revl_require = _revl_createRequire(import.meta.url)",
+        "function _revl_ref_path(rel: string): string {",
+        "  const root = (globalThis as any).__REVL_REF_ROOT__",
+        "  if (root === undefined)",
+        "    throw new Error('revl: no host-ref root set; the runner must set "
+        "globalThis.__REVL_REF_ROOT__ (item 396 option B)')",
+        "  return _revl_pathmod.resolve(root, rel)",
+        "}",
+        "",
+    ]
+
+
+def _emit_ts_ref_thunk(name: str, params_decl: str, arg_names: str,
+                       returns: str, ext: dict, ref: dict) -> list[str]:
+    """The lazy import thunk for a `@ts ref` extern. Sync goes through
+    `createRequire` (a synchronous ESM load); async through a dynamic `import()`.
+    The colour assertion mirrors py's where the tier allows: a declared-SYNC ref
+    whose resolved symbol is an async function (`constructor.name ===
+    'AsyncFunction'`) is refused at first call. The async direction cannot be
+    asserted structurally (an ordinary function may legitimately return a
+    promise), so it stays awaited-by-name — loud-wrong at worst, never silent.
+    The `constructor.name` check has the same evasion the py `iscoroutinefunction`
+    check has (a wrapper/callable-instance can hide the async shape); stated, not
+    claimed away (design re-review #3)."""
+    rel = ref["path"]
+    symbol = _ident(ref["symbol"], "ref symbol")
+    where = f"{rel}#{symbol}"
+    is_async = bool(ext.get("async"))
+    lines: list[str] = []
+    if is_async:
+        lines.append(
+            f"export async function {name}({params_decl}): Promise<{returns}> {{")
+        lines.append(f"  let _f = _REVL_REFS.get({_string(name)})")
+        lines.append("  if (_f === undefined) {")
+        lines.append(f"    const _m = await import("
+                     f"_revl_pathToFileURL(_revl_ref_path({_string(rel)})).href)")
+        lines.append(f"    _f = _m[{_string(symbol)}]")
+        lines.append(f"    if (typeof _f !== 'function') throw new Error("
+                     f"{_string(f'revl extern `{name}`: {where} is not a function')})")
+        lines.append(f"    _REVL_REFS.set({_string(name)}, _f)")
+        lines.append("  }")
+        lines.append(f"  return await _f({arg_names})")
+        lines.append("}")
+    else:
+        lines.append(f"export function {name}({params_decl}): {returns} {{")
+        lines.append(f"  let _f = _REVL_REFS.get({_string(name)})")
+        lines.append("  if (_f === undefined) {")
+        lines.append(f"    const _m = _revl_require(_revl_ref_path({_string(rel)}))")
+        lines.append(f"    _f = _m[{_string(symbol)}]")
+        lines.append(f"    if (typeof _f !== 'function') throw new Error("
+                     f"{_string(f'revl extern `{name}`: {where} is not a function')})")
+        lines.append("    if (_f.constructor && _f.constructor.name === 'AsyncFunction')")
+        lines.append(f"      throw new Error({_string(f'revl extern `{name}` is declared sync but {where} is an async function; declare the extern async or ref a sync symbol')})")
+        lines.append(f"    _REVL_REFS.set({_string(name)}, _f)")
+        lines.append("  }")
+        lines.append(f"  return _f({arg_names})")
+        lines.append("}")
+    lines.append("")
+    return lines
+
+
 def _emit_ts_externs(externs: list) -> list[str]:
     lines: list[str] = []
     for ext in externs:
@@ -2936,10 +3005,19 @@ def _emit_ts_externs(externs: list) -> list[str]:
         )
         returns = _ts_v3_type(ext.get("returns"))
         bodies = ext.get("bodies") or {}
+        refs = ext.get("refs") or {}
+        # item 396 option B: a `@ts ref` extern emits a lazy import thunk.
+        if "ts" in refs and "ts" not in bodies:
+            arg_names = ", ".join(
+                _ident(p.get("name"), "extern parameter name")
+                for p in ext.get("params") or [])
+            lines.extend(_emit_ts_ref_thunk(name, params, arg_names, returns,
+                                            ext, refs["ts"]))
+            continue
         if "ts" not in bodies:
             raise EmitError(
                 f"extern `{name}` has no @ts body — not portable to this backend "
-                f"(available: {', '.join(sorted(bodies)) or 'none'})"
+                f"(available: {', '.join(sorted(set(bodies) | set(refs))) or 'none'})"
             )
         # async extern (roadmap item 80, docs/design/async-extern.md §5): emit
         # an `async function` returning `Promise<T>`; the verbatim @ts body may
@@ -3291,7 +3369,21 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     ]
     if tests:
         out.append("import { expect, it } from 'vitest'")
+    # item 396 option B: a `@ts ref` extern emits a lazy thunk that resolves the
+    # ref'd module at CALL time through a root the runner provides (so the
+    # artifact text stays machine-independent) and imports the symbol then —
+    # never a module-top static import (which would run host code at module
+    # evaluation, the load-time execution point B forbids, and could not resolve
+    # from the _gen placement anyway). Emitted only when some extern carries a
+    # ts ref, so a ref-free module is byte-identical.
+    if any(ext.get("refs", {}).get("ts") for ext in externs):
+        out.append("import { createRequire as _revl_createRequire } from 'node:module'")
+        out.append("import { pathToFileURL as _revl_pathToFileURL } from 'node:url'")
+        out.append("import * as _revl_pathmod from 'node:path'")
     out.append("")
+
+    if any(ext.get("refs", {}).get("ts") for ext in externs):
+        out.extend(_emit_ts_ref_runtime())
 
     out.extend(_revl_helpers(ir))
     if _uses_lifecycle_tests(ir):
