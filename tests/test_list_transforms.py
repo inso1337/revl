@@ -19,7 +19,11 @@ function value) — an honestly-scoped subset, verified per tier below.
 """
 
 import importlib.util
+import json
+import shutil
+import subprocess
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -28,7 +32,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import compile_files  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 
 STDLIB = ROOT / "stdlib" / "list.rvl"
@@ -80,6 +84,20 @@ def _exec_python(ir: dict):
     return namespace
 
 
+def _emit(backend: str, ir: dict) -> str:
+    path = str(ROOT / "backends" / backend)
+    sys.path.insert(0, path)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            f"emit_{backend}_383", ROOT / "backends" / backend / "emit.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        out = module.emit(ir)
+        return "\n".join(out.values()) if isinstance(out, dict) else str(out)
+    finally:
+        sys.path.remove(path)
+
+
 def test_map_filter_reduce_run_on_py():
     ns = _exec_python(_compile(CONSUMER))
     assert ns["dbl"]([1, 2, 3]) == [2, 4, 6]
@@ -87,3 +105,81 @@ def test_map_filter_reduce_run_on_py():
     assert ns["total"]([1, 2, 3]) == 6
     # the dot-sugar and the free-function form agree
     assert ns["dbl_free"]([1, 2, 3]) == ns["dbl"]([1, 2, 3])
+
+
+# ---------------------------------------------------------------- py + ts parity
+
+#: everything is built and rendered INSIDE revl (list literals, the transforms,
+#: `.to_str()`, `.join()`), so the proof crosses no JS/py value boundary — the
+#: emitted `proof()` returns one Str both tiers can print and compare verbatim.
+#: `[1,2,3].map(x => x*2)` == [2,4,6]; `.filter(x => x>1)` == [2,3];
+#: `.reduce(0, (a,x) => a+x)` == 6 — the exact PROVE-IT of roadmap item 383.
+_PROOF = """\
+use "stdlib/list.rvl" { list_map, list_filter, list_reduce }
+fn show(xs: List[Int]) -> Str { return list_map(xs, n => n.to_str()).join(",") }
+pub fn proof() -> Str {
+  let m = [1, 2, 3].map(x => x * 2)
+  let f = [1, 2, 3].filter(x => x > 1)
+  let r = [1, 2, 3].reduce(0, (a, x) => a + x)
+  return show(m) + "|" + show(f) + "|" + r.to_str()
+}
+"""
+
+
+def test_proof_py():
+    ns = _exec_python(_compile(_PROOF))
+    assert ns["proof"]() == "2,4,6|2,3|6"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_proof_ts_matches_py():
+    """The identical source runs on the ts tier (arrows compose per item 342)
+    and prints the SAME string — the map/filter/reduce trio is portable across
+    the py and ts tiers, byte-for-byte on the rendered result."""
+    ir = _compile(_PROOF)
+    py_out = _exec_python(ir)["proof"]()
+    code = _emit("typescript", ir)
+    d = Path(tempfile.mkdtemp())
+    (d / "runtime.ts").write_text("export const host: any = {};\n", encoding="utf-8")
+    pkg = d / "pkg"
+    pkg.mkdir()
+    (pkg / "mod.ts").write_text(code + "\nconsole.log(proof());\n", encoding="utf-8")
+    proc = subprocess.run(  # noqa: S603
+        ["node", str(pkg / "mod.ts")], capture_output=True, text=True)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr}"
+    ts_out = proc.stdout.strip().splitlines()[-1]
+    assert ts_out == py_out == "2,4,6|2,3|6"
+
+
+# ------------------------------------------------ honest per-tier emit coverage
+
+def test_emits_on_py_ts_rust_go():
+    """The pure-revl transforms lower on the four tiers that can carry a
+    function value in parameter position."""
+    ir = _compile(_PROOF)
+    for tier in ("python", "typescript", "rust", "go"):
+        assert _emit(tier, ir), f"{tier} produced no output"
+
+
+@pytest.mark.parametrize("tier", ["java", "wasm"])
+def test_refused_on_java_wasm(tier):
+    """java and wasm cannot represent a function value, so a program that
+    reaches list_map/list_filter/list_reduce refuses at EMIT (loudly, not
+    silently) on those two tiers — the honestly-scoped subset."""
+    ir = _compile(_PROOF)
+    with pytest.raises(Exception):
+        _emit(tier, ir)
+
+
+# ---------------------------------------------------------- comprehension redirect
+
+def test_comprehension_redirect_message():
+    """`[x for x in xs]` had no revl spelling and gave the cryptic `expected an
+    expression, found 'for'`; item 383 redirects it to a message that names the
+    missing feature and points at the two spellings that DO work."""
+    with pytest.raises(RevlError) as exc:
+        compile_source("fn go() -> List[Int] { return [x for x in [1, 2, 3]] }")
+    assert "no list comprehensions" in str(exc.value)
+    assert ".map(" in (exc.value.hint or "")
+    # the old cryptic message is gone
+    assert "found 'for'" not in str(exc.value)
