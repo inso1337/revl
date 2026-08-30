@@ -591,16 +591,18 @@ class _Driver:
         closing/offloaded loop can cancel the deferred activation with an empty-
         string `CancelledError` and no diagnostic. This:
 
-        1. drives the `_LazyTask`/activation body to settlement (`fiber.await_`
-           re-raises the fiber's own activation error instead of swallowing it),
-           then pumps the loop until the provisions actually resolve;
-        2. converts a cancelled/failed activation into a typed, named
-           :class:`ActivationError` — never a silent empty string;
+        1. drives the `_LazyTask`/activation body to settlement (pumps the
+           fiber's `inertia`, then the loop, until the provisions resolve);
+        2. converts a cancelled activation — whose bare `CancelledError` renders
+           as the empty string — into a typed, named :class:`ActivationError`;
         3. enforces the FIBERS/ROOT invariant: an ACTIVE fiber whose provision
            never landed in ROOT is the false-loaded contradiction, refused here.
 
         A component whose requirements are genuinely unmet stays PENDING — it
         provides nothing and is reported, not counted loaded, and never raised.
+        A mid-body FAILED activation is likewise honest and observable (its keys
+        are simply absent from `resolved_keys()`); only the ACTIVE-but-unpublished
+        contradiction and a cancellation are raised.
         """
         provided = list((comp.get("provides") or {}).keys())
         try:
@@ -1124,5 +1126,11 @@ def run_command(args) -> int:
         if getattr(args, "watch", False):
             return asyncio.run(driver.watch(args.files))
         return asyncio.run(driver.hold_repl())
+    except ActivationError as exc:
+        # item 372: a component's deferred activation did not complete — report
+        # it loudly and named, rather than dropping into a REPL over a
+        # composition whose "loaded" would be a lie.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:  # pragma: no cover — signal handler covers unix
         return 130
