@@ -56,8 +56,10 @@ from .parser import (
     AssertStmt,
     AssignStmt,
     AwaitStmt,
+    BreakStmt,
     CallStmt,
     ComponentDecl,
+    ContinueStmt,
     EffectStmt,
     EmitExpr,
     EmitStmt,
@@ -956,6 +958,25 @@ def _has_return(stmts) -> bool:
     return False
 
 
+def _loop_has_targeting_break(stmts) -> bool:
+    """True when a bare `break` in `stmts` targets the loop these statements are
+    the body of — i.e. a `break` at any statement depth that is not itself
+    inside a nested `while`/`for` (a nested loop captures its own `break`). With
+    only unlabeled `break`, "targets this loop" is exactly "not shadowed by a
+    nearer loop" (JLS 14.21's reachability rule for the same conservative
+    analysis, docs/design/379-break-continue.md)."""
+    for stmt in stmts:
+        if isinstance(stmt, BreakStmt):
+            return True
+        if isinstance(stmt, IfStmt):
+            if (_loop_has_targeting_break(stmt.then)
+                    or _loop_has_targeting_break(stmt.otherwise or [])):
+                return True
+        # a nested while/for is NOT descended: a `break` inside it targets that
+        # inner loop, not this one.
+    return False
+
+
 def _definitely_returns(stmts) -> bool:
     """True when control cannot reach the end of `stmts` without returning.
 
@@ -966,8 +987,12 @@ def _definitely_returns(stmts) -> bool:
     - an `if` terminates only when it has an `else` *and* both arms terminate
       (a bare `if` may be skipped);
     - `for` and a conditional `while` may run zero times, so neither terminates;
-    - `while (true)` diverges (there is no `break` in the grammar), so nothing
-      after it is reachable — Java and Rust agree, and no tier needs a value.
+    - `while (true)` diverges — and so terminates the path — *iff* its body has
+      no reachable `break` that targets it (item 379,
+      docs/design/379-break-continue.md). A `while (true)` with a reachable
+      `break` may leave the loop and fall through, so it does NOT terminate;
+      one with no such `break` never exits, exactly as Java (JLS 14.21) and Rust
+      (`loop {}` : `!`) judge it, and no tier needs a fallthrough value.
     """
     for stmt in stmts:
         if isinstance(stmt, ReturnStmt):
@@ -978,7 +1003,8 @@ def _definitely_returns(stmts) -> bool:
                     and _definitely_returns(stmt.otherwise)):
                 return True
         elif isinstance(stmt, WhileStmt):
-            if isinstance(stmt.cond, ExprLit) and stmt.cond.value is True:
+            if (isinstance(stmt.cond, ExprLit) and stmt.cond.value is True
+                    and not _loop_has_targeting_break(stmt.body)):
                 return True
     return False
 
@@ -2967,6 +2993,15 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
     elif isinstance(stmt, AssertStmt):
         _bool_cond(stmt.expr, type_env, types, filename, "assert")
         body.append({"step": "assert", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
+    elif isinstance(stmt, BreakStmt):
+        # item 379: additive step kind, no payload. The parser already refused a
+        # `break` outside a loop, so lowering only records it; teardown is
+        # untouched (break/continue are frame-neutral — no revl teardown
+        # boundary coincides with a loop boundary, docs/design/379-break-
+        # continue.md Decision 1).
+        body.append({"step": "break", "line": stmt.line})
+    elif isinstance(stmt, ContinueStmt):
+        body.append({"step": "continue", "line": stmt.line})
     else:  # pragma: no cover — grammar prevents it
         raise RevlError(filename, getattr(stmt, "line", 1), "unexpected statement in fn body")
 
@@ -3730,6 +3765,100 @@ def _raise_collected(errors: list[RevlError], program: Program) -> None:
     raise RevlErrors(unique)
 
 
+# --- item 379 / Decision 2 (docs/design/379-break-continue.md) --------------
+# The frame-neutrality of `break`/`continue` rests on a grammar accident: loops
+# live only in the fn statement grammar, and every teardown-registering form
+# lives only in the activation/method grammar, so the two never meet and no
+# emitter wraps a loop in teardown scaffolding. This pass makes that accident an
+# enforced whole-IR invariant, run once over the lowered IR: no registering step
+# may sit inside a `while`/`for` body, and — the same invariant read the other
+# way — no `while`/`for` step may sit in a component activation, provide-method,
+# or setup body. Either leak would let a future item register teardown at a loop
+# boundary; the java setup emitter (`_emit_setup_stmt`) would even compile the
+# loop-in-activation form silently, so a parse-time counter or a single
+# lowering-local assert would not catch it on every tier.
+
+_REGISTERING_STEP_KINDS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+_LOOP_STEP_KINDS = frozenset({"while", "for"})
+
+
+def _iter_all_fn_steps(steps):
+    """Every step in a fn-grammar body, descending `if` arms and loop bodies."""
+    for step in steps or []:
+        yield step
+        kind = step.get("step")
+        if kind in _LOOP_STEP_KINDS:
+            yield from _iter_all_fn_steps(step.get("body") or [])
+        elif kind == "if":
+            yield from _iter_all_fn_steps(step.get("then") or [])
+            yield from _iter_all_fn_steps(step.get("else") or [])
+
+
+def _iter_loop_scoped_steps(steps):
+    """Every step lexically inside a `while`/`for` body within a fn-grammar step
+    list (descending `if` arms, and nested loops via `_iter_all_fn_steps`)."""
+    for step in steps or []:
+        kind = step.get("step")
+        if kind in _LOOP_STEP_KINDS:
+            yield from _iter_all_fn_steps(step.get("body") or [])
+        elif kind == "if":
+            yield from _iter_loop_scoped_steps(step.get("then") or [])
+            yield from _iter_loop_scoped_steps(step.get("else") or [])
+
+
+def _find_loop_step(node):
+    """Deep-search an activation/method/setup IR subtree for a `while`/`for`
+    step. Expression nodes key on `kind`, never `step`, and component IR never
+    embeds a module `fn` body, so this never false-positives on a real loop."""
+    if isinstance(node, dict):
+        if node.get("step") in _LOOP_STEP_KINDS:
+            return node
+        for value in node.values():
+            found = _find_loop_step(value)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_loop_step(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
+    doc = "docs/design/379-break-continue.md"
+    fn_bodies: list[list] = [fn.get("body") or [] for fn in ir.get("functions") or []]
+    for key in ("tests", "fault_tests", "prop_tests"):
+        for unit in ir.get(key) or []:
+            body = unit.get("body")
+            if isinstance(body, list):
+                fn_bodies.append(body)
+    for body in fn_bodies:
+        for step in _iter_loop_scoped_steps(body):
+            kind = step.get("step")
+            if kind in _REGISTERING_STEP_KINDS:
+                raise RevlError(
+                    filename, step.get("line", 0),
+                    f"a `{kind}` step registers teardown and may not appear "
+                    f"inside a `while`/`for` body",
+                    hint="`break`/`continue` are frame-neutral only because loops "
+                         "and registration never meet; an item that wants them to "
+                         f"must first amend the teardown contract ({doc})",
+                )
+    for component in ir.get("components") or []:
+        loop = _find_loop_step(component)
+        if loop is not None:
+            raise RevlError(
+                filename, loop.get("line", 0),
+                "a `while`/`for` loop may not appear in a component activation "
+                "or provide-method body",
+                hint="iteration lives in the fn statement grammar; lift the loop "
+                     f"into a module `fn` and call it ({doc})",
+            )
+
+
 def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
     (a running manifest, DESIGN §4's runtime-admission gate): ambient services
@@ -4191,6 +4320,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # program with no `endorse` is rebuilt identically (byte-identity).
     if taint_model.active:
         result = splice_declassifiers(result)
+    # item 379 Decision 2: the frame-neutrality invariant, enforced over the
+    # fully-assembled IR (after every body is lowered and any declassifier
+    # splice has run).
+    _validate_no_loop_scoped_registration(result, program.filename)
     return result
 
 

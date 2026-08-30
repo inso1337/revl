@@ -4119,6 +4119,21 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     return "\n".join(lines)
 
 
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is
+# enforced whole-IR in the frontend; this is the cheap per-emitter guard.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=None) -> None:
     pad = "\t" * indent
     step = node.get("step")
@@ -4163,11 +4178,13 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
                 _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
         out.append(f"{pad}}}")
     elif step == "while":
+        _guard_frame_neutral_loop(node.get("body"))
         out.append(f"{pad}for {_go_v3_expr(node['cond'], ctx)} {{")
         for child in node.get("body") or []:
             _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
         out.append(f"{pad}}}")
     elif step == "for":
+        _guard_frame_neutral_loop(node.get("body"))
         bind = _v3_ident(node.get("bind"), "loop binding")
         it_node = node.get("iterable")
         it_t = _go_v3_infer_type(it_node, ctx)
@@ -4178,6 +4195,10 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         for child in node.get("body") or []:
             _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
         out.append(f"{pad}}}")
+    elif step == "break":
+        out.append(f"{pad}break")
+    elif step == "continue":
+        out.append(f"{pad}continue")
     elif step == "expr":
         out.append(f"{pad}_ = {_go_v3_expr(node['expr'], ctx)}")
     elif step == "assert":

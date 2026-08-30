@@ -24,6 +24,9 @@ KEYWORDS = {
     # v2.0 full-language (docs/syntax-2.0.md)
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail",
+    # loop control flow (docs/design/379-break-continue.md, roadmap item 379):
+    # bare `break`/`continue`, valid only inside a `while`/`for` body.
+    "break", "continue",
     # typed holes (docs/holes.md): a placeholder with a type and no body
     "hole",
     # reserved for later tiers
