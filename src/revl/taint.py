@@ -282,14 +282,21 @@ class _FlowChecker:
     # -- callee-name extraction across the two IR dialects ---------------------
     @staticmethod
     def _callee_name(node: dict) -> str | None:
-        """A call is `{kind:fn, name}` in a component body and
-        `{kind:call, callee:{kind:var, name}}` in a pure fn body."""
+        """The callable name a node invokes, across every dialect:
+          * `{kind:fn, name}`                           a component host call
+          * `{kind:call, callee:{kind:var, name}}`      a pure-fn call
+          * `{kind:call, target:{kind:req}, method}`    a required-service method
+            (`emit s.run(page)`) — the sink is keyed by the METHOD name, so a
+            `Trusted[T]` service-operation parameter is enforced too.
+        """
         if node.get("kind") == "fn" and isinstance(node.get("name"), str):
             return node["name"]
         if node.get("kind") == "call":
             callee = node.get("callee")
             if isinstance(callee, dict) and callee.get("kind") == "var":
                 return callee.get("name")
+            if isinstance(node.get("method"), str):
+                return node["method"]
         return None
 
     @staticmethod
@@ -470,11 +477,17 @@ def check_taint(program, fns, components, model: TaintModel,
                 env[pname] = Taint(frozenset({seeded[i]}), (pname,))
         checker.run(fn.get("body") or [], env)
 
+    # the IR carries no per-body line, so fall back to the component's declared
+    # line (from the AST) — better than 0 for a component-body refusal.
+    comp_lines = {c.name: getattr(c, "line", 0)
+                  for c in getattr(program, "components", ())}
+
     # component provide-method bodies (lowered IR)
     for comp in components:
         source = comp.get("source") or filename
         reaches, declassified = _walk_component_methods(
-            comp.get("body") or [], model, source)
+            comp.get("body") or [], model, source,
+            comp_lines.get(comp.get("name"), 0))
         # fold the per-component provenance onto the IR entry (Decision 5), so
         # `_boundary` can emit `taint:`/`declassify:` tokens. Additive: absent
         # when the component touches no taint, so its IR stays byte-identical.
@@ -511,8 +524,8 @@ def splice_declassifiers(node):
     return {key: splice_declassifiers(value) for key, value in node.items()}
 
 
-def _walk_component_methods(body, model: TaintModel,
-                            source: str) -> tuple[set, set]:
+def _walk_component_methods(body, model: TaintModel, source: str,
+                            line: int = 0) -> tuple[set, set]:
     reaches: set = set()
     declassified: set = set()
     for step in body:
@@ -520,7 +533,8 @@ def _walk_component_methods(body, model: TaintModel,
             continue
         if step.get("step") == "provide":
             for method in step.get("methods") or []:
-                checker = _FlowChecker(model, source, method.get("line") or 0)
+                checker = _FlowChecker(model, source,
+                                       method.get("line") or line)
                 env: dict = {}
                 seeded = model.untrusted_params.get(method.get("name"), {})
                 for i, pname in enumerate(method.get("params") or []):
