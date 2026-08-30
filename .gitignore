@@ -18,13 +18,10 @@ backends/typescript/_gen/
 resume-web.log
 backends/typescript/tests/generated/
 
-# item 173: guard against sweeping machine-generated test output / secrets back in
+# guard against sweeping machine-generated test output / secrets back in
 backends/typescript/test-secret-store/
+backends/typescript/.conformance-*/
 backends/*/cost-ledger*.log
+backends/*/costs-budgets.log
 bench/results/opus-4-8-pilot/
-uv.lock
-
-# machine-generated test/bench artifacts (do not commit)
-backends/typescript/test-secret-store/
-backends/*/cost-ledger*.log
 uv.lock
