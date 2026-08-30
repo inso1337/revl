@@ -43,7 +43,7 @@ discipline for the `--json` form.
 from __future__ import annotations
 
 from .lower import SHARED_REALM
-from .query import Composition, withdrawal
+from .query import Composition, classify_compensation, withdrawal
 
 # Report identity — a versioned, self-describing artifact, in the spirit of
 # `interchange.stamp`. Bump MINOR for an additive change, MAJOR for a breaking
@@ -134,12 +134,19 @@ def _provisions(index: Composition, members: list[str], realm: str) -> list[dict
     return sorted(out, key=lambda p: (p["key"], p["provider"]))
 
 
-def _crossings(index: Composition, members: list[str]) -> dict:
+def _crossings(index: Composition, members: list[str],
+               residue: list | None = None) -> dict:
     """Aggregate the G8 boundary surface of the realm's members: every
-    emission and reached host extern, each tagged compensated vs bare.
+    emission and reached host extern, each tagged bare / compensated /
+    unresolved (item 247 gap 2, docs/design/247-compensate.md Decision 2).
 
     Read straight from `query.Composition`'s per-scope facts — the same
-    surface `revl audit` prints, so this can never disagree with it."""
+    surface `revl audit` prints, so this can never disagree with it.
+
+    `residue` is the runtime `compensation-residue` from an abort / `revl
+    recover`. When given, a compensated crossing whose offset did not land is
+    lifted into the third state `unresolved`; when omitted the report is the
+    static two-state (bare/compensated) surface, byte-identical to before."""
     emissions: list[dict] = []
     externs: list[dict] = []
     witnessed: list[dict] = []
@@ -207,8 +214,16 @@ def _crossings(index: Composition, members: list[str]) -> dict:
     externs.sort(key=lambda e: (e["component"], e["name"]))
     witnessed.sort(key=lambda e: (e["component"], e["name"]))
     all_cross = emissions + externs
+    # item 247 gap 2: overlay the runtime residue to split the compensated
+    # crossings into those that landed and those left unresolved. With no
+    # residue this leaves every compensated crossing compensated and the
+    # unresolved set empty — the pre-247 two-state surface, byte-identical.
+    partition = classify_compensation(all_cross, residue)
     bare = [c for c in all_cross if not c["compensated"]]
     compensated = [c for c in all_cross if c["compensated"]]
+    unresolved = partition["unresolved"]
+    unresolved_tokens = sorted(
+        c["token"] for c in unresolved if c.get("token"))
     return {
         "emissions": emissions,
         "externs": externs,
@@ -217,12 +232,23 @@ def _crossings(index: Composition, members: list[str]) -> dict:
         # class off the aggregation finds it here, tagged actionClass "a".
         "witnessed": witnessed,
         "total": len(all_cross),
+        # `compensatedCount` counts crossings with an offset ATTACHED (the
+        # static compile-time judgment), unchanged for back-compat. The runtime
+        # overlay of which attached offsets did NOT land is `unresolvedCount`
+        # below — additive, so the static report is byte-identical without it.
         "compensatedCount": len(compensated),
         "bareCount": len(bare),
         "bareTokens": sorted(c["token"] for c in bare),
-        "note": "a crossing is bare when nothing was done about it. "
-                "Compensation is not inversion (paper §6.1): a compensated "
-                "crossing still left the system.",
+        # item 247 gap 2: the third state. Empty (and unresolvedCount 0) when no
+        # residue was supplied, so the static report is unchanged.
+        "unresolved": unresolved,
+        "unresolvedCount": len(unresolved),
+        "unresolvedTokens": unresolved_tokens,
+        "note": "a crossing is bare when nothing was done about it, "
+                "compensated when an offset landed, unresolved when an offset "
+                "was owed but did not land. Compensation is not inversion "
+                "(paper §6.1): a compensated crossing still left the system, "
+                "and an unresolved one is still out there.",
     }
 
 
@@ -305,11 +331,18 @@ def _prove_no_residue(ir: dict) -> dict:
 
 # --------------------------------------------------------------- entry point
 
-def build_report(ir: dict, realm: str, *, prove_residue: bool = True) -> dict:
+def build_report(ir: dict, realm: str, *, prove_residue: bool = True,
+                 compensation_residue: list | None = None) -> dict:
     """The composed, versioned erase-report for one realm.
 
     `prove_residue=False` skips the runtime section (for a pure static report
-    or where the cordis runtime is unavailable)."""
+    or where the cordis runtime is unavailable).
+
+    `compensation_residue` (item 247 gap 2) is the runtime `compensation-
+    residue` from an abort / `revl recover`. When given, the boundary-crossings
+    section reports the third audit state `unresolved` for any compensated
+    crossing whose best-effort offset did not land; when omitted the crossings
+    section is the static two-state (bare/compensated) surface, unchanged."""
     index = Composition(ir)
     known = realms_of(ir)
     if realm not in known:
@@ -342,7 +375,7 @@ def build_report(ir: dict, realm: str, *, prove_residue: bool = True) -> dict:
         # holds (or, if the runtime is unavailable, this is unproven).
         "proven": residue.get("proven"),
     }
-    crossings = _crossings(index, members)
+    crossings = _crossings(index, members, compensation_residue)
     others = _others_untouched(ir, index, members, realm)
 
     return {
@@ -362,6 +395,7 @@ def build_report(ir: dict, realm: str, *, prove_residue: bool = True) -> dict:
             "boundaryCrossings": crossings["total"],
             "bareCrossings": crossings["bareCount"],
             "compensatedCrossings": crossings["compensatedCount"],
+            "unresolvedCrossings": crossings["unresolvedCount"],
             "stateGoneProven": residue.get("proven"),
             "otherRealmsUntouched": others["untouched"],
         },
@@ -417,9 +451,12 @@ def render(report: dict) -> str:
 
     # 2. crossings
     cross = report["boundaryCrossings"]
+    unresolved_n = cross.get("unresolvedCount", 0)
     out.append("")
-    out.append(f"  [2] BOUNDARY CROSSINGS — {cross['total']} "
-               f"({cross['compensatedCount']} compensated, {cross['bareCount']} bare)")
+    header = (f"  [2] BOUNDARY CROSSINGS — {cross['total']} "
+              f"({cross['compensatedCount']} compensated, {cross['bareCount']} bare")
+    header += f", {unresolved_n} UNRESOLVED)" if unresolved_n else ")"
+    out.append(header)
     if not cross["emissions"] and not cross["externs"]:
         out.append("      none — this realm made no irreversible boundary "
                    "crossing (fully revertible, G8)")
@@ -428,6 +465,15 @@ def render(report: dict) -> str:
         out.append(f"      {tag:<14} {c['component']}  emit {c['label']}")
     for c in cross["externs"]:
         out.append(f"      {'[BARE]':<14} {c['component']}  host {c['name']}()")
+    # item 247 gap 2: the unresolved residue, named so an operator sees exactly
+    # which owed offset is still out in the world.
+    for c in cross.get("unresolved") or []:
+        rec = c.get("residue") or {}
+        err = (rec.get("error") or {}).get("message", "")
+        label = c.get("label") or c.get("method") or rec.get("method") or "?"
+        comp = c.get("component") or rec.get("component") or "?"
+        out.append(f"      {'[UNRESOLVED]':<14} {comp}  offset {label}"
+                   + (f"  — {err}" if err else ""))
     out.append(f"      note: {cross['note']}")
 
     # 3. others untouched

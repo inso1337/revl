@@ -25,12 +25,12 @@ audit-surface classifier does not.
 
 import copy
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
 import pytest
 
+from revl import query
 from revl.compiler import compile_source
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -103,3 +103,116 @@ def test_aborted_session_surfaces_unresolved_compensation_residue():
     # and it counts as a residue prompt (item 246, the same channel a
     # flush-residue uses), so prompts-per-session reflects it.
     assert report["prompts"]["residue"] >= 1
+
+    # the residue NAMES the crossing it was offsetting (design Decision 2).
+    r = residue[0]
+    assert r["component"] == "Agent"
+    assert r["method"] == "offset_fails"
+
+
+@needs_cordis
+def test_clean_compensated_session_reports_no_residue():
+    """A session that commits cleanly discharges the offset (never runs it) and
+    surfaces an EMPTY residue — the `compensated` state, no `unresolved`."""
+    session = _session()
+    session.load(_ir(compile_source(_SOURCE_CLEAN, "residue_surfacing.rvl")))
+    session.call("ops", "run", ["go"])
+
+    report = session.commit()             # enumerate
+    confirm = session.commit_confirm(report["hash"])
+
+    assert confirm["committed"] is True
+    assert confirm["compensationResidue"] == []
+    assert confirm["prompts"]["residue"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The audit surface (revl.query) — the three states, PURE (no cordis needed).
+# ---------------------------------------------------------------------------
+
+def test_query_classify_compensation_three_states():
+    crossings = [
+        {"component": "A", "compensated": False},   # bare
+        {"component": "A", "compensated": True},    # compensated (offset landed)
+        {"component": "B", "compensated": True},    # compensated -> unresolved
+    ]
+    residue = [{"kind": "compensation-residue", "state": "unresolved",
+                "component": "B", "method": "offset_fails", "seq": 3,
+                "outcome": "failed",
+                "error": {"type": "RuntimeError", "message": "offset boom"}}]
+
+    out = query.classify_compensation(crossings, residue)
+
+    assert out["states"] == {"bare": 1, "compensated": 1, "unresolved": 1}
+    assert out["bare"][0]["residueState"] == "bare"
+    assert out["compensated"][0]["component"] == "A"
+    assert out["compensated"][0]["residueState"] == "compensated"
+    [un] = out["unresolved"]
+    assert un["component"] == "B"
+    assert un["residueState"] == "unresolved"
+    assert un["residue"]["error"]["message"] == "offset boom"
+
+
+def test_query_classify_compensation_byte_inert_without_residue():
+    """No residue -> every attached offset stays `compensated`, `unresolved`
+    empty. The pre-247 two-state split, unchanged."""
+    crossings = [{"component": "A", "compensated": True},
+                 {"component": "A", "compensated": False}]
+    out = query.classify_compensation(crossings, residue=None)
+    assert out["states"] == {"bare": 1, "compensated": 1, "unresolved": 0}
+    assert out["unresolved"] == []
+
+
+def test_query_compensation_audit_surfaces_standalone_residue():
+    """With only residue and no recording, the unresolved fact is still fully
+    enumerated — never silently swallowed."""
+    residue = [{"kind": "compensation-residue", "state": "unresolved",
+                "component": "Agent", "method": "offset_fails", "seq": 1,
+                "outcome": "failed",
+                "error": {"type": "RuntimeError", "message": "offset boom"}}]
+    out = query.compensation_audit(timeline=None, residue=residue)
+    assert out["ok"] is True
+    assert out["states"]["unresolved"] == 1
+    assert out["unresolved"][0]["residue"]["method"] == "offset_fails"
+
+
+# ---------------------------------------------------------------------------
+# The erase-report surface — the third state threads through, PURE.
+# ---------------------------------------------------------------------------
+
+_REALM_SOURCE = (
+    "extern emission fn note(msg: Str) -> Unit = @py { return }\n"
+    "extern pure fn offset(msg: Str) -> Unit = @py { return }\n"
+    "service Ops { emission fn run(msg: Str) }\n"
+    "component Agent provides ops: Ops {\n"
+    "  isolate ops in realm(\"wa\")\n"
+    "  provide ops {\n"
+    "    fn run(msg) { emit note(msg) compensate offset(msg) }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+def test_erase_report_threads_unresolved_state():
+    from revl import erase_report
+    ir = compile_source(_REALM_SOURCE, "erase_residue.rvl")
+    realms = erase_report.realms_of(ir)
+    realm = next(r for r in realms if r)  # the isolated realm, not shared
+
+    residue = [{"kind": "compensation-residue", "state": "unresolved",
+                "component": "Agent", "method": "offset", "seq": 1,
+                "outcome": "failed",
+                "error": {"type": "RuntimeError", "message": "offset boom"}}]
+
+    # without residue: the static two-state surface, no unresolved.
+    plain = erase_report.build_report(ir, realm, prove_residue=False)
+    assert plain["boundaryCrossings"]["unresolvedCount"] == 0
+    assert plain["summary"]["unresolvedCrossings"] == 0
+
+    # with residue: the compensated crossing lifts into `unresolved`.
+    withres = erase_report.build_report(
+        ir, realm, prove_residue=False, compensation_residue=residue)
+    assert withres["boundaryCrossings"]["unresolvedCount"] == 1
+    assert withres["summary"]["unresolvedCrossings"] == 1
+    text = erase_report.render(withres)
+    assert "UNRESOLVED" in text
