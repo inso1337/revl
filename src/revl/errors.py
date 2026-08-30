@@ -36,3 +36,39 @@ class RevlError(Exception):
         if trace:
             rendered += "\n" + trace
         super().__init__(rendered)
+
+
+class RevlErrors(RevlError):
+    """Carrier for a multi-refusal compile (roadmap item 386, Stage 1).
+
+    The frontend used to abort on the FIRST `RevlError`; Stage 1 collects every
+    recoverable refusal and raises them together at the end of
+    `check_and_lower`. This carrier IS a `RevlError` so all ~70 `except
+    RevlError` sites and `classify()` keep working with no change: its primary
+    fields (`filename`/`line`/`message`/`code`/`category`/…) MIRROR THE FIRST
+    diagnostic, so every legacy single-error consumer sees exactly what it saw
+    before. The full ordered list lives on `.errors`; `diagnostics.report`,
+    `plan._add` and the LSP iterate it. `__str__` renders the whole list plus a
+    census line, so the many `print(f"error: {error}")` sites upgrade for free
+    — and, for a lone refusal, renders byte-identically to that one error.
+    """
+
+    def __init__(self, errors: "list[RevlError]"):
+        if not errors:
+            raise ValueError("RevlErrors requires at least one error")
+        self.errors: list[RevlError] = list(errors)
+        first = self.errors[0]
+        super().__init__(first.filename, first.line, first.message,
+                         hint=first.hint, code=first.code, category=first.category,
+                         expected=first.expected, actual=first.actual, why=first.why)
+
+    def __str__(self) -> str:
+        # A single refusal renders exactly as a plain `RevlError` would: no
+        # census line, so the text path stays byte-identical for the common case.
+        if len(self.errors) == 1:
+            return str(self.errors[0])
+        files = {e.filename for e in self.errors}
+        n, m = len(self.errors), len(files)
+        census = (f"{n} refusals across {m} "
+                  f"{'file' if m == 1 else 'files'}")
+        return "\n".join([str(e) for e in self.errors] + [census])

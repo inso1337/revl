@@ -17,7 +17,7 @@ import dataclasses
 import keyword
 
 from . import holes
-from .errors import RevlError
+from .errors import RevlError, RevlErrors
 from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
     CASES_KEY,
@@ -3400,6 +3400,67 @@ def _validate_default_params(program: Program, types: dict,
                                f"default for parameter `{p.name}`", p.type, dt)
 
 
+def _component_header_stub(comp: ComponentDecl, filename: str) -> dict:
+    """A header-only placeholder for a component whose BODY lowering aborted
+    (item 386, Stage 1, Change 1 — the soundness fix).
+
+    Body lowering raised, so no lowered body exists — but DROPPING the component
+    corrupts `_link`: the multi-realm route check would fabricate "no component
+    provides key in realm" for a consumer routing to this component's key, and
+    G2 (provision conflict) / G3 (dependency cycle) would silently MISS a real
+    conflict or cycle on a key this component's HEADER declares. So we keep the
+    topology complete from the parts available BEFORE body lowering — the
+    `requires`/`provides` clauses on the `component` declaration — and mark it
+    `poisoned` so the body-walking post-passes (taint, spawn bounds/attenuation,
+    holes) skip it. `isolate`/`routes` are body statements, so a stub carries
+    none: its provisions sit in the shared realm, which is exactly enough to
+    stop the route-check fabrication and keep G2/G3 sound over its keys."""
+    return {
+        "name": comp.name,
+        "source": comp.source or filename,
+        "requires": {local for local, _svc, _line in comp.requires},
+        "provides": {key for key, _svc, _line in comp.provides},
+        "body": [],
+        "poisoned": True,
+    }
+
+
+def _raise_collected(errors: list[RevlError], program: Program) -> None:
+    """Dedup, order, and raise the collected refusals as a `RevlErrors` carrier
+    (item 386, Stage 1, Change 4).
+
+    Dedup key is `(code, filename, line, message)` — two recovery paths reaching
+    the same refusal collapse to one. Ordering is by COMPILE ORDER, not
+    alphabetical: `program.filename` (paths[0]) first, then each component's
+    `source` in declaration order (== the multi-file argument order, roadmap
+    312), then line. Python's sort is stable, so ties keep the pipeline
+    (append) order. This makes `diagnostics[0]` equal to what today's
+    single-error compile reports for the same input, keeping every existing
+    single-error test and consumer stable."""
+    file_rank: dict[str, int] = {}
+
+    def _rank(name: str) -> int:
+        if name not in file_rank:
+            file_rank[name] = len(file_rank)
+        return file_rank[name]
+
+    _rank(program.filename)
+    for comp in program.components:
+        _rank(comp.source or program.filename)
+
+    seen: set = set()
+    unique: list[RevlError] = []
+    for err in errors:
+        key = (err.code, err.filename, err.line, err.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(err)
+
+    unique.sort(key=lambda e: (file_rank.get(e.filename, len(file_rank)), e.line))
+    raise RevlErrors(unique)
+
+
 def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
     (a running manifest, DESIGN §4's runtime-admission gate): ambient services
@@ -3560,86 +3621,139 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         "sites": [],        # G4 spawn-boundary obligations, checked after lowering
     }
 
+    # item 386, Stage 1: collect ALL refusals in one pass instead of aborting
+    # on the first. `errors` accumulates every recoverable refusal; the
+    # carrier is raised once at the end (below). The component loop is the
+    # cleanest recovery unit — by this point the type and signature tables
+    # already exist, so one component's failure does not poison another's
+    # lowering.
+    errors: list[RevlError] = []
+
+    def _collect(fn, *args, **kwargs):
+        """Run a whole-composition post-pass, collecting a `RevlError` instead
+        of aborting so its sibling passes still run (item 386, Change 2). An
+        UNEXPECTED (non-`RevlError`) crash is dropped only when the compile is
+        ALREADY failing: a post-pass tripping over poisoned/partial state must
+        not replace N good diagnostics with a traceback. On an otherwise-clean
+        compile it propagates as the bug it is."""
+        try:
+            return fn(*args, **kwargs)
+        except RevlError as post_error:
+            errors.append(post_error)
+            return None
+        except Exception:  # noqa: BLE001 — see docstring: guarded only when failing
+            if errors:
+                return None
+            raise
+
     components = []
     seen = set()
     for comp in program.components:
         if comp.name in seen:
-            raise RevlError(comp.source or program.filename, comp.line,
-                            f"duplicate component `{comp.name}`")
+            # A duplicate component is already represented in the topology by
+            # its first declaration, so record the refusal but append NO stub
+            # (a second same-named entry would fabricate a `_link` G2 conflict).
+            errors.append(RevlError(comp.source or program.filename, comp.line,
+                                    f"duplicate component `{comp.name}`"))
+            continue
         seen.add(comp.name)
-        # A multi-file composition merges declarations from several sources into
-        # one Program whose `filename` is only the first argument (paths[0]).
-        # Body diagnostics render through `env.filename`, so a component from a
-        # LATER file must lower under its own `source`. Otherwise its rejection
-        # names the first source with this file's line number (roadmap 312).
-        lowered_comp = _lower_component(comp, services,
-                                        comp.source or program.filename,
-                                        component_callables, types, emitting_fns,
-                                        emitting_caps, emission_evidence, spawn_reg,
-                                        async_colored, witnessed_externs,
-                                        colour_polymorphic, sync_monomorphs)
-        if comp.source:
-            _retarget_holes(lowered_comp, comp.source)
-        # async coloring (docs/design/async-extern.md §3, "Component bodies"):
-        # a setup/activation body (an `emit` step, an `effect`, an `await`
-        # step) may not reach an async callable — an async extern *or* a
-        # phase-2 colored fn — because divert/inertia semantics are out of
-        # scope for v1. Provide-method bodies are checked at their own site
-        # above, so they are pruned here.
-        if async_colored:
-            _reached: set = set()
-            _async_reached_outside_provide(lowered_comp, async_colored, _reached)
-            if _reached:
-                _culprit = sorted(_reached)[0]
-                _kind = "extern" if _culprit in {
-                    e.name for e in program.externs if e.async_} else "function"
-                raise RevlError(
-                    comp.source or program.filename, comp.line,
-                    f"component `{comp.name}` reaches async {_kind} "
-                    f"`{_culprit}` in a setup/activation body, which "
-                    f"cannot suspend a fiber (A1)",
-                    hint="wrap the suspending call in an `async fn` service "
-                         "operation and drive it from a provide method — v1 does "
-                         "not lower an awaited `emit` step",
-                    code="A1", category="async-propagation",
-                )
-        components.append(lowered_comp)
+        try:
+            # A multi-file composition merges declarations from several sources
+            # into one Program whose `filename` is only the first argument
+            # (paths[0]). Body diagnostics render through `env.filename`, so a
+            # component from a LATER file must lower under its own `source`.
+            # Otherwise its rejection names the first source with this file's
+            # line number (roadmap 312).
+            lowered_comp = _lower_component(comp, services,
+                                            comp.source or program.filename,
+                                            component_callables, types, emitting_fns,
+                                            emitting_caps, emission_evidence, spawn_reg,
+                                            async_colored, witnessed_externs,
+                                            colour_polymorphic, sync_monomorphs)
+            if comp.source:
+                _retarget_holes(lowered_comp, comp.source)
+            # async coloring (docs/design/async-extern.md §3, "Component
+            # bodies"): a setup/activation body (an `emit` step, an `effect`, an
+            # `await` step) may not reach an async callable — an async extern
+            # *or* a phase-2 colored fn — because divert/inertia semantics are
+            # out of scope for v1. Provide-method bodies are checked at their
+            # own site above, so they are pruned here.
+            if async_colored:
+                _reached: set = set()
+                _async_reached_outside_provide(lowered_comp, async_colored, _reached)
+                if _reached:
+                    _culprit = sorted(_reached)[0]
+                    _kind = "extern" if _culprit in {
+                        e.name for e in program.externs if e.async_} else "function"
+                    raise RevlError(
+                        comp.source or program.filename, comp.line,
+                        f"component `{comp.name}` reaches async {_kind} "
+                        f"`{_culprit}` in a setup/activation body, which "
+                        f"cannot suspend a fiber (A1)",
+                        hint="wrap the suspending call in an `async fn` service "
+                             "operation and drive it from a provide method — v1 does "
+                             "not lower an awaited `emit` step",
+                        code="A1", category="async-propagation",
+                    )
+            components.append(lowered_comp)
+        except RevlError as comp_error:
+            # This component's BODY lowering aborted. DROPPING it would corrupt
+            # `_link` (the route check fabricates "no provider", G2/G3 silently
+            # miss real conflicts/cycles on its keys), so append a HEADER-ONLY
+            # stub — provides/requires from the `comp` declaration, marked
+            # `poisoned` — to keep the topology complete, and continue.
+            errors.append(comp_error)
+            components.append(_component_header_stub(comp, program.filename))
+            continue
+
+    # item 386: the body-walking post-passes run over the SUCCESSFULLY lowered
+    # components only. A poisoned header stub has no lowered body, so feeding it
+    # to taint / spawn / hole walks would crash or fabricate; `_link` alone sees
+    # the full list (stubs included) because it needs the complete topology.
+    live_components = [c for c in components if not c.get("poisoned")]
 
     # sync/async arrow polymorphism (item 342): materialize the sync clones the
     # sync call sites above requested. Additive — a program with no lifted call
     # site registers none, so `fns` (and every downstream section) is
     # byte-identical to before.
-    _synthesize_sync_monomorphs(fns, sync_monomorphs)
+    _collect(_synthesize_sync_monomorphs, fns, sync_monomorphs)
 
     # Taint/provenance verdict (item 249, Slice A): refuse any untrusted-origin
     # value that reaches a `Trusted[T]` sink without a declassifier on its path
     # (G9). No-op and byte-identical when the program declared no qualifier.
-    check_taint(program, fns, components, taint_model, program.filename)
+    _collect(check_taint, program, fns, live_components, taint_model, program.filename)
 
     # state hand-off admission (roadmap item 53): a candidate provider that
     # *accepts* a `handoff` on a key some running provider *exports* must accept
     # a §5-compatible shape — else the swap would drop the predecessor's state.
     # No-op unless the ambient carries running hand-offs (a swap against a
     # stateful running provider), so a fresh compile is unaffected.
-    _admit_handoff_replacement(program, components, ambient)
+    _collect(_admit_handoff_replacement, program, live_components, ambient)
 
     # G4/G6 across the spawn boundary: a spawner's declared emission upper
     # bound must cover what its spawned instances emit (decision 8). Checked
     # here, after every component's emission surface is known.
-    _check_spawn_emission_bounds(components, services, spawn_reg, program.filename)
+    _collect(_check_spawn_emission_bounds, live_components, services, spawn_reg,
+             program.filename)
 
     # Capability attenuation across the spawn boundary (item 66): a child's
     # capability set must be a checked subset of its spawner's held authority,
     # so lineage narrows monotonically and a supervisor cannot amplify. Returns
     # the per-instance attenuation chain for the G8 audit surface.
-    attenuation_chain = _check_spawn_attenuation(
-        components, spawn_reg, program.filename)
+    attenuation_chain = _collect(_check_spawn_attenuation,
+                                 live_components, spawn_reg, program.filename)
 
-    fault_tests = _lower_fault_tests(program, components, program.filename)
+    fault_tests = _collect(_lower_fault_tests, program, live_components,
+                           program.filename)
 
-    manifest = _link(program, components, ambient.get("components") or [],
-                     templates=spawn_reg["templates"])
-    if attenuation_chain:
+    # `_link` collects its own G2/G3 refusals into the shared `errors` sink
+    # (item 386, Change 2): it must see the FULL component list, stubs included,
+    # so its topology is complete — a real conflict/cycle on a refused
+    # component's declared key is still reported, and a consumer routing to it
+    # gets no fabricated "no provider" error.
+    manifest = _collect(_link, program, components, ambient.get("components") or [],
+                        templates=spawn_reg["templates"], errors=errors)
+    if manifest and attenuation_chain:
         # additive, spawn-only: a non-spawning composition has no `instances`
         # key, so its manifest is byte-identical to before (docs/capability-
         # attenuation.md).
@@ -3647,8 +3761,17 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
-    tests = _lower_tests(program, program.filename, types, services)
-    prop_tests = _lower_prop_tests(program, program.filename, types, services)
+    tests = _collect(_lower_tests, program, program.filename, types, services)
+    prop_tests = _collect(_lower_prop_tests, program, program.filename, types, services)
+
+    # item 386: every recoverable refusal is now collected. Raise them together
+    # as a `RevlErrors` carrier BEFORE building the IR — the result dict reads
+    # `manifest`/`components`/etc. which may be partial or poisoned on the error
+    # path, so short-circuiting here keeps a failing compile from crashing while
+    # assembling an IR nobody will read. A clean compile has `errors == []` and
+    # falls straight through, byte-identical to before.
+    if errors:
+        _raise_collected(errors, program)
 
     uses_components_2 = any(
         isinstance(stmt, (FailStmt, IfStmt))
@@ -6193,7 +6316,7 @@ def _node_desc(node: dict) -> str:
 # ---------------------------------------------------------------- linker
 
 def _link(program: Program, components: list[dict], ambient_components: list[dict],
-          templates: set | None = None) -> dict:
+          templates: set | None = None, errors: list | None = None) -> dict:
     """G2/G3 over the union of ambient (running) and new components, and the
     composition manifest (cordisc-compatible schema: components with
     name/file/inject/provides, plus loadOrder).
@@ -6204,9 +6327,29 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
     G2/G3 table and they take no place in `loadOrder`: at runtime each is
     instantiated into its own fresh local realm by `spawn`, disjoint by
     construction (decision 5/6). Non-spawning programs have no templates, so
-    the manifest is byte-identical to before."""
+    the manifest is byte-identical to before.
+
+    `errors` (item 386, Change 2): when a collect-all sink is supplied, every G2
+    provision conflict, multi-realm route gap, and G3 cycle is APPENDED to it
+    instead of raised, so the linker reports all of them in one pass — capped at
+    one reported cycle per strongly-connected set to avoid overlapping-path
+    noise. When `errors is None` (a direct caller), the first refusal is raised,
+    the legacy fail-fast behavior."""
     templates = templates or set()
-    lines = {comp["name"]: decl.line for comp, decl in zip(components, program.components)}
+
+    def _fail(err: RevlError) -> None:
+        """Collect the refusal if a sink was supplied, else raise it (legacy)."""
+        if errors is None:
+            raise err
+        errors.append(err)
+
+    # name-keyed, not positionally zipped: a collected duplicate-component
+    # refusal (item 386) can leave `components` shorter than
+    # `program.components`, which would misalign a `zip`. First declaration of
+    # a name wins its line.
+    lines: dict[str, int] = {}
+    for decl in program.components:
+        lines.setdefault(decl.name, decl.line)
 
     entries: list[dict] = []
     for amb in ambient_components:
@@ -6280,12 +6423,16 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
                         TraceStep(entry["name"], "provider",
                                   *_where(entry["name"]), detail),
                     ])
-                raise RevlError(
+                _fail(RevlError(
                     program.filename, _line(entry["name"]),
                     f"provision conflict: key `{key}`{where} is provided "
                     f"by both {provider_of[(key, realm)]} and {entry['name']} (G2)",
                     why=why,
-                )
+                ))
+                # keep the FIRST provider registered (item 386): the conflict is
+                # reported once, and downstream route/edge resolution still finds
+                # a provider for the key rather than fabricating a "no provider".
+                continue
             provider_of[(key, realm)] = entry["name"]
 
     def _routes(entry: dict) -> dict:
@@ -6312,7 +6459,7 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
                                          *_where(entry["name"]),
                                          f"routes `{key}` across "
                                          f"{len(route['realms'])} realms{strat_where}")])
-                    raise RevlError(
+                    _fail(RevlError(
                         program.filename, _line(entry["name"]),
                         f"multi-realm bind of `{key}` in {entry['name']} names realm "
                         f"`{realm}`, but no component provides `{key}` in realm `{realm}` "
@@ -6322,7 +6469,7 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
                              "to exactly one). Add a provider isolated into realm "
                              f"`{realm}`, or drop `{realm}` from the route",
                         why=why,
-                    )
+                    ))
 
     # edges: provider -> consumer where the consumer's realm for a key
     # matches the provider's — realm separation legitimately breaks cycles
@@ -6355,14 +6502,15 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
             provider = provider_of.get((key, _realm(entry, key)))
             if provider == entry["name"]:
                 name = entry["name"]
-                raise RevlError(
+                _fail(RevlError(
                     program.filename, _line(name),
                     f"component {name} requires a key it provides itself (`{key}`) (G3)",
                     why=WhyTrace(
                         kind="dependency-cycle", subject=name, shape=CHAIN,
                         steps=[TraceStep(name, "component", *_where(name),
                                          f"provides and requires `{key}`")]),
-                )
+                ))
+                continue
             if provider is not None:
                 graph[provider].append(entry["name"])
                 edge_key.setdefault((provider, entry["name"]), key)
@@ -6370,6 +6518,11 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
 
     state: dict[str, int] = {}
     stack: list[str] = []
+    # item 386, Change 2: nodes already named in a reported cycle. A single
+    # strongly-connected set has many overlapping cycles; reporting each is
+    # noise, so once any node of a cycle is reported we suppress further cycles
+    # that touch it — one G3 per SCC.
+    cycled: set = set()
 
     def visit(name: str):
         state[name] = 1
@@ -6385,10 +6538,16 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
                                if i + 1 < len(cycle) else None))
                     for i, node in enumerate(cycle)
                 ]
-                raise RevlError(program.filename, _line(succ),
-                                "dependency cycle: " + " -> ".join(cycle) + " (G3)",
-                                why=WhyTrace(kind="dependency-cycle", subject=succ,
-                                             steps=steps, shape=CHAIN))
+                cyc_err = RevlError(
+                    program.filename, _line(succ),
+                    "dependency cycle: " + " -> ".join(cycle) + " (G3)",
+                    why=WhyTrace(kind="dependency-cycle", subject=succ,
+                                 steps=steps, shape=CHAIN))
+                if errors is None:
+                    raise cyc_err
+                if not any(node in cycled for node in cycle):
+                    cycled.update(cycle)
+                    errors.append(cyc_err)
             if state.get(succ, 0) == 0:
                 visit(succ)
         stack.pop()
