@@ -22,6 +22,7 @@ table, or **[vision.md](vision.md)** for what this is *for*. The
 - [mcp-reference.md](mcp-reference.md) — the MCP verbs, per-verb inputs and outputs
 - [mcp-bridge.md](mcp-bridge.md) — the compiler as an MCP server, full shapes
 - [guide-ai-agents.md](guide-ai-agents.md) — the agent-facing workflow guide
+- [harness-gate-guide.md](harness-gate-guide.md) — driving the 245/246 approval gate from a harness: the three action classes, the MCP verbs, the commit two-step, and the `session.state()` metrics
 
 ## Testing and guarantees
 
