@@ -4568,12 +4568,23 @@ _METHOD_WITNESSED_COMMIT_EXT = '''func (f *RevlFrame) commit() {
 	// stc-go disposers, so this is their sole disposal — no double-free with the
 	// fiber's own unwind. commit() is the LAST-registered inverse, hence stc-go
 	// runs it FIRST on unwind, so this is ordered before any body inverse runs.
+	//
+	// item 369: replay in reverse INVOCATION order (LIFO), NOT registration
+	// order. `deferred` is appended newest-last as each provide-method fires
+	// (registerMethodWitnessed), so it must be drained newest-FIRST — exactly
+	// like the activation-body path, where stc-go unwinds its disposer stack
+	// LIFO. On a COMMIT order is immaterial (every entry no-op discharges); on
+	// an ABORT two inverses whose paths OVERLAP must undo newest-first or a FIFO
+	// replay leaves residue or DESTROYS pre-session data (every stdlib/fs.rvl
+	// inverse is idempotent-and-total, so the oldest inverse runs first, no-ops,
+	// and the newer one undoes into the hole — G7, 243 §2). Mirrors the py/ts
+	// runtimes.
 	f.mu.Lock()
 	deferred := f.deferred
 	f.deferred = nil
 	f.mu.Unlock()
-	for _, d := range deferred {
-		_ = d()
+	for i := len(deferred) - 1; i >= 0; i-- {
+		_ = deferred[i]()
 	}
 }'''
 
