@@ -1397,6 +1397,27 @@ def _ts_emission_is_async(expr: dict, ctx: "_Ctx") -> bool:
              or callee.get("name") in ctx.async_locals)
 
 
+def _await_statement(expr: dict, ctx: "_Ctx") -> str:
+    """Render `expr` as a KEYWORD-LED `await …` statement (item 131).
+
+    The activation-body await positions that discard the awaited value — the
+    `await` step, an `await emit`, and an unbound `effect await` — emit an
+    expression statement. Rendered under an in_async view, the shared `_expr`
+    seeds the `await` for whatever the position suspends on: a req-target async
+    op (`ctx.w.heat()` -> `(await ctx.w.heat())`), an async extern, or an async-
+    colored fn (the sources the await step widened to under item 131). The
+    `await` is hoisted to the front so the statement never begins with `(`,
+    which JS ASI would otherwise glue to a preceding `yield () => <undo>` arrow
+    (a real merge — verified: it makes `await` land in a sync arrow, a syntax
+    error). This is exactly the `await <call>` shape the plain await step has
+    always emitted; a req-op await is therefore byte-identical to before."""
+    actx = ctx.with_scope(ctx.component_scope, in_async=True)
+    rendered = _expr(expr, actx)
+    if rendered.startswith("(await ") and rendered.endswith(")"):
+        return "await " + rendered[len("(await "):-1]
+    return "await " + rendered
+
+
 def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     indent: str, lines: list[str], frame_var: Optional[str]) -> None:
     """One step of the activation body, appended to `lines`.
@@ -1435,16 +1456,41 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
             # non-compensating program's emission identical to before this
             # slice (`_needs_frame`, below, is what makes the whole `Frame`
             # apparatus itself conditional on the same basis).
-            acquire = _expr(step["acquire"], ctx)
-            if kind == "let-effect":
-                bind_name = scope.bind(step["bind"])
-                lines.append(f"{indent}const {bind_name} = {acquire}")
+            # item 131: an async-flagged acquisition awaits its landed result
+            # (not the in-flight Promise), THEN registers the inverse — the
+            # `yield () => undo` is the next action in the same generator step,
+            # so registration is boundary-atomic with the acquisition (design §4
+            # clause 1). The `undo` stays sync (rule 3 keeps teardown
+            # suspension-free). A sync acquisition carries no flag and is
+            # byte-identical to before.
+            if step.get("async"):
+                if kind == "let-effect":
+                    bind_name = scope.bind(step["bind"])
+                    # `const c = await …` — a `const`-led statement is ASI-safe,
+                    # so the awaited call keeps its `(await …)` shape here.
+                    actx = ctx.with_scope(ctx.component_scope, in_async=True)
+                    lines.append(f"{indent}const {bind_name} = {_expr(step['acquire'], actx)}")
+                else:
+                    lines.append(f"{indent}{_await_statement(step['acquire'], ctx)}")
             else:
-                lines.append(f"{indent}{acquire}")
+                acquire = _expr(step["acquire"], ctx)
+                if kind == "let-effect":
+                    bind_name = scope.bind(step["bind"])
+                    lines.append(f"{indent}const {bind_name} = {acquire}")
+                else:
+                    lines.append(f"{indent}{acquire}")
             undo = _expr(step["undo"], ctx)
             lines.append(f"{indent}yield () => {undo}")
     elif kind == "emit":
-        lines.append(f"{indent}{_expr(step['expr'], ctx)}")
+        # item 131: `await emit …` awaits the boundary crossing so the emission
+        # actually fires — a bare async emit would leave a floating, unordered
+        # Promise. Emitted keyword-led (`await …`) so it never begins with `(`;
+        # the compensation registers after, as in the sync spelling. A sync emit
+        # carries no flag and is byte-identical to before.
+        if step.get("async"):
+            lines.append(f"{indent}{_await_statement(step['expr'], ctx)}")
+        else:
+            lines.append(f"{indent}{_expr(step['expr'], ctx)}")
         if step.get("compensate") is not None:
             # item 247: a compensation entry — audit-facing, best-effort,
             # ABORT-ONLY, Phase 2 (never on a clean unload). Args are bound to
@@ -1478,8 +1524,12 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
             )
     elif kind == "await":
         # v1/A1: the await lands (inertia), then the yield closes the
-        # iteration so a divert during the await skips every later step
-        lines.append(f"{indent}await {_expr(step['expr'], ctx)}")
+        # iteration so a divert during the await skips every later step.
+        # item 131 widens the await step's suspension sources from req-ops /
+        # `Job.run` to also include an async extern or an async-colored fn;
+        # `_await_statement` renders under an in_async view so those await too.
+        # A req-op await stays byte-identical (`await ctx.w.heat()`).
+        lines.append(f"{indent}{_await_statement(step['expr'], ctx)}")
         lines.append(f"{indent}yield () => {{}}  // iteration boundary (A1)")
     elif kind == "provide":
         name = step.get("name")
@@ -1702,9 +1752,16 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     # One generator per body: cordis runs disposers of a single effect
     # strictly sequentially (LIFO); top-level fiber effects would be
     # disposed concurrently (see REPORT.md, finding 1). A body containing
-    # an `await` step compiles to an async generator (v1/A1).
+    # an `await` step compiles to an async generator (v1/A1). item 131: an
+    # async-flagged `effect`/`let-effect`/`emit` step (an awaited acquisition or
+    # emission) is likewise a suspension in the body and forces the async
+    # generator. Timer steps are excluded: a timer's async flag colors its OWN
+    # runtime-awaited firing (item 170), not the activation body generator.
     is_async = any(
-        step.get("step") == "await" for step in component.get("body") or []
+        step.get("step") == "await"
+        or (step.get("step") in ("effect", "let-effect", "emit")
+            and step.get("async"))
+        for step in component.get("body") or []
     )
     generator = "async function*" if is_async else "function*"
     lines.append(f"    ctx.effect({generator} () {{")
