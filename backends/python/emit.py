@@ -2323,6 +2323,13 @@ def _uses_builtin_result(ir: dict) -> bool:
     # names them. Any witnessed extern is enough to require them.
     if any(ext.get("class") == "witnessed" for ext in ir.get("externs") or []):
         return True
+    # item 362: a pure/total extern that RETURNS a Result builds `Ok(..)`/
+    # `Err(..)` in its host body (e.g. `json_try_parse`), so the classes must
+    # be present even when no surface `match`/`adt` names them — the same
+    # reasoning as the witnessed case, extended to any Result-returning extern.
+    if any(str(ext.get("returns", "")).startswith("Result")
+           for ext in ir.get("externs") or []):
+        return True
     return walk(ir.get("components")) or walk(ir.get("functions")) or walk(ir.get("tests"))
 
 
