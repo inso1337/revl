@@ -29,10 +29,16 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl.compiler import compile_source  # noqa: E402
+from revl.compiler import compile_files  # noqa: E402
 
-_FS_SRC = (ROOT / "stdlib" / "fs.rvl").read_text(encoding="utf-8")
-_BASE = compile_source(_FS_SRC, "fs.rvl")
+# item 410 stage 5: `stdlib/fs.rvl`'s `@ts` externs are now `= @ts ref` imports
+# of the per-extern entry points in `backends/typescript/revl_fs_ts.ts`, so the
+# fixture must be compiled through `compile_files` with the module's REAL path
+# (a bare-string `compile_source` has no root tree to jail the ref against). The
+# file sits inside `stdlib_root()`, so it classifies stdlib-origin and its refs
+# jail to the install tree and stamp `"root": "stdlib"` — exactly what the
+# runner (and the vitest harness) resolves against `__REVL_STDLIB_REF_ROOT__`.
+_BASE = compile_files([str(ROOT / "stdlib" / "fs.rvl")])
 
 
 def _lit(v: str) -> dict:

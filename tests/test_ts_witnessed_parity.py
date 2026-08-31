@@ -51,7 +51,7 @@ for _p in (str(_ROOT / "src"), str(_BACKEND_PY)):
         sys.path.insert(0, _p)
 
 import revl_shell_classify as _sc  # noqa: E402  (py classifier, the oracle)
-from revl.compiler import compile_source  # noqa: E402
+from revl.compiler import compile_files, compile_source  # noqa: E402
 
 
 def _load_ts_emit():
@@ -239,7 +239,9 @@ def test_py_multi_op_same_path_abort_replays_lifo(tmp_path, monkeypatch):
     monkeypatch.setenv("REVL_FS_WORKSPACE", str(tmp_path))
     (tmp_path / "A.txt").write_text("orig")
 
-    base = compile_source((_ROOT / "stdlib" / "fs.rvl").read_text(encoding="utf-8"), "fs.rvl")
+    # item 410 stage 5: fs.rvl's `@ts` externs are `= @ts ref` imports, which
+    # need a root compile tree to jail against, so compile from the real path.
+    base = compile_files([str(_ROOT / "stdlib" / "fs.rvl")])
     ir = copy.deepcopy(base)
     ir["components"] = [{
         "name": "FsAbortSamePath", "source": "fs.rvl", "config": [],

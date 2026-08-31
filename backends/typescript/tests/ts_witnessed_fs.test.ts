@@ -18,9 +18,18 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { createHash } from 'node:crypto'
-// side effect: installs globalThis.__revlFs, the host the @ts fs bodies reach
-// (the ts analog of `backends/python` being on sys.path for the @py bodies).
-import '../revl_fs_ts.ts'
+import { fileURLToPath } from 'node:url'
+// item 410 stage 5: the fs externs are now `= @ts ref` imports of the per-extern
+// entry points in `../revl_fs_ts.ts`, resolved lazily at each op's first call.
+// The stdlib-origin thunk joins the recorded relative path against the runner-
+// provided `globalThis.__REVL_STDLIB_REF_ROOT__` (the install tree) — set here to
+// the repo root, exactly as the node placement runner self-derives it. No
+// pre-import and no `globalThis.__revlFs` seam: this is the retirement itself.
+// This runs during module evaluation, before any `it` invokes the first fs op.
+const _installRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
+;(globalThis as { __REVL_STDLIB_REF_ROOT__?: string }).__REVL_STDLIB_REF_ROOT__ =
+  _installRoot
 import { FsCommit, FsAbort, FsAbortSamePath } from './generated/ts_witnessed_fs.ts'
 
 let ws: string

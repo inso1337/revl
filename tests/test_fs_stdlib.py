@@ -42,7 +42,7 @@ from pathlib import Path
 
 import pytest
 
-from revl.compiler import compile_source
+from revl.compiler import compile_files
 
 _ROOT = Path(__file__).resolve().parents[1]
 _BACKEND = _ROOT / "backends" / "python"
@@ -58,11 +58,13 @@ needs_cordis = pytest.mark.skipif(
            "composition — install it with `sh backends/python/setup.sh`",
 )
 
-# The real module, compiled once. `compile_source` of the actual file text
-# yields the externs (write/rm/move/mkdir + their inverses) with the witnessed
-# classification and lowered `undo` the runtime seam keys off.
-_FS_SRC = (_ROOT / "stdlib" / "fs.rvl").read_text(encoding="utf-8")
-_BASE = compile_source(_FS_SRC, "fs.rvl")
+# The real module, compiled once. `compile_files` of the actual file yields the
+# externs (write/rm/move/mkdir + their inverses) with the witnessed
+# classification and lowered `undo` the runtime seam keys off. Compiled from the
+# real path (not `compile_source`) because item 410 stage 5 made the `@ts` bodies
+# `= @ts ref` imports, which need a root compile tree to jail against; the `@py`
+# bodies this suite drives are unchanged.
+_BASE = compile_files([str(_ROOT / "stdlib" / "fs.rvl")])
 
 
 # ---------------------------------------------------------------------------
