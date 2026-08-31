@@ -1,12 +1,12 @@
-"""Navigable refusals — the machine-facing map beside a policy deny (item 274).
+"""Navigable refusals - the machine-facing map beside a policy deny (item 274).
 
 Slice 1: the mechanism plus the two already-wired families (the taint sink,
 249/G9, and the boundary policy, 33), with the two review findings baked in:
 
-  * CRITICAL — under the untrusted-author profile every policy-family refusal
+  * CRITICAL - under the untrusted-author profile every policy-family refusal
     collapses to ONE non-discriminating verdict, so an author cannot read the
     family/reason/proof back to reconstruct the operator's policy topology.
-  * HIGH — a `clears-this-gate` proof marker never sits on a runtime-mutable
+  * HIGH - a `clears-this-gate` proof marker never sits on a runtime-mutable
     (lease/ledger) predicate; such a predicate is `candidate` (TOCTOU).
 
 The tests are the spec made executable (design §7).
@@ -79,7 +79,7 @@ def test_taint_sink_trusted_view_carries_navigate_with_endorse_form():
 
 def test_taint_sink_names_in_scope_declassifier_as_clears_this_gate():
     """A declassifier in scope and returning `Trusted[T]` clears THIS gate by
-    construction — an immutable-at-refusal fact, so `clears-this-gate`."""
+    construction - an immutable-at-refusal fact, so `clears-this-gate`."""
     model = TaintModel()
     model.declassifiers.add("wash")
     checker = _FlowChecker(model, "f.rvl", 1, endorse_allowed=frozenset())
@@ -165,7 +165,7 @@ def test_untrusted_author_matrix_is_mutually_indistinguishable():
 def test_redacted_operator_only_is_byte_identical_to_genuine_blocked():
     """A refusal whose only real alternatives were operator-enacted (now
     redacted) and a genuinely-blocked refusal are byte-identical under the
-    untrusted profile — no dropped-then-empty vs genuinely-blocked one-bit
+    untrusted profile - no dropped-then-empty vs genuinely-blocked one-bit
     tell."""
     prof = _untrusted()
     redacted_operator_only = evaluate(
