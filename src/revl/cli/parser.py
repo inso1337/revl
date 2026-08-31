@@ -610,6 +610,23 @@ def build_parser() -> argparse.ArgumentParser:
     recover.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
                          help="on roll-forward, the item-15 snapshot to re-admit "
                               "so recovery resumes the persisted generation")
+    # re-establishing the approval posture on roll-forward (item 246): a snapshot
+    # taken under `--approval-policy`/`--policy` refuses to restore into a
+    # policy-less session, because that would replay a once-approved class-(c)
+    # activation crossing UNPROMPTED. Pass the SAME posture the original serve had
+    # so the gate re-arms and the crossing re-prompts (or is refused) as on first
+    # boot (docs/crash-recovery.md).
+    recover.add_argument("--approval-policy", default=None, metavar="MODE",
+                         choices=("auto",),
+                         help="on --restore, re-arm the auto-approve policy (item "
+                              "246) the snapshot was taken under, so a class-(c) "
+                              "activation crossing re-prompts on recovery instead "
+                              "of firing unprompted. Required when the snapshot "
+                              "records an approval policy")
+    recover.add_argument("--policy", default=None, metavar="POLICY",
+                         help="on --restore, re-bind the boundary-policy file (item "
+                              "33) the snapshot was taken under, so its `requires "
+                              "approval` gate re-arms on recovery")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
 
     why = sub.add_parser(
