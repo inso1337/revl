@@ -91,7 +91,36 @@ def audit_report(ir: dict) -> dict:
         # appear). This is the slice-1 exit surface: the derivation is
         # inspectable before any runtime consumes it.
         **_parallel_plan_surface(ir),
+        # item 256 Slice 2 (docs/design/256-capability-bound-secrets.md §5): the
+        # audit secrets table. NAME and CAPABILITY only - never the value, and no
+        # length, hash, or timing (§5a, attack A5). The value lives solely in the
+        # driver's run-time `_REVL_SECRETS`, never in the IR, so there is nothing
+        # here to leak. ADDITIVE and PRESENT ONLY when the program binds a secret,
+        # so a secret-free composition's audit surface is byte-identical to before
+        # (the same conditional-presence discipline as `parallel_plan` above).
+        # Binding a secret, or rebinding it to a wider capability, surfaces as a
+        # `secret:<capability>:<name>` crossing the drift gate flags as a widening
+        # (see `crossings`); removing a binding is a narrowing.
+        **_secrets_surface(ir),
     }
+
+
+def _secrets_table(ir: dict) -> list:
+    """The audit secrets table: one `{"name","capability"}` row per bound secret
+    (item 256, Slice 2, §5). NAME and CAPABILITY only - the value is NEVER present
+    (it lives solely in the driver's run-time `_REVL_SECRETS`, never in the IR),
+    and there is no length, hash, or timing field (§5a, attack A5). Built purely
+    statically from `ir["secrets"]`, the manifest-visible rows Slice 1 lowered."""
+    return [{"name": row["name"], "capability": row["capability"]}
+            for row in ir.get("secrets") or []]
+
+
+def _secrets_surface(ir: dict) -> dict:
+    """The additive `secrets` audit key, or `{}` when the program binds no secret,
+    so a secret-free composition's audit surface stays byte-identical to before
+    (the same conditional-presence discipline as `_parallel_plan_surface`)."""
+    table = _secrets_table(ir)
+    return {"secrets": table} if table else {}
 
 
 def _parallel_plan_surface(ir: dict) -> dict:
@@ -183,12 +212,21 @@ def crossings(audit: dict) -> set[str]:
         host:<component>:<name>           a reached host extern
         taint:<component>:<origin>        a value of <origin> reaches an emission here
         declassify:<component>:<origin>   an untrusted value of <origin> is declassified here
+        secret:<capability>:<name>        a secret bound to a capability (item 256)
 
     The two taint tokens flow through `diff_crossings`/`evaluate` unchanged, so a
     newly-appearing `taint:` (web content newly routed into a send) or
     `declassify:` (a newly-added `endorse`) is a *widening* that fails the drift
     gate — the same mechanism that already catches "one more emission" now
     catching "one more declassification" (item 249, Decision 5).
+
+    The `secret:` token (item 256, Slice 2) is a composition-level crossing, not a
+    per-component one: it is drawn from the top-level `secrets` table, so binding a
+    new secret, or rebinding one to a *wider* capability (a different token), is an
+    addition the gate flags as a widening; removing a binding is a narrowing. The
+    token carries name and capability only (the value is never in the audit at
+    all), so the drift gate reveals the authority fact (which key, which
+    capability), never the secret.
     """
     out: set[str] = set()
     for component, stats in (audit.get("boundary") or {}).items():
@@ -201,6 +239,11 @@ def crossings(audit: dict) -> set[str]:
             out.add(f"taint:{component}:{origin}")
         for origin in taint.get("declassify") or []:
             out.add(f"declassify:{component}:{origin}")
+    # item 256 Slice 2: the bound-secret crossings, read from the composition-level
+    # `secrets` table (name + capability only, never a value). Absent for a
+    # secret-free composition, so its crossing set is byte-identical to before.
+    for row in audit.get("secrets") or []:
+        out.add(f"secret:{row['capability']}:{row['name']}")
     return out
 
 
