@@ -228,7 +228,7 @@ def test_ts_only_extern_is_not_python_portable():
 
 def test_acquire_extern_without_undo_rejected():
     with pytest.raises(RevlError, match="must declare `undo`"):
-        compile_source("extern acquire fn listen(port: Int) -> Int = @py { return port }")
+        compile_source("extern acquire fn listen(port: Int) -> Socket = @py { return port }")
 def test_test_block_lowers_and_emits_runnable_python():
     ir, ns = _compile_emit(
         """

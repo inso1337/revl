@@ -148,7 +148,8 @@ def test_non_witnessed_method_effect_stays_refused():
     (site-`undo`) effect in a method body is still a hard refusal — the wasm
     accumulator has no general method-time acquisition."""
     src = '''
-    extern acquire fn tick() -> Int undo untick(0) = @wasm { (i64.const 0) }
+    type Bracket = { fd: Int }
+    extern acquire fn tick() -> Bracket undo untick(0) = @wasm { (i32.const 0) }
     extern pure fn untick(r: Int) -> Unit = @wasm { }
     service S { emission fn f(x: Int) }
     component C provides s: S {

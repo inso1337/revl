@@ -71,7 +71,7 @@ def test_deferred_is_refused_in_a_teardown_position():
     # an acquire's undo may not call a deferred emission (teardown runs at/after
     # the verdict; enqueueing into a flushing/dropped queue is unanswerable)
     src = (_SEND +
-           "extern acquire fn a() -> Str undo send(result) = @py { return \"r\" }\n")
+           "extern acquire fn a() -> Ticket undo send(result) = @py { return \"r\" }\n")
     with pytest.raises(RevlError) as exc:
         _compile(src)
     assert "teardown position" in str(exc.value)
