@@ -46,11 +46,24 @@ proven in-bounds.
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 
 from .errors import RevlError
 from .why import CHAIN, SET, TraceStep, WhyTrace
+
+
+class InertTaintPolicyWarning(UserWarning):
+    """A taint policy rule (`<origin>-taint may not reach ...` /
+    `... may not declassify <origin>`) was evaluated against an audit that
+    carries NO taint surface at all (item 249, Finding 3).
+
+    The taint walk mints an origin only when the program is annotated
+    (`Untrusted[T]`) or compiled with derived sources on (`--taint-strict` / the
+    untrusted-author profile). Over an unannotated, no-profile program the walk is
+    inert, so a taint rule silently matches nothing — an operator must not mistake
+    an inert rule for a protecting one. This warns loudly rather than passing clean."""
 
 # a reach of `*` is an unbounded emission or a first-class dispatch — a
 # boundary the analysis cannot name (docs/capabilities.md). It is the token no
@@ -622,7 +635,34 @@ def evaluate(policy: Policy, audit: dict,
 
     if policy.tenants_isolated:
         violations.extend(_tenant_violations(audit, manifest))
+
+    # item 249, Finding 3: a taint policy rule over an audit with NO taint surface
+    # is inert — the derived-source walk is off (an unannotated, no-profile
+    # program), so the rule mints nothing and matches nothing. Warn loudly so an
+    # operator is not lulled by a rule that protects nothing.
+    _warn_if_taint_rules_are_inert(policy, audit)
     return violations
+
+
+def _warn_if_taint_rules_are_inert(policy: Policy, audit: dict) -> None:
+    if not (policy.taint_flow_rules or policy.declassify_rules):
+        return
+    for stats in (audit.get("boundary") or {}).values():
+        taint = stats.get("taint") or {}
+        if taint.get("reaches") or taint.get("declassify"):
+            return  # a real taint surface exists; the rules can match
+    origins = sorted(
+        {rule.origin for rule in policy.taint_flow_rules}
+        | {pat for rule in policy.declassify_rules for pat in rule.patterns})
+    warnings.warn(
+        "taint policy rule(s) naming ["
+        + ", ".join(origins)
+        + "] match nothing: this composition carries no taint surface, so the "
+          "rule protects nothing. Derived taint sources are OFF unless the "
+          "program is annotated (`Untrusted[T]`) or compiled with `--taint-strict` "
+          "(the untrusted-author profile turns it on). An inert rule is not a "
+          "protecting one (item 249).",
+        InertTaintPolicyWarning, stacklevel=2)
 
 
 def _allow_violation(manifest: dict, name: str, reach: Reach,
