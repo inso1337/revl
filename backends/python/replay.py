@@ -789,6 +789,74 @@ class _ServiceProxy:
         return f"<recording {self._key}: {self._service}>"
 
 
+class _SpawnRecorder:
+    """A recording wrapper around a runtime ``SpawnHandle``.
+
+    Everything delegates to the real handle (``dispose``, the hot-swap
+    ``capture_state``/``restore_state`` surface, ``component``); ONLY ``get(key)``
+    is intercepted. When the provision at ``key`` publishes ``emission`` methods,
+    ``get`` returns a :class:`_ServiceProxy` bound to the SPAWNER's timeline, so a
+    ``emit s.inner.method()`` crossing records a WAL step exactly as a required
+    service does. Without this, a provision reached off a spawn handle came back
+    unwrapped and its emissions were invisible to the crash-recovery no-residue
+    proof and the erase-report overlay.
+
+    The registry (``_remember_instance``) still holds the REAL handle, and this
+    wrapper forwards ``dispose``/state to it, so teardown identity and live
+    instance enumeration are unchanged.
+    """
+
+    __slots__ = ("_handle", "_timeline", "_ir", "_services")
+
+    def __init__(self, handle, timeline: Timeline, ir: dict, services: dict) -> None:
+        object.__setattr__(self, "_handle", handle)
+        object.__setattr__(self, "_timeline", timeline)
+        object.__setattr__(self, "_ir", ir or {})
+        object.__setattr__(self, "_services", services or {})
+
+    def get(self, key: str):
+        value = self._handle.get(key)
+        if value is None:
+            return value
+        service = self._service_for(key)
+        if service is None:
+            return value
+        methods = ((self._services.get(service) or {}).get("methods") or {})
+        emissions = {m for m, spec in methods.items() if (spec or {}).get("emission")}
+        if not emissions:
+            return value
+        return _ServiceProxy(value, self._timeline, key, service, emissions)
+
+    def _service_for(self, key: str) -> Optional[str]:
+        component = getattr(self._handle, "component", None)
+        for comp in (self._ir.get("components") or []):
+            if comp.get("name") == component:
+                return (comp.get("provides") or {}).get(key)
+        return None
+
+    def __getattr__(self, name: str):
+        # everything that is not `get` is the real handle's own surface
+        # (dispose, capture_state, restore_state, component, ...).
+        return getattr(object.__getattribute__(self, "_handle"), name)
+
+    def __repr__(self) -> str:  # pragma: no cover — debugging aid
+        return f"<recording spawn {getattr(self._handle, 'component', '?')}>"
+
+
+# The recorder observes an emission only where the crossing is routed through a
+# handle it wraps: a required service (`_ServiceProxy` off the recording context)
+# or a spawn-handle provision (`_SpawnRecorder.get` above). A *direct* free host
+# extern emission (`emit announce(x)`, a kind-3/4 crossing) compiles to a bare
+# module-level call — `announce(x)` — that never touches the recording context,
+# and the extern body is G8-opaque, so there is no seam to record it at this
+# layer. That crossing is caught statically by the approval fold and the
+# activation-crossing gate, not by this runtime WAL recorder.
+# TODO(414): if such a free-extern emission ever needs a runtime WAL record, the
+# seam is the emitter (route the extern call through `_revl_ctx`) or a recorded
+# extern shim, not `_RecordingContext` — the recorder cannot see the call as it
+# stands.
+
+
 class _RecordingContext:
     """Delegates everything to the real cordis context, recording the
     accumulator events on the way through.
@@ -799,13 +867,32 @@ class _RecordingContext:
     """
 
     def __init__(self, ctx, timeline: Timeline, requires: dict,
-                 services: dict) -> None:
+                 services: dict, ir: Optional[dict] = None) -> None:
         object.__setattr__(self, "_revl_ctx", ctx)
         object.__setattr__(self, "_revl_timeline", timeline)
         object.__setattr__(self, "_revl_requires", dict(requires or {}))
         object.__setattr__(self, "_revl_services", services or {})
+        object.__setattr__(self, "_revl_ir", ir or {})
 
     # -- recorded surface --------------------------------------------------
+
+    def _revl_record_spawn(self, handle):
+        """Wrap a spawn handle so an emission reached through it
+        (``emit s.inner.method()``) records on THIS component's timeline, exactly
+        as a required-service emission does.
+
+        The runtime's :func:`runtime.spawn` calls this when a recording context is
+        threaded through the spawn (the hook is absent on the real cordis
+        ``Context``, so an un-instrumented activation is untouched). This is the
+        runtime counterpart to the static spawn-fold: the spawner is the one doing
+        the crossing, so the crossing is recorded against the spawner, the same
+        seam the static approval fold was taught to see.
+        """
+        return _SpawnRecorder(
+            handle,
+            object.__getattribute__(self, "_revl_timeline"),
+            object.__getattribute__(self, "_revl_ir"),
+            object.__getattribute__(self, "_revl_services"))
 
     def effect(self, fn, *args, **kwargs):
         label = args[0] if args else kwargs.get("label")
@@ -942,7 +1029,8 @@ class Recorder:
             # resolution here to keep the recorded body faithful.
             if config_schema is not None:
                 config = config_schema.resolve(config)
-            return apply(_RecordingContext(ctx, timeline, requires, services), config)
+            return apply(_RecordingContext(ctx, timeline, requires, services,
+                                           recorder._ir), config)
 
         recording_apply.__name__ = getattr(apply, "__name__", "apply")
         recording_apply.__doc__ = getattr(apply, "__doc__", None)
