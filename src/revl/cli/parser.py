@@ -141,6 +141,12 @@ def build_parser() -> argparse.ArgumentParser:
              "envelope per sandboxed process: the fs/net grant, the effective "
              "reach of each seam-served key, and the externs the [sandbox.needs] "
              "table vouches (claimed, unverified). Human output only.")
+    # item 309: the replay-class view over the recovery surface.
+    audit.add_argument(
+        "--recovery", action="store_true", default=None,
+        help="also print the item-309 recovery view: every inverse, deferred "
+             "emission, and compensation with its replay class (free / fenced / "
+             "human-finish) and idempotency register. Human output only.")
     # item 290: the confidence/evidence admission inputs, so the `--policy` gate
     # can see a component's item-293 evidence bundle. Absent unless the policy
     # carries evidence rules; a policy with none is byte-identical.

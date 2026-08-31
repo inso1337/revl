@@ -283,19 +283,52 @@ def test_mcp_gauntlet_threshold_needs_no_attestation_root():
     assert policy.evidence_rules[0].unrooted_facets() == frozenset()
 
 
-# --------------------------------------------------- register floor (slice 1)
+# ------------------------------------ register floor (item 290, unlocked by 309)
 
-def test_requires_register_declared_admits():
-    audit = _audit(SOLO)
+# `db` now carries a `declared` idempotency register (item 44 emission claim,
+# recorded in the IR by 309's ledger), so `requires register` reads a real
+# register off `audit["capability_registers"]`.
+IDEMPOTENT_SOLO = """
+service Store { emission[db] idempotent fn put(key: Str, value: Str) }
+component CsvReader requires store: Store {
+  emit store.put("a", "b")
+}
+"""
+
+
+def test_requires_register_declared_admits_a_declared_capability():
+    audit = _audit(IDEMPOTENT_SOLO)
+    assert audit["capability_registers"] == {"db": "declared"}
     policy = parse_policy("capability db requires register declared")
     assert evaluate(policy, audit) == []
 
 
-def test_requires_register_higher_floor_is_a_parse_error():
+def test_requires_register_declared_refuses_an_unregistered_capability():
+    # plain SOLO: `db` is a non-idempotent emission, so it carries NO register
+    # and falls below even the `declared` floor (309's ledger made the floor
+    # meaningful — it is no longer a no-op).
+    audit = _audit(SOLO)
+    assert "db" not in audit["capability_registers"]
+    policy = parse_policy("capability db requires register declared")
+    violations = evaluate(policy, audit)
+    assert any(v.kind == "register" and v.token == "db" for v in violations)
+
+
+def test_requires_register_higher_floor_parses_and_enforces():
+    # 309's ledger unlocks the floors: they PARSE now, and enforce under the
+    # partial order (declared < keyed, declared < shape-proven; peers).
     for level in ("keyed", "shape-proven", "strong"):
-        with pytest.raises(PolicyError) as exc:
-            parse_policy(f"capability db requires register {level}")
-        assert "not yet recordable" in str(exc.value)
+        policy = parse_policy(f"capability db requires register {level}")
+        declared_audit = _audit(IDEMPOTENT_SOLO)  # db is only `declared`
+        violations = evaluate(policy, declared_audit)
+        assert any(v.token == "db" for v in violations), level
+    # a keyed capability satisfies a keyed floor (and a strong floor).
+    keyed_audit = _audit(IDEMPOTENT_SOLO)
+    keyed_audit["capability_registers"] = {"db": "keyed"}
+    assert evaluate(parse_policy("capability db requires register keyed"),
+                    keyed_audit) == []
+    assert evaluate(parse_policy("capability db requires register strong"),
+                    keyed_audit) == []
 
 
 # ----------------------------------------------- revl policy evaluate report

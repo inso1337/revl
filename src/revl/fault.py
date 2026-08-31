@@ -1252,7 +1252,12 @@ def _outstanding(events: list) -> dict:
             conns.pop(tag, None)
         elif verb == "insert":
             if tag in keys:
-                keys[tag].add(rest)
+                # item 309: a value-carrying insert line is `<key> = <hash>`.
+                # `_outstanding` stays the value-BLIND negative control — it folds
+                # the KEY and ignores the digest — but it must strip the ` = <hash>`
+                # suffix so insert/remove still pair (a bare pre-309 `insert k`
+                # line has no suffix and is unchanged).
+                keys[tag].add(rest.split(" = ", 1)[0].strip())
         elif verb == "insert_if_absent":
             # item 397: the record is "<key> -> true|false". A `true` CAS set
             # the key (fold it in exactly as `insert`); a `false` CAS changed
@@ -1310,6 +1315,175 @@ def _fingerprint_delta(baseline: dict, final: dict) -> list:
             diffs.append(f"`{tag}` released baseline connection {conn} "
                          "(the inverse released more than it acquired)")
     return diffs
+
+
+# ---------------------------------------------------------------------------
+# item 309: the value-aware double-undo round
+# ---------------------------------------------------------------------------
+#
+# The precondition the design (docs/design/309-idempotent-inverse.md, §"The
+# test") fixes FIRST: `_outstanding` above is value-BLIND. It folds the trace
+# into referent SETS, carrying keys and never values, so a delta-shaped inverse
+# (the design's counter-increment headline, a refund) moves a value twice and
+# the set fingerprint never sees it. Left as-is a falsified `undo idempotent`
+# declaration sails through and `replay: free` rests on unearned evidence.
+#
+# So this section adds a VALUE-CARRYING fold and a value-modeling world, WITHOUT
+# touching `_outstanding` — the value-blind fold is retained deliberately as the
+# negative control the design names ("the same fixture against the referent-set
+# fingerprint PASSES, so the round must assert on digests"). Scope, stated
+# plainly (design §"Scope of the sweep"): the double-undo instruments catch
+# referent-cardinality divergence and VALUE divergence, and NOTHING ELSE.
+# External-emission divergence (a refund that fires twice at a real remote) is
+# invisible to the model world by construction; it is covered only by the keyed
+# register and the mock-remote key tests, never by this sweep. A green round
+# says the descriptor's replay is value-stable against the model, not that the
+# world's remotes dedup.
+
+import hashlib  # noqa: E402 — kept local to the value-aware section
+
+# verbs whose recovered inverse APPLIES A DELTA to the referent's value rather
+# than writing an absolute one: re-running one moves the value again, so it is
+# non-idempotent by construction (the exact class 309 exists to catch). A verb
+# not in this set is treated as restore-to-recorded-value (last-writer-wins,
+# idempotent). Matched as a substring of the lowered method, like DictWorld's
+# `_REMOVE`, so `credit_account`/`applyRefund` are caught too.
+_DELTA_VERBS = ("increment", "decrement", "refund", "credit", "debit",
+                "deposit", "withdraw", "append", "push", "adjust", "accrue",
+                "add", "subtract")
+
+
+def _value_digest(value) -> str:
+    """A short, STABLE digest of an applied value (design §"The test", point 1).
+
+    Stable across processes — uses hashlib, never Python's per-process-salted
+    `hash()`, because the digest is compared across a recovery re-run in a fresh
+    process. Canonicalizes through `repr` of a JSON-ish normal form so two
+    equal values digest equally regardless of dict key order."""
+    try:
+        import json  # noqa: PLC0415
+        canon = json.dumps(value, sort_keys=True, default=repr)
+    except (TypeError, ValueError):  # pragma: no cover — exotic value
+        canon = repr(value)
+    return hashlib.blake2s(canon.encode("utf-8"), digest_size=6).hexdigest()
+
+
+def _outstanding_valued(events: list) -> dict:
+    """The value-AWARE companion to `_outstanding`: the same acquire/insert/
+    remove fold, but it ALSO folds the per-key value digest carried by a
+    value-carrying insert line (`<tag>.insert <key> = <hash>`), item 309.
+
+    Backward-compatible: a bare `<tag>.insert <key>` line (every pre-309 trace,
+    and the fabricated-ledger unit fixtures) folds exactly as before with no
+    digest recorded for that key, so `_outstanding_valued` degrades to a
+    superset of `_outstanding`. The digest map is what a delta-shaped inverse
+    moves on a second application and a restore-shaped one does not."""
+    base = _outstanding(events)
+    digests: dict = {}
+    for event in events:
+        head = event.split(" ", 1)[0]
+        tag, _, verb = head.rpartition(".")
+        if not tag or verb not in ("insert", "insert_if_absent"):
+            continue
+        rest = event[len(head):].strip()
+        if " = " not in rest:
+            continue  # a bare (value-blind) insert line — no digest to fold
+        key_part, _, digest = rest.partition(" = ")
+        key_part = key_part.strip()
+        # a CAS `<key> -> true|false = <hash>`: only a `true` set a value
+        if " -> " in key_part:
+            key_only, _, outcome = key_part.rpartition(" -> ")
+            if outcome != "true":
+                continue
+            key_part = key_only
+        digests.setdefault(tag, {})[key_part] = digest.strip()
+    # a `remove` clears any digest for that key (mirrors the key-set fold)
+    for event in events:
+        head = event.split(" ", 1)[0]
+        tag, _, verb = head.rpartition(".")
+        if verb == "remove" and tag in digests:
+            digests[tag].pop(event[len(head):].strip(), None)
+    base["digests"] = {tag: d for tag, d in digests.items() if d}
+    return base
+
+
+class _ValueWorld:
+    """A value-modeling world the double-undo round re-applies inverse ops to
+    (design §"The test", point 2): an extension of the recovery `DictWorld`
+    idea that stores a per-referent VALUE and applies a delta op as a DELTA, so
+    a non-idempotent inverse can actually diverge in the model instead of being
+    flattened by a dict overwrite.
+
+    An inverse op is the reconstructible WAL shape recovery already keys off —
+    `{"receiver","method","args"}` — extended with the applied `value`. The
+    verb decides the shape: a `_DELTA_VERBS` method accumulates (re-applying
+    moves the value), any other method is restore-to-recorded-value (re-applying
+    is a no-op). Pure and runtime-free, so the round is unit-testable against
+    fabricated op lists exactly as `_outstanding` is against fabricated
+    ledgers."""
+
+    def __init__(self) -> None:
+        self.values: dict = {}
+
+    @staticmethod
+    def _key(op: dict) -> str:
+        args = op.get("args") or []
+        return f"{op.get('receiver')}:{args[0] if args else ''}"
+
+    @staticmethod
+    def _is_delta(op: dict) -> bool:
+        method = (op.get("method") or "").lower()
+        return any(verb in method for verb in _DELTA_VERBS)
+
+    def apply(self, op: dict) -> None:
+        ref = self._key(op)
+        value = op.get("value")
+        if self._is_delta(op):
+            # a delta accumulates onto whatever stands — the non-idempotent
+            # shape. Numeric deltas sum; a non-numeric delta (an append) grows a
+            # tuple, so a second application still moves the digest.
+            prior = self.values.get(ref)
+            if isinstance(value, (int, float)) and isinstance(prior, (int, float)):
+                self.values[ref] = prior + value
+            elif isinstance(value, (int, float)) and prior is None:
+                self.values[ref] = value
+            else:
+                self.values[ref] = (prior, value) if prior is not None else (value,)
+        else:
+            # restore-to-recorded-value: last writer wins, so re-applying the
+            # same absolute value is a no-op (idempotent by construction).
+            self.values[ref] = value
+
+    def fingerprint(self) -> dict:
+        return {ref: _value_digest(v) for ref, v in sorted(self.values.items())}
+
+
+def _double_undo_round(inverse_ops: list) -> tuple:
+    """The property in operational terms (design §"The test"): re-applying an
+    inverse's WAL descriptor to the post-rollback world changes nothing.
+
+    Apply the recorded reconstructible inverse ops once against a value-modeling
+    world (`final`), then re-issue the SAME ops once more (`final2`), and return
+    `(ok, detail, final, final2)` with `ok = (final2 == final)` over value
+    digests. A restore-to-recorded-value inverse re-applies to the same digest
+    and passes; a delta-shaped inverse moves the digest on the second
+    application and is CAUGHT — which the value-blind `_outstanding` fold cannot
+    see (the negative control the extension exists for)."""
+    world = _ValueWorld()
+    for op in inverse_ops:
+        world.apply(op)
+    final = world.fingerprint()
+    for op in inverse_ops:
+        world.apply(op)
+    final2 = world.fingerprint()
+    if final2 == final:
+        return (True, None, final, final2)
+    moved = sorted(ref for ref in set(final) | set(final2)
+                   if final.get(ref) != final2.get(ref))
+    detail = ("a second application of the recorded inverse moved the value "
+              f"digest of referent(s) {', '.join(moved)} — the inverse is "
+              "delta-shaped (non-idempotent), so `undo(undo(s)) != undo(s)`")
+    return (False, detail, final, final2)
 
 
 def _verified_effect_labels(body: list) -> list:
@@ -1485,6 +1659,27 @@ def _roundtrip_dossier(results: list, rounds: int) -> dict:
             "rounds": rounds,
         },
         "components": components,
+        # item 309: the value-aware double-undo facet the gauntlet grade can
+        # require. The value-modeling round (`_double_undo_round` over a
+        # `_ValueWorld`) re-applies a recorded inverse's descriptor a SECOND time
+        # and asserts the value digest is stable — catching a delta/refund-shaped
+        # inverse the value-blind referent-set fingerprint above cannot see. Its
+        # scope is referent-cardinality + value divergence in the model ONLY,
+        # never external-emission divergence (docs/design/309-idempotent-inverse.md,
+        # §"Scope of the sweep"). The descriptor-level double-undo runs in the
+        # recovery-twice unit over witnessed-extern WAL descriptors;
+        # TODO(309-slice2): re-issue the live verified-effect inverses a second
+        # time here so this facet carries a per-component pass/fail from the
+        # runtime path too (needs the runtime to emit value-carrying trace lines).
+        "doubleUndo": {
+            "available": True,
+            "scope": "referent-cardinality + value divergence in the model; "
+                     "external-emission divergence out of reach",
+            "note": "value-aware re-application round — a delta-shaped inverse "
+                    "moves the value digest on the second undo and is caught; a "
+                    "restore-to-recorded-value inverse re-applies to the same "
+                    "digest and passes (item 309).",
+        },
     }
 
 
