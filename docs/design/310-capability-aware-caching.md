@@ -37,7 +37,12 @@ Dynamically, a cache entry is scoped to the authority that produced it: an
 access that does not hold live, covering authority cannot hit, and an entry
 dies with the grant, approval, or composition generation that covered its
 miss. A hit is a re-delivery of an already-authorized crossing's result, it is
-never a way to obtain one without the authorization.
+never a way to obtain one without the authorization. WHERE that dynamic
+check can fire is not a free choice: the shipped consent protocol decides
+the transaction at the seam, before execution, so the stated semantics are
+implementable today only where the hit/miss decision is visible to the seam
+gate. The enforcement-point section derives the slice restriction from that
+fact instead of pretending the runtime can ask a ledger it cannot reach.
 
 ## Background: what already exists, with the seams named
 
@@ -58,7 +63,19 @@ never a way to obtain one without the authorization.
   ledger already enforces `expiresAt` at the crossing and `remainingUses`
   consume-before-fire; 294's value order already says a shorter ttl is below a
   longer one. 310's `ttl` reuses all three: the spelling, the enforcement
-  point, and the attenuation order. No parallel duration mechanism.
+  point, and the attenuation order. No parallel duration mechanism (the
+  source-side LEXING of a duration is a small new spend, surface section:
+  `_parse_ttl` is a policy string parser, not an rvl token).
+- **The consent seam (245/246, shipped).** The whole authority transaction
+  happens at the seam, once per top-level call, before execution:
+  `_approval_decide_call` (mcp/session.py) classifies the call and durably
+  consumes a grant use or an approval before `invoke()` runs. The runtime
+  that executes the body has no ledger access at all; it sees only the
+  process-global `_SESSION_OWNER` (backends/python/runtime.py). Consumption
+  is per-call-atomic and refusal fires before any work starts. Any construct
+  wanting a per-access authority decision must either live at that seam or
+  build a crossing-level ledger transaction that does not exist today; this
+  constraint shapes 310's implementable slice (enforcement-point section).
 - **Idempotency keys (item 309).** A per-call dynamic key in a declared
   parameter role, grammar not manifest, because re-runnability is author
   knowledge. 310's freshness clauses sit in the same crux-table cell.
@@ -120,8 +137,8 @@ the authorizing scope stands.
 
 - **Applicability (checked shape).** Every crossing in the callee's reach is
   an emission crossing, and each carries the author's `cache capability`
-  claim or is pure. A reach that includes a witnessed, acquire, or `deferred`
-  crossing refuses (reconciliations section). Worst-over-reach applies: one
+  claim or is pure. A reach that includes a witnessed, acquire, `deferred`,
+  or `compensate`-declaring crossing refuses (reconciliations section). Worst-over-reach applies: one
   undeclared crossing anywhere in the reach and the whole callee is
   uncacheable, the same shape as the a/b/c fold.
 - **Soundness condition.** Three conjuncts, and all three are enforced, not
@@ -133,10 +150,14 @@ the authorizing scope stands.
      and the composition generation. Two callers under different grants never
      share an entry; a swap invalidates everything, the same way it
      invalidates a standing approval;
-  3. the capability check fires on every access. A hit performs the same
-     admission-derived and ledger-liveness checks a miss performs, minus only
-     the host body. No live covering grant, no hit: the access takes the miss
-     path and THAT is refused exactly as an uncached call would be.
+  3. the capability check fires on every access. A hit is admitted only
+     after the same classification and ledger-liveness checks a miss
+     performs, minus only the host body and the use consumption. No live
+     covering grant, no hit: the access takes the miss path and THAT is
+     refused exactly as an uncached call would be. Where in the shipped
+     protocol this check can run is derived, not chosen, in the
+     enforcement-point section, and it restricts the implementable slice
+     to seam service methods.
 - **Freshness.** No `invalidated_by`/`ttl` required: the scope bound IS the
   freshness bound. The entry dies when its authorizing grant dies (expiry,
   revocation, exhaustion) or the composition generation changes. A ttl MAY be
@@ -146,7 +167,9 @@ the authorizing scope stands.
   lease bounds boundary crossings, and a hit crosses nothing), and it cannot
   be used to stretch a count lease either: an exhausted grant is not live, so
   its entries are already dead. A one-use lease therefore yields one miss and
-  zero hits. Fail closed, no residue of authority.
+  zero hits. Fail closed, no residue of authority. This bullet is only
+  satisfiable where the gate can see the entry BEFORE it consumes, which is
+  the seam; the enforcement-point section owns the mechanics.
 
 ### `cache external` (class `external_effect`)
 
@@ -205,6 +228,18 @@ in the composition can ever cross is refused at admission (a subscription
 nothing can fire is a freshness claim that can never come true; misspelled
 tokens must not fail open into an effectively-ttl-less cache).
 
+Scope, stated bluntly: "ordered by the same WAL" presumes ONE WAL. The
+entry store is per-session and single-process. A single composition placed
+across processes (the 414 kind 5/6 seams, distribute.py) has a child firing
+its own extern crossings locally, where no shared WAL orders an
+invalidating crossing against an entry held in another process. Until the
+federation surface lands, a distributed placement REFUSES `cache` on any
+method the placement splits from its invalidating crossings (admission
+time, next to the existing distribution checks): a per-process private
+cache with cross-process invalidation traffic is exactly the stale-read
+bug this clause exists to prevent, and refusing is cheaper than a
+consistency protocol nobody has designed.
+
 ### `ttl <duration>`
 
 The shipped duration spelling, `<n>[ms|s|m|h]` with a bare number meaning
@@ -256,9 +291,16 @@ at every layer where 414 says a fold can go blind:
    the taint fold still records the origin; the attenuation algebra still
    compares its valuation. A component that reaches `net` through a cached
    read reaches `net`, full stop.
-2. **Admission is unchanged.** A caller needs the same capability grant to
-   call a cached-read method as an uncached one. There is no "read-through
-   cache" service a low-authority component can require instead.
+2. **Admission classification is unchanged; consumption is hit-aware.** A
+   caller needs the same capability grant to call a cached-read method as an
+   uncached one, and there is no "read-through cache" service a
+   low-authority component can require instead. The unqualified claim
+   "admission is unchanged" is dropped, because it is false in one precise
+   step: the seam gate checks entry liveness BEFORE it consumes a use, so a
+   live hit skips the consumption a miss performs. Everything upstream of
+   that step (classification, policy reach, refusal posture) is byte-for-
+   byte today's; the enforcement-point section specifies the one reordered
+   step and why it can only live at the seam.
 3. **Entries are authority-scoped, not ambient.** The entry key includes the
    grant id and composition generation (soundness condition 2 above). The
    hazard's sharpest sub-case, caller A misses under grant GA, caller B holds
@@ -272,7 +314,14 @@ at every layer where 414 says a fold can go blind:
    unbounded stream of silent answers; it converts one `yes` into answers for
    exactly as long as the operator said a `yes` lasts. A class-(c) cached
    emission still prompts per miss; what the operator's `requires approval
-   ttl` bounds is precisely how long the hit window stays open.
+   ttl` bounds is precisely how long the hit window stays open. One shipped
+   fact makes this promise non-trivial: standing approvals are single-use
+   (`_consume_approval` sets `consumed` after one use), so the approval
+   that covered a miss is consumed the moment the entry is born, and a
+   naive "hit requires an unconsumed approval" rule would close the window
+   after zero hits. The enforcement-point section decides the rule
+   deliberately: entry liveness binds to the approval record's ttl and
+   revocation, not its `consumed` flag.
 5. **Hits are on the record.** Every hit writes a WAL entry naming the entry
    and the miss crossing it re-delivers, and `session.state()` counts hits in
    their own counter (never folded into `silent`, which would overstate the
@@ -284,11 +333,107 @@ at every layer where 414 says a fold can go blind:
    (class fold sees the hit path) and F x 11 (taint fold sees it) as the
    high-value cells. The guard test forces the scope decision on every
    surface, so the next fold written cannot forget the hit path silently.
+7. **414 gets a column too: the applicability fold is surface H.** The fold
+   that computes "is this callee's reach cacheable" is itself an
+   authority-derivation surface, and "plausibly correct if implemented over
+   the ClassMap closure" is exactly the hand-wave the matrix exists to
+   eliminate. Surface H is REQUIRED to be a worst-over-reach fold over the
+   SAME closure the ClassMap folds, and it gets a 414-cell test per
+   crossing kind, pinned: does the refusal follow the spawn/instance-get
+   seam (kind 2)? the transitive closure (kind 4)? the `*` widening
+   (kind 8)? Each kind answers with a test, not a sentence.
+8. **The entry store is a value-copy surface (the E x 7 shape).** An entry
+   copies a result (and digests args) into a store that outlives the call,
+   which is the same hazard class as surface E's resource-in-seam-arguments
+   refusal: a resource handle stored in an entry would be stored authority,
+   re-deliverable to a later access. The applicability fold refuses a
+   resource-carrying result or parameter type with a STRUCTURAL walk
+   (nested records, variants, generic instantiations), never a type-name
+   match: a resource renamed or wrapped two levels deep refuses identically.
 
 What is deliberately NOT claimed: that the runtime can verify the host's
 determinism claim (`cache capability`) or the completeness of an
 `invalidated_by` subscription against the real world. Those are author
 claims with an out-of-band verification path, and the audit surface says so.
+
+## The enforcement point: consume-before-fire is load-bearing
+
+The laundering section says WHAT must hold on a hit. This section says WHERE
+it can hold in the shipped protocol, because the obvious placement cannot.
+
+Today the whole authority transaction is at the seam, once per top-level
+call, before execution: `_approval_decide_call` classifies the call and
+durably consumes a grant use or an approval before `invoke()` runs, and the
+runtime executing the body has no ledger access (only the process-global
+`_SESSION_OWNER`). The obvious placement for the hit/miss decision is deep
+in the runtime crossing, where the argument digest first exists. That
+placement makes two claims of this design JOINTLY UNSATISFIABLE: "a hit
+does not consume `remainingUses`" and "admission is unchanged". The seam
+has already consumed a use by the time the runtime discovers the hit.
+Repairing that by moving consumption into the crossing is worse: it
+silently restructures 245/246 consent from per-call-atomic to
+per-crossing, and it makes a refusal fire MID-body with partial work
+already escrowed, two changes to shipped semantics this item has no
+mandate to make.
+
+The resolution is scoping, not machinery. The implementable slice is
+`cache` on a SEAM SERVICE METHOD, where the call IS the crossing: the args
+the seam already holds are the cache key, so the gate can act
+pre-execution, in the exact spot `_approval_decide_call` runs today:
+
+1. check entry liveness against the ledger the seam already owns;
+2. on a live hit: deliver the entry, skip consumption, write the hit WAL
+   record; no body runs;
+3. on a miss: consume-before-fire and execute, byte-for-byte today's path.
+
+Per-call atomicity, refusal-before-work, and hit-does-not-consume hold
+simultaneously because the decision happens where the ledger lives. The
+stated semantics work THERE, today, with a one-step reorder inside the
+gate.
+
+Three sharp edges at the seam, each decided here rather than discovered in
+review:
+
+- **Single-use approvals.** `_consume_approval` sets `consumed` after one
+  use, so the approval covering a miss is consumed when the entry is born.
+  Decision: an approval-covered entry's liveness binds to the approval
+  record's ttl and revocation, NOT its `consumed` flag. The flag means
+  "this approval's one authorized crossing happened", and that crossing is
+  the miss that populated the entry; a hit re-delivers that crossing's
+  result and needs no unconsumed use. One `yes` buys one miss plus hits
+  for the same args until the ttl lapses; any new miss prompts again,
+  exactly as today. The grant-side asymmetry is deliberate: an exhausted
+  count lease (`remainingUses` 0) IS a liveness event and kills its
+  entries, because a count lease bounds obtainable results while an
+  approval ttl declares a time window.
+- **Multiple covering grants.** `_find_standing_grant` returns a LIST. An
+  entry records the ONE grant id the seam actually consumed on its miss,
+  and hit liveness is checked against that recorded grant only. A hit
+  never shops among covering grants: entry authority is the authority
+  that produced it, not any authority that could have.
+- **No-policy sessions.** A session with no policy has no ledger, so a
+  `cache capability` or `cache external` entry would have no authority
+  scope to be keyed on or to die with. Decision: no ledger, no entry
+  store. Every access takes the miss path and the declaration is
+  dynamically inert (compile-time checks still run). Fail closed into
+  correctness: an unscoped entry is exactly the ambient store the
+  laundering section forbids. `cache pure` is unaffected (it has no
+  ledger interaction by construction).
+
+The extern-deep-in-the-reach case, a cacheable crossing INTERIOR to the
+called body where only the runtime sees the args, is real and is NOT
+specified here. Making the semantics hold there needs a crossing-level
+ledger transaction that does not exist: an emitted cache-step wrapper in
+the `_witnessed_step` mold, an owner-carried liveness/consume callback so
+the runtime can ask a question it currently cannot, WAL record ordering
+between the seam's consumption record and the crossing's hit record, and
+mid-execution refusal semantics for a crossing whose authority died
+between admission and arrival. That is a later slice with its own design
+pass (staged plan). Until it lands, the grammar still admits `cache` on an
+extern declaration, but admission refuses it when the declared crossing is
+not itself the seam method's direct body: "cache on an interior crossing
+is not yet enforceable; declare it on the seam method". Grammar-forward,
+enforcement-honest.
 
 ## Surface (question 4)
 
@@ -327,9 +472,32 @@ service Users {
 Grammar spend: one production, `cache` (`pure` | `capability` | `external`)
 (`invalidated_by` token (`,` token)*)? (`ttl` duration)?, accepted after the
 return type of a `fn`, an extern declaration, or a service-method
-declaration, before `=` or `undo`. `cache` becomes a reserved word in the
-lexer's KEYWORDS set, the 44/309 precedent (no contextual-keyword
-compatibility story to defend later). The class words are the roadmap's
+declaration, before `=` or `undo`. `cache` is a CONTEXTUAL keyword,
+recognized only in that post-return-type clause slot, and NOT added to the
+lexer's KEYWORDS set: this design's own motivating file uses `cache` as a
+provided KEY name (`provides cache: Store`, `handoff cache`,
+`provide cache` in examples/handoff_cache.rvl), and a global reservation
+would break it and every user file shaped like it. The clause slot is
+unambiguous (after a return type only clause heads may appear), so the
+contextual read costs one token of lookahead, cheaper than the in-tree
+migration plus the silent user-code break. `compensate` never contends for
+the slot: a `compensate`-declaring emission is in the refused reach
+(reconciliations section), so the two clauses cannot legally co-occur on
+one declaration and no ordering rule between them is needed, worth saying
+because both trail the signature.
+
+On `ttl`, the reuse claim is the spelling and the value order, not the
+parser: `_parse_ttl` is a policy STRING parser, and the rvl lexer has no
+duration token (`5m` today lexes as a number followed by an identifier).
+The clause therefore costs a small, real lexer/parser spend: a duration
+literal or a number-ident juxtaposition rule scoped to the clause slot,
+accepting exactly `_parse_ttl`'s forms (`<n>[ms|s|m|h]`, bare number is
+seconds) so the two surfaces cannot drift. One parser test is required
+because the namespaces overlap: an `invalidated_by` token literally named
+`ttl` (`... invalidated_by ttl ttl 5m`) must parse as one dotted-namespace
+token then one ttl clause, not swallow the clause head.
+
+The class words are the roadmap's
 `pure_fn` / `capability_result` / `external_effect` in the IR; the surface
 spells them `pure` / `capability` / `external` because `pure` is already a
 keyword, the modifier position makes `_fn`/`_result`/`_effect` redundant,
@@ -339,7 +507,10 @@ duration literal.
 
 On a service method the clause is part of the interface contract: every
 provider of the method inherits it, and audit attributes the cache to the
-seam. On an extern it binds the host boundary directly. Declaring it on a
+seam. On an extern it binds the host boundary directly; the spelling is
+grammar-legal from slice 1 but admission-refused until the
+interior-crossing slice lands, except where the extern is the seam
+method's direct body (enforcement-point section). Declaring it on a
 plain `fn` is only legal for `cache pure` (a plain fn with crossing reach
 gets the mismatch refusal, which points at the emission that should carry
 the declaration instead: freshness belongs on the boundary, not on a caller
@@ -412,9 +583,30 @@ history (a G7 completeness hole); and the witnessed result's meaning is "the
 world was changed and here is the receipt", which is exactly the thing a
 second caller must never receive without a second change. The same argument
 refuses `cache` where the reach includes a `deferred` class-(b) emission (a
-queued write is still a write). Cacheable reach is read-shaped by
-construction: pure calls and declared-cacheable emission reads only. The
-refusal text names the offending crossing and its class.
+queued write is still a write), and where it includes an emission declaring
+`compensate` (the parser's emission compensation clause): a compensated
+emission registers a `_Compensation` escrow entry at fire time whose
+second phase runs on abort, so a hit that skips the firing skips the
+registration, and an abort after a hit would replay an INCOMPLETE offset
+history: the miss caller's abort compensates, the hit caller's abort has
+nothing to run. One word in the refused set closes the hole: witnessed,
+acquire, `deferred`, `compensate`. The refusal text names the offending
+crossing and its class.
+
+Cacheable reach is read-shaped by DECLARATION, not by construction: the
+effect system has no read class, and a bare `emission` is write-capable
+with no checked inverse. `cache external` on an emission whose G8-opaque
+body actually WRITES is the mis-declaration failure mode, and it deserves
+its name: ELIDED WRITE, one silently dropped write per repeated argument
+tuple for the length of the ttl. The checker cannot see it (the 44/309
+honest-ledger tier applies with full force); the recording roundtrip and
+the audit cache line are the stated mitigations, and the open-questions
+section carries a sampling-revalidation tripwire. One staleness note in
+the same honest register: when every bound is absent (a `cache capability`
+entry under a grant with no `expiresAt`, no ttl clause, no generation
+change), the entry is fresh-by-definition for the entire session. That is
+the declared semantics, not a bug, but the audit line should surface an
+unbounded entry as such so an operator can cap it by policy.
 
 ### Leases and idempotency (294, 309)
 
@@ -448,22 +640,39 @@ tests; a slice is not "runtime works, honesty later".
   class-mismatch and no-clauses-on-pure refusals, IR field, and a cordis-py
   memo table keyed on the structural args digest. No ledger interaction.
   Smallest complete slice and the only one with zero security surface.
-- **Slice 2: `cache capability`.** Emission-read declaration, authority-
-  scoped entry store on the session ledger (grant id + valuation +
-  generation in the key), per-access liveness checks, WAL hit records, the
-  witnessed/acquire/deferred reach refusal, `state()` hit counter, audit
-  cache line, and the 414 crossing-kind-11 row with the A x 11 cell (the
-  class fold sees the hit path). This slice carries the laundering
-  resolution and its exit tests.
+- **Slice 2: `cache capability` on SEAM SERVICE METHODS.** Emission-read
+  declaration, authority-scoped entry store on the session ledger (recorded
+  grant id + valuation + generation in the key), the seam-gate
+  liveness-before-consume reorder (enforcement-point section: hit skips
+  consumption, miss consumes-before-fire unchanged), the recorded-grant
+  rule for multi-grant coverage, the no-policy inert rule, the
+  interior-crossing admission refusal, the distributed-placement refusal,
+  WAL hit records, the witnessed/acquire/deferred/compensate reach
+  refusal, the structural resource-in-entry walk, `state()` hit counter,
+  audit cache line, the 414 crossing-kind-11 row with the A x 11 cell, and
+  surface H with its per-kind cells. This slice carries the laundering
+  resolution and its exit tests, and it is implementable against the
+  shipped consent protocol as it stands.
 - **Slice 3: `cache external`.** The required-freshness refusal,
   `invalidated_by` (token resolution at admission, WAL-ordered invalidation
-  at the named crossing), `ttl` via the shipped duration parser and expiry
-  check, approval-ttl coupling of hit windows, taint re-attachment and the
-  F x 11 cell. The roadmap's `cache user_profile invalidated_by user.updated
-  ttl 5m` example compiles, runs, and audits at the end of this slice.
+  at the named crossing, single-process scope), `ttl` via the new duration
+  lexing matched to `_parse_ttl`'s forms and the shipped expiry check,
+  approval-ttl coupling of hit windows (consumed-flag rule per the
+  enforcement-point section), taint re-attachment and the F x 11 cell.
+  Still seam methods only. The roadmap's `cache user_profile invalidated_by
+  user.updated ttl 5m` example compiles, runs, and audits at the end of
+  this slice.
+- **Slice 4 (unscheduled, own design pass): interior crossings.** The
+  crossing-level ledger transaction the enforcement-point section scopes
+  out: an emitted cache-step wrapper in the `_witnessed_step` mold, an
+  owner-carried liveness/consume callback, WAL ordering between seam
+  consumption and crossing hit records, and mid-execution refusal
+  semantics. Not started until slices 2 and 3 have soaked; until then the
+  extern spelling stays admission-refused.
 
 Out of order is refused by dependency: slice 3's soundness conditions are a
-superset of slice 2's.
+superset of slice 2's, and slice 4 changes shipped consent mechanics no
+earlier slice touches.
 
 ## Exit tests
 
@@ -489,15 +698,49 @@ superset of slice 2's.
 6. **`invalidated_by` re-fetches.** After a crossing of the named token, the
    next access misses; ordering test: a session that fires the invalidating
    emission then reads observes the fresh value, never its own stale write.
-7. **Witnessed refusal.** `cache` on a witnessed extern (and on a fn whose
-   reach includes one) refuses; the fault sweep shows no escrow entry is
-   ever skipped by a cache in any admitted program.
+7. **Escrow-shaped refusals.** `cache` on a witnessed extern (and on a fn
+   whose reach includes one) refuses; likewise a reach including an
+   `acquire`, a `deferred` emission, or a `compensate`-declaring emission.
+   The fault sweep covers ALL escrow entry kinds (`_Transactional`,
+   `_Compensation`, witnessed inverses, acquire undos), not just
+   `_Transactional`, and shows no entry of any kind is ever skipped by a
+   cache in any admitted program.
 8. **Provenance.** A hit's value carries the miss's taint origins (the
    F x 11 cell); a taint-flow policy rule that refuses the miss path refuses
    the hit path identically.
 9. **Consent bound.** For an approval-required token, hits stop when the
    covering approval's ttl lapses; `state()` shows hits in their own
    counter, `prompts.perCall` unchanged by hits, incremented per miss.
+   The consumed-flag rule holds: after the miss consumes the single-use
+   approval, same-args hits continue until the ttl (not zero hits), and a
+   different-args access prompts again.
+10. **Seam consumption order.** On a miss, exactly one use is consumed
+    BEFORE the body fires (WAL order: consumption record precedes fire
+    record); on a hit, `remainingUses` is unchanged and no body runs; a
+    refusal on the miss path fires before any work, never mid-body. With
+    two covering grants, the entry hits only while its RECORDED grant is
+    live: revoking that grant forces a miss (which consumes the other
+    grant and re-keys) even though the other grant covered all along.
+11. **No-policy inertness.** In a session with no policy, a `cache
+    capability`/`cache external` program compiles, every access takes the
+    miss path (host count increments per call), and no entry store exists;
+    `cache pure` still memoizes.
+12. **Distribution refusal.** A placement that splits a `cache`-declaring
+    method across processes (distribute.py) refuses at admission, naming
+    the method and the split; the same composition placed in one process
+    admits.
+13. **Surface H per-kind cells.** The applicability fold is computed over
+    the same closure as the ClassMap, verified per 414 crossing kind: the
+    refusal follows the spawn/instance-get seam (kind 2), the transitive
+    closure (kind 4), and the `*` widening (kind 8), one cell test per
+    kind. The structural resource walk refuses a resource nested in a
+    record, in a variant arm, and under a generic instantiation, and a
+    structurally-resource type with an innocent name refuses identically.
+14. **Grammar edges.** `examples/handoff_cache.rvl` still compiles
+    unchanged (`cache` as a provided key name is untouched by the
+    contextual keyword); `... invalidated_by ttl ttl 5m` parses as the
+    token `ttl` plus a ttl clause; `5m` in the clause slot lexes as one
+    duration with `_parse_ttl`-identical semantics.
 
 ## Scoped out (and to whom)
 
@@ -525,3 +768,11 @@ superset of slice 2's.
 3. Does `invalidated_by` want glob patterns over tokens (the policy `covers`
    precedent) or exact tokens only? (Slice 3 starts exact; widening is
    backward-compatible.)
+4. Should the runtime carry a sampling-revalidation tripwire for the
+   elided-write failure mode: occasionally take the miss path on a
+   would-be hit and compare result digests, where a divergence is hard
+   evidence of a mis-declared `cache capability`/`cache external`? It is
+   sound (the re-cross runs under authority the caller already holds and
+   consumes as a miss), but it makes hit latency bimodal and its detection
+   is probabilistic; possibly a `revl verify`-family mode rather than an
+   always-on cost. (Open; pairs with the item-37 recording roundtrip.)
