@@ -216,17 +216,20 @@ def test_default_wal_path_is_durable_not_tempdir(tmp_path, monkeypatch):
     (no XDG override), the path resolves under ~/.local/state, and the created
     directory is owner-only (0o700) so no other local account can splice it."""
     import os as _os
-    import tempfile as _tempfile
 
     monkeypatch.delenv("REVL_WAL_DIR", raising=False)
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("sys.platform", "linux")
 
+    # Durable means: resolved under the per-user XDG state home (relative to
+    # HOME), not the old reboot-wiped tempfile fallback. The exact-path equality
+    # is the real check; a naive "not under gettempdir()" assertion is unsound
+    # because a test HOME under tmp_path is itself under the tempdir on CI.
     directory = wal_core.default_wal_dir()
     assert directory == str(tmp_path / ".local" / "state" / "revl" / "approval-wal")
+    assert directory.startswith(str(tmp_path))
     assert _os.path.isdir(directory)
-    assert not directory.startswith(_tempfile.gettempdir())
     assert (_os.stat(directory).st_mode & 0o777) == 0o700
 
     path = wal_core.default_wal_path("sess-1")
