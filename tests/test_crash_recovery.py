@@ -373,6 +373,59 @@ def test_a_real_recorded_activation_persists_and_recovers(session, tmp_path):
     assert any(e["kind"] == "emission" for e in report["unreconstructible"])
 
 
+# A supervisor whose provide-method reaches an emission THROUGH a spawn handle
+# (`emit w.inner.charge(n)`), not off a required service. Item 414: the runtime
+# recorder wrapped only required services, so this crossing produced no WAL record
+# and recover/erase-report silently missed it. The spawner is the one doing the
+# crossing, so the crossing must record against the spawner (Supervisor).
+_SPAWN_EMIT = """
+service Charger { emission fn charge(n: Int) -> Int }
+service Sup { emission fn run(n: Int) -> Int }
+component Worker provides inner: Charger {
+  provide inner { fn charge(n: Int) = n }
+}
+component Supervisor provides sup: Sup {
+  let w = effect spawn Worker with { } undo w.dispose()
+  provide sup { fn run(n: Int) { emit w.inner.charge(n) return n } }
+}
+"""
+
+
+@needs_cordis
+def test_a_spawn_handle_emission_is_recorded_in_the_wal(session, tmp_path):
+    """Item 414 (runtime counterpart to the spawn-fold static fix). An emission
+    reached through a spawn handle (`emit w.inner.charge(n)`) must land in the WAL
+    exactly as a required-service emission does, on the SPAWNER's timeline, so the
+    crash-recovery no-residue proof and the erase-report overlay see it. Before the
+    fix the spawned crossing left no record and recover reported it clean."""
+    session.load(compile_source(_SPAWN_EMIT, "<spawn>.rvl"), record=True)
+    assert session.call("sup", "run", [5])["result"] == 5
+
+    tl = session.recorder.timeline("Supervisor")
+    spawned = [s for s in tl.steps
+               if s.kind == replay.KIND_EMISSION
+               and (s.detail or {}).get("service") == "Charger"]
+    assert len(spawned) == 1  # the crossing THROUGH the spawn handle was recorded
+    assert spawned[0].detail["method"] == "charge"
+    assert spawned[0].detail["args"] == [5]
+
+    path = str(tmp_path / "spawn.wal")
+    with replay.WriteAheadLog(path, ir=session.ir, generation=1) as wal:
+        wal.append_timeline(tl)  # NO commit -> crashed mid-activation
+
+    loaded = replay.WriteAheadLog.read(path)
+    assert "emission" in [r["boundary"]["class"] for r in loaded["records"]
+                          if r["record"] == "effect"]
+
+    report = recover(path)
+    assert report["verdict"] == "rolled-back"
+    # the spawned crossing has no inverse: it surfaces as honest residue, no
+    # longer invisible to the recovery proof.
+    assert any(e["kind"] == "emission"
+               and "charge" in e.get("label", "")
+               for e in report["unreconstructible"])
+
+
 @needs_cordis
 def test_roll_forward_resumes_the_persisted_generation(session, tmp_path):
     """Roll-forward composes with item 15: a completed activation's WAL, plus
