@@ -577,6 +577,13 @@ def _run_audit(args, ir: dict) -> int:
                 bounded = [f"{token} <= {info['bound']} per activation"
                            for token, info in per_cap.items()
                            if info.get("kind") == "bounded"]
+                # a certified iteration whose initial fuel is still a config
+                # field: the ceiling is symbolic until composition pins it
+                # (docs/design/260 §2.2, §1.2).
+                bounded += [f"{token} <= {info['expr']} per activation "
+                            f"({info['per_iter']} per iteration)"
+                            for token, info in per_cap.items()
+                            if info.get("kind") == "bounded-symbolic"]
                 if bounded:
                     detail.append(f"cardinality: {', '.join(bounded)}")
                 for token, info in per_cap.items():
