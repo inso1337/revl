@@ -547,14 +547,18 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # imported closure). Inert without a profile, so a trusted compile is
     # byte-identical.
     _enforce_source([m.program for m in root_modules], profile)
-    # item 330: the import/reach bypass of the no-extern check — a root that
-    # `use`s a pre-granted module's host extern and reaches it directly. Built
-    # from the loader's resolved imports (only it knows which imported names
-    # resolve to a host-body extern), and refused before lowering runs a body.
+    # items 330 + 329/transitive: the import/reach bypass of the no-extern check.
+    # 330 refused a root that `use`s a host extern and reaches it directly, but
+    # `compile_files` merges the whole transitive `included` closure into one
+    # program, so an untrusted turn reaches host code through a `pub fn` wrapper in
+    # a NON-root module too. Feed the reach sweep every host-body extern in the
+    # merged closure (not just the root's imports) and let it follow the transitive
+    # call graph across `merged.fn_decls`; refused before lowering runs a body.
     if profile is not None and profile.no_extern:
         _check_no_host_extern_reach(
             [m.program for m in root_modules],
-            _imported_host_externs(root_modules, loader), profile)
+            merged.fn_decls,
+            _included_host_externs(included), profile)
     document = check_and_lower(
         merged, ambient, taint_strict=bool(profile and profile.taint_strict))
     # the allowlist half — refuse a reach outside the granted service set, on the
@@ -851,29 +855,29 @@ def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
                 recur(part)
 
 
-def _imported_host_externs(root_modules: list[_LoadedModule],
-                           loader: _ModuleLoader) -> dict:
-    """item 330: map every host-body extern NAME a ROOT imports by name to
-    `(decl, module_path)`.
+def _included_host_externs(included: list[_LoadedModule]) -> dict:
+    """items 330 + 329/transitive: map every host-body extern NAME declared in ANY
+    included module to `(decl, module_path)`.
 
-    Only named imports (`use "..." { sh }`) can put an extern in a body's scope
-    as a bare callable — an alias import exposes only public fns (lower rejects an
-    alias-qualified extern call), so an alias `use` reaches no extern. A resolved
-    `public_externs` entry with a non-empty `bodies` list is verbatim host code
-    (item 24, the gate does not sandbox it); a bodyless extern is a deploy-wired
-    host requirement, not host code smuggled through the import, so it is not
-    collected. The loader is already warm from the compose load, so re-resolving a
-    root `use` hits its cache."""
+    The 330 feeder collected only the ROOT's directly-imported extern surface
+    (`use "..." { sh }` on a root). But `compile_files` merges and lowers the whole
+    transitive `included` closure into one program, so a host body declared in a
+    NON-root module (reached through a `pub fn` wrapper that a root imports) is
+    just as callable and just as lowered. `check_no_extern` is root-scoped, so a
+    non-root module may freely DECLARE host-body externs; the reach sweep must
+    therefore see EVERY host body in the merged closure, not just the root's imports.
+
+    An extern with a non-empty `bodies` list is verbatim host code (item 24, the
+    gate does not sandbox it); a bodyless extern is a deploy-wired host requirement,
+    not smuggled host code, so it is not collected. The name is the merged-program
+    key `_iter_var_refs` sees: `_apply_module_privacy` has already run, so a private
+    extern carries its (possibly mangled) name and a `pub` extern its bare name,
+    consistent with the reach sweep's references."""
     result: dict = {}
-    for module in root_modules:
-        for use in module.program.uses:
-            if use.names is None:
-                continue
-            used = loader.load(loader.resolve_use(module.dir, module.path, use))
-            for name in use.names:
-                decl = used.public_externs.get(name)
-                if decl is not None and decl.bodies:
-                    result[name] = (decl, used.path)
+    for module in included:
+        for ext in module.program.externs:
+            if ext.bodies:
+                result.setdefault(ext.name, (ext, module.path))
     return result
 
 

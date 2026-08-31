@@ -247,6 +247,144 @@ def test_untrusted_importing_a_pure_fn_still_admits():
     assert {c["name"] for c in doc["components"]} == {"TurnComp"}
 
 
+# --------------------------------------------------------------------------- #
+# (a3) no-extern, TRANSITIVE import/reach bypass: items 330 + 329/transitive.
+# The 330 cut walked only the ROOT's directly-imported extern surface and swept
+# only the ROOT bodies. But `compile_files` MERGES and LOWERS the entire
+# transitive module closure into one program, so an untrusted turn reaches
+# arbitrary host code through a `pub fn` wrapper in a NON-root module: the wrapper
+# is bare-callable from a root body and its own body reaches the host extern.
+# The reach is real (the merged doc lowers and carries the host body) but the
+# host extern is DECLARED in a non-root module the root never `use`s directly.
+# The reach sweep must follow the transitive call graph across the merged closure.
+# --------------------------------------------------------------------------- #
+
+
+def test_transitive_reach_through_a_nonroot_pub_fn_wrapper_is_refused():
+    # One hop: root -> `wrap` (a `pub fn` in a NON-root module) -> `sh` (host
+    # extern in a third module). The root declares no extern and imports no extern
+    # (only the pure-looking `wrap`), so the root-only 330 sweep saw nothing, yet
+    # the merged program lowers `sh` and `wrap` calls it. Must be REFUSED.
+    root = """
+    use "evil.rvl" { wrap }
+    service Pwn { emission fn go() -> Str }
+    component P provides pwn: Pwn {
+      provide pwn { fn go() = emit wrap("id > /tmp/PWNED") }
+    }
+    """
+    evil = 'use "shelltool.rvl" { sh }\npub fn wrap(c: Str) -> Str { return sh(c) }\n'
+    with pytest.raises(RevlError) as exc:
+        compile_source(root, "turn.rvl", manifest=_base_ir(),
+                       modules={"evil.rvl": evil, "shelltool.rvl": _SHELL_TOOL},
+                       profile=AdmissionProfile.untrusted_author(set()))
+    assert getattr(exc.value, "code", None) == "G8"
+    msg = str(exc.value)
+    assert "reaching host code" in msg
+    assert "sh" in msg
+
+
+def test_two_hop_nonroot_chain_to_a_host_extern_is_refused():
+    # Two hops through NON-root modules: root -> `relay` -> `sh`. Neither the
+    # relay module nor the host module is imported by the root directly; the reach
+    # sweep must follow the whole call graph across the merged closure.
+    root = """
+    use "a.rvl" { relay }
+    service Pwn { emission fn go() -> Str }
+    component P provides pwn: Pwn { provide pwn { fn go() = emit relay("id") } }
+    """
+    a = 'use "b.rvl" { sh }\npub fn relay(c: Str) -> Str { return sh(c) }\n'
+    with pytest.raises(RevlError) as exc:
+        compile_source(root, "turn.rvl", manifest=_base_ir(),
+                       modules={"a.rvl": a, "b.rvl": _SHELL_TOOL},
+                       profile=AdmissionProfile.untrusted_author(set()))
+    assert getattr(exc.value, "code", None) == "G8"
+    assert "sh" in str(exc.value)
+
+
+def test_pure_py_host_body_reached_transitively_is_refused():
+    # A `pure` @py body (os.popen) is host code just the same: the profile
+    # refuses ANY host-body reach, across all classifications, exactly
+    # `check_no_extern`'s stance. Reached one hop through a non-root wrapper.
+    root = """
+    use "evil.rvl" { wrap }
+    service Turn { fn go() -> Str }
+    component P provides turn: Turn { provide turn { fn go() = wrap("id") } }
+    """
+    evil = 'use "tool.rvl" { sh }\npub fn wrap(c: Str) -> Str { return sh(c) }\n'
+    tool = ('pub extern pure fn sh(cmd: Str) -> Str\n'
+            '  = @py { import os; return os.popen(cmd).read() }\n')
+    with pytest.raises(RevlError) as exc:
+        compile_source(root, "turn.rvl", manifest=_base_ir(),
+                       modules={"evil.rvl": evil, "tool.rvl": tool},
+                       profile=AdmissionProfile.untrusted_author(set()))
+    assert getattr(exc.value, "code", None) == "G8"
+    assert "sh" in str(exc.value)
+
+
+def test_real_stdlib_transitive_pure_host_reach_is_refused():
+    # A real-stdlib case: `value_is_object` is a `pub fn` that calls the host-body
+    # `pub extern pure fn value_kind`. An untrusted turn that imports and reaches
+    # `value_is_object` transitively reaches `value_kind`'s @py body. It is a
+    # BENIGN pure body today, but the profile refuses ALL reachable host-body
+    # externs (the all-classifications stance `check_no_extern` set): the reviewer
+    # showed the SAME transitive path reaches shell the instant any stdlib `pub fn`
+    # ever wraps an effectful extern, so "refuse every host-body reach" is the only
+    # safe rule. Refusing here, not carving a pure-stdlib exception, keeps the
+    # profile sound against that future without re-auditing the whole stdlib.
+    src = """
+    use "stdlib/value.rvl" { value_is_object }
+    service Turn { fn run(v: Value) -> Bool }
+    component TurnComp provides turn: Turn {
+      provide turn { fn run(v) = value_is_object(v) }
+    }
+    """
+    with pytest.raises(RevlError) as exc:
+        compile_source(src, "turn.rvl", manifest=_base_ir(),
+                       profile=AdmissionProfile.untrusted_author(set()))
+    assert getattr(exc.value, "code", None) == "G8"
+    msg = str(exc.value)
+    assert "value_kind" in msg
+    assert "reaching host code" in msg
+
+
+def test_transitive_reach_admits_without_the_profile():
+    # The SAME transitive composition is normal usage for a TRUSTED author: the
+    # refusal is a property of the profile, not the code. No profile => admits,
+    # and the merged doc carries the host extern as before.
+    root = """
+    use "evil.rvl" { wrap }
+    service Pwn { emission fn go() -> Str }
+    component P provides pwn: Pwn { provide pwn { fn go() = emit wrap("id") } }
+    """
+    evil = 'use "shelltool.rvl" { sh }\npub fn wrap(c: Str) -> Str { return sh(c) }\n'
+    doc = compile_source(root, "turn.rvl", manifest=_base_ir(),
+                         modules={"evil.rvl": evil, "shelltool.rvl": _SHELL_TOOL})
+    assert {c["name"] for c in doc["components"]} == {"P"}
+    assert any(e["name"] == "sh" for e in doc.get("externs") or [])
+
+
+def test_unreached_nonroot_host_extern_still_admits():
+    # Precision, not over-approximation: an imported module MAY declare a host
+    # extern the turn never actually reaches. The root imports only the pure `calm`
+    # wrapper; the module's OTHER `pub fn` `danger` (which reaches `sh`) is never
+    # called from any reachable path, so the precise call-graph sweep does not
+    # false-refuse. A closure over-approximation would wrongly refuse this.
+    root = """
+    use "mixed.rvl" { calm }
+    service Turn { fn run() -> Str }
+    component TurnComp provides turn: Turn { provide turn { fn run() = calm("x") } }
+    """
+    mixed = (
+        'use "shelltool.rvl" { sh }\n'
+        'pub fn calm(x: Str) -> Str { return x }\n'
+        'pub fn danger(c: Str) -> Str { return sh(c) }\n'
+    )
+    doc = compile_source(root, "turn.rvl", manifest=_base_ir(),
+                         modules={"mixed.rvl": mixed, "shelltool.rvl": _SHELL_TOOL},
+                         profile=AdmissionProfile.untrusted_author(set()))
+    assert {c["name"] for c in doc["components"]} == {"TurnComp"}
+
+
 def test_real_stdlib_shell_import_and_emit_is_refused():
     # Fidelity to the reviewer's exact probe: the REAL stdlib `sh` extern,
     # resolved off the item-319 search path, imported and emitted by an

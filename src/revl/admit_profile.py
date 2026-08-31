@@ -148,53 +148,95 @@ def _iter_var_refs(node, out: set) -> None:
 
 
 def check_no_host_extern_reach(root_programs: list[Program],
-                               imported_host_externs: dict,
+                               merged_fn_decls: list,
+                               host_externs: dict,
                                profile: AdmissionProfile) -> None:
-    """(a2) Refuse if an untrusted-authored ROOT reaches an IMPORTED extern that
-    carries a host body — the import-and-call bypass of `check_no_extern`.
+    """(a2) Refuse if an untrusted-authored turn REACHES an extern that carries a
+    host body: the import-and-call bypass of `check_no_extern`, closed across the
+    WHOLE transitive module closure (items 330 and 329/transitive).
 
     `check_no_extern` refuses a root that DECLARES an extern, but nothing stopped
     a root from `use "stdlib/shell.rvl" { sh }` and calling `sh(...)`: the extern
     is DECLARED in a search-path module (trusted host code, granted deliberately)
-    yet REACHED directly from the untrusted turn. That runs arbitrary host code
-    under the profile whose whole purpose is to forbid it. The design's intent is
-    "compose granted SERVICES, never reach host code"; an imported host-body
-    extern is host code just the same (item 24: the gate does not sandbox host
-    code), so an untrusted author may not reach one directly.
+    yet REACHED from the untrusted turn. That runs arbitrary host code under the
+    profile whose whole purpose is to forbid it. The design's intent is "compose
+    granted SERVICES, never reach host code"; a host-body extern is host code just
+    the same (item 24: the gate does not sandbox host code).
 
-    `imported_host_externs` maps each host-body extern NAME the roots imported by
-    name to `(decl, module_path)` — built by the compiler, which owns the module
-    loader that resolves the imports. Refusal is conservative and sound: ANY
-    reference to such a name in a root component or fn body (a direct call, or
-    binding it to pass along) is a reach and is refused, full stop — there is no
-    extern allowlist, matching `check_no_extern`'s all-classifications stance. The
-    refusal fires at COMPILE (admission), before any host body runs, and names the
-    reached extern, the module it came from, and the profile rule.
+    The 330 cut walked only the ROOT's directly-imported extern surface and swept
+    only the ROOT bodies. But `compile_files` MERGES and LOWERS the entire
+    transitive `included` closure into one program, so an untrusted turn reaches
+    arbitrary host code through a `pub fn` wrapper in a NON-root module: the wrapper
+    is bare-callable from a root body and its own body reaches the host extern. The
+    reach is real (the merged doc lowers and carries the host body) but was neither
+    SEEN by the root-`uses`-only feeder nor SWEPT by the root-only reference sweep.
+
+    So the feeder (`_included_host_externs`) now keys every host-body extern in ANY
+    included module by name, and this sweep is a transitive call-graph reachability
+    pass: starting from every root component / provide-method body and every root
+    fn body (the admitted source), it follows bare-name calls into imported `pub
+    fn`s across `merged_fn_decls` and refuses the moment any reached name is a
+    host-body extern. This is the PRECISE call graph, not a closure over-
+    approximation: an included module whose host extern is never actually reached
+    from a root does NOT false-refuse (matching `test_untrusted_importing_a_pure_fn`
+    additivity). Refusal is otherwise conservative and sound: ANY bare reference
+    to a host-body extern anywhere on a reachable path is a reach and is refused,
+    full stop, with no extern allowlist and across all classifications, exactly
+    `check_no_extern`'s stance. It fires at COMPILE (admission), before any host
+    body runs, and names the reached extern, the module it came from, and the rule.
     """
-    if not profile.no_extern or not imported_host_externs:
+    if not profile.no_extern or not host_externs:
         return
+    host_names = set(host_externs)
+    fn_by_name: dict = {}
+    for fn in merged_fn_decls:
+        # first binding wins; the merge already refused a genuine pub-name
+        # duplicate, and privates are mangled apart, so a name maps to one body.
+        fn_by_name.setdefault(fn.name, fn)
+
     for program in root_programs:
-        refs: set = set()
-        _iter_var_refs(program.components, refs)
-        _iter_var_refs(program.fn_decls, refs)
-        reached = refs & set(imported_host_externs)
-        if not reached:
+        # seed the reach set from the admitted source: every bare name referenced
+        # from a root component / provide body and from a root fn body.
+        reached_names: set = set()
+        _iter_var_refs(program.components, reached_names)
+        _iter_var_refs(program.fn_decls, reached_names)
+        # transitively follow bare-name calls into imported `pub fn` bodies across
+        # the merged closure; a fn body's bare refs join the reach set.
+        worklist = [n for n in reached_names if n in fn_by_name]
+        visited_fns: set = set()
+        while worklist:
+            fn_name = worklist.pop()
+            if fn_name in visited_fns:
+                continue
+            visited_fns.add(fn_name)
+            body_refs: set = set()
+            _iter_var_refs(fn_by_name[fn_name], body_refs)
+            for ref in body_refs:
+                if ref not in reached_names:
+                    reached_names.add(ref)
+                    if ref in fn_by_name:
+                        worklist.append(ref)
+
+        reached_host = reached_names & host_names
+        if not reached_host:
             continue
-        name = sorted(reached)[0]
-        decl, module_path = imported_host_externs[name]
+        name = sorted(reached_host)[0]
+        decl, module_path = host_externs[name]
         backend = decl.bodies[0].backend if decl.bodies else "?"
         raise RevlError(
             program.filename, decl.line,
             f"admission refused: the untrusted-author profile forbids reaching "
-            f"host code, but this source imports and reaches host-block extern "
+            f"host code, but this source transitively reaches host-block extern "
             f"`{name}` ({decl.classification} @{backend} body, from "
-            f"`{module_path}`) — an imported `extern` with a host body is verbatim "
-            f"host code the gate does not sandbox (G8, item 24)",
-            hint="`no_extern` forbids DECLARING host code; reaching an IMPORTED "
-                 "host extern is the same escape hatch by another door. An "
-                 "untrusted author may only COMPOSE pre-granted services, never "
-                 "reach a host extern directly — drop the import and reach a "
-                 "granted service instead (item 330)",
+            f"`{module_path}`): a host-body `extern`, reached through the merged "
+            f"module closure, is verbatim host code the gate does not sandbox "
+            f"(G8, item 24)",
+            hint="`no_extern` forbids DECLARING host code; REACHING a host extern "
+                 "is the same escape hatch by another door: directly, or through "
+                 "a `pub fn` wrapper in an imported module the merge lowers into "
+                 "the same program. An untrusted author may only COMPOSE pre-"
+                 "granted services, never reach a host extern; drop the import "
+                 "and reach a granted service instead (items 330, 329/transitive)",
             code="G8", category="admission",
         )
 
