@@ -4182,7 +4182,8 @@ def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
             )
 
 
-def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
+def check_and_lower(program: Program, ambient: dict | None = None,
+                    taint_strict: bool = False) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
     (a running manifest, DESIGN §4's runtime-admission gate): ambient services
     are in scope without redeclaration, and G2/G3 are checked over the union
@@ -4190,6 +4191,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     `ambient`: {"services": <v1 services table>, "components": [<manifest
     component entries>]} — see compile_files for how it is derived.
+
+    `taint_strict` (item 249, Slice D) turns on derived taint sinks and sources —
+    off by default and byte-identical when off, on under the untrusted-author
+    profile or `revl compile --taint-strict`.
     """
     ambient = ambient or {}
 
@@ -4198,7 +4203,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # declared types in place, so base typing, method lookup and the emitted IR
     # are byte-identical for any program that uses no qualifier. The flow verdict
     # (`check_taint`, below) runs once every component body is lowered.
-    taint_model = extract_and_normalize(program)
+    taint_model = extract_and_normalize(program, taint_strict=taint_strict)
 
     ambient_services = {
         name: _service_from_ir(name, spec)
