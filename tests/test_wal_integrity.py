@@ -166,3 +166,97 @@ def test_normal_cycle_still_recovers(tmp_path):
     _write_valid_wal(path)
     result = recovery.recover(path)
     assert result["verdict"] == "rolled-forward"
+
+
+# --- forged records never yield a MORE-permissive cleanup -------------------
+
+def test_forged_discharge_mid_file_fails_closed(tmp_path):
+    """A forged/torn `discharge` spliced mid-file must fail closed, not be
+    silently skipped. A dropped-or-mangled discharge would otherwise let recover
+    replay a committed transaction's rollback (or skip a real inverse); refusing
+    keeps a tampered WAL from ever producing a MORE-permissive cleanup."""
+    path = tmp_path / "forged_discharge.wal"
+    _write_valid_wal(str(path))
+    good = path.read_text(encoding="utf-8").splitlines()
+    # a truncated (unparseable) forged discharge, with real records after it
+    spliced = [good[0], '{"record": "discharge", "discharged": [0'] + good[1:]
+    path.write_text("\n".join(spliced) + "\n", encoding="utf-8")
+
+    with pytest.raises(wal_core.WALIntegrityError):
+        wal_core.read_wal(str(path))
+    with pytest.raises(wal_core.WALIntegrityError):
+        recovery.recover(str(path))
+
+
+def test_truncation_removing_terminal_marker_rolls_back(tmp_path):
+    """Truncation is the one tamper an unauthenticated log cannot detect, but it
+    can only ever REMOVE trailing records, and the terminal `activation-complete`
+    marker's ABSENCE is roll-back. So dropping it flips a completed WAL from
+    rolled-forward to the CONSERVATIVE rolled-back, never the other way: tamper
+    by truncation stays strictly less permissive, upholding the invariant."""
+    path = tmp_path / "truncated.wal"
+    _write_valid_wal(str(path))
+    assert recovery.recover(str(path))["verdict"] == "rolled-forward"
+
+    good = path.read_text(encoding="utf-8").splitlines()
+    # drop the terminal activation-complete line (it is the last record written)
+    assert '"activation-complete"' in good[-1]
+    path.write_text("\n".join(good[:-1]) + "\n", encoding="utf-8")
+
+    loaded = wal_core.read_wal(str(path))
+    assert loaded["complete"] is False   # the forged/absent marker is not trusted
+    assert recovery.recover(str(path))["verdict"] == "rolled-back"
+
+
+# --- item 413.4: durable default WAL directory ------------------------------
+
+def test_default_wal_path_is_durable_not_tempdir(tmp_path, monkeypatch):
+    """The approval-WAL default lands under a durable per-user state directory,
+    not the reboot-wiped tempdir it used to. With HOME pointed at a scratch dir
+    (no XDG override), the path resolves under ~/.local/state, and the created
+    directory is owner-only (0o700) so no other local account can splice it."""
+    import os as _os
+    import tempfile as _tempfile
+
+    monkeypatch.delenv("REVL_WAL_DIR", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("sys.platform", "linux")
+
+    directory = wal_core.default_wal_dir()
+    assert directory == str(tmp_path / ".local" / "state" / "revl" / "approval-wal")
+    assert _os.path.isdir(directory)
+    assert not directory.startswith(_tempfile.gettempdir())
+    assert (_os.stat(directory).st_mode & 0o777) == 0o700
+
+    path = wal_core.default_wal_path("sess-1")
+    assert path == _os.path.join(directory, "revl-approval-sess-1.wal")
+
+
+def test_default_wal_dir_honours_explicit_override(tmp_path, monkeypatch):
+    """An embedder that sets REVL_WAL_DIR pins the WAL there verbatim, so a host
+    with its own durable location (or a test) can steer the gate's authority."""
+    override = tmp_path / "custom-wal-home"
+    monkeypatch.setenv("REVL_WAL_DIR", str(override))
+    assert wal_core.default_wal_dir() == str(override)
+    assert override.is_dir()
+
+
+def test_default_wal_dir_prefers_xdg_state_home(tmp_path, monkeypatch):
+    """XDG_STATE_HOME wins over the platform default when set (the standard
+    per-user state location on an XDG host)."""
+    monkeypatch.delenv("REVL_WAL_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    directory = wal_core.default_wal_dir()
+    assert directory == str(tmp_path / "xdg" / "revl" / "approval-wal")
+
+
+def test_session_default_wal_uses_durable_helper():
+    """The MCP session's auto-opened approval WAL routes through the durable
+    helper, not the old tempdir literal (item 413.4 wiring guard)."""
+    import inspect
+
+    from revl.mcp.session import Session
+    src = inspect.getsource(Session._configure_owner_approvals)
+    assert "default_wal_path" in src
+    assert "gettempdir" not in src
