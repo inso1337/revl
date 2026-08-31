@@ -844,6 +844,45 @@ class _ComponentEmitter:
             return bool((self._extern_by_name.get(expr.get("name")) or {}).get("idempotent"))
         return False
 
+    def _call_declares_idempotent(self, expr: Any) -> bool:
+        """Whether a call expression's target operation is DECLARED idempotent -
+        forward `idempotent` (item 44/309) or inverse `undo_idempotent` (item 309,
+        the flag recovery.py reads). Used to decide whether a member's
+        COMPENSATION is safe to re-run or skip: a compensation whose operation is
+        idempotent leaves the world in the same state whether it runs once, twice,
+        or (under a divert) not at all."""
+        if not isinstance(expr, dict):
+            return False
+        kind = expr.get("kind")
+        target = expr.get("target")
+        if kind == "call" and isinstance(target, dict) and target.get("kind") == "req":
+            svc = self.services.get(self.requires.get(target.get("name"))) or {}
+            spec = (svc.get("methods") or {}).get(expr.get("method")) or {}
+            return bool(spec.get("idempotent") or spec.get("undo_idempotent"))
+        if kind == "fn":
+            ext = self._extern_by_name.get(expr.get("name")) or {}
+            return bool(ext.get("idempotent") or ext.get("undo_idempotent"))
+        return False
+
+    def _compensation_idempotent_or_absent(self, step: dict) -> bool:
+        """The CRITICAL conservative restriction (item 259, S3.3/S5/S8, the
+        adversarial-review fix): a multi-emission group may form ONLY from
+        emissions whose COMPENSATION is itself idempotent-or-absent - NOT merely
+        whose forward delivery is idempotent.
+
+        `absent`: the `emit` step declares no `compensate` clause (the common case,
+        trivially safe). `idempotent`: the compensation operation is declared
+        idempotent (`_call_declares_idempotent`). A member with a PRESENT,
+        non-idempotent compensation stays sequential (a singleton), because a
+        fault or an A1 divert that fires it and then runs (or, at the divert
+        boundary, skips) its compensation would not leave the same world state a
+        skipped sequential tail would - the exact soundness gap this restriction
+        closes by construction (§3.3 invariant E)."""
+        compensate = step.get("compensate")
+        if compensate is None:
+            return True  # absent - trivially safe
+        return self._call_declares_idempotent(compensate)
+
     def _group_eligible(self, step: dict) -> bool:
         """Whether one `emit` step may join a concurrent fan-out group (item 259
         slice 2, the C2/E fail-safe). ALL of:
@@ -851,11 +890,13 @@ class _ComponentEmitter:
           * it is an awaited (`async`) `emit` step - a real suspension, so the
             branches' round trips are actually in flight at once and the body is
             already the `async def` generator the fan-out needs;
-          * forward delivery is declared `idempotent` - the checkable proxy for
-            "safe to over-fire under a fault or an A1 divert" (the current IR
-            carries no separate compensation-idempotence flag, so the forward
-            `idempotent` declaration plus the absent-compensation common case is
-            the conservative admissible surface; §3.3, C2 residual);
+          * forward delivery is declared `idempotent` (item 44/309) - safe to
+            over-fire under a fault or an A1 divert;
+          * its COMPENSATION is idempotent-or-absent (the CRITICAL restriction,
+            `_compensation_idempotent_or_absent`) - NOT merely idempotent forward
+            delivery. A member carrying a present, non-idempotent compensation
+            stays sequential, so a divert can never leave a fired member with a
+            real, un-runnable compensation (§3.3/§5/§8);
           * its audit records are produced synchronously on-task - a req-target or
             direct host-extern emission, NOT a spawn-handle provision call whose
             records route off-task (§3.2);
@@ -870,6 +911,8 @@ class _ComponentEmitter:
         if self._emission_shape(expr) not in ("req", "extern"):
             return False
         if not self._emission_idempotent(expr):
+            return False
+        if not self._compensation_idempotent_or_absent(step):
             return False
         if step.get("approval") is not None:
             return False
