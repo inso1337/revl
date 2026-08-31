@@ -353,15 +353,20 @@ def resolve_ref_spec_origin(dotted: str, search_paths: list[str]) -> str | None:
     dirs: list[str] = list(search_paths)
     for i, part in enumerate(parts):
         if i == len(parts) - 1:
-            # leaf: a module file wins over a package of the same name, per entry
-            # order (the interpreter imports the first hit).
+            # leaf: a PACKAGE (`<part>/__init__.py`) wins over a module file of
+            # the same name, matching CPython's FileFinder, which checks the
+            # package directory before the `<part>.py` module (Finding 3). Entry
+            # order still decides across bases (the interpreter imports the first
+            # hit). Checking the module first would let the resolver hash a
+            # `<part>.py` while the real import loaded `<part>/__init__.py` —
+            # hash-one-file, a different-file-executes divergence.
             for base in dirs:
-                modfile = os.path.join(base, part + ".py")
-                if os.path.isfile(modfile):
-                    return modfile
                 init = os.path.join(base, part, "__init__.py")
                 if os.path.isfile(init):
                     return init
+                modfile = os.path.join(base, part + ".py")
+                if os.path.isfile(modfile):
+                    return modfile
             return None
         # non-leaf: descend into `part` as a regular OR namespace package.
         namespace_dirs: list[str] = []
@@ -402,6 +407,27 @@ def _module_file(mod) -> str | None:
     return None
 
 
+def _first_component_origin(dotted: str, search_paths: list[str]) -> str | None:
+    """The concrete path the FIRST dotted component of `dotted` resolves to on
+    `search_paths`, in import path order — the tree a real import would begin
+    descending. Used to NAME the intercepting package when a stdlib ref fails to
+    hash-verify inside the install root (the fail-closed backstop): an earlier
+    `sys.path` entry holding a regular `backends/__init__.py` without the
+    `python.<helper>` portion is exactly what must be named and refused."""
+    first = dotted.split(".", 1)[0]
+    for base in search_paths:
+        init = os.path.join(base, first, "__init__.py")
+        if os.path.isfile(init):
+            return os.path.join(base, first)
+        modfile = os.path.join(base, first + ".py")
+        if os.path.isfile(modfile):
+            return modfile
+        pkgdir = os.path.join(base, first)
+        if os.path.isdir(pkgdir):
+            return pkgdir
+    return None
+
+
 def plug_refs(ir: dict, root_dirs: list[str]) -> None:
     """Prepare a ref-carrying IR for execution, at plug, before any extern is
     first called. No-op when the IR carries no py ref, so a ref-free program's
@@ -411,8 +437,13 @@ def plug_refs(ir: dict, root_dirs: list[str]) -> None:
        not shadow a trusted runtime module the whole process over).
     2. For each ref: resolve the file the interpreter would import (no parent
        execution), and REFUSE a hash mismatch against the IR's pin, naming both
-       the expected and the resolved path. A missing MODULE is left to the
-       thunk's first-call ImportError (a late, loud error), matching the design.
+       the expected and the resolved path. For a STDLIB ref, a resolution that
+       is not a file INSIDE the appended install root (`origin is None`, or a
+       file outside it) is a HARD REFUSAL naming both the pinned install path and
+       the intercepting foreign one — never a fall-through to a first-call import
+       that would run a shadowing `backends/__init__.py`'s top-level code before
+       failing (the fail-CLOSED item 410 backstop). A missing USER-ref MODULE is
+       still left to the thunk's first-call ImportError, matching the design.
     3. EVICT from `sys.modules` every ref-derived dotted name (and project-tree
        ancestor packages) so a re-emit/replug in one process runs the NEW code
        rather than a stale gen-N module python cached process-wide.
@@ -430,16 +461,63 @@ def plug_refs(ir: dict, root_dirs: list[str]) -> None:
     # the load-time hash refusal below detects and names). A composition with no
     # stdlib ref never touches the install root.
     all_roots = list(root_dirs)
+    stdlib_install_root: str | None = None
     if any(r.get("root") == "stdlib" for r in refs):
-        all_roots.append(str(stdlib_root().parent))
+        stdlib_install_root = str(stdlib_root().parent)
+        all_roots.append(stdlib_install_root)
     real_roots = [os.path.realpath(r) for r in all_roots]
+    stdlib_real = (
+        os.path.realpath(stdlib_install_root)
+        if stdlib_install_root is not None else None)
     for root in all_roots:
         if root not in sys.path:
             sys.path.append(root)
     search = list(sys.path)
     for ref in refs:
         origin = resolve_ref_spec_origin(ref["dotted"], search)
-        if origin is not None and os.path.isfile(origin):
+        origin_ok = origin is not None and os.path.isfile(origin)
+        # item 410 fail-CLOSED backstop: a stdlib ref MUST hash-verify against a
+        # file INSIDE the appended install root. If the disk walk returns no file
+        # (`origin is None` — a partial `backends` shadow on an earlier `sys.path`
+        # entry that lacks the `python.<helper>` portion, or a helper provided by
+        # a mechanism the static walk cannot see: zipimport, a `.pth` namespace
+        # portion, a custom `meta_path` finder), or resolves to a file OUTSIDE the
+        # install root, we REFUSE LOUDLY here rather than fall through to the
+        # thunk's first-call import — because that import runs the FOREIGN
+        # top-level `backends/__init__.py` (side effects) BEFORE it fails. The
+        # advertised "loud plug-time mismatch, never a silent substitution" must
+        # therefore fail CLOSED, not OPEN.
+        if ref.get("root") == "stdlib" and not (
+                origin_ok and stdlib_real is not None
+                and _contained(os.path.realpath(origin), stdlib_real)):
+            pinned = os.path.join(stdlib_install_root or "", ref["path"])
+            first = ref["dotted"].split(".", 1)[0]
+            intercept = _first_component_origin(ref["dotted"], search)
+            where = (
+                f"the top-level package `{first}` resolves on sys.path to "
+                f"{intercept}, OUTSIDE the install root {stdlib_install_root}"
+                if intercept is not None else
+                f"the module `{ref['dotted']}` does not resolve to any file "
+                f"inside the install root {stdlib_install_root} (it may be "
+                f"provided by zipimport, a .pth namespace portion, or a custom "
+                f"meta_path finder the plug-time disk walk cannot verify)")
+            raise RevlError(
+                "<plug>", 0,
+                f"@py host-module ref for extern `{ref['extern']}` is a shipped "
+                f"stdlib ref that could NOT be hash-verified against a file "
+                f"inside the revl install root: expected {pinned} (pinned at "
+                f"compile), but {where}",
+                hint="a stdlib ref that cannot be hash-verified against a file "
+                     "inside the install root is REFUSED, never imported: the "
+                     "emitted thunk's `from backends.python.<helper> import ...` "
+                     "would otherwise run the intercepting package's top-level "
+                     "`__init__.py` (foreign side effects) before raising. This "
+                     "is the fail-CLOSED backstop for the item 410 py namespace "
+                     "seam. Remove the shadowing package from sys.path, or "
+                     "reinstall/repair the revl install so the pinned helper "
+                     "resolves from the install root (item 396 option B deploy "
+                     "contract)")
+        if origin_ok:
             # Drop any stale cached bytecode for the ref'd source. Python's
             # source-mtime pyc invalidation has 1-SECOND granularity, so a
             # same-second edit of the same byte-length (the item-380 class this
