@@ -42,9 +42,23 @@ registry/
       manifest.json            # the compiled manifest (item 28 format)
       dossier.json             # evidence: audit --json today; the item 31
                                # gauntlet dossier when it exists
+      evidence/                # the item-293 evidence bundle (see §2.3)
+        attestation.json       #   revl.attest.make_attestation (item 127)
+        gauntlet.json          #   mcp.gauntlet.run dossier (falls back to
+                               #   the sibling dossier.json)
+        fault-sweep.json       #   fault.sweep_dossier (item 30/125)
+        inverse-roundtrip.json #   fault.roundtrip_dossier (item 26)
+        capabilities.json      #   the G8 boundary surface
+        provenance.json        #   assembled source/build provenance
       README.md                # optional, for humans
   index.json                   # GENERATED — never hand-edited
 ```
+
+The evidence bundle is assembled by `registry.build_evidence` (the publish
+path, run after `build_index`) from the **existing producers' verbatim output**
+- it re-implements no evidence. A missing facet is `unavailable`, never faked;
+the runtime-tested facets (`fault-sweep`, `inverse-roundtrip`) are written when
+the cordis-py runtime is present and honestly skipped when it is absent.
 
 `index.json` maps each component to what a resolver needs without opening
 sources: provided service shapes (canonicalized), required keys,
@@ -118,14 +132,26 @@ wouldn't admit it, resolve doesn't return it.
 would force a third call (a separate fetch, a pagination step, a detail
 lookup) is a regression against this document.
 
-**Ranking — least authority first.** Order candidates by:
+**Ranking - least authority first, then evidence quality.** Order candidates by:
 
 1. smallest declared capability set (a candidate that reaches less
    outranks one that reaches more — the registry teaches the same lesson
    G4 does);
 2. tighter interface fit (exact match over compatible-with-widening);
-3. presence and strength of evidence (gauntlet dossier > audit-only);
+3. **evidence quality** (item 293): among candidates tied on the above, the
+   one with the stronger evidence bundle wins - a fuller fault sweep (12/12
+   over unavailable), a valid attestation, a trusted publisher, an
+   inverse-roundtrip pass;
 4. smaller source (less for the agent to hold in context).
+
+Interface compatibility (§5) is a **hard filter**, never a ranking term: an
+incompatible candidate is dropped in `_match_entry` and can never be chosen,
+however strong its evidence. Evidence only ranks the already-compatible set. A
+missing evidence file is `unavailable` - ranked below present-and-valid, never
+read as valid; a tampered attestation grades `invalid` (bottom), and a
+`verifyRequired` resolve filters any candidate lacking a cryptographically valid
+attestation. The chosen candidate's `why` names the evidence it won on
+(`fault sweep 12/12, attestation valid, gauntlet admissible`).
 
 Popularity is deliberately **not** a rank input in phase 0: with one
 author and agent traffic, download counts measure prompt fashion, not
