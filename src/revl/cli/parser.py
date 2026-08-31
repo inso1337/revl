@@ -114,6 +114,64 @@ def build_parser() -> argparse.ArgumentParser:
              "envelope per sandboxed process: the fs/net grant, the effective "
              "reach of each seam-served key, and the externs the [sandbox.needs] "
              "table vouches (claimed, unverified). Human output only.")
+    # item 290: the confidence/evidence admission inputs, so the `--policy` gate
+    # can see a component's item-293 evidence bundle. Absent unless the policy
+    # carries evidence rules; a policy with none is byte-identical.
+    audit.add_argument(
+        "--evidence", metavar="DIR", default=None,
+        help="a component entry directory holding an `evidence/` bundle (item "
+             "293) for the single audited composition, so a `requires evidence` "
+             "rule can threshold its recorded facts (item 290)")
+    audit.add_argument(
+        "--key", metavar="PATH", default=None,
+        help="an attestation verification key, so `attestation valid` clauses "
+             "verify against the rebuilt IR (item 290; keyless `valid` fails "
+             "closed)")
+    audit.add_argument(
+        "--trusted-publisher", action="append", default=[], metavar="ID",
+        dest="trusted_publisher",
+        help="a publisher id in the operator trust set, for `publisher trusted` "
+             "clauses (repeatable; item 290)")
+
+    # item 290: `revl policy evaluate` — the dry-run explain verb. Runs the SAME
+    # `policy.evaluate` (one comparison site) and reports, per component, which
+    # rules select it and which clauses pass/fail with the recorded fact vs the
+    # threshold; never admits, refuses, or mutates.
+    policy_cmd = sub.add_parser(
+        "policy", help="boundary/evidence policy tools (item 33/290)")
+    policy_sub = policy_cmd.add_subparsers(dest="policy_command", required=True)
+    pol_eval = policy_sub.add_parser(
+        "evaluate",
+        help="dry-run: report per rule which clauses pass/fail and why "
+             "(fact vs threshold), for a policy over a composition (item 290)")
+    pol_eval.add_argument("policy_file", metavar="POLICY",
+                          help="the boundary policy file (DSL or JSON)")
+    pol_eval.add_argument("files", nargs="*", metavar="PROGRAM.rvl",
+                          help="the composition source(s) to evaluate the "
+                               "policy against")
+    pol_eval.add_argument("--json", action="store_true",
+                          help="machine-readable per-clause verdicts")
+    pol_eval.add_argument("--component", metavar="NAME", default=None,
+                          help="narrow the report to one component")
+    pol_eval.add_argument("--evidence", metavar="DIR", default=None,
+                          help="a component entry directory holding an "
+                               "`evidence/` bundle for a bare-source component "
+                               "(item 293)")
+    pol_eval.add_argument("--registry", metavar="DIR", default=None,
+                          help="evaluate a published registry entry instead of "
+                               "a bare source (with --candidate)")
+    pol_eval.add_argument("--candidate", metavar="NAME", default=None,
+                          help="the registry entry name to evaluate")
+    pol_eval.add_argument("--trusted-publisher", action="append", default=[],
+                          metavar="ID", dest="trusted_publisher",
+                          help="a publisher id in the operator trust set "
+                               "(repeatable)")
+    pol_eval.add_argument("--key", metavar="PATH", default=None,
+                          help="an attestation verification key")
+    pol_eval.add_argument("--mcp-scope", action="append", default=[],
+                          metavar="COMPONENT",
+                          help="treat COMPONENT as MCP/agent-admitted; `*` = "
+                               "every component")
 
     diff_cmd = sub.add_parser(
         "diff",

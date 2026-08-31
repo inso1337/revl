@@ -252,6 +252,13 @@ class Session:
         # enforced at load/swap as a machine-checked invariant instead of a
         # review convention. None = no sandbox (the default).
         self.sandbox = None
+        # item 290, §4: gauntlet dossiers this session produced (candidate name
+        # -> the `mcp.gauntlet.run` dossier), so a `mcp requires evidence
+        # [gauntlet admissible]` rule can threshold the operator-run session
+        # gauntlet at admission. Operator-produced at evaluation time, so it
+        # needs no attestation root. Populated by the gauntlet verb; empty until
+        # a candidate has been graded.
+        self._gauntlet_dossiers: dict = {}
         # the bound operator identity (roadmap item 55): a `revl.mcp.operator.
         # Operator` whose grants bound which management verbs this session may
         # call, over which components and realms. None = no profile: every verb
@@ -370,6 +377,7 @@ class Session:
                 f"implementation, so it may never enter a running composition; "
                 f"`revl_check` lists them (docs/holes.md)")
         self._enforce_sandbox(ir)
+        self._enforce_evidence(ir)
         # item 246, Slice 2: the policy-owned `requires approval` gate. A component
         # reaching an approval-required capability with no `with` edge is refused
         # at admission, before any runtime is touched (the same place the sandbox
@@ -649,6 +657,44 @@ class Session:
                 f"permits [{', '.join(self.sandbox.mcp_allow)}] and nothing "
                 f"else (boundary policy, docs/boundary-policy.md)")
 
+    def record_gauntlet(self, dossier: dict) -> None:
+        """Store an admissible gauntlet dossier under each component name it
+        graded (item 290, §4), so a later `mcp requires evidence [gauntlet
+        admissible]` admission can read the operator-run session dossier."""
+        if not isinstance(dossier, dict) or dossier.get("verdict") != "admissible":
+            return
+        for comp in (dossier.get("candidate") or {}).get("components") or []:
+            name = comp.get("name")
+            if name:
+                self._gauntlet_dossiers[name] = dossier
+
+    def _enforce_evidence(self, ir: dict) -> None:
+        """item 290, §4: the confidence/evidence admission rules over agent
+        output. When the sandbox policy carries `requires evidence` rules, every
+        MCP-admitted component must clear its thresholds. The live session
+        gauntlet dossier (operator-run, no attestation root) is plumbed in for
+        components it graded; every other facet stays `unavailable` for a draft,
+        so a rule thresholding published evidence refuses fail-closed.
+
+        Additive: a no-op unless the bound sandbox names evidence rules, so an
+        evidence-free sandbox admits exactly as before."""
+        if self.sandbox is None \
+                or not getattr(self.sandbox, "evidence_rules", ()):
+            return
+        from ..audit_diff import audit_report  # noqa: PLC0415 — lazy, no cordis
+        from ..policy import evaluate, first_error  # noqa: PLC0415
+        from .. import registry as reg  # noqa: PLC0415
+
+        audit = audit_report(ir)
+        everyone = frozenset(audit.get("boundary") or {})
+        evidence = {
+            name: reg.EvidenceBundle(gauntlet=self._gauntlet_dossiers[name])
+            for name in everyone if name in self._gauntlet_dossiers}
+        error = first_error(evaluate(self.sandbox, audit,
+                                     mcp_components=everyone, evidence=evidence))
+        if error is not None:
+            raise SessionError(str(error).split("\n")[0])
+
     def _prepare_module(self, ir: dict):
         """Emit the module and, when recording, instrument it before load.
 
@@ -689,6 +735,7 @@ class Session:
         reconciles the dynamic instance layer the static swap never saw."""
         driver = self._require()
         self._enforce_sandbox(ir)
+        self._enforce_evidence(ir)
         # item 246: classify the candidate and gate its activation reach BEFORE
         # any teardown — a swap-in whose activation body reaches a class-(c)
         # emission answers for it with the ticket two-step before it boots, which
