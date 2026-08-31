@@ -55,11 +55,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import AdmissionProfile, compile_source  # noqa: E402
 from revl.audit_diff import audit_report  # noqa: E402
+from revl.distill import blast_radius, class_c_capabilities  # noqa: E402
 from revl.distribute import _resource_taint  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 from revl.mcp.approval import ClassMap  # noqa: E402
 from revl.placement import resource_crossing_refusal  # noqa: E402
-from revl.policy import component_reach  # noqa: E402
+from revl.policy import (  # noqa: E402
+    TAINT_FOLD_ORIGINS, AutoApproveRule, component_reach,
+)
 
 
 # ===========================================================================
@@ -541,6 +544,28 @@ SURFACES: dict[str, dict[str, str]] = {
                 "the signature fixed point, so the seam is not a distinct secret "
                 "axis (the same reasoning as the `taint` surface's seam exemption)",
     },
+    # item 251: the approval-distillation blast-radius fold. It enumerates which
+    # crossings a candidate `AutoApproveRule` admits, and an operator approves the
+    # rule believing that enumeration is complete (design §3.3). A fold that
+    # visited one crossing kind and missed another would UNDERSTATE the blast, so
+    # the fold reuses the approval `ClassMap` closure (`class_c_capabilities`)
+    # precisely to visit the same kinds that surface does. The row item 274
+    # slice 2 reserved.
+    "distill_blast_251": {
+        "req": IN_SCOPE,
+        "spawn": IN_SCOPE,       # the spawn/instance-get seam must be in the blast
+        "extern": IN_SCOPE,      # an emission extern reached transitively
+        "firstclass": IN_SCOPE,  # the unnameable `*`, class-(c) and never admitted
+        "seam": "the blast fold reuses the approval `ClassMap` closure over a "
+                "per-component reach; the same-tier/cross-tier process seam is the "
+                "distributability axis (`resource_crossing_refusal`), not a "
+                "crossing the class-(c) enumeration derives",
+        "nested_res": "the fold enumerates class-(c) capabilities and their bound "
+                      "resource valuation, not resource TYPES; a resource nested "
+                      "in a record is the distribution-seam axis, and the blast "
+                      "fold's own resource axis is the host/path/table VALUE cone "
+                      "(exercised by the resource-scope cell below), not nesting",
+    },
 }
 
 
@@ -711,6 +736,92 @@ def test_dist_seam_refusal_visits_every_in_scope_kind():
     for service in ("RecSvc", "VarSvc", "GenSvc"):
         assert _seam_refuses(ir, service), service
     assert not _seam_refuses(ir, "ValSvc")
+
+
+# --- the item-251 blast-radius fold -------------------------------------------
+
+def _blast_251_reach(kinds: frozenset[str]) -> frozenset[str]:
+    """Surface: the item-251 blast-radius fold. The class-(c) capability set the
+    fold enumerates for `Hub`'s `hive.go` closure, via the SAME approval
+    `ClassMap` closure the runtime consent path uses (`class_c_capabilities`) - so
+    a fold that stopped visiting a crossing kind would drop that kind's capability
+    and the differential would go RED (the blast would silently understate)."""
+    ir = compile_source(_reach_zoo(kinds), "reach.rvl")
+    return class_c_capabilities(ir, "hive", "go")
+
+
+def _hub_grant(caps, **extra):
+    """One ledger record carrying `Hub`'s class-(c) crossings, the shape the blast
+    fold partitions."""
+    return {"component": "Hub", "session": "s", "operator": "op", "realm": "",
+            "classCCapabilities": sorted(caps), **extra}
+
+
+def test_distill_blast_251_fold_visits_every_in_scope_kind():
+    """Each IN_SCOPE cell is DIFFERENTIAL: the fold's class-(c) enumeration is read
+    WITH a crossing kind and WITHOUT it, and the kind's capability must be present
+    in the first and absent in the second. A fold that stopped visiting the kind
+    would make the two sets equal and this goes RED - the blast-radius understating
+    what the rule admits is exactly the CRITICAL shape item 414 exists to catch."""
+    scoped = _in_scope("distill_blast_251")
+    assert scoped == frozenset({"req", "spawn", "extern", "firstclass"}), sorted(scoped)
+    # every in_scope kind is a reach-zoo kind (the fold shares the reach axis).
+    assert scoped <= REACH_KINDS, sorted(scoped - REACH_KINDS)
+    full = _blast_251_reach(REACH_KINDS)
+    for kind in sorted(scoped):
+        without = _blast_251_reach(REACH_KINDS - {kind})
+        introduced = full - without
+        assert introduced, (
+            f"the 251 blast fold did not change when {kind!r} "
+            f"({CROSSING_KINDS[kind]}) was removed - the fold does not visit this "
+            f"crossing kind, so a rule's blast radius would understate it")
+        assert not (introduced & without), (
+            f"distill_blast_251: {kind!r}'s authority leaked into the without-kind set")
+
+    # and the fold PARTITIONS every enumerated crossing: a rule naming each
+    # class-(c) capability covers one grant per capability, so the fold visited
+    # each (total == the enumeration size, covered == total).
+    wide = AutoApproveRule("Hub", tuple(sorted(full)), realm=None,
+                           admitting=TAINT_FOLD_ORIGINS)
+    blast = blast_radius(wide, [_hub_grant(full)])
+    assert blast.total == len(full) == blast.covered
+
+
+def test_distill_blast_251_resource_scope_cell():
+    """The resource-scope cell (§3.3): the fold operates on the BOUND RESOURCE
+    VALUATION, not `argsDigest`. A crossing that carries a `_REGISTRY` resource
+    param (host) but reaches the fold WITHOUT its resource scope projected is a
+    visible red - a host-scoped rule must NOT count the un-projected (bare)
+    crossing as covered, exactly the surface the N1 CRITICAL slipped through when
+    the destination lived only in the hash."""
+    rule = AutoApproveRule("Hub", ('gateway.send(host="api.stripe.com")',),
+                           realm=None, admitting=TAINT_FOLD_ORIGINS)
+    projected = _hub_grant(
+        ["gateway.send"],
+        resourceScopes={"gateway.send": 'gateway.send(host="api.stripe.com")'})
+    unprojected = _hub_grant(["gateway.send"])          # no resource scope recorded
+    assert blast_radius(rule, [projected]).covered == 1
+    # the un-projected crossing reds: it is NOT silently bucketed as a bare match.
+    bare = blast_radius(rule, [unprojected])
+    assert bare.covered == 0
+    assert all(nc.reason == "resource" for nc in bare.not_covered)
+
+
+def test_distill_blast_251_enforcement_tier_taint_cell():
+    """The enforcement-tier taint cell (§3.3, H2): a taint-RELEVANT crossing whose
+    admission taint set comes back EMPTY must see the static floor (all five
+    origins), so it reds the differential against an untainted rule - proving the
+    floor substitution is wired and not defaulting to `{}`."""
+    rule = AutoApproveRule("Hub", ("gateway.send",), realm=None,
+                           admitting=frozenset())        # admits nothing
+    relevant_empty = _hub_grant(["gateway.send"], taintRelevant=True, taintOrigins=[])
+    floored = blast_radius(rule, [relevant_empty])
+    assert floored.covered == 0                          # empty set floored to five
+    assert all(nc.reason == "taint" for nc in floored.not_covered)
+    # a genuinely non-taint-relevant crossing is still covered (no over-refusal),
+    # so the cell is discriminating rather than a blanket refusal.
+    clean = blast_radius(rule, [_hub_grant(["gateway.send"])])
+    assert clean.covered == 1
 
 
 # ===========================================================================
