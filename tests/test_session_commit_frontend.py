@@ -50,8 +50,8 @@ def test_deferred_and_async_parse_in_either_order():
 @pytest.mark.parametrize("src,fragment", [
     ("extern pure deferred fn f() = @py { return }\n",
      "only valid on an `emission`"),
-    ("extern acquire deferred fn f() -> Str undo g(result) = @py { return }\n"
-     "extern pure fn g(x: Str) = @py { return }\n",
+    ("extern acquire deferred fn f() -> Handle undo g(result) = @py { return }\n"
+     "extern pure fn g(x: Handle) = @py { return }\n",
      "only valid on an `emission`"),
     ("extern emission deferred fn f(to: Str) -> Str = @py { return \"x\" }\n",
      "must return `Unit`"),

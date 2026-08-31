@@ -25,8 +25,8 @@ from revl.errors import RevlError
 # -- fixtures ---------------------------------------------------------------
 
 _ACQ_UNDO = (
-    "extern pure fn r_close(h: Str) = @py { return }\n"
-    "extern acquire fn r_open(n: Int) -> Str undo r_close(result)"
+    "extern pure fn r_close(h: RHandle) = @py { return }\n"
+    "extern acquire fn r_open(n: Int) -> RHandle undo r_close(result)"
     ' = @py { return "h" }\n'
 )
 _DEFERRED = "extern emission deferred fn notify(s: Str) = @py { return }\n"
