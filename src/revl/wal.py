@@ -48,6 +48,28 @@ import json
 #: header carries it so a reader can refuse a version it does not understand.
 WAL_VERSION = 1
 
+#: The versions this reader understands. A WAL whose header names anything else
+#: is refused rather than read as if current (item 413). Extend this set, never
+#: replace :data:`WAL_VERSION`, if a future reader stays backward compatible.
+SUPPORTED_WAL_VERSIONS = frozenset({WAL_VERSION})
+
+
+class WALIntegrityError(RuntimeError):
+    """A WAL failed an integrity gate on read (item 413).
+
+    Raised for a header version this reader does not support, or for MID-FILE
+    corruption (a torn or unparseable line with valid records after it). It is
+    deliberately NOT raised for a torn TRAILING line, which is the expected
+    crash-interrupted-write case recovery exists to tolerate. Raising fails
+    CLOSED: a corrupt or version-mismatched WAL stops recovery loudly instead of
+    silently dropping records (a dropped ``discharge`` would replay a committed
+    transaction's rollback; a dropped ``flushed`` would re-owe a fired emission).
+
+    The gate never reads back approval or grant records, so authority injection
+    stays structurally impossible; it only protects the cleanup path's integrity.
+    """
+
+
 #: The single sentence recovery is allowed to claim. Deliberately narrow. Kept
 #: byte-identical to ``replay.WAL_GUARANTEE`` (pinned by a test) because it is
 #: written verbatim into every WAL header, py or non-py.
@@ -71,31 +93,71 @@ def read_wal(path: str) -> dict:
     genuine ``kill -9`` can leave one) is tolerated and reported as ``torn``
     rather than crashing the recovery that exists to handle exactly that.
 
-    This is the exact behaviour ``replay.WriteAheadLog.read`` had before item
-    322 factored it here; the py writer's own reader delegates to nothing, so
-    ``test_wal_core_agrees_with_py_replay`` pins the two to identical output.
+    Two integrity gates run ahead of the roll-forward/roll-back decision (item
+    413), both fail-closed via :class:`WALIntegrityError`:
+
+    * a header whose ``walVersion`` is not in :data:`SUPPORTED_WAL_VERSIONS` is
+      REFUSED, not read as if current;
+    * an unparseable line is tolerated ONLY when it is the last line in the file
+      (the crash-interrupted write). An unparseable line with any content after
+      it is MID-FILE corruption and is refused, because silently skipping it
+      would drop a committed record and corrupt cleanup replay.
+
+    A missing header is left as ``{}`` (an empty or pre-header WAL is a valid
+    nothing-to-recover input); the version gate only fires when a header exists.
+    The gate reads no approval or grant record, so authority injection stays
+    impossible. On a supported version with a clean or trailing-torn file the
+    output is byte-identical to the pre-413 reader, so
+    ``test_wal_core_agrees_with_py_replay`` still pins this to
+    ``replay.WriteAheadLog.read``.
     """
     header: dict = {}
     records: list = []
     complete = False
     torn = False
     with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
+        lines = [line.strip() for line in handle]
+    # A torn line is only the crash-interrupted write when it is the LAST line
+    # carrying content; anything after it means real mid-file corruption.
+    last_content = max((i for i, line in enumerate(lines) if line), default=-1)
+    for index, line in enumerate(lines):
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            if index == last_content:
+                torn = True   # a partial FINAL record: the crash itself
                 continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                torn = True   # a partial final record — the crash itself
-                continue
-            kind = entry.get("record")
-            if kind == "header":
-                header = entry
-            elif kind == "activation-complete":
-                complete = True
-                records.append(entry)
-            else:
-                records.append(entry)
+            raise WALIntegrityError(
+                f"WAL {path} is corrupt at line {index + 1}: an unparseable "
+                f"record with {last_content - index} line(s) after it. This is "
+                "mid-file corruption, not a crash-torn trailing line; refusing "
+                "to read past it would silently drop committed records."
+            ) from None
+        kind = entry.get("record")
+        if kind == "header":
+            header = entry
+            _check_version(header, path)
+        elif kind == "activation-complete":
+            complete = True
+            records.append(entry)
+        else:
+            records.append(entry)
     return {"header": header, "records": records,
             "complete": complete, "torn": torn}
+
+
+def _check_version(header: dict, path: str) -> None:
+    """Refuse a WAL whose header names a version this reader cannot read.
+
+    Only called when a header record is present, so an empty or pre-header WAL
+    stays a valid nothing-to-recover input.
+    """
+    version = header.get("walVersion")
+    if version not in SUPPORTED_WAL_VERSIONS:
+        raise WALIntegrityError(
+            f"WAL {path} declares walVersion {version!r}, which this reader does "
+            f"not support (supported: {sorted(SUPPORTED_WAL_VERSIONS)}). Refusing "
+            "to read an incompatible WAL as if it were the current format."
+        )
