@@ -1553,7 +1553,7 @@ class Parser:
             while self.at("."):
                 self.next()
                 parts.append(self.expect("ident").value)
-            names.append(".".join(parts))
+            names.append(self._capability_params(".".join(parts)))
             if self.at(","):
                 self.next()
         self.expect("]")
@@ -1570,6 +1570,50 @@ class Parser:
                 raise self.err(line, f"duplicate capability `{cap}` in `{kind}[...]`")
             seen.add(cap)
         return tuple(names)
+
+    def _capability_params(self, token: str) -> str:
+        """An optional parenthesized literal parameter list on a dotted
+        capability token (item 294): `fs.write(path="/data/incoming")`,
+        `db.read(table="orders")`, `model.complete(calls=3)`. A bare token with
+        no `(` returns unchanged (byte-identical to every pre-294 token), so the
+        extension is purely additive.
+
+        Values are STATIC literals (a string or a non-negative integer). The
+        parse funnels through `cap_order.make_cap`, the ONE canonical point: it
+        validates against the CLOSED parameter registry (an unknown name like
+        `pth=` refuses HERE, at parse, never silently inert), canonicalizes a
+        path value (trailing slash dropped, `.`/`..`/`//`/`"/"` refused), refuses
+        a parameter list on `*` and duplicate keys, and returns the canonical
+        `(T, P)`, stored as its canonical spelling so the fold re-reads it at a
+        single point."""
+        if not self.at("("):
+            return token
+        from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+        line = self.next().line          # consume `(`
+        raw: list[tuple[str, object]] = []
+        while not self.at(")"):
+            name = self.expect("ident", what="a capability parameter name").value
+            self.expect("=", what="`=` after a capability parameter name")
+            vtok = self.peek()
+            if vtok.kind in ("string", "int"):
+                self.next()
+                value: object = vtok.value
+            else:
+                raise self.err(
+                    vtok.line,
+                    "a capability parameter value must be a string or integer "
+                    f"literal, found {vtok.value!r}",
+                    hint='write `path="/data/incoming"` or `calls=10`; a '
+                         "per-instance value (`config.job_root`) is item 294 "
+                         "Slice 2")
+            raw.append((name, value))
+            if self.at(","):
+                self.next()
+        self.expect(")")
+        try:
+            return cap_order.make_cap(token, raw).to_str()
+        except cap_order.CapError as exc:
+            raise self.err(line, str(exc), hint=exc.hint) from exc
 
     def _capability_token(self, what: str = "a capability token") -> str:
         """One capability token in an `Approval[C]` type or an `await
