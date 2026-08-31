@@ -1571,6 +1571,12 @@ def _host_of(component: dict, bind: str, map_values: dict[str, str] | None = Non
             # so a provide-method that captures it can call `.dispose()`.
             if acquire.get("kind") == "spawn":
                 return "RevlSpawnHandle"
+            # item 397: a result-declared host CAS binds the atomic `bool`
+            # result (`let fresh = Arc::new(ledger.insert_if_absent(...))`), not
+            # a host resource, so a provide struct that captures it holds an
+            # `Arc<bool>`, never the opaque `Arc<Value>` fallback (E0308).
+            if _is_map_cas(acquire):
+                return "bool"
             host = (acquire.get("fn") or "").split(".")[0] or "Value"
             # FR-4: the host Map is generic over its value type, learned from
             # the IR's `insert` sites (defaults to the historical `String`).
@@ -2906,9 +2912,33 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             req_undo = f"{req}_undo"
             out.append(f"{pad}let {req_undo} = {req}.clone();")
             undo_rename[req] = req_undo
+        is_cas = _is_map_cas(step.get("acquire"))
+        if is_cas:
+            # item 397: a result-declared host CAS binds an `Arc<bool>`. Its
+            # site-spelled undo removes from a PRIOR activation bind (the
+            # ledger); a bare `move` closure would consume that bind, leaving
+            # the later provide struct's `.clone()` a use-after-move (E0382).
+            # Reclone every referenced prior activation bind into the closure,
+            # exactly as the reqs are recloned above.
+            referenced: set[str] = set()
+            _expr_var_names(step.get("undo"), referenced)
+            for local in sorted(referenced & set(env.activation_binds)):
+                if local == step["bind"]:
+                    continue
+                local_undo = f"{local}_undo"
+                out.append(f"{pad}let {local_undo} = {local}.clone();")
+                undo_rename[local] = local_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
         label = _string(env.name + "." + step["bind"] + ".undo")
-        out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
+        if is_cas:
+            # result-guarded undo: the identity inverse on a `false` CAS, so
+            # teardown never removes the winner's entry (`*` derefs the
+            # `Arc<bool>` clone the closure owns).
+            out.append(
+                f"{pad}ctx.effect({label}, "
+                f"move || {{ if *{undo_name} {{ {undo}; }} Ok(()) }})?;")
+        else:
+            out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "effect":
         for setup in step.get("setup") or []:
             _emit_setup_step(setup, env, out, indent)
