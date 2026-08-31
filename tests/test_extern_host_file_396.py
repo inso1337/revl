@@ -147,16 +147,28 @@ def test_jail_prefix_sibling_does_not_pass_containment():
 
 
 def test_jail_hardlink_residual_is_accepted_and_stated(tmp_path):
-    """The one accepted residual (design §jail): a hardlink INSIDE the tree to a
-    file outside it realpaths to the inside name and passes. This documents the
-    residual as a test rather than claiming it away."""
-    outside = _write(tmp_path.parent / f"hl-outside-{tmp_path.name}.py",
-                     _INNER_PY + "\n")
+    """The one accepted residual (design §jail): an inode reachable both INSIDE
+    the tree and outside it (a hardlink straddling the jail boundary) realpaths
+    to the inside name when opened there and passes. This documents the residual
+    as a test rather than claiming it away.
+
+    Ordering matters for determinism: the inside name is created FIRST, then a
+    second hardlink is placed outside the module dir. A hardlink has no
+    direction (both names are equal entries to one inode), so this is the same
+    boundary-straddling inode either way, but the opened handle's real path
+    (macOS `F_GETPATH`, Linux `/proc/self/fd`) reports whichever name the
+    kernel's vnode name cache holds. With the inside name created first that is
+    the inside name deterministically; creating the outside name first let
+    `F_GETPATH` return the OUTSIDE link under concurrent filesystem churn from
+    neighbouring tests (~2% of the time), flipping the jail verdict and making
+    this test order dependent (item 415). Everything stays under `tmp_path` so
+    nothing leaks into the shared session basetemp."""
     moddir = tmp_path / "mod"
     moddir.mkdir()
-    link = moddir / "body.py"
+    inside = _write(moddir / "body.py", _INNER_PY + "\n")   # created inside FIRST
+    outside = tmp_path / "hl-outside.py"                    # a sibling of moddir
     try:
-        os.link(outside, link)   # hardlink inside the tree
+        os.link(inside, outside)   # second hardlink, OUTSIDE the module dir
     except OSError:
         pytest.skip("hardlink not permitted on this filesystem")
     m = _write(moddir / "m.rvl", _py_file("body.py"))
