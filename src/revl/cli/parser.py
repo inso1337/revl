@@ -108,6 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="treat COMPONENT as MCP/agent-admitted so the policy's `mcp` "
              "sandbox allow-list applies to it (repeatable); `*` = every "
              "component")
+    audit.add_argument(
+        "--placement", metavar="PLACEMENT", default=None,
+        help="a TOML/JSON placement map: also print the item-411 sandbox "
+             "envelope per sandboxed process: the fs/net grant, the effective "
+             "reach of each seam-served key, and the externs the [sandbox.needs] "
+             "table vouches (claimed, unverified). Human output only.")
 
     diff_cmd = sub.add_parser(
         "diff",
