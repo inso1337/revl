@@ -26,6 +26,12 @@ def build_parser() -> argparse.ArgumentParser:
     cmd.add_argument("--json-diagnostics", action="store_true",
                      help="on rejection, print a structured diagnostic (code, guarantee, "
                           "expected/actual, hint) instead of the human rendering")
+    cmd.add_argument("--taint-strict", action="store_true",
+                     help="derive taint sinks and sources with no annotation (item 249, "
+                          "Slice D): a shell/exec/terminal-scoped crossing refuses "
+                          "untrusted input, and a web/net/fs/model/input emission mints "
+                          "its origin. Additive — a program that already passes without "
+                          "it is unaffected")
 
     exp = sub.add_parser("explain", help="what a diagnostic code means and how to fix it")
     exp.add_argument("code", help="a diagnostic code, e.g. G4 (case-insensitive)")

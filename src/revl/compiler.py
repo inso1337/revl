@@ -302,7 +302,8 @@ def compile_source(source: str, filename: str = "<string>",
                 hint="a bare source string has no root compile tree to jail the "
                      "ref against, and `compile_source` reads nothing from disk "
                      "(item 396 option B)")
-        document = check_and_lower(program)
+        document = check_and_lower(
+            program, taint_strict=bool(profile and profile.taint_strict))
         _enforce_document(document, profile)
         return document
 
@@ -486,7 +487,8 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # imported closure). Inert without a profile, so a trusted compile is
     # byte-identical.
     _enforce_source([m.program for m in root_modules], profile)
-    document = check_and_lower(merged, ambient)
+    document = check_and_lower(
+        merged, ambient, taint_strict=bool(profile and profile.taint_strict))
     # the allowlist half — refuse a reach outside the granted service set, on the
     # lowered document's resolved requires/provides.
     _enforce_document(document, profile)
