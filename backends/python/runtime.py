@@ -347,6 +347,16 @@ def spawn(ctx, component: dict, config, realms):
     fiber = scoped.plugin(component, dict(config or {}))
     handle = SpawnHandle(fiber, component.get("name"))
     _remember_instance(handle)  # so a hot-swap can enumerate live instances
+    # If a recording context is threaded through the spawn, give it the chance to
+    # wrap the handle so an emission reached off it (`emit s.inner.method()`) is
+    # recorded in the WAL, the same as a required-service emission (replay.py's
+    # `_SpawnRecorder`). The hook lives only on the recorder's context wrapper;
+    # the real cordis `Context` returns None for a `_`-prefixed unknown name, so a
+    # normal (un-recorded) activation is untouched. The registry above still holds
+    # the REAL handle, so teardown and live-instance enumeration are unchanged.
+    record = getattr(ctx, "_revl_record_spawn", None)
+    if callable(record):
+        return record(handle)
     return handle
 
 
