@@ -55,6 +55,7 @@ import tempfile
 from pathlib import Path
 
 from ._paths import backends_root
+from .errors import RevlError
 from .wal import WAL_GUARANTEE
 
 _BACKENDS_DIR = backends_root()
@@ -201,23 +202,18 @@ def _emit_modules(ir: dict, record: bool = False) -> dict[str, str]:
 
 
 def run_wasm(ir: dict, config: dict, files, once: bool = False,
-             interactive: bool = False) -> int:
+             interactive: bool = False, policy=None) -> int:
     """Emit -> boot the composition on the cordis-wasm runtime as a process,
     then run the once round-trip (LIFO teardown + no-residue proof) and exit.
     Returns 0 on a clean ``UP`` -> ``NO-RESIDUE`` -> ``DOWN``; nonzero otherwise.
     A missing cordis-wasm runtime is a skip-with-reason and exit 3, mirroring the
-    py/rust/java tiers (never a feint at passing)."""
-    reason = wasm_runtime_reason()
-    if reason is not None:
-        print(f"error: the cordis-wasm runtime is not available.\n"
-              f"       {reason}", file=sys.stderr)
-        return 3
+    py/rust/java tiers (never a feint at passing).
 
-    if once is False and interactive:
-        print("note: the interactive REPL is wired for the py tier only; the "
-              "wasm tier runs the\n      boot -> teardown -> no-residue "
-              "round-trip (as with --once) and exits.", flush=True)
-
+    ``policy`` (item 289) is an optional boundary policy. Emit is pure and needs
+    no runtime, so the least-authority chain that reads the emitted import
+    sections runs BEFORE the runtime-availability gate: an over-authority wasm
+    cell is refused as an admission decision whether or not wasmtime is present.
+    """
     # item 322 Slice 2: with REVL_WAL set, emit in RECORD mode and drain the
     # module's framed discharge-descriptors into that durable host WAL. Unset
     # (every ordinary run), record mode is off and emission is byte-identical,
@@ -238,6 +234,29 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
         print(f"error: the wasm emitter produced no module for: {', '.join(missing)}",
               file=sys.stderr)
         return 1
+
+    # item 289: the least-authority chain. The import-subset-of-declared leg
+    # already fired inside the emitter (a by-construction invariant); with a
+    # policy in force we also refuse a wasm cell whose declared caps exceed the
+    # policy allow-list. No policy: the emit-time leg is the whole check and
+    # this is a no-op.
+    from .least_authority import enforce_wasm_least_authority  # noqa: PLC0415
+    try:
+        enforce_wasm_least_authority(ir, policy, modules)
+    except RevlError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    reason = wasm_runtime_reason()
+    if reason is not None:
+        print(f"error: the cordis-wasm runtime is not available.\n"
+              f"       {reason}", file=sys.stderr)
+        return 3
+
+    if once is False and interactive:
+        print("note: the interactive REPL is wired for the py tier only; the "
+              "wasm tier runs the\n      boot -> teardown -> no-residue "
+              "round-trip (as with --once) and exits.", flush=True)
 
     tmp = Path(tempfile.mkdtemp(prefix="revl_run_wasm_"))
     wal_handle = None
