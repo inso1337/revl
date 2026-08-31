@@ -3599,6 +3599,27 @@ def _emit_component_stmts(
             if wit is not None:
                 _emit_witnessed_step(out, pad, step, wit, v3_ctx, env, bind, frame_expr)
                 continue
+            if kind == "let-effect" and _is_map_cas(step.get("acquire")):
+                # item 397: a result-declared host CAS binds an atomic
+                # `boolean`; guard the site-spelled undo on it so a `false` CAS
+                # registers the identity inverse and teardown never removes the
+                # winner's entry. Bind `boolean` (not `var`), matching the
+                # method-body path, so a later `if (fresh)` in activation code
+                # compiles.
+                out.append(
+                    f"{pad}boolean {bind} = "
+                    f"{_expr(step['acquire'], v3_ctx, None, env)};")
+                undo_expr = _expr(step["undo"], v3_ctx, None, env)
+                guarded = f"() -> {{ if ({bind}) {{ {undo_expr}; }} }}"
+                if frame_expr is None:
+                    out.append(f"{pad}fx.track(Disposables.of({guarded}));")
+                else:
+                    crossing = _string(_call_label(step["acquire"]))
+                    attempted = _string(_call_label(step["undo"]))
+                    out.append(
+                        f"{pad}fx.track({frame_expr}.bracket({crossing}, "
+                        f"{attempted}, {guarded}));")
+                continue
             if kind == "let-effect":
                 # FR-4: a host Map binding pins its value type at the
                 # declaration (`Map<...> store = Map.create();`) — `var` would
