@@ -522,6 +522,45 @@ def _tool_revoke(arguments: dict) -> dict:
         return _session_error(str(error))
 
 
+def _tool_distillation_offers(_arguments: dict) -> dict:
+    """Fold this session's approval ledger to candidate `AutoApproveRule` offers
+    (roadmap item 251). Read-only and PROPOSE-ONLY - it applies no policy, so it
+    is ungated. Scoped to the caller's own attributed grants."""
+    try:
+        return {"ok": True, **SESSION.distillation_offers()}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_apply_distillation(arguments: dict) -> dict:
+    """Install a distilled offer as a live `AutoApproveRule` (roadmap item 251),
+    recording a `distillation-applied` WAL fact with the attribution. Gated by the
+    `approve` operator verb (item 55): installing a standing auto-approve is the
+    same authority as granting the underlying yeses."""
+    offer_id = arguments.get("offerId")
+    if not offer_id:
+        return _session_error("provide `offerId` - the id from "
+                              "`distillation_offers`")
+    try:
+        return {"ok": True, **SESSION.apply_distillation(offer_id)}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_revoke_distillation(arguments: dict) -> dict:
+    """Retire an applied distilled rule from the live policy (roadmap item 251),
+    recording a `distillation-revoked` WAL fact - the next matching crossing
+    prompts again (fail-closed). Gated by the `approve` operator verb (item 55)."""
+    rule = arguments.get("rule")
+    if not rule:
+        return _session_error("provide `rule` - the rule text (or its canonical "
+                              "DSL) to revoke")
+    try:
+        return {"ok": True, **SESSION.revoke_distillation(rule)}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
 def _tool_abort(_arguments: dict) -> dict:
     """Abort the session (item 245): drop the deferral queue (never fired),
     replay the witnessed inverses, prove a clean world."""
@@ -1549,6 +1588,80 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_revoke,
+    },
+    {
+        "name": "revl_distillation_offers",
+        "description": "Fold this session's approval ledger to candidate distilled "
+                       "auto-approve rules (item 251). The ledger is the item-248 "
+                       "stream of human yeses to class-(c) crossings; distillation "
+                       "notices the same operator keeps saying yes to the same "
+                       "SHAPE of crossing (the resource-scoped capability, realm, "
+                       "and taint origins) and writes down the AutoApproveRule that "
+                       "would have said yes for them - a rule an operator could "
+                       "have typed, checked on the same runtime path. Read-only "
+                       "and PROPOSE-ONLY: it applies no policy and is ungated, but "
+                       "is scoped to the caller's own attributed grants. Each offer "
+                       "carries its rule text, blast radius (the past prompts it "
+                       "would have covered, the destinations seen, and the taint "
+                       "origins it can NEVER admit), the attributed operator, and "
+                       "the sessions it was distilled from. Apply one with "
+                       "revl_apply_distillation.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_distillation_offers,
+    },
+    {
+        "name": "revl_apply_distillation",
+        "description": "Install a distilled offer as a live AutoApproveRule (item "
+                       "251). Writes the rule into the bound policy and records a "
+                       "`distillation-applied` WAL fact with the attribution "
+                       "(distilledBy - the operator whose repeated yeses it "
+                       "encodes; reviewedBy - the operator who applied it; the "
+                       "ledger window it was distilled from; appliedAt). The rule "
+                       "is bound to the enumerated component set it was reviewed "
+                       "against: a component later ENTERING its glob that was not "
+                       "in that set suspends the rule and re-offers (fail-closed). "
+                       "A distilled `host=X` rule never auto-approves a send to "
+                       "another host (the resource scope is enforced by the same "
+                       "`covers` order a hand-written rule is), and an admission "
+                       "with unknown taint is floored to all origins (never waved "
+                       "through). Gated by the `approve` operator verb (item 55): "
+                       "installing a standing auto-approve is the same authority as "
+                       "granting the underlying yeses.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "offerId": {"type": "string",
+                            "description": "the offer id from "
+                                           "revl_distillation_offers"}},
+            "required": ["offerId"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_apply_distillation,
+    },
+    {
+        "name": "revl_revoke_distillation",
+        "description": "Retire an applied distilled AutoApproveRule from the live "
+                       "policy (item 251), the symmetric partner of "
+                       "revl_apply_distillation. Removes the rule (matched by its "
+                       "canonical DSL text), records a `distillation-revoked` WAL "
+                       "fact, and the NEXT matching crossing prompts again "
+                       "(fail-closed); consume-before-fire already covers any "
+                       "in-flight crossing, so there is no orphaned auto-approval "
+                       "mid-revoke. Revoking a rule with no live match is a clean "
+                       "no-op (`count: 0`). Gated by the `approve` operator verb "
+                       "(item 55): withdrawing a standing auto-approve is the same "
+                       "authority as installing it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "rule": {"type": "string",
+                         "description": "the rule text (or its canonical DSL) to "
+                                        "revoke"}},
+            "required": ["rule"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_revoke_distillation,
     },
     {
         "name": "revl_state",

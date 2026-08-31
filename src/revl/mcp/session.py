@@ -18,7 +18,9 @@ call — between tool calls the composition is simply idle.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sys
+from fnmatch import fnmatchcase
 
 from .. import cap_order
 from .._paths import backends_root
@@ -313,6 +315,27 @@ class Session:
         # (the candidateHash check invalidates a stale grant, exactly as
         # `_ledger` does); reset per session (invariant 5).
         self._grants: list = []
+        # roadmap item 251 Slice 2: distilled `AutoApproveRule`s loaded from the
+        # bound policy (`self.sandbox.auto_approve_rules`) into a persistent
+        # standing-grant analog, matched by a component glob + realm + resource
+        # scope + taint-subset gate rather than a frozen candidate hash. Unlike a
+        # 344 grant (session-scoped, minted at runtime), these are POLICY: an
+        # operator wrote them (or applied a distilled offer), so they persist and
+        # are re-materialized each generation. `_auto_reviewed` persists the
+        # enumerated glob-member set each rule was reviewed against (the H1 bind,
+        # §6 A1): a component ENTERING the glob that was not in that set suspends
+        # the rule, fail-closed. Keyed by the rule's canonical DSL so it survives a
+        # swap's re-materialize. Reset per session.
+        self._auto_rules: list = []
+        self._auto_reviewed: dict = {}
+        # the in-memory mirror of the `approval-granted` / `approval-denied`
+        # records this session produced, WITH the item-251 shape-key fields, so
+        # `distillation_offers` folds the live ledger without re-reading the WAL.
+        self._approval_records: list = []
+        # how many per-call class-(c) crossings auto-approved against a distilled
+        # rule, and the offers/revokes applied this session (attribution + metrics).
+        self._auto_consumed: int = 0
+        self._distillation_seq: int = 0
         # how many per-call class-(c) crossings auto-approved against a standing
         # grant this session — the grant-consumed half of the metrics the 344
         # measurement reads beside prompts-per-session (Decision 6). Off-policy
@@ -430,6 +453,11 @@ class Session:
         # a class-(c) emission does not boot without approval (Fix 1). Off when no
         # policy is configured, so nothing below runs and the load is byte-identical.
         self._class_map = self._build_class_map(ir)
+        # item 251 Slice 2: materialize the bound policy's distilled auto-approve
+        # rules against this generation, atomically with the class map so a call is
+        # never decided against a stale rule set. Inert (empty) when the policy
+        # names no `auto-approve` rule, so an off-distillation load is byte-identical.
+        self._install_auto_approve_rules()
         # item 310: the seam-method cache index, rebuilt atomically with the class
         # map so a call is never decided against a stale cache contract.
         self._install_cache_index(ir)
@@ -863,6 +891,11 @@ class Session:
         # gets the unknown-hash refusal and the caller re-issues).
         self._class_map = new_map
         self._tickets = {}
+        # item 251 Slice 2: re-materialize the distilled rules against the new
+        # generation. The H1 review bind (`_auto_reviewed`) persists across the
+        # swap, so a component the swap moves INTO a rule's glob that was not in the
+        # reviewed set suspends the rule (fail-closed), never silently carried.
+        self._install_auto_approve_rules()
         # item 310: the new generation's cache index goes live atomically too, and
         # every prior-generation entry dies (a generation change is a liveness
         # event — a swapped provider may answer differently, so a stale entry is a
@@ -1684,6 +1717,12 @@ class Session:
         self._ledger = []
         self._grants = []
         self._grants_consumed = 0
+        # item 251 Slice 2: distilled-rule materialization and its H1 review bind.
+        self._auto_rules = []
+        self._auto_reviewed = {}
+        self._approval_records = []
+        self._auto_consumed = 0
+        self._distillation_seq = 0
         # item 310: the seam-method cache is session-scoped, exactly as the ledger
         # and grants are (a cached result cannot outlive the session that
         # authorized its miss).
@@ -2124,6 +2163,31 @@ class Session:
         recording is refused up front, so this is None only with the policy off."""
         return self.recorder.wal if self.recorder is not None else None
 
+    def _operator_token(self) -> str:
+        """The bound operator identity (item 55) attributed to a grant, so the
+        distiller (item 251) can require every grant of a shape to share one
+        author. Empty when no operator profile is bound."""
+        op = getattr(self, "operator", None)
+        return getattr(op, "token", "") if op is not None else ""
+
+    def _distillation_ledger_fields(self, ticket: dict) -> dict:
+        """The item-251 shape-key fields a grant record carries so the distiller
+        folds it (design §1.1, §2.1): the crossing's realm, its bound resource
+        valuations (`resourceScopes`, the registered-resource projection the N1
+        fix binds at ticket time), the resource-bound `classCCapabilities`, the
+        recorded post-endorsement `taintOrigins`, and the attributed operator. Only
+        present-on-the-ticket fields are copied, so a bare crossing records exactly
+        as before plus the realm and operator."""
+        fields: dict = {"realm": ticket.get("realm", ""),
+                        "operator": self._operator_token()}
+        if ticket.get("classCCapabilities"):
+            fields["classCCapabilities"] = ticket["classCCapabilities"]
+        if ticket.get("resourceScopes"):
+            fields["resourceScopes"] = ticket["resourceScopes"]
+        if ticket.get("taintOrigins"):
+            fields["taintOrigins"] = ticket["taintOrigins"]
+        return fields
+
     def _find_standing_approval(self, ticket: dict):
         """The first unconsumed ledger entry that covers this ticket: same ticket
         hash, same reach-closure candidate hash against the LIVE generation, same
@@ -2220,6 +2284,17 @@ class Session:
             if record is not None:
                 record["scope"] = ("grants", [g["requestId"] for g in grants])
             return
+        # item 251 Slice 2: a distilled `AutoApproveRule` in the bound policy that
+        # covers the crossing (component glob + realm + resource scope + taint
+        # subset) auto-approves it, consuming a use durably before the fire. Same
+        # runtime enforcement as a hand-written rule of the identical text - the
+        # distiller only selected it.
+        auto = self._find_auto_approve(ticket)
+        if auto is not None:
+            self._consume_auto_rule(auto)      # durable spend before the fire
+            if record is not None:
+                record["scope"] = ("auto", auto["requestId"])
+            return
         self._tickets[ticket["hash"]] = ticket
         if self._owner is not None:
             self._owner.prompts["perCall"] += 1
@@ -2248,6 +2323,10 @@ class Session:
             if grants is not None:
                 for g in grants:            # every class-(c) cap is covered
                     self._consume_grant(g)
+                continue
+            auto = self._find_auto_approve(ticket)        # item 251 Slice 2
+            if auto is not None:
+                self._consume_auto_rule(auto)
                 continue
             self._tickets[ticket["hash"]] = ticket
             if self._owner is not None:
@@ -2448,12 +2527,15 @@ class Session:
             "consumed": False,
         }
         self._ledger.append(entry)
+        granted = {
+            "requestId": entry["requestId"], "hash": entry["hash"],
+            "candidateHash": entry["candidateHash"],
+            "component": entry["component"], "kind": entry["kind"],
+            **self._distillation_ledger_fields(ticket)}
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_granted({
-                "requestId": entry["requestId"], "hash": entry["hash"],
-                "candidateHash": entry["candidateHash"],
-                "component": entry["component"], "kind": entry["kind"]})
+            wal.record_approval_granted(granted)
+        self._approval_records.append({"record": "approval-granted", **granted})
         return {"approved": True, "hash": ticket["hash"],
                 "component": ticket["component"], "key": ticket.get("key"),
                 "method": ticket.get("method"), "kind": ticket.get("kind"),
@@ -2568,6 +2650,165 @@ class Session:
         wal = self._approval_wal()
         if wal is not None:
             wal.record_approval_consumed(grant["requestId"])
+
+    # -- item 251 Slice 2: distilled AutoApproveRule enforcement -------------
+
+    def _glob_members(self, glob: str) -> frozenset[str]:
+        """The component names currently selected by a rule's component glob
+        (`fnmatchcase`, the same machinery every item-33 rule uses). The H1
+        signature: a component ENTERING this set that was not in the reviewed
+        blast set suspends the rule (§6 A1)."""
+        # source the generation's components from the class map (set atomically
+        # with the rules), so membership is correct even while `self.ir` is still
+        # being assigned during load, and always names the live generation.
+        ir = self._class_map.ir if self._class_map is not None else (self.ir or {})
+        names = [c.get("name") for c in ir.get("components") or []]
+        return frozenset(n for n in names if n and fnmatchcase(n, glob))
+
+    def _install_auto_approve_rules(self) -> None:
+        """Materialize the bound policy's `AutoApproveRule`s into the live standing
+        analog for this generation (item 251 Slice 2). Each entry carries the
+        parsed rule caps (for the resource-scope `covers` check), the `admitting`
+        taint set, a `remainingUses`/`expiresAt` bound, and the enumerated glob
+        members it is REVIEWED against (the H1 bind). The reviewed set is snapshot
+        the first time a rule is seen and PERSISTS across a swap (`_auto_reviewed`),
+        so a swap that moves a new component into the glob is detected as growth.
+
+        Inert when the policy names no `auto-approve` rule (`self._auto_rules`
+        stays empty), so a composition with no distilled rule is byte-identical."""
+        self._auto_rules = []
+        pol = self.sandbox
+        rules = getattr(pol, "auto_approve_rules", ()) if pol is not None else ()
+        now = self._now_ms()
+        for i, rule in enumerate(rules):
+            key = rule.to_dsl()
+            members = self._glob_members(rule.component)
+            reviewed = self._auto_reviewed.get(key)
+            if reviewed is None:
+                reviewed = members
+                self._auto_reviewed[key] = reviewed
+            try:
+                caps = [cap_order.parse_cap(c) for c in rule.caps]
+            except cap_order.CapError:
+                continue  # a malformed rule cannot admit anything (fail-closed)
+            self._auto_rules.append({
+                "requestId": "auto:" + hashlib.sha256(
+                    key.encode("utf-8")).hexdigest()[:16],
+                "kind": "auto-approve-rule",
+                "rule": rule,
+                "glob": rule.component,
+                "realm": rule.realm,
+                "caps": caps,
+                "admitting": rule.admitting,
+                "reviewedComponents": reviewed,
+                "remainingUses": rule.uses,
+                "expiresAt": (now + rule.ttl_ms) if rule.ttl_ms is not None
+                else None,
+                "consumed": False,
+                "suspended": False,
+            })
+
+    def _admission_taint_origins(self, component: str) -> frozenset[str] | None:
+        """The crossing's taint origin set AT ADMISSION, or None when this tier has
+        no honest source (design §2.2, §6 A2 H2 corollary). The static item-249
+        over-approximation (`ClassMap.static_taint`, post-endorsement) is the floor
+        on a tier with the audit; a session flagged as having no runtime/static
+        value taint (`_runtime_taint_available = False`) returns None, and the
+        caller substitutes ALL FIVE origins (fail-closed, over-prompt is safe),
+        NEVER an empty set a `{} subset admitting` test would wave through."""
+        if getattr(self, "_runtime_taint_available", True) is False:
+            return None
+        if self._class_map is None:
+            return None
+        return self._class_map.static_taint(component)
+
+    def _auto_rule_suspended(self, entry: dict) -> bool:
+        """Whether a distilled rule is suspended by glob-membership GROWTH (§6 A1,
+        the H1 fix). Any component currently selected by the glob that was not in
+        the reviewed blast set is a signature change: the rule is bound to the
+        enumerated set it was distilled from, not to the open glob, so a new member
+        suspends it and it must be re-offered - never silently auto-approved."""
+        current = self._glob_members(entry["glob"])
+        return bool(current - entry["reviewedComponents"])
+
+    def _auto_rule_covers(self, entry: dict, ticket: dict, now: int) -> bool:
+        """Whether one distilled rule auto-approves this class-(c) ticket, using the
+        SAME predicates a hand-written rule is checked by (§2.2): the component
+        glob, the realm scope, the resource-scope `covers` order over EVERY
+        class-(c) capability, and the taint-subset gate with the H2 admission
+        floor. Liveness (uses/expiry) and the H1 suspend are checked here too."""
+        if entry["consumed"]:
+            return False
+        exp = entry.get("expiresAt")
+        if exp is not None and now > exp:
+            return False
+        remaining = entry.get("remainingUses")
+        if remaining is not None and remaining <= 0:
+            return False
+        component = ticket.get("component", "")
+        if not fnmatchcase(component, entry["glob"]):
+            return False
+        # H1: a grown glob suspends the whole rule (fail-closed, re-offer).
+        if self._auto_rule_suspended(entry):
+            entry["suspended"] = True
+            return False
+        if entry["realm"] is not None \
+                and entry["realm"] != ticket.get("realm", ""):
+            return False
+        # every class-(c) capability the crossing reaches must be COVERED by some
+        # rule cap in the item-294 order - a host-scoped rule never admits a send
+        # to another host (the N1 fix, enforced by `covers`).
+        class_c = ticket.get("classCCapabilities") or []
+        if not class_c:
+            return False
+        for cap_str in class_c:
+            try:
+                crossing = cap_order.parse_cap(cap_str)
+            except cap_order.CapError:
+                return False
+            if not any(cap_order.covers(rc, crossing) for rc in entry["caps"]):
+                return False
+        # the taint-subset gate with the H2 floor (§2.2, §6 A2 H2 corollary): an
+        # UNKNOWN admission taint (None - a tier with no honest source) is treated
+        # as ALL FIVE origins (fail-closed, over-prompt is safe), NEVER an empty
+        # set a `{} subset admitting` test would wave through. A KNOWN set (from the
+        # static over-approximation, possibly empty for a clean crossing) is used
+        # as-is, so a genuinely untainted send still auto-approves.
+        from ..policy import TAINT_FOLD_ORIGINS  # noqa: PLC0415
+        raw = self._admission_taint_origins(component)
+        admission = TAINT_FOLD_ORIGINS if raw is None else raw
+        return admission <= entry["admitting"]
+
+    def _find_auto_approve(self, ticket: dict):
+        """The first LIVE distilled rule that auto-approves this class-(c) ticket,
+        or None (the crossing then prompts, exactly as before - fail-closed). A
+        single rule must cover EVERY class-(c) capability the crossing reaches, so
+        a distilled rule can never silently authorize a capability outside the text
+        an operator reviewed."""
+        if not self._auto_rules:
+            return None
+        now = self._now_ms()
+        for entry in self._auto_rules:
+            if self._auto_rule_covers(entry, ticket, now):
+                return entry
+        return None
+
+    def _consume_auto_rule(self, entry: dict) -> None:
+        """Spend one use of a distilled rule durably BEFORE the crossing fires
+        (consume-before-fire, reusing the 344 WAL ordering). A `uses`-bounded rule
+        decrements `remainingUses` and marks `consumed` at zero, so an applied rule
+        cannot double-fire and a crash between this `approval-consumed` record and
+        the fire re-prompts (fail-closed). An unbounded rule records the spend for
+        the audit join without a counter."""
+        remaining = entry.get("remainingUses")
+        if remaining is not None:
+            entry["remainingUses"] = remaining - 1
+            if entry["remainingUses"] <= 0:
+                entry["consumed"] = True
+        self._auto_consumed += 1
+        wal = self._approval_wal()
+        if wal is not None:
+            wal.record_approval_consumed(entry["requestId"])
 
     def mint_standing_grant(self, *, ticket_hash: str | None = None,
                             capability: str | None = None,
@@ -2729,15 +2970,20 @@ class Session:
             "lease": is_lease,              # item 294: minted from an effect lease
         }
         self._grants.append(entry)
+        tk = self._tickets.get(ticket_hash) if ticket_hash else None
+        dist = (self._distillation_ledger_fields(tk) if tk is not None
+                else {"operator": self._operator_token()})
+        granted = {
+            "requestId": entry["requestId"], "kind": entry["kind"],
+            "capability": entry["capability"],
+            "candidateHash": entry["candidateHash"],
+            "component": entry["component"], "session": entry["session"],
+            "expiresAt": entry["expiresAt"],
+            "remainingUses": entry["remainingUses"], **dist}
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_granted({
-                "requestId": entry["requestId"], "kind": entry["kind"],
-                "capability": entry["capability"],
-                "candidateHash": entry["candidateHash"],
-                "component": entry["component"], "session": entry["session"],
-                "expiresAt": entry["expiresAt"],
-                "remainingUses": entry["remainingUses"]})
+            wal.record_approval_granted(granted)
+        self._approval_records.append({"record": "approval-granted", **granted})
         return {"granted": True, "kind": "standing-grant",
                 "requestId": entry["requestId"], "capability": capability,
                 "component": component, "candidateHash": candidate_hash,
@@ -2827,6 +3073,147 @@ class Session:
         if request_id is not None:
             out["requestId"] = request_id
         return out
+
+    # -- item 251 Slice 2: the distillation operator surface ----------------
+
+    def distillation_offers(self) -> dict:
+        """Fold this session's approval ledger to candidate `AutoApproveRule`
+        offers (roadmap item 251, §4). Read-only and PROPOSE-ONLY: it applies no
+        policy. Scoped to the CALLER's own grants - an operator sees offers
+        distilled only from yeses attributed to them (an empty operator token sees
+        the unattributed grants, the ungated single-agent case). Each offer carries
+        its rule text, blast radius, attributed operator, and source sessions."""
+        from ..distill import distill  # noqa: PLC0415 - pure, lazy
+        me = self._operator_token()
+        records = [r for r in self._approval_records
+                   if str(r.get("operator", "")) == me]
+        result = distill(records)
+        offers = []
+        for off in result.offers:
+            offers.append({
+                "offerId": "offer:" + hashlib.sha256(
+                    off.rule_text.encode("utf-8")).hexdigest()[:16],
+                "rule": off.rule_text,
+                "operator": off.operator,
+                "sessions": list(off.sessions),
+                "grantCount": off.grant_count,
+                "blast": {
+                    "covered": off.blast.covered,
+                    "total": off.blast.total,
+                    "resourceScope": off.blast.resource_scope,
+                    "destinations": list(off.blast.destinations),
+                    "negativeGuarantee": sorted(off.blast.negative_guarantee),
+                }})
+        refusals = [{"reason": r.reason.value, "token": r.token,
+                     "realm": r.realm, "detail": r.detail} for r in result.refusals]
+        return {"offers": offers, "refusals": refusals}
+
+    def _offer_by_id(self, offer_id: str):
+        """Resolve an offer id back to its `DistilledOffer` (re-folding the ledger,
+        so the applied rule is exactly the reviewed text - never operator-supplied
+        rule text that the review never saw)."""
+        from ..distill import distill  # noqa: PLC0415
+        me = self._operator_token()
+        records = [r for r in self._approval_records
+                   if str(r.get("operator", "")) == me]
+        for off in distill(records).offers:
+            oid = "offer:" + hashlib.sha256(
+                off.rule_text.encode("utf-8")).hexdigest()[:16]
+            if oid == offer_id:
+                return off
+        return None
+
+    def apply_distillation(self, offer_id: str) -> dict:
+        """Install a distilled offer as a live `AutoApproveRule` (roadmap item 251,
+        §4). Writes the rule into the bound policy (`self.sandbox`), re-materializes
+        it against the live generation (binding the H1 reviewed component set to
+        the offer's blast set), and records a `distillation-applied` WAL fact with
+        the attribution (`distilledBy`, `reviewedBy`, `appliedAt`, the ledger
+        window). Gated in the mcp verb dispatch by the item-55 `approve` verb - the
+        same authority as granting the underlying yeses.
+
+        Carries the mint/revoke ambiguity refusal: a distilled cone whose rule text
+        already stands in the policy is refused rather than silently duplicated."""
+        import dataclasses  # noqa: PLC0415 - stdlib
+        from ..policy import Policy  # noqa: PLC0415
+        offer = self._offer_by_id(offer_id)
+        if offer is None:
+            raise SessionError(
+                f"unknown distillation offer {offer_id!r} - re-read "
+                f"`distillation_offers` (the ledger folds to the current offers; "
+                f"an offer id is stable only while its shape is still settled)")
+        rule = offer.rule
+        pol = self.sandbox if self.sandbox is not None else Policy()
+        existing = {r.to_dsl() for r in getattr(pol, "auto_approve_rules", ())}
+        if rule.to_dsl() in existing:
+            raise SessionError(
+                f"a rule with the identical text is already applied "
+                f"({rule.to_dsl()!r}) - an offer already covered by a live rule is "
+                f"refused rather than duplicated (item 251, the apply ambiguity "
+                f"refusal)")
+        self.sandbox = dataclasses.replace(
+            pol, auto_approve_rules=tuple(pol.auto_approve_rules) + (rule,))
+        # bind the H1 reviewed set to the offer's blast components (the enumerated
+        # set the operator reviewed), not merely the current glob membership.
+        reviewed = frozenset(nc.component for nc in offer.blast.not_covered) \
+            | self._glob_members(rule.component)
+        self._auto_reviewed[rule.to_dsl()] = reviewed
+        self._install_auto_approve_rules()
+        now = self._now_ms()
+        me = self._operator_token()
+        fields = {
+            "rule": rule.to_dsl(),
+            "distilledBy": offer.operator,
+            "reviewedBy": me,
+            "distilledFrom": {"sessions": list(offer.sessions),
+                              "grantCount": offer.grant_count},
+            "blast": {"covered": offer.blast.covered, "total": offer.blast.total},
+            "appliedAt": now,
+        }
+        wal = self._approval_wal()
+        if wal is not None:
+            wal.record_distillation_applied(fields)
+        self._distillation_seq += 1
+        return {"applied": True, "offerId": offer_id, "rule": rule.to_dsl(),
+                "distilledBy": offer.operator, "reviewedBy": me}
+
+    def revoke_distillation(self, rule: str) -> dict:
+        """Retire an applied distilled rule from the live policy (roadmap item 251,
+        §4), the symmetric partner of `apply_distillation`. Removes the rule
+        (matched by its canonical DSL text), re-materializes, and records a
+        `distillation-revoked` WAL fact - the NEXT matching crossing prompts again
+        (fail-closed); consume-before-fire already covers any in-flight crossing.
+        Revoking a rule with no live match is a clean no-op (`count: 0`). Gated by
+        the item-55 `approve` verb, exactly as apply."""
+        import dataclasses  # noqa: PLC0415
+        pol = self.sandbox
+        rules = tuple(getattr(pol, "auto_approve_rules", ())) if pol is not None \
+            else ()
+        # canonicalize the target through the parser so a caller can name the rule
+        # by any equivalent spelling; fall back to the raw text on a parse miss.
+        want_dsl = {rule}
+        try:
+            from ..policy import parse_policy  # noqa: PLC0415
+            want_dsl |= {r.to_dsl() for r in parse_policy(rule).auto_approve_rules}
+        except Exception:  # noqa: BLE001 - a bare id or non-DSL fragment
+            pass
+        kept, removed = [], []
+        for r in rules:
+            if r.to_dsl() in want_dsl:
+                removed.append(r.to_dsl())
+            else:
+                kept.append(r)
+        if removed and pol is not None:
+            self.sandbox = dataclasses.replace(pol,
+                                               auto_approve_rules=tuple(kept))
+            self._install_auto_approve_rules()
+            me = self._operator_token()
+            wal = self._approval_wal()
+            for dsl in removed:
+                if wal is not None:
+                    wal.record_distillation_revoked({"rule": dsl, "revokedBy": me})
+            self._distillation_seq += 1
+        return {"revoked": True, "count": len(removed), "rules": removed}
 
     def approval_metrics(self) -> dict | None:
         """The auto-approve headline numbers for `session.state()` (Decision 6):

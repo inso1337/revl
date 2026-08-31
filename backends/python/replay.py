@@ -1516,8 +1516,43 @@ class WriteAheadLog:
         the ticket hash, the reach-closure candidate hash, the component, and the
         fields the human saw, so the audit can answer "which human decision
         authorized this crossing". Consumes no seq — like ``commit-approved`` it
-        names facts, it is not an effect."""
+        names facts, it is not an effect.
+
+        Item 251 Slice 2 (additive, no seq change) extends the recorded ``entry``
+        with the distiller's shape-key fields when the grant site supplies them:
+        the crossing's ``realm``, its ``taintOrigins`` (the post-endorsement
+        runtime taint at the sink), its bound ``resourceScopes`` and resource-bound
+        ``classCCapabilities`` (the registered-resource projection - the
+        ``host=``/``path=``/``table=`` values that actually crossed, NOT the whole
+        ``argsDigest`` hash), and the attributed ``operator``. All are optional
+        keys spliced from ``entry``, so a grant site that supplies none records
+        byte-identically to before."""
         record = {"record": "approval-granted", **entry}
+        self._write(record)
+        return record
+
+    def record_distillation_applied(self, entry: dict) -> dict:
+        """Append the ``distillation-applied`` record when an operator applies a
+        distilled `AutoApproveRule` into the live policy (roadmap item 251, Slice
+        2). Names the ``rule`` text, the operator who applied it (``reviewedBy``),
+        the operator whose repeated yeses it encodes (``distilledBy``), the ledger
+        window / grant ids it was distilled from (``distilledFrom``), the
+        blast-radius snapshot, and ``appliedAt`` - so the item-27 causal trace can
+        answer "what auto-approved this crossing and on whose authority" through
+        the rule to the operator and to the original yeses (design §4). Consumes no
+        seq: like ``approval-granted`` it names a consent fact, not an effect."""
+        record = {"record": "distillation-applied", **entry}
+        self._write(record)
+        return record
+
+    def record_distillation_revoked(self, entry: dict) -> dict:
+        """Append the ``distillation-revoked`` record when an operator retires a
+        distilled `AutoApproveRule` from the live policy (roadmap item 251, Slice
+        2), the symmetric partner of ``distillation-applied``. Names the ``rule``
+        text and the operator who revoked it (``revokedBy``), so the next matching
+        crossing prompts again (fail-closed) and the audit tells an operator's cut
+        from a natural lapse. Consumes no seq."""
+        record = {"record": "distillation-revoked", **entry}
         self._write(record)
         return record
 
