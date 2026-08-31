@@ -55,8 +55,8 @@ Every fact the rule language can threshold is OBJECTIVE and RECORDED:
 - a gauntlet run ended `admissible` or it did not;
 - a publisher is in the operator's trust set or it is not (trust is supplied by
   the operator, never self-asserted: `registry._publisher_status`);
-- a declaration carries the `declared`, `keyed`, `sweep-evidenced`, or
-  `shape-proven` register (the item-44/309 honesty ledger).
+- a declaration carries the `declared`, `keyed`, or `shape-proven` register
+  (the item-44/309 honesty ledger; section 3.2 adopts 309's partial order).
 
 A rule is a predicate over these facts. `component Csv* requires evidence
 [fault-sweep 12/12, attestation valid]` either holds or does not hold; the
@@ -113,13 +113,29 @@ Notes:
   worse than none, exactly as the resolve ranks it), so no satisfiable
   threshold ever admits an invalid attestation.
 - The fault-sweep numeric form `fault-sweep 12/12` holds iff the dossier's
-  recorded coverage `(passed, steps)` satisfies `steps >= 12 and passed ==
-  steps`: at least that many steps were swept and every swept step passed.
-  `fault-sweep full` holds iff `passed == steps > 0`. Both are integer
-  comparisons over the recorded counts; a `passed` dossier with zero steps is
-  honest but weightless (`partial`, per `_sweep_status`) and satisfies neither.
-  The numeric form exists because "full" floats with the program: an operator
-  pinning a floor wants "a sweep of at least this size, fully passed".
+  recorded coverage satisfies `steps >= 12 and passed == steps and
+  unreachable == 0`: at least that many steps were swept, every swept step
+  passed, and no step sat beyond the scheme's reach. The numerator must equal
+  the denominator: `fault-sweep 8/12` is a `PolicyError` at parse time. The
+  only semantics on offer is all-passed (section 2 forbids partial credit),
+  so a numerator below the denominator can only mislead: an operator writing
+  `8/12` expects partial credit the design refuses, and under all-passed
+  semantics the `8` would be dead weight. `fault-sweep full` holds iff
+  `passed == steps > 0 and unreachable == 0`. The `unreachable == 0` check is
+  290's addition on top of 293's grading: `_sweep_status` grades `full` from
+  `status == passed and passed == steps` alone, so a component with 12
+  sweepable steps and 8 the scheme cannot address grades `full` at 12/12
+  while nearly half its effects were never exercised. The gate reads the
+  recorded `unreachable` count directly (an integer comparison over recorded
+  counts, like the rest of the form; no new grading logic) and refuses to
+  call that `full`. A `passed` dossier with zero steps is honest but
+  weightless (`partial`, per `_sweep_status`) and satisfies neither form. The
+  numeric form exists because "full" floats with the program: an operator
+  pinning a floor wants "a sweep of at least this size, fully passed". One
+  honest sentence to keep expectations straight: the step count is
+  author-controlled, so twelve trivial reversible effects yield an honest
+  12/12; the numeric floor buys a size proxy, not rigor. It keeps out toy
+  sweeps; it does not certify sweep quality.
 - `publisher trusted` is graded against the trust set the EVALUATION supplies
   (section 4), mirroring `resolve(trusted_publishers=...)`. A component cannot
   self-assert trust.
@@ -130,26 +146,34 @@ Extending the item-33 DSL (docs/boundary-policy.md), same subjects as the reach
 rules plus a capability-scoped form:
 
 ```
-component <glob>  requires evidence [<facet> <threshold>, ...]
-realm <name>      requires evidence [<facet> <threshold>, ...]
-mcp               requires evidence [<facet> <threshold>, ...]
-capability <glob> requires evidence [<facet> <threshold>, ...]
-capability <glob> requires register <level>
+component <glob>          requires evidence [<facet> <threshold>, ...]
+component registry:<glob> requires evidence [<facet> <threshold>, ...]
+realm <name>              requires evidence [<facet> <threshold>, ...]
+mcp                       requires evidence [<facet> <threshold>, ...]
+capability <glob>         requires evidence [<facet> <threshold>, ...]
+capability <glob>         requires register <level>
+<any evidence rule> ... self-attested     # unrooted acknowledgment, section 6.3
+evidence-root: local                      # policy-level acknowledgment, section 6.3
 ```
 
 Examples:
 
 ```
-# only fully-swept, attested components anywhere in this composition
-component *        requires evidence [attestation valid, fault-sweep full]
+# every registry-resolved component must be fully swept and attested;
+# first-party bare-source components are outside this rule by construction
+# (origin scoping, below)
+component registry:* requires evidence [attestation valid, fault-sweep full]
 
 # the agent sandbox: agent-admitted code must have survived the gauntlet
+# (satisfiable for drafts from slice 1 via the session gauntlet dossier,
+# section 4)
 mcp                requires evidence [gauntlet admissible]
 
 # anything reaching payments must come from a trusted publisher, attested
 capability payments.* requires evidence [publisher trusted, attestation valid]
 
 # a witnessed inverse behind inventory.* may not be a bare trust-me claim
+# (floors above `declared` land with 309's ledger; see below)
 capability inventory.* requires register keyed
 ```
 
@@ -162,22 +186,79 @@ matching the glob: "whatever touches payments must clear this bar". A
 component selected by several evidence rules must satisfy ALL of them
 (conjunction; nothing widens).
 
+**Origin scoping.** The `registry:` prefix scopes a component rule by
+ADMISSION ORIGIN, and it exists because the unscoped flagship rule is
+unwritable in practice: `policy.evaluate` walks EVERY component, a real
+composition always contains first-party components with no registry bundle,
+so `component * requires evidence [...]` refuses the operator's own main
+component. The tempting remedies are worse. Scoping by name glob
+(`component vendored-*`) or an explicit exemption form
+(`component local-* exempt evidence`) INVERTS fail-closed: a vendored
+component renamed to dodge the glob silently escapes the bar, and the safe
+sentence "every component except these first-party ones" is inexpressible by
+name. Origin cannot be dodged by renaming, because it is recorded by the
+admission path itself, never asserted by the component. The audit graph
+therefore carries each component's admission origin (`registry` for
+registry-resolved admission, `source` for bare-source; MCP-session
+membership is already its own set), populated at admission time, and
+`component registry:<glob>` selects by origin AND `fnmatchcase` over the
+name. Bare `component <glob>` keeps its shipped meaning: name only, any
+origin. The exemption form is rejected; the origin-scoped selector is the
+design.
+
 `requires register <level>` is the declaration-strength floor over the
-item-44/309 honesty ledger. The ladder, weakest first:
+item-44/309 honesty ledger. 290 adopts 309's PARTIAL order verbatim, because
+309 is the source of the ledger and the two items must not grade the same
+declaration differently:
 
 ```
-declared < keyed < sweep-evidenced < shape-proven
+declared < keyed        declared < shape-proven        keyed, shape-proven: peers
 ```
 
-mapping onto 309's verification-ledger columns: `declared` is the bare item-44
-trust-me register, `keyed` adds the idempotency-key discipline (309),
-`sweep-evidenced` means the claim was exercised by the fault sweep
-(value-digest checked), `shape-proven` means the static proof holds. The rule
-selects components reaching the capability and refuses any whose relevant
-declarations (today: the witnessed-inverse and idempotence claims lowered onto
-that boundary) sit below the floor. Slice 1 scopes `requires register` to the
-registers the IR already records per declaration; it grows as 309's ledger
-lands more registers, with the vocabulary staying closed at parse time.
+`declared` is the bare item-44 trust-me register; `keyed` (the
+idempotency-key discipline) and `shape-proven` (the static proof) are PEERS,
+neither above the other, and either one satisfies a strong floor. An earlier
+draft of this design used the total order `declared < keyed <
+sweep-evidenced < shape-proven`; that is withdrawn. It contradicted 309
+outright (same rule, opposite verdicts: a keyed declaration under a
+shape-proven floor passes in one ordering and fails in the other), and
+`sweep-evidenced` is not a declaration register at all but evidence about
+the component, already thresholdable as the `fault-sweep` facet; keeping it
+in the ladder would fork 309's vocabulary. The floor vocabulary is therefore
+`declared`, `keyed`, `shape-proven`, and `strong` (at least one strong form:
+`keyed` or `shape-proven`, exactly 309's strong floor). A named-form floor
+is satisfied only by that form or a form above it (nothing sits above either
+peer today); an operator who means "verified, either way" writes `strong`.
+
+The rule selects components reaching the capability and refuses any whose
+relevant declarations (today: the witnessed-inverse and idempotence claims
+lowered onto that boundary) sit below the floor. Two evaluator rules are
+stated here so slice work does not invent them ad hoc:
+
+- **Worst register wins per capability.** When a register rule selects a
+  component, EVERY declaration lowered onto a matching reach token must meet
+  the floor; the effective register of a capability is the WEAKEST among the
+  declarations behind it. One bare `declared` inverse beside three keyed
+  ones fails a `keyed` floor. This is the same worst-wins discipline as the
+  rest of the policy (section 5).
+- **The audit surface.** `component_reach` yields `(token, via, kind)`
+  tuples, not declaration objects, so registers are invisible to the walk
+  today. The audit graph gains a declaration-register surface: a
+  `capability_registers` map from reach token to the register levels of the
+  declarations behind that token, alongside `component_reach`, populated at
+  lowering time. The rule evaluates against that map, and the why-trace
+  names the weakest declaration.
+
+Timing, stated bluntly: the register does not exist in the IR yet. Only
+`idempotent: true` is recorded per method; no `keyed`/`shape-proven` string
+exists anywhere in `src/revl`, and there is no `idempotent(key: p)` parse
+form. A floor above `declared` accepted today would be an unsatisfiable
+rule, an unconditional deny wearing a register costume, whose meaning
+silently flips the day 309's ledger lands. So slice 1 parses
+`requires register declared` only and rejects every higher level at parse
+time with a distinct `PolicyError` ("register level `keyed` is not yet
+recordable; lands with 309's ledger"): the vocabulary is closed in time as
+well as in space. The higher floors ship behind 309's ledger (section 9).
 
 ### 3.3 JSON equivalent
 
@@ -187,21 +268,31 @@ Same `Policy`, machine-authored, alongside the existing `components` / `realms`
 ```json
 {
   "evidence": [
-    {"component": "Csv*",
+    {"component": "registry:Csv*",
      "require": {"attestation": "valid", "fault-sweep": "12/12"}},
+    {"component": "vendored-*",
+     "require": {"fault-sweep": "full"}, "selfAttested": true},
     {"capability": "payments.*",
      "require": {"publisher": "trusted", "attestation": "valid"}},
     {"mcp": true, "require": {"gauntlet": "admissible"}}
   ],
   "registers": [
     {"capability": "inventory.*", "atLeast": "keyed"}
-  ]
+  ],
+  "evidenceRoot": "local"
 }
 ```
 
-An unknown facet name or status is a `PolicyError` at parse time (a closed
-vocabulary, like every other rule family): a typo must not become a rule that
-silently requires nothing.
+The `registry:` origin prefix is the same string in JSON; `selfAttested` and
+the policy-level `evidenceRoot` are the section-6.3 acknowledgments (the
+example shows both forms; a real file needs at most one).
+
+An unknown facet name, status, or register level is a `PolicyError` at parse
+time (a closed vocabulary, like every other rule family): a typo must not
+become a rule that silently requires nothing. So are the malformed shapes
+from sections 3.1 and 3.2: a numeric sweep threshold with numerator below
+denominator, and a register floor above `declared` before 309's ledger
+lands.
 
 ### 3.4 Model changes
 
@@ -213,12 +304,14 @@ parses byte-identically and `is_empty()` stays honest:
 class EvidenceRule:
     scope: str                        # "component" | "realm" | "mcp" | "capability"
     selector: str                     # glob / realm name ("" for mcp)
+    origin: str | None                # "registry" for origin-scoped rules, else None
     require: tuple                    # ((facet, threshold), ...) conjunction
+    self_attested: bool               # explicit unrooted acknowledgment (section 6.3)
 
 @dataclass(frozen=True)
 class RegisterRule:
     capability: str                   # glob over capability tokens
-    at_least: str                     # "declared" | "keyed" | "sweep-evidenced" | "shape-proven"
+    at_least: str                     # "declared" | "keyed" | "shape-proven" | "strong"
 ```
 
 `Violation` gains two `kind` values, `evidence` and `register`, beside the
@@ -257,9 +350,19 @@ Where the bundle comes from, per admission path:
   every facet is `unavailable`, so a selecting evidence rule refuses. This is
   the correct fail-closed reading, not a bug: an operator who writes "only
   attested, fully-swept components" has refused evidence-less code by
-  definition. Compositions that admit local drafts simply scope their evidence
-  rules (`component vendored-*` rather than `component *`), or run producers
-  locally (next point).
+  definition. Compositions with first-party code scope their evidence rules
+  by ORIGIN (`component registry:*`, section 3.2), never by name-glob
+  exemption, or run producers locally (below).
+- **MCP-admitted agent draft.** A draft admitted through the MCP session is
+  bare-source, but the session's OWN gauntlet (`mcp/gauntlet.py run()`) has
+  just produced a gauntlet dossier live at admission time: operator-run
+  evidence that needs no attestation root, already in hand at exactly the
+  evaluation site. Slice 1 plumbs that dossier into the evidence map for
+  MCP-admitted components, so the recommended item-329 pairing
+  `mcp requires evidence [gauntlet admissible]` is satisfiable in slices 1
+  and 2 for drafts that survived the gauntlet, instead of refusing every
+  draft until slice 3's `--recompute` lands. All other facets stay
+  `unavailable` for drafts, as they should.
 - **Locally recomputed evidence** (slice 3): `revl policy evaluate
   --recompute` may run the producers the operator already has (gauntlet, fault
   sweep, inverse round-trip) against the component in hand and grade THAT
@@ -309,9 +412,9 @@ Reconciliation with item 251 (approval distillation): 251's contract is that a
 distilled rule is "33's policy, never regexes", reviewed once with its blast
 radius. Item 290 enlarges the vocabulary 251 can distill into. The ledger
 observing an operator repeatedly approving swaps to components that are
-attested + fully swept can now offer the typed diff `component csv-* requires
-evidence [attestation valid, fault-sweep full]`, with the same
-would-have-covered accounting. 290 ships no distillation logic; it ships the
+attested + fully swept can now offer the typed diff `component
+registry:csv-* requires evidence [attestation valid, fault-sweep full]`, with
+the same would-have-covered accounting. 290 ships no distillation logic; it ships the
 rule kind 251 will target.
 
 Reconciliation with item 293's resolve: unchanged code paths, one new
@@ -326,33 +429,114 @@ the marker is a courtesy prediction computed by the same evaluator.
 The bundle is author-produced (item 293's design says so explicitly: facets are
 verbatim producer output, assembled at publish, never re-derived). An evidence
 policy that thresholds author-supplied dossiers is only as good as the
-bundle's own root of trust. The design makes that boundary explicit:
+bundle's own root of trust. The adversarial review found the first draft of
+this section broken at its root, so it now states the gap first and the
+rules second.
 
-- **The root is the attestation, or the operator's own run.** `attestation
-  valid` is a cryptographic check with an operator-held key against the
-  rebuilt IR (`attest.verify_attestation`, plus `truc reproduce` for
-  artifact-level reproduction). `publisher trusted` is membership in an
-  operator-supplied set. Everything else in the bundle is, absent those, a
-  self-attested claim.
+### 6.1 Today, the trust root does not root the dossiers
+
+What the shipped item-293 artifacts actually sign and check:
+
+- `attest._body` signs only the IR-level composition facts: kind, version,
+  verdict, IR hash, guarantees, timestamp, signer. The fault-sweep,
+  gauntlet, and inverse-roundtrip dossiers are SEPARATE, UNSIGNED files
+  under `evidence/`; `registry.build_evidence` writes them verbatim side by
+  side with the attestation.
+- `registry.verify()` checks index/manifest reproducibility only; it never
+  opens the evidence files.
+- `_sweep_dossier` carries no source or IR hash and no signature; nothing
+  ties a dossier to the component it claims to describe.
+
+Consequence: a publisher holding an honest, signed, valid attestation can
+hand-write `evidence/fault-sweep.json` with `{status: passed, 12/12}`, or
+copy a simpler component's dossier wholesale, and `component registry:Csv*
+requires evidence [attestation valid, fault-sweep 12/12]` admits with false
+confidence. That is exactly the failure item 290 exists to prevent, and in
+the first draft the unrooted-threshold warning stayed silent because the
+rule "has" an attestation clause. An attestation that does not COVER the
+dossiers must not be allowed to vouch for them.
+
+### 6.2 The fix: bind the dossiers to the signed root
+
+- **Per-facet dossier hashes enter the signed payload.** The attestation
+  payload is extended with the sha256 of each evidence dossier the bundle
+  publishes (or the binding lives in the provenance document, which already
+  carries `sourceSha256` and `manifestSha256` and is the natural home,
+  provided the attestation signs it). `attestation valid` then means: the
+  signature verifies AND every dossier present in the bundle hashes to its
+  signed binding. A bound dossier whose bytes do not match is a tamper and
+  grades the attestation `invalid` (below `unavailable`, as always); a
+  dossier present in the bundle with no binding in the signed payload is
+  merely self-attested and gains nothing from the attestation. This is a
+  small item-293 amendment; it lands WITH slice 1 (section 9), because
+  290's gate semantics depend on it.
+- **Only a covering attestation roots.** An `attestation valid` clause
+  silences the unrooted diagnosis (6.3) for exactly the facets whose
+  dossiers are bound inside the verified payload, and for no others. Until
+  the binding lands, the sweep, gauntlet, and inverse-roundtrip facets are
+  ALWAYS self-attested with today's artifacts, so a rule thresholding them
+  is unrooted, attestation clause or not.
+- **Verified against the rebuilt IR at admission.** Admission-time
+  `attestation valid` is verified against the ADMITTED component's REBUILT
+  IR: rebuild from the source actually being admitted, then verify the
+  signature against that (`attest.verify_attestation`, plus
+  `truc reproduce` for artifact-level reproduction). It is never merely
+  re-read from the bundle in transit; otherwise a resolved-then-modified
+  source rides into the composition on the original, still-valid
+  attestation.
 - **`valid` needs a key, and fails closed without one.** `assess_evidence`
   without a key can grade an attestation at most `present` (well-formed, not
   verified). A policy demanding `attestation valid` evaluated without a
   verification key REFUSES with a distinct reason ("cannot verify is not
-  valid"), mirroring the shipped `verify_required` resolve which refuses to run
-  keyless rather than silently downgrading.
-- **A loud warning for unrooted thresholds.** An evidence rule that thresholds
-  non-attestation facets while requiring neither `attestation valid` nor
-  `publisher trusted` anywhere in its clause list gets an
-  `UnrootedEvidenceWarning` (same pattern as item 249's
-  `InertTaintPolicyWarning`): "this rule thresholds self-attested evidence;
-  add `attestation valid` to root it". A warning, not an error: an operator
-  thresholding evidence they produced themselves (private registry, local
-  recompute) is legitimate, and the gate must not pretend to a guarantee it
-  cannot check, in either direction.
-- **The report restates the caveat.** Like the item-33 report restates the G8
-  lying-pure-extern caveat, every `revl policy evaluate` report states which
-  facets were verified (attestation checked with a key, recomputed locally)
-  and which were read from the published bundle as claims.
+  valid"), mirroring the shipped `verify_required` resolve which refuses to
+  run keyless rather than silently downgrading.
+- **`publisher trusted` roots nothing by itself.** Membership in the
+  operator's trust set says who published, not that the dossiers are
+  theirs; it roots dossiers only in combination with a covering valid
+  attestation under that publisher's key.
+
+### 6.3 Unrooted thresholds are an error, acknowledged or refused
+
+The first draft made an unrooted threshold a Python `UserWarning`. The
+review is right that a warning to stderr in CI trains blindness: it scrolls
+past once, then forever. The design replaces it with a named, grep-able
+decision:
+
+- A rule that thresholds self-attested facets (per 6.2: any fault-sweep,
+  gauntlet, or inverse-roundtrip threshold not covered by a
+  binding-verified `attestation valid` clause in the same rule) is a
+  `PolicyError` at policy-load time, UNLESS the operator acknowledges it
+  explicitly, either per rule:
+
+  ```
+  component vendored-* requires evidence [fault-sweep full] self-attested
+  ```
+
+  or once for the whole policy (a private registry or local-recompute shop):
+
+  ```
+  evidence-root: local
+  ```
+
+- The acknowledgment is a one-time named decision a reviewer can grep for
+  (`self-attested`, `evidence-root`), not a perpetual warning to tune out.
+  The legitimate case from the first draft, an operator thresholding
+  evidence they produced themselves, stays fully expressible; it is now
+  spelled in the policy instead of implied by warning fatigue.
+- Facets that are operator-run at evaluation time need no acknowledgment:
+  the MCP session gauntlet dossier (section 4) and slice-3 `--recompute`
+  facets are rooted in the operator's own run by construction.
+- Any advisory diagnostic that remains, and the acknowledgment itself,
+  appear in the `revl policy evaluate` report BODY and in `--json`
+  (`"selfAttested": true` per rule), never only on stderr.
+
+### 6.4 The report restates the boundary
+
+Like the item-33 report restates the G8 lying-pure-extern caveat, every
+`revl policy evaluate` report states, per facet, which of three standings
+its fact has: verified (key checked, dossier hash bound and matching, IR
+rebuilt), operator-run at evaluation time, or read from the published
+bundle as an acknowledged self-attested claim.
 
 ## 7. `revl policy evaluate`: the explain verb
 
@@ -377,8 +561,8 @@ fact against threshold:
 
 ```
 component csv-reader
-  rule: component * requires evidence [attestation valid, fault-sweep 12/12]
-    attestation      valid            (verified with key)          PASS
+  rule: component registry:* requires evidence [attestation valid, fault-sweep 12/12]
+    attestation      valid            (verified, bindings match)   PASS
     fault-sweep      8/12 partial     required 12/12               FAIL
   rule: capability payments.* requires register keyed
     (not selected: csv-reader does not reach payments.*)
@@ -392,6 +576,19 @@ Contract:
   violations. There is exactly one place a threshold is compared, so the
   dry-run can never disagree with the gate; a golden test pins that (the verb's
   refused set equals the gate's refusals on the same inputs).
+- **Vacuous admission is named, not blurred.** The verdict line
+  distinguishes the two ways a component passes: `admitted: no evidence rule
+  selects this component` (vacuous, nothing was checked) versus
+  `admitted: all N clauses across M selecting rules hold` (checked and
+  passed). An operator scanning the report must be able to tell "nothing
+  applied" from "everything held" without reading the clause table; JSON
+  carries `"selected": false` versus the full clause list.
+- **Inert selectors are reported.** Following item 249's
+  `_warn_if_taint_rules_are_inert` precedent verbatim: an evidence or
+  register rule that selects NO component in the audit graph is reported as
+  inert (`component Csv*` never matches a component named `csv-reader`;
+  `fnmatchcase` is case-sensitive). The diagnosis appears in the report body
+  and in `--json`, so a typo'd selector cannot silently require nothing.
 - **Dry-run only.** It never admits, refuses, or mutates; exit 0 when
   everything selected would be admitted, 1 when anything would be refused, 2 on
   a parse/usage error. `revl audit --policy` remains the enforcement surface
@@ -424,13 +621,23 @@ Contract:
 
 ## 9. Staged plan
 
-**Slice 1: the rule kind.** `EvidenceRule`/`RegisterRule` in `policy.py` (DSL +
-JSON parsing, closed vocabulary, `PolicyError` on unknown facet/status/level),
-evaluation over a supplied `{name: EvidenceBundle}` via
-`registry.assess_evidence`, `evidence`/`register` violations with why-traces,
-`UnrootedEvidenceWarning`, keyless-`valid` fail-closed, composition tests with
-the shipped families. `revl audit --policy` gains `--evidence`/`--key`/
-`--trusted-publisher` plumbing so the gate can actually see bundles.
+**Slice 1: the rule kind, rooted.** `EvidenceRule`/`RegisterRule` in
+`policy.py` (DSL + JSON parsing, closed vocabulary, `PolicyError` on unknown
+facet/status/level, on numeric sweep thresholds with numerator below
+denominator, on register floors above `declared`, and on unacknowledged
+unrooted thresholds per section 6.3), the origin-scoped
+`component registry:<glob>` selector with admission origin recorded in the
+audit graph, evaluation over a supplied `{name: EvidenceBundle}` via
+`registry.assess_evidence` plus the raw sweep counts (`passed`, `steps`,
+`unreachable`), `evidence`/`register` violations with why-traces,
+keyless-`valid` fail-closed, the item-293 amendment binding per-facet
+dossier hashes into the signed payload with `attestation valid` verifying
+the bindings against the rebuilt IR (section 6.2; the gate's semantics
+depend on it, so it is in this slice, not deferred), the MCP session
+gauntlet dossier plumbed into the evidence map for MCP-admitted components
+(section 4), composition tests with the shipped families. `revl audit
+--policy` gains `--evidence`/`--key`/`--trusted-publisher` plumbing so the
+gate can actually see bundles.
 
 **Slice 2: `revl policy evaluate`.** The explain mode on `policy.evaluate`
 (every clause verdict, pass and fail), the verb with the CLI shape of section
@@ -438,16 +645,23 @@ the shipped families. `revl audit --policy` gains `--evidence`/`--key`/
 resolve-side `wouldBeRefused` marker.
 
 **Slice 3: recomputed evidence + register depth.** `--recompute` running local
-producers and marking facets `recomputed` vs `published`; `requires register`
-widened as 309's ledger lands its remaining registers; distillation (251)
-taught to emit evidence rules stays in 251's own item, unblocked by slice 1.
+producers and marking facets `recomputed` vs `published`; the register
+floors above `declared` (`keyed`, `shape-proven`, `strong`) unlocked when
+309's ledger actually records those registers in the IR (they stay
+parse-rejected until then, per section 3.2); distillation (251) taught to
+emit evidence rules stays in 251's own item, unblocked by slice 1.
 
 ## 10. Exit tests
 
-1. **High evidence admits.** A component whose bundle grades `attestation
-   valid` (real key, real signature) and `fault-sweep 12/12` is admitted under
-   `component * requires evidence [attestation valid, fault-sweep full]`; the
-   evaluate report shows both clauses PASS with the recorded facts.
+1. **High evidence admits; first-party code stays writable.** A
+   registry-resolved component whose bundle grades `attestation valid` (real
+   key, real signature, every dossier hashing to its signed binding) and
+   `fault-sweep 12/12` is admitted under `component registry:* requires
+   evidence [attestation valid, fault-sweep full]`; the evaluate report
+   shows both clauses PASS with the recorded facts. A first-party
+   bare-source component in the SAME composition is not selected by the rule
+   and admits; its verdict line reads "admitted: no evidence rule selects
+   this component".
 2. **Low evidence refuses, naming the threshold.** The same policy over a
    bundle with an 8/12 sweep refuses admission; the violation and the
    `revl policy evaluate` report both carry "fault-sweep 8/12, required full
@@ -460,24 +674,63 @@ taught to emit evidence rules stays in 251's own item, unblocked by slice 1.
    with a tampered attestation fails it with `invalid` (never read as merely
    unverified); evaluating `attestation valid` without a key refuses with the
    cannot-verify reason, not a silent downgrade.
-5. **Unrooted rule warns.** `component * requires evidence [fault-sweep full]`
-   alone raises `UnrootedEvidenceWarning`; adding `attestation valid` or
-   `publisher trusted` silences it.
-6. **The gate stays a hard predicate.** Property test: for any bundle and any
-   policy, the verdict is a deterministic function of the recorded facts and
-   the thresholds; no ordering among components affects any verdict; the
-   grammar rejects any numeric-confidence spelling (`confidence`, a bare
-   float) as a `PolicyError`.
-7. **Nothing widens.** A component refused by a deny/allow reach rule stays
-   refused whatever its evidence; approval-required capabilities still require
-   the `with` edge for a component with maximal evidence.
-8. **Dry-run agrees with the gate.** On a corpus of policies x compositions,
-   the set of components `revl policy evaluate` reports "would be REFUSED"
-   equals the violations `revl audit --policy` / `enforce` produce.
-9. **Register floor.** A witnessed inverse at the bare `declared` register
-   behind `inventory.*` is refused by `capability inventory.* requires
-   register keyed`; the same declaration with an idempotency key admits.
-10. **Byte-identical when absent.** A policy file with no evidence/register
+5. **A forged dossier cannot ride a valid attestation.** A bundle carrying an
+   honest, signed attestation plus a hand-written `evidence/fault-sweep.json`
+   claiming `passed 12/12` (bytes not hashing to the signed binding) is
+   refused: the binding check grades the attestation `invalid` and the report
+   names the hash mismatch. Same outcome for a dossier copied wholesale from
+   a simpler component. A dossier present in the bundle but never bound in
+   the signed payload gains nothing from the attestation clause: its facet
+   stays self-attested and needs the 6.3 acknowledgment.
+6. **Attestation is verified against the rebuilt IR.** A component resolved
+   with a valid attestation, then modified before admission, is refused: the
+   admission-time check rebuilds the IR from the source actually being
+   admitted, and the original signature no longer verifies against it.
+7. **Unreachable steps block `full`.** A dossier recording
+   `passed == steps == 12` with `unreachable == 8` satisfies neither
+   `fault-sweep full` nor `fault-sweep 12/12`; the report shows the recorded
+   unreachable count against the requirement.
+8. **Malformed thresholds die at parse.** `fault-sweep 8/12` (numerator below
+   denominator) is a `PolicyError`; so is `requires register keyed` in slice
+   1 ("not yet recordable; lands with 309's ledger"); so is any unknown
+   facet, status, or register level, and any numeric-confidence spelling
+   (`confidence`, a bare float).
+9. **Unrooted thresholds are refused unless acknowledged.** `component
+   vendored-* requires evidence [fault-sweep full]` without acknowledgment
+   is a `PolicyError` at policy load; with the `self-attested` suffix (or a
+   policy-level `evidence-root: local`) it loads and evaluates, and the
+   report marks the rule self-attested in the body and in `--json`. Before
+   the dossier binding lands, adding `attestation valid` does NOT lift the
+   error for sweep/gauntlet/inverse thresholds; once the binding is shipped,
+   a binding-covering `attestation valid` clause does.
+10. **MCP drafts can satisfy the gauntlet clause in slice 1.** An
+    MCP-admitted agent draft that survived the session's own gauntlet run
+    satisfies `mcp requires evidence [gauntlet admissible]` (the live
+    dossier is in the evidence map, no attestation root needed); a draft
+    admitted without a gauntlet run is refused with `gauntlet unavailable`.
+11. **The gate stays a hard predicate.** Property test: for any bundle and
+    any policy, the verdict is a deterministic function of the recorded
+    facts and the thresholds; no ordering among components affects any
+    verdict.
+12. **Nothing widens.** A component refused by a deny/allow reach rule stays
+    refused whatever its evidence; approval-required capabilities still
+    require the `with` edge for a component with maximal evidence.
+13. **Dry-run agrees with the gate.** On a corpus of policies x compositions,
+    the set of components `revl policy evaluate` reports "would be REFUSED"
+    equals the violations `revl audit --policy` / `enforce` produce.
+14. **Register floor honors 309's partial order** (lands with 309's ledger,
+    per section 9). A witnessed inverse at the bare `declared` register
+    behind `inventory.*` is refused by `capability inventory.* requires
+    register keyed`; the same declaration with an idempotency key admits. A
+    `keyed` declaration satisfies a `strong` floor and does NOT satisfy a
+    `shape-proven` floor (peers, not rungs). With one `declared` and one
+    `keyed` declaration behind the same token, a `keyed` floor refuses
+    (worst register wins) and the why-trace names the weakest declaration.
+15. **Inert selectors are reported.** An evidence rule whose selector matches
+    no component in the audit graph (`component Csv*` against a component
+    named `csv-reader`) is reported inert in the evaluate report body and in
+    `--json`, mirroring item 249's inert-taint precedent.
+16. **Byte-identical when absent.** A policy file with no evidence/register
     rules parses to a `Policy` that evaluates byte-identically to today
     (existing policy test suite green, `is_empty` unchanged for empty files).
 
@@ -487,10 +740,12 @@ taught to emit evidence rules stays in 251's own item, unblocked by slice 1.
   capability surface (manifest) or the G8 REACH (audit graph). This design says
   reach, matching every other rule family; revisit if 294's parameterized
   capabilities want the declared-valuation side.
-- Where the evidence bundle rides during MCP admission of a resolved candidate
-  (the resolve result carries facets today; the load call needs the bundle or
-  the entry dir). Slice 1 will pick the narrowest plumbing that keeps
-  `session.load` byte-identical when no evidence rules exist.
+- Where the evidence bundle rides during MCP admission of a RESOLVED
+  candidate (the resolve result carries facets today; the load call needs
+  the bundle or the entry dir). The session-gauntlet plumbing for drafts is
+  decided (section 4); this question is only about resolved candidates.
+  Slice 1 will pick the narrowest plumbing that keeps `session.load`
+  byte-identical when no evidence rules exist.
 - Whether `wouldBeRefused` on resolve candidates should also FILTER under a
   flag (`resolve(policy=...)`), turning prediction into pre-filtering. Deferred:
   filtering at resolve duplicates the gate's job and risks divergence; the
