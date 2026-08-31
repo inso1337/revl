@@ -876,6 +876,12 @@ class Violation:
     token: str
     message: str
     why: WhyTrace
+    # item 274: the navigable-refusal map for this violation, computed from the
+    # same tables that refused (navigate.py). Optional and additive — a
+    # violation with no navigate threads nothing onto its `RevlError`, so every
+    # existing surface is byte-identical. Already redacted for the
+    # untrusted-author view at construction.
+    navigate: dict | None = None
 
     def render(self) -> str:
         from .why import render as render_why  # noqa: PLC0415
@@ -1288,7 +1294,8 @@ def evaluate(policy: Policy, audit: dict,
              *, evidence: dict | None = None,
              origins: dict | None = None,
              trusted_publishers=frozenset(), key=None,
-             evidence_ir: dict | None = None) \
+             evidence_ir: dict | None = None,
+             profile=None) \
         -> list[Violation]:
     """Evaluate `policy` against an audit graph — the whole gate decision.
 
@@ -1319,15 +1326,18 @@ def evaluate(policy: Policy, audit: dict,
             for rule in denies:
                 if _matches_any(r.token, rule.patterns) or \
                         (r.token == UNBOUNDED and UNBOUNDED in rule.patterns):
-                    violations.append(_deny_violation(manifest, name, r, rule))
+                    violations.append(
+                        _deny_violation(manifest, name, r, rule, profile))
             # a closed component/realm allow-list
             if allow is not None and not _allowed(r.token, allow):
                 violations.append(
-                    _allow_violation(manifest, name, r, allow, "capability"))
+                    _allow_violation(manifest, name, r, allow, "capability",
+                                     profile))
             # the MCP / agent sandbox allow-list
             if sandbox is not None and not _allowed(r.token, sandbox):
                 violations.append(
-                    _allow_violation(manifest, name, r, sandbox, "mcp-sandbox"))
+                    _allow_violation(manifest, name, r, sandbox, "mcp-sandbox",
+                                     profile))
 
         # item 249, Slice C: a forbidden taint downgrade. Read the origins this
         # component declassifies off the `declassify:` audit surface and refuse
@@ -1428,7 +1438,8 @@ def _warn_if_taint_rules_are_inert(policy: Policy, audit: dict) -> None:
 
 
 def _allow_violation(manifest: dict, name: str, reach: Reach,
-                     allow: tuple[str, ...], kind: str) -> Violation:
+                     allow: tuple[str, ...], kind: str,
+                     profile=None) -> Violation:
     permitted = ", ".join(allow) or "nothing"
     if kind == "mcp-sandbox":
         head = (f"agent-sandbox violation: component `{name}` was admitted "
@@ -1442,11 +1453,12 @@ def _allow_violation(manifest: dict, name: str, reach: Reach,
     message = f"{head} {detail} — admission refused (boundary policy, item 33)"
     why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
                    steps=_reach_step(manifest, name, reach))
-    return Violation(kind, name, reach.token, message, why)
+    nav = _reach_navigate(reach, kind, allow, profile)
+    return Violation(kind, name, reach.token, message, why, navigate=nav)
 
 
 def _deny_violation(manifest: dict, name: str, reach: Reach,
-                    rule: Rule) -> Violation:
+                    rule: Rule, profile=None) -> Violation:
     where = (f"realm `{rule.selector}`" if rule.scope == "realm"
              else f"components matching `{rule.selector}`")
     detail = (f"via emission `{reach.via}`" if reach.kind == "emission"
@@ -1457,7 +1469,83 @@ def _deny_violation(manifest: dict, name: str, reach: Reach,
                f"(boundary policy, item 33)")
     why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
                    steps=_reach_step(manifest, name, reach))
-    return Violation("deny", name, reach.token, message, why)
+    nav = _deny_navigate(reach, rule, profile)
+    return Violation("deny", name, reach.token, message, why, navigate=nav)
+
+
+# ------------------------------------------------ item 274: navigable refusals
+#
+# The boundary-policy family's nearest-allowed, derived from the rule that fired
+# and the reach that missed — never advisory prose (design §2.2). Every marker
+# obeys the HIGH restriction: a reach set is a STATIC fact at the refusal site
+# (the audit graph is already computed), so dropping the reach is
+# `clears-this-gate`; a policy edit is operator-enacted and therefore always
+# `candidate` (the operator decision the compiler does not hold). The record is
+# redacted to the single collapsed verdict under the untrusted-author profile.
+
+def _reach_navigate(reach: Reach, kind: str, allow: tuple[str, ...],
+                    profile) -> dict:
+    """A capability/sandbox allow-list refusal: re-route to an in-policy
+    capability, drop the reach, or (operator) extend the allow rule."""
+    from . import navigate as nav  # noqa: PLC0415 — lazy, additive
+    family = "mcp-sandbox" if kind == "mcp-sandbox" else "policy-capability"
+    named_allowed = [t for t in allow if t != UNBOUNDED]
+    alts = []
+    if named_allowed:
+        # re-route: the allowed set is already in hand. Author-enactable, but
+        # whether an in-policy capability does the job is a judgment the compiler
+        # does not hold, so `candidate`, not `clears`.
+        alts.append(nav.alternative(
+            enacts=nav.ENACTS_AUTHOR,
+            action=(f"re-route to an in-policy capability instead: this "
+                    f"component may reach [{', '.join(named_allowed)}]"),
+            ref=named_allowed[0]))
+    # drop the reach: removing the emission/host edge removes `token` from the
+    # reach set, which clears THIS gate by construction (the reach is a static
+    # fact at the refusal site — immutable operand, so `clears-this-gate`).
+    drop_where = ("the emission" if reach.kind == "emission" else "the host-code")
+    alts.append(nav.alternative(
+        enacts=nav.ENACTS_AUTHOR,
+        action=(f"drop the reach: remove {drop_where} edge that reaches "
+                f"`{reach.token}` (the why-trace names it)"),
+        ref=reach.token, clears=True))
+    # the nearest policy edit: extend the matched allow rule with the token.
+    # Operator-enacted (design §2.2), always `candidate` — never predicts
+    # approval, and an operator alternative is never author-enactable.
+    alts.append(nav.alternative(
+        enacts=nav.ENACTS_OPERATOR,
+        action=(f"extend the matched `may reach` allow rule with `{reach.token}` "
+                f"(a 251-style candidate, referenced not applied)"),
+        ref=reach.token))
+    return nav.record(family=family,
+                      refused={"token": reach.token, "kind": reach.kind,
+                               "allowed": list(named_allowed)},
+                      blocked=False, alternatives=alts, profile=profile)
+
+
+def _deny_navigate(reach: Reach, rule: Rule, profile) -> dict:
+    """A `may not reach` deny refusal: drop the reach (author), or narrow the
+    deny rule (operator). The deny wins over any allow, so there is no re-route
+    to an in-policy capability under it."""
+    from . import navigate as nav  # noqa: PLC0415 — lazy, additive
+    drop_where = ("the emission" if reach.kind == "emission" else "the host-code")
+    alts = [
+        nav.alternative(
+            enacts=nav.ENACTS_AUTHOR,
+            action=(f"drop the reach: remove {drop_where} edge that reaches "
+                    f"`{reach.token}` (the why-trace names it)"),
+            ref=reach.token, clears=True),
+        nav.alternative(
+            enacts=nav.ENACTS_OPERATOR,
+            action=(f"narrow the `may not reach [{', '.join(rule.patterns)}]` "
+                    f"deny rule so `{reach.token}` is no longer matched "
+                    f"(referenced, not applied)"),
+            ref=reach.token),
+    ]
+    return nav.record(family="policy-deny",
+                      refused={"token": reach.token, "kind": reach.kind,
+                               "denied": list(rule.patterns)},
+                      blocked=False, alternatives=alts, profile=profile)
 
 
 def _declassify_violation(manifest: dict, name: str, origin: str,
@@ -1714,14 +1802,21 @@ def first_error(violations: list[Violation]) -> RevlError | None:
     hint = ("state what a component may reach in the policy file; a boundary "
             "outside its allow-list, a denied one, or a cross-tenant reach "
             "refuses admission (boundary policy, docs/boundary-policy.md)")
-    return RevlError(file, None, v.message, hint=hint, why=v.why)
+    # item 274: thread the violation's navigable-refusal map onto the raised
+    # error so `classify()`/`--json` carry it (additive; None for a violation
+    # that built none, so every existing surface is byte-identical).
+    return RevlError(file, None, v.message, hint=hint, why=v.why,
+                     navigate=v.navigate)
 
 
 def enforce(policy: Policy, audit: dict,
-            mcp_components: frozenset[str] | set[str] | None = None) -> None:
+            mcp_components: frozenset[str] | set[str] | None = None,
+            *, profile=None) -> None:
     """Evaluate and raise on the first violation. Admission calls this; a
-    clean policy returns silently."""
-    error = first_error(evaluate(policy, audit, mcp_components))
+    clean policy returns silently. `profile` (item 274) is the untrusted-author
+    admission profile, threaded so the navigable-refusal map is redacted to the
+    collapsed verdict for an untrusted author."""
+    error = first_error(evaluate(policy, audit, mcp_components, profile=profile))
     if error is not None:
         raise error
 
