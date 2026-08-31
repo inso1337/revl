@@ -470,8 +470,25 @@ extern emission fn raw_model_post(body: Str) -> Str
   governed by the untrusted-author admission profile
   (docs/design/329-untrusted-author-profile.md), unchanged: a model-authored
   source that `no_extern` refuses still cannot declare one.
+- The coeffect works on **every seamful tier**, not just `@py` (item 378
+  Stage 5). Each backend emits a module- or class-global config map plus a
+  fail-loud lookup and binds `_revl_config` as the first line of the host body,
+  mirroring how that tier binds a component's config: py/ts/go/java carry the
+  resolved config as a dynamic value map (`dict` / `Record<string, unknown>` /
+  `map[string]any` / `Map<String, Object>`), so a field keeps its declared type;
+  the `@rs` seam is string-valued (`HashMap<String, String>`), so a rust config
+  extern is restricted to `Str` fields and a non-`Str` field is refused loudly
+  at emit rather than silently narrowed. `@wasm` is the one gap: a wasm extern
+  body is raw WAT and wasm's only config channel is a scalar-only, spawn-time
+  runtime import with no plug-time config dict, so a config extern carrying a
+  `@wasm` body is refused at compile, naming the tier and redirecting to
+  option (c).
+- The lookup **fails loud** on every tier. A required (non-defaulted) field that
+  is absent at the call raises or panics, naming the extern, instead of handing
+  the body an empty map that reads `undefined` later. A defaults-only extern
+  still resolves to its defaults driver-free.
 - An extern with no `config` block is byte-identical across parse, IR, and every
-  emitted tier — the clause is purely additive.
+  emitted tier: the clause is purely additive.
 
 ### 6.1 `acquire` and the two undos — the durable-resource discipline
 
