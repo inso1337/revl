@@ -27,6 +27,7 @@ token is exactly the string printed after the `+` for each addition.
 
 from __future__ import annotations
 
+from .cardinality import cardinality
 from .distribute import distributability
 
 
@@ -71,6 +72,13 @@ def audit_report(ir: dict) -> dict:
         # unregistered entry).
         "recovery_surface": _recovery_surface(ir),
         "distributability": distributability(ir),
+        # item 260 (docs/design/260-emission-cardinality-bounds.md): the
+        # per-component crossing-count ceilings. A top-level key next to
+        # `distributability`, always present (empty `{}` when nothing crosses -
+        # the LOW-finding precision). The per-component `boundary[...]` entries
+        # are NOT extended, so a crossing-free component's boundary entry stays
+        # byte-identical (§1, Exit-5).
+        "cardinality": cardinality(ir),
     }
 
 
