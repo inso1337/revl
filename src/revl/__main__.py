@@ -628,7 +628,11 @@ def main(argv: list[str] | None = None) -> int:
         return _run_history_query(args)
 
     try:
-        ir = compile_files(args.files)
+        profile = None
+        if getattr(args, "taint_strict", False):
+            from .admit_profile import AdmissionProfile  # noqa: PLC0415 — lazy
+            profile = AdmissionProfile(taint_strict=True)
+        ir = compile_files(args.files, profile=profile)
     except RevlError as error:
         if getattr(args, "json_diagnostics", False):
             print(json.dumps(report(error), indent=2))

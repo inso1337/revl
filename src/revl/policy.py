@@ -120,6 +120,20 @@ class ApprovalRule:
 
 
 @dataclass(frozen=True)
+class TaintFlowRule:
+    """item 249, Slice D (D2): ``<origin>-taint may not reach <cap>[, ...]
+    [without approval]`` — the operator's power over a legitimate-but-dangerous
+    taint flow (the exfiltration edge of the lethal trifecta). Read over the
+    `taint:<component>:<origin>` audit tokens: a component that carries `origin`
+    taint to an emission AND reaches a capability matching `patterns` is refused,
+    unless `without_approval` and the reached flow is approval-covered (the
+    item-246 surface, declassifier three)."""
+    origin: str
+    patterns: tuple[str, ...]
+    without_approval: bool = False
+
+
+@dataclass(frozen=True)
 class Policy:
     """A parsed boundary policy: rules, the tenants switch, the sandbox."""
     rules: tuple[Rule, ...] = ()
@@ -133,13 +147,16 @@ class Policy:
     # deny-list `Rule` (allow=False) whose `patterns` are origin tokens, checked
     # against the `declassify:<origin>` audit surface.
     declassify_rules: tuple[Rule, ...] = ()
+    # item 249, Slice D (D2): `<origin>-taint may not reach <cap> [without
+    # approval]` — the policy-gated tier over the landed taint tokens.
+    taint_flow_rules: tuple[TaintFlowRule, ...] = ()
     source: str | None = None                # file path, for messages
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
             and self.mcp_allow is None and not self.leases_enforced \
             and not self.quarantine_required and not self.approval_rules \
-            and not self.declassify_rules
+            and not self.declassify_rules and not self.taint_flow_rules
 
     def requires_approval(self) -> bool:
         """Whether this policy names any approval-required capability — the
@@ -186,6 +203,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     quarantine_required = False
     approval_rules: list[ApprovalRule] = []
     declassify_rules: list[Rule] = []
+    taint_flow_rules: list[TaintFlowRule] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -193,6 +211,27 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         low = line.lower()
         if low == "tenants never reach each other":
             tenants = True
+            continue
+        # item 249, Slice D (D2): `<origin>-taint may not reach <cap>[, ...]
+        # [without approval]`. Checked before the generic `may not reach` loop
+        # (it CONTAINS that phrase) so the taint tier is not misread as a reach
+        # rule. The subject is the taint origin, not a component/realm.
+        if "-taint may not reach" in low:
+            origin = line[:low.find("-taint may not reach")].strip()
+            tail = line[low.find("-taint may not reach") + len("-taint may not reach"):]
+            without_approval = False
+            low_tail = tail.lower()
+            if low_tail.rstrip().endswith("without approval"):
+                without_approval = True
+                tail = tail[:low_tail.rstrip().rfind("without approval")]
+            caps = _split_caps(tail)
+            if not origin or not caps:
+                raise PolicyError(source, lineno,
+                                  f"a taint-flow rule is `<origin>-taint may not "
+                                  f"reach <cap>[, ...] [without approval]`, got "
+                                  f"{raw.strip()!r}")
+            taint_flow_rules.append(
+                TaintFlowRule(origin, caps, without_approval))
             continue
         # item 249, Slice C: `<subject> may not declassify <origin>[, ...]` — the
         # operator forbids a taint downgrade. `<subject>` is `component <glob>`
@@ -286,7 +325,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                               f"unrecognised policy line: {raw.strip()!r}")
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
                   quarantine_required, tuple(approval_rules),
-                  tuple(declassify_rules), source)
+                  tuple(declassify_rules), tuple(taint_flow_rules), source)
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -346,9 +385,21 @@ def _parse_json(text: str, source: str | None) -> Policy:
                               "a declassify rule needs a `component`/`realm` "
                               "selector and a `deny`/`origins` list")
         declassify_rules.append(Rule(scope, sel, False, tuple(origins)))
+    taint_flow_rules: list[TaintFlowRule] = []
+    for entry in doc.get("taintFlow") or doc.get("taint_flow") or []:
+        origin = entry.get("origin")
+        caps = entry.get("reach") or entry.get("deny")
+        if not origin or not caps:
+            raise PolicyError(source, 1,
+                              "a taint-flow rule needs an `origin` and a "
+                              "`reach`/`deny` capability list")
+        taint_flow_rules.append(
+            TaintFlowRule(origin, tuple(caps),
+                          bool(entry.get("withoutApproval")
+                               or entry.get("without_approval"))))
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
                   quarantine_required, tuple(approval_rules),
-                  tuple(declassify_rules), source)
+                  tuple(declassify_rules), tuple(taint_flow_rules), source)
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:
@@ -549,6 +600,26 @@ def evaluate(policy: Policy, audit: dict,
                         _declassify_approval_violation(manifest, name, origin,
                                                        token))
 
+        # item 249, Slice D (D2): the policy-gated tier. A component that carries
+        # `origin` taint to an emission AND reaches a forbidden capability is the
+        # exfiltration edge; refuse it unless the flow is approval-covered under a
+        # `without approval` rule. Coarse component-scoped (the design's sound
+        # fallback), read off the `taint:` tokens and the same reach graph.
+        if policy.taint_flow_rules:
+            reached = taint.get("reaches") or []
+            approvals = taint.get("reach_approvals") or []
+            for rule in policy.taint_flow_rules:
+                if rule.origin not in reached:
+                    continue
+                for r in reach:
+                    if not _matches_any(r.token, rule.patterns):
+                        continue
+                    if rule.without_approval and \
+                            any(_approval_edge_covers(a, r.token) for a in approvals):
+                        continue
+                    violations.append(
+                        _taint_flow_violation(manifest, name, rule, r))
+
     if policy.tenants_isolated:
         violations.extend(_tenant_violations(audit, manifest))
     return violations
@@ -607,6 +678,29 @@ def _declassify_violation(manifest: dict, name: str, origin: str,
     why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
                    steps=steps)
     return Violation("declassify", name, origin, message, why)
+
+
+def _taint_flow_violation(manifest: dict, name: str, rule: TaintFlowRule,
+                          reach: Reach) -> Violation:
+    """A component routes `origin` taint into a capability a taint-flow rule
+    forbids (item 249, Slice D). The exfiltration edge, named with its chain."""
+    file, _ = _location(manifest, name)
+    approval = (" without approval" if rule.without_approval else "")
+    hint_tail = (" (acquire an approval and thread it on the send: `emit … with a`)"
+                 if rule.without_approval else "")
+    message = (f"policy violation: `{rule.origin}`-taint may not reach "
+               f"[{', '.join(rule.patterns)}]{approval}, but `{name}` carries "
+               f"`{rule.origin}`-origin data to `{reach.token}` — the flow is "
+               f"forbidden; admission refused (boundary policy, item 249 Slice "
+               f"D){hint_tail}")
+    steps = [
+        TraceStep(name, "component", file, None,
+                  f"carries `{rule.origin}`-origin taint to an emission"),
+        TraceStep(reach.token, reach.kind, None, None, "forbidden taint flow",
+                  (reach.token,)),
+    ]
+    why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN, steps=steps)
+    return Violation("taint-flow", name, reach.token, message, why)
 
 
 def _approval_edge_covers(edge_scope: str, token: str) -> bool:

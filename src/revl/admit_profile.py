@@ -69,20 +69,28 @@ class AdmissionProfile:
     # the whole Slice A/B taint discipline cannot be opted out of by the one
     # author item 329 refuses to trust. Off (inert) for a trusted author.
     no_declassify: bool = False
+    # item 249, Slice D (D3): derive taint sinks and sources with NO annotation —
+    # a shell/exec/terminal-scoped crossing is a sink, a web/net/fs/model/input
+    # emission mints its origin. On by default in `untrusted_author` (a
+    # model-authored turn annotates nothing), and byte-identical when off, so a
+    # plain compile never moves. Also reachable via `revl compile --taint-strict`.
+    taint_strict: bool = False
 
     @staticmethod
     def untrusted_author(granted) -> "AdmissionProfile":
         """The profile for a model-authored per-turn source: no new host code,
-        reach bounded to an explicit granted service set, and no self-minted
-        declassifier (item 249 Slice C — declassification comes only from the
-        pre-granted closure or a human approval)."""
+        reach bounded to an explicit granted service set, no self-minted
+        declassifier (item 249 Slice C), and derived taint sinks/sources so the
+        defense exists with zero annotations (item 249 Slice D)."""
         return AdmissionProfile(no_extern=True,
                                 granted=frozenset(granted or ()),
-                                no_declassify=True)
+                                no_declassify=True,
+                                taint_strict=True)
 
     @property
     def active(self) -> bool:
-        return self.no_extern or self.granted is not None or self.no_declassify
+        return (self.no_extern or self.granted is not None
+                or self.no_declassify or self.taint_strict)
 
 
 def check_no_extern(root_programs: list[Program], profile: AdmissionProfile) -> None:
