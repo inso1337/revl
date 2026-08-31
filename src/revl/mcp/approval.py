@@ -35,7 +35,6 @@ import hashlib
 import json
 
 from ..query import Composition, SHARED_REALM
-from ..emission_analysis import _calls_in
 
 # worst-class ordering: (c) > (b) > (a) > none. One prompt covers the whole call
 # or none of it — the same all-or-nothing rule admission and the operator gate
@@ -90,7 +89,6 @@ class ClassMap:
         self.index = Composition(ir)
         self._semantic = {c["name"]: _semantic(c)
                           for c in ir.get("components") or []}
-        self._emitting = self.index.emitting_fns
         # direct (non-transitive) classification per scope
         self._direct: dict[str, dict] = {}
         for sid, scope in self.index.scopes.items():
@@ -172,7 +170,10 @@ class ClassMap:
         # `emission[...]` list can name, so it can never be proven reversible —
         # class (c). This is exactly the reach the advisory `_method_effects`
         # walk misses and the `_emitting_capabilities` fixed point catches.
-        if self._value_widens(scope["nodes"]):
+        # `_crossings` in the erase report consults the SAME detection
+        # (`Composition.value_widens`), so the two class folds can never disagree
+        # about whether a scope widens (item 414).
+        if self.index.value_widens(scope["nodes"]):
             cls = worse(cls, "c")
             caps.add("*")
             class_c.add("*")
@@ -185,15 +186,6 @@ class ClassMap:
 
         return {"class": cls, "crossings": crossings, "capabilities": caps,
                 "classC": class_c}
-
-    def _value_widens(self, nodes) -> bool:
-        """Whether this scope references an emitting callable in value position
-        (an arrow-typed argument, a stored binding) — the `*` widening the G4
-        fixed point applies (`emission_analysis._emitting_capabilities`)."""
-        found: set = set()
-        values: set = set()
-        _calls_in(nodes, found, values=values)
-        return bool(values & self._emitting)
 
     # -- reach-closure fold -------------------------------------------------
 
