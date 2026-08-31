@@ -2945,6 +2945,101 @@ def _lower_externs(program: Program, filename: str, types: dict,
     return externs
 
 
+def _extern_emission_caps(entry: dict) -> tuple:
+    """The declared emission capability tokens of a lowered extern IR entry
+    (item 256): its scoped `capabilities`, or its NAME when the emission is bare
+    (the name-as-capability rule, docs/capabilities.md). Empty for a non-emission
+    extern, which can never carry a bound secret."""
+    if entry.get("class") != "emission":
+        return ()
+    return tuple(entry.get("capabilities") or (entry["name"],))
+
+
+def _lower_secrets(program: Program, externs: list, filename: str) -> list:
+    """Cross-index `program.secrets` against the lowered extern emission
+    capabilities (item 256, Slice 1). For each `secret NAME for CAP`:
+
+      * find every emission extern whose declared capability includes CAP - the
+        bound bodies the runtime injects the key into, and nowhere else (§3);
+      * refuse a secret bound to a capability whose bound body's ONLY tier is a
+        non-injection tier (wasm has no plug-time secrets dict - §3 Cross-tier),
+        exactly as a config extern on wasm is refused;
+      * refuse a secret whose NAME collides with a bound extern's parameter name
+        (the injected `NAME = _revl_secret(...)` first local would shadow it);
+      * refuse a secret that binds NO emission extern at all - the key would be
+        injected nowhere, an inert binding is a footgun (fail-loud, §1b);
+      * annotate each bound extern entry with `entry["secrets"]` (the names it
+        receives) so the emitter binds them as the first body locals.
+
+    Returns the manifest-visible `[{"name","capability"}]` rows (name and
+    capability only - the value is NEVER in the IR, §1b). Empty and fully inert
+    for a program that binds no secret, so every existing IR is byte-identical."""
+    secrets = getattr(program, "secrets", None) or []
+    if not secrets:
+        return []
+    by_name = {e["name"]: e for e in externs}
+    # bound bodies per extern name, accumulated so the emitter injects once even
+    # when several secrets share a capability an extern serves.
+    bound_names: dict[str, list[str]] = {}
+    rows: list = []
+    seen: set[str] = set()
+    for sec in secrets:
+        if sec.name in seen:
+            raise RevlError(filename, sec.line,
+                            f"duplicate secret `{sec.name}`")
+        seen.add(sec.name)
+        bound = [e for e in externs if sec.capability in _extern_emission_caps(e)]
+        if not bound:
+            raise RevlError(
+                filename, sec.line,
+                f"secret `{sec.name}` is bound to capability `{sec.capability}`, "
+                f"but no emission extern serves it - the key would be injected "
+                f"nowhere",
+                hint="a secret injects only into the extern bodies of an "
+                     "`emission[<cap>]` whose token matches (a component/service "
+                     "method body never receives it). Declare a matching emission "
+                     "extern, or fix the capability token "
+                     "(docs/design/256-capability-bound-secrets.md §3).")
+        for e in bound:
+            # name / parameter collision: the injected first local would shadow a
+            # declared parameter (a bug the author would never diagnose at run
+            # time - the body would read the key instead of its argument).
+            for p in e.get("params") or []:
+                if p.get("name") == sec.name:
+                    raise RevlError(
+                        filename, sec.line,
+                        f"secret `{sec.name}` collides with a parameter of extern "
+                        f"`{e['name']}` - the injected secret local would shadow "
+                        f"the parameter",
+                        hint="rename the secret (or the parameter); the secret is "
+                             "bound as the first local of every extern body it "
+                             "reaches (item 256).")
+            # tier gate: the key is bound as a plug-time local, which only the
+            # injection-tier emitters (py/ts/go/java/rs) can do. A wasm-only bound
+            # body has no plug-time secrets dict, exactly as a wasm config extern
+            # has none - refuse at compile, naming the tier.
+            body_tiers = set(e.get("bodies") or {}) | set(e.get("refs") or {})
+            if body_tiers and not (body_tiers & _CONFIG_INJECTION_TIERS):
+                offending = ", ".join(sorted(body_tiers))
+                raise RevlError(
+                    filename, sec.line,
+                    f"secret `{sec.name}` is bound to a capability whose only "
+                    f"extern body is on the @{offending} tier, which has no "
+                    f"plug-time secret injection (emission extern `{e['name']}`)",
+                    hint="only the py/ts/go/java/rs emitters bind a secret as a "
+                         "body-scope local from the plug-time secrets map; wasm's "
+                         "raw body has no such dict, so a wasm-only bound "
+                         "capability cannot carry a secret (item 256, §3 "
+                         "Cross-tier).")
+            bound_names.setdefault(e["name"], []).append(sec.name)
+        rows.append({"name": sec.name, "capability": sec.capability})
+    # carry the resolved bound-body set into the IR: each bound extern lists the
+    # secret names it receives, so the emitter binds them as its first locals.
+    for ename, names in bound_names.items():
+        by_name[ename]["secrets"] = names
+    return rows
+
+
 # item 310: capability-aware caching (docs/design/310-capability-aware-caching.md).
 # The source class words map to the roadmap IR vocabulary; `cache` lowers to
 # metadata the emission fixed point NEVER reads (so every 414 static fold sees a
@@ -4765,6 +4860,12 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename, types, fns)
+    # item 256 Slice 1: cross-index the bound secrets against the extern emission
+    # capabilities - refuse a wasm-only or nowhere-bound secret and a name/param
+    # collision, annotate each bound extern with the secret names it receives, and
+    # produce the manifest-visible (name, capability) rows. Empty and inert for a
+    # program that binds no secret, so every existing IR is byte-identical.
+    secrets_ir = _lower_secrets(program, externs, program.filename)
     # item 388: the poly externs (`fn|async`), pre-seeded above as async IR
     # entries. `extern_colour_instances` is the shared registry each provide
     # method fills with the colour its call sites of a poly extern requested (the
@@ -5182,6 +5283,13 @@ def check_and_lower(program: Program, ambient: dict | None = None,
         result["functions"] = fns
     if externs:
         result["externs"] = externs
+    # item 256 Slice 1: the manifest-visible secret bindings (name + capability
+    # only, never a value). Present only when the program binds a secret, so every
+    # existing IR is byte-identical. The driver (run.py) resolves each name to a
+    # value at plug and installs it into `_REVL_SECRETS`; the value lives nowhere
+    # in the IR.
+    if secrets_ir:
+        result["secrets"] = secrets_ir
     if tests:
         result["tests"] = tests
     # the obligation ledger (docs/holes.md). Present only when the draft has
