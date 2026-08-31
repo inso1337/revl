@@ -429,6 +429,15 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if id(fault) not in emitted_ids:
                 merged.fault_tests.append(fault)
                 emitted_ids.add(id(fault))
+        # item 256: a bound secret is a composition-scoped declaration, like a
+        # component (never imported: it binds against a capability the roots
+        # serve). Carry it into the merged program so `_lower_secrets` cross-
+        # indexes it against the merged externs on the multi-file / CLI path,
+        # exactly as it already does on the single-source `compile_source` path.
+        for sec in getattr(module.program, "secrets", None) or []:
+            if id(sec) not in emitted_ids:
+                merged.secrets.append(sec)
+                emitted_ids.add(id(sec))
 
     # Directly imported services enter the composition service table. Alias
     # imports do not: a service is referred to by its interface name, not a

@@ -493,7 +493,7 @@ def _run_audit(args, ir: dict) -> int:
         # audit_report; the interchange body must carry them too so it stays the
         # byte-for-byte unstamped audit report (test_version_is_additive_body_unchanged).
         from .audit_diff import (  # noqa: PLC0415
-            _capability_registers, _recovery_surface)
+            _capability_registers, _recovery_surface, _secrets_surface)
         from .cardinality import cardinality  # noqa: PLC0415
         print(json.dumps(stamp(
             {"manifest": manifest, "boundary": boundary,
@@ -504,7 +504,12 @@ def _run_audit(args, ir: dict) -> int:
              # item 260: the per-component crossing-count ceilings, next to
              # distributability. Must match audit_report byte-for-byte
              # (test_version_is_additive_body_unchanged), so it is the same call.
-             "cardinality": cardinality(ir)}), indent=2))
+             "cardinality": cardinality(ir),
+             # item 256 Slice 2: the audit secrets table (name + capability only).
+             # ADDITIVE and present only when a secret is bound, so this must match
+             # audit_report byte-for-byte (test_version_is_additive_body_unchanged);
+             # `_secrets_surface` spreads `{}` for a secret-free composition.
+             **_secrets_surface(ir)}), indent=2))
         return 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
     for entry in manifest.get("components") or []:
