@@ -614,7 +614,38 @@ def _run_audit(args, ir: dict) -> int:
             print()
             for line in lines:
                 print(line)
+    # item 309: `revl audit --recovery` — the replay-class view. Every inverse,
+    # deferred emission, and compensation with its replay class (`replay: free`
+    # for a declared/keyed idempotent entry, `replay: fenced` for an undeclared
+    # inverse, `recovery: human-finish` for an unkeyed owed emission) and its
+    # register (`declared`/`keyed`/`shape-proven`).
+    if getattr(args, "recovery", None):
+        for line in _recovery_audit_view(ir):
+            print(line)
     return 0
+
+
+def _recovery_audit_view(ir: dict) -> list:
+    """The `--recovery` replay-class lines (item 309 §"question 4", point 1)."""
+    from .audit_diff import _recovery_surface  # noqa: PLC0415
+    surface = _recovery_surface(ir)
+    lines = ["recovery surface (item 309): replay class per boundary crossing"]
+    if not surface:
+        lines.append("  (none — no inverse, deferred emission, or compensation)")
+        return lines
+    for entry in surface:
+        register = entry.get("register")
+        kind = entry.get("kind")
+        if kind == "inverse":
+            cls = "replay: free" if register else "replay: fenced"
+        elif kind == "owed-emission":
+            cls = "replay: free" if register == "keyed" else "recovery: human-finish"
+        else:  # compensation
+            cls = ("compensate: keyed-retry" if register == "keyed"
+                   else "compensate: best-effort")
+        reg = f"idempotent: {register}" if register else "idempotent: none (fenced)"
+        lines.append(f"  {entry['name']:<24} {kind:<14} {cls:<24} {reg}")
+    return lines
 
 
 def _run_version(args, ir: dict) -> int:

@@ -45,15 +45,93 @@ def audit_report(ir: dict) -> dict:
          "backends": sorted((ext.get("bodies") or {}).keys()),
          # item 373: carry the reach so the drift gate can read it. Absent unless
          # declared — a bare emission's audit entry is byte-identical to today's.
-         **({"reach": ext["reach"]} if ext.get("reach") else {})}
+         **({"reach": ext["reach"]} if ext.get("reach") else {}),
+         # item 309: carry the idempotency register so the `--recovery` view and
+         # the register/idempotent-teardown policy floors read it. Absent unless
+         # declared — a non-idempotent extern's audit entry is byte-identical.
+         **({"register": ext["register"]} if ext.get("register") else {}),
+         **({"undo_idempotent": True} if ext.get("undo_idempotent") else {}),
+         **({"idempotent": True} if ext.get("idempotent") else {}),
+         **({"idempotency_key": ext["idempotency_key"]}
+            if ext.get("idempotency_key") else {})}
         for ext in ir.get("externs") or []
     ]
     return {
         "manifest": manifest,
         "boundary": boundary,
         "externs": declared_externs,
+        # item 309/290: the per-capability-token register floor input. Maps each
+        # capability token an idempotent extern scopes to its declaration
+        # register, so a `capability <glob> requires register <level>` (290) can
+        # refuse below the floor. Absent tokens carry no register.
+        "capability_registers": _capability_registers(ir),
+        # item 309: the recovery surface the `requires idempotent-teardown`
+        # (strength) floor reads — every inverse, deferred emission, and
+        # compensation, with its declaration register (or None for a fenced,
+        # unregistered entry).
+        "recovery_surface": _recovery_surface(ir),
         "distributability": distributability(ir),
     }
+
+
+def _recovery_surface(ir: dict) -> list:
+    """Every reversible boundary crossing that could be replayed on recovery,
+    with its idempotency register (item 309). A witnessed/acquire extern's `undo`
+    is an INVERSE; a `deferred` emission is an OWED-EMISSION; an emission's
+    `compensate` is a COMPENSATION. `register` is `None` for an entry with no
+    idempotency claim (a fenced/human-finish entry the strength floor refuses)."""
+    out: list = []
+    for ext in ir.get("externs") or []:
+        cls = ext.get("class")
+        register = ext.get("register")
+        if ext.get("undo") is not None or cls == "witnessed":
+            out.append({"name": ext["name"], "kind": "inverse",
+                        "register": register})
+        if ext.get("deferred"):
+            out.append({"name": ext["name"], "kind": "owed-emission",
+                        "register": register})
+        if ext.get("compensate") is not None:
+            out.append({"name": ext["name"], "kind": "compensation",
+                        "register": register})
+    return out
+
+
+def _capability_registers(ir: dict) -> dict:
+    """Map each capability token an idempotent extern scopes to its declaration
+    register (item 309/290, §3.2). An extern's register attaches to every
+    capability token in its `capabilities` scope; a token declared by several
+    externs takes the STRONGEST register (the floor the policy can safely
+    assert). Absent for a token no idempotent extern scopes."""
+    from .lower import _REGISTER_RANK  # noqa: PLC0415 — the partial order
+
+    out: dict = {}
+
+    def _record(tokens, register: str) -> None:
+        for token in tokens:
+            prior = out.get(token)
+            if prior is None or _REGISTER_RANK.get(register, -1) \
+                    > _REGISTER_RANK.get(prior, -1):
+                out[token] = register
+
+    for ext in ir.get("externs") or []:
+        register = ext.get("register")
+        if register:
+            _record(ext.get("capabilities") or [ext.get("name")], register)
+    # service-method emissions carry the same item-44/309 `idempotent` claim; a
+    # keyed method registers `keyed`, a bare one `declared` (the keyed form
+    # extends to service methods, §1b).
+    for method in _iter_service_methods(ir):
+        if not method.get("idempotent"):
+            continue
+        register = "keyed" if method.get("idempotency_key") else "declared"
+        _record(method.get("capabilities") or [], register)
+    return out
+
+
+def _iter_service_methods(ir: dict):
+    for svc in (ir.get("services") or {}).values():
+        for method in (svc.get("methods") or {}).values():
+            yield method
 
 
 def crossings(audit: dict) -> set[str]:

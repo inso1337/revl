@@ -239,6 +239,24 @@ def _py_async_arrow(body: Any, params: str, render, requires=None,
     return f"_revl_as_async(lambda {params}: {rendered_body})"
 
 
+def _transactional_register_kwargs(ext: dict) -> str:
+    """item 309: the extra `.transactional(...)` kwargs carrying an extern's
+    idempotency register, or `""` when none is declared.
+
+    Emitted ONLY when the author declared `undo idempotent` / `idempotent(key:)`,
+    so a pre-309 witnessed extern's emitted code is byte-identical (additivity).
+    The kwargs let the runtime fence-vs-free the abort Phase-1 apply and thread
+    the register into the WAL descriptor a fresh-process recover reads."""
+    parts: list = []
+    if ext.get("undo_idempotent"):
+        parts.append("undo_idempotent=True")
+    if ext.get("register"):
+        parts.append(f"register={ext['register']!r}")
+    if ext.get("idempotency_key"):
+        parts.append(f"idempotency={ext['idempotency_key']!r}")
+    return (", " + ", ".join(parts)) if parts else ""
+
+
 def _mangle(name: str) -> str:
     """Rename a syntactically-valid identifier that collides with a *Python*
     reserved word, so a valid revl identifier that happens to be a Python
@@ -1227,8 +1245,14 @@ class _ComponentEmitter:
         undo = self._expr(ext["undo"], where)  # e.g. `restore(result)`
         out.add(indent, f"{tmp} = {self._expr(step.get('acquire'), where)}")
         out.add(indent, f"if isinstance({tmp}, Ok):")
+        # item 309: pass the idempotency register to the transactional entry ONLY
+        # when the author declared it, so a witnessed extern with no register
+        # emits byte-identical code (the additivity discipline). The register
+        # gates free-vs-fenced abort-Phase-1 fencing and free-vs-fenced recover.
+        extra = _transactional_register_kwargs(ext)
         out.add(indent + 1,
-                f"yield _revl_frame.transactional((lambda result: {undo}), {tmp}.value)")
+                f"yield _revl_frame.transactional((lambda result: {undo}), "
+                f"{tmp}.value{extra})")
         if bind is not None:
             out.add(indent, f"{bind} = {tmp}")
 
@@ -1255,6 +1279,11 @@ class _ComponentEmitter:
         undo = self._expr(ext["undo"], where)  # e.g. `restore(result)`
         out.add(indent, f"{tmp} = {self._expr(step.get('acquire'), where)}")
         out.add(indent, f"if isinstance({tmp}, Ok):")
+        # TODO(309-slice3): thread the idempotency register (item 309) into the
+        # provide-method transactional entry too, mirroring `_witnessed_step`, so
+        # a method-seam witnessed inverse (item 318) fences its abort Phase-1 apply
+        # and recovers free-vs-fenced. The activation-body path is wired; this
+        # narrower per-tool-call seam is deferred.
         out.add(indent + 1,
                 f"_revl_frame.transactional_method((lambda result: {undo}), {tmp}.value)")
         if bind is not None:
