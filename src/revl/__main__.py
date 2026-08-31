@@ -29,8 +29,8 @@ from .cli.change import (
 from .cli.interop import (
     _run_contract, _run_export, _run_fmt, _run_import, _run_mcp, _run_serve)
 from .cli.observe import (
-    _run_attest, _run_dash, _run_diff, _run_explain, _run_history_query,
-    _run_metrics, _run_profile, _run_why)
+    _run_attest, _run_changelog, _run_dash, _run_diff, _run_explain,
+    _run_history_query, _run_metrics, _run_profile, _run_why)
 
 
 # G8 audit: the pseudo-boundary recorded when a component reaches host code
@@ -851,6 +851,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_contract(args)
     if args.command == "diff":
         return _run_diff(args)
+    # `revl changelog` has its own two-input loader (like `diff`), so it is
+    # routed before the shared single-source compile step.
+    if args.command == "changelog":
+        return _run_changelog(args)
     # historical query mode reads a recorded run (files, not source), so it is
     # routed before the compile-from-source step every other command shares
     if args.command == "query" and args.query_command in ("emitted-between",
