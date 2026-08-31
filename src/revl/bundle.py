@@ -85,6 +85,7 @@ from pathlib import Path
 
 from ._paths import stdlib_root
 from .errors import RevlError
+from .hostfile import _contained  # same canonical containment jail hostref uses
 
 # Reuse the item-297 reproduce vocabulary and projections verbatim, no new
 # status scheme, no new surface derivation.
@@ -508,9 +509,33 @@ def _check_stdlib_refs(bundle: Path) -> list[Check]:
         return []
     install_root = Path(str(stdlib_root().parent))
     checks: list[Check] = []
+    install_real = os.path.realpath(str(install_root))
     for ref in refs:
         label = f"stdlib ref {ref['path']}#{ref['tier']}"
-        target = install_root / ref["path"]
+        raw_path = ref["path"]
+        # The ref path comes from the bundle's own recorded ir/ir.json, i.e. from
+        # the artifact under verification, so it is attacker-controlled. Gate on
+        # realpath-containment BEFORE any read/hash, mirroring the hostref /
+        # 410-escape install-origin jail: a `..`-bearing, absolute, or NUL-bearing
+        # path that resolves outside the install tree re-hashes a file the bundle
+        # never shipped and could report OK against an attacker-chosen sha256.
+        if os.path.isabs(raw_path) or "\x00" in raw_path:
+            checks.append(Check(
+                label, MISMATCH,
+                f"the bundled stdlib ref path {raw_path!r} for extern "
+                f"`{ref['extern']}` is absolute or contains a NUL byte; a stdlib "
+                f"ref is resolved strictly relative to the install root, so this "
+                f"is a forged or tampered bundle"))
+            continue
+        target = install_root / raw_path
+        if not _contained(os.path.realpath(str(target)), install_real):
+            checks.append(Check(
+                label, MISMATCH,
+                f"the bundled stdlib ref path {raw_path!r} for extern "
+                f"`{ref['extern']}` escapes the install tree "
+                f"({install_real}); a ref that resolves outside the install root "
+                f"is a forged or tampered bundle"))
+            continue
         try:
             # raw file bytes, matching the compile-time pin in hostref.py
             got = hashlib.sha256(target.read_bytes()).hexdigest()
