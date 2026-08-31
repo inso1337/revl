@@ -736,6 +736,9 @@ def main(argv: list[str] | None = None) -> int:
         return run_verify(args)
     if args.command == "explain":
         return _run_explain(args)
+    if args.command == "adapt":
+        from .cli.adapt import _run_adapt
+        return _run_adapt(args)
     if args.command == "doctor":
         from .doctor import doctor_command  # noqa: PLC0415 — lazy: no heavy imports
         return doctor_command(args)
