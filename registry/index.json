@@ -3,7 +3,7 @@
     "audited_database": {
       "capabilities": [],
       "emissions": 0,
-      "manifestHash": "c3d5fbd465c46747e52a20a9fcf78fd53b8416ba29b192d84c0965d0158e86f3",
+      "manifestHash": "90d801bd197de57c73798c18f2c4a1f634f18b1cddfba152021067452c224635",
       "provides": {
         "db": "Database"
       },
@@ -44,7 +44,7 @@
     "mysql_database": {
       "capabilities": [],
       "emissions": 0,
-      "manifestHash": "3d60959611237d43c5b28a72d49dc75c9cb4159ff2bef1bddcb5d8ccfabfa18a",
+      "manifestHash": "28baa9583877511a513c56c0b93b1158e7c5c32dca2621cbd8e816c7385c0c98",
       "provides": {
         "db": "Database"
       },
@@ -80,7 +80,7 @@
     "pg_database": {
       "capabilities": [],
       "emissions": 0,
-      "manifestHash": "f3487477a17d53733e15c7689710cd5de9a51a4f6c81241f27156b3d72f9f904",
+      "manifestHash": "0ecdfa933bf1fd638edf4d85d972c813f5e1890aed3c11cf677f40904ed50744",
       "provides": {
         "db": "Database"
       },
@@ -116,7 +116,7 @@
     "readonly_database": {
       "capabilities": [],
       "emissions": 0,
-      "manifestHash": "e700e6c9757e679124eebf43dd6c4fed777723722458a5f567ba9306956a95f9",
+      "manifestHash": "6323ed2e56e9e2f9c1a1bb46f78105efd5a1c5d2543159a3cc34efd86eb6bcf7",
       "provides": {
         "db": "Database"
       },
@@ -144,7 +144,7 @@
         "*"
       ],
       "emissions": 1,
-      "manifestHash": "d7d185fde7a4de8d2cf9aa3c3af732183615662f133f9c657dfe6554649afc08",
+      "manifestHash": "339a2cc50d1277eac596fb03cdecc5cace0ea42cee9021749807407aaef428fe",
       "provides": {
         "cache": "Cache"
       },

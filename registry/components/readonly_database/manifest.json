@@ -13,6 +13,7 @@
       "reasons": [
         "query: not async fn"
       ],
+      "resources": [],
       "verdict": "address-space-bound"
     }
   },
