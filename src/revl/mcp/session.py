@@ -446,8 +446,31 @@ class Session:
         `_dispose_all` before the successor loads). The caller guarantees
         `clear_session_owner()` in a finally that covers the load."""
         runtime_mod = self._driver.runtime
+        prev = self._owner
         self._owner = runtime_mod.SessionOwner(
             wal_getter=lambda: self.recorder.wal if self.recorder else None)
+        # item 247 second-pass (F2, data loss): a hot-swap disposes the
+        # PREDECESSOR generation (`swap`/`_abort_swap` run `_dispose_all` just
+        # above) while the predecessor owner's verdict is still pending, so those
+        # frames ESCROW their undischarged transactional/compensation entries
+        # into `prev` (`Frame.drain`'s mid-session-withdrawal branch). Installing
+        # a fresh owner for the successor generation must CARRY THAT ESCROW OVER,
+        # or the pre-swap witnessed mutations are orphaned in the dead owner: a
+        # later `Session.abort()` reverts nothing (`begin_abort`/`finalize_abort`
+        # iterate the NEW owner's escrow) and a commit never discharges their WAL
+        # descriptors (`_witnessed_seqs` reads the new owner), so `revl recover`
+        # would roll back committed work. Transfer the escrow and the session-
+        # cumulative residue/prompt bookkeeping onto the successor; the per-
+        # generation approval state is re-seeded fresh below (the reach-closure
+        # candidate hashes change per generation, so a stale ledger must NOT
+        # carry over). `load` sees `prev is None` (a fresh session), so this is
+        # inert there — only a swap/abort-swap has a predecessor to inherit from.
+        if prev is not None:
+            self._owner._escrow = prev._escrow
+            self._owner.compensation_residue = prev.compensation_residue
+            self._owner.prompts = prev.prompts
+            self._owner.flush_residue = prev.flush_residue
+            self._owner.approvals = prev.approvals
         # item 246, Slice 3: seed the SessionOwner with the typed-approval state
         # BEFORE the activation body runs, so a `with a` crossing in the activation
         # body checks and consumes its token against the live ledger (the runtime
@@ -1342,6 +1365,25 @@ class Session:
         self._run(driver._dispose_all(self.ir))
         if owner is not None and not aborting:
             owner.finalize_commit()   # the consolidated commit proof
+        elif owner is not None:
+            # item 247 second-pass (F3, data loss): an aborting unload must
+            # REPLAY the escrow, exactly as `Session.abort` does. The
+            # not-aborting branch discharges via `finalize_commit`; the aborting
+            # branch previously did NEITHER, so an escrowed entry (a mid-session
+            # -withdrawn component's witnessed mutation) was dropped un-reverted
+            # and no `aborted` WAL completion record was written. `_dispose_all`
+            # above already replayed the live frames' inverses (their frames are
+            # `_aborting` and the verdict is `abort`). Mark the ESCROWED frames
+            # aborting too, exactly as `begin_abort` does before an explicit
+            # abort: their `_owner` is the dead predecessor generation's owner
+            # whose verdict never settled, so without this `_hold_for_session`
+            # would re-hold the entry (frame still `_holding`, dead owner still
+            # pending) and `finalize_abort` would skip the replay. Then
+            # `finalize_abort` replays the escrowed entries (LIFO, in its two
+            # phases) and writes the `aborted` record naming every seq that ran.
+            for entry in owner._escrow:
+                entry.frame.abort()
+            owner.finalize_abort()
         residue = self._surface_compensation_residue(owner)
         report = self._teardown_report(driver)
         self._reset()

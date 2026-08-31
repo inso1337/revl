@@ -315,6 +315,17 @@ class Timeline:
             self._wal_append(step)
             return step, None
 
+        if inspect.ismethod(value) and getattr(value, "__name__", "") == "begin":
+            # `yield frame.begin` (item 247 second-pass): the Phase-2 post-unwind
+            # hook, yielded as the body's FIRST step so it disposes LAST. It is
+            # pure runtime scaffolding at the very bottom of the unwind stack with
+            # no author meaning and no author inverse, so it is INVISIBLE to the
+            # timeline and the WAL — recording it would prepend a spurious leading
+            # step to every recorded body. The disposer is passed through
+            # untouched so the runtime still installs it; step-back never needs
+            # to see it (it drains Phase 2, which has no forward author step).
+            return None, value
+
         if inspect.ismethod(value) and getattr(value, "__name__", "") == "drain":
             # `yield frame.drain`: the Frame's adopted-effect hinge.  Left
             # completely untouched — its ordering is load-bearing for R1 and
