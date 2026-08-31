@@ -4724,8 +4724,120 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
     return out
 
 
+# item 378 Stage 5: module-level config seam for document-global config externs.
+# Mirrors the py tier's `_REVL_EXTERN_CONFIG` map + fail-loud
+# `_revl_extern_config` helper: a mutable module-global config map (a
+# `OnceLock<Mutex<..>>`, the safe-Rust equivalent of a plug-time mutable
+# global), keyed by extern name, that a composition driver fills at plug time,
+# and a lookup that PANICS, naming the extern, when a required (non-defaulted)
+# field is absent, instead of handing the body an empty map that fails opaquely
+# later. A defaults-only extern still resolves to its defaults driver-free.
+#
+# Rust has no dynamic value top-type with literal defaults (unlike ts `unknown`
+# / go `any` / java `Object`), so the config map is `HashMap<String, String>`
+# and a rust-bodied config extern is restricted to `Str` config fields
+# (`_rust_extern_config_bind` refuses a non-Str field LOUDLY, redirecting to
+# @py or option (c)). This covers the design's motivating case (provider
+# identity is a string); a typed heterogeneous carrier is a separate value-
+# carrier design step. Fully-qualified `std::` paths so the seam adds no `use`
+# (which could duplicate the module's own imports). Emitted only when a config
+# extern is present, so a no-config program is byte-identical.
+_RUST_EXTERN_CONFIG_SCAFFOLD = [
+    "fn _revl_extern_config_store() -> &'static std::sync::Mutex<",
+    "    std::collections::HashMap<String, "
+    "std::collections::HashMap<String, String>>,",
+    "> {",
+    "    static STORE: std::sync::OnceLock<",
+    "        std::sync::Mutex<std::collections::HashMap<String, "
+    "std::collections::HashMap<String, String>>>,",
+    "    > = std::sync::OnceLock::new();",
+    "    STORE.get_or_init(|| std::sync::Mutex::new("
+    "std::collections::HashMap::new()))",
+    "}",
+    "",
+    "#[allow(dead_code)]",
+    "fn _revl_extern_config(",
+    "    name: &str,",
+    "    required: &[&str],",
+    "    defaults: &[(&str, &str)],",
+    ") -> std::collections::HashMap<String, String> {",
+    "    let mut out: std::collections::HashMap<String, String> = "
+    "std::collections::HashMap::new();",
+    "    for (k, v) in defaults {",
+    "        out.insert((*k).to_string(), (*v).to_string());",
+    "    }",
+    "    let store = _revl_extern_config_store().lock().unwrap();",
+    "    match store.get(name) {",
+    "        None => {",
+    "            if !required.is_empty() {",
+    "                panic!(",
+    "                    \"config extern `{}` called before plug-time "
+    "configuration was installed (required config: {}); configure it through "
+    "the run driver's config seam\",",
+    "                    name,",
+    "                    required.join(\", \")",
+    "                );",
+    "            }",
+    "        }",
+    "        Some(cfg) => {",
+    "            let missing: Vec<&str> = required",
+    "                .iter()",
+    "                .copied()",
+    "                .filter(|f| !cfg.contains_key(*f))",
+    "                .collect();",
+    "            if !missing.is_empty() {",
+    "                panic!(",
+    "                    \"config extern `{}` called before plug-time "
+    "configuration was installed (missing required config: {})\",",
+    "                    name,",
+    "                    missing.join(\", \")",
+    "                );",
+    "            }",
+    "            for (k, v) in cfg {",
+    "                out.insert(k.clone(), v.clone());",
+    "            }",
+    "        }",
+    "    }",
+    "    out",
+    "}",
+    "",
+]
+
+
+def _rust_extern_config_bind(ext: dict) -> str:
+    """The `let _revl_config = ...` first-body line for a config extern, or None.
+    `_revl_config` is a `HashMap<String, String>`; the verbatim @rs body reads a
+    field as `_revl_config["field"]` (a `&String`). Refuses a non-`Str` config
+    field LOUDLY: the rust map is string-valued, so a heterogeneous field has no
+    faithful home on this tier yet."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    name = ext.get("name")
+    for field in schema:
+        if field.get("type") != "Str":
+            raise EmitError(
+                f"config extern `{name}`: field `{field.get('name')}` has type "
+                f"`{field.get('type')}`, but the @rs config seam is string-valued "
+                f"and supports only `Str` config fields today. Give this extern a "
+                f"@py body, or use option (c) (a home component that `requires` "
+                f"the service). See docs/design/378-sync-extern-service-reach.md.")
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = [(f["name"], f["default"]) for f in schema
+                if f.get("default") is not None]
+    req_lit = "&[%s]" % ", ".join(_string(f) for f in required)
+    def_lit = "&[%s]" % ", ".join(
+        f"({_string(k)}, {_string(v)})" for k, v in defaults)
+    return (f"let _revl_config = _revl_extern_config("
+            f"{_string(name)}, {req_lit}, {def_lit});")
+
+
 def _emit_v3_externs(externs: list, types: dict) -> list[str]:
     out: list[str] = []
+    # item 378 Stage 5: emit the config seam once, before the externs, when any
+    # extern carries a config schema (byte-identical when none do).
+    if any(ext.get("config") for ext in externs):
+        out.extend(_RUST_EXTERN_CONFIG_SCAFFOLD)
     for ext in externs:
         name = _ident(ext.get("name"), "extern name")
         params = ", ".join(
@@ -4741,6 +4853,11 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         out.append(f"fn {name}({params}) -> {returns} {{")
+        # item 378 Stage 5: a config extern binds `_revl_config` as the first
+        # body line; None for a no-config extern (byte-identical body splice).
+        config_bind = _rust_extern_config_bind(ext)
+        if config_bind:
+            out.append("    " + config_bind)
         body = bodies["rs"].strip()
         if body:
             for line in body.splitlines() or [""]:
