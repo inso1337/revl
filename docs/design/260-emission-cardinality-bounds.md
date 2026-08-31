@@ -238,7 +238,7 @@ The expressible-iteration design (`docs/expressible-iteration.md`) made the
 agent loop writable as bounded structural recursion through a pure fn that is
 handed an emitting arrow:
 
-```revl
+```revl fragment
 fn run_loop(msgs: List[Msg], step: (List[Msg]) -> Step, n: Int) -> Step {
   if (n <= 0) { return Final("max_steps exhausted") }
   return match step(msgs) {
