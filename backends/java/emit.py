@@ -1895,8 +1895,90 @@ def _emit_v3_types(types: dict) -> list[str]:
     return lines
 
 
+# item 378 Stage 5: class-level config seam for document-global config externs.
+# Mirrors the py tier's `_REVL_EXTERN_CONFIG` map + fail-loud
+# `_revl_extern_config` helper: a mutable static config map, keyed by extern
+# name, that a composition driver fills at plug time, and a lookup that THROWS,
+# naming the extern, when a required (non-defaulted) field is absent, instead
+# of handing the body a null that fails opaquely later. A defaults-only extern
+# still resolves to its defaults driver-free. Fully-qualified `java.util.*` so
+# the seam adds no import; open-coded joins so it needs no `String.join`.
+# Emitted only when a config extern is present, so a no-config program is
+# byte-identical.
+_JAVA_EXTERN_CONFIG_SCAFFOLD = [
+    "static final java.util.Map<String, java.util.Map<String, Object>> "
+    "_REVL_EXTERN_CONFIG = new java.util.HashMap<>();",
+    "",
+    "static java.util.Map<String, Object> _revlExternConfig(",
+    "        String name, String[] required, "
+    "java.util.Map<String, Object> defaults) {",
+    "    java.util.Map<String, Object> out = new java.util.HashMap<>(defaults);",
+    "    java.util.Map<String, Object> cfg = _REVL_EXTERN_CONFIG.get(name);",
+    "    if (cfg == null) {",
+    "        if (required.length > 0) {",
+    "            String msg = \"\";",
+    "            for (int i = 0; i < required.length; i++) {",
+    "                if (i > 0) msg += \", \";",
+    "                msg += required[i];",
+    "            }",
+    "            throw new RuntimeException(\"config extern `\" + name +",
+    "                \"` called before plug-time configuration was installed "
+    "(required config: \" +",
+    "                msg + \"); configure it through the run driver's config "
+    "seam\");",
+    "        }",
+    "        return out;",
+    "    }",
+    "    String missing = \"\";",
+    "    int n = 0;",
+    "    for (String f : required) {",
+    "        if (!cfg.containsKey(f)) {",
+    "            if (n > 0) missing += \", \";",
+    "            missing += f;",
+    "            n++;",
+    "        }",
+    "    }",
+    "    if (n > 0) {",
+    "        throw new RuntimeException(\"config extern `\" + name +",
+    "            \"` called before plug-time configuration was installed "
+    "(missing required config: \" +",
+    "            missing + \")\");",
+    "    }",
+    "    out.putAll(cfg);",
+    "    return out;",
+    "}",
+    "",
+]
+
+
+def _java_extern_config_bind(ext: dict) -> str:
+    """The `_revl_config = ...` first-body line for a config extern, or None.
+    `_revl_config` is a `java.util.Map<String, Object>`; the verbatim @java body
+    reads a field as `(Cast) _revl_config.get("field")`, exactly as the py body
+    reads the resolved dict."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    name = ext.get("name")
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = {f["name"]: f["default"] for f in schema
+                if f.get("default") is not None}
+    req_lit = "new String[]{%s}" % ", ".join(_string(f) for f in required)
+    if defaults:
+        pairs = ", ".join(f"{_string(k)}, {_lit(v)}" for k, v in defaults.items())
+        def_lit = f"java.util.Map.<String, Object>of({pairs})"
+    else:
+        def_lit = "java.util.Map.<String, Object>of()"
+    return (f"java.util.Map<String, Object> _revl_config = _revlExternConfig("
+            f"{_string(name)}, {req_lit}, {def_lit});")
+
+
 def _emit_v3_externs(externs: list) -> list[str]:
     lines: list[str] = []
+    # item 378 Stage 5: emit the config seam once, before the externs, when any
+    # extern carries a config schema (byte-identical when none do).
+    if any(ext.get("config") for ext in externs):
+        lines.extend(_JAVA_EXTERN_CONFIG_SCAFFOLD)
     for ext in externs:
         name = _fn_name(ext.get("name"))
         params = ", ".join(
@@ -1911,6 +1993,11 @@ def _emit_v3_externs(externs: list) -> list[str]:
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         lines.append(f"public static {ret} {name}({params}) {{")
+        # item 378 Stage 5: a config extern binds `_revl_config` as the first
+        # body line; None for a no-config extern (byte-identical body splice).
+        config_bind = _java_extern_config_bind(ext)
+        if config_bind:
+            lines.append("    " + config_bind)
         body = bodies["java"].strip()
         if body:
             for line in body.splitlines() or [""]:

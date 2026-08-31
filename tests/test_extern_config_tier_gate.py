@@ -67,37 +67,54 @@ def _exec(src):
 
 
 # -- Change 1: compile-time tier gate ---------------------------------------
+#
+# Item 378 Stage 5 grew the config-injection seam to ts/go/java/rust, so those
+# tiers now COMPILE a config extern (each binds `_revl_config` from a module-
+# global config map with a fail-loud lookup). Only @wasm stays refused: its
+# extern body is raw WAT and its config channel is a scalar-only, spawn-time
+# runtime import with no plug-time config dict to bind.
 
-def test_config_extern_with_ts_body_is_refused_at_compile():
-    with pytest.raises(RevlError) as exc:
-        compile_source(_TS_CONFIG_EXTERN)
-    msg = str(exc.value)
-    # names the offending tier and redirects to option (c).
-    assert "@ts" in msg
-    assert "option (c)" in msg
+def test_config_extern_with_ts_body_now_compiles():
+    # Stage 5: a @ts config extern lowers with a config schema and is no longer
+    # gated (the ts emitter binds `_revl_config`).
+    ir = compile_source(_TS_CONFIG_EXTERN)
+    ext = next(e for e in ir["externs"] if e["name"] == "author_ts")
+    assert ext["config"][0] == {"name": "provider", "type": "Str", "default": None}
 
 
-@pytest.mark.parametrize("tier", ["ts", "go", "rs", "java", "wasm"])
-def test_config_extern_refused_on_every_seamless_tier(tier):
+@pytest.mark.parametrize("tier", ["ts", "go", "rs", "java"])
+def test_config_extern_now_compiles_on_seamful_tier(tier):
+    # the four tiers that grew the seam in Stage 5 all compile a config extern.
     src = (
         f'extern emission fn f(body: Str) -> Str\n'
         f'  config {{ provider: Str }}\n'
         f'  = @{tier} {{ return body }}\n'
     )
-    with pytest.raises(RevlError, match=f"@{tier} tier"):
+    ir = compile_source(src)
+    assert next(e for e in ir["externs"] if e["name"] == "f")["config"]
+
+
+def test_config_extern_still_refused_on_wasm():
+    # wasm remains a genuine conformance gap (raw WAT, no plug-time config dict).
+    src = (
+        'extern emission fn f(body: Str) -> Str\n'
+        '  config { provider: Str }\n'
+        '  = @wasm { return body }\n'
+    )
+    with pytest.raises(RevlError, match="@wasm tier"):
         compile_source(src)
 
 
-def test_config_extern_with_py_and_ts_bodies_is_refused():
-    # even when a valid @py body is present, an accompanying seam-less body is
-    # the hazard the gate closes.
+def test_config_extern_with_py_and_wasm_bodies_is_refused():
+    # a still-seamless body (wasm) accompanying a valid @py body is the hazard
+    # the gate still closes.
     src = (
         'extern emission fn f(body: Str) -> Str\n'
         '  config { provider: Str }\n'
         '  = @py { return _revl_config["provider"] + body }\n'
-        '  = @ts { return _revl_config["provider"] + body }\n'
+        '  = @wasm { return body }\n'
     )
-    with pytest.raises(RevlError, match="@ts tier"):
+    with pytest.raises(RevlError, match="@wasm tier"):
         compile_source(src)
 
 

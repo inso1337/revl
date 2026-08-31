@@ -182,6 +182,22 @@ A refusal is only a *gap* when the tier could reasonably express the
 construct. An extern with no body for that backend, or a `Str` on the
 i32-only wasm tier, is the toolchain working as designed.
 
+### Extern `config` coeffect (item 378)
+
+A document-global extern may carry a typed `config { ... }` block, resolved once
+at plug from the composition config map and bound in the host body as
+`_revl_config` (docs/syntax-2.0.md §6.0). The coeffect behaves identically on
+**py, ts, go, and java**: each emits a module- or class-global config map plus a
+fail-loud lookup (a required field absent at the call raises or panics, naming
+the extern) and reads config as a dynamic-keyed value map, so a field keeps its
+declared type. **rust** supports the coeffect for `Str` config fields only (its
+map is string-valued); a non-`Str` field on a `@rs` body is refused loudly at
+emit, not silently narrowed. **wasm** is a genuine gap: a wasm extern body is
+raw WAT and wasm's only config channel is a scalar-only, spawn-time runtime
+import with no plug-time config dict, so a config extern with a `@wasm` body is
+refused at compile, redirecting to option (c) (a home component that `requires`
+the service). A no-config extern is byte-identical on every tier.
+
 ## Golden policy: snapshot, not freeze
 
 The per-backend byte-equality goldens (`backends/*/golden/user_cache.*`,

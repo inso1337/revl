@@ -653,12 +653,17 @@ def _check_host_verb(family: str, verb: str, argc: int,
 # item 395 / Stage 5 gate of docs/design/378-sync-extern-service-reach.md: the
 # backend tiers whose emitter HAS the extern config-injection seam (binds
 # `_revl_config` in the extern body from the plug-time composition config map).
-# Item 378 landed option (b) py-ONLY, so this is `{"py"}` today; ts/go/rust/java/
-# wasm gain a key here as each grows the seam. A config extern that carries a
-# host body for a tier NOT in this set is refused at compile (`_lower_externs`),
-# because that tier would emit the body with `_revl_config` unbound — a late,
-# mis-attributed runtime failure. The key is the @-body spelling (`py`/`ts`/…).
-_CONFIG_INJECTION_TIERS = {"py"}
+# Item 378 landed option (b) py-ONLY; Stage 5 grew the seam to ts/go/java/rust,
+# each emitting a module-global config map + a fail-loud lookup that mirrors the
+# py `_REVL_EXTERN_CONFIG` / `_revl_extern_config` shape. wasm stays OUT: its
+# extern body is raw WAT and its only config channel is a scalar-only, spawn-
+# time runtime import, with no plug-time config dict to bind (see the design's
+# Stage 5 note and backends/wasm/emit.py config refusal). A config extern that
+# carries a host body for a tier NOT in this set is refused at compile
+# (`_lower_externs`), because that tier would emit the body with `_revl_config`
+# unbound: a late, mis-attributed failure. The key is the @-body spelling
+# (`py`/`ts`/`go`/`java`/`rs`).
+_CONFIG_INJECTION_TIERS = {"py", "ts", "go", "java", "rs"}
 # item 396 option B: the tiers on which a host-module `ref` is native (py, ts).
 # Imported from `hostref` so the compile-time gate and the resolver agree; a ref
 # on go/rust/java/wasm is refused in `_lower_externs`.
