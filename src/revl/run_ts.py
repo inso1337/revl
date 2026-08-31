@@ -57,6 +57,7 @@ from pathlib import Path
 # path the cross-tier bridge uses for node processes. We drive the resulting
 # module through the same placement runner, in `once` mode.
 from . import placement as _placement
+from ._paths import stdlib_root
 from .errors import RevlError
 
 _TS_DIR = _placement._TS_DIR
@@ -139,8 +140,16 @@ def _spec(ir: dict, config: dict, files, module: str) -> dict:
         # list the runner hash-checks.
         "refRoot": (os.path.dirname(os.path.abspath(str(files[0])))
                     if files else ""),
+        # item 410: the SECOND root a stdlib-origin `@ts ref` resolves against —
+        # the install tree, layout-uniform. The runner also self-derives this
+        # from `import.meta.url` when the key is absent, but setting it here keeps
+        # the single-process runner explicit. Each ref carries its `root` kind so
+        # the runner joins and hash-checks against the right root, never the wrong
+        # trust domain.
+        "stdlibRefRoot": str(stdlib_root().parent),
         "refs": [
-            {"extern": e.get("name"), "path": r["path"], "sha256": r["sha256"]}
+            {"extern": e.get("name"), "path": r["path"], "sha256": r["sha256"],
+             **({"root": r["root"]} if r.get("root") else {})}
             for e in ir.get("externs") or []
             for r in [(e.get("refs") or {}).get("ts")] if r is not None
         ],

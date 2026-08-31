@@ -2968,6 +2968,19 @@ def _emit_ts_ref_runtime() -> list[str]:
         "globalThis.__REVL_REF_ROOT__ (item 396 option B)')",
         "  return _revl_pathmod.resolve(root, rel)",
         "}",
+        # item 410: a stdlib-origin ref resolves against a SECOND runner-provided
+        # root (the install tree), never the user root. No fallback in either
+        # direction: a stdlib-kind thunk with no stdlib root set fails loudly
+        # naming the missing knob, and a user thunk never reads this global. The
+        # two globals ARE the two trust domains, and the emitted text stays
+        # machine-independent.
+        "function _revl_ref_path_stdlib(rel: string): string {",
+        "  const root = (globalThis as any).__REVL_STDLIB_REF_ROOT__",
+        "  if (root === undefined)",
+        "    throw new Error('revl: no stdlib host-ref root set; the runner must "
+        "set globalThis.__REVL_STDLIB_REF_ROOT__ (item 410 two-root scheme)')",
+        "  return _revl_pathmod.resolve(root, rel)",
+        "}",
         "",
     ]
 
@@ -2988,6 +3001,11 @@ def _emit_ts_ref_thunk(name: str, params_decl: str, arg_names: str,
     symbol = _ident(ref["symbol"], "ref symbol")
     where = f"{rel}#{symbol}"
     is_async = bool(ext.get("async"))
+    # item 410: a stdlib-origin ref (`"root": "stdlib"`) resolves against the
+    # install root (`_revl_ref_path_stdlib`); a user ref against the user root
+    # (`_revl_ref_path`, unchanged). Kind-dispatched, no cross-domain fallback.
+    path_fn = ("_revl_ref_path_stdlib" if ref.get("root") == "stdlib"
+               else "_revl_ref_path")
     lines: list[str] = []
     if is_async:
         lines.append(
@@ -2995,7 +3013,7 @@ def _emit_ts_ref_thunk(name: str, params_decl: str, arg_names: str,
         lines.append(f"  let _f = _REVL_REFS.get({_string(name)})")
         lines.append("  if (_f === undefined) {")
         lines.append(f"    const _m = await import("
-                     f"_revl_pathToFileURL(_revl_ref_path({_string(rel)})).href)")
+                     f"_revl_pathToFileURL({path_fn}({_string(rel)})).href)")
         lines.append(f"    _f = _m[{_string(symbol)}]")
         lines.append(f"    if (typeof _f !== 'function') throw new Error("
                      f"{_string(f'revl extern `{name}`: {where} is not a function')})")
@@ -3007,7 +3025,7 @@ def _emit_ts_ref_thunk(name: str, params_decl: str, arg_names: str,
         lines.append(f"export function {name}({params_decl}): {returns} {{")
         lines.append(f"  let _f = _REVL_REFS.get({_string(name)})")
         lines.append("  if (_f === undefined) {")
-        lines.append(f"    const _m = _revl_require(_revl_ref_path({_string(rel)}))")
+        lines.append(f"    const _m = _revl_require({path_fn}({_string(rel)}))")
         lines.append(f"    _f = _m[{_string(symbol)}]")
         lines.append(f"    if (typeof _f !== 'function') throw new Error("
                      f"{_string(f'revl extern `{name}`: {where} is not a function')})")

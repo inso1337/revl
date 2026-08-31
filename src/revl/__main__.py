@@ -41,6 +41,16 @@ from .cli.observe import (
 _UNKNOWN_DISPATCH = "*"
 
 
+def _ref_provenance(ref: dict) -> str:
+    """The audit provenance string for one host-module ref (item 396/410):
+    `path#symbol`, prefixed with the root KIND for an install-origin ref
+    (`stdlib:backends/typescript/revl_fs_ts.ts#fsWrite`), so a reviewer sees
+    which trust domain a crossing reaches into. A user ref has no `root` key and
+    renders exactly as 396(B) did — byte-identical."""
+    prefix = f"{ref['root']}:" if ref.get("root") else ""
+    return f"{prefix}{ref['path']}#{ref['symbol']}"
+
+
 def _fn_call_names(node, out: set) -> None:
     """Collect callable references in an IR tree: component positions use
     `{"kind": "fn", "name"}`, fn bodies use `{"kind": "call", "callee":
@@ -213,7 +223,7 @@ def _boundary(ir: dict) -> dict:
                  "backends": sorted(
                      set(extern_class.get(name, {}).get("bodies") or {})
                      | set(extern_class.get(name, {}).get("refs") or {})),
-                 **({"refs": {tier: f"{r['path']}#{r['symbol']}" for tier, r in
+                 **({"refs": {tier: _ref_provenance(r) for tier, r in
                               (extern_class.get(name, {}).get("refs") or {}).items()}}
                     if extern_class.get(name, {}).get("refs") else {})}
                 for name in sorted(host)
@@ -329,8 +339,10 @@ def _run_audit(args, ir: dict) -> int:
          **({"reach": ext["reach"]} if ext.get("reach") else {}),
          # item 396 option B: the ref provenance (`tier: "path#symbol"`), so a
          # review can see WHERE a crossing's implementation lives when it moved
-         # out of the audited document. Absent unless a ref is used.
-         **({"refs": {tier: f"{r['path']}#{r['symbol']}"
+         # out of the audited document. item 410 prefixes the root KIND
+         # (`stdlib:path#symbol`) so a reviewer sees which trust domain the
+         # crossing reaches into at a glance. Absent unless a ref is used.
+         **({"refs": {tier: _ref_provenance(r)
                       for tier, r in (ext.get("refs") or {}).items()}}
             if ext.get("refs") else {})}
         for ext in ir.get("externs") or []

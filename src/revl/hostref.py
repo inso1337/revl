@@ -37,17 +37,32 @@ mutates its own `__path__` at runtime can diverge from the static spec walk;
 unhashed/unjailed/invisible to `revl audit`; (4) the appended root grants NEW
 importability of every project module to every host body (append only prevents
 SHADOWING of already-importable names).
+
+item 410 residual (the py namespace seam, stated not claimed away): a stdlib
+ref imports its helper as `backends.python.<mod>` off an APPENDED install root
+(`stdlib_root().parent`). This keeps the IR path layout-uniform (the same
+relative path on a source checkout and a wheel install), but `backends` is a
+GENERIC top-level name: a site-packages distribution that already owns
+`backends` wins on `sys.path` position over the appended install root. The
+mitigation is append-not-prepend (a first-party tree never shadows an
+already-importable name) plus the load-time hash refusal as the backstop — a
+collision surfaces as a LOUD plug-time mismatch naming both paths, never a
+silent substitution. The clean alternative (a `revl.`-prefixed dotted path
+under the wheel layout) would cost the single layout-uniform relative path the
+IR scheme rests on, so it is deliberately NOT taken here; an implementer hitting
+the collision refusal in the field should revisit that choice rather than widen
+the fallback (design §"The honest hard part").
 """
 
 from __future__ import annotations
 
 import hashlib
-import importlib.machinery
 import importlib.util
 import keyword
 import os
 import sys
 
+from ._paths import stdlib_root
 from .errors import RevlError
 from .hostfile import _contained, _normcase  # same canonical containment jail
 
@@ -147,24 +162,44 @@ def _validate_specifier(rel_path: str, backend: str, decl_name: str,
 
 
 def _record(node, decl_name: str, rel_path: str, digest: str,
-            filename: str) -> None:
+            filename: str, root_kind: str | None) -> None:
     node.rel_path = rel_path.replace(os.sep, "/")
     node.sha256 = digest
+    node.root_kind = root_kind
     _validate_specifier(node.rel_path, node.backend, decl_name, filename,
                         node.line)
 
 
 def resolve_refs(program, module_dir: str, root_dirs: list[str],
-                 sources: dict[str, str], is_virtual: bool) -> None:
-    """Resolve every `HostRef` node in `program`'s externs against the ROOT-tree
+                 sources: dict[str, str], is_virtual: bool,
+                 install_root: str | None = None) -> None:
+    """Resolve every `HostRef` node in `program`'s externs against a ROOT-tree
     jail, pinning `rel_path` (relative to the containing root) and `sha256` onto
     each node. A virtual module resolves through `sources` only (no disk read);
     a real module reads the file's bytes from disk. Refuses a ref that resolves
     outside every root tree, or whose path cannot become a legal tier specifier.
+
+    item 410 — origin decides the jail's root SET, exclusively:
+
+    - USER-ORIGIN (`install_root is None`): resolve against `root_dirs`, the
+      composition's root compile trees, exactly as 396(B) always has. The node
+      carries no `root_kind` and its IR ref is byte-identical.
+    - INSTALL-ORIGIN (`install_root` set): the declaring module was resolved
+      through the item-319 search path (or is contained in `stdlib_root()`), so
+      its ref jails to that ONE entry's tree (per-entry jail, entries never
+      pool). The node is stamped `root_kind = "stdlib"`; the IR gains an additive
+      `"root": "stdlib"` key and the runners pick the install root at deploy. A
+      user ref NEVER resolves against this root and vice versa: the caller passes
+      the single root set the origin selects, never both.
     """
     from .parser import HostRef
 
-    real_roots = [os.path.realpath(r) for r in root_dirs]
+    if install_root is not None:
+        jail_roots = [os.path.realpath(install_root)]
+        root_kind: str | None = "stdlib"
+    else:
+        jail_roots = [os.path.realpath(r) for r in root_dirs]
+        root_kind = None
     for ext in program.externs:
         for body in ext.bodies:
             if not isinstance(body, HostRef):
@@ -173,13 +208,14 @@ def resolve_refs(program, module_dir: str, root_dirs: list[str],
                                      program.filename, body.line)
             if is_virtual:
                 _resolve_ref_memory(body, ext.name, module_dir, sources,
-                                    real_roots, program.filename)
+                                    jail_roots, program.filename, root_kind)
             else:
-                _resolve_ref_disk(body, ext.name, module_dir, real_roots,
-                                  program.filename)
+                _resolve_ref_disk(body, ext.name, module_dir, jail_roots,
+                                  program.filename, root_kind)
 
 
-def _resolve_ref_disk(body, decl_name, module_dir, real_roots, filename):
+def _resolve_ref_disk(body, decl_name, module_dir, real_roots, filename,
+                      root_kind=None):
     candidate = os.path.join(module_dir, body.path)
     if not os.path.exists(candidate):
         raise RevlError(
@@ -199,30 +235,47 @@ def _resolve_ref_disk(body, decl_name, module_dir, real_roots, filename):
         raise RevlError(
             filename, body.line,
             f"@{body.backend} host-module ref {body.path!r} for extern "
-            f"`{decl_name}` resolves OUTSIDE the root compile tree ({real} is "
-            f"not inside {', '.join(real_roots) or '(no root)'})",
-            hint="option B's file must be reachable at deploy time through one "
-                 "import root, so the ref must sit inside the root compile "
-                 "file's directory tree. A module resolved from the stdlib or "
-                 "REVL_IMPORT_PATH may not declare a ref — inline the body "
-                 "(`= @backend { ... }`) or splice it (`= @backend file`) "
-                 "instead (item 396 option B jail)")
+            f"`{decl_name}` resolves OUTSIDE the "
+            f"{'install' if root_kind == 'stdlib' else 'root compile'} tree "
+            f"({real} is not inside {', '.join(real_roots) or '(no root)'})",
+            hint=_outside_root_hint(root_kind))
     with open(real, "rb") as fh:
         data = fh.read()
     rel = os.path.relpath(real, root)
-    _record(body, decl_name, rel, hashlib.sha256(data).hexdigest(), filename)
+    _record(body, decl_name, rel, hashlib.sha256(data).hexdigest(), filename,
+            root_kind)
+
+
+def _outside_root_hint(root_kind: str | None) -> str:
+    if root_kind == "stdlib":
+        # item 410: an install-origin (stdlib / REVL_IMPORT_PATH) ref is jailed
+        # to its OWN entry's tree; escaping it is refused so a shipped module
+        # cannot embed reach outside the install (each entry is its own jail).
+        return ("an install-origin ref (a stdlib or REVL_IMPORT_PATH module) is "
+                "jailed to that one entry's tree; the ref target must sit inside "
+                "it (`..` allowed while the resolved realpath stays contained) "
+                "and may never reach into the composition's user tree "
+                "(item 410 two-root jail)")
+    return ("option B's file must be reachable at deploy time through one "
+            "import root, so the ref must sit inside the root compile "
+            "file's directory tree. A module resolved from the stdlib or "
+            "REVL_IMPORT_PATH may not declare a ref against the USER tree — "
+            "inline the body (`= @backend { ... }`) or splice it "
+            "(`= @backend file`) instead (item 396 option B jail)")
 
 
 def _resolve_ref_memory(body, decl_name, module_dir, sources, real_roots,
-                        filename):
+                        filename, root_kind=None):
     key = os.path.abspath(os.path.join(module_dir, body.path))
     root = _pick_root(key, [os.path.abspath(r) for r in real_roots])
     if root is None:
         raise RevlError(
             filename, body.line,
             f"@{body.backend} host-module ref {body.path!r} for extern "
-            f"`{decl_name}` resolves outside the root compile tree ({key})",
-            hint="item 396 option B jail")
+            f"`{decl_name}` resolves outside the "
+            f"{'install' if root_kind == 'stdlib' else 'root compile'} tree "
+            f"({key})",
+            hint=_outside_root_hint(root_kind))
     if key not in sources:
         raise RevlError(
             filename, body.line,
@@ -234,7 +287,8 @@ def _resolve_ref_memory(body, decl_name, module_dir, sources, real_roots,
                  "map (item 396)")
     data = sources[key].encode("utf-8")
     rel = os.path.relpath(key, root)
-    _record(body, decl_name, rel, hashlib.sha256(data).hexdigest(), filename)
+    _record(body, decl_name, rel, hashlib.sha256(data).hexdigest(), filename,
+            root_kind)
 
 
 def program_has_ref(program) -> bool:
@@ -262,6 +316,11 @@ def ir_refs(ir: dict) -> list[dict]:
                 "symbol": ref["symbol"],
                 "path": ref["path"],
                 "sha256": ref["sha256"],
+                # item 410: the root KIND (`"stdlib"` for an install-origin ref,
+                # absent -> None for a user ref). Selects which root the dotted
+                # name resolves against at plug (the appended install root vs the
+                # user compile tree).
+                "root": ref.get("root"),
             })
     return out
 
@@ -270,29 +329,56 @@ def resolve_ref_spec_origin(dotted: str, search_paths: list[str]) -> str | None:
     """The file `dotted` would import from, WITHOUT executing any parent
     `__init__.py`. `importlib.util.find_spec` imports and runs the parent
     packages at plug — the exact host-code-at-load point option B forbids — so
-    this walks `importlib.machinery.PathFinder.find_spec` level by level, feeding
-    each level the parent spec's `submodule_search_locations` and never
-    importing. Returns the leaf module's `origin` (its file), or `None` when the
-    name does not resolve on these paths.
+    this descends the on-disk package layout level by level and NEVER imports.
+    Returns the leaf module's file (its `origin`), or `None` when the name does
+    not resolve on these paths.
 
-    Residual (stated): a parent `__init__` that mutates its own `__path__` at
-    RUNTIME can make the real import diverge from this static walk; the walk sees
-    the on-disk package layout, not a runtime-mutated one.
+    item 410: the walk must handle NAMESPACE packages (no `__init__.py`), because
+    a stdlib ref imports its helper as `backends.python.<mod>` and both
+    `backends` and `backends.python` are namespace packages in the revl install
+    (no `__init__.py`, `_paths.py`). `PathFinder.find_spec` cannot resolve a
+    namespace SUBpackage without its parent already in `sys.modules` (the
+    namespace `__path__` is dynamic and reads `sys.modules[parent].__path__`),
+    and importing the parent is exactly what this must not do — so the resolution
+    is done directly against the directory layout instead, with the same
+    path-order semantics the import system uses: an earlier `search_paths` entry
+    wins, a regular package (`__init__.py`) short-circuits namespace aggregation,
+    and namespace portions accumulate across entries.
+
+    Residual (stated, unchanged): a parent `__init__` that mutates its own
+    `__path__` at RUNTIME can make the real import diverge from this static walk;
+    the walk sees the on-disk package layout, not a runtime-mutated one.
     """
     parts = dotted.split(".")
-    paths: list[str] | None = list(search_paths)
-    spec = None
-    for i in range(len(parts)):
-        fullname = ".".join(parts[:i + 1])
-        spec = importlib.machinery.PathFinder.find_spec(fullname, paths)
-        if spec is None:
+    dirs: list[str] = list(search_paths)
+    for i, part in enumerate(parts):
+        if i == len(parts) - 1:
+            # leaf: a module file wins over a package of the same name, per entry
+            # order (the interpreter imports the first hit).
+            for base in dirs:
+                modfile = os.path.join(base, part + ".py")
+                if os.path.isfile(modfile):
+                    return modfile
+                init = os.path.join(base, part, "__init__.py")
+                if os.path.isfile(init):
+                    return init
             return None
-        if i < len(parts) - 1:
-            locs = spec.submodule_search_locations
-            if not locs:
-                return None
-            paths = list(locs)
-    return spec.origin if spec is not None else None
+        # non-leaf: descend into `part` as a regular OR namespace package.
+        namespace_dirs: list[str] = []
+        resolved: list[str] | None = None
+        for base in dirs:
+            pkgdir = os.path.join(base, part)
+            if os.path.isfile(os.path.join(pkgdir, "__init__.py")):
+                resolved = [pkgdir]  # regular package: it wins outright
+                break
+            if os.path.isfile(os.path.join(base, part + ".py")):
+                return None  # a module cannot own a subpackage
+            if os.path.isdir(pkgdir):
+                namespace_dirs.append(pkgdir)  # namespace portion, keep scanning
+        dirs = resolved if resolved is not None else namespace_dirs
+        if not dirs:
+            return None
+    return None
 
 
 def _file_sha256(path: str) -> str | None:
@@ -334,8 +420,20 @@ def plug_refs(ir: dict, root_dirs: list[str]) -> None:
     refs = ir_refs(ir)
     if not refs:
         return
-    real_roots = [os.path.realpath(r) for r in root_dirs]
-    for root in root_dirs:
+    # item 410: a stdlib-origin (`"root": "stdlib"`) py ref imports its helper
+    # as a dotted name off the install tree (`backends/python/x.py` ->
+    # `backends.python.x`), so the install root is APPENDED to the union search
+    # path when any stdlib ref is present. Append, never prepend — the same
+    # shadowing rationale as the user root: a first-party tree must not shadow an
+    # already-importable name, and the mirror cuts the other way too (an already-
+    # importable top-level `backends` distribution wins on path position, which
+    # the load-time hash refusal below detects and names). A composition with no
+    # stdlib ref never touches the install root.
+    all_roots = list(root_dirs)
+    if any(r.get("root") == "stdlib" for r in refs):
+        all_roots.append(str(stdlib_root().parent))
+    real_roots = [os.path.realpath(r) for r in all_roots]
+    for root in all_roots:
         if root not in sys.path:
             sys.path.append(root)
     search = list(sys.path)
@@ -361,9 +459,14 @@ def plug_refs(ir: dict, root_dirs: list[str]) -> None:
                     hint="the referenced file was edited, swapped, or SHADOWED "
                          "by an earlier importable module of the same dotted "
                          "name since compile (the appended `sys.path` means an "
-                         "already-importable module wins). Recompile against the "
-                         "deployed file, or restore the reviewed one (item 396 "
-                         "option B deploy contract)")
+                         "already-importable module wins). For a stdlib ref the "
+                         "dotted name is a generic top-level package (`backends`) "
+                         "and a site-packages distribution owning that name wins "
+                         "over the appended install root on path position — this "
+                         "refusal is the backstop that catches it (item 410 py "
+                         "namespace seam). Recompile against the deployed file, "
+                         "or restore the reviewed one (item 396 option B deploy "
+                         "contract)")
         _evict_ref(ref["dotted"], real_roots)
 
 
