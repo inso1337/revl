@@ -291,6 +291,109 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
                            allow_async=False, in_fn_return=False)
 
 
+# ------------------------------------------------- config is data, not a capability
+#
+# item 378 (docs/design/378-sync-extern-service-reach.md) asserts "Config is
+# static data, not a capability, so the capability gate is untouched". That was
+# only a COMMENT. `config_block` parses a field type with the FULL type grammar,
+# so `config { handler: (Str) -> Str }` or `config { p: SomeService }` compiled,
+# and a provider invoking `config.handler(x)` reached host emission with no
+# ticket, no reach attribution, and no `emission[caps]` check: a live callable
+# arrives at plug/spawn/load time (or through the embedding API) and is invoked
+# past every authority fold. This makes the assertion a CHECK: a config value is
+# injected as static data, so its declared type must be built, transitively, out
+# of data. The only heads a config field may NOT reach are a function (arrow)
+# type (which carries a live callable) and a `service` reference (a capability
+# channel). Scalars, records/ADTs/aliases, and `Opt`/`List`/`Map` of data are all
+# fine, so the legitimate data-config feature (`config { url: Str, retries: Int,
+# opts: Options }`) is untouched.
+
+_CONFIG_DATA_HINT = (
+    "a config field must be static data (a scalar, or a record/list/Opt of "
+    "data); an arrow type / a service cannot be a config field, because config "
+    "is not a capability channel (item 378)"
+)
+
+
+def check_config_field_is_data(filename: str, line: int, field_name: str,
+                               owner: str, type_name: str | None, *,
+                               service_names: set[str],
+                               type_defs: dict) -> None:
+    """Refuse a config field whose declared type can carry a live callable or a
+    capability. `service_names` is the set of declared `service` names; each
+    entry of `type_defs` is a lowered type-table shape
+    (`{"kind": "record", "fields": {name: type}}` or
+    `{"kind": "variant", "cases": [{"name":…, "payload":…}]}`), used to resolve a
+    nominal record/ADT/alias into its component types."""
+    _walk_config_type(filename, line, field_name, owner, type_name, type_name,
+                      service_names=service_names, type_defs=type_defs,
+                      visited=frozenset())
+
+
+def _config_data_error(filename: str, line: int, field_name: str, owner: str,
+                       root: str | None, offender: str) -> RevlError:
+    return RevlError(
+        filename, line,
+        f"config field `{field_name}` of {owner} has type `{root}`, which "
+        f"reaches {offender}; a config field must be static data",
+        hint=_CONFIG_DATA_HINT,
+        code="G4", category="config-data",
+    )
+
+
+def _walk_config_type(filename: str, line: int, field_name: str, owner: str,
+                      type_name: str | None, root: str | None, *,
+                      service_names: set[str], type_defs: dict,
+                      visited: frozenset) -> None:
+    if not type_name:
+        return
+    type_name = type_name.strip()
+    # A structural record literal type `{a: T, ...}` (item 71) carries its field
+    # types inline; recurse into each so a smuggled arrow field is caught.
+    sfields = structural_fields(type_name)
+    if sfields is not None:
+        for ftype in sfields.values():
+            _walk_config_type(filename, line, field_name, owner, ftype, root,
+                              service_names=service_names, type_defs=type_defs,
+                              visited=visited)
+        return
+    head, args = parse_type(type_name)
+    if head == FN_HEAD:
+        raise _config_data_error(filename, line, field_name, owner, root,
+                                 "an arrow (function) type")
+    if head in service_names:
+        raise _config_data_error(filename, line, field_name, owner, root,
+                                 f"the service `{head}`")
+    info = type_defs.get(head or "")
+    if info is not None:
+        # A nominal record/ADT/alias: resolve it and walk its component types.
+        # Guard against a recursive type (`type Tree = Node(Tree)`) with the
+        # visited set (a cycle through data heads is still data).
+        if head not in visited:
+            child_visited = visited | {head}
+            if info.get("kind") == "record":
+                for ftype in (info.get("fields") or {}).values():
+                    _walk_config_type(filename, line, field_name, owner, ftype,
+                                      root, service_names=service_names,
+                                      type_defs=type_defs, visited=child_visited)
+            else:
+                for case in info.get("cases") or []:
+                    # A variant case carries either a parenthesised payload
+                    # (`Hit(Row)`) or, for an alias RHS (`type Rows = List[Row]`),
+                    # the target type spelled as the sole case name.
+                    target = case.get("payload") or case.get("name")
+                    _walk_config_type(filename, line, field_name, owner, target,
+                                      root, service_names=service_names,
+                                      type_defs=type_defs, visited=child_visited)
+    # A parametric head (builtin `Opt`/`List`/`Map`/`Result` or a user generic)
+    # carries its data in the type arguments; walk them regardless of whether the
+    # head itself resolved above.
+    for arg in args:
+        _walk_config_type(filename, line, field_name, owner, arg, root,
+                          service_names=service_names, type_defs=type_defs,
+                          visited=visited)
+
+
 # ------------------------------------------------- type parameters
 #
 # A `fn`/`extern` signature declares type parameters two ways, both feeding the
