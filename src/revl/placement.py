@@ -268,15 +268,30 @@ def expand_tiers(placement: dict, component_names) -> tuple[dict, str | None]:
     """
     tiers = placement.get("tiers")
     default_tier = placement.get("default_tier")
-    if tiers is None and default_tier is None:
+    # item 411: the `[tiers]`-form `[sandbox]` sugar table assigns a component
+    # to its own isolation boundary. It shares the top-level `sandbox` key with
+    # the `[sandbox.needs]` table (form-independent, consumed by the gate later),
+    # so split the two: every non-`needs` key is a component -> sandbox-table
+    # assignment. A manifest with no tier/sandbox sugar is returned unchanged.
+    sandbox_tbl = placement.get("sandbox") or {}
+    if not isinstance(sandbox_tbl, dict):
+        return placement, ('`[sandbox]` must be a table (component sandbox '
+                           'assignments and/or a `needs` sub-table)')
+    sandbox_needs = sandbox_tbl.get("needs")
+    sandbox_assign = {k: v for k, v in sandbox_tbl.items() if k != "needs"}
+    if tiers is None and default_tier is None and not sandbox_assign:
         return placement, None  # classic [processes] form, untouched
     if placement.get("processes"):
+        both = "[tiers]" if (tiers is not None or default_tier is not None) else "[sandbox]"
+        if sandbox_assign and both != "[sandbox]":
+            both = "[tiers]/[sandbox]"
         return placement, (
-            "a placement declares both a per-component `[tiers]` table and an "
+            f"a placement declares both a per-component {both} sugar table and an "
             "explicit `[processes]` topology — they are two spellings of the "
-            "same placement and mutually exclusive in one file; keep `[tiers]` "
-            "for one-process-per-tier, or `[processes]` for a hand-written "
-            "topology (addresses, TLS identities, probes, per-process deadlines)")
+            "same placement and mutually exclusive in one file; keep the sugar "
+            "table for one-process-per-tier/sandbox, or `[processes]` for a "
+            "hand-written topology (addresses, TLS identities, probes, "
+            "per-process deadlines, and per-process `[processes.<p>.sandbox]`)")
     if tiers is not None and not isinstance(tiers, dict):
         return placement, '`[tiers]` must be a table of `Component = "backend"`'
     tiers = tiers or {}
@@ -286,6 +301,11 @@ def expand_tiers(placement: dict, component_names) -> tuple[dict, str | None]:
     if unknown:
         return placement, (
             f"[tiers] names unknown component(s): {', '.join(unknown)} "
+            f"(known: {', '.join(sorted(known_names))})")
+    unknown_sb = sorted(c for c in sandbox_assign if c not in known_names)
+    if unknown_sb:
+        return placement, (
+            f"[sandbox] names unknown component(s): {', '.join(unknown_sb)} "
             f"(known: {', '.join(sorted(known_names))})")
     # validate every declared tier before synthesizing: wasm is refused with a
     # redirect (no wasm placement runner on the substrate), an unknown name is
@@ -309,15 +329,31 @@ def expand_tiers(placement: dict, component_names) -> tuple[dict, str | None]:
             return placement, (
                 f"{who} is placed on unknown tier {raw!r} "
                 f"(known: {', '.join(KNOWN_BACKENDS)})")
-    # group components by their declared (or default) tier, deterministically
+    # group NON-sandboxed components by their declared (or default) tier,
+    # deterministically; a `[sandbox]`-listed component is split OUT into its
+    # own synthesized process below (item 411). The tier a sandboxed component
+    # runs on is still its `[tiers]` entry (or the default); isolation is a
+    # fourth placement dimension composed WITH the tier, not a replacement.
     by_tier: dict[str, list[str]] = {}
     for cname in component_names:
+        if cname in sandbox_assign:
+            continue
         backend = _canonical_backend(str(tiers.get(cname, default_tier)))
         by_tier.setdefault(backend, []).append(cname)
     processes: dict[str, dict] = {}
     for backend in sorted(by_tier):
         processes[f"tier_{backend}"] = {
             "backend": backend, "components": list(by_tier[backend])}
+    # each sandboxed component gets its own `sandbox_<component>` process
+    # carrying the sandbox table verbatim (validated + normalized in
+    # run_placement, uniformly with the `[processes.<p>.sandbox]` form).
+    for cname in component_names:
+        if cname not in sandbox_assign:
+            continue
+        backend = _canonical_backend(str(tiers.get(cname, default_tier)))
+        processes[f"sandbox_{cname}"] = {
+            "backend": backend, "components": [cname],
+            "sandbox": sandbox_assign[cname]}
     # a top-level `probe` list drives the default-tier (control-plane) process:
     # the [tiers] form has no named process for the author to attach probes to,
     # and a cross-seam probe originates from the orchestrating control plane.
@@ -340,9 +376,329 @@ def expand_tiers(placement: dict, component_names) -> tuple[dict, str | None]:
                 f"the default tier, or move to an explicit `[processes]` "
                 f"topology and attach `probe` to the process you mean to run it.")
     expanded = {k: v for k, v in placement.items()
-                if k not in ("tiers", "default_tier", "probe")}
+                if k not in ("tiers", "default_tier", "probe", "sandbox")}
     expanded["processes"] = processes
+    # keep the `[sandbox.needs]` table for the plan-time gate (it is
+    # form-independent: an extern's needs do not depend on where it runs). The
+    # sandbox ASSIGNMENTS have been consumed into the synthesized processes.
+    if sandbox_needs is not None:
+        expanded["sandbox"] = {"needs": sandbox_needs}
     return expanded, None
+
+
+# --------------------------------------------------------------------------
+# capability-enforced sandbox placement (roadmap item 411, Slice 1)
+# --------------------------------------------------------------------------
+#
+# Isolation is a FOURTH per-process placement dimension over the 363 seam: a
+# process may declare an isolation boundary (`wasm-cell` | `container` |
+# `microvm`) and an OS capability envelope (`fs`, `net`) it confines the
+# process to. Slice 1 is the STATIC surface: parse the manifest tables, refuse
+# at plan time (the advisory needs gate + the fail-closed unmappable-need
+# refusal + the cell opaque-residue refusal), narrow each sandboxed process's
+# spec to its own config so a sibling's secret never enters the boundary, and
+# print the envelope + effective reach in the boot summary and `revl audit`.
+#
+# Slice 1 does NOT launch a real jail: a sandboxed process still boots on the
+# ordinary runner (the isolation is declared + gated but not yet ENFORCED). The
+# runtime driver (launch/canary/transport/approval seam, the container/microVM/
+# wasm-cell rungs) is Slice 2. Every refusal and every printed line below is
+# real; only the enforcing boundary is deferred. A placement with no sandbox
+# surface is byte-identical throughout (the 342/363/396 additivity discipline).
+
+_ISOLATION_RUNGS = ("wasm-cell", "container", "microvm")
+# The envelope vocabulary is fs and net, and ONLY fs and net (the design's
+# surface section): the derived flags confine what the process reaches on the
+# network and the filesystem; env, exec, ipc and device authority have no
+# fs/net analogue and are NOT confined by item 411. A `[sandbox.needs]` entry
+# naming a resource outside this vocabulary is a plan-time refusal, never a
+# silently unenforced grant.
+_ENVELOPE_RESOURCES = ("fs", "net")
+
+
+def _normalize_sandbox_table(sb) -> tuple[dict | None, str | None]:
+    """Validate one `sandbox` table (either `[processes.<p>.sandbox]` or a
+    `[tiers]`-form `[sandbox]` assignment) and return `(normalized, None)` or
+    `(None, diagnostic)`. Both envelope keys default to DENY: no `fs` key means
+    no mount is granted, no `net` key means `net = "none"`."""
+    if not isinstance(sb, dict):
+        return None, "a sandbox table must be a mapping (isolation, image, fs, net)"
+    iso = sb.get("isolation")
+    if iso not in _ISOLATION_RUNGS:
+        return None, (f"`isolation` must be one of "
+                      f"{', '.join(repr(r) for r in _ISOLATION_RUNGS)} "
+                      f"(got {iso!r})")
+    net = sb.get("net", "none")
+    if net not in ("none", "all"):
+        return None, (f'`net` must be "none" or "all" (got {net!r}); a host '
+                      "allowlist is a named follow-on, not a Slice-1 spelling")
+    fs = sb.get("fs", [])
+    if not isinstance(fs, list):
+        return None, "`fs` must be a list of `path` or `path:mode` mount strings"
+    fs = [str(m) for m in fs]
+    image = sb.get("image")
+    if iso in ("container", "microvm") and not image:
+        return None, (f"the {iso!r} rung needs an `image` (pin by digest; the "
+                      "image is trusted input at the level of the placement file)")
+    # cell: the `fs`/`net` keys bind nothing a wasm instance could use (its
+    # confinement is a generated import set, not an OS grant), so a NON-DEFAULT
+    # value under a cell is refused as unmappable rather than accepted as
+    # decoration (the isolation-ladder honesty paragraph).
+    if iso == "wasm-cell" and (net != "none" or fs):
+        return None, ("the `wasm-cell` rung takes no fs/net OS envelope; its "
+                      "confinement is a generated import set (no_extern plus the "
+                      "seam-only imports), so `fs`/`net` bind nothing here; "
+                      "remove them, or use the `container` rung for an OS envelope")
+    return {"isolation": iso, "image": image, "fs": fs, "net": net}, None
+
+
+def _parse_need(resource: str) -> tuple[str, str | None, str | None]:
+    """Parse one `[sandbox.needs]` resource string. Returns `(kind, path, mode)`:
+    `("net", None, None)`, `("fs", path, mode)` (mode defaults to "ro"), or
+    `("?", resource, None)` for anything outside the fs/net vocabulary (`env`,
+    `exec`, `ipc`, devices); the fail-closed unmappable case."""
+    parts = resource.split(":")
+    if parts[0] == "net" and len(parts) == 1:
+        return "net", None, None
+    if parts[0] == "fs" and len(parts) >= 2:
+        path = parts[1]
+        mode = parts[2] if len(parts) >= 3 and parts[2] else "ro"
+        return "fs", path, mode
+    return "?", resource, None
+
+
+def _parse_mount(mount: str) -> tuple[str, str]:
+    """`/scratch:rw` -> ("/scratch", "rw"); `/data` -> ("/data", "ro")."""
+    parts = mount.split(":")
+    path = parts[0]
+    mode = parts[1] if len(parts) >= 2 and parts[1] else "ro"
+    return path, mode
+
+
+def _fs_covers(mounts: list[str], path: str, mode: str) -> bool:
+    """Does the envelope's mount list grant `path` at `mode`? A mount covers a
+    path it equals or is a prefix of; `rw` is needed for a `rw` need, `ro`
+    suffices for a `ro` need."""
+    for mount in mounts:
+        mpath, mmode = _parse_mount(mount)
+        prefix = mpath.rstrip("/")
+        covers_path = path == mpath or path.startswith(prefix + "/")
+        covers_mode = mmode == "rw" or mode != "rw"
+        if covers_path and covers_mode:
+            return True
+    return False
+
+
+def _need_covered(kind: str, path: str | None, mode: str | None, env: dict) -> bool:
+    """Is a parsed need covered by the normalized envelope `env`?"""
+    if kind == "net":
+        return env.get("net") == "all"
+    if kind == "fs":
+        return _fs_covers(env.get("fs") or [], path or "", mode or "ro")
+    return False  # unmappable; handled as a refusal by the caller
+
+
+def _component_reach(ir: dict) -> dict[str, set]:
+    """`{component: {reached extern name, ...}}`, `*` included for the opaque
+    residue (a first-class-dispatched reach no name bounds). This is the same
+    authoritative G8/G4 boundary walk `revl audit` uses; reused here so the
+    sandbox gate partitions the exact reach the audit prints, with no second
+    walk to drift (the `_boundary` surface, `__main__._boundary`)."""
+    from .__main__ import _boundary  # noqa: PLC0415; lazy, avoids an import cycle
+    surface = _boundary(ir)
+    return {name: {e["name"] for e in (stats.get("externs") or [])}
+            for name, stats in surface.items()}
+
+
+def _envelope_str(env: dict) -> str:
+    """`net=none fs=none` / `net=all fs=/scratch:rw`; the one-line envelope."""
+    fs = env.get("fs") or []
+    return f"net={env.get('net', 'none')} fs={','.join(fs) if fs else 'none'}"
+
+
+def _reach_descriptor(pname: str, sandboxes: dict, backends: dict) -> str:
+    """How a provider process's reach reads on a seam-served line: its envelope
+    if it is sandboxed, else `full host reach` (an unsandboxed process runs with
+    the conductor's ambient authority)."""
+    backend = backends.get(pname, "py")
+    if pname in sandboxes:
+        env = sandboxes[pname]
+        return f"{pname}[{backend}, {env['isolation']}: {_envelope_str(env)}]"
+    return f"{pname}[{backend}, unsandboxed: full host reach]"
+
+
+def process_tag(pname: str, processes: dict, backends: dict, sandboxes: dict) -> str:
+    """The boot-summary tag for one process. A non-sandboxed process is
+    byte-identical to the pre-411 tag (`p[backend]=[comps]`); a sandboxed one
+    carries its rung + envelope (`p[py, container: net=none fs=none]=[comps]`)."""
+    backend = backends.get(pname) or _canonical_backend(
+        (processes.get(pname) or {}).get("backend", "py"))
+    comps = ",".join((processes.get(pname) or {}).get("components") or [])
+    if pname in sandboxes:
+        env = sandboxes[pname]
+        return f"{pname}[{backend}, {env['isolation']}: {_envelope_str(env)}]=[{comps}]"
+    return f"{pname}[{backend}]=[{comps}]"
+
+
+def sandbox_capability_gate(ir: dict, processes: dict, sandboxes: dict,
+                            needs: dict, requires: dict, provides: dict,
+                            owner: dict) -> str | None:
+    """The item-411 Slice-1 plan-time gate. Returns a diagnostic for the first
+    refusal, or None. Runs before anything spawns, next to the 119/363 gates.
+
+    Two refusals, plus a cell carve-out (the design's "Capability enforcement
+    and the plan-time gate"):
+
+    * **fail-closed unmappable need**: a `[sandbox.needs]` entry (consulted for
+      a reached host-rooted capability) naming a resource outside the fs/net
+      envelope vocabulary (`env`, `exec`, ...) is refused naming the entry and
+      the unmappable need. This is the one hard gate in Slice 1: the envelope
+      cannot enforce it, so it is never silently ignored.
+    * **advisory declared-need vs grant**: a reached host-rooted capability
+      whose DECLARED needs are not covered by the envelope is refused naming the
+      component, capability, need and missing grant. This borrows item 119's
+      refusal shape and claims 119's authority for NEITHER: the needs side is an
+      unverified authorial claim (G8 keeps the bodies opaque), so admission here
+      is advisory and the ENVELOPE, not this gate, is the security boundary. A
+      missing/understated entry defaults to "needs nothing" and is admitted.
+    * **cell opaque residue**: `*` (a first-class-dispatched reach) under a
+      `wasm-cell` is refused: the cell's confinement is a generated import set,
+      and an opaque reach has no representable import. On the container/microVM
+      rungs `*` is a REPORT (the envelope binds it regardless), not a refusal.
+    """
+    if not sandboxes:
+        return None
+    reach = _component_reach(ir)
+    for pname in processes:
+        if pname not in sandboxes:
+            continue
+        env = sandboxes[pname]
+        rung = env["isolation"]
+        for cname in processes[pname].get("components") or []:
+            host_rooted = reach.get(cname, set())
+            for cap in sorted(c for c in host_rooted if c != "*"):
+                declared = needs.get(cap)
+                if declared is None:
+                    continue  # advisory default: "needs nothing", admitted
+                for resource in declared:
+                    kind, path, mode = _parse_need(str(resource))
+                    if kind == "?":
+                        return (
+                            f"[sandbox.needs] entry {cap!r} names {str(resource)!r}, "
+                            f"which the sandbox envelope cannot enforce: the envelope "
+                            f"vocabulary is fs and net only (env, exec, ipc and device "
+                            f"authority are not confined by item 411). Remove the "
+                            f"entry, or express the need as an fs/net resource "
+                            f"(`net`, `fs:/path:rw`).")
+                    if not _need_covered(kind, path, mode, env):
+                        grant = (f'net = "{env["net"]}"' if kind == "net"
+                                 else (f"fs = [{', '.join(repr(m) for m in env['fs'])}]"
+                                       if env["fs"] else "fs = [] (no covering mount)"))
+                        want = "net" if kind == "net" else str(resource)
+                        return (
+                            f"component {cname!r} cannot run in sandbox {pname!r}: "
+                            f"capability {cap!r} needs {want}, but the sandbox grants "
+                            f"{grant}; grant it ([processes.{pname}.sandbox] "
+                            f"{'net = \"all\"' if kind == 'net' else 'fs = [...]'}), "
+                            f"serve it across the seam instead, or move the component "
+                            f"out of the sandbox")
+            if "*" in host_rooted and rung == "wasm-cell":
+                return (
+                    f"component {cname!r} reaches `*` (an opaque, first-class-"
+                    f"dispatched host surface) but is placed in the `wasm-cell` "
+                    f"sandbox {pname!r}: a cell's confinement is a generated import "
+                    f"set and an opaque reach has no representable import. Use the "
+                    f"`container` rung, whose runtime envelope binds an opaque body "
+                    f"regardless.")
+    return None
+
+
+def render_sandbox_summary(processes: dict, sandboxes: dict, reach: dict,
+                           needs: dict, requires: dict, provides: dict,
+                           owner: dict, backends: dict) -> list[str]:
+    """The per-sandboxed-process boot-summary / audit lines: the envelope-scope
+    note, the opaque-reach report, the seam-served keys with each provider's
+    reach, the claimed-vouched externs, and the net=none egress note. Empty for
+    a placement with no sandbox (additivity)."""
+    lines: list[str] = []
+    for pname in processes:
+        if pname not in sandboxes:
+            continue
+        env = sandboxes[pname]
+        comps = processes[pname].get("components") or []
+        host_rooted: set = set()
+        for cname in comps:
+            host_rooted |= reach.get(cname, set())
+        lines.append(f"  sandbox {pname}: envelope confines fs+net only; "
+                     f"env/exec/ipc unenforced")
+        if "*" in host_rooted:
+            lines.append("    reach * (opaque host surface), bounded only by the envelope")
+        # seam-served keys: required by this process, owned by ANOTHER process
+        seam_keys = sorted(k for k in requires.get(pname, {})
+                           if k not in provides.get(pname, {})
+                           and owner.get(k) not in (None, pname))
+        if seam_keys:
+            pad = " " * len("    seam-served: ")
+            for i, key in enumerate(seam_keys):
+                head = "    seam-served: " if i == 0 else pad
+                lines.append(f"{head}{key} -> "
+                             f"{_reach_descriptor(owner[key], sandboxes, backends)}")
+        vouched = sorted(c for c in host_rooted if c != "*" and c in needs)
+        if vouched:
+            lines.append("    vouched self-contained (claimed, unverified): "
+                         + ", ".join(vouched))
+        lines.append(f"    note: net={env['net']} bounds this process's own egress, "
+                     f"not the reach of its seam-served providers")
+    return lines
+
+
+def sandbox_audit_view(ir: dict, placement: dict) -> tuple[list[str], str | None]:
+    """`revl audit --placement`: the sandbox envelope + per-key reach + claimed-
+    vouched list for a placement, computed off the same reach walk the gate and
+    boot summary use. Returns `(lines, None)` or `([], diagnostic)`. Empty lines
+    (no diagnostic) when the placement declares no sandbox."""
+    expanded, err = expand_tiers(
+        placement, [c["name"] for c in ir.get("components") or []])
+    if err:
+        return [], err
+    processes = expanded.get("processes") or {}
+    needs = (expanded.get("sandbox") or {}).get("needs") or {}
+    sandboxes: dict[str, dict] = {}
+    for pname, pconf in processes.items():
+        sb = pconf.get("sandbox")
+        if sb is None:
+            continue
+        normalized, sb_err = _normalize_sandbox_table(sb)
+        if sb_err:
+            return [], f"process {pname!r} [sandbox]: {sb_err}"
+        sandboxes[pname] = normalized
+    if not sandboxes:
+        return [], None
+    components = {c["name"]: c for c in ir.get("components") or []}
+
+    def _merged(cnames, which):
+        out: dict[str, str] = {}
+        for cname in cnames:
+            out.update((components.get(cname) or {}).get(which) or {})
+        return out
+
+    requires = {p: _merged(pc.get("components") or [], "requires")
+                for p, pc in processes.items()}
+    provides = {p: _merged(pc.get("components") or [], "provides")
+                for p, pc in processes.items()}
+    owner = {key: p for p, keys in provides.items() for key in keys}
+    backends = {p: _canonical_backend(pc.get("backend", "py"))
+                for p, pc in processes.items()}
+    reach = _component_reach(ir)
+    lines = ["sandbox placement (item 411): envelope confines fs+net only "
+             "(env/exec/ipc/devices unenforced); the envelope, not the needs "
+             "table, is the security boundary"]
+    for pname in processes:
+        if pname in sandboxes:
+            lines.append("  " + process_tag(pname, processes, backends, sandboxes))
+    lines.extend(render_sandbox_summary(
+        processes, sandboxes, reach, needs, requires, provides, owner, backends))
+    return lines, None
 
 
 # --------------------------------------------------------------------------
@@ -1316,6 +1672,25 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     cap_realm_problem = capability_realm_diagnostic(processes, ir, required_caps)
     if cap_realm_problem:
         return abort(cap_realm_problem)
+
+    # --- sandbox placement (item 411, Slice 1): a process may declare an
+    # isolation boundary + fs/net envelope, either as `[processes.<p>.sandbox]`
+    # (validated here) or via the `[tiers]`-form `[sandbox]` sugar (already
+    # split into `sandbox_<component>` processes by expand_tiers, carrying the
+    # raw table; normalized here uniformly). The `[sandbox.needs]` table is
+    # form-independent. Purely additive: a placement with no sandbox surface
+    # builds `sandboxes = {}` and every 411 step below is a no-op.
+    sandboxes: dict[str, dict] = {}
+    for pname, pconf in processes.items():
+        sb_raw = pconf.get("sandbox")
+        if sb_raw is None:
+            continue
+        normalized, sb_err = _normalize_sandbox_table(sb_raw)
+        if sb_err:
+            return abort(f"process {pname!r} [sandbox]: {sb_err}")
+        sandboxes[pname] = normalized
+    sandbox_needs = (placement.get("sandbox") or {}).get("needs") or {}
+
     if placement.get("report_colocation"):
         for advice in colocation_advice(processes, placed, ir):
             print(f"  co-location: {advice}", flush=True)
@@ -1725,6 +2100,15 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     for advice in boundary_report:
         print(advice, flush=True)
 
+    # --- sandbox placement gate (item 411, Slice 1): the fail-closed
+    # unmappable-need refusal + the advisory declared-need-vs-envelope refusal +
+    # the cell opaque-residue refusal, all before anything spawns. A no-op when
+    # the placement declares no sandbox (`sandboxes == {}`).
+    sandbox_problem = sandbox_capability_gate(
+        ir, processes, sandboxes, sandbox_needs, requires, provides, owner)
+    if sandbox_problem:
+        return abort(sandbox_problem)
+
     try:
         for backend in backends.values():
             ensure_backend(backend)
@@ -1734,8 +2118,25 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     for pname, spec in specs.items():
         adapt_spec(spec, backends[pname])
 
-    summary = "  ".join(f"{p}[{backends[p]}]=[{','.join(processes[p].get('components') or [])}]" for p in processes)
+    summary = "  ".join(process_tag(p, processes, backends, sandboxes) for p in processes)
     print(f"placement: {summary}", flush=True)
+    if sandboxes:
+        # item 411 Slice 1: the envelope + effective reach per sandboxed
+        # process (the per-key seam-served provider reach, the opaque residue,
+        # the claimed-vouched externs, and the net=none egress note), so
+        # `net=none` is never readable as a total-egress claim. The isolation
+        # is DECLARED and gated here but not yet ENFORCED; the runtime driver
+        # (container/microVM/wasm-cell launch, boot canary, per-rung transport,
+        # the conductor-served approval channel) is Slice 2.
+        # TODO(411 Slice 2): wrap the runner in the isolation boundary, print
+        # the derived confinement flags, and add the approval channel row.
+        print("  sandbox placement (item 411, Slice 1): isolation DECLARED + "
+              "gated, not yet enforced (runtime driver is Slice 2)", flush=True)
+        reach = _component_reach(ir)
+        for line in render_sandbox_summary(
+                processes, sandboxes, reach, sandbox_needs,
+                requires, provides, owner, backends):
+            print(line, flush=True)
     if "java" in built:
         note = ("real cordis4j (reactive)" if built["java"][0] == "real"
                 else "stub (non-reactive; set REVL_CORDIS4J_CLASSES + a JDK 21 for reactive withdrawal)")
@@ -1822,6 +2223,19 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                   f"({', '.join(KNOWN_BACKENDS)})", flush=True)
             return
         old = placed[component]
+        # item 411: moving a component across an ISOLATION boundary changes the
+        # security posture of a running system; an operator decision this item
+        # declines to automate in v1. A swap naming a sandboxed component (or
+        # targeting its process) is refused with the named gap; lifting it is a
+        # follow-on with its own admission story.
+        if old in sandboxes:
+            env = sandboxes[old]
+            print(f"swap refused (item 411): {component!r} runs in sandbox {old!r} "
+                  f"({env['isolation']}: {_envelope_str(env)}); moving a component "
+                  f"across an isolation boundary changes the running system's "
+                  f"security posture and is not automated in v1 (a sandbox swap is "
+                  f"a follow-on). Running composition untouched.", flush=True)
+            return
         housemates = [c for c, p in placed.items() if p == old]
         if housemates != [component]:
             others = ", ".join(c for c in housemates if c != component)
