@@ -4590,7 +4590,8 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     # so lineage narrows monotonically and a supervisor cannot amplify. Returns
     # the per-instance attenuation chain for the G8 audit surface.
     attenuation_chain = _collect(_check_spawn_attenuation,
-                                 live_components, spawn_reg, program.filename)
+                                 live_components, services, spawn_reg,
+                                 program.filename)
 
     fault_tests = _collect(_lower_fault_tests, program, live_components,
                            program.filename)
@@ -7987,6 +7988,100 @@ def _collect_emit_caps(node, caps: set) -> None:
             _collect_emit_caps(value, caps)
 
 
+def _cap_keyed(key: str, cap_str: str) -> "object":
+    """The key-to-token bridge (item 294): resolve a declared emission token
+    string to a `Cap` keyed by the WIRING KEY, carrying the declared token's
+    VALUATION. The token identity stays the wiring key (exactly today's fold
+    element, so a parameter-free token (`kv_a`) yields `Cap("kv_a", ())` which
+    compares bit-for-bit like the old string) while the parameter map now rides
+    into the fold so a narrowing that lives only in `P` actually changes the
+    verdict. Both `reach` and `held` are built through this one function, so the
+    two sides of `covers` are always structured `(T, P)` valuations."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    return cap_order.Cap(key, cap_order.parse_cap(cap_str).params)
+
+
+def _emit_step_caps_pairs(node: dict, requires_map: dict, services: dict) -> list:
+    """The `Cap`(s) a single lowered `emit` step crosses, resolved through the
+    key-to-token bridge. A req-keyed emission resolves key -> requires-target
+    service -> the method being called -> that method's `emission[...]`
+    valuation(s); a bare or unresolvable method degrades to the bare key
+    (`Cap(key, ())`, today's element); a host emission is the unnameable `*`."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    expr = node.get("expr") or {}
+    target = expr.get("target") or {}
+    if target.get("kind") != "req":
+        return [cap_order.Cap("*", ())]
+    key = target.get("name")
+    svc = services.get(requires_map.get(key)) if requires_map else None
+    decl = svc.methods.get(expr.get("method")) if svc is not None else None
+    cap_strs = getattr(decl, "capabilities", None) if decl is not None else None
+    if not cap_strs:
+        return [cap_order.Cap(key, ())]
+    return [_cap_keyed(key, s) for s in cap_strs]
+
+
+def _collect_emit_caps_pairs(node, caps: set, requires_map: dict,
+                             services: dict) -> None:
+    """`_collect_emit_caps`, resolved to structured `Cap`s through the bridge.
+    Same traversal (emit STEPS only), so a parameter-free body yields the same
+    set of elements as today, spelled as bare `Cap`s."""
+    if isinstance(node, dict):
+        if node.get("step") == "emit":
+            caps.update(_emit_step_caps_pairs(node, requires_map, services))
+        for value in node.values():
+            _collect_emit_caps_pairs(value, caps, requires_map, services)
+    elif isinstance(node, list):
+        for value in node:
+            _collect_emit_caps_pairs(value, caps, requires_map, services)
+
+
+def _spawn_reached_surface_pairs(components: list[dict],
+                                 services: dict) -> dict[str, set]:
+    """Per-component actual capability reach as structured `(T, P)` pairs,
+    resolved through the bridge: the boundaries a component's own code crosses
+    (the key-and-valuation of every `emit` step, `*` for a host emission), so a
+    parameterized crossing survives into the attenuation fold as its valuation
+    rather than degrading to a bare wiring key."""
+    surface: dict[str, set] = {}
+    for comp in components:
+        requires_map = comp.get("requires") or {}
+        caps: set = set()
+        _collect_emit_caps_pairs(comp.get("body") or [], caps, requires_map,
+                                 services)
+        surface[comp["name"]] = caps
+    return surface
+
+
+def _held_capabilities_pairs(comp: dict, base_surface: set,
+                             services: dict) -> set:
+    """What a component holds (the capabilities it may pass down to a child it
+    spawns, item 66, lineage) as structured `(T, P)` pairs. A requires key
+    resolves, through the same bridge, to the declared emission valuation(s) of
+    the service it wires: a bare-token service method contributes the bare key
+    `Cap(key, ())` (today's element, byte-identical), and a parameterized one
+    contributes its narrower cone INSTEAD of the bare key, which is what lets a
+    parent that holds `fs.write(path="/tmp")` refuse a child reaching wider. A
+    plain or unresolvable service keeps the bare key (a child cannot reach a
+    non-emission key, so this only preserves byte-identity)."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    held: set = set(base_surface)
+    for key, svcname in (comp.get("requires") or {}).items():
+        svc = services.get(svcname)
+        emission_methods = ([m for m in svc.methods.values() if m.emission]
+                            if svc is not None else [])
+        if not emission_methods:
+            held.add(cap_order.Cap(key, ()))
+            continue
+        for m in emission_methods:
+            if not m.capabilities:
+                held.add(cap_order.Cap(key, ()))
+            else:
+                for s in m.capabilities:
+                    held.add(_cap_keyed(key, s))
+    return held
+
+
 def _spawn_emission_surface(components: list[dict], services: dict) -> dict[str, set]:
     """Per-component upper bound on what activating an instance of it can emit.
 
@@ -8012,26 +8107,6 @@ def _spawn_emission_surface(components: list[dict], services: dict) -> dict[str,
     return surface
 
 
-def _spawn_reached_surface(components: list[dict]) -> dict[str, set]:
-    """Per-component *actual* capability reach — the boundaries a component's
-    own code crosses, drawn from its lowered body (`_collect_emit_caps`, the
-    G4 capability machinery): the required key of every `emit` step, and `*`
-    for any host emission or first-class dispatch that no key can name.
-
-    This is deliberately more precise than `_spawn_emission_surface`, which
-    over-approximates from a provided service's *declaration* (a bare
-    `emission` provider counts as `*`). Attenuation asks what an instance can
-    actually reach — bounded by the keys it wires through `requires` — so the
-    least-authority claim is exact: a worker that only ever emits through
-    `kv_a` provably does not reach `kv_b`, whatever its service promises."""
-    surface: dict[str, set] = {}
-    for comp in components:
-        caps: set = set()
-        _collect_emit_caps(comp.get("body") or [], caps)
-        surface[comp["name"]] = caps
-    return surface
-
-
 def _spawn_surface_closure(base: dict[str, set], edges: list) -> dict[str, set]:
     """Fold the spawn graph into a per-component base surface: after this, a
     component's set is everything it can emit *plus* everything its transitive
@@ -8051,18 +8126,6 @@ def _spawn_surface_closure(base: dict[str, set], edges: list) -> dict[str, set]:
     return closed
 
 
-def _held_capabilities(comp: dict, base_surface: set) -> set:
-    """What a component *holds* — the capabilities it may pass down to a child
-    it spawns (item 66, lineage). A component holds a boundary when it has
-    wired access to it: every key in its `requires` clause (a `requires db: DB`
-    is the right to reach `db`), together with every boundary its own body
-    already crosses (`base_surface`: its `emit` steps and the emission methods
-    it provides, including the unnameable host `*`). This is the spawner's own
-    authority, *not* its transitive spawn closure — a parent cannot launder a
-    capability it lacks by routing it through one child into another."""
-    return set((comp.get("requires") or {}).keys()) | set(base_surface)
-
-
 def _activation_spawn_sites(comp: dict) -> "list[dict]":
     """The `spawn` nodes in a component's *activation* body — the top-level
     supervision `let s = effect spawn C ...`, excluding spawns nested inside a
@@ -8078,56 +8141,110 @@ def _activation_spawn_sites(comp: dict) -> "list[dict]":
     return sites
 
 
-def _check_spawn_attenuation(components: list[dict],
-                             spawn_reg: dict, filename: str) -> list[dict]:
-    """Capability attenuation on spawn (item 66): a spawned child's capability
-    set must be a **checked subset** of its spawner's — monotone shrinkage, the
-    direction §5 admits for purity. A spawn may narrow (pass down less), never
-    widen (grant a boundary the parent does not hold), so spawning cannot
-    amplify authority and each per-tenant instance gets least-authority for
-    free: an instance whose template reaches only `kv_a` provably cannot reach
-    `kv_b`, even when the spawner holds both.
+def _cap_offending(cap: "object") -> str:
+    """Render an uncovered capability for a refusal message: the unnameable host
+    boundary reads in words, everything else as its canonical `(T, P)` spelling
+    (`fs.write`, `fs.write(path="/etc")`)."""
+    return ("an unnameable host boundary" if cap.token == "*"
+            else f"`{cap.to_str()}`")
 
-    Reuses the G4 capability-bound machinery (`_spawn_emission_surface`): the
-    child's *reachable* set is its emission surface closed over its own spawn
-    subtree, the spawner's *held* set is its requires-wired authority. Where G4
-    bounds a component's declaration, item 33 the composition, and item 55 the
-    operators, this bounds **lineage**.
+
+def _widening_reason(cap: "object", held: set) -> str | None:
+    """Why a child capability is not covered by any held one, when the token IS
+    held but the VALUATION widens it (the item 294 case). Names the parameter
+    and the direction; returns None when the token itself is absent (today's
+    missing-boundary case, whose message is enough)."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    same_token = [h for h in held if h.token == cap.token and h.token != "*"]
+    if not same_token:
+        return None
+    child_params = cap.param_map()
+    for h in same_token:
+        for name, _wide in h.params:
+            if name not in child_params:
+                return (f"a capability parameter only narrows; `{cap.to_str()}` "
+                        f"drops `{name}`, which `{h.to_str()}` binds; a dropped "
+                        f"parameter is wider, so the child reaches more than the "
+                        f"parent holds")
+    # the token is held with the parameter bound on both sides but the value
+    # widens (e.g. a path outside the held cone)
+    h = same_token[0]
+    return (f"a capability parameter only narrows; `{cap.to_str()}` is wider "
+            f"than the held `{h.to_str()}` (its value is not within the parent's "
+            f"cone)")
+
+
+def _cap_sorted_strs(caps: set) -> list[str]:
+    """Canonical spellings of a Cap set, sorted (the audit-chain rendering). A
+    bare `Cap(key, ())` renders as `key`, byte-identical to the old string, so a
+    parameter-free chain is unchanged."""
+    return sorted(c.to_str() for c in caps)
+
+
+def _check_spawn_attenuation(components: list[dict], services: dict,
+                             spawn_reg: dict, filename: str) -> list[dict]:
+    """Capability attenuation on spawn (item 66, extended by item 294): a
+    spawned child's capability set must be a **checked subset** of its
+    spawner's (monotone shrinkage, the direction §5 admits for purity). A spawn
+    may narrow (pass down less), never widen (grant a boundary the parent does
+    not hold), so spawning cannot amplify authority and each per-tenant instance
+    gets least-authority for free: an instance whose template reaches only
+    `kv_a` provably cannot reach `kv_b`, even when the spawner holds both.
+
+    The fold compares structured `(T, P)` capabilities via `cap_order.covers`,
+    resolved through the key-to-token bridge (`_cap_keyed`) on BOTH sides, so a
+    parameterized token is actually compared: a child declaring
+    `fs.write(path="/etc")` under a parent holding `fs.write(path="/tmp")` is
+    refused, and a bare `fs.write` child under that parent is refused too (a
+    dropped parameter widens). A parameter-free program yields bare `Cap`s that
+    compare bit-for-bit like the old wiring-key strings (additive, item 294
+    Slice 1). Where G4 bounds a component's declaration, item 33 the
+    composition, and item 55 the operators, this bounds **lineage**.
 
     Applies to activation-body spawns (see `_activation_spawn_sites`); returns
     the per-instance attenuation chain (spawner → child narrowing) for the G8
-    audit surface. Raises on a widening spawn, naming the chain."""
+    audit surface. Raises on a widening spawn, naming the chain.
+
+    TODO(294-slice2): per-instance `with { }` literal substitution into
+    `config.`-valued parameters; the chain would then show resolved paths."""
     edges = spawn_reg.get("edges") or []
     if not edges:
         return []
-    base = _spawn_reached_surface(components)
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    base = _spawn_reached_surface_pairs(components, services)
     reachable = _spawn_surface_closure(base, edges)
 
     chain: list[dict] = []
     seen: set = set()
     for comp in components:
-        held = _held_capabilities(comp, base.get(comp["name"], set()))
+        held = _held_capabilities_pairs(comp, base.get(comp["name"], set()),
+                                        services)
         for spawn in _activation_spawn_sites(comp):
             child = spawn.get("component")
             child_reach = reachable.get(child, set())
-            extra = sorted(child_reach - held)
+            extra = cap_order.covers_set(held, child_reach)
             line = spawn.get("line", comp.get("line", 1))
             if extra:
-                held_str = ", ".join(f"`{c}`" for c in sorted(held)) or "no capabilities"
-                offending = ", ".join(
-                    "an unnameable host boundary" if c == "*" else f"`{c}`"
-                    for c in extra)
+                extra = sorted(extra, key=lambda c: c.to_str())
+                held_str = ", ".join(
+                    f"`{s}`" for s in _cap_sorted_strs(held)) or "no capabilities"
+                offending = ", ".join(_cap_offending(c) for c in extra)
+                reasons = [r for r in (_widening_reason(c, held) for c in extra)
+                           if r is not None]
+                extra_hint = ("; " + "; ".join(reasons)) if reasons else ""
                 raise RevlError(
                     comp.get("source") or filename, line,
                     f"`{comp['name']}` spawns `{child}`, granting it {offending}, "
                     f"but `{comp['name']}` holds only {held_str} — a spawn may "
                     "narrow a child's capabilities, never widen them",
-                    hint="a spawned child's capability set must be a subset of "
-                         f"its spawner's (attenuation, item 66) — `{comp['name']}` "
-                         f"cannot pass down {offending} it does not hold; add the "
-                         f"matching `requires` to `{comp['name']}` so it holds what "
-                         f"it grants, or drop the capability from `{child}` "
-                         "(monotone shrinkage: narrowing is sound, widening is not)",
+                    hint="a spawned child's capability set must be covered by "
+                         f"its spawner's (attenuation, item 66/294); "
+                         f"`{comp['name']}` cannot pass down {offending} it does "
+                         f"not hold; add the matching `requires` to "
+                         f"`{comp['name']}` so it holds what it grants, or narrow "
+                         f"the capability on `{child}` "
+                         "(monotone shrinkage: narrowing is sound, widening is "
+                         "not)" + extra_hint,
                     code="G4", category="capability-attenuation",
                 )
             edge = (comp["name"], child)
@@ -8140,9 +8257,9 @@ def _check_spawn_attenuation(components: list[dict],
             chain.append({
                 "parent": comp["name"],
                 "child": child,
-                "holds": sorted(held),
-                "granted": sorted(child_reach),
-                "attenuated": sorted(held - child_reach),
+                "holds": _cap_sorted_strs(held),
+                "granted": _cap_sorted_strs(child_reach),
+                "attenuated": _cap_sorted_strs(held - child_reach),
                 "line": line,
             })
     return chain
