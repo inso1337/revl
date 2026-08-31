@@ -63,17 +63,26 @@ class AdmissionProfile:
 
     no_extern: bool = False
     granted: frozenset[str] | None = None
+    # item 249, Slice C: forbid the admitted ROOT source from minting its own
+    # declassifiers — no `endorse` in any form, and no root-declared
+    # `Trusted`-returning `verified fn`. On by default in `untrusted_author`, so
+    # the whole Slice A/B taint discipline cannot be opted out of by the one
+    # author item 329 refuses to trust. Off (inert) for a trusted author.
+    no_declassify: bool = False
 
     @staticmethod
     def untrusted_author(granted) -> "AdmissionProfile":
         """The profile for a model-authored per-turn source: no new host code,
-        and reach bounded to an explicit granted service set."""
+        reach bounded to an explicit granted service set, and no self-minted
+        declassifier (item 249 Slice C — declassification comes only from the
+        pre-granted closure or a human approval)."""
         return AdmissionProfile(no_extern=True,
-                                granted=frozenset(granted or ()))
+                                granted=frozenset(granted or ()),
+                                no_declassify=True)
 
     @property
     def active(self) -> bool:
-        return self.no_extern or self.granted is not None
+        return self.no_extern or self.granted is not None or self.no_declassify
 
 
 def check_no_extern(root_programs: list[Program], profile: AdmissionProfile) -> None:
@@ -107,6 +116,70 @@ def check_no_extern(root_programs: list[Program], profile: AdmissionProfile) -> 
                      "service instead",
                 code="G8", category="admission",
             )
+
+
+def _iter_endorse(node, out: list) -> None:
+    """Collect every `ExprEndorse` node reachable from a parsed AST fragment, by
+    a structural walk over dataclass fields and containers. Structural (like
+    `check_no_extern`) so it fires on the parsed source, before lowering."""
+    from .parser import ExprEndorse  # noqa: PLC0415 — lazy, avoids import cycle
+    if isinstance(node, ExprEndorse):
+        out.append(node)
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _iter_endorse(item, out)
+        return
+    fields = getattr(node, "__dict__", None)
+    if fields:
+        for value in fields.values():
+            _iter_endorse(value, out)
+
+
+def check_no_declassify(root_programs: list[Program],
+                        profile: AdmissionProfile) -> None:
+    """(c) Refuse if the untrusted-authored source mints its own declassifier
+    (item 249, Slice C, closing hole 2 for the untrusted author).
+
+    Two doors, both refused structurally on the parsed ROOT AST, before lowering
+    (like `no_extern`): an `endorse` in any form, and a `verified fn` whose
+    return mentions `Trusted[...]`. Declassification for an admitted turn then
+    comes only from the pre-granted closure (a granted checked parser) or a human
+    approval — never from the turn's own source. Refused loudly, so the model
+    gets the repair signal rather than a mystery G9 downstream."""
+    if not profile.no_declassify:
+        return
+    from .taint import _mentions_trusted  # noqa: PLC0415 — lazy, avoids cycle
+    for program in root_programs:
+        # door 1: a self-declared laundering `verified fn`.
+        for fn in program.fn_decls:
+            if getattr(fn, "verified", False) and _mentions_trusted(fn.returns):
+                raise RevlError(
+                    program.filename, fn.line,
+                    f"admission refused: the untrusted-author profile forbids "
+                    f"self-minted declassifiers, but `verified fn {fn.name}` "
+                    f"returns `Trusted[...]` — a laundering parser the turn "
+                    f"declares itself",
+                    hint="`verified` proves totality, not validation quality; an "
+                         "untrusted author may not mint its own declassifier. "
+                         "Reach a granted checked parser, or gate the downgrade on "
+                         "a human approval (item 249, Slice C)",
+                    code="G9", category="admission")
+        # door 2: an `endorse` anywhere in the admitted source.
+        endorses: list = []
+        _iter_endorse(program.fn_decls, endorses)
+        _iter_endorse(program.components, endorses)
+        if endorses:
+            first = endorses[0]
+            raise RevlError(
+                program.filename, getattr(first, "line", 0),
+                f"admission refused: the untrusted-author profile forbids "
+                f"declassification, but this source calls `endorse[{first.origin}]"
+                f"(...)` — an untrusted author may not downgrade taint",
+                hint="declassification for an admitted turn comes only from the "
+                     "pre-granted closure (a granted checked parser) or a human "
+                     "approval, never from the turn's own `endorse` (item 249, "
+                     "Slice C)",
+                code="G9", category="admission")
 
 
 def check_allowlist(document: dict, profile: AdmissionProfile) -> None:
@@ -152,9 +225,12 @@ def enforce_source(root_programs: list[Program],
     parsed source. Runs BEFORE lowering, so an untrusted `extern` is refused
     with the profile's own message before any host body is even lowered — never
     a runtime check. A `None`/inert profile is a no-op."""
-    if profile is None or not profile.no_extern:
+    if profile is None:
         return
-    check_no_extern(root_programs, profile)
+    if profile.no_extern:
+        check_no_extern(root_programs, profile)
+    if profile.no_declassify:
+        check_no_declassify(root_programs, profile)
 
 
 def enforce_document(document: dict, profile: AdmissionProfile | None) -> None:
