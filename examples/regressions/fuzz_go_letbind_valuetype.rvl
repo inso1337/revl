@@ -5,10 +5,17 @@
 // non-host acquisition returning a value — a plain fn or service-method call —
 // failed to compile (`cannot use openHandle() (int64) as *int64`).
 //
-// Here `openHandle` is an `extern acquire fn ... -> Int`: the acquisition is a
+// Here `openHandle` is an `extern pure fn ... -> Int`: the acquisition is a
 // plain fn call kind, NOT a host object or a spawn handle, so `handle` binds
 // the returned Int by VALUE. The provide method reads it back, and the
 // lifecycle test proves the whole thing loads, serves the value, and reverts.
+//
+// `openHandle` is `pure`, not `acquire`: item 308 R0 requires an `acquire`
+// return to be a nominal opaque handle type (never a bare `Int`), and this
+// regression is specifically about a VALUE-typed (`Int`) bracket acquisition.
+// A plain-fn (`pure`) acquisition is exactly the "plain fn call returning a
+// value type" case the property under test names, so the go value-vs-pointer
+// bracket decision is guarded unchanged while satisfying R0.
 
 service Probe {
   fn ping() -> Int
@@ -20,7 +27,7 @@ extern pure fn closeHandle(h: Int) -> Unit
 	return
     }
 
-extern acquire fn openHandle() -> Int undo closeHandle(result)
+extern pure fn openHandle() -> Int
   = @py { return 7 }
   = @go {
 	return 7

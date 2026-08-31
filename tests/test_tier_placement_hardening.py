@@ -55,18 +55,20 @@ def _ir(tmp: Path, app: str) -> dict:
 # F1 — a resource handle nested in a record crosses UNREFUSED
 # --------------------------------------------------------------------------
 
+# item 308: `Db.run() -> Session` returns a resource CARRIER; B1 clause 3 refuses
+# a provide method returning a tainted carrier (a `Session` wrapping a `Sock`),
+# so the resource service is DECLARED here and its crossing exercised through the
+# seam functions' own wiring — the taint/distributability/seam analyses read the
+# service and type tables, not a component body. `open_sock` seeds the `Sock`
+# taint base; `Session` is tainted transitively over the type table.
 _NESTED_RES = """
 type Sock = { fd: Int }
 type Session = { conn: Sock, label: Str }
 extern pure fn close_sock(h: Int) = @py { return None }
 extern acquire fn open_sock() -> Sock undo close_sock(0) = @py { return {"fd": 1} }
-extern pure fn wrap(s: Sock, l: Str) -> Session = @py { return {"conn": s, "label": l} }
 service Db { async fn run() -> Session }
 service Ctl { async fn go() -> Str }
-component Store provides db: Db {
-  provide db { async fn run() = wrap(open_sock(), "x") }
-}
-component Front requires db: Db provides ctl: Ctl {
+component Front provides ctl: Ctl {
   provide ctl { async fn go() = "z" }
 }
 """
@@ -108,8 +110,31 @@ def test_f1_nested_handle_crossing_a_tier_seam_is_refused(tmp_path):
     assert "Session" in problem and "Db" in problem
 
 
+# item 308: the swap test needs a running `Store` that PROVIDES the
+# resource-carrier service. Under B1 that provider must OWN the handle it lends
+# (a built carrier or a per-call acquire is refused), so `Store` acquires the
+# `Session` at activation scope and returns its own handle. `Session` is still a
+# resource crossing (it carries a handle), so the swap seam refuses it.
+_NESTED_RES_SWAP = """
+type Sock = { fd: Int }
+type Session = { conn: Sock, label: Str }
+extern pure fn close_session(h: Int) = @py { return None }
+extern acquire fn open_session() -> Session undo close_session(0)
+  = @py { return {"conn": {"fd": 1}, "label": "x"} }
+service Db { async fn run() -> Session }
+service Ctl { async fn go() -> Str }
+component Store provides db: Db {
+  let sess = effect open_session() undo close_session(0)
+  provide db { async fn run() = sess }
+}
+component Front requires db: Db provides ctl: Ctl {
+  provide ctl { async fn go() = "z" }
+}
+"""
+
+
 def test_f1_swap_also_refuses_a_nested_handle_crossing(tmp_path):
-    p = _write(tmp_path, "app.rvl", _NESTED_RES)
+    p = _write(tmp_path, "app.rvl", _NESTED_RES_SWAP)
     ir = compile_files([p])
     candidate, error = swap_admission([p], ir, "Store", "go")
     assert candidate is None

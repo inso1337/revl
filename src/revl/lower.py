@@ -52,6 +52,13 @@ from .typecheck import (
     _check_method_namespace_disjoint,
 )
 from .taint import extract_and_normalize, check_taint, splice_declassifiers
+from .resources import (
+    NO_HANDLE_RETURNS,
+    acquire_return_is_nominal_handle,
+    closing_ops,
+    resource_in,
+    resource_taint,
+)
 from .parser import (
     _describe_expr,
     AbortStmt,
@@ -2373,6 +2380,27 @@ def _lower_externs(program: Program, filename: str, types: dict,
                 f"acquire extern `{decl.name}` must declare `undo` (G4)",
                 hint="an `acquire` crosses into an observable effect and needs a teardown inverse",
             )
+        # R0 (item 308): an `acquire` return must be a NOMINAL OPAQUE HANDLE
+        # type. A primitive (`Int`) or a structural carrier (`Result[..]`,
+        # `Opt[..]`, `List[..]`, a function type, a record literal) is refused
+        # at the declaration. The acquire returns are the resource-taint base
+        # (`resources.resource_base`); promoting that base into the frontend
+        # ownership checks means the base must carry identity, and a primitive
+        # cannot — `-> Int` would make every integer a borrowed handle and the
+        # language unwritable (design doc 308, R0).
+        if (decl.classification == "acquire" and decl.returns is not None
+                and decl.returns not in NO_HANDLE_RETURNS
+                and not acquire_return_is_nominal_handle(decl.returns)):
+            raise RevlError(
+                filename, decl.line,
+                f"acquire extern `{decl.name}` returns `{decl.returns}`, which is "
+                f"not a nominal opaque handle type (item 308, R0)",
+                hint="an `acquire` return is an owned resource handle whose "
+                     "identity the ownership checks track; declare an opaque "
+                     "handle type (a bare nominal like `LogHandle`) and return "
+                     "that, not a primitive or a structural carrier "
+                     "(`Result[..]`, `Opt[..]`, `List[..]`, a function type)",
+            )
         if decl.classification == "pure" and (decl.undo is not None or decl.compensate is not None):
             raise RevlError(
                 filename, decl.line,
@@ -3960,6 +3988,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             else:
                 inner_type_env.pop(param, None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
+        _b1_capture_check(expr, type_env, types, filename, expr.line)
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": _lower_pure_expr(expr.body, inner, callables, alias_fns, filename, inner_type_env, types)}
         # IR v3: an arrow that the checker typed carries its signature, so a
@@ -5281,6 +5310,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             else:
                 env.type_env.pop(param, None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
+        _b1_capture_check(expr, env.type_env, env.types, filename, expr.line)
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": _lower_component_pure_expr(expr.body, env, inner, callables,
                                                    pure_only)}
@@ -6219,6 +6249,417 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
     return step
 
 
+# ---------------------------------------------------------------------------
+# item 308: effect ownership modes (owned + borrowed v1). The resource-taint
+# base (R0: nominal opaque handles) lives in `resources.py`; these helpers are
+# the frontend consumers of it — O1 (no hand-call of a declared inverse) and B1
+# (a borrowed resource does not escape its scope). `owned` is the implicit mode
+# of a handle bound by `let x = effect <acquire> …` at activation scope; every
+# other resource-typed position is `borrowed` (positional, never dataflow — the
+# safe direction, since every wrong answer is a false positive, not an unsound
+# admission).
+#
+# Deferred, each with its landing place named in the design doc:
+#   TODO(308-followup): `shared` mode (a 294 lease binding); `shared`/`transfer`
+#     are reserved contextual keywords, not implemented in v1.
+#   TODO(308-followup): explicit `transfer` (a source marker that moves the
+#     bracket; the only honest future for a handoff of resource-carrying state).
+#   TODO(308-followup): the retaining-extern audit (F10) — a report-only `revl
+#     audit` listing of resource-typed arguments reaching a non-inverse extern
+#     or bridge service (the declaration-is-the-proof-surface limitation).
+#   TODO(308-followup): the method-scope acquire early-release surface (F9). v1
+#     does NOT refuse method-scope acquires wholesale — the corpus admits them
+#     (item 399, provide-method acquisitions), so refusing them here would break
+#     additivity. Their escape hazards (return/store/capture of the method-scoped
+#     handle) ARE caught by B1; the residual leak-until-unload lifetime concern
+#     is the deferred F9 decision.
+# ---------------------------------------------------------------------------
+
+
+def _resource_ctx(types: dict) -> tuple[set, set]:
+    """`(taint, closers)` from a lowering `types` table (its `APPROVAL_KEY`
+    carries the externs index). Cached on the table under a private key so a
+    per-site call is O(1) after the first."""
+    cache = types.get("__resource_ctx__")
+    if cache is not None:
+        return cache
+    idx = (types.get(APPROVAL_KEY) or {}).get("externs") or {}
+    externs = list(idx.values())
+    ctx = (resource_taint(externs, types), closing_ops(externs))
+    try:
+        types["__resource_ctx__"] = ctx
+    except Exception:  # pragma: no cover - types is always a plain dict
+        pass
+    return ctx
+
+
+def _owned_handles(env: "Env") -> set:
+    """The activation-scope owned-handle safe-names of the component being
+    lowered (bound by `let x = effect <acquire-class extern>`)."""
+    owned = getattr(env, "_owned_handles", None)
+    if owned is None:
+        owned = set()
+        env._owned_handles = owned
+    return owned
+
+
+def _node_local_name(node) -> str | None:
+    """The bare local name a lowered leaf node references, or None. Covers the
+    `{"kind": "name", "id": ..}` and `{"kind": "var", "name": ..}` shapes."""
+    if not isinstance(node, dict):
+        return None
+    if node.get("kind") in ("name", "var"):
+        return node.get("id") or node.get("name")
+    return None
+
+
+def _node_resource(node, env: "Env", taint: set) -> str | None:
+    """The resource type a lowered expression node carries, or None."""
+    if not isinstance(node, dict):
+        return None
+    t = infer_ir(node, env.type_env, env.types, env.services)
+    return resource_in(t, taint)
+
+
+def _walk_call_nodes(node):
+    """Yield every lowered call node (`kind` fn/call) reachable in `node`."""
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            if cur.get("kind") in ("fn", "call"):
+                yield cur
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+
+
+def _walk_value_nodes(node):
+    """Yield every dict node reachable in a lowered expression tree."""
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            yield cur
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+
+
+def _o1_check(node, env: "Env", filename: str, line: int, *,
+              position: str, exempt_handle: str | None = None) -> None:
+    """O1: refuse a hand-call of a declared inverse (a closing op) on a
+    resource-typed argument anywhere in `node`. `position` names the syntactic
+    slot for the diagnostic (`body` / `undo` / `compensate`). `exempt_handle`
+    is the acquiring binding's own handle safe-name: in that binding's own
+    `undo`, a closer call on that handle IS the bracket being created, not a
+    double-close, and is admitted (the mandatory own-undo exemption)."""
+    taint, closers = _resource_ctx(env.types)
+    if not closers:
+        return
+    for call in _walk_call_nodes(node):
+        name = call.get("name") if call.get("kind") == "fn" else \
+            (call.get("callee") or {}).get("name")
+        if name not in closers:
+            continue
+        for arg in call.get("args") or []:
+            rt = _node_resource(arg, env, taint)
+            if not rt:
+                continue
+            if (exempt_handle is not None
+                    and _node_local_name(arg) == exempt_handle):
+                continue
+            owned = _node_local_name(arg) in _owned_handles(env)
+            mode = "owned" if owned else "borrowed"
+            raise RevlError(
+                filename, line,
+                f"`{name}(...)` is a declared inverse (a close) of a resource; "
+                f"the {mode} handle `{rt}` is closed exactly once by the "
+                f"acquiring activation's teardown (G7), so hand-calling it here "
+                f"(in {position} position) would double-close (item 308, O1)",
+                hint="let teardown run the inverse; if a resource must end "
+                     "early, that is an explicit-release surface revl does not "
+                     "have yet (only the acquiring binding's own `undo` may name "
+                     "its inverse)",
+                code="G7", category="ownership",
+            )
+
+
+def _b1_no_resource(node, env: "Env", filename: str, line: int, *,
+                    clause: str, borrows_only: bool = True,
+                    extra_owned: set | None = None) -> None:
+    """B1: refuse a resource-typed value appearing anywhere in `node`. When
+    `borrows_only` is True the owner's own handle is admitted (the owner-carve-
+    out); when False (a `compensate` position, clause 5) an OWNED handle is
+    refused too, because compensations run in teardown Phase 2 after Phase 1
+    closed every bracket — a resource there is use-after-close by phase order.
+    `extra_owned` adds method-scope owned-handle names (an acquire bound inside
+    the current provide method) to the owner set for the own-undo exemption."""
+    taint, _ = _resource_ctx(env.types)
+    if not taint:
+        return
+    owned = _owned_handles(env) | (extra_owned or set())
+
+    def _is_owned(n):
+        return _node_local_name(n) in owned
+
+    for sub in _walk_value_nodes(node):
+        rt = _node_resource(sub, env, taint)
+        if not rt:
+            continue
+        if borrows_only and _is_owned(sub):
+            continue
+        mode = "owned" if _is_owned(sub) else "borrowed"
+        raise RevlError(filename, line, _b1_message(clause, mode, rt),
+                        hint=_b1_hint(clause), code="G7", category="ownership")
+    # a borrowed value with no local name (a bare call result / field read) is
+    # still a resource by type; catch it when the whole node is the resource.
+    rt = _node_resource(node, env, taint)
+    if rt and not (borrows_only and _is_owned(node)):
+        mode = "owned" if _is_owned(node) else "borrowed"
+        raise RevlError(filename, line, _b1_message(clause, mode, rt),
+                        hint=_b1_hint(clause), code="G7", category="ownership")
+
+
+_B1_CLAUSE_TEXT = {
+    "state": "stored into activation-level state",
+    "capture": "captured by a closure",
+    "return": "returned across a signature",
+    "carrier": "placed in an escaping record/collection value",
+    "undo": "placed in an `undo` expression",
+    "witnessed": "passed to a witnessed effect's argument list",
+    "compensate": "placed in a `compensate` expression",
+    "spawn": "seated in a `spawn` config value",
+    "handoff": "carried by a `handoff` type",
+}
+
+
+# container-mutating verbs whose target is an activation-level host local: a
+# resource seated through one of these is stored into activation state (B1
+# clause 1), unlike a plain fn/service call which is legitimate down-passing.
+_MUTATING_VERBS = frozenset({
+    "insert", "put", "set", "push", "add", "append", "store", "enqueue",
+})
+
+
+def _b1_flag_if_borrow(v, env: "Env", taint: set, owned: set, filename: str,
+                       line: int, clause: str) -> None:
+    rt = _node_resource(v, env, taint)
+    if rt and _node_local_name(v) not in owned:
+        raise RevlError(filename, line, _b1_message(clause, "borrowed", rt),
+                        hint=_b1_hint(clause), code="G7", category="ownership")
+
+
+def _b1_body_scan(node, env: "Env", filename: str, line: int) -> None:
+    """B1 clauses 1 (store into activation state) and 4 (escaping carrier):
+    refuse a BORROWED resource value placed in a record/list/map literal, or
+    inserted into an activation-level container (a mutating verb on an
+    activation host local). Both orders are caught — the value is checked
+    wherever it is seated, whether the carrier is then parked or was already
+    parked. The owner's own handle is exempt (these clauses bind borrows only);
+    passing a borrow DOWN a plain call chain stays admitted."""
+    taint, _ = _resource_ctx(env.types)
+    if not taint:
+        return
+    owned = _owned_handles(env)
+    host_locals = getattr(env, "host_locals", {}) or {}
+    for sub in _walk_value_nodes(node):
+        kind = sub.get("kind")
+        if kind == "record":
+            for _, v in sub.get("fields") or []:
+                _b1_flag_if_borrow(v, env, taint, owned, filename, line, "carrier")
+        elif kind == "list":
+            for v in sub.get("items") or []:
+                _b1_flag_if_borrow(v, env, taint, owned, filename, line, "carrier")
+        elif kind == "map":
+            for entry in sub.get("entries") or []:
+                v = entry[1] if isinstance(entry, (list, tuple)) and len(entry) == 2 \
+                    else entry
+                _b1_flag_if_borrow(v, env, taint, owned, filename, line, "carrier")
+        elif kind == "call" and sub.get("method") in _MUTATING_VERBS:
+            if _node_local_name(sub.get("target") or {}) in host_locals:
+                for a in sub.get("args") or []:
+                    _b1_flag_if_borrow(a, env, taint, owned, filename, line, "state")
+
+
+def _ownership_check_expr(node, env: "Env", filename: str, line: int) -> None:
+    """Run the body-position ownership checks over one lowered expression: O1
+    (no hand-call of a declared inverse, no own-undo exemption in a body
+    position) and B1 clauses 1/4 (no borrow stored into activation state or an
+    escaping carrier)."""
+    if node is None:
+        return
+    _o1_check(node, env, filename, line, position="body")
+    _b1_body_scan(node, env, filename, line)
+
+
+def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
+    """Apply the body-position O1/B1 checks over a lowered provide-METHOD body.
+    A handle a service method parameter carries is a BORROW; an acquire bound
+    inside the method is owned by the method (its own `undo` is exempt). Runs
+    O1 (no hand-close) and B1 clauses 1/4/5 across the method's statements —
+    clause 3 (return) and the emit `compensate` half are enforced inline where
+    they are lowered."""
+    method_owned: set = set()
+    taint, _ = _resource_ctx(env.types)
+    for st in steps or []:
+        if not isinstance(st, dict):
+            continue
+        stp = st.get("step")
+        if stp in ("let-effect", "effect"):
+            acq = st.get("acquire")
+            bind = st.get("bind")
+            acq_res = _node_resource(acq, env, taint) if acq is not None else None
+            undo = st.get("undo")
+            if undo is not None:
+                exempt = bind if (acq_res and bind) else None
+                _o1_check(undo, env, filename, line, position="undo",
+                          exempt_handle=exempt)
+                _b1_no_resource(undo, env, filename, line, clause="undo",
+                                borrows_only=True, extra_owned=method_owned)
+            _ownership_check_expr(acq, env, filename, line)
+            _b1_witnessed_check(acq, env, filename, line)
+            if acq_res and bind:
+                method_owned.add(bind)
+        elif stp == "emit":
+            _ownership_check_expr(st.get("expr"), env, filename, line)
+        elif stp in ("let", "assign"):
+            _ownership_check_expr(st.get("value"), env, filename, line)
+        elif stp in ("return", "await"):
+            _ownership_check_expr(st.get("expr"), env, filename, line)
+
+
+def _b1_witnessed_check(acquire, env: "Env", filename: str, line: int) -> None:
+    """B1 clause 5 (witnessed half): a witnessed effect's declared inverse is
+    auto-registered on the same per-activation accumulator as an `undo`, so a
+    resource-typed value in its argument list rides teardown and replays after
+    the owner is gone. Refuse a resource argument to a witnessed acquisition."""
+    if not isinstance(acquire, dict) or acquire.get("kind") != "fn":
+        return
+    if acquire.get("name") not in getattr(env, "witnessed_externs", set()):
+        return
+    taint, _ = _resource_ctx(env.types)
+    if not taint:
+        return
+    owned = _owned_handles(env)
+    for a in acquire.get("args") or []:
+        rt = _node_resource(a, env, taint)
+        if rt:
+            mode = "owned" if _node_local_name(a) in owned else "borrowed"
+            raise RevlError(filename, line, _b1_message("witnessed", mode, rt),
+                            hint=_b1_hint("witnessed"), code="G7",
+                            category="ownership")
+
+
+def _all_free_names(expr, bound: set[str]) -> set[str]:
+    """Every `ExprVar` name referenced in `expr` and not shadowed by a lambda
+    parameter or match binding (all free vars, unlike `_mutable_free_vars`
+    which keeps only mutable ones)."""
+    bound = set(bound or ())
+    if isinstance(expr, ExprVar):
+        return set() if expr.name in bound else {expr.name}
+    if isinstance(expr, ExprArrow):
+        return _all_free_names(expr.body, bound | set(expr.params))
+    if isinstance(expr, ExprMatch):
+        found = _all_free_names(expr.scrutinee, bound)
+        for _, bind, body in expr.arms:
+            arm_bound = set(bound) | ({bind} if bind is not None else set())
+            found |= _all_free_names(body, arm_bound)
+        return found
+    found: set[str] = set()
+    for attr in ("left", "right", "operand", "callee", "target", "index",
+                 "cond", "then", "otherwise", "base"):
+        child = getattr(expr, attr, None)
+        if child is not None and not isinstance(child, (str, int, bool)):
+            found |= _all_free_names(child, bound)
+    for arg in getattr(expr, "args", None) or []:
+        found |= _all_free_names(arg, bound)
+    for _, value in getattr(expr, "fields", None) or []:
+        found |= _all_free_names(value, bound)
+    for _, value in getattr(expr, "updates", None) or []:
+        found |= _all_free_names(value, bound)
+    for item in getattr(expr, "items", None) or []:
+        found |= _all_free_names(item, bound)
+    return found
+
+
+def _b1_capture_check(arrow, type_env: dict, types: dict, filename: str,
+                      line: int) -> None:
+    """item 308, B1 clause 2: refuse capturing ANY resource-typed value in a
+    closure (owner included). A closure value's type (`() -> Int`) erases the
+    capture, so a closure carrying a handle is invisible to the taint fixpoint
+    and launders the handle across a signature (the recommended v1 rule is the
+    outright refusal, strictly smaller than closure-value taint tracking)."""
+    taint, _ = _resource_ctx(types)
+    if not taint:
+        return
+    for name in _all_free_names(arrow.body, set(arrow.params)):
+        t = type_env.get(name)
+        rt = resource_in(t, taint) if t else None
+        if rt:
+            raise RevlError(
+                filename, line, _b1_message("capture", "borrowed", rt),
+                hint=_b1_hint("capture"), code="G7", category="ownership")
+
+
+def _b1_return_admitted(node, env: "Env", taint: set) -> bool:
+    """B1 clause 3: is this resource-typed return a borrow-CREATING move (so it
+    is admitted) rather than a borrow-escape?
+
+      * the owner returning its OWN activation handle (a bare name in the owned
+        set), or
+      * a FRESH MINT: a direct call whose result is the resource and NONE of
+        whose arguments carry a resource — a constructor/factory handing the
+        caller a newly-made handle (the transfer case). A call that threads a
+        resource ARGUMENT into its result is a carrier/laundering and stays
+        refused.
+    """
+    if _node_local_name(node) in _owned_handles(env):
+        return True
+    if isinstance(node, dict) and node.get("kind") in ("fn", "call"):
+        for a in node.get("args") or []:
+            if _node_resource(a, env, taint):
+                return False
+        return True
+    return False
+
+
+def _b1_message(clause: str, mode: str, rt: str) -> str:
+    what = _B1_CLAUSE_TEXT.get(clause, clause)
+    return (f"{mode} resource `{rt}` cannot be {what}; a borrow is confined to "
+            f"the scope that received it and may not outlive its owner's "
+            f"bracket (G7) (item 308, B1)")
+
+
+def _b1_hint(clause: str) -> str:
+    if clause in ("state", "carrier"):
+        return ("restructure so the owner holds the handle and lends it per "
+                "call; a borrow may be passed further down a call chain, but "
+                "not parked in activation state or an escaping carrier")
+    if clause == "capture":
+        return ("v1 refuses capturing any resource handle in a closure (owner "
+                "included): a closure value's type erases the capture, so it "
+                "would launder the handle across a signature")
+    if clause == "return":
+        return ("only the owner may return its OWN handle from a provide "
+                "method; a borrow (or a tainted carrier) may not be returned "
+                "onward")
+    if clause in ("undo", "witnessed", "compensate"):
+        return ("teardown-position captures outlive or outrun the bracket; a "
+                "compensate runs after every bracket closed, so no resource "
+                "value (owned or borrowed) may appear there")
+    if clause == "spawn":
+        return ("spawn config seats the value in the child's activation for its "
+                "whole lifetime; a child acquires its own handle or calls the "
+                "owner's service per use")
+    if clause == "handoff":
+        return ("a handoff re-seats the predecessor's resource vector on the "
+                "successor while the predecessor's teardown closes it; a real "
+                "handle transfer is the deferred `transfer` marker, not handoff "
+                "shape-compat")
+    return "a borrow may not escape its scope"
+
+
 def _poison_failed_binding(stmt, env: "Env") -> None:
     """Bind a recovered binding-statement's name to the poison sentinel so its
     later uses stay silent (item 386, Stage 2).
@@ -6401,6 +6842,21 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             if getattr(stmt, "verified", False):
                 step["verified"] = True
             _admit_effect_async(stmt, step, env, filename)
+            # item 308: a `let x = effect <acquire> …` whose acquisition yields a
+            # resource makes `x` the OWNED handle of this activation. O1 admits
+            # this binding's own `undo` naming its own inverse on `x` (the
+            # own-undo exemption); B1 clause 5 still refuses a BORROW smuggled
+            # into that undo.
+            _taint308, _ = _resource_ctx(env.types)
+            if resource_in(acquired_type, _taint308):
+                _owned_handles(env).add(safe)
+            if step.get("undo") is not None:
+                _o1_check(step["undo"], env, filename, stmt.line,
+                          position="undo", exempt_handle=safe)
+                _b1_no_resource(step["undo"], env, filename, stmt.line,
+                                clause="undo", borrows_only=True)
+            _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
+            _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
             body.append(step)
         elif isinstance(stmt, EffectStmt):
             if stmt.setup:
@@ -6427,6 +6883,14 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             if getattr(stmt, "verified", False):
                 step["verified"] = True
             _admit_effect_async(stmt, step, env, filename)
+            # item 308: an unbound effect creates no owned handle, so its `undo`
+            # gets no own-undo exemption (O1) and may carry no resource (B1).
+            if step.get("undo") is not None:
+                _o1_check(step["undo"], env, filename, stmt.line, position="undo")
+                _b1_no_resource(step["undo"], env, filename, stmt.line,
+                                clause="undo", borrows_only=True)
+            _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
+            _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
             body.append(step)
         elif isinstance(stmt, FailStmt):
             body.append({
@@ -6490,6 +6954,17 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # session boundary, so an `Approval[C]` may not be its shape. The
             # general type well-formedness rule refuses it (with `Async` etc.).
             check_type_wellformed(filename, stmt.line, stmt.state_type)
+            # item 308, B1 clause 7: a resource-tainted handoff type re-seats the
+            # predecessor's live handle vector on the successor while the
+            # predecessor's teardown closes it — the successor starts warm with a
+            # dead descriptor. Refuse it at admission from the shared taint set.
+            _taint308, _ = _resource_ctx(env.types)
+            _ho_res = resource_in(stmt.state_type, _taint308)
+            if _ho_res:
+                raise RevlError(
+                    filename, stmt.line,
+                    _b1_message("handoff", "owned", _ho_res),
+                    hint=_b1_hint("handoff"), code="G7", category="ownership")
             handoff = {"key": stmt.key, "type": stmt.state_type}
             continue
         if isinstance(stmt, RouteStmt):
@@ -6928,6 +7403,29 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 pin_hole(mstmt.expr, decl.returns, filename,
                          f"`{method.name}` returns")
                 lowered_return = _lower_expr(mstmt.expr, env, mode="setup")
+                # item 308, B1 clause 3: a resource-tainted return escapes the
+                # activation across a signature. Three shapes are admitted, all
+                # borrow-CREATING moves rather than borrow-escapes:
+                #   * the OWNER returning its OWN activation handle (owner-holds);
+                #   * a FRESH MINT — a direct call to a resource CONSTRUCTOR none
+                #     of whose arguments carry a resource (a factory returning a
+                #     newly-acquired handle; the caller becomes its owner, the
+                #     transfer case whose full teardown-migration surface is
+                #     deferred). This keeps resource-constructor factories, e.g.
+                #     the WIT-import codegen's `fn open(p) = wit_open(p)`,
+                #     compiling — refusing them would be a false-positive wall.
+                # A bare BORROW (a parameter/local handle) or a tainted CARRIER
+                # (`Session` wrapping a `Sock`, `wrap(c)` threading a borrow) is
+                # refused. Keys on the tainted return TYPE, not the bare handle.
+                _taint308, _ = _resource_ctx(env.types)
+                _ret_res = (resource_in(decl.returns, _taint308)
+                            or _node_resource(lowered_return, env, _taint308))
+                if _ret_res and not _b1_return_admitted(lowered_return, env, _taint308):
+                    raise RevlError(
+                        filename, mstmt.line,
+                        _b1_message("return", "borrowed", _ret_res),
+                        hint=_b1_hint("return"), code="G7",
+                        category="ownership")
                 # item 404: sweep the returned value with the raising oracle so
                 # an internal operator/index/builtin misuse is refused uniformly
                 # with a `fn`/`test` body, not only the return-type mismatch.
@@ -6958,6 +7456,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 code="T1", category="type-mismatch",
                 expected=decl.returns, actual=None,
             )
+        # item 308: O1/B1 over the provide-method body — run BEFORE the param
+        # types are restored out of `env.type_env`, so a parameter handle (a
+        # borrow) is typed and detectable. An acquire bound in the method is
+        # method-owned (its own `undo` is exempt).
+        _ownership_walk_method(mbody, env, comp.source or filename, method.line)
         safe_params = [env.params[p] for p in method.params]
         env.params = saved
         env.type_env = saved_tenv
@@ -7209,7 +7712,15 @@ def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
     step = {"step": "emit", "expr": node}
     if stmt.compensate is not None:
         # compensation is teardown-position: emissions are permitted bare (A5)
-        step["compensate"] = _lower_expr(stmt.compensate, env, mode="undo")
+        comp = _lower_expr(stmt.compensate, env, mode="undo")
+        step["compensate"] = comp
+        # item 308, B1 clause 5 (compensate half): a compensation runs in
+        # teardown Phase 2, AFTER Phase 1 closed every bracket, so ANY resource
+        # value there (owned OR borrowed) is use-after-close by phase order.
+        # O1 also refuses a declared inverse smuggled into a compensate.
+        _o1_check(comp, env, env.filename, stmt.line, position="compensate")
+        _b1_no_resource(comp, env, env.filename, stmt.line,
+                        clause="compensate", borrows_only=False)
     _lower_emit_approval(stmt, node, step, env)
     return step
 
@@ -7494,6 +8005,17 @@ def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:
         check_ast(vexpr, tconfig[field].type, env.type_env, env.types,
                   env.filename, f"config field `{field}` of {expr.component}")
         lowered_cfg[field] = _lower_expr(vexpr, env, "setup")
+        # item 308, B1 clause 6: a resource-tainted spawn config value seats the
+        # handle in the child's activation for its whole lifetime (a
+        # per-invocation borrow escalated to an activation-lifetime hold).
+        _taint308, _ = _resource_ctx(env.types)
+        _cfg_res = (resource_in(tconfig[field].type, _taint308)
+                    or _node_resource(lowered_cfg[field], env, _taint308))
+        if _cfg_res:
+            raise RevlError(
+                env.filename, expr.line,
+                _b1_message("spawn", "borrowed", _cfg_res),
+                hint=_b1_hint("spawn"), code="G7", category="ownership")
     for f in target.config:
         if f.default is None and f.name not in expr.config:
             raise RevlError(

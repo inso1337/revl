@@ -26,61 +26,29 @@ the resource set off `extern acquire` returns, both already in the IR.
 
 from __future__ import annotations
 
-import re
+from .resources import resource_in, resource_taint, resource_types
+
+# Resource-typedness now lives in the shared frontend module `resources.py` so
+# the seam analysis here and the frontend ownership checks (item 308: O1/B1 in
+# lower.py) read ONE implementation and cannot drift. These thin ir-dict
+# wrappers keep the original private names for the existing callers here.
 
 
 def _resource_types(ir: dict) -> set[str]:
     """Type names returned by an `extern acquire`: the handles, not values."""
-    return {
-        ext["returns"]
-        for ext in ir.get("externs") or []
-        if ext.get("class") == "acquire" and ext.get("returns")
-    }
+    return resource_types(ir.get("externs"))
 
 
 def _resource_in(type_str: str | None, resources: set[str]) -> str | None:
     """The first resource type named anywhere in `type_str` (handles nesting
     like `Opt[Socket]` / `List[Socket]`), or None."""
-    if not type_str:
-        return None
-    for resource in resources:
-        if re.search(rf"\b{re.escape(resource)}\b", type_str):
-            return resource
-    return None
+    return resource_in(type_str, resources)
 
 
 def _resource_taint(ir: dict) -> set[str]:
     """The transitive closure of resource-typedness over the type table
-    (item 363 hardening F1).
-
-    The base set is the `extern acquire` return handles (`_resource_types`). A
-    record/variant type ANY of whose fields or case payloads mentions an
-    already-tainted type is itself resource-typed — recursively, to a fixpoint.
-    So a handle NESTED in a user record (`type Session = { conn: Sock, label:
-    Str }`, `Sock` a resource) makes `Session` resource-typed too: a signature
-    that carries `Session` across a seam is proxied, not copied by value.
-    Without this closure a nested handle read as a plain value crossed the seam
-    as a dead integer wearing the handle's type, detaching the undo/teardown
-    contract from the copy — the data-loss the audit, the swap gate, and 363's
-    boundary check all now refuse."""
-    tainted = set(_resource_types(ir))
-    types = ir.get("types") or {}
-    changed = True
-    while changed:
-        changed = False
-        for name, spec in types.items():
-            if name in tainted:
-                continue
-            if spec.get("kind") == "record":
-                member_types = list((spec.get("fields") or {}).values())
-            elif spec.get("kind") == "variant":
-                member_types = [c.get("payload") for c in spec.get("cases") or []]
-            else:
-                member_types = []
-            if any(_resource_in(t, tainted) for t in member_types):
-                tainted.add(name)
-                changed = True
-    return tainted
+    (item 363 hardening F1), computed by the shared module."""
+    return resource_taint(ir.get("externs"), ir.get("types"))
 
 
 def distributability(ir: dict) -> dict:
