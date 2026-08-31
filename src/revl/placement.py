@@ -595,11 +595,12 @@ def sandbox_capability_gate(ir: dict, processes: dict, sandboxes: dict,
                                  else (f"fs = [{', '.join(repr(m) for m in env['fs'])}]"
                                        if env["fs"] else "fs = [] (no covering mount)"))
                         want = "net" if kind == "net" else str(resource)
+                        grant_hint = 'net = "all"' if kind == "net" else "fs = [...]"
                         return (
                             f"component {cname!r} cannot run in sandbox {pname!r}: "
                             f"capability {cap!r} needs {want}, but the sandbox grants "
                             f"{grant}; grant it ([processes.{pname}.sandbox] "
-                            f"{'net = \"all\"' if kind == 'net' else 'fs = [...]'}), "
+                            f"{grant_hint}), "
                             f"serve it across the seam instead, or move the component "
                             f"out of the sandbox")
             if "*" in host_rooted and rung == "wasm-cell":
