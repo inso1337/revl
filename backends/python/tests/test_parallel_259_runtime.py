@@ -16,14 +16,21 @@ What is PROVEN here (§9, corrected exit criterion):
   * a fault in one branch is teardown-EFFECT equivalent: the world ends in the
     same state, with the fired members compensated in plan order and a correct
     LIFO unwind - NOT a byte-identical `accumulated`, which the design withdraws;
-  * a divert (dispose) landing mid-group drives the whole group to quiescence
-    (no in-flight branch orphaned to race teardown) and tears the activation down
-    to DISPOSED with the audit flushed and no residual error - the conservative
-    slice's guarantee (full divert-effect-equivalence for a PRESENT-compensation
-    member is the deferred divert-aware runtime, §4.1/§10);
-  * a group member that is non-idempotent, routes its audit off-task (a
-    spawn-handle emission), is an approval crossing, or is not awaited stays
-    SEQUENTIAL - the emitter's fan-out gate refuses to parallelize it;
+  * a divert (a deadline) landing at an emission's in-flight await is FULLY
+    teardown-EFFECT equivalent for the restricted set - every fired member is
+    compensated in plan order, the world ends in the same state - because the
+    tightened gate admits only members whose compensation is idempotent-or-absent;
+  * an external dispose landing at the group's own await drives the whole group
+    to quiescence (no in-flight branch orphaned) and tears the activation down to
+    DISPOSED with no residual error; the tightened gate guarantees no member
+    carries a real non-idempotent compensation to orphan, so the only residual is
+    a bounded idempotent-FORWARD over-delivery (the deferred divert-aware runtime,
+    §4.1/§10);
+  * the CRITICAL restriction: a member is admitted to a group only if its
+    COMPENSATION is idempotent-or-absent (NOT merely idempotent forward delivery);
+    a member with a present, non-idempotent compensation stays SEQUENTIAL, as do
+    non-idempotent-forward, off-task (spawn-handle), approval, and non-awaited
+    emissions;
   * a same-key non-commutative pair and an all-singleton body emit no fan-out at
     all (byte-identical to pre-259).
 """
@@ -252,6 +259,71 @@ def test_gate_rejects_approval_crossing():
     assert em._group_eligible(step) is False
 
 
+def test_gate_rejects_present_non_idempotent_compensation():
+    """The CRITICAL restriction (§3.3/§5/§8): a member with idempotent FORWARD
+    delivery but a PRESENT, non-idempotent COMPENSATION must stay sequential -
+    NOT merely idempotent forward delivery. This is the exact gap that would let a
+    divert leave a fired member with a real (non-idempotent) compensation it can
+    never run at the interrupted join."""
+    fire = {"name": "fire_a", "class": "emission", "idempotent": True}
+    undo = {"name": "undo_a", "class": "emission"}  # present but NOT idempotent
+    em = _emitter_for([fire, undo])
+    step = {"step": "emit", "async": True,
+            "expr": {"kind": "fn", "name": "fire_a"},
+            "compensate": {"kind": "fn", "name": "undo_a"}}
+    assert em._compensation_idempotent_or_absent(step) is False
+    assert em._group_eligible(step) is False
+
+
+def test_gate_admits_present_idempotent_compensation():
+    """A present compensation is admissible when its operation is DECLARED
+    idempotent (item 44/309) - over-firing the member and then running (or, at a
+    divert boundary, skipping) an idempotent compensation is world-state-safe."""
+    fire = {"name": "fire_a", "class": "emission", "idempotent": True}
+    undo = {"name": "undo_a", "class": "emission", "idempotent": True}
+    em = _emitter_for([fire, undo])
+    step = {"step": "emit", "async": True,
+            "expr": {"kind": "fn", "name": "fire_a"},
+            "compensate": {"kind": "fn", "name": "undo_a"}}
+    assert em._compensation_idempotent_or_absent(step) is True
+    assert em._group_eligible(step) is True
+
+
+def test_gate_admits_absent_compensation():
+    """No `compensate` clause is the trivially-safe idempotent-or-absent case."""
+    fire = {"name": "fire_a", "class": "emission", "idempotent": True}
+    em = _emitter_for([fire])
+    step = {"step": "emit", "async": True, "expr": {"kind": "fn", "name": "fire_a"}}
+    assert em._compensation_idempotent_or_absent(step) is True
+    assert em._group_eligible(step) is True
+
+
+def test_present_non_idempotent_compensation_stays_sequential_end_to_end():
+    """End to end: three disjoint idempotent-forward emissions each carrying a
+    PRESENT non-idempotent compensation emit NO fan-out (the whole group degrades
+    to sequential), so a divert can never orphan one of their real compensations.
+    Declaring the SAME compensations `idempotent` restores the fan-out."""
+    def src(comp_kw: str) -> str:
+        return (
+            'extern emission[send.email] idempotent async fn fire_a(x: Str) -> Str '
+            '= @py { import asyncio; await asyncio.sleep(0.0); return x }\n'
+            'extern emission[db.write] idempotent async fn fire_b(x: Str) -> Str '
+            '= @py { import asyncio; await asyncio.sleep(0.0); return x }\n'
+            'extern emission[metrics] idempotent async fn fire_c(x: Str) -> Str '
+            '= @py { import asyncio; await asyncio.sleep(0.0); return x }\n'
+            f'extern emission[send.email] {comp_kw}fn undo_a(x: Str) -> Str = @py {{ return x }}\n'
+            f'extern emission[db.write] {comp_kw}fn undo_b(x: Str) -> Str = @py {{ return x }}\n'
+            f'extern emission[metrics] {comp_kw}fn undo_c(x: Str) -> Str = @py {{ return x }}\n'
+            'component W {\n'
+            '  await emit fire_a("a") compensate undo_a("a")\n'
+            '  await emit fire_b("b") compensate undo_b("b")\n'
+            '  await emit fire_c("c") compensate undo_c("c")\n'
+            '}\n'
+        )
+    assert "_revl_parallel" not in _emitted(src(""))            # non-idempotent comp
+    assert "_revl_parallel" in _emitted(src("idempotent "))     # idempotent comp
+
+
 # --------------------------------------------------------------------------- #
 # 4. fault: teardown-EFFECT equivalence (NOT byte-identical accumulated)
 # --------------------------------------------------------------------------- #
@@ -278,11 +350,11 @@ def _fault_src(kw: str) -> str:
         f'extern emission[metrics] {kw}async fn fire_c(x: Str) -> Str = @py '
         f'{{ import runtime, asyncio; await asyncio.sleep(0.0); '
         f'runtime._record("fire " + x); return x }}\n'
-        f'extern emission[send.email] fn undo_a(x: Str) -> Str = @py '
+        f'extern emission[send.email] idempotent fn undo_a(x: Str) -> Str = @py '
         f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
-        f'extern emission[db.write] fn undo_b(x: Str) -> Str = @py '
+        f'extern emission[db.write] idempotent fn undo_b(x: Str) -> Str = @py '
         f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
-        f'extern emission[metrics] fn undo_c(x: Str) -> Str = @py '
+        f'extern emission[metrics] idempotent fn undo_c(x: Str) -> Str = @py '
         f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
         f'component W {{\n'
         f'  await emit fire_a("a") compensate undo_a("a")\n'
@@ -301,7 +373,7 @@ async def _run_to_teardown(module):
         fiber = root.plugin(module.W)
         try:
             await fiber
-        except Exception:  # noqa: BLE001 — the branch fault surfaces here
+        except Exception:  # noqa: BLE001 - the branch fault surfaces here
             pass
         for _ in range(80):
             await asyncio.sleep(0.005)
@@ -334,23 +406,78 @@ async def test_fault_in_one_branch_is_teardown_effect_equivalent():
 
 
 # --------------------------------------------------------------------------- #
-# 5. divert: the group is driven to quiescence and tears down cleanly
+# 5. divert: teardown-EFFECT equivalence for the restricted set
 # --------------------------------------------------------------------------- #
 
+def _divert_src(kw: str) -> str:
+    """A DEADLINE landing at one emission's in-flight await (a named A1 divert
+    trigger, §3.3): `fire_b` awaits, then the deadline fires and its await raises.
+    Sequential SKIPS the remaining emission (c never fires); parallel fires a and
+    c and, because the join completes, compensates BOTH in plan order. All three
+    compensations are declared `idempotent`, so the members satisfy the tightened
+    gate (compensation idempotent-or-absent)."""
+    return (
+        f'extern emission[send.email] {kw}async fn fire_a(x: Str) -> Str = @py '
+        f'{{ import runtime, asyncio; await asyncio.sleep(0.0); '
+        f'runtime._record("fire " + x); return x }}\n'
+        f'extern emission[db.write] {kw}async fn fire_b(x: Str) -> Str = @py '
+        f'{{ import asyncio; await asyncio.sleep(0.0); '
+        f'raise RuntimeError("deadline exceeded on b") }}\n'
+        f'extern emission[metrics] {kw}async fn fire_c(x: Str) -> Str = @py '
+        f'{{ import runtime, asyncio; await asyncio.sleep(0.0); '
+        f'runtime._record("fire " + x); return x }}\n'
+        f'extern emission[send.email] idempotent fn undo_a(x: Str) -> Str = @py '
+        f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
+        f'extern emission[db.write] idempotent fn undo_b(x: Str) -> Str = @py '
+        f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
+        f'extern emission[metrics] idempotent fn undo_c(x: Str) -> Str = @py '
+        f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
+        f'component W {{\n'
+        f'  await emit fire_a("a") compensate undo_a("a")\n'
+        f'  await emit fire_b("b") compensate undo_b("b")\n'
+        f'  await emit fire_c("c") compensate undo_c("c")\n'
+        f'}}\n'
+    )
+
+
 @pytest.mark.asyncio
-async def test_divert_mid_group_end_state_correct():
-    """A dispose landing mid-group is the A1 divert path. The conservative slice
-    does not abandon in-flight branches: `_revl_parallel` sits at one `await`, so
-    the await LANDS (inertia) and the whole group is driven to quiescence - no
-    orphaned branch races the teardown. The activation then unwinds to DISPOSED
-    with the audit flushed and no residual error, and nothing records AFTER the
-    teardown settles (no leaked in-flight branch). Full divert-effect-equivalence
-    for a PRESENT-compensation member is the deferred divert-aware runtime
-    (§4.1/§10); the members here declare no compensation (idempotent-or-absent,
-    the trivially-safe case), so over-firing them is the accepted bounded
-    residual (C2)."""
+async def test_divert_at_member_await_is_teardown_effect_equivalent():
+    """A divert (a deadline) landing at an emission's in-flight await drives the
+    activation's teardown; because the tightened gate admits only members whose
+    compensation is idempotent-or-absent, every fired member is compensated in
+    plan order and the WORLD ends in the same state a sequential (also-diverted)
+    run would leave it in - FULLY teardown-EFFECT equivalent for the restricted
+    set. The registered sets legitimately differ ([a,c] vs [a]); byte-identical
+    `accumulated` is not claimed (§3.3, invariant E)."""
+    par_ops, par_state = await _run_to_teardown(_module(_divert_src("idempotent "), "dpar"))
+    seq_ops, seq_state = await _run_to_teardown(_module(_divert_src(""), "dseq"))
+
+    assert par_state is FiberState.FAILED
+    assert seq_state is FiberState.FAILED
+
+    # full teardown-EFFECT equivalence: the world ends empty in BOTH
+    assert _world(par_ops) == _world(seq_ops) == set()
+    # parallel compensated both fired members in plan order, unwound LIFO
+    assert par_ops == ["fire a", "fire c", "comp c", "comp a"]
+    assert seq_ops == ["fire a", "comp a"]
+
+
+@pytest.mark.asyncio
+async def test_external_dispose_mid_group_tears_down_cleanly():
+    """An external dispose landing at the group's own `await` is the other A1
+    divert shape: cordis's inertia lands the await (the whole group fires to
+    quiescence - no in-flight branch orphaned to race teardown), then the close
+    interrupts the plan-order join. The conservative slice guarantees: (1) the
+    activation unwinds to DISPOSED with no residual error, (2) nothing records
+    AFTER teardown settles (no orphan), and (3) the tightened gate means NO member
+    of the group carries a real non-idempotent compensation, so a divert can never
+    leave one un-run. The residual - an idempotent-FORWARD over-delivery of the
+    members past the divert boundary - is bounded (within the declared count, G4)
+    and is the design's accepted residual / deferred divert-aware runtime
+    (§4.1/§10). The members here declare no compensation (the trivially-safe
+    idempotent-or-absent case)."""
     delay = 0.2
-    module = _module(_three_emission_src("idempotent ", delay), "dvt")
+    module = _module(_three_emission_src("idempotent ", delay), "xdvt")
 
     events: list[str] = []
     runtime_mod.set_trace(events.append)
@@ -366,17 +493,13 @@ async def test_divert_mid_group_end_state_correct():
         killer = asyncio.ensure_future(_kill())
         try:
             await fiber
-        except BaseException:  # noqa: BLE001 — a divert may surface here
+        except BaseException:  # noqa: BLE001 - a divert may surface here
             pass
         for _ in range(120):
             await asyncio.sleep(0.005)
         await killer
 
-        # the divert tore the activation down cleanly
         assert fiber.state is FiberState.DISPOSED
-        # the whole group was driven to quiescence, then settled: capture the
-        # trace and confirm it is STABLE (no in-flight branch records after
-        # teardown - no orphan racing the unwind)
         settled = list(events)
         for _ in range(40):
             await asyncio.sleep(0.005)
