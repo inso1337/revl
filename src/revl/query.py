@@ -242,6 +242,26 @@ class Composition:
         return [key for key in entry.get("inject") or []
                 if self.provider(component, key) is None]
 
+    def value_widens(self, nodes) -> bool:
+        """Whether `nodes` reference an emitting callable in VALUE position (an
+        arrow-typed argument, a stored binding). This is the `*` first-class
+        widening the G4 fixed point applies (`emission_analysis._emitting_
+        capabilities`): an emitting callable handed on as a value escapes this
+        scope and may be dispatched by whoever receives it, so the boundary it
+        may reach cannot be named (`*`) and can never be proven reversible.
+
+        It is exactly the reach the name-only extern walk misses and the
+        emitting-fn fixed point catches. Both the auto-approve `ClassMap`
+        (which raises a class-(c) `*` crossing) and the erase report consult
+        THIS one detection, so the two can never disagree about whether a scope
+        widens (item 414: the erase report was a second class fold blind to it)."""
+        from .lower import _calls_in
+
+        found: set = set()
+        values: set = set()
+        _calls_in(nodes, found, values=values)
+        return bool(values & self.emitting_fns)
+
     # -- per-scope boundary facts -------------------------------------
 
     def _facts(self, comp: dict, scope: dict) -> dict:
