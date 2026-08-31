@@ -39,6 +39,7 @@ host; its guarantees govern the ADMITTED code.
 
 from __future__ import annotations
 
+import weakref
 from typing import Any, Callable, Mapping
 
 # Re-export the WAL recovery entry point so an embedder whose host crashed
@@ -157,17 +158,27 @@ def _verdict_from_error(error: Exception) -> "Verdict":
 
 
 def admit(source: str) -> "Verdict":
-    """The frontend gate: a program the checker refuses cannot be compiled.
+    """The frontend gate: a program the checker refuses cannot be compiled, and
+    a draft with an open obligation may compile but may never run.
 
     Pure and disk-pure (`compile_source` reads nothing from and writes nothing
     to disk). Returns an admitted `Verdict` when the reference compiler accepts
-    `source`, else a refusal `Verdict` whose `code`/`message` are the reference
-    compiler's, verbatim. The security clause: this delegates to the reference
-    `compile_source`, so it can never admit what `revl` refuses."""
+    `source` AND the admission gate lets it run, else a refusal `Verdict` whose
+    `code`/`message` are the reference compiler's, verbatim. The security clause
+    (load-bearing): this delegates to the reference `compile_source` AND applies
+    `refuse_admission` — the SAME admission gate `admit_into`
+    (`compile_source(..., manifest=...)`), `Gate.load` (`Session.load`), and
+    `revl run` apply — so it can never admit what `revl` refuses. Without that
+    second call `admit` would accept a draft the reference refuses to run (a
+    typed hole checks so the rest of the draft can be checked, but it has no
+    implementation), which is exactly the false-admit the admission gate exists
+    to close (docs/holes.md)."""
     from .compiler import compile_source  # noqa: PLC0415 — lazy, keeps layer 1 light
     from .errors import RevlError  # noqa: PLC0415
+    from .holes import refuse_admission  # noqa: PLC0415
     try:
-        compile_source(source)
+        document = compile_source(source)
+        refuse_admission(document)
     except RevlError as error:
         return _verdict_from_error(error)
     return Verdict(True)
@@ -339,7 +350,22 @@ class AdmitResult:
 # process-global admit-bridge/session-owner binds (`admit_bridge._SESSION`,
 # `runtime._SESSION_OWNER`). Lifting this is owner-scoping work the arc does not
 # need here (337's mesh runs one gate per tier process).
-_ACTIVE_GATE: "Gate | None" = None
+#
+# The slot is a WEAK reference, not a strong one: a Gate dropped without
+# `close()` (`g = Gate(); del g`) must not soft-brick the process by pinning the
+# slot for a referent that is already gone. A weak slot lets a collected gate
+# free the slot on its own, so the single-gate invariant tracks the gate that is
+# actually LIVE, not merely the last one ever constructed.
+_ACTIVE_GATE: "weakref.ref[Gate] | None" = None
+
+
+def _live_gate() -> "Gate | None":
+    """The gate currently holding the single-gate slot, or None if the slot is
+    free — either never taken, released by `close()`, or vacated because the
+    holder was dropped without `close()` and has since been collected."""
+    if _ACTIVE_GATE is None:
+        return None
+    return _ACTIVE_GATE()
 
 
 class Gate:
@@ -371,7 +397,7 @@ class Gate:
                  approver: Callable[[dict], bool] | None = None,
                  record: bool | None = None) -> None:
         global _ACTIVE_GATE
-        if _ACTIVE_GATE is not None:
+        if _live_gate() is not None:
             raise GateError(
                 "a Gate is already live in this process. v1 is single-gate-per-"
                 "process (item 332): the admit crossing and the session owner "
@@ -392,7 +418,7 @@ class Gate:
         self._record = record if record is not None else (
             approval_policy is not None)
         self._loaded = False
-        _ACTIVE_GATE = self
+        _ACTIVE_GATE = weakref.ref(self)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -511,7 +537,7 @@ class Gate:
             except Exception:  # noqa: BLE001 — best-effort teardown on close
                 pass
             self._loaded = False
-        if _ACTIVE_GATE is self:
+        if _live_gate() is self:
             _ACTIVE_GATE = None
 
     def __enter__(self) -> "Gate":
