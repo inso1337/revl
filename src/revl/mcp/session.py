@@ -597,9 +597,12 @@ class Session:
         # activation body's crossing, so the `approval-consumed`/`approval-emission`
         # pair is written and the audit can join them on `requestId`.
         if self.recorder is not None and self.recorder.wal is None:
-            import tempfile  # noqa: PLC0415
-            path = self._wal_path or (
-                tempfile.gettempdir() + f"/revl-approval-{self._session_id}.wal")
+            from ..wal import default_wal_path  # noqa: PLC0415
+            # item 413: default the approval WAL into a durable, owner-only
+            # per-user state directory, not the reboot-wiped/world-traversable
+            # tempdir. "The gate's authority is the WAL": it must outlive a
+            # reboot and stay unreadable to other local accounts.
+            path = self._wal_path or default_wal_path(self._session_id)
             self.recorder.open_wal(path, self._generation)
 
     def grant_language_approval(self, capability: str, component: str,
