@@ -114,6 +114,53 @@ class BridgeResult:
     merges: tuple[str, ...] = ()
 
 
+# ---------------------------------------------------- item 274: navigable map
+#
+# The adapter refusal is already navigable in its OWN shape (a closed clause enum
+# per position). 274's work is a projection into the SHARED `navigate` record
+# (design §2.7), NOT a second decision. A REPAIRABLE clause (a missing default, an
+# unmapped Err variant, an ambiguous pairing, a dropped value, an outcome merge)
+# becomes one author-enacted `candidate` alternative naming the concrete edit. A
+# clause whose only "fix" would EXPAND capability (an unbounded/uncovered reach)
+# is TERMINAL: no alternative is emitted for it, because suggesting a capability
+# expansion is exactly the unsafe hint this design forbids (§2.7, the never-
+# unsafe test). When no repairable clause survives, the record is `blocked`.
+
+# clauses whose repair would add authority, or that the adapter simply cannot
+# synthesize — never an author-enactable adapter alternative.
+_ADAPTER_TERMINAL: frozenset[str] = frozenset({
+    "effect-missing-declaration", "effect-exceeds-bound", "unnameable-reach",
+    "color-mismatch", "commutative-mismatch", "fabricated-return",
+    "non-total-conversion", "method-missing",
+})
+
+
+def navigate_for_refusals(refusals, profile=None) -> dict:
+    """Project a `Refusal` list into one shared `navigate` record (family
+    `adapter`). Repairable clauses become author `candidate` alternatives; a
+    capability-expanding or otherwise-terminal clause contributes no alternative
+    (never a capability-expansion suggestion). `blocked` iff nothing repairable
+    survives. Collapses to the untrusted view like any other family."""
+    from . import navigate as nav  # noqa: PLC0415 — lazy, avoids a cycle
+    alts = []
+    for r in refusals:
+        if r.clause in _ADAPTER_TERMINAL:
+            continue
+        action = (r.hint.strip() or r.reason.strip()
+                  or f"repair the `{r.clause}` position")
+        where = f"{r.method or '?'}:{r.position or r.clause}"
+        alts.append(nav.alternative(
+            enacts=nav.ENACTS_AUTHOR, action=action, ref=where))
+    if not alts:
+        first = refusals[0] if refusals else None
+        reason = (first.reason if first is not None
+                  else "the adapter is not synthesizable")
+        return nav.blocked_record(family="adapter", reason=reason,
+                                  profile=profile)
+    return nav.record(family="adapter", blocked=False, alternatives=alts,
+                      profile=profile)
+
+
 # ---------------------------------------------------------------- type helpers
 
 

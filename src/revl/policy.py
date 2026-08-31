@@ -1479,8 +1479,8 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
     return out
 
 
-def _evidence_violations(policy: Policy, reports: dict, manifest: dict) \
-        -> list[Violation]:
+def _evidence_violations(policy: Policy, reports: dict, manifest: dict,
+                         profile=None) -> list[Violation]:
     """Turn every failing evidence clause into a refuse-only `Violation`."""
     violations: list[Violation] = []
     for name, entry in reports.items():
@@ -1489,7 +1489,7 @@ def _evidence_violations(policy: Policy, reports: dict, manifest: dict) \
                 continue
             for clause in report.failed():
                 violations.append(
-                    _evidence_violation(manifest, name, report, clause))
+                    _evidence_violation(manifest, name, report, clause, profile))
     return violations
 
 
@@ -1701,7 +1701,8 @@ def evaluate(policy: Policy, audit: dict,
             policy, audit, mcp_components, evidence=evidence, origins=origins,
             trusted_publishers=trusted_publishers, key=key,
             evidence_ir=evidence_ir)
-        violations.extend(_evidence_violations(policy, reports, manifest))
+        violations.extend(_evidence_violations(policy, reports, manifest,
+                                               profile))
         violations.extend(_register_violations(policy, reports, manifest))
 
     # item 249, Finding 3: a taint policy rule over an audit with NO taint surface
@@ -1901,8 +1902,25 @@ def _evidence_subject_phrase(report: "RuleReport") -> str:
     return f"components matching `{report.selector}`"
 
 
+# item 274, design §2.6: the closed facet registry, one producer per facet. The
+# refusal names the producer that RECORDS the missing fact; it never predicts the
+# outcome (a re-run may still fail). Off-table facets fall back to a generic
+# producer phrase (`--recompute` for a stale-standing fact).
+_EVIDENCE_PRODUCER = {
+    "fault-sweep": "the fault gauntlet run that records the sweep dossier",
+    "attestation": "the attestation registration for this component",
+    "publisher": "publishing this component under a trusted publisher",
+    "register": "the registration that records the fact",
+}
+
+
+def _evidence_producer(facet: str) -> str:
+    return _EVIDENCE_PRODUCER.get(
+        facet, f"the `{facet}` producer (or `--recompute` when stale-standing)")
+
+
 def _evidence_violation(manifest: dict, name: str, report: "RuleReport",
-                        clause: "ClauseVerdict") -> Violation:
+                        clause: "ClauseVerdict", profile=None) -> Violation:
     """A component fails an evidence threshold a rule requires (item 290). The
     why-trace is a CHAIN: component -> the failing facet with its recorded fact
     -> the rule's threshold (§3.4)."""
@@ -1922,7 +1940,13 @@ def _evidence_violation(manifest: dict, name: str, report: "RuleReport",
     ]
     why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
                    steps=steps)
-    return Violation("evidence", name, clause.facet, message, why)
+    from . import navigate as nav  # noqa: PLC0415 — lazy, additive
+    nav_rec = nav.evidence_navigate(
+        facet=clause.facet, threshold=clause.threshold, fact=clause.fact,
+        producer=_evidence_producer(clause.facet), rule_line=_rule_line(report),
+        profile=profile)
+    return Violation("evidence", name, clause.facet, message, why,
+                     navigate=nav_rec)
 
 
 def _approval_edge_covers(edge_scope: str, token: str) -> bool:
@@ -2035,7 +2059,7 @@ def _component_approval_edges(comp: dict) -> set:
     return scopes
 
 
-def approval_admission(policy: Policy, ir: dict) -> list[Violation]:
+def approval_admission(policy: Policy, ir: dict, profile=None) -> list[Violation]:
     """Refuse admission for a component that reaches a POLICY-approval-required
     capability with no covering `with` edge (item 246, Slice 2, Decision 3 rule
     2). Evaluated at admission over the audit graph, the same place the sandbox
@@ -2068,12 +2092,13 @@ def approval_admission(policy: Policy, ir: dict) -> list[Violation]:
                 continue
             if any(fnmatchcase(token, scope) or scope == token for scope in edges):
                 continue
-            violations.append(_approval_violation(manifest, name, reach, rule))
+            violations.append(
+                _approval_violation(manifest, name, reach, rule, profile))
     return violations
 
 
 def _approval_violation(manifest: dict, name: str, reach: Reach,
-                        rule: ApprovalRule) -> Violation:
+                        rule: ApprovalRule, profile=None) -> Violation:
     detail = (f"via emission `{reach.via}`" if reach.kind == "emission"
               else "through host code")
     message = (f"policy violation: capability `{reach.token}` requires approval, "
@@ -2083,7 +2108,15 @@ def _approval_violation(manifest: dict, name: str, reach: Reach,
                f"[{reach.token}] {{ ... }}`) and thread it (`emit … with a`)")
     why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
                    steps=_reach_step(manifest, name, reach))
-    return Violation("approval", name, reach.token, message, why)
+    from . import navigate as nav  # noqa: PLC0415 — lazy, additive
+    # the grant ledger is a RUNTIME surface (mcp/session), not held here at
+    # admission; a covering standing grant, when a caller threads one, is always
+    # a `candidate`/`live` alternative (TOCTOU, the HIGH fix), never a promise.
+    nav_rec = nav.approval_navigate(
+        token=reach.token, ttl_ms=rule.ttl_ms if rule is not None else None,
+        profile=profile)
+    return Violation("approval", name, reach.token, message, why,
+                     navigate=nav_rec)
 
 
 # ------------------------------------------------------------- enforcement
