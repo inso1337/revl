@@ -390,3 +390,122 @@ def test_no_policy_is_byte_identical(sink, files):
     # no approval metrics surface off-policy
     assert "approval" not in session.state()
     assert session._class_map is None
+
+
+# ---------------------------------------------------------------------------
+# 11. the spawn/instance seam does not evade the gate (item 246)
+#
+# The worst-class fold used to follow only the requires-wired service seam. An
+# emission reached through a supervised spawn handle (`emit w.inner.charge(x)`)
+# carries no `req` target, so it folded as class none at the caller and fired
+# with no human approval prompt. In the untrusted-author model the gated party
+# writes the composition, so it can deliberately route a granted-service
+# emission through a spawned worker to evade the class-(c) prompt.
+# ---------------------------------------------------------------------------
+
+# a supervisor whose ONLY crossing is a class-(c) emission reached through a
+# spawn handle (`emit w.inner.charge(...)`). The spawn is in the activation body
+# and the handle is used from the provide-method, the shape phase-1 instance
+# access supports at runtime (docs/design-v2-instances.md).
+_SPAWN_ROUTED = (
+    "extern emission fn charge(sink: Str, msg: Str) = @py {\n"
+    "    with open(sink, 'a') as _f:\n"
+    "        _f.write('charge:' + msg + '\\n')\n"
+    "    return\n"
+    "}\n"
+    "service Inner { emission fn charge(sink: Str, msg: Str) }\n"
+    "service Svc { emission fn serve(sink: Str, msg: Str) -> Int }\n"
+    "component Worker provides inner: Inner {\n"
+    "  provide inner { fn charge(sink, msg) { emit charge(sink, msg) return 1 } }\n"
+    "}\n"
+    "component C provides svc: Svc {\n"
+    "  let w = effect spawn Worker with { } undo w.dispose()\n"
+    "  provide svc { fn serve(sink, msg) { emit w.inner.charge(sink, msg) return 1 } }\n"
+    "}\n"
+)
+
+
+def test_spawn_routed_emission_folds_to_class_c():
+    # the class map must see the crossing through the spawn handle: without the
+    # fix `classify_call` returns class none and the gate proceeds silently.
+    from revl.mcp.approval import ClassMap
+    cm = ClassMap(compile_source(_SPAWN_ROUTED, "spawn_routed.rvl"))
+    reach = cm.classify_call("svc", "serve")
+    assert reach is not None and reach["class"] == "c"
+    assert "charge" in reach["capabilities"]
+
+
+@needs_cordis
+def test_spawn_routed_class_c_emission_prompts_and_holds_until_approved(sink):
+    from revl.mcp.approval import ApprovalRequired
+    session = _session()
+    session.load(compile_source(_SPAWN_ROUTED, "spawn_routed.rvl"), record=True)
+
+    with pytest.raises(ApprovalRequired) as exc:
+        session.call("svc", "serve", [sink, "hi"])
+    ticket = exc.value.ticket
+    assert _lines(sink) == []                        # the host body did NOT run
+    assert session._owner.prompts["perCall"] == 1
+    assert session._owner.approvals["prompted"] == 1
+
+    # approve, then the identical re-issue fires exactly once
+    session.approve_ticket(ticket["hash"])
+    session.call("svc", "serve", [sink, "hi"])
+    assert _lines(sink) == ["charge:hi"]
+
+
+def test_spawn_routed_emission_is_attributed_to_the_caller_audit():
+    # the G8 boundary / `policy.component_reach` must attribute the spawned
+    # emission's capability to the supervisor. The crossing routes a granted
+    # `payment` service through the worker, so C reaches `payment`.
+    from revl.__main__ import _boundary
+    from revl import policy
+    src = (
+        "extern emission fn wire(x: Str) = @py { return }\n"
+        "service Wire { emission fn send(x: Str) -> Int }\n"
+        "service Inner { emission[payment] fn charge(x: Str) -> Int }\n"
+        "service Svc { emission fn serve(x: Str) -> Int }\n"
+        "component Worker requires payment: Wire provides inner: Inner {\n"
+        "  provide inner { fn charge(x) { emit payment.send(x) return 1 } }\n"
+        "}\n"
+        "component C provides svc: Svc {\n"
+        "  provide svc {\n"
+        "    fn serve(x) {\n"
+        "      let w = effect spawn Worker with { } undo w.dispose()\n"
+        "      emit w.inner.charge(x)\n"
+        "      return 1\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    ir = compile_source(src, "spawn_audit.rvl")
+    reach = policy.component_reach({"boundary": _boundary(ir)}, "C")
+    tokens = {(r.token, r.kind) for r in reach}
+    assert ("payment", "emission") in tokens
+
+
+def test_spawn_routed_class_a_worker_does_not_over_prompt():
+    # a spawn whose provide-method reaches only class-(a) work must still fold to
+    # (a): no spurious per-call prompt. Only a spawned class-(c) crossing raises
+    # the caller to (c).
+    from revl.mcp.approval import ClassMap
+    src = (
+        "type Stash = { path: Str, bak: Str }\n"
+        "type FsError = { code: Str }\n"
+        "extern pure fn unstash(w: Stash) -> Unit = @py { return }\n"
+        "extern witnessed[fs] fn stash_path(p: Str)"
+        " -> Result[Stash, FsError] undo unstash(result) = @py {\n"
+        "    return Ok({'path': p, 'bak': p})\n"
+        "}\n"
+        "service Inner { emission fn touch(x: Str) }\n"
+        "service Svc { emission fn serve(x: Str) -> Int }\n"
+        "component Worker provides inner: Inner {\n"
+        "  provide inner { fn touch(x) { effect stash_path(x) } }\n"
+        "}\n"
+        "component D provides svc: Svc {\n"
+        "  let w = effect spawn Worker with { } undo w.dispose()\n"
+        "  provide svc { fn serve(x) { emit w.inner.touch(x) return 1 } }\n"
+        "}\n"
+    )
+    cm = ClassMap(compile_source(src, "spawn_safe.rvl"))
+    assert cm.classify_call("svc", "serve")["class"] == "a"
