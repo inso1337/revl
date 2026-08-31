@@ -706,7 +706,8 @@ def sandbox_audit_view(ir: dict, placement: dict) -> tuple[list[str], str | None
 # --------------------------------------------------------------------------
 
 
-def swap_admission(files, running_ir: dict, component: str, backend: str):
+def swap_admission(files, running_ir: dict, component: str, backend: str,
+                   from_backend: str | None = None):
     """Admit a candidate provider for `component`, re-hosted on `backend`,
     against the *running* manifest. Returns ``(candidate_ir, None)`` when the
     swap is admissible, or ``(None, diagnostic)`` when it is refused — in which
@@ -722,12 +723,21 @@ def swap_admission(files, running_ir: dict, component: str, backend: str):
       operation a consumer still calls is refused here with a guarantee-naming
       diagnostic (G2/G3, `differs from the running manifest in a way that
       breaks <consumer>`).
-    * **the seam is crossable** — a tier swap moves the component into its own
-      process, so every service it *provides and another component consumes*
-      must be transport-safe (async, value-typed; docs/interop-bridge.md §4).
-      An address-space-bound service (a sync `fn`, an `emission`, or a resource
-      return) cannot be re-pointed across a process boundary, so the swap is
-      refused before anything is booted.
+    * **the seam is crossable, in both directions.** A tier swap moves the
+      component into its own process, so every seam between it and the rest of
+      the composition becomes cross-process, INBOUND and OUTBOUND alike. A
+      resource-type return cannot cross a process seam by copy in either
+      direction, so a resource crossing on the services the component provides
+      (consumed by a component staying behind) OR on the services it requires
+      (from a component staying behind) is refused, through the same tier-
+      agnostic predicate the plan-time gate uses (`resource_crossing_refusal`).
+      The outbound side additionally refuses a re-pointed sync `fn`/`emission`:
+      an existing consumer's live call site is re-pointed across the new seam and
+      only a transport-safe (async, value-typed) service survives that re-point.
+      All of this is decided before anything is booted, and `do_swap` re-runs the
+      real plan-time gate (`cross_tier_boundary_check` + `tier_capability_gate`)
+      over the post-swap topology, so the swap-vs-plan parity is actual and
+      symmetric rather than prose.
 
     A pure tier swap (same source, new backend) satisfies the first trivially;
     the check still runs, because passing it *is* the cross-tier guarantee.
@@ -744,6 +754,44 @@ def swap_admission(files, running_ir: dict, component: str, backend: str):
         return None, (f"{component!r} is not a component of the running "
                       f"composition (nothing to swap)")
 
+    # Model the post-swap topology as two processes: the moving component alone
+    # (it goes to its own process on `backend`, v1 scope) and everything staying
+    # behind. Every seam between the two halves becomes cross-process, in BOTH
+    # directions: the services the component PROVIDES that another consumes
+    # (outbound) and the services it REQUIRES from a component staying behind
+    # (inbound). A resource handle cannot cross a process seam by copy either
+    # way, so refuse a resource crossing on EITHER side through the SAME shared
+    # predicate the plan-time gate uses (`resource_crossing_refusal`), keeping
+    # the swap-vs-plan parity actual and symmetric rather than a private loop
+    # that only walked the provides side.
+    cand_comps = candidate.get("components") or []
+    cand_moving = next((c for c in cand_comps
+                        if c.get("name") == component), running_comp)
+    move_provides = cand_moving.get("provides") or {}
+    move_requires = cand_moving.get("requires") or {}
+    rest_provides: dict[str, str] = {}
+    rest_requires: dict[str, str] = {}
+    for other in cand_comps:
+        if other.get("name") == component:
+            continue
+        rest_provides.update(other.get("provides") or {})
+        rest_requires.update(other.get("requires") or {})
+    model_provides = {"__moving__": dict(move_provides), "__rest__": rest_provides}
+    model_requires = {"__moving__": dict(move_requires), "__rest__": rest_requires}
+    model_owner = {k: "__moving__" for k in move_provides}
+    model_owner.update({k: "__rest__" for k in rest_provides})
+    model_backends = {"__moving__": backend, "__rest__": from_backend or "py"}
+    resource_problem = resource_crossing_refusal(
+        candidate, model_requires, model_provides, model_owner, model_backends)
+    if resource_problem is not None:
+        return None, resource_problem
+
+    # The provides side (outbound) additionally refuses a re-pointed SYNC/emission
+    # service: an existing consumer's live call site is re-pointed across the new
+    # seam, and only a transport-safe (async, value-typed) service survives that
+    # re-point. The inbound side is a FRESH successor wiring (no live re-point),
+    # so a sync inbound seam is permitted here exactly as the plan-time gate
+    # permits (and reports) a cross-tier sync seam.
     provided = running_comp.get("provides") or {}
     consumed_services = set()
     for other in running_ir.get("components") or []:
@@ -2245,12 +2293,39 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             return
 
         # --- admission gate: refuse without touching the running composition
-        candidate, error = swap_admission(files, ir, component, to_backend)
+        candidate, error = swap_admission(files, ir, component, to_backend,
+                                          from_backend=backends.get(old))
         if error is not None:
             for i, text in enumerate(error.splitlines()):
                 print(f"  {'swap refused:' if i == 0 else '             '} {text}", flush=True)
             print("  running composition untouched — the candidate never booted.", flush=True)
             return
+
+        # --- re-gate the POST-SWAP topology exactly like the initial plan
+        # (parity, not prose). The swap re-tiers `component` from `old`'s backend
+        # onto `to_backend`; the same seam that admission modelled component-wise
+        # is here re-checked over the real process placement, so the swapped
+        # component's new tier is gated identically to a from-scratch plan:
+        #   * tier_capability_gate: the target tier can actually emit it;
+        #   * cross_tier_boundary_check: no resource crosses a seam the re-tier
+        #     opens (either direction), matching the plan-time refusal.
+        # Modelled on a copy of the placement maps (the component is alone in its
+        # process in v1, so only its process's backend changes), so a refusal
+        # here leaves the running composition untouched, nothing booted.
+        post_backends = dict(backends)
+        post_backends[old] = to_backend
+        cap_after = tier_capability_gate(ir, placed, post_backends)
+        if cap_after:
+            print(f"  swap refused: {cap_after}", flush=True)
+            print("  running composition untouched; the candidate never booted.", flush=True)
+            return
+        boundary_after, _ = cross_tier_boundary_check(
+            ir, requires, provides, owner, post_backends, services)
+        if boundary_after:
+            print(f"  swap refused: {boundary_after}", flush=True)
+            print("  running composition untouched; the candidate never booted.", flush=True)
+            return
+
         try:
             # the successor hosts `component` alone on the target tier, so its
             # build must contain it even in a mixed-tier placement where the
