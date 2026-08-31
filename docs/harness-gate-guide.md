@@ -59,7 +59,18 @@ at runtime or in the harness can move a call between classes.
 | (c) immediate | any emission crossing that is neither (a `compensate` does not change this, 247) | prompt per call | `revl_call` returns `approvalRequired` with a ticket; nothing fired |
 
 A call's class is the worst class over every crossing its checked reach
-includes: one prompt covers the whole call or none of it. The three classes
+includes: one prompt covers the whole call or none of it.
+
+Because the class is the worst over the WHOLE reach, an indirection does not
+preserve it. A class-(a) `witnessed` op is 0-prompt, but an `emission fn` that
+merely forwards to it reaches an emission crossing and is class-(c), one prompt
+per call (D1). So a witnessed call factored behind any relay, wrapper, or helper
+emission silently loses the auto-approve guarantee: the natural refactor is not
+class-preserving, and there is no warning at the call site. To keep a witnessed
+op's (a) guarantee, keep the crossing direct. A relay over it is a deliberate
+escalation to (c), not a free abstraction.
+
+The three classes
 map onto three externs:
 
 ```revl
