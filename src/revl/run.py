@@ -1112,6 +1112,16 @@ class _Driver:
 
 def run_command(args) -> int:
     if getattr(args, "placement", None):
+        # `--placement` splits the composition across processes, each with its
+        # own tier; a top-level `--backend` would name one tier for the whole
+        # composition, which the placement contradicts. Refuse loudly instead
+        # of silently ignoring `--backend` (item 363).
+        if getattr(args, "backend", "py") != "py":
+            print("error: --backend and --placement are mutually exclusive — a "
+                  "placement assigns a tier per component (or per process), so "
+                  "there is no single --backend for the whole composition; drop "
+                  "--backend, or run without --placement", file=sys.stderr)
+            return 2
         from .placement import run_placement  # noqa: PLC0415 — lazy: no cordis needed to orchestrate
         return run_placement(args.files, args.placement, once=getattr(args, "once", False))
 

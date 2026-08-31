@@ -231,6 +231,108 @@ def _parse_probe(expr: str) -> dict:
 
 
 # --------------------------------------------------------------------------
+# per-component tier placement (roadmap item 363): the `[tiers]` surface
+# --------------------------------------------------------------------------
+#
+# A composition declares which backend tier each component emits to, in the
+# placement manifest, with no `.rvl` source change (docs/interop-bridge.md
+# "the broker is manifest data"; item 119 "read off the placement toml"):
+#
+#     default_tier = "py"
+#     [tiers]
+#     HotWorker = "rust"
+#     [config.HotWorker]
+#     threads = 4
+#
+# The conductor expands `[tiers]` into the equivalent synthesized `[processes]`
+# topology — one process per distinct declared tier — and proceeds through the
+# EXISTING conductor unchanged (placed map, seams, proxies, stub allowlists,
+# preflight, capability/realm checks, per-tier builds). A cross-tier component
+# communicates over the existing cross-process seam (generated proxy/stub over
+# UDS/mTLS, canonical value-copy encoding, G8 allowlist, seam deadline,
+# peer-death-as-withdrawal); two components on different tiers are in different
+# processes by construction, so there is no in-process cross-tier FFI to build.
+
+
+def expand_tiers(placement: dict, component_names) -> tuple[dict, str | None]:
+    """Expand a `[tiers]` / `default_tier` manifest into the equivalent
+    synthesized `[processes]` topology (one `tier_<backend>` process per
+    distinct declared tier, grouping every component by its tier; a component
+    absent from `[tiers]` takes `default_tier`, itself defaulting to ``py``).
+
+    Returns ``(expanded_placement, None)`` on success or
+    ``(placement, diagnostic)`` on a refusal. A manifest with neither
+    ``[tiers]`` nor ``default_tier`` is returned **unchanged** — the classic
+    hand-written `[processes]` form is byte-identical downstream, so the whole
+    feature is a no-op then (the item's additivity guarantee).
+    """
+    tiers = placement.get("tiers")
+    default_tier = placement.get("default_tier")
+    if tiers is None and default_tier is None:
+        return placement, None  # classic [processes] form, untouched
+    if placement.get("processes"):
+        return placement, (
+            "a placement declares both a per-component `[tiers]` table and an "
+            "explicit `[processes]` topology — they are two spellings of the "
+            "same placement and mutually exclusive in one file; keep `[tiers]` "
+            "for one-process-per-tier, or `[processes]` for a hand-written "
+            "topology (addresses, TLS identities, probes, per-process deadlines)")
+    if tiers is not None and not isinstance(tiers, dict):
+        return placement, '`[tiers]` must be a table of `Component = "backend"`'
+    tiers = tiers or {}
+    default_tier = default_tier or "py"
+    known_names = set(component_names)
+    unknown = sorted(c for c in tiers if c not in known_names)
+    if unknown:
+        return placement, (
+            f"[tiers] names unknown component(s): {', '.join(unknown)} "
+            f"(known: {', '.join(sorted(known_names))})")
+    # validate every declared tier before synthesizing: wasm is refused with a
+    # redirect (no wasm placement runner on the substrate), an unknown name is
+    # named. The default_tier is validated once (it applies to every component
+    # absent from [tiers]).
+    for cname, backend in [("<default_tier>", default_tier),
+                           *tiers.items()]:
+        raw = str(backend)
+        canon = _canonical_backend(raw)
+        if raw == "wasm" or canon == "wasm":
+            who = ("default_tier" if cname == "<default_tier>"
+                   else f"component {cname!r}")
+            return placement, (
+                f"{who} is placed on the `wasm` tier, which is not a placement "
+                "tier: no wasm placement runner, bridge client, or stub exists "
+                "on the substrate (a wasm placement runner is a separately "
+                "designed follow-on). Place native components on `rust` or `go`.")
+        if canon not in KNOWN_BACKENDS:
+            who = ("default_tier" if cname == "<default_tier>"
+                   else f"component {cname!r}")
+            return placement, (
+                f"{who} is placed on unknown tier {raw!r} "
+                f"(known: {', '.join(KNOWN_BACKENDS)})")
+    # group components by their declared (or default) tier, deterministically
+    by_tier: dict[str, list[str]] = {}
+    for cname in component_names:
+        backend = _canonical_backend(str(tiers.get(cname, default_tier)))
+        by_tier.setdefault(backend, []).append(cname)
+    processes: dict[str, dict] = {}
+    for backend in sorted(by_tier):
+        processes[f"tier_{backend}"] = {
+            "backend": backend, "components": list(by_tier[backend])}
+    # a top-level `probe` list drives the default-tier (control-plane) process:
+    # the [tiers] form has no named process for the author to attach probes to,
+    # and a cross-seam probe originates from the orchestrating control plane.
+    probe = placement.get("probe")
+    if probe:
+        control = f"tier_{_canonical_backend(str(default_tier))}"
+        if control in processes:
+            processes[control]["probe"] = list(probe)
+    expanded = {k: v for k, v in placement.items()
+                if k not in ("tiers", "default_tier", "probe")}
+    expanded["processes"] = processes
+    return expanded, None
+
+
+# --------------------------------------------------------------------------
 # live swap: admission gate (roadmap §23, `revl swap <component> --to <backend>`)
 # --------------------------------------------------------------------------
 
@@ -625,6 +727,190 @@ def ts_safe_ir(ir: dict) -> dict:
     return out
 
 
+def placement_slice(ir: dict, kept) -> dict:
+    """The slice of a linked composition a process hosts (roadmap item 363,
+    the general form of `ts_safe_ir`). Keep the `kept` components, every
+    service and type declaration, and every top-level fn and extern REACHED
+    from a kept component (transitively through kept fns); drop the rest.
+
+    Two load-bearing properties, each an exit test:
+
+    * **Additive.** A process that hosts every component gets the full IR back
+      byte-identical (the guard below), so a single-process placement — and
+      every all-same-tier placement — builds exactly today's artifact.
+    * **Unblocking.** A `@py`-only extern reached only by py-placed components
+      never reaches the rust/go emitter, so a composition whose control plane
+      touches a `@py` extern can still place its hot worker on rust. This is
+      `ts_safe_ir`'s job done once, uniformly, by placement declaration instead
+      of per-tier body inference; `ts_safe_ir` stays as a second ts-specific
+      filter applied after this slice.
+
+    Reachability reuses the deliberately over-inclusive `_names_in` name walk
+    (it never drops an extern a kept component still reaches). A shared pure fn
+    reached from both sides of a seam is kept in BOTH slices — correct (pure
+    code has no home process), and exactly where the item-385 cross-tier
+    byte-equality discipline bites.
+    """
+    all_names = {c.get("name") for c in ir.get("components") or []}
+    kept = {k for k in kept if k in all_names}
+    if kept >= all_names:
+        return ir  # hosts everything -> the whole document, byte-identical
+    components = [c for c in ir.get("components") or [] if c.get("name") in kept]
+    functions = ir.get("functions") or []
+    externs = ir.get("externs") or []
+    reachable: set = set()
+    for comp in components:
+        _names_in(comp, reachable)
+    # fixpoint: a kept fn may reach further fns/externs (a shared helper chain)
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            if fn.get("name") in reachable:
+                before = len(reachable)
+                _names_in(fn, reachable)
+                changed = changed or len(reachable) != before
+    out = dict(ir)
+    out["components"] = components
+    out["functions"] = [f for f in functions if f.get("name") in reachable]
+    out["externs"] = [e for e in externs if e.get("name") in reachable]
+    return out
+
+
+# per-backend emitter modules, imported lazily for the plan-time capability
+# dry-run. Every emitter is pure-python codegen (stdlib only), so the gate
+# needs no tier toolchain — a fn-typed component placed on java is refused at
+# plan time with the emitter's own tier-limit message, never a javac stderr.
+_EMIT_GATE_MODULES: dict[str, object] = {}
+_EMIT_GATE_PATHS = {
+    "py": _BACKENDS_DIR / "python" / "emit.py",
+    "node": _TS_DIR / "emit.py",
+    "rust": _BACKENDS_DIR / "rust" / "emit.py",
+    "go": _GO_DIR / "emit.py",
+    "java": _JAVA_DIR / "emit.py",
+}
+
+
+def _emit_gate_module(backend: str):
+    if backend not in _EMIT_GATE_MODULES:
+        path = _EMIT_GATE_PATHS[backend]
+        spec = importlib.util.spec_from_file_location(f"revl_{backend}_emit_gate", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _EMIT_GATE_MODULES[backend] = module
+    return _EMIT_GATE_MODULES[backend]
+
+
+def _dryrun_emit(backend: str, sliced: dict) -> None:
+    """Run `backend`'s emitter over `sliced` and let its tier-limit `EmitError`
+    propagate. The emitters ARE the capability oracle (docs/conformance.md):
+    each tier limit lives as a named refusal at emit time, so dry-running the
+    emit keeps the gate exactly as strong as the real refusal set with no
+    second list to drift (the design's recommended shape)."""
+    module = _emit_gate_module(backend)
+    if backend == "node":
+        module.emit(ts_safe_ir(sliced))
+    elif backend == "go":
+        module.emit(sliced, "emitted")
+    else:  # py, rust, java
+        module.emit(sliced)
+
+
+def tier_capability_gate(ir: dict, placed: dict, backends: dict) -> str | None:
+    """Refuse, at plan time, a component placed on a tier that cannot emit it,
+    naming the component, the tier, and the tier's own reason — never a raw
+    toolchain error (roadmap item 363, stage 3).
+
+    Mechanism: dry-run each tier's placement slice through its emitter before
+    anything spawns. On a refusal, attribution re-emits single-component
+    sub-slices to name the culprit (bounded work, only on the failure path).
+    `py` is skipped — it is the reference tier and refuses no construct that
+    compiled — so a placement using only `py` processes runs no gate and is
+    byte-identical.
+    """
+    # components hosted on each compiled tier, in load order for a stable slice
+    by_backend: dict[str, list[str]] = {}
+    order = [c.get("name") for c in ir.get("components") or []]
+    for cname in order:
+        backend = backends.get(placed.get(cname))
+        if backend and backend != "py":
+            by_backend.setdefault(backend, []).append(cname)
+    for backend, comps in by_backend.items():
+        try:
+            _dryrun_emit(backend, placement_slice(ir, set(comps)))
+        except Exception as whole:  # noqa: BLE001 — any refusal is a plan diagnostic
+            culprit, reason = None, str(whole).strip()
+            for cname in comps:
+                try:
+                    _dryrun_emit(backend, placement_slice(ir, {cname}))
+                except Exception as single:  # noqa: BLE001
+                    culprit, reason = cname, str(single).strip()
+                    break
+            named = f"component {culprit!r}" if culprit else "a component"
+            return (
+                f"{named} cannot be placed on the `{backend}` tier: {reason}\n"
+                f"       (place it on a tier that supports the construct, or "
+                f"keep it on the default tier; the `{backend}` emitter is the "
+                f"capability oracle — docs/conformance.md)")
+    return None
+
+
+def cross_tier_boundary_check(ir: dict, requires: dict, provides: dict,
+                              owner: dict, backends: dict,
+                              services: dict) -> tuple[str | None, list[str]]:
+    """Plan-time checks over every CROSS-TIER seam the conductor creates
+    (roadmap item 363, stage 4). A cross-tier seam is a required key served by
+    a process on a DIFFERENT backend; a same-tier cross-process seam is
+    untouched (byte-identical to today).
+
+    * **Refuse** a resource-type crossing. A service whose signature mentions a
+      resource type (an `extern acquire` return) cannot cross a process seam —
+      a handle's lifetime is tied to a fiber in one process; copying it is
+      meaningless and proxying it is out of scope. This is parity with the
+      `revl swap` gate (`placement.py` `swap_admission`), which the initial
+      conductor did not enforce; 363 closes that asymmetry for the seams it
+      creates. A cross-tier witnessed rollback is the same scope-out: what
+      crosses a seam is a call and a value, never a witness ledger.
+    * **Report** a sync (address-space-bound-for-async-reasons) crossing. A
+      sync `fn`/`emission` behind a cross-tier seam is permitted (today's
+      cross-process placements permit it and pay the blocking round-trip) but
+      NAMED — a hot worker behind a sync seam is a performance lie the author
+      should see before wondering where the native speedup went.
+
+    Returns ``(diagnostic_or_None, report_lines)``.
+    """
+    verdicts = distributability(ir)
+    lines: list[str] = []
+    for consumer, keys in requires.items():
+        for key, service in keys.items():
+            if key in provides.get(consumer, {}):
+                continue  # served locally, not a seam
+            host = owner.get(key)
+            if host is None:
+                continue  # a remote seam (item 151) has no local owner
+            if backends.get(host) == backends.get(consumer):
+                continue  # same-tier seam: unchanged from today
+            verdict = verdicts.get(service) or {}
+            reasons = verdict.get("reasons") or []
+            resource_reasons = [r for r in reasons if "resource type" in r]
+            if resource_reasons:
+                return (
+                    f"service `{service}` (key {key!r}) crosses the tier "
+                    f"boundary {backends.get(consumer)} <- {backends.get(host)} "
+                    f"but is address-space-bound: {', '.join(resource_reasons)}. "
+                    "A resource handle's lifetime is tied to a fiber in one "
+                    "process; it cannot cross a seam by copy, and a cross-tier "
+                    "witnessed rollback is out of scope (parity with the "
+                    "`revl swap` gate, docs/interop-bridge.md §4)."), lines
+            if verdict.get("verdict") == "address-space-bound":
+                lines.append(
+                    f"  seam {consumer}.{key} ({backends.get(consumer)} <- "
+                    f"{backends.get(host)}): service `{service}` is "
+                    f"address-space-bound ({', '.join(reasons)}) — permitted, "
+                    "but each call is a blocking cross-tier round-trip")
+    return None, lines
+
+
 def _emit_ts_module(ir: dict, tmp: Path) -> str:
     """Emit the cordis-ts module for node processes into backends/typescript/
     _gen/ so its `../runtime.ts` / `cordis` imports resolve.
@@ -801,6 +1087,15 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         return 1
 
     placement = _load_placement(placement_path)
+    # item 363: a `[tiers]` / `default_tier` manifest declares a backend tier
+    # per component and is expanded here into the equivalent synthesized
+    # `[processes]` topology (one process per distinct tier). A classic
+    # `[processes]` manifest is returned unchanged, so everything below runs
+    # identically and is byte-identical for existing placements.
+    placement, tier_err = expand_tiers(placement, [c["name"] for c in ir.get("components") or []])
+    if tier_err:
+        print(f"error: {tier_err}", file=sys.stderr)
+        return 1
     processes = placement.get("processes") or {}
     config = placement.get("config") or {}
     # composition-wide seam-deadline default; a process may override it, and a
@@ -1074,6 +1369,12 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     backends: dict[str, str] = {}
     for pname, pconf in processes.items():
         backend = _canonical_backend(pconf.get("backend", "py"))
+        if backend == "wasm" or pconf.get("backend") == "wasm":
+            return abort(f"process {pname!r} is on the `wasm` tier, which is not a "
+                         "placement tier: no wasm placement runner, bridge client, "
+                         "or stub exists on the substrate (a wasm placement runner "
+                         "is a separately designed follow-on). Place native "
+                         "components on `rust` or `go`.")
         if backend not in KNOWN_BACKENDS:
             return abort(f"process {pname!r} has unsupported backend {pconf.get('backend')!r} "
                          f"({', '.join(KNOWN_BACKENDS)})")
@@ -1191,25 +1492,37 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     cleanup: list[str] = []
     built: dict[str, object] = {}
 
-    def ensure_backend(backend: str) -> None:
-        if backend in built:
+    def _backend_slice(backend: str, extra=()) -> dict:
+        """The IR a tier's emitter sees: the placement slice of every component
+        hosted on that backend (item 363). `extra` names a component being
+        swapped onto the tier live, so its successor build contains it. A tier
+        that hosts every component gets the full IR back byte-identical, so an
+        existing (single-tier or all-same-tier) placement builds today's
+        artifact unchanged."""
+        comps = {c for c, p in placed.items() if backends.get(p) == backend}
+        comps |= set(extra)
+        return placement_slice(ir, comps)
+
+    def ensure_backend(backend: str, extra=(), rebuild: bool = False) -> None:
+        if backend in built and not rebuild:
             return
+        sliced = _backend_slice(backend, extra)
         if backend == "node":
-            module = _emit_ts_module(ir, tmp)
+            module = _emit_ts_module(sliced, tmp)
             cleanup.append(module)
             built["node"] = module
         elif backend == "rust":
-            built["rust"] = _build_rust(ir, tmp)
+            built["rust"] = _build_rust(sliced, tmp)
         elif backend == "go":
-            built["go"] = _build_go(ir, tmp)
+            built["go"] = _build_go(sliced, tmp)
         elif backend == "java":
             java21_bin = _find_jdk21()
             cordis_classes = _find_cordis4j_classes()
             if java21_bin and cordis_classes:
-                built["java"] = ("real", _build_java_real(ir, tmp, java21_bin, cordis_classes),
+                built["java"] = ("real", _build_java_real(sliced, tmp, java21_bin, cordis_classes),
                                  java21_bin, cordis_classes)
             else:
-                built["java"] = ("stub", _build_java(ir, tmp), None, None)
+                built["java"] = ("stub", _build_java(sliced, tmp), None, None)
         else:  # py needs no build step
             built["py"] = True
 
@@ -1247,6 +1560,27 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                         str(spec_file)], None, "term"
             return ["java", "-cp", out, "PlacementRunner", str(spec_file)], None, "term"
         return [sys.executable, "-m", "revl._process_runner", str(spec_file)], env, "term"
+
+    # --- tier-capability gate (item 363, stage 3): a component placed on a
+    # tier that cannot emit it is refused HERE, at plan time, with a diagnostic
+    # naming the component + tier + the tier's own reason — never a raw
+    # toolchain error after a partial spawn. The emitters are the oracle
+    # (dry-run per slice); wasm was already refused at expansion.
+    cap_problem = tier_capability_gate(ir, placed, backends)
+    if cap_problem:
+        return abort(cap_problem)
+
+    # --- cross-tier boundary checks (item 363, stage 4): refuse a resource-type
+    # crossing (parity with the swap gate; a handle cannot cross a process
+    # seam and a cross-tier witnessed rollback is out of scope), and NAME every
+    # sync (address-space-bound) cross-tier seam (permitted, but a blocking
+    # round-trip the author should see). Same-tier seams are untouched.
+    boundary_problem, boundary_report = cross_tier_boundary_check(
+        ir, requires, provides, owner, backends, services)
+    if boundary_problem:
+        return abort(boundary_problem)
+    for advice in boundary_report:
+        print(advice, flush=True)
 
     try:
         for backend in backends.values():
@@ -1361,7 +1695,12 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             print("  running composition untouched — the candidate never booted.", flush=True)
             return
         try:
-            ensure_backend(to_backend)
+            # the successor hosts `component` alone on the target tier, so its
+            # build must contain it even in a mixed-tier placement where the
+            # tier's initial slice did not (item 363: builds are per component
+            # set, not the shared whole-IR cache). rebuild=True re-emits the
+            # tier binary including the swapped component.
+            ensure_backend(to_backend, extra=(component,), rebuild=True)
         except (RevlError, RuntimeError, OSError) as exc:
             print(f"swap refused: could not build the {to_backend} tier:\n{exc}", flush=True)
             print("  running composition untouched.", flush=True)
