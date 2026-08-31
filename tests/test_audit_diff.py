@@ -196,3 +196,117 @@ def test_cli_json_diff_is_composable(tmp_path, capsys):
     assert report["added"] == ["emit:Front:cache.put"]
     assert report["widened"] is True
     assert code == 1
+
+
+# -------------------------------------------- item 256 Slice 2: secrets table
+
+# A composition that binds one secret to the emission extern it is confined to.
+# The two-extern helper lets a rebind move the binding to a WIDER (different)
+# capability, so the crossing token changes and the addition is a widening.
+def _secret_prog(cap: str) -> str:
+    return (
+        "extern emission[model.complete] fn complete(p: Str) -> Str "
+        "= @py { return p }\n"
+        "extern emission[model.embed] fn embed(p: Str) -> Str "
+        "= @py { return p }\n"
+        "secret openai_key for " + cap + "\n"
+        "service Ops { emission fn go(u: Str) -> Int }\n"
+        "component Agent provides ops: Ops {\n"
+        "  provide ops { fn go(u) { return 0 } }\n}\n"
+    )
+
+
+# a secret-free sibling with the SAME externs and shape, so the only difference
+# is the `secret` declaration itself.
+_SECRET_FREE = (
+    "extern emission[model.complete] fn complete(p: Str) -> Str "
+    "= @py { return p }\n"
+    "extern emission[model.embed] fn embed(p: Str) -> Str = @py { return p }\n"
+    "service Ops { emission fn go(u: Str) -> Int }\n"
+    "component Agent provides ops: Ops {\n"
+    "  provide ops { fn go(u) { return 0 } }\n}\n"
+)
+
+
+def test_secrets_table_is_name_and_capability_only():
+    rep = _audit(_secret_prog("model.complete"))
+    assert rep["secrets"] == [
+        {"name": "openai_key", "capability": "model.complete"}]
+    # name + capability ONLY, never a value, length, hash, or timing (§5a, A5).
+    row = rep["secrets"][0]
+    assert set(row) == {"name", "capability"}
+    for forbidden in ("value", "length", "len", "hash", "digest", "timing"):
+        assert forbidden not in row
+    # the value string appears NOWHERE in the audit surface (it is not in the IR).
+    import json as _json
+    assert "openai_key" in _json.dumps(rep)   # the NAME is intentional (authority)
+    assert "capability" in _json.dumps(rep["secrets"][0])
+
+
+def test_secret_binding_shows_the_secret_crossing():
+    cs = crossings(_audit(_secret_prog("model.complete")))
+    assert "secret:model.complete:openai_key" in cs
+    # exactly one secret crossing, and it names the capability, not a value.
+    assert [c for c in cs if c.startswith("secret:")] == [
+        "secret:model.complete:openai_key"]
+
+
+def test_secret_free_composition_has_no_secrets_table():
+    rep = _audit(_SECRET_FREE)
+    # ABSENT (not `[]`) for a secret-free composition, byte-identical to before.
+    assert "secrets" not in rep
+    assert [c for c in crossings(rep) if c.startswith("secret:")] == []
+
+
+def test_secret_free_audit_is_byte_identical_to_before():
+    # The `secrets` key is the ONLY thing Slice 2 adds. A composition that binds
+    # no secret must produce the exact same report as a hand-built dict with no
+    # `secrets` key, i.e. nothing about the surface moved for the common case.
+    rep = _audit(_SECRET_FREE)
+    assert all(k != "secrets" for k in rep)
+
+
+def test_binding_a_secret_is_a_widening():
+    prev = _audit(_SECRET_FREE)
+    new = _audit(_secret_prog("model.complete"))
+    result = evaluate(prev, new)
+    assert "secret:model.complete:openai_key" in result["added"]
+    assert result["widened"] is True
+    assert result["unacknowledged"] == ["secret:model.complete:openai_key"]
+
+
+def test_rebinding_a_secret_to_a_wider_capability_is_a_widening():
+    prev = _audit(_secret_prog("model.complete"))
+    new = _audit(_secret_prog("model.embed"))
+    result = evaluate(prev, new)
+    # the new (wider) binding is an addition the gate flags...
+    assert "secret:model.embed:openai_key" in result["added"]
+    assert result["widened"] is True
+    # ...and the old binding drops out as a narrowing (safe).
+    assert "secret:model.complete:openai_key" in result["removed"]
+
+
+def test_removing_a_secret_binding_is_a_narrowing():
+    prev = _audit(_secret_prog("model.complete"))
+    new = _audit(_SECRET_FREE)
+    result = evaluate(prev, new)
+    assert "secret:model.complete:openai_key" in result["removed"]
+    assert result["added"] == []
+    assert result["widened"] is False
+
+
+def test_cli_json_body_carries_secrets_identically_to_audit_report(tmp_path,
+                                                                    capsys):
+    # The `--json` hand-built doc (__main__._run_audit) must match audit_report
+    # byte-for-byte, INCLUDING the secrets key (test_interchange's additive-body
+    # invariant, now exercised on a secret-bearing composition).
+    from revl import compile_files  # noqa: PLC0415
+    src = tmp_path / "secret.rvl"
+    src.write_text(_secret_prog("model.complete"))
+    assert main(["audit", str(src), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    body = {k: v for k, v in doc.items()
+            if k not in ("schema_version", "kind")}
+    assert body == audit_report(compile_files([str(src)]))
+    assert body["secrets"] == [
+        {"name": "openai_key", "capability": "model.complete"}]
