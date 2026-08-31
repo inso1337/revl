@@ -213,6 +213,14 @@ REJECTIONS = {
     "g4_extern_compensate_result.rvl": "`result` is not bound in the `compensate` slot of extern `send`",
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
     "g4_emission_not_declared.rvl": "`Cache.put` is declared plain, but this implementation reaches `db.execute`",
+    # item 294 Slice 1: a spawn that widens a parameterized capability (a child
+    # reaching a path outside the parent's declared cone) is refused by the same
+    # attenuation fold that refuses a dropped token, now comparing (T, P) via
+    # the key-to-token bridge.
+    "g4_spawn_widens_parameter.rvl":
+        "granting it `fs(path=\"/etc\")`, but `Router` holds only "
+        "`fs(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
+        "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
     "g4_spawn_widens_capability.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
     # item 82: an emission reached through a spawn handle (`w.task.run(...)`,
