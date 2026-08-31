@@ -76,6 +76,7 @@ _IMPORT_ALIAS = {
     "plug": "_revl_plug",
     "set_trace": "_revl_set_trace",
     "retry_idempotent": "_revl_retry_idempotent",
+    "validate_response": "_revl_validate",
     "Clock": "_revl_Clock",
     "SessionOwner": "_revl_SessionOwner",
     "set_session_owner": "_revl_set_session_owner",
@@ -815,10 +816,22 @@ class _ComponentEmitter:
             # ternary arm (`p == "go" ? emit m.complete(p) : "idle"`), so no
             # coroutine leaks unawaited. `_py_yields_coroutine` is the same
             # predicate the arrow renderer uses, so the two stay in lockstep.
-            if self._in_async and not self._in_arrow \
-                    and _py_yields_coroutine(expr, self.requires):
-                return f"(await {rendered})"
-            return rendered
+            awaited = (self._in_async and not self._in_arrow
+                       and _py_yields_coroutine(expr, self.requires))
+            settled = f"(await {rendered})" if awaited else rendered
+            # item 257: the validate-on-response seam. A `validated` emission's
+            # SETTLED response is checked revl-side against the schema derived
+            # from its return type (regardless of the provider), and the revl ADT
+            # is constructed from the validated tag/value. A malformed response is
+            # a typed fault (retry is Slice 2). Byte-identical for any non-
+            # `validated` call: `_validated_call` returns None.
+            validated = self._validated_call(expr)
+            if validated is not None:
+                schema, ctors = validated
+                self.uses.add("validate_response")
+                return (f"_revl_validate({settled}, {schema!r}, {where!r}, "
+                        f"{ctors})")
+            return settled
         if kind == "host":
             fn = expr.get("fn") or ""
             root, _, rest = fn.partition(".")
@@ -1144,6 +1157,37 @@ class _ComponentEmitter:
         else:
             raise EmitError(f"{where}: unknown step {kind!r}")
         out.add(0)
+
+    def _validated_call(self, expr: dict):
+        """Item 257: if this `call` node is an `emit` on a `validated` service
+        emission (through a req key), return `(schema, ctors)` for the validate
+        seam; else None. `schema` is the derived boundary schema carried on the
+        method IR; `ctors` is a Python dict-literal mapping each case tag to its
+        emitted ADT case class (or `None` when the validated return is not a
+        tagged variant, e.g. a record or primitive, and the validated value is
+        used as-is)."""
+        target = expr.get("target")
+        if not (isinstance(target, dict) and target.get("kind") == "req"):
+            return None
+        svc_name = self.requires.get(target.get("name"))
+        spec = (((self.services.get(svc_name) or {}).get("methods") or {})
+                .get(expr.get("method")) or {})
+        if not spec.get("validated"):
+            return None
+        return spec.get("response_schema"), self._ctor_map(spec.get("response_schema"))
+
+    def _ctor_map(self, schema) -> str:
+        """The tag -> ADT-case-class dict literal for a discriminated-union
+        response schema, or `"None"` when the schema is not a tagged union."""
+        tags = []
+        for arm in (schema or {}).get("oneOf") or []:
+            tag = ((arm.get("properties") or {}).get("tag") or {}).get("const")
+            if isinstance(tag, str):
+                tags.append(tag)
+        if not tags:
+            return "None"
+        return "{" + ", ".join(
+            f"{tag!r}: {_ident(tag, 'adt case')}" for tag in tags) + "}"
 
     def _emit_fire(self, step: dict, where: str) -> str:
         """The Python expression that fires an `emit` step's host body. When the

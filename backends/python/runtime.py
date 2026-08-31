@@ -109,6 +109,149 @@ async def retry_idempotent(call, *, idempotent: bool = False,
     raise last
 
 
+class ResponseValidationError(RuntimeError):
+    """Item 257: a `validated` emission's response failed to validate against
+    the schema derived from its return type.
+
+    This is a TYPED fault at the boundary, not a stringly parse error a body
+    forgets to handle. The malformed response is DISCARDED before the body ever
+    sees it (validation runs at the forward crossing, before the value binds and
+    before the body resumes), so nothing downstream consumed it and no `emit`
+    step fired on it. That is what makes a completion safe-to-retry ("a read with
+    a cost", §5.1), but the retry BUDGET and loop are Slice 2; Slice 1 raises
+    this typed fault without re-issuing. `retryable` records the classification
+    so the audit surface and the Slice-2 loop can read it.
+    """
+
+    retryable = True
+
+    def __init__(self, message: str, *, where: str = "", schema=None, value=None):
+        super().__init__(message)
+        self.where = where
+        self.schema = schema
+        self.value = value
+
+
+def _json_type_ok(value, json_type: str) -> bool:
+    if json_type == "object":
+        return isinstance(value, dict)
+    if json_type == "array":
+        return isinstance(value, list)
+    if json_type == "string":
+        return isinstance(value, str)
+    if json_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if json_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if json_type == "boolean":
+        return isinstance(value, bool)
+    if json_type == "null":
+        return value is None
+    return True
+
+
+def _json_schema_error(value, schema, path: str = "$"):
+    """Validate ``value`` against the derived JSON-Schema subset the revl mapping
+    emits (item 257, §3). Returns an error string for the FIRST violation, or
+    ``None`` when the value conforms. Covers exactly the constructs
+    `json_schema_for` produces: primitive `type`, `const`, `enum`, `nullable`,
+    `properties`/`required`/`additionalProperties` (bool or schema), `items`, and
+    a discriminated `oneOf` (exactly one arm matches). No `$ref` (Slice 1 refuses
+    cyclic types), so the walk is finite by construction."""
+    if not isinstance(schema, dict):
+        return None
+
+    if "const" in schema:
+        if value != schema["const"]:
+            return f"{path}: expected const {schema['const']!r}, got {value!r}"
+        return None
+
+    if "enum" in schema:
+        if value not in schema["enum"]:
+            return f"{path}: {value!r} is not one of {schema['enum']!r}"
+        return None
+
+    if "oneOf" in schema:
+        matches = [arm for arm in schema["oneOf"]
+                   if _json_schema_error(value, arm, path) is None]
+        if len(matches) == 1:
+            return None
+        if not matches:
+            return (f"{path}: value matches no arm of the union "
+                    f"(a well-formed value names exactly one constructor)")
+        return f"{path}: value is ambiguous, matching {len(matches)} union arms"
+
+    if schema.get("nullable") and value is None:
+        return None
+
+    json_type = schema.get("type")
+    if json_type is not None and not _json_type_ok(value, json_type):
+        return f"{path}: expected type {json_type!r}, got {type(value).__name__}"
+
+    if json_type == "object" or isinstance(value, dict):
+        if not isinstance(value, dict):
+            return None
+        props = schema.get("properties") or {}
+        for name in schema.get("required") or []:
+            if name not in value:
+                return f"{path}: missing required property {name!r}"
+        extra = schema.get("additionalProperties", True)
+        for key, item in value.items():
+            if key in props:
+                err = _json_schema_error(item, props[key], f"{path}.{key}")
+                if err is not None:
+                    return err
+            elif extra is False:
+                return f"{path}: unexpected property {key!r}"
+            elif isinstance(extra, dict):
+                err = _json_schema_error(item, extra, f"{path}.{key}")
+                if err is not None:
+                    return err
+
+    if json_type == "array" and isinstance(value, list):
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for i, item in enumerate(value):
+                err = _json_schema_error(item, items, f"{path}[{i}]")
+                if err is not None:
+                    return err
+
+    return None
+
+
+_VALIDATE_MISSING = object()
+
+
+def validate_response(value, schema, where: str = "", constructors=None):
+    """Item 257 (§4): the validate-on-response seam. Check ``value`` against the
+    derived ``schema`` REGARDLESS of what the provider did, and on success
+    construct the revl ADT value from the validated tag/value so the tagged wire
+    shape never leaks into the matched-over value (§3.2). On failure raise the
+    typed :class:`ResponseValidationError` (the malformed value is discarded
+    before the body sees it).
+
+    ``constructors`` maps each case tag to its emitted ADT case class. Absent
+    (a non-ADT validated return, e.g. a record or a primitive), the validated
+    value is returned as-is."""
+    err = _json_schema_error(value, schema, "$")
+    if err is not None:
+        raise ResponseValidationError(
+            f"{where}: response failed validation: {err}"
+            if where else f"response failed validation: {err}",
+            where=where, schema=schema, value=value)
+    if constructors and isinstance(value, dict) and "tag" in value:
+        tag = value["tag"]
+        ctor = constructors.get(tag)
+        if ctor is None:
+            raise ResponseValidationError(
+                f"{where}: validated response tag {tag!r} names no constructor"
+                if where else f"validated response tag {tag!r} names no constructor",
+                where=where, schema=schema, value=value)
+        payload = value.get("value", _VALIDATE_MISSING)
+        return ctor() if payload is _VALIDATE_MISSING else ctor(payload)
+    return value
+
+
 # ---------------------------------------------------------------------------
 # v2: realm placement (docs/design-v2-realms.md)
 # ---------------------------------------------------------------------------
