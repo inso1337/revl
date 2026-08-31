@@ -680,6 +680,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict", action="store_true",
         help="least-privilege gate: exit nonzero if any component over-declares "
              "an emission the run never exercised")
+    profile_cmd.add_argument(
+        "--patch", "--minimize", dest="patch", action="store_true",
+        help="repair mode (item 307): instead of the profile, PROPOSE the "
+             "least-authority `emission[...]` each over-declaring component "
+             "should declare (narrowed to the observed reach, never past a `*`). "
+             "Printed, never applied: apply it and re-run the gate. Combine "
+             "with --json for an agent-consumable patch document")
 
     attest_cmd = sub.add_parser(
         "attest",
