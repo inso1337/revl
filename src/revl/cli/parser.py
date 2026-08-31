@@ -222,6 +222,37 @@ def build_parser() -> argparse.ArgumentParser:
     diff_cmd.add_argument("--json", action="store_true",
                           help="machine-readable delta an agent can consume")
 
+    # `revl changelog --from OLD --to NEW` (item 261) - the release note is
+    # computed, not written. Its own two-input loader (like `diff`), so it is
+    # routed before the shared single-source compile step.
+    changelog_cmd = sub.add_parser(
+        "changelog",
+        help="derive a release note from the structural delta between two "
+             "compositions: authority widenings and the item-64 semver bump "
+             "lead, every line traces to a differ fact (item 261)")
+    changelog_cmd.add_argument(
+        "--from", dest="from_", metavar="OLD", required=True,
+        help="the earlier composition: a compiled IR/interchange JSON document "
+             "(`revl compile -o` or `revl audit --json`) or a `.rvl` source")
+    changelog_cmd.add_argument(
+        "--to", dest="to", metavar="NEW", required=True,
+        help="the later composition (same accepted forms as --from)")
+    changelog_cmd.add_argument("--json", action="store_true",
+                               help="the structured changelog document a "
+                                    "registry or bot can consume")
+    changelog_cmd.add_argument(
+        "--no-semver", action="store_true",
+        help="skip the interface-diff semver headline (structural + authority "
+             "changelog only); implied when an input lacks the interface table")
+    changelog_cmd.add_argument(
+        "--current-version", metavar="X.Y.Z", default=None,
+        help="the earlier composition's declared version; when given, the "
+             "computed next version is printed in the headline")
+    changelog_cmd.add_argument(
+        "--title", metavar="TEXT", default=None,
+        help="an opaque header line for the Markdown note (e.g. a version and "
+             "date); never enters a derived line")
+
     version_cmd = sub.add_parser(
         "version",
         help="derive the required semver bump from the interface diff against "
