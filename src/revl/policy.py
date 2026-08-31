@@ -146,6 +146,80 @@ class TaintFlowRule:
     without_approval: bool = False
 
 
+# ---------------------------------------------- item 290: evidence / register
+#
+# The closed facet vocabulary, taken VERBATIM from the shipped item-293
+# assessment (`registry.assess_evidence`). 290 introduces no new grading: a
+# threshold is "at least this recorded status", a hard predicate over an
+# objective fact. The status sets are the thresholds an operator may name (the
+# strongest few, since a threshold weaker than the bottom status is vacuous);
+# `fault-sweep` additionally accepts the numeric `N/N` size floor.
+_EVIDENCE_STATUS_THRESHOLDS = {
+    "fault-sweep": ("full",),                 # plus the numeric N/N form
+    "attestation": ("valid", "present"),
+    "inverse-roundtrip": ("pass",),
+    "gauntlet": ("admissible", "present"),
+    "publisher": ("trusted",),
+    "capabilities": ("present",),
+}
+
+# The facets whose evidence is author-produced and therefore UNROOTED unless a
+# binding-covering `attestation valid` clause roots them (item 290, §6.2/6.3).
+# `attestation` and `publisher` are checked against operator-held inputs (a key,
+# a trust set), so they are never self-attested.
+_SELF_ATTESTING_FACETS = frozenset({"fault-sweep", "inverse-roundtrip",
+                                    "gauntlet"})
+
+# The declaration-strength floors (item 290, §3.2, adopting 309's partial
+# order). Slice 1 records only `declared` in the IR, so a higher floor is a
+# parse error until 309's ledger lands (`_REGISTER_RECORDABLE`).
+_REGISTER_LEVELS = ("declared", "keyed", "shape-proven", "strong")
+_REGISTER_RECORDABLE = frozenset({"declared"})
+
+
+@dataclass(frozen=True)
+class EvidenceRule:
+    """A ``<subject> requires evidence [<facet> <threshold>, ...]`` rule (item
+    290). A hard predicate over the item-293 evidence facets: a conjunction of
+    clauses (no scores, no partial credit), fail-closed (a missing facet fails),
+    refuse-only (it can append a `Violation`, never widen past a deny or waive
+    an approval). `origin` is ``"registry"`` for the origin-scoped
+    ``component registry:<glob>`` selector (§3.2), else None."""
+    scope: str                        # "component" | "realm" | "mcp" | "capability"
+    selector: str                     # glob / realm name ("" for mcp)
+    origin: str | None                # "registry" for origin-scoped rules, else None
+    require: tuple                    # ((facet, threshold), ...) conjunction
+    self_attested: bool = False       # explicit unrooted acknowledgment (§6.3)
+
+    def unrooted_facets(self) -> frozenset:
+        """The named facets that are UNROOTED — self-attesting evidence not
+        covered by a binding `attestation valid` clause in this rule, and not
+        operator-run at evaluation time (the mcp-session gauntlet). An unrooted
+        facet is a `PolicyError` unless acknowledged (§6.3)."""
+        has_valid_attest = any(
+            f == "attestation" and t == "valid" for f, t in self.require)
+        out = set()
+        for facet, _ in self.require:
+            if facet not in _SELF_ATTESTING_FACETS:
+                continue
+            if facet == "gauntlet" and self.scope == "mcp":
+                continue  # operator-run session dossier — rooted by construction
+            if has_valid_attest:
+                continue  # the binding-covering attestation roots it (§6.2)
+            out.add(facet)
+        return frozenset(out)
+
+
+@dataclass(frozen=True)
+class RegisterRule:
+    """A ``capability <glob> requires register <level>`` rule (item 290, §3.2):
+    the declaration-strength floor over the item-44/309 honesty ledger. Slice 1
+    parses only ``declared`` (the sole register the IR records today); a higher
+    floor is a parse error until 309's ledger lands."""
+    capability: str                   # glob over capability reach tokens
+    at_least: str                     # "declared" | "keyed" | "shape-proven" | "strong"
+
+
 @dataclass(frozen=True)
 class Policy:
     """A parsed boundary policy: rules, the tenants switch, the sandbox."""
@@ -164,12 +238,19 @@ class Policy:
     # approval]` — the policy-gated tier over the landed taint tokens.
     taint_flow_rules: tuple[TaintFlowRule, ...] = ()
     source: str | None = None                # file path, for messages
+    # item 290: the confidence/evidence admission rules. Defaulting empty so
+    # every existing policy file parses byte-identically and evaluates the same.
+    evidence_rules: tuple[EvidenceRule, ...] = ()
+    register_rules: tuple[RegisterRule, ...] = ()
+    evidence_root_local: bool = False        # `evidence-root: local` (§6.3)
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
             and self.mcp_allow is None and not self.leases_enforced \
             and not self.quarantine_required and not self.approval_rules \
-            and not self.declassify_rules and not self.taint_flow_rules
+            and not self.declassify_rules and not self.taint_flow_rules \
+            and not self.evidence_rules and not self.register_rules \
+            and not self.evidence_root_local
 
     def requires_approval(self) -> bool:
         """Whether this policy names any approval-required capability — the
@@ -198,6 +279,160 @@ def _split_caps(text: str) -> tuple[str, ...]:
     return caps
 
 
+# ------------------------------------------------ item 290: evidence parsing
+
+def _parse_facet_clause(clause: str, source, lineno) -> tuple[str, str]:
+    """Parse one ``<facet> <threshold>`` clause into a validated pair.
+
+    The vocabulary is CLOSED: an unknown facet, an unknown status, a numeric
+    sweep floor whose numerator differs from its denominator, or any numeric-
+    confidence spelling is a `PolicyError` at parse time, so a typo can never
+    become a rule that silently requires nothing (§3.3)."""
+    parts = clause.split()
+    if len(parts) < 2:
+        raise PolicyError(source, lineno,
+                          f"an evidence clause is `<facet> <threshold>`, got "
+                          f"{clause.strip()!r}")
+    facet = parts[0]
+    threshold = " ".join(parts[1:])
+    if facet == "confidence" or _is_float(facet) or _is_float(threshold):
+        raise PolicyError(
+            source, lineno,
+            f"evidence is a hard predicate, not a score: {clause.strip()!r} "
+            f"names a numeric confidence. There is no `confidence`, weight, or "
+            f"float in the vocabulary (item 290, §2) — threshold an objective "
+            f"facet instead, e.g. `fault-sweep full` or `attestation valid`")
+    if facet not in _EVIDENCE_STATUS_THRESHOLDS:
+        raise PolicyError(
+            source, lineno,
+            f"unknown evidence facet {facet!r} — the closed vocabulary is "
+            f"[{', '.join(sorted(_EVIDENCE_STATUS_THRESHOLDS))}] (item 293's "
+            f"assessment facets)")
+    if facet == "fault-sweep" and "/" in threshold:
+        num, _, den = threshold.partition("/")
+        num, den = num.strip(), den.strip()
+        if not (num.isdigit() and den.isdigit()):
+            raise PolicyError(source, lineno,
+                              f"malformed fault-sweep floor {threshold!r} — "
+                              f"expected `full` or `<n>/<n>`")
+        if int(num) != int(den):
+            raise PolicyError(
+                source, lineno,
+                f"fault-sweep floor {threshold!r} has numerator below "
+                f"denominator: the only semantics is all-passed (no partial "
+                f"credit, item 290 §2/§3.1), so the numerator must equal the "
+                f"denominator — write `{den}/{den}`")
+        return ("fault-sweep", f"{int(den)}/{int(den)}")
+    allowed = _EVIDENCE_STATUS_THRESHOLDS[facet]
+    if threshold not in allowed:
+        raise PolicyError(
+            source, lineno,
+            f"unknown threshold {threshold!r} for facet {facet!r} — expected "
+            f"one of [{', '.join(allowed)}]"
+            + (" or `<n>/<n>`" if facet == "fault-sweep" else ""))
+    return (facet, threshold)
+
+
+def _is_float(text: str) -> bool:
+    try:
+        float(text)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _parse_require_list(text: str, source, lineno) -> tuple:
+    """Parse ``[<facet> <threshold>, ...]`` into a validated conjunction."""
+    inner = text.strip()
+    if not (inner.startswith("[") and inner.endswith("]")):
+        raise PolicyError(source, lineno,
+                          f"a `requires evidence` list is `[<facet> <threshold>"
+                          f", ...]`, got {text.strip()!r}")
+    clauses = [c for c in inner[1:-1].split(",") if c.strip()]
+    if not clauses:
+        raise PolicyError(source, lineno,
+                          "a `requires evidence` rule names no facet")
+    return tuple(_parse_facet_clause(c, source, lineno) for c in clauses)
+
+
+def _parse_evidence_subject(head: str, source, lineno) -> tuple[str, str, str | None]:
+    """Parse an evidence-rule subject into ``(scope, selector, origin)``.
+
+    Supports ``component <glob>``, the origin-scoped ``component registry:<glob>``
+    (§3.2), ``realm <name>``, ``mcp``, and ``capability <glob>``."""
+    parts = head.split()
+    if len(parts) == 1 and parts[0].lower() == "mcp":
+        return ("mcp", "", None)
+    if len(parts) != 2:
+        raise PolicyError(
+            source, lineno,
+            f"unrecognised evidence subject {head!r} — expected `component "
+            f"<glob>`, `component registry:<glob>`, `realm <name>`, `mcp`, or "
+            f"`capability <glob>`")
+    kind, sel = parts[0].lower(), parts[1]
+    if kind == "component":
+        if sel.startswith("registry:"):
+            return ("component", sel[len("registry:"):], "registry")
+        if ":" in sel:
+            raise PolicyError(
+                source, lineno,
+                f"unknown origin prefix in {sel!r} — the only origin selector "
+                f"is `registry:` (item 290, §3.2); a bare `component <glob>` "
+                f"selects by name at any origin")
+        return ("component", sel, None)
+    if kind == "realm":
+        return ("realm", sel, None)
+    if kind == "capability":
+        return ("capability", sel, None)
+    raise PolicyError(
+        source, lineno,
+        f"unrecognised evidence subject {head!r} — expected `component <glob>`, "
+        f"`component registry:<glob>`, `realm <name>`, `mcp`, or `capability "
+        f"<glob>`")
+
+
+def _parse_register_level(level: str, source, lineno) -> str:
+    """Validate a `requires register <level>` floor. Slice 1 records only
+    `declared` in the IR, so a higher floor is a distinct parse error until
+    309's ledger lands (§3.2)."""
+    lvl = level.strip()
+    if lvl not in _REGISTER_LEVELS:
+        raise PolicyError(
+            source, lineno,
+            f"unknown register level {lvl!r} — expected one of "
+            f"[{', '.join(_REGISTER_LEVELS)}] (item 290/309)")
+    if lvl not in _REGISTER_RECORDABLE:
+        raise PolicyError(
+            source, lineno,
+            f"register level {lvl!r} is not yet recordable; lands with 309's "
+            f"ledger. Slice 1 records only `declared` in the IR, so a `{lvl}` "
+            f"floor would be an unconditional deny wearing a register costume — "
+            f"it is rejected until 309 records the register (item 290, §3.2)")
+    return lvl
+
+
+def _validate_evidence_rooting(rules, root_local: bool) -> None:
+    """After the whole policy is parsed, refuse any evidence rule that
+    thresholds an UNROOTED self-attesting facet without an acknowledgment — per
+    rule (`self-attested`) or policy-wide (`evidence-root: local`) — per §6.3.
+    Deferred to here because `evidence-root: local` may appear on any line."""
+    if root_local:
+        return
+    for rule in rules:
+        if rule.self_attested:
+            continue
+        unrooted = rule.unrooted_facets()
+        if unrooted:
+            raise PolicyError(
+                rule.selector or "<policy>", None,
+                f"evidence rule thresholds self-attested facet(s) "
+                f"[{', '.join(sorted(unrooted))}] with no root: an author-"
+                f"produced dossier is only as good as its trust root (item 290, "
+                f"§6). Root it with a binding-covering `attestation valid` "
+                f"clause, or acknowledge it explicitly — add `self-attested` to "
+                f"the rule, or `evidence-root: local` to the policy")
+
+
 def _parse_dsl(text: str, source: str | None) -> Policy:
     """The line DSL. Grammar (blank lines and ``#`` comments ignored):
 
@@ -217,6 +452,9 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     approval_rules: list[ApprovalRule] = []
     declassify_rules: list[Rule] = []
     taint_flow_rules: list[TaintFlowRule] = []
+    evidence_rules: list[EvidenceRule] = []
+    register_rules: list[RegisterRule] = []
+    evidence_root_local = False
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -224,6 +462,49 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         low = line.lower()
         if low == "tenants never reach each other":
             tenants = True
+            continue
+        # item 290, §6.3: the policy-wide unrooted acknowledgment.
+        if low in ("evidence-root: local", "evidence-root local"):
+            evidence_root_local = True
+            continue
+        # item 290: `<subject> requires evidence [<facet> <threshold>, ...]
+        # [self-attested]`. Checked before the approval/reach loops (it shares
+        # neither phrase). A trailing `self-attested` is the per-rule unrooted
+        # acknowledgment (§6.3).
+        if "requires evidence" in low:
+            head, _, tail = line.partition(" requires evidence")
+            scope, selector, origin = _parse_evidence_subject(
+                head.strip(), source, lineno)
+            self_attested = False
+            body = tail.strip()
+            close = body.rfind("]")
+            if close != -1:
+                trailer = body[close + 1:].strip().lower()
+                if trailer == "self-attested":
+                    self_attested = True
+                elif trailer:
+                    raise PolicyError(
+                        source, lineno,
+                        f"unexpected trailer after `requires evidence [...]`: "
+                        f"{body[close + 1:].strip()!r} — only `self-attested` "
+                        f"is allowed (item 290, §6.3)")
+                body = body[:close + 1]
+            require = _parse_require_list(body, source, lineno)
+            evidence_rules.append(
+                EvidenceRule(scope, selector, origin, require, self_attested))
+            continue
+        # item 290, §3.2: `capability <glob> requires register <level>`.
+        if "requires register" in low:
+            head, _, tail = line.partition(" requires register")
+            parts = head.split()
+            if len(parts) != 2 or parts[0].lower() != "capability":
+                raise PolicyError(
+                    source, lineno,
+                    f"a `requires register` rule names one capability glob: "
+                    f"`capability <glob> requires register <level>`, got "
+                    f"{raw.strip()!r}")
+            level = _parse_register_level(tail.strip(), source, lineno)
+            register_rules.append(RegisterRule(parts[1], level))
             continue
         # item 249, Slice D (D2): `<origin>-taint may not reach <cap>[, ...]
         # [without approval]`. Checked before the generic `may not reach` loop
@@ -336,9 +617,12 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         else:
             raise PolicyError(source, lineno,
                               f"unrecognised policy line: {raw.strip()!r}")
+    _validate_evidence_rooting(evidence_rules, evidence_root_local)
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
                   quarantine_required, tuple(approval_rules),
-                  tuple(declassify_rules), tuple(taint_flow_rules), source)
+                  tuple(declassify_rules), tuple(taint_flow_rules), source,
+                  tuple(evidence_rules), tuple(register_rules),
+                  evidence_root_local)
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -410,9 +694,57 @@ def _parse_json(text: str, source: str | None) -> Policy:
             TaintFlowRule(origin, tuple(caps),
                           bool(entry.get("withoutApproval")
                                or entry.get("without_approval"))))
+    evidence_root_local = str(doc.get("evidenceRoot") or "").lower() == "local"
+    evidence_rules: list[EvidenceRule] = []
+    for entry in doc.get("evidence") or []:
+        self_attested = bool(entry.get("selfAttested")
+                             or entry.get("self_attested"))
+        require_obj = entry.get("require") or {}
+        if not isinstance(require_obj, dict) or not require_obj:
+            raise PolicyError(source, 1,
+                              "an evidence rule needs a non-empty `require` map "
+                              "of {facet: threshold}")
+        require = tuple(
+            _parse_facet_clause(f"{facet} {threshold}", source, 1)
+            for facet, threshold in require_obj.items())
+        if entry.get("mcp"):
+            evidence_rules.append(
+                EvidenceRule("mcp", "", None, require, self_attested))
+            continue
+        if entry.get("capability"):
+            evidence_rules.append(
+                EvidenceRule("capability", entry["capability"], None, require,
+                             self_attested))
+            continue
+        if entry.get("realm"):
+            evidence_rules.append(
+                EvidenceRule("realm", entry["realm"], None, require,
+                             self_attested))
+            continue
+        comp = entry.get("component")
+        if not comp:
+            raise PolicyError(source, 1,
+                              "an evidence rule needs a `component`, `realm`, "
+                              "`capability`, or `mcp` selector")
+        scope, selector, origin = _parse_evidence_subject(
+            f"component {comp}", source, 1)
+        evidence_rules.append(
+            EvidenceRule(scope, selector, origin, require, self_attested))
+    register_rules: list[RegisterRule] = []
+    for entry in doc.get("registers") or []:
+        cap = entry.get("capability") or entry.get("pattern")
+        if not cap:
+            raise PolicyError(source, 1,
+                              "a register rule needs a `capability` glob")
+        level = _parse_register_level(
+            str(entry.get("atLeast") or entry.get("at_least") or ""), source, 1)
+        register_rules.append(RegisterRule(cap, level))
+    _validate_evidence_rooting(evidence_rules, evidence_root_local)
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
                   quarantine_required, tuple(approval_rules),
-                  tuple(declassify_rules), tuple(taint_flow_rules), source)
+                  tuple(declassify_rules), tuple(taint_flow_rules), source,
+                  tuple(evidence_rules), tuple(register_rules),
+                  evidence_root_local)
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:
@@ -481,6 +813,8 @@ def component_realms(manifest: dict, name: str) -> frozenset[str]:
 class Violation:
     """One way the composition breaches the policy."""
     kind: str                        # capability | deny | tenant | mcp-sandbox
+                                     #   | approval | declassify | taint-flow
+                                     #   | evidence | register (item 290)
     component: str
     token: str
     message: str
@@ -548,14 +882,287 @@ def _components(audit: dict) -> list[str]:
     return list((audit.get("boundary") or {}).keys())
 
 
+# ------------------------------------------------ item 290: evidence evaluation
+
+@dataclass(frozen=True)
+class ClauseVerdict:
+    """One evidence clause evaluated against a component's recorded facts — the
+    unit both the gate (a failing clause becomes a `Violation`) and the
+    `revl policy evaluate` report (every clause, pass and fail) read, so the
+    dry-run can never disagree with the gate (§7, one comparison site)."""
+    facet: str
+    threshold: str
+    fact: str                 # the recorded fact, e.g. "8/12 partial", "valid"
+    passed: bool
+    standing: str             # "verified" | "operator-run" | "self-attested"
+    detail: str = ""          # extra note (hash mismatch, cannot-verify, ...)
+
+
+@dataclass(frozen=True)
+class RuleReport:
+    """One evidence rule's verdict for one component: whether it selected the
+    component, and every clause verdict when it did."""
+    scope: str
+    selector: str
+    origin: str | None
+    self_attested: bool
+    selected: bool
+    clauses: tuple = ()
+
+    def failed(self) -> list:
+        return [c for c in self.clauses if not c.passed]
+
+
+def _component_origin(audit: dict, origins, name: str) -> str | None:
+    """A component's admission ORIGIN (`registry` for a registry-resolved
+    admission, `source` for bare-source), recorded by the admission path and
+    never asserted by the component (§3.2). Read from an explicit `origins` map
+    or from `audit["origins"]`; absent when the admission path did not record
+    one, in which case an origin-scoped `registry:` rule selects nothing (it
+    never refuses first-party bare-source code by accident)."""
+    if origins and name in origins:
+        return origins[name]
+    graph_origins = audit.get("origins")
+    if isinstance(graph_origins, dict):
+        return graph_origins.get(name)
+    return None
+
+
+def _evidence_rule_selects(rule: EvidenceRule, name: str,
+                           realms: frozenset, reach_tokens: frozenset,
+                           origin: str | None,
+                           mcp_components: frozenset) -> bool:
+    if rule.scope == "mcp":
+        return name in mcp_components
+    if rule.scope == "realm":
+        return rule.selector in realms
+    if rule.scope == "capability":
+        return any(fnmatchcase(tok, rule.selector) for tok in reach_tokens
+                   if tok != UNBOUNDED)
+    # component: name glob, plus origin when the rule is origin-scoped
+    if not fnmatchcase(name, rule.selector):
+        return False
+    if rule.origin is not None:
+        return origin == rule.origin
+    return True
+
+
+def _sweep_counts(bundle) -> tuple[int, int, int]:
+    """The raw (passed, steps, unreachable) a fault-sweep dossier records — read
+    directly for the numeric form and the `unreachable == 0` check 290 adds on
+    top of 293's grading (§3.1)."""
+    dossier = getattr(bundle, "fault_sweep", None) if bundle else None
+    counts = (dossier or {}).get("counts") or {} if isinstance(dossier, dict) else {}
+    return (int(counts.get("passed") or 0), int(counts.get("steps") or 0),
+            int(counts.get("unreachable") or 0))
+
+
+def _clause_verdict(facet: str, threshold: str, assessment, bundle,
+                    *, key_present: bool, standing: str,
+                    att_detail: str) -> ClauseVerdict:
+    """Evaluate one `<facet> <threshold>` clause against the graded assessment
+    and the raw dossier counts. A hard predicate: missing evidence
+    (`unavailable`) fails, no partial credit, fail-closed (§2)."""
+    status = (assessment.facets.get(facet) if assessment else None) or "unavailable"
+
+    if facet == "fault-sweep":
+        passed_n, steps_n, unreachable_n = _sweep_counts(bundle)
+        fact = (f"{passed_n}/{steps_n} {status}" if bundle
+                and getattr(bundle, "fault_sweep", None) is not None
+                else "unavailable")
+        if unreachable_n:
+            fact += f" ({unreachable_n} unreachable)"
+        if threshold == "full":
+            ok = status == "full" and unreachable_n == 0
+        else:                                   # "N/N"
+            floor = int(threshold.split("/")[0])
+            ok = (steps_n >= floor and passed_n == steps_n and steps_n > 0
+                  and unreachable_n == 0)
+        detail = ("some swept effects were unreachable to the scheme"
+                  if unreachable_n and status == "full" else "")
+        return ClauseVerdict(facet, threshold, fact, ok, standing, detail)
+
+    if facet == "attestation":
+        if threshold == "valid":
+            if status == "present" and not key_present:
+                return ClauseVerdict(
+                    facet, threshold, "present (unverified)", False, "self-attested",
+                    "cannot verify is not valid — pass a verification key (--key)")
+            ok = status == "valid"
+            return ClauseVerdict(facet, threshold, status, ok,
+                                 "verified" if ok else standing, att_detail)
+        # "present"
+        ok = status in ("valid", "present")
+        return ClauseVerdict(facet, threshold, status, ok,
+                             "verified" if status == "valid" else standing,
+                             att_detail if not ok else "")
+
+    if facet == "publisher":
+        ok = status == "trusted"
+        return ClauseVerdict(facet, threshold, status, ok, "verified", "")
+
+    if facet == "inverse-roundtrip":
+        ok = status == "pass"
+        return ClauseVerdict(facet, threshold, status, ok, standing, "")
+
+    if facet == "gauntlet":
+        ok = (status == "admissible" if threshold == "admissible"
+              else status in ("admissible", "present"))
+        return ClauseVerdict(facet, threshold, status, ok, standing, "")
+
+    if facet == "capabilities":
+        ok = status == "present"
+        return ClauseVerdict(facet, threshold, status, ok, "verified", "")
+
+    return ClauseVerdict(facet, threshold, status, False, standing, "")
+
+
+def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
+                  *, evidence, origins, trusted_publishers, key,
+                  evidence_ir) -> dict:
+    """The single comparison site: every evidence rule against every component,
+    every clause verdict (pass and fail). `evaluate` turns failing clauses into
+    violations; `revl policy evaluate` renders the whole thing. Register rules
+    are reported alongside (slice 1: a `declared` floor is met by every selected
+    component; higher floors are parse-rejected until 309's ledger).
+
+    Returns {component: {"evidence": [RuleReport], "registers": [RuleReport]}}.
+    """
+    # TODO(slice 3: --recompute): run the operator's local producers (gauntlet,
+    # fault sweep, inverse round-trip) against the component in hand and grade
+    # THAT dossier, marking each facet `recomputed` vs `published` (§4). Until
+    # then, evidence is whatever the supplied bundle carries.
+    from . import registry as reg  # noqa: PLC0415 — lazy, pulls the compiler
+    evidence = evidence or {}
+    key_bytes = bytes(key) if key is not None else None
+    trusted = frozenset(trusted_publishers or ())
+    manifest = audit.get("manifest") or {}
+    out: dict = {}
+    for name in _components(audit):
+        realms = component_realms(manifest, name)
+        reach_tokens = frozenset(r.token for r in component_reach(audit, name))
+        origin = _component_origin(audit, origins, name)
+        bundle = evidence.get(name)
+        assessment = None
+        att_detail = ""
+        ev_reports: list[RuleReport] = []
+        reg_reports: list[RuleReport] = []
+        for rule in policy.evidence_rules:
+            selected = _evidence_rule_selects(
+                rule, name, realms, reach_tokens, origin, mcp_components)
+            if not selected:
+                ev_reports.append(RuleReport(rule.scope, rule.selector,
+                                             rule.origin, rule.self_attested,
+                                             False, ()))
+                continue
+            if assessment is None:
+                b = bundle if bundle is not None else reg.EvidenceBundle()
+                assessment = reg.assess_evidence(
+                    b, key=key_bytes, ir=(evidence_ir or {}).get(name),
+                    trusted_publishers=trusted)
+                mismatch = reg.binding_mismatch(getattr(b, "attestation", None), b)
+                if mismatch is not None:
+                    att_detail = (f"dossier `{mismatch}` does not hash to the "
+                                  f"signed binding — forged or copied")
+                elif assessment.facets.get("attestation") == "invalid":
+                    att_detail = "attestation signature does not verify"
+            has_valid_attest = any(
+                f == "attestation" and t == "valid" for f, t in rule.require)
+            clauses = []
+            for facet, threshold in rule.require:
+                if facet in _SELF_ATTESTING_FACETS:
+                    if facet == "gauntlet" and rule.scope == "mcp":
+                        standing = "operator-run"
+                    elif (has_valid_attest
+                          and assessment.facets.get("attestation") == "valid"):
+                        standing = "verified"
+                    else:
+                        standing = "self-attested"
+                else:
+                    standing = "verified"
+                clauses.append(_clause_verdict(
+                    facet, threshold, assessment,
+                    bundle if bundle is not None else reg.EvidenceBundle(),
+                    key_present=key_bytes is not None, standing=standing,
+                    att_detail=att_detail))
+            ev_reports.append(RuleReport(rule.scope, rule.selector, rule.origin,
+                                         rule.self_attested, True, tuple(clauses)))
+        for rrule in policy.register_rules:
+            # TODO(309): when the ledger records `keyed`/`shape-proven` in the
+            # IR, read the per-token register off `audit["capability_registers"]`
+            # (§3.2) and refuse below the floor with the weakest-declaration
+            # why-trace. Slice 1 parses only `declared`, always satisfied here.
+            selected = any(fnmatchcase(tok, rrule.capability)
+                           for tok in reach_tokens if tok != UNBOUNDED)
+            # slice 1: only `declared` is parseable, and every declaration meets
+            # the bare `declared` floor, so a selected register rule always holds
+            # (the higher floors land with 309's ledger; §3.2).
+            clause = (ClauseVerdict("register", rrule.at_least, "declared",
+                                    True, "verified",
+                                    "declared floor (309 ledger pending)"),)
+            reg_reports.append(RuleReport("capability", rrule.capability, None,
+                                          False, selected,
+                                          clause if selected else ()))
+        out[name] = {"evidence": ev_reports, "registers": reg_reports}
+    return out
+
+
+def _evidence_violations(policy: Policy, reports: dict, manifest: dict) \
+        -> list[Violation]:
+    """Turn every failing evidence clause into a refuse-only `Violation`."""
+    violations: list[Violation] = []
+    for name, entry in reports.items():
+        for report in entry["evidence"]:
+            if not report.selected:
+                continue
+            for clause in report.failed():
+                violations.append(
+                    _evidence_violation(manifest, name, report, clause))
+    return violations
+
+
+def _inert_evidence_selectors(policy: Policy, reports: dict) -> list:
+    """Evidence/register rules that select NO component in the audit graph
+    (item 249's inert-taint precedent, §7). Returned for the report body and
+    JSON, never a silent nothing."""
+    selected_ev = set()
+    selected_reg = set()
+    for entry in reports.values():
+        for i, r in enumerate(entry["evidence"]):
+            if r.selected:
+                selected_ev.add(i)
+        for i, r in enumerate(entry["registers"]):
+            if r.selected:
+                selected_reg.add(i)
+    inert = []
+    for i, rule in enumerate(policy.evidence_rules):
+        if i not in selected_ev:
+            inert.append(("evidence", rule))
+    for i, rule in enumerate(policy.register_rules):
+        if i not in selected_reg:
+            inert.append(("register", rule))
+    return inert
+
+
 def evaluate(policy: Policy, audit: dict,
-             mcp_components: frozenset[str] | set[str] | None = None) \
+             mcp_components: frozenset[str] | set[str] | None = None,
+             *, evidence: dict | None = None,
+             origins: dict | None = None,
+             trusted_publishers=frozenset(), key=None,
+             evidence_ir: dict | None = None) \
         -> list[Violation]:
     """Evaluate `policy` against an audit graph — the whole gate decision.
 
     Returns every `Violation`; an empty list is a clean pass. `mcp_components`
     are the components admitted through the MCP session, to which the sandbox
     (`mcp_allow`) profile applies.
+
+    Item 290 grows the signature with the evidence inputs, all defaulting empty
+    so an evidence-free policy evaluates BYTE-IDENTICALLY to before: `evidence`
+    is the per-component `{name: EvidenceBundle}`, `origins` the per-component
+    admission origin (`registry`/`source`), `trusted_publishers` the operator
+    trust set, `key` the attestation verification key, and `evidence_ir` the
+    per-component rebuilt IR an `attestation valid` clause verifies against.
     """
     mcp_components = frozenset(mcp_components or ())
     manifest = audit.get("manifest") or {}
@@ -635,6 +1242,17 @@ def evaluate(policy: Policy, audit: dict,
 
     if policy.tenants_isolated:
         violations.extend(_tenant_violations(audit, manifest))
+
+    # item 290: the confidence/evidence admission rules. Refuse-only and
+    # additive — a policy with no evidence/register rules skips this entirely and
+    # the result is byte-identical to before. The reports are the single
+    # comparison site `revl policy evaluate` also reads (§7).
+    if policy.evidence_rules or policy.register_rules:
+        reports = _rule_reports(
+            policy, audit, mcp_components, evidence=evidence, origins=origins,
+            trusted_publishers=trusted_publishers, key=key,
+            evidence_ir=evidence_ir)
+        violations.extend(_evidence_violations(policy, reports, manifest))
 
     # item 249, Finding 3: a taint policy rule over an audit with NO taint surface
     # is inert — the derived-source walk is off (an unannotated, no-profile
@@ -741,6 +1359,42 @@ def _taint_flow_violation(manifest: dict, name: str, rule: TaintFlowRule,
     ]
     why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN, steps=steps)
     return Violation("taint-flow", name, reach.token, message, why)
+
+
+def _evidence_subject_phrase(report: "RuleReport") -> str:
+    if report.scope == "mcp":
+        return "MCP-admitted components"
+    if report.scope == "realm":
+        return f"realm `{report.selector}`"
+    if report.scope == "capability":
+        return f"components reaching `{report.selector}`"
+    if report.origin == "registry":
+        return f"registry-resolved components matching `{report.selector}`"
+    return f"components matching `{report.selector}`"
+
+
+def _evidence_violation(manifest: dict, name: str, report: "RuleReport",
+                        clause: "ClauseVerdict") -> Violation:
+    """A component fails an evidence threshold a rule requires (item 290). The
+    why-trace is a CHAIN: component -> the failing facet with its recorded fact
+    -> the rule's threshold (§3.4)."""
+    file, _ = _location(manifest, name)
+    where = _evidence_subject_phrase(report)
+    tail = (f" ({clause.detail})" if clause.detail else "")
+    message = (f"policy violation: {where} require evidence "
+               f"[{clause.facet} {clause.threshold}], but `{name}` "
+               f"{clause.facet} is `{clause.fact}` — admission refused "
+               f"(confidence/evidence admission, item 290){tail}")
+    steps = [
+        TraceStep(name, "component", file, None,
+                  f"{clause.facet}: recorded `{clause.fact}` "
+                  f"({clause.standing})"),
+        TraceStep(f"{clause.facet} {clause.threshold}", "evidence", None, None,
+                  "required threshold", (clause.facet,)),
+    ]
+    why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
+                   steps=steps)
+    return Violation("evidence", name, clause.facet, message, why)
 
 
 def _approval_edge_covers(edge_scope: str, token: str) -> bool:
@@ -926,6 +1580,135 @@ def enforce(policy: Policy, audit: dict,
     error = first_error(evaluate(policy, audit, mcp_components))
     if error is not None:
         raise error
+
+
+def _rule_line(report: "RuleReport") -> str:
+    facets = ", ".join(f"{c.facet} {c.threshold}" for c in report.clauses) \
+        if report.clauses else ""
+    subj = _evidence_subject_phrase(report).replace("components ", "").strip()
+    prefix = {"mcp": "mcp", "realm": f"realm {report.selector}",
+              "capability": f"capability {report.selector}"}.get(
+                  report.scope,
+                  (f"component registry:{report.selector}"
+                   if report.origin == "registry"
+                   else f"component {report.selector}"))
+    tail = f" [{facets}]" if facets else ""
+    sa = " self-attested" if report.self_attested else ""
+    return f"{prefix} requires evidence{tail}{sa}"
+
+
+def explain(policy: Policy, audit: dict,
+            mcp_components: frozenset[str] | set[str] | None = None,
+            *, evidence: dict | None = None, origins: dict | None = None,
+            trusted_publishers=frozenset(), key=None,
+            evidence_ir: dict | None = None,
+            component: str | None = None) -> dict:
+    """The `revl policy evaluate` dry-run: run the SAME `evaluate` (the gate's
+    refusal set is authoritative), plus the per-clause reports for the explain
+    body. Returns a JSON-able dict; `render_explain` prints it. Nothing is
+    admitted, refused, or mutated (§7)."""
+    mcp_components = frozenset(mcp_components or ())
+    violations = evaluate(
+        policy, audit, mcp_components, evidence=evidence, origins=origins,
+        trusted_publishers=trusted_publishers, key=key, evidence_ir=evidence_ir)
+    reports = _rule_reports(
+        policy, audit, mcp_components, evidence=evidence, origins=origins,
+        trusted_publishers=trusted_publishers, key=key,
+        evidence_ir=evidence_ir) if (policy.evidence_rules
+                                     or policy.register_rules) else {}
+    refused = {v.component for v in violations}
+    inert = _inert_evidence_selectors(policy, reports) if reports else []
+    comps = []
+    for name in _components(audit):
+        if component and name != component:
+            continue
+        entry = reports.get(name, {"evidence": [], "registers": []})
+        rule_objs = []
+        n_selected_clauses = 0
+        n_selecting = 0
+        for r in entry["evidence"]:
+            clause_objs = [
+                {"facet": c.facet, "threshold": c.threshold, "fact": c.fact,
+                 "pass": c.passed, "standing": c.standing,
+                 **({"detail": c.detail} if c.detail else {})}
+                for c in r.clauses]
+            if r.selected:
+                n_selecting += 1
+                n_selected_clauses += len(r.clauses)
+            rule_objs.append({"rule": _rule_line(r), "selected": r.selected,
+                              "selfAttested": r.self_attested,
+                              "clauses": clause_objs})
+        for r in entry["registers"]:
+            rule_objs.append(
+                {"rule": f"capability {r.selector} requires register "
+                         f"{r.clauses[0].threshold if r.clauses else '?'}",
+                 "selected": r.selected, "clauses": []})
+            if r.selected:
+                n_selecting += 1
+        refused_here = name in refused
+        if refused_here:
+            verdict = "would be REFUSED"
+        elif n_selecting == 0:
+            verdict = "admitted: no evidence rule selects this component"
+        else:
+            verdict = (f"admitted: all {n_selected_clauses} clause(s) across "
+                       f"{n_selecting} selecting rule(s) hold")
+        comps.append({"component": name, "origin": _component_origin(
+            audit, origins, name), "selected": n_selecting > 0,
+            "rules": rule_objs, "refused": refused_here, "verdict": verdict})
+    return {
+        "policy": policy.source,
+        "components": comps,
+        "inertSelectors": [
+            {"kind": kind,
+             "rule": (_rule_line(RuleReport(
+                 r.scope, r.selector, r.origin, r.self_attested, False, ()))
+                 if kind == "evidence"
+                 else f"capability {r.capability} requires register {r.at_least}")}
+            for kind, r in inert],
+        "refused": bool(violations),
+        "violations": [{"kind": v.kind, "component": v.component,
+                        "token": v.token, "message": v.message} for v in violations],
+    }
+
+
+def render_explain(result: dict) -> str:
+    """Human-readable `revl policy evaluate` report (§7)."""
+    lines: list[str] = []
+    where = f" ({result['policy']})" if result.get("policy") else ""
+    lines.append(f"policy evaluate{where}: dry-run, nothing admitted or refused")
+    lines.append("")
+    for comp in result["components"]:
+        origin = f" [origin: {comp['origin']}]" if comp.get("origin") else ""
+        lines.append(f"component {comp['component']}{origin}")
+        selecting = [r for r in comp["rules"] if r["selected"]]
+        if not selecting:
+            lines.append("  (no evidence rule selects this component)")
+        for r in comp["rules"]:
+            if not r["selected"]:
+                continue
+            sa = "  [self-attested]" if r.get("selfAttested") else ""
+            lines.append(f"  rule: {r['rule']}{sa}")
+            for c in r["clauses"]:
+                glyph = "PASS" if c["pass"] else "FAIL"
+                detail = f"   {c['detail']}" if c.get("detail") else ""
+                lines.append(
+                    f"    {c['facet']:<18}{c['fact']:<24}"
+                    f"required {c['threshold']:<10}({c['standing']}) "
+                    f"{glyph}{detail}")
+        lines.append(f"  verdict: {comp['verdict']}")
+        lines.append("")
+    for inert in result["inertSelectors"]:
+        lines.append(f"inert selector ({inert['kind']}): `{inert['rule']}` "
+                     f"selects no component in this composition — it requires "
+                     f"nothing (item 290, §7; item 249 inert-taint precedent)")
+    if result["inertSelectors"]:
+        lines.append("")
+    verdict = ("REFUSED — at least one component would be refused"
+               if result["refused"]
+               else "clean — every selected component clears its thresholds")
+    lines.append(f"gate verdict: {verdict}")
+    return "\n".join(lines).rstrip()
 
 
 def render_report(policy: Policy, violations: list[Violation]) -> str:
