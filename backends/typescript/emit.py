@@ -452,6 +452,21 @@ def _float_operand(node: object, ctx: "_Ctx") -> str:
     return rendered if _is_float_expr(node) else f"Number({rendered})"
 
 
+# item 397: a compare-and-set host verb (`insert_if_absent`) whose site-spelled
+# `undo` must be RESULT-GUARDED, registered only when the CAS actually
+# inserted. A `false` CAS (key already present) inserted nothing, so its inverse
+# is the identity; replaying `remove(k)` at teardown would delete the WINNING
+# claimant's entry, the exact corruption single-use exists to prevent. Mirrors
+# backends/python/emit.py and backends/go/emit.py, which guard the same way.
+_MAP_CAS_VERBS = frozenset({"insert_if_absent"})
+
+
+def _is_map_cas(acquire: object) -> bool:
+    """Whether an acquisition node is a result-guarded map CAS (item 397)."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 def _int_as_number(node: object, ctx: "_Ctx") -> str:
     """Render an `Int`-typed expression as the JS `number` an index/count API
     needs. `xs[i]`, `slice`, `charAt` and `repeat` all take a `number` on the
@@ -1006,7 +1021,13 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
                 lines.append(f"{indent}  {bind} = {acquire}")
             else:
                 lines.append(f"{indent}  {acquire}")
-            lines.append(f"{indent}  return () => {undo}")
+            if bind is not None and _is_map_cas(step.get("acquire")):
+                # item 397: result-guarded undo. A `false` CAS registers the
+                # identity inverse (a no-op disposer), so teardown never removes
+                # the winning claimant's entry.
+                lines.append(f"{indent}  return {bind} ? () => {undo} : () => {{}}")
+            else:
+                lines.append(f"{indent}  return () => {undo}")
             lines.append(f"{indent}}})")
         elif kind == "emit":
             if step.get("compensate") is not None:
@@ -1498,9 +1519,11 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
             # clause 1). The `undo` stays sync (rule 3 keeps teardown
             # suspension-free). A sync acquisition carries no flag and is
             # byte-identical to before.
+            cas_bind: Optional[str] = None
             if step.get("async"):
                 if kind == "let-effect":
                     bind_name = scope.bind(step["bind"])
+                    cas_bind = bind_name
                     # `const c = await …` — a `const`-led statement is ASI-safe,
                     # so the awaited call keeps its `(await …)` shape here.
                     actx = ctx.with_scope(ctx.component_scope, in_async=True)
@@ -1511,11 +1534,19 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                 acquire = _expr(step["acquire"], ctx)
                 if kind == "let-effect":
                     bind_name = scope.bind(step["bind"])
+                    cas_bind = bind_name
                     lines.append(f"{indent}const {bind_name} = {acquire}")
                 else:
                     lines.append(f"{indent}{acquire}")
             undo = _expr(step["undo"], ctx)
-            lines.append(f"{indent}yield () => {undo}")
+            if cas_bind is not None and _is_map_cas(step.get("acquire")):
+                # item 397: result-guarded undo. A `false` CAS registers the
+                # identity inverse (a no-op disposer), so teardown never removes
+                # the winning claimant's entry. Mirrors py's `yield lambda:
+                # (<undo> if <bind> else None)`.
+                lines.append(f"{indent}yield {cas_bind} ? () => {undo} : () => {{}}")
+            else:
+                lines.append(f"{indent}yield () => {undo}")
     elif kind == "emit":
         # item 131: `await emit …` awaits the boundary crossing so the emission
         # actually fires — a bare async emit would leave a floating, unordered

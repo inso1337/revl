@@ -112,6 +112,134 @@ def test_result_guarded_undo_is_visible_in_emitted_py():
         "the undo must be the identity inverse on a false CAS"
 
 
+# A component that runs the CAS at BOTH lowering sites: the ACTIVATION body
+# (`let fresh = ...` at component scope) and a provide-METHOD body (`let won =
+# ...` inside `claim`). The result-guarded undo (item 397) landed only on py and
+# go; on ts (both sites) and on the rust/java activation-body site a lost race
+# registered an UNCONDITIONAL remove, so the loser's teardown deleted the
+# winning claimant's entry. These guard the emitted inverse at BOTH sites on the
+# three parallel tiers so the hole cannot silently reopen.
+_BOOT_CLAIM = """
+service Gate {
+  fn claim(ticket: Str, actor: Str) -> Bool
+  fn lookup(ticket: Str) -> Opt[Str]
+}
+component Boot provides gate: Gate {
+  let ledger = effect Map.new() undo ledger.drop()
+  let fresh = effect ledger.insert_if_absent("boot", "sys")
+              undo ledger.remove("boot")
+  provide gate {
+    fn claim(ticket, actor) {
+      let won = effect ledger.insert_if_absent(ticket, actor)
+                undo ledger.remove(ticket)
+      return won
+    }
+    fn lookup(ticket) = ledger.get(ticket)
+  }
+}
+"""
+
+
+def _emit_tier(tier: str, ir: dict) -> str:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        f"revl_{tier}_emit_guard", ROOT / "backends" / tier / "emit.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.emit(ir)
+
+
+def _fresh_undo_line(src: str, needle: str) -> str:
+    """The single emitted line registering the ACTIVATION-body CAS undo."""
+    hits = [ln for ln in src.splitlines() if needle in ln]
+    assert len(hits) == 1, f"expected exactly one {needle!r} line, got {hits}"
+    return hits[0]
+
+
+def test_ts_cas_undo_is_result_guarded_at_both_sites():
+    """TypeScript had NO map-CAS handling: both the activation-body `yield () =>
+    <undo>` and the method-body `return () => <undo>` were unconditional. Both
+    must now be a result ternary whose false arm is a no-op disposer."""
+    src = _emit_tier("typescript", compile_source(_BOOT_CLAIM, "boot.rvl"))
+    # activation body: `yield fresh ? () => ledger.remove(...) : () => {}`
+    assert "yield fresh ? () =>" in src and 'ledger.remove("boot")' in src
+    # method body: `return won ? () => ledger.remove(ticket) : () => {}`
+    assert "return won ? () =>" in src and "ledger.remove(ticket)" in src
+    # the false arm is the identity (a no-op disposer), never a bare remove
+    assert "yield () => ledger.remove" not in src
+    assert "return () => ledger.remove" not in src
+
+
+def test_rust_cas_undo_is_result_guarded_and_compiles_at_both_sites():
+    """Rust guarded the METHOD path only; the activation-body path emitted an
+    UNGUARDED remove AND moved the `ledger` bind into the closure, leaving the
+    later provide struct's `ledger.clone()` a use-after-move (E0382). The
+    activation undo must guard on the CAS result and reclone the ledger."""
+    src = _emit_tier("rust", compile_source(_BOOT_CLAIM, "boot.rvl"))
+    # method body: already correct, `if won { ... }`.
+    assert "if won {" in src
+    # activation body: the `Boot.fresh.undo` closure guards on the bound result
+    # and operates on a CLONE (`ledger_undo`), never the moved-out `ledger`.
+    undo_line = _fresh_undo_line(src, "Boot.fresh.undo")
+    assert "if *fresh_undo {" in undo_line, undo_line
+    assert "ledger_undo.remove(" in undo_line, undo_line
+    # a bare `ledger.remove` inside that closure would be the E0382 use-after-move
+    assert " ledger.remove(" not in undo_line, undo_line
+
+
+def test_java_cas_undo_is_result_guarded_at_both_sites():
+    """Java guarded the METHOD path only; the activation-body path bound `var`
+    (an `Object`) and registered an UNCONDITIONAL `Disposables.of(() ->
+    remove(...))`. The activation undo must bind `boolean` and guard on it."""
+    src = _emit_tier("java", compile_source(_BOOT_CLAIM, "boot.rvl"))
+    # method body: already correct.
+    assert "if (won) {" in src
+    # activation body: bind the atomic boolean and guard the disposer on it.
+    assert 'boolean fresh = ledger.insert_if_absent("boot", "sys");' in src
+    assert 'if (fresh) { ledger.remove("boot"); }' in src
+    # never an unconditional activation-body CAS disposer
+    assert 'Disposables.of(() -> ledger.remove("boot"))' not in src
+
+
+# An ACTIVATION-body winning CAS (`let fresh` at component scope) that another
+# claim then loses on the same key. The activation-body lowering site is the one
+# the emitted-source tests above guard; this drives it end-to-end so the site
+# COMPILES and runs. On rust it forces `cargo test` over the activation-body CAS
+# the regression guard for the use-after-move (E0382) and the `Arc<bool>` vs
+# `Arc<Value>` struct-field mismatch (E0308) that both blocked it before.
+#
+# NOTE on observability: a host Map cannot outlive or be shared beyond the
+# component that owns it, so every unwind that would replay the loser's undo
+# also drops the map, so the double-remove is a no-op by teardown and the runtime
+# residue check cannot observe it on ANY tier. The guard for the undo CONDITION
+# is therefore the emitted-source assertions above; this test guards that the
+# activation-body site lowers to code that compiles and runs cleanly.
+_ACTIVATION_WINNER = _BOOT_CLAIM + """
+lifecycle test "activation-body CAS: loser's claim does not overwrite" {
+  load Boot
+  let late = call gate.claim("boot", "late")
+  assert late == false
+  let who = call gate.lookup("boot")
+  assert who == Some("sys")
+  unload Boot
+  assert no_residue
+}
+"""
+
+
+@pytest.mark.parametrize("tier", ["py", "ts", "go", "rust", "java"])
+def test_activation_body_cas_compiles_and_runs(tier):
+    """The activation-body CAS lowers to compiling, cleanly-unwinding code on
+    every tier that runs lifecycle tests (java/wasm refuse them by design and
+    skip; ts skips without node). The winner's value survives the live losing
+    claim, and teardown leaves no residue."""
+    status, message = RUNNERS[tier](compile_source(_ACTIVATION_WINNER, "boot.rvl"))
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} diverged: {message}"
+
+
 # The CONCURRENCY exit test on the loop tier: under any admitted concurrency,
 # N `insert_if_absent(k, ...)` on one map yield EXACTLY ONE `true`. On py the
 # runtime is one event loop and the CAS is a single synchronous, suspension-free
