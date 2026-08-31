@@ -69,9 +69,10 @@ def _lifecycle():
 # ---------------------------------------------------------------------------
 
 _EXTERNS = '''
-extern acquire fn tick() -> Int
+type Bracket = { fd: Int }
+extern acquire fn tick() -> Bracket
     undo untick(0)
-    = @wasm { (i64.const 0) }
+    = @wasm { (i32.const 0) }
 extern pure fn untick(r: Int) -> Unit
     = @wasm { (i32.store (i32.const 5000) (i32.add (i32.load (i32.const 5000)) (i32.const 1))) }
 
@@ -92,7 +93,7 @@ extern emission fn sendmsg(x: Int) -> Int compensate undosend(0) = @wasm { (loca
 extern pure fn undosend(x: Int) -> Unit
     = @wasm { (i32.store (i32.const 5020) (i32.add (i32.load (i32.const 5020)) (i32.const 1))) }
 
-extern acquire fn boom() -> Int undo noop(0) = @wasm { unreachable }
+extern acquire fn boom() -> Bracket undo noop(0) = @wasm { unreachable }
 extern pure fn noop(r: Int) -> Unit = @wasm { }
 '''
 
@@ -296,7 +297,8 @@ def test_epoch_deadline_bounds_a_hung_compensation():
     wasmtime = pytest.importorskip("wasmtime", reason="wasmtime Python package not installed")
     lifecycle = _lifecycle()
     src = '''
-    extern acquire fn boom() -> Int undo noop(0) = @wasm { unreachable }
+    type Bracket = { fd: Int }
+    extern acquire fn boom() -> Bracket undo noop(0) = @wasm { unreachable }
     extern pure fn noop(r: Int) -> Unit = @wasm { }
     extern emission fn spinner(x: Int) -> Int compensate undospin(0) = @wasm { (local.get $p_x) }
     extern pure fn undospin(x: Int) -> Unit
