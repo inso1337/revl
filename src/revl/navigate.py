@@ -151,3 +151,225 @@ def blocked_record(*, family: str, reason: str, refused: dict | None = None,
     Collapses to the untrusted view like any other policy-family refusal."""
     return record(family=family, refused=refused, blocked=True, reason=reason,
                   alternatives=[], profile=profile)
+
+
+# ============================================================ family builders
+#
+# Slice 2 (item 274). Each builder is PURE: it takes only the primitive facts
+# the gate already held at the refusal site, and returns the `navigate` record.
+# The raise site calls it with the tables it already has; no gate's control flow
+# changes (design §5, "every change is 'also attach this'"). Two invariants ride
+# every builder:
+#
+#   * §4 collapse - a POLICY-family refusal (approval/ceiling/evidence, joining
+#     slice 1's taint/boundary) that leaks OPERATOR policy topology collapses to
+#     `collapsed()` under the untrusted-author profile. Author-structural
+#     families that leak only the author's own source (ownership/cache/adapter)
+#     collapse too (over-redaction is always sound and keeps the matrix byte-
+#     identical); the ONE exception is `admit-profile`, whose granted-set
+#     enumeration IS the author's own contract (§2.9) and is built with
+#     `profile=None` so it survives.
+#   * §3 proof marker - `clears-this-gate` sits ONLY on an author-enactable edit
+#     over an operand IMMUTABLE at the refusal site. A ceiling/lease counter or a
+#     grant ledger entry is runtime-mutable (TOCTOU): `alternative(...,
+#     mutable_operand=True)` forces `candidate` and flags the value `live`.
+
+
+def approval_navigate(*, token: str, ttl_ms: int | None = None,
+                      standing_grant: str | None = None, profile=None) -> dict:
+    """Approval (item 246, design §2.3). The acquire-and-thread recipe is the
+    always-present alternative, enacted by the runtime approval surface (revl has
+    no principal directory, so never `author`). When the grant ledger holds a
+    covering standing grant, name it - but ledger membership is RUNTIME-MUTABLE
+    (revoked or expired between the refusal and the retry, TOCTOU), so it is
+    always `candidate`/`live`, never `clears-this-gate` (the HIGH fix)."""
+    alts = [alternative(
+        enacts=ENACTS_RUNTIME_APPROVAL,
+        action=(f"acquire an approval and thread it: "
+                f"`let a = await approval[{token}] {{ ... }}` then "
+                f"`emit … with a`"),
+        ref=token)]
+    if standing_grant is not None:
+        alts.append(alternative(
+            enacts=ENACTS_RUNTIME_APPROVAL,
+            action=(f"a standing grant covering `{token}` is on the ledger; "
+                    f"thread it instead of minting a fresh prompt (it is a live "
+                    f"value that may be revoked or expire before the retry)"),
+            ref=standing_grant, clears=True, mutable_operand=True))
+    refused: dict = {"token": token}
+    if ttl_ms is not None:
+        refused["ttl_ms"] = ttl_ms
+    return record(family="approval", refused=refused, blocked=False,
+                  alternatives=alts, profile=profile)
+
+
+def ceiling_navigate(*, param: str, child_value: str, parent_bound: str,
+                     bound_site: str, is_budget: bool, profile=None) -> dict:
+    """Ceilings (items 294/260, design §2.4). The largest in-bounds valuation is
+    the failing `covers` comparison re-read as a suggestion (zero new analysis).
+    A resource bound (a path prefix / host match declared at the grant site) is
+    immutable at the refusal site, so narrowing the child to it `clears-this-gate`;
+    a BUDGET bound (a `remainingUses`/`calls` counter) is a live counter that may
+    already be spent at the retry (TOCTOU), so it is `candidate`/`live` (the HIGH
+    fix and the soundness sweep). Raising the bound is operator-enacted at its
+    declaration site - a child can never mint the widening itself (attenuation)."""
+    if is_budget:
+        narrow = alternative(
+            enacts=ENACTS_AUTHOR,
+            action=(f"narrow `{param}` on the child to the parent's bound "
+                    f"{parent_bound} (the largest in-bounds value; {parent_bound} "
+                    f"is a live budget counter that may already be spent at the "
+                    f"retry)"),
+            ref=param, clears=True, mutable_operand=True)
+    else:
+        narrow = alternative(
+            enacts=ENACTS_AUTHOR,
+            action=(f"narrow the child's `{param}` to the parent's bound "
+                    f"`{parent_bound}` (the largest in-bounds value)"),
+            ref=param, clears=True)
+    raise_bound = alternative(
+        enacts=ENACTS_OPERATOR,
+        action=(f"raise the bound at its declaration site ({bound_site}) so the "
+                f"parent holds what it grants (a child can never mint the "
+                f"widening itself)"),
+        ref=bound_site)
+    return record(family="ceiling",
+                  refused={"param": param, "child": child_value,
+                           "parent": parent_bound, "budget": is_budget},
+                  blocked=False, alternatives=[narrow, raise_bound],
+                  profile=profile)
+
+
+def ownership_navigate(*, kind: str, resource: str | None = None,
+                       mode: str | None = None, clause: str | None = None,
+                       binding: str | None = None, returns: str | None = None,
+                       handle_name: str | None = None, profile=None) -> dict:
+    """Ownership (item 308, design §2.5). All alternatives are author-enacted -
+    there is no policy knob, so the hint must not invent one. They are
+    `candidate`, never `clears-this-gate`: the compiler does not re-synthesize the
+    restructured source to re-run the gate, so it cannot promise the rewrite
+    clears (§3). `kind` selects O1 / B1 / R0."""
+    alts = []
+    if kind == "o1":
+        alts.append(alternative(
+            enacts=ENACTS_AUTHOR,
+            action=("let teardown run the inverse; the only legal explicit close "
+                    "is the acquiring binding's own `undo`"),
+            ref=binding or resource))
+    elif kind == "b1":
+        if clause == "compensate":
+            alts.append(alternative(
+                enacts=ENACTS_AUTHOR,
+                action=(f"carry the data out as a value, not the resource handle "
+                        f"`{resource}`; a compensate runs after every bracket "
+                        f"closed"),
+                ref="compensate"))
+        else:
+            alts.append(alternative(
+                enacts=ENACTS_AUTHOR,
+                action=(f"pass `{resource}` down as a call argument instead (the "
+                        f"owner lends it per call); a borrow may not be "
+                        f"{_B1_ESCAPE_TEXT.get(clause, 'escaped')}"),
+                ref=clause))
+    elif kind == "r0":
+        stem = (handle_name or "Log")
+        alts.append(alternative(
+            enacts=ENACTS_AUTHOR,
+            action=(f"declare a nominal opaque handle type (e.g. "
+                    f"`type {stem}Handle`) and return it, not `{returns}`"),
+            ref="handle-type"))
+    else:  # pragma: no cover - guarded by callers
+        raise ValueError(f"unknown ownership navigate kind {kind!r}")
+    return record(family="ownership",
+                  refused={"kind": kind, "resource": resource, "mode": mode,
+                           "clause": clause},
+                  blocked=False, alternatives=alts, profile=profile)
+
+
+_B1_ESCAPE_TEXT = {
+    "state": "parked in activation state",
+    "capture": "captured by a closure",
+    "return": "returned across a signature",
+    "carrier": "placed in an escaping carrier",
+    "undo": "placed in an `undo` expression",
+    "witnessed": "passed to a witnessed effect",
+    "spawn": "seated in a `spawn` config",
+    "handoff": "carried by a `handoff`",
+}
+
+
+def evidence_navigate(*, facet: str, threshold: str, fact: str,
+                      producer: str, rule_line: str | None = None,
+                      profile=None) -> dict:
+    """Evidence (item 290, design §2.6). Split honestly on the recorded standing:
+
+      * MISSING (`unavailable`): the facet has a closed-registry producer; name
+        it (author) and offer the operator's unrooted-threshold acknowledgment;
+      * RECORDED-but-below-threshold: `blocked`. No command manufactures
+        confidence - the operator may lower the named rule, or the component must
+        earn the facet via its named producer. The hint names the mechanism,
+        never the outcome (re-running the producer may still fail)."""
+    missing = fact.startswith("unavailable")
+    if not missing:
+        reason = (f"`{facet}` is recorded as `{fact}`, below the required "
+                  f"`{facet} {threshold}`; no command manufactures confidence - "
+                  f"the operator may lower the rule"
+                  + (f" ({rule_line})" if rule_line else "")
+                  + f", or the component must earn the facet via {producer}")
+        return blocked_record(family="evidence", reason=reason,
+                              refused={"facet": facet, "threshold": threshold,
+                                       "fact": fact}, profile=profile)
+    alts = [
+        alternative(
+            enacts=ENACTS_AUTHOR,
+            action=(f"produce the `{facet}` facet: run {producer} so the fact is "
+                    f"recorded, then re-admit"),
+            ref=facet),
+        alternative(
+            enacts=ENACTS_OPERATOR,
+            action=(f"acknowledge the unrooted `{facet}` threshold at the operator "
+                    f"surface (an acknowledged PolicyError)"),
+            ref=facet),
+    ]
+    return record(family="evidence",
+                  refused={"facet": facet, "threshold": threshold, "fact": fact},
+                  blocked=False, alternatives=alts, profile=profile)
+
+
+def cache_navigate(*, kind: str, what: str, clause: str | None = None,
+                   category: str | None = None, profile=None) -> dict:
+    """Cache (item 310, design §2.8). Three shapes:
+
+      * `add`: `cache external` with no freshness bound - name the missing clause
+        with its grammar (author). Adding a `ttl` clears the freshness predicate
+        by construction (a static duration, immutable operand), so `clears`;
+      * `drop`: a `cache pure` freshness bound or a `cache capability`
+        `invalidated_by` - name the clause to remove (author, `clears`);
+      * `blocked`: an uncacheable category (a witnessed/acquire/deferred/
+        compensate reach, a resource-carrying result, an interior extern) - there
+        is no nearest-allowed spelling, and the hint must NOT imply reclassifying
+        the extern (design §2.8, the unsafe suggestion)."""
+    if kind == "add":
+        alt = alternative(
+            enacts=ENACTS_AUTHOR,
+            action=(f"add a freshness bound to {what}: `cache external "
+                    f"invalidated_by <token> ttl 5m` (an emission token some "
+                    f"crossing fires, and/or a ttl)"),
+            ref="freshness", clears=True)
+        return record(family="cache", refused={"what": what},
+                      blocked=False, alternatives=[alt], profile=profile)
+    if kind == "drop":
+        alt = alternative(
+            enacts=ENACTS_AUTHOR,
+            action=f"drop the `{clause}` clause on {what}",
+            ref=clause, clears=True)
+        return record(family="cache", refused={"what": what, "clause": clause},
+                      blocked=False, alternatives=[alt], profile=profile)
+    if kind == "blocked":
+        reason = (f"cache on {what} is uncacheable ({category}); there is no "
+                  f"freshness spelling that admits it - do not reclassify the "
+                  f"extern to force a hit")
+        return blocked_record(family="cache", reason=reason,
+                              refused={"what": what, "category": category},
+                              profile=profile)
+    raise ValueError(f"unknown cache navigate kind {kind!r}")  # pragma: no cover
