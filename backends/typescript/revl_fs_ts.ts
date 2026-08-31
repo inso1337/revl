@@ -1,25 +1,30 @@
 // Node-tier host support for the witnessed `stdlib/fs.rvl` catalog on the ts
 // tier (roadmap item 369 — the ts peer of backends/python/revl_fs_workspace.py).
 //
-// ---------------------------------------------------------------- why a global
-// A `@ts` extern body is spliced VERBATIM into `export function name(...) {...}`
-// (backends/typescript/emit.py `_emit_ts_externs`), so — unlike a `@py` body,
-// which can `import revl_fs_workspace` at function scope — it cannot carry its
-// own `import`. And these helpers need `node:fs` (real filesystem), which the
-// deliberately environment-neutral runtime.ts must not drag in (it imports zero
-// node builtins, so it stays browser-targetable). So this module installs the
-// helpers on `globalThis.__revlFs` at import time and the `@ts` fs bodies reach
-// them there — the same `globalThis` seam the witnessed teardown fixture uses
-// for host state (`__revlWitnessBox`, tests/fixtures/_gen_witnessed_teardown.py).
+// ---------------------------------------------------- how stdlib/fs.rvl reaches it
+// item 410 stage 5: `stdlib/fs.rvl`'s `@ts` externs import this module's
+// per-extern entry points directly via `= @ts ref fsWrite from ".../revl_fs_ts.ts"`
+// (the multi-root stdlib-ref import: origin selects the install root, the runner
+// provides `__REVL_STDLIB_REF_ROOT__`, the ref is hash-pinned in the IR). The
+// thunk resolves and loads this module at the extern's FIRST CALL, so no host
+// code runs at artifact load. Each op's logic lives in its exported entry point
+// (`fsWrite`/`fsRm`/`fsMove`/`fsMkdir` + the inverses `fsRestore`/`fsUnrm`/
+// `fsUnmove`/`fsRmdirIfEmpty`), returning the `{ kind, value }` Result / Unit the
+// witnessed frame reads.
+//
+// Historically these helpers were reached through `globalThis.__revlFs`: a
+// verbatim `@ts` body cannot carry its own `import`, and these helpers need
+// `node:fs` (real filesystem), which the deliberately environment-neutral
+// runtime.ts must not drag in (it imports zero node builtins, so it stays
+// browser-targetable). The `globalThis.__revlFs` install below is RETAINED for
+// one deprecation release for out-of-tree embedders (and the harness's
+// `fs_host_install`) that still pre-import this module for the global; nothing
+// in-tree depends on it after the ref migration.
 //
 // The py analog's contract is preserved verbatim (docs/witnessed-fs.md, the
 // "three musts"): symlinks resolved BEFORE the membership check, the guard
 // applied to the inverse path too, and the garbage dir + preimage snapshots
 // living INSIDE the workspace root so reversal can never escape.
-//
-// Loading: a node entrypoint (a test harness, or a future ts session runner —
-// the analog of `backends/python` being on `sys.path`) imports this module for
-// its install side effect before any witnessed fs body runs.
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -234,6 +239,164 @@ export function dirname(p: string): string {
   return path.dirname(p)
 }
 
+// -------------------------------------------------------- per-extern entry points
+// item 410 stage 5: the entry points a `stdlib/fs.rvl` `= @ts ref` thunk imports
+// at first call, one per witnessed op and one per inverse. Each carries the exact
+// logic the module's inline `@ts` body used to hold — the same three-musts
+// contract (docs/witnessed-fs.md) — now reachable as a normal named export
+// instead of through the `globalThis.__revlFs` seam. The ref thunk calls the
+// export positionally with the extern's parameters and returns its value
+// verbatim, so a forward op returns the `{ kind, value }` Result shape the
+// witnessed frame keys off, and an inverse returns `void` (Unit).
+
+/** `write`'s preimage witness — the ts mirror of `stdlib/fs.rvl`'s WriteWitness. */
+export interface WriteWitness { path: string; preimage: string; created: boolean }
+/** `rm`'s witness: the original path and where the target was parked. */
+export interface RmWitness { path: string; garbage: string }
+/** `move`'s witness: the resolved source and destination. */
+export interface MoveWitness { from: string; to: string }
+/** `mkdir`'s witness: the created directory. */
+export interface MkdirWitness { path: string }
+
+/** The `Result[Witness, FsError]` shape a forward fs op returns — the ts spelling
+ * of the emitted `{ kind: 'Ok' | 'Err', value }` the witnessed runtime reads. */
+export type FsResult<T> =
+  | { kind: 'Ok'; value: T }
+  | { kind: 'Err'; value: FsError }
+
+/** Overwrite (or create) `path` with `contents`, snapshotting the preimage
+ * first. Registers `undo fsRestore(result)` on Ok (the accumulator's binding). */
+export function fsWrite(path: string, contents: string): FsResult<WriteWitness> {
+  let target: string
+  try {
+    target = resolveWithin(path)     // must #1: realpath BEFORE the check
+  } catch (e) {
+    if (e instanceof ConfinementError) return { kind: 'Err', value: e.asError() }
+    throw e
+  }
+  const existed = exists(target)
+  let preimage = ''
+  if (existed) {
+    if (!isFile(target)) {
+      return { kind: 'Err', value: { code: 'ENOTFILE',
+        message: 'write target exists and is not a regular file',
+        path: target } }
+    }
+    // snapshot the preimage INSIDE the root (must #3) before diverging it.
+    preimage = freshSidecar(preimageDir(), 'pre')
+    snapshot(target, preimage)
+  } else {
+    // require the parent to exist — we create no directories, so the
+    // inverse (delete the created file) leaves zero residue.
+    const parent = dirname(target)
+    if (parent && !isDir(parent)) {
+      return { kind: 'Err', value: { code: 'ENOENT',
+        message: 'parent directory does not exist', path: target } }
+    }
+  }
+  writeFile(target, contents)
+  return { kind: 'Ok', value: { path: target, preimage, created: !existed } }
+}
+
+/** Remove `path` by parking it in the session garbage dir (inside the root).
+ * Registers `undo fsUnrm(result)` on Ok. */
+export function fsRm(path: string): FsResult<RmWitness> {
+  let target: string
+  try {
+    target = resolveWithin(path)     // must #1
+  } catch (e) {
+    if (e instanceof ConfinementError) return { kind: 'Err', value: e.asError() }
+    throw e
+  }
+  if (!exists(target)) {
+    // Ok-conditional: an rm on a missing path registers nothing (item 243).
+    return { kind: 'Err', value: { code: 'ENOENT', message: 'no such file', path: target } }
+  }
+  const parked = freshSidecar(garbageDir(), 'rm')   // must #3: inside root
+  replace(target, parked)
+  return { kind: 'Ok', value: { path: target, garbage: parked } }
+}
+
+/** Rename `from` -> `to` (both confined). Registers `undo fsUnmove(result)`. */
+export function fsMove(src: string, dst: string): FsResult<MoveWitness> {
+  let realFrom: string
+  let realTo: string
+  try {
+    realFrom = resolveWithin(src)    // must #1, BOTH endpoints
+    realTo = resolveWithin(dst)
+  } catch (e) {
+    if (e instanceof ConfinementError) return { kind: 'Err', value: e.asError() }
+    throw e
+  }
+  if (!exists(realFrom)) {
+    return { kind: 'Err', value: { code: 'ENOENT', message: 'no such source', path: realFrom } }
+  }
+  if (exists(realTo)) {
+    return { kind: 'Err', value: { code: 'EEXIST', message: 'destination exists', path: realTo } }
+  }
+  replace(realFrom, realTo)
+  return { kind: 'Ok', value: { from: realFrom, to: realTo } }
+}
+
+/** Create directory `path`. Registers `undo fsRmdirIfEmpty(result)` on Ok. */
+export function fsMkdir(path: string): FsResult<MkdirWitness> {
+  let target: string
+  try {
+    target = resolveWithin(path)     // must #1
+  } catch (e) {
+    if (e instanceof ConfinementError) return { kind: 'Err', value: e.asError() }
+    throw e
+  }
+  if (exists(target)) {
+    return { kind: 'Err', value: { code: 'EEXIST', message: 'path already exists', path: target } }
+  }
+  mkdirOne(target)
+  return { kind: 'Ok', value: { path: target } }
+}
+
+/** Inverse of `fsWrite`: restore the preimage snapshot over the target, or
+ * delete the created file. Confined (must #2), idempotent on replay. */
+export function fsRestore(w: WriteWitness): void {
+  // must #2: the inverse path is confined too. A throw here is caught by the
+  // teardown loop as restore-residue, never a silent write outside root.
+  const target = resolveWithin(w.path)
+  if (w.created) {
+    // the file did not exist before the write: undo == delete it.
+    // idempotent — a second replay finds it already gone.
+    if (exists(target)) remove(target)
+    return
+  }
+  // restore the preimage snapshot over the target. renameSync is atomic and
+  // consumes the snapshot (residue-free). idempotent — once the snapshot is
+  // gone (already restored), a second replay is a no-op.
+  if (exists(w.preimage)) replace(w.preimage, target)
+}
+
+/** Inverse of `fsRm`: rename the parked file back. Confined, idempotent. */
+export function fsUnrm(w: RmWitness): void {
+  const target = resolveWithin(w.path)   // must #2
+  // rename the parked file back. idempotent — once moved back (garbage gone),
+  // a second replay is a no-op.
+  if (exists(w.garbage)) replace(w.garbage, target)
+}
+
+/** Inverse of `fsMove`: move it back. Both endpoints confined, idempotent. */
+export function fsUnmove(w: MoveWitness): void {
+  const src = resolveWithin(w.from)      // must #2: BOTH endpoints confined
+  const dst = resolveWithin(w.to)
+  // move it back. idempotent — once back (dst gone), a second replay no-ops.
+  if (exists(dst)) replace(dst, src)
+}
+
+/** Inverse of `fsMkdir`: remove the created directory iff still empty. Total. */
+export function fsRmdirIfEmpty(w: MkdirWitness): void {
+  const target = resolveWithin(w.path)   // must #2
+  // remove the created directory iff still empty — never delete a dir the
+  // activation (or a concurrent writer) populated. idempotent + total: a
+  // missing or non-empty dir is left as-is, no throw.
+  try { rmdir(target) } catch (_e) { /* non-empty or missing: leave as-is */ }
+}
+
 /** The helper surface the `@ts` fs bodies reach through `globalThis.__revlFs`.
  * A flat record so a body reads `globalThis.__revlFs.resolveWithin(path)` — the
  * ts spelling of the py body's `_ws.resolve_within(path)`. */
@@ -281,5 +444,9 @@ const HOST: RevlFsHost = {
   dirname,
 }
 
-// Install on import (the side effect the fs bodies depend on).
+// DEPRECATED (item 410 stage 5): install on import for out-of-tree embedders
+// (and the harness `fs_host_install`) that still pre-import this module for the
+// `globalThis.__revlFs` seam. `stdlib/fs.rvl` no longer reaches through it — it
+// imports the per-extern entry points above via `= @ts ref`. Retained for one
+// deprecation release, then removed with a note.
 ;(globalThis as unknown as { __revlFs?: RevlFsHost }).__revlFs = HOST

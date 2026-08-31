@@ -30,11 +30,12 @@ from __future__ import annotations
 import copy
 import importlib.util
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from revl.compiler import compile_source
+from revl.compiler import compile_files, compile_source
 
 _ROOT = Path(__file__).resolve().parents[1]
 _BACKEND = _ROOT / "backends" / "python"
@@ -50,12 +51,16 @@ needs_cordis = pytest.mark.skipif(
            "and run under its venv",
 )
 
-# The REAL stdlib/fs.rvl module, plus a consumer whose provide-methods fire the
-# witnessed mutations per tool call. Concatenated into ONE source so the
-# witnessed externs are same-file (the cross-module `use` surface is a separate
-# frontend slice; the runtime seam under test is identical either way).
-_FS_SRC = (_ROOT / "stdlib" / "fs.rvl").read_text(encoding="utf-8")
+# A consumer whose provide-methods fire the REAL stdlib/fs.rvl witnessed
+# mutations per tool call. item 410 stage 5 made fs.rvl's `@ts` bodies `= @ts
+# ref` imports, which need a root compile tree to jail against, so fs.rvl can no
+# longer be concatenated into a bare-string compile — the consumer `use`s it
+# from disk instead, resolved through the stdlib search path (its refs resolve
+# stdlib-origin; the `@py` bodies this suite drives are unchanged). The runtime
+# seam under test is identical to the old same-file arrangement.
 _CONSUMER = """
+use "stdlib/fs.rvl" { write, rm, move }
+
 service FsOps {
   emission fn mv(a: Str, b: Str)
   emission fn writef(p: Str, c: Str)
@@ -71,7 +76,9 @@ component Agent provides ops: FsOps {
   }
 }
 """
-_BASE = compile_source(_FS_SRC + "\n" + _CONSUMER, "witnessed_abort_lifo.rvl")
+_consumer_file = Path(tempfile.mkdtemp(prefix="revl_abort_lifo_")) / "agent.rvl"
+_consumer_file.write_text(_CONSUMER, encoding="utf-8")
+_BASE = compile_files([str(_consumer_file)])
 
 
 def _ir() -> dict:

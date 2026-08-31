@@ -82,9 +82,12 @@ def test_plan_names_the_catalog_op_and_inverse(cmd, witnessed, inverse):
 def test_every_named_witnessed_op_exists_in_the_fs_catalog():
     # a drift guard: the classifier must never name an op the catalog does not
     # export. Parse the real stdlib/fs.rvl and confirm each named extern is there.
-    from revl.compiler import compile_source
+    from revl.compiler import compile_files
 
-    fs_ir = compile_source((_ROOT / "stdlib" / "fs.rvl").read_text(), "fs.rvl")
+    # item 410 stage 5: fs.rvl's `@ts` externs are `= @ts ref` imports now, so it
+    # must be compiled from its real path (a bare-string compile has no root tree
+    # to jail the ref against).
+    fs_ir = compile_files([str(_ROOT / "stdlib" / "fs.rvl")])
     fs_names = {e["name"] for e in fs_ir.get("externs", [])}
     for _cmd, witnessed, inverse in LOWERINGS:
         assert witnessed in fs_names, f"{witnessed} missing from fs.rvl"
