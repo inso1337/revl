@@ -6554,6 +6554,21 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             env.type_env[env.params[surface]] = ptype
         mbody = []
         returned = False
+
+        def _sweep(node, line):
+            # item 404: the provide-method twin of the activation-setup
+            # `_sweep` (`_lower_component_setup_stmt`). A provide-method body is
+            # stratum-3 lowered code that ran `infer_ir` only in its NON-raising
+            # oracle mode, so a definite operator / index / builtin misuse that a
+            # `fn`/`test` body (stratum 1, `infer_ast`) refuses compiled clean
+            # inside a provide method — the same context-scoping gap item 392
+            # closed for the Any-field-read. Run the SAME raising oracle over the
+            # lowered pure value here so the whole refusal class fires uniformly.
+            # Unknown / host operands infer to None and are left alone, exactly
+            # as in the setup sweep. Returns the inferred type (or None).
+            return infer_ir(node, env.type_env, env.types, env.services,
+                            filename, line)
+
         for mstmt in method.body:
             if returned:
                 raise RevlError(filename, mstmt.line, "unreachable statement after `return`")
@@ -6678,6 +6693,9 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                                     f"`{mstmt.name}` is already bound in `{method.name}`")
                 safe = _safe_name(mstmt.name, set(env.params.values()) | set(method_locals.values()))
                 value = _lower_expr(mstmt.value, env, mode="setup")
+                # item 404: raise on a definite operator/index/builtin misuse in
+                # the bound value, uniformly with a `fn`/`test` body.
+                swept = _sweep(value, mstmt.line)
                 method_locals[mstmt.name] = safe
                 env.params[mstmt.name] = safe  # visible to later statements
                 if mstmt.type is not None:
@@ -6698,10 +6716,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     # `xs.length()` is a List length, not an unpinned call) —
                     # the stdlib-named-method guard (roadmap 75(b)) depends on
                     # provable receiver types.
-                    inferred = infer_ir(value, env.type_env, env.types,
-                                        env.services)
-                    if inferred is not None:
-                        env.type_env[safe] = inferred
+                    if swept is not None:
+                        env.type_env[safe] = swept
                 mbody.append({"step": "let", "name": safe, "value": value,
                               "mutable": bool(mstmt.mutable)})
             elif isinstance(mstmt, AssignStmt):
@@ -6711,8 +6727,10 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                                     f"`{mstmt.name}` is not declared in `{method.name}`",
                                     hint="declare it with `let` (single-assignment) or "
                                          "`var` (mutable)")
+                assigned = _lower_expr(mstmt.value, env, mode="setup")
+                _sweep(assigned, mstmt.line)  # item 404
                 mbody.append({"step": "assign", "name": method_locals[mstmt.name],
-                              "value": _lower_expr(mstmt.value, env, mode="setup")})
+                              "value": assigned})
             elif isinstance(mstmt, ReturnStmt):
                 if mstmt.expr is None:
                     # a void operation: `fn f(x) { return }`
@@ -6730,8 +6748,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 pin_hole(mstmt.expr, decl.returns, filename,
                          f"`{method.name}` returns")
                 lowered_return = _lower_expr(mstmt.expr, env, mode="setup")
+                # item 404: sweep the returned value with the raising oracle so
+                # an internal operator/index/builtin misuse is refused uniformly
+                # with a `fn`/`test` body, not only the return-type mismatch.
+                actual = _sweep(lowered_return, mstmt.line)
                 if decl.returns:
-                    actual = infer_ir(lowered_return, env.type_env, env.types, env.services)
                     if actual and not compatible(decl.returns, actual):
                         raise mismatch(filename, mstmt.line,
                                        f"`{method.name}` returns", decl.returns, actual)
