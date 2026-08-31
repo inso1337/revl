@@ -256,7 +256,10 @@ def test_initialize_and_tools_list():
                           # the component registry read path (docs/registry.md)
                           "revl_resolve",
                           # verified canary (docs/verified-canary.md, item 59)
-                          "revl_canary"}
+                          "revl_canary",
+                          # approval distillation operator surface (item 251)
+                          "revl_distillation_offers", "revl_apply_distillation",
+                          "revl_revoke_distillation"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True
