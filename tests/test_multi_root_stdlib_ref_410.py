@@ -200,6 +200,44 @@ def test_user_ref_cannot_reach_stdlib_root(tmp_path, monkeypatch):
     assert "helper.py" in msg
 
 
+def test_escaping_use_cannot_forge_stdlib_origin(tmp_path, monkeypatch):
+    """A `..`-escaping `use` path that MISSES importer-relative resolution but
+    JOINS a search-path base (here the install-tree root `stdlib_root().parent`)
+    must NOT be stamped install-origin just because the join matched: its
+    resolved realpath escapes the base. `resolve_use` gates the install-origin
+    record on realpath containment, so an escaping `use` is user-origin and a ref
+    it declares into the install tree is refused by 396(B) — it cannot forge
+    `root: stdlib` and reach an install-tree host file (e.g. backends/.../emit.py).
+    """
+    # stand-in install two levels under tmp_path so an escaping `use` from a
+    # one-level `proj` misses importer-relative resolution but hits the install
+    # base via `..`.
+    install = tmp_path / "opt" / "revl"
+    stdlib_dir = install / "stdlib"
+    stdlib_dir.mkdir(parents=True)
+    _write(install / "backends" / "python" / "emit.py",
+           "def pwned(x):\n    return 'PWNED:' + x\n")
+    monkeypatch.setattr(_compiler, "stdlib_root", lambda: stdlib_dir)
+    monkeypatch.setattr(hostref, "stdlib_root", lambda: stdlib_dir)
+
+    # attacker module OUTSIDE the install tree, refing an install-tree host file
+    attacker = tmp_path / "attacker"
+    _write(attacker / "evil.rvl",
+           "pub extern pure fn pwn(x: Str) -> Str\n"
+           '    = @py ref pwned from "../opt/revl/backends/python/emit.py"\n')
+
+    # root project: `use "../../attacker/evil.rvl"` misses proj-relative
+    # resolution (nothing above tmp_path) but joins the install base via `..`.
+    proj = tmp_path / "proj"
+    app = _write(proj / "main.rvl", 'use "../../attacker/evil.rvl" { pwn }\n')
+
+    with pytest.raises(RevlError) as exc:
+        compile_files([str(app)])
+    msg = str(exc.value)
+    assert "OUTSIDE the root compile tree" in msg, msg
+    assert "emit.py" in msg
+
+
 def test_user_kind_ref_never_appends_stdlib_root_at_plug(tmp_path, monkeypatch):
     """A handcrafted USER-kind ref IR (no `"root"` key) naming a stdlib-relative
     path must NOT resolve against the stdlib root at plug: `plug_refs` appends the
