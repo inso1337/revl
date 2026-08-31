@@ -25,6 +25,7 @@ from .._paths import backends_root
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from .approval import ApprovalRequired
+from .approval import _args_digest as _cache_args_digest
 
 
 class SessionError(RuntimeError):
@@ -318,6 +319,30 @@ class Session:
         # this is never surfaced (`approval_metrics` returns None), so the
         # manifest and `state()` stay byte-identical.
         self._grants_consumed: int = 0
+        # item 310 (capability-aware caching): the seam-method cache. The index
+        # maps a provided (key, method) to its `cache` IR descriptor, rebuilt per
+        # generation next to the class map. `_cache_entries` is the authority-
+        # scoped entry store (keyed on the recorded grant + generation + args
+        # digest); an entry lives only while its recorded grant, its generation,
+        # its ttl, and its `invalidated_by` epochs all stand, so a hit can never
+        # launder authority (the check fires on every access; a live hit only
+        # skips the host body and the use consumption a miss performs). No ledger
+        # (no policy) means no entry store: every access is a miss and the
+        # capability/external declaration is dynamically inert (design
+        # §enforcement, no-policy decision). `_cache_inval_epoch` bumps when a
+        # crossing of a subscribed `invalidated_by` token fires, WAL-ordered so a
+        # session never reads its own stale write. `cache pure` is memoized in the
+        # emitted body and never reaches this store. All reset per generation.
+        self._cache_index: dict = {}
+        self._cache_entries: dict = {}
+        self._cache_inval_epoch: dict = {}
+        self._cache_inval_tokens: set = set()
+        self._cache_hits: int = 0
+        # `cache pure` memo table: keyed on (key, method, args digest), no
+        # authority scope (the pure class crosses nothing, so it has no ledger
+        # interaction by construction — it memoizes even in a no-policy session).
+        # Generation-scoped like the entry store.
+        self._cache_pure: dict = {}
         # item 246, Slice 2/3: granted typed `Approval[C]` entries (the language
         # surface, `await approval` / `with`). Distinct from `_ledger` (the
         # operator-layer ticket path): each carries a single `capability`, its
@@ -405,6 +430,9 @@ class Session:
         # a class-(c) emission does not boot without approval (Fix 1). Off when no
         # policy is configured, so nothing below runs and the load is byte-identical.
         self._class_map = self._build_class_map(ir)
+        # item 310: the seam-method cache index, rebuilt atomically with the class
+        # map so a call is never decided against a stale cache contract.
+        self._install_cache_index(ir)
         self._enforce_activation_gate(ir)
         # item 294 Slice 2: the capability-lease gate, alongside the activation
         # gate and BEFORE any runtime is touched. A `let l = effect lease …`
@@ -832,6 +860,11 @@ class Session:
         # gets the unknown-hash refusal and the caller re-issues).
         self._class_map = new_map
         self._tickets = {}
+        # item 310: the new generation's cache index goes live atomically too, and
+        # every prior-generation entry dies (a generation change is a liveness
+        # event — a swapped provider may answer differently, so a stale entry is a
+        # laundered result).
+        self._install_cache_index(ir)
         state = self.state(drain=True)
         if migration is not None:
             state["migration"] = migration
@@ -1648,6 +1681,15 @@ class Session:
         self._ledger = []
         self._grants = []
         self._grants_consumed = 0
+        # item 310: the seam-method cache is session-scoped, exactly as the ledger
+        # and grants are (a cached result cannot outlive the session that
+        # authorized its miss).
+        self._cache_index = {}
+        self._cache_entries = {}
+        self._cache_pure = {}
+        self._cache_inval_epoch = {}
+        self._cache_inval_tokens = set()
+        self._cache_hits = 0
 
     # -- the per-turn admit+run crossing (roadmap item 330) ----------------
 
@@ -1791,13 +1833,59 @@ class Session:
         if target is None or not callable(target):
             raise SessionError(f"`{key}.{method}` is not callable on the provided value")
 
+        # item 310: the seam-method cache gate. Active only for a `cache
+        # capability`/`external` method under a policy with a ledger — a no-policy
+        # session has no authority scope to key an entry on, so the declaration is
+        # dynamically inert and every access is a miss (design §enforcement,
+        # no-policy decision). `cache pure` is memoized in the emitted body and
+        # never reaches here. Non-cache methods leave `cache_active` False and take
+        # the byte-for-byte path below.
+        cache_spec = self._cache_index.get((key, method))
+        cache_class = cache_spec.get("class") if cache_spec else None
+        pure_key = None
+        if cache_class == "pure_fn":
+            # `cache pure`: memoize on the args digest. No ledger interaction (the
+            # reach crosses nothing), so it hits in any session, policy or not, and
+            # a hit is observationally equivalent to the call (G6: equal args, equal
+            # result). Generation-scoped: a swap drops the memo.
+            pure_key = (key, method, _cache_args_digest(args))
+            if pure_key in self._cache_pure:
+                self._cache_hits += 1
+                return {"result": _plain(self._cache_pure[pure_key]),
+                        "trace": [], "cacheHit": True}
+        cache_active = (
+            cache_class in ("capability_result", "external_effect")
+            and self.approval_policy is not None
+            and self._class_map is not None)
+        entry_key = None
+        if cache_active:
+            entry_key = (key, method, _cache_args_digest(args))
+            entry = self._cache_entries.get(entry_key)
+            if entry is not None and self._cache_entry_live(entry):
+                # LIVE HIT: the seam checks liveness BEFORE it consumes, so a hit
+                # skips the consumption a miss performs (design laundering point 2)
+                # — no host body runs, no use is spent, no boundary is crossed, so
+                # a hit can invalidate nothing. The entry's own liveness IS the
+                # authority binding (its recorded grant must still be live, or its
+                # covering approval's ttl unlapsed), so a hit cannot launder
+                # authority: an access whose recorded authority has died takes the
+                # miss path below and is refused exactly as an uncached call.
+                self._cache_hits += 1
+                self._record_cache_hit(key, method, entry)
+                return {"result": _plain(entry["value"]), "trace": [],
+                        "cacheHit": True}
+            # MISS: fall through to today's consume-before-fire path, then store.
+
         # item 246: the auto-approve decision, at the single chokepoint every
         # internal re-invocation passes through — `replay_forward` re-invokes
         # `self.call(...)`, so a class-(c) replayed step is refused here exactly as
         # a fresh one (Fix 2, exit test 13). class none/(a)/(b) proceed and are
         # counted; class (c) consumes a standing approval or raises the ticket.
-        # A no-policy session never enters this (returns immediately).
-        self._approval_decide_call(key, method, args)
+        # A no-policy session never enters this (returns immediately). item 310:
+        # `decision` records which authority the miss consumed, so the stored entry
+        # binds to THAT grant/approval (not any that could have covered).
+        decision: dict | None = {} if cache_active else None
+        self._approval_decide_call(key, method, args, record=decision)
 
         async def invoke():
             result = target(*(args or []))
@@ -1833,7 +1921,133 @@ class Session:
         # has returned and the loop is free — the turn's keys become callable and
         # its crossings are already governed by this session's 245 frame.
         self._drain_pending_admits()
+        # item 310: store the miss result. A `cache pure` result is memoized
+        # unconditionally (no authority); a capability/external result is stored
+        # scoped to the authority the miss consumed.
+        if pure_key is not None:
+            self._cache_pure[pure_key] = result
+        if cache_active and entry_key is not None:
+            self._cache_store(entry_key, result, cache_spec, decision)
+        # item 310: fire `invalidated_by` for any subscribed token this call
+        # crossed, BEFORE the result is delivered — the write and the invalidation
+        # ride the same order, so a session never reads its own stale write
+        # (design §invalidated_by). Guarded on the subscribed-token set, so a
+        # composition with no `invalidated_by` clause is byte-identical.
+        if self._cache_inval_tokens:
+            self._fire_cache_invalidations(key, method)
         return {"result": _plain(result), "trace": driver.drain_events()}
+
+    # -- item 310: the seam-method cache entry store ------------------------
+
+    def _grant_live_by_id(self, request_id: str, now: int) -> bool:
+        """Whether the standing grant `request_id` recorded on a cache entry is
+        still live: present, un-revoked, un-exhausted (`_consume_grant` sets
+        `consumed` when uses hit zero), and unexpired. A one-use grant consumed by
+        the miss is dead here, so it yields one miss and zero hits (design: no
+        residue of authority)."""
+        for g in self._grants:
+            if g["requestId"] != request_id:
+                continue
+            if g.get("consumed") or g.get("revoked"):
+                return False
+            exp = g.get("expiresAt")
+            if exp is not None and now > exp:
+                return False
+            return True
+        return False
+
+    def _cache_entry_live(self, entry: dict) -> bool:
+        """Whether a cache entry may still answer — the check the seam runs on
+        EVERY access, hit or miss. An entry dies at the FIRST of: a generation
+        change, its ttl lapsing, its covering approval's ttl lapsing (for an
+        approval-required token — the consumed flag is deliberately NOT consulted,
+        design §single-use approvals), an `invalidated_by` token crossing since it
+        was born, or its recorded grant dying (revocation / exhaustion / expiry).
+        Past any line the access is a miss and re-crosses under full authority."""
+        if entry["generation"] != self._generation:
+            return False
+        now = self._now_ms()
+        exp = entry.get("expiresAt")
+        if exp is not None and now > exp:
+            return False
+        aexp = entry.get("approvalExpiresAt")
+        if aexp is not None and now > aexp:
+            return False
+        for token, epoch in (entry.get("invalEpochs") or {}).items():
+            if self._cache_inval_epoch.get(token, 0) != epoch:
+                return False
+        for rid in entry.get("grantIds") or ():
+            if not self._grant_live_by_id(rid, now):
+                return False
+        return True
+
+    def _cache_store(self, entry_key: tuple, value, cache_spec: dict,
+                     decision: dict | None) -> None:
+        """Store a miss result, scoped to the authority the miss consumed. A
+        capability/external entry with NO consumed grant or approval has no
+        authority scope to be keyed on or to die with — an ambient store the
+        laundering section forbids — so it is NOT stored (fail closed into
+        correctness). The ttl `expiresAt` and the `invalidated_by` epoch snapshot
+        are captured here so the liveness check reads a fixed floor."""
+        scope = (decision or {}).get("scope")
+        grant_ids: list = []
+        approval_expires = None
+        if scope is not None:
+            kind, val = scope
+            if kind == "grants":
+                grant_ids = list(val)
+            elif kind == "approval":
+                approval_expires = (decision or {}).get("approvalExpiresAt")
+        if not grant_ids and approval_expires is None:
+            # no authority scope (an off-crossing class-none/(a)/(b) result, or a
+            # scope the miss did not consume): an unscoped entry is the ambient
+            # store the design forbids — leave it uncached, dynamically inert.
+            return
+        now = self._now_ms()
+        ttl_ms = cache_spec.get("ttl_ms")
+        expires_at = (now + ttl_ms) if ttl_ms is not None else None
+        tokens = cache_spec.get("invalidated_by") or []
+        inval_epochs = {tok: self._cache_inval_epoch.get(tok, 0) for tok in tokens}
+        self._cache_entries[entry_key] = {
+            "value": value,
+            "generation": self._generation,
+            "grantIds": grant_ids,
+            "approvalExpiresAt": approval_expires,
+            "expiresAt": expires_at,
+            "invalEpochs": inval_epochs,
+        }
+
+    def _fire_cache_invalidations(self, key: str, method: str) -> None:
+        """When a call crosses a subscribed `invalidated_by` token, bump that
+        token's epoch so every entry declaring it is a miss on its next access
+        (single-process, WAL-ordered — design §invalidated_by). A crossing of a
+        wider token invalidates a narrower subscription (the item-294 order)."""
+        if self._class_map is None:
+            return
+        reach = self._class_map.classify_call(key, method)
+        if reach is None:
+            return
+        crossed = reach.get("capabilities") or set()
+        if not crossed:
+            return
+        from .approval import _cap_covers  # noqa: PLC0415
+        for token in self._cache_inval_tokens:
+            if any(_cap_covers(cap, token) for cap in crossed):
+                self._cache_inval_epoch[token] = \
+                    self._cache_inval_epoch.get(token, 0) + 1
+
+    def _record_cache_hit(self, key: str, method: str, entry: dict) -> None:
+        """Write a WAL record naming the hit and the miss crossing it re-delivers
+        (design laundering point 5: hits are on the record). Best-effort — a
+        session with no WAL still counts the hit in `state()` (the `cacheHits`
+        counter), it just has no durable audit line."""
+        wal = self._approval_wal()
+        if wal is None:
+            return
+        recorder = getattr(wal, "record_cache_hit", None)
+        if callable(recorder):
+            recorder({"key": key, "method": method,
+                      "grantIds": entry.get("grantIds") or []})
 
     def _drain_pending_admits(self) -> None:
         """Wire every turn admitted (and queued) during the call that just
@@ -1856,6 +2070,50 @@ class Session:
             return None
         from .approval import ClassMap  # noqa: PLC0415 — lazy, no cordis
         return ClassMap(ir)
+
+    # -- item 310: the seam-method cache index + entry store ----------------
+
+    def _build_cache_index(self, ir: dict) -> dict:
+        """`(key, method) -> cache IR descriptor` for every provided seam method
+        that declares `cache` (item 310). Walks the components' `provide` steps
+        (key -> service) and reads the descriptor off the service-method interface
+        (`ir["services"][svc]["methods"][m]["cache"]`), so every provider of a
+        `cache`-declaring method inherits the same contract. Empty for any
+        composition with no `cache` clause, so the seam is byte-identical."""
+        services = ir.get("services") or {}
+        index: dict = {}
+
+        def walk(node) -> None:
+            if isinstance(node, dict):
+                if node.get("step") == "provide":
+                    key = node.get("name")
+                    svc = services.get(node.get("service")) or {}
+                    methods = svc.get("methods") or {}
+                    for mname, spec in methods.items():
+                        cache = spec.get("cache")
+                        if cache is not None:
+                            index[(key, mname)] = cache
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(ir.get("components") or [])
+        return index
+
+    def _install_cache_index(self, ir: dict) -> None:
+        """Rebuild the per-generation cache index and drop every entry from the
+        prior generation (a generation change is itself a liveness event, design
+        laundering point 3). Called next to the class-map rebuild at load/swap."""
+        self._cache_index = self._build_cache_index(ir)
+        self._cache_entries = {}
+        self._cache_pure = {}
+        self._cache_inval_epoch = {}
+        self._cache_inval_tokens = set()
+        for cache in self._cache_index.values():
+            for token in cache.get("invalidated_by") or ():
+                self._cache_inval_tokens.add(token)
 
     def _approval_wal(self):
         """The session WAL, when recording (an enabled policy requires it). None
@@ -1913,11 +2171,20 @@ class Session:
         if bucket is not None:
             owner.approvals[bucket] += 1
 
-    def _approval_decide_call(self, key: str, method: str, args) -> None:
+    def _approval_decide_call(self, key: str, method: str, args,
+                              record: dict | None = None) -> None:
         """The per-call decision (Decision 2). Off -> return immediately (byte-
         identical). class none/(a)/(b) -> proceed and count. class (c) -> consume
         a standing approval and proceed, else mint a ticket, count the prompt, and
-        raise `ApprovalRequired` (the two-step's refusal)."""
+        raise `ApprovalRequired` (the two-step's refusal).
+
+        `record` (item 310, additive out-param) is filled in place with the
+        authority the miss actually consumed, so the seam cache can bind an entry
+        to THAT authority (the recorded grant, not any grant that could have
+        covered): `{"scope": ("grants", [requestId, ...])}` or
+        `{"scope": ("approval", requestId)}`, and `{"scope": None}` for a
+        class-none/(a)/(b) call. Default `None` -> nothing recorded, so every
+        existing caller is byte-identical."""
         if self.approval_policy is None or self._class_map is None:
             return
         reach = self._class_map.classify_call(key, method)
@@ -1926,6 +2193,8 @@ class Session:
         klass = reach["class"]
         if klass in (None, "a", "b"):
             self._count_posture(klass)
+            if record is not None:
+                record["scope"] = None
             return
         # class (c): a standing approval, or a fresh ticket.
         from .approval import ApprovalRequired  # noqa: PLC0415
@@ -1933,6 +2202,9 @@ class Session:
         standing = self._find_standing_approval(ticket)
         if standing is not None:
             self._consume_approval(standing)   # durable spend before the fire
+            if record is not None:
+                record["scope"] = ("approval", standing["requestId"])
+                record["approvalExpiresAt"] = standing.get("expiresAt")
             return
         # item 344: a session-scoped standing grant keyed by the capability's
         # semantic identity covers ANY class-(c) call reaching it (differing
@@ -1942,6 +2214,8 @@ class Session:
         if grants is not None:
             for g in grants:                   # every class-(c) cap is covered
                 self._consume_grant(g)         # durable spend before the fire
+            if record is not None:
+                record["scope"] = ("grants", [g["requestId"] for g in grants])
             return
         self._tickets[ticket["hash"]] = ticket
         if self._owner is not None:
@@ -2576,6 +2850,11 @@ class Session:
             # takes prompts-per-session below the single-use floor for a
             # repeat-shaped session.
             "grantsConsumed": self._grants_consumed,
+            # item 310: seam-method cache hits in their OWN counter, never folded
+            # into `silent` (which would overstate the auto-approved-with-proof
+            # number). A hit is a prompt avoided by proof of FRESHNESS, not of
+            # revertibility — its own line (design laundering point 5).
+            "cacheHits": self._cache_hits,
             "standingGrants": [
                 {"capability": g["capability"], "component": g["component"],
                  "remainingUses": g.get("remainingUses"),

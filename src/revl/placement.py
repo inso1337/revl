@@ -1400,6 +1400,47 @@ def resource_crossing_refusal(ir: dict, requires: dict, provides: dict,
     return None
 
 
+def cache_crossing_refusal(ir: dict, requires: dict, provides: dict,
+                           owner: dict) -> str | None:
+    """Refuse a `cache`-declaring seam method split across a PROCESS boundary
+    (roadmap item 310, §invalidated_by scope). Returns a diagnostic naming the
+    service, method and split, or None.
+
+    "Ordered by the same WAL" presumes ONE WAL: the item-310 entry store is
+    per-session and single-process. A composition placed across processes has
+    each child firing its own extern crossings locally, where no shared WAL
+    orders an `invalidated_by` crossing against an entry held in another process
+    — a per-process private cache with cross-process invalidation traffic is
+    exactly the stale-read bug the freshness clause exists to prevent. Until the
+    federation surface lands, a distributed placement refuses `cache` on any
+    method the placement splits from its invalidating crossings, at admission,
+    next to the resource-crossing refusal. The same composition placed in ONE
+    process admits (this check only fires on a cross-process seam)."""
+    services = ir.get("services") or {}
+    for consumer, keys in requires.items():
+        for key, service in keys.items():
+            if key in provides.get(consumer, {}):
+                continue  # served locally in-process, not a seam
+            host = owner.get(key)
+            if host is None:
+                continue  # a remote seam (item 151) has no local owner to gate
+            methods = (services.get(service) or {}).get("methods") or {}
+            cached = sorted(m for m, spec in methods.items()
+                            if (spec or {}).get("cache"))
+            if cached:
+                return (
+                    f"service `{service}` (key {key!r}) declares `cache` on "
+                    f"{', '.join(cached)} but is split across a process seam "
+                    f"({host!r} -> {consumer!r}). The item-310 entry store is "
+                    "single-process and WAL-ordered; a per-process private cache "
+                    "with cross-process invalidation traffic is the stale-read "
+                    "bug `invalidated_by` exists to prevent. Cross-composition "
+                    "invalidation is the federation surface (unshipped) — place "
+                    "the cache-declaring method in one process, or drop `cache` "
+                    "(item 310, §invalidated_by scope).")
+    return None
+
+
 def cross_tier_boundary_check(ir: dict, requires: dict, provides: dict,
                               owner: dict, backends: dict,
                               services: dict) -> tuple[str | None, list[str]]:
@@ -1423,6 +1464,9 @@ def cross_tier_boundary_check(ir: dict, requires: dict, provides: dict,
     Returns ``(diagnostic_or_None, report_lines)``.
     """
     problem = resource_crossing_refusal(ir, requires, provides, owner, backends)
+    if problem is not None:
+        return problem, []
+    problem = cache_crossing_refusal(ir, requires, provides, owner)
     if problem is not None:
         return problem, []
     verdicts = distributability(ir)
