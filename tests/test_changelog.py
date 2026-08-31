@@ -59,46 +59,95 @@ def _changelog(before_src: str, after_src: str, **kw) -> dict:
 
 # ----------------------------------------------------- the guard regression suite
 
-def test_guard_capability_scope_widening_on_a_stable_crossing():
-    """The new CRITICAL: an emission that widens its declared capability scope
-    (`send.mail -> send.*`) while its crossing token stays `emit:C:notify` is
-    invisible to `diff_crossings` (scope is not in the token). The path-granular
-    guard must honesty-line it - it must NOT be dropped, and the release must
-    NOT read as a clean PATCH."""
+def test_capability_scope_widening_on_a_stable_crossing_classifies_breaking():
+    """Slice 2 (was the Slice-1 CRITICAL honesty line): an emission that widens
+    its declared capability scope (`send.mail -> send.*`) while its crossing
+    token stays `emit:C:notify` is now CLASSIFIED breaking by
+    `diff_capability_scopes` (scope is not in the token, so `diff_crossings` is
+    still blind to it). The leaf `boundary[*].capabilities` is now in
+    CONSUMED_PATHS, so the guard NO LONGER double-reports it as unclassified."""
     before = {"boundary": {"C": {"emissions": ["notify"],
                                  "capabilities": {"notify": ["send.mail"]}}}}
     after = {"boundary": {"C": {"emissions": ["notify"],
                                 "capabilities": {"notify": ["send.*"]}}}}
 
-    lines = _completeness_guard(before, after)
-    assert len(lines) == 1
-    line = lines[0]
-    assert line.category == "unclassified"
-    assert line.fact == "audit-path:boundary"
-    assert line.changed is True
-    assert any("capabilities.notify" in p for p in line.paths)
+    # the leaf is consumed now: the guard no longer surfaces it.
+    assert _completeness_guard(before, after) == []
 
-    # and end-to-end it forces a non-clean headline, never a clean PATCH.
     doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
                            before, after, "v1", "v2", None, degraded=False)
-    assert doc["headline"]["clean"] is False
-    assert "PATCH?" in doc["headline"]["marker"]
-    assert len(doc["unclassified"]) == 1
+    assert len(doc["breaking"]) == 1
+    assert doc["breaking"][0]["fact"] == "scope.widened:C:notify"
+    assert doc["breaking"][0]["lede"] is True
+    # classified, so the bucket is empty and the headline is a CLEAN major.
+    assert doc["unclassified"] == []
+    assert doc["headline"]["clean"] is True
+    assert doc["headline"]["bump"] == "major"
+    assert "marker" not in doc["headline"]
 
 
-def test_guard_new_backend_host_body():
-    """The second CRITICAL instance: an extern that GAINS a backend host body
-    (`backends: ["rust"] -> ["py","rust"]`, new reachable host code) is
-    invisible to `diff_reach`, which reads only `reach`. The guard honesty-lines
-    it."""
+def test_capability_scope_narrowing_classifies_added():
+    """The safe direction: an emission that NARROWS its scope (`send.* ->
+    send.mail`) is added/relaxed, never breaking."""
+    before = {"boundary": {"C": {"emissions": ["notify"],
+                                 "capabilities": {"notify": ["send.*"]}}}}
+    after = {"boundary": {"C": {"emissions": ["notify"],
+                                "capabilities": {"notify": ["send.mail"]}}}}
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert doc["breaking"] == []
+    assert doc["added"][0]["fact"] == "scope.tightened:C:notify"
+
+
+def test_new_backend_host_body_classifies_breaking():
+    """Slice 2 (was the Slice-1 second-CRITICAL honesty line): an extern that
+    GAINS a backend host body (`backends: ["rust"] -> ["py","rust"]`, new
+    reachable host code) is now CLASSIFIED breaking by `diff_backends`
+    (`diff_reach` reads only `reach`, so it is still blind to a new body). The
+    leaf `externs[*].backends` is now in CONSUMED_PATHS."""
     before = {"externs": [{"name": "x", "reach": {"kind": "net"},
                            "backends": ["rust"]}]}
     after = {"externs": [{"name": "x", "reach": {"kind": "net"},
                           "backends": ["py", "rust"]}]}
-    lines = _completeness_guard(before, after)
-    assert len(lines) == 1
-    assert lines[0].fact == "audit-path:externs"
-    assert any("backends" in p for p in lines[0].paths)
+    assert _completeness_guard(before, after) == []
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert len(doc["breaking"]) == 1
+    assert doc["breaking"][0]["fact"] == "backend.added:x:py"
+    assert doc["breaking"][0]["lede"] is True
+    assert doc["unclassified"] == []
+    assert doc["headline"]["bump"] == "major"
+
+
+def test_weakened_register_floor_classifies_breaking():
+    """Slice 2: a weakened idempotency register floor (`keyed -> declared`) is
+    classified breaking by `diff_registers`; the `capability_registers` leaf is
+    consumed, so the guard no longer honesty-lines it."""
+    before = {"capability_registers": {"send.mail": "keyed"}}
+    after = {"capability_registers": {"send.mail": "declared"}}
+    assert _completeness_guard(before, after) == []
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert doc["breaking"][0]["fact"] == "register.weakened:send.mail"
+    assert doc["breaking"][0]["lede"] is True
+    assert doc["unclassified"] == []
+    assert doc["headline"]["bump"] == "major"
+
+
+def test_raised_cardinality_ceiling_classifies_breaking():
+    """Slice 2: a raised emission ceiling (`<= 3` -> `unbounded`) is classified
+    breaking by `diff_cardinality`; the `cardinality` leaf is consumed."""
+    before = {"cardinality": {"C": {"per_capability": {
+        "send.mail": {"bound": 3, "kind": "bounded"}}}}}
+    after = {"cardinality": {"C": {"per_capability": {
+        "send.mail": {"bound": None, "kind": "unbounded"}}}}}
+    assert _completeness_guard(before, after) == []
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert doc["breaking"][0]["fact"] == "cardinality.widened:C:send.mail"
+    assert doc["breaking"][0]["lede"] is True
+    assert doc["unclassified"] == []
+    assert doc["headline"]["bump"] == "major"
 
 
 def test_guard_reach_change_alone_is_consumed_not_honesty_lined():
@@ -126,42 +175,64 @@ def test_guard_removed_optional_surface_trips_over_before_union():
 
 
 def test_guard_same_length_reshuffle_reports_changed_not_a_count():
-    """LOW finding 4: a same-length register swap inside `recovery_surface`
-    (unhashable `list[dict]`) must report `changed: true` with the moved paths,
-    never a bare count that a reshuffle could hide."""
-    before = {"recovery_surface": [
-        {"name": "a", "kind": "inverse", "register": "keyed"},
-        {"name": "b", "kind": "inverse", "register": "declared"}]}
-    after = {"recovery_surface": [
-        {"name": "a", "kind": "inverse", "register": "declared"},
-        {"name": "b", "kind": "inverse", "register": "keyed"}]}
+    """LOW finding 4, on a STILL-UNCLASSIFIED surface: Slice 2 now CONSUMES
+    `recovery_surface`, so the reshuffle-not-hidden invariant rides
+    `parallel_plan`, which no differ reads. A same-length reorder inside an
+    unhashable `list[dict]` surface must report `changed: true` with the moved
+    leaf paths, never a bare count a reshuffle could hide."""
+    before = {"parallel_plan": {"C": [{"group": [0, 1]}, {"group": [2, 3]}]}}
+    after = {"parallel_plan": {"C": [{"group": [2, 3]}, {"group": [0, 1]}]}}
     lines = _completeness_guard(before, after)
     assert len(lines) == 1
-    assert lines[0].fact == "audit-path:recovery_surface"
+    assert lines[0].fact == "audit-path:parallel_plan"
     assert lines[0].changed is True
-    assert any("register" in p for p in lines[0].paths)
+    assert lines[0].paths  # the moved leaf paths, not a bare count
 
 
-def test_guard_dropped_recovery_inverse_honesty_lines_and_floors_headline():
-    """The original CRITICAL: a witnessed/acquire extern's `undo` is deleted,
-    turning a reversible effect irreversible. It shows up ONLY in
-    `recovery_surface` (no crossing, no interface change). It must honesty-line
-    AND force the headline non-clean - never a silent clean PATCH."""
+def test_dropped_recovery_inverse_classifies_breaking_and_floors_headline():
+    """Slice 2 (was the original Slice-1 CRITICAL honesty line): a
+    witnessed/acquire extern's `undo` is deleted, turning a reversible effect
+    irreversible. It shows up ONLY in `recovery_surface` (no crossing, no
+    interface change). `diff_recovery` now CLASSIFIES it breaking with
+    `lede=True`, and it FLOORS the headline to a CLEAN major - never the silent
+    clean PATCH Slice 1 could only mark non-clean."""
     before = {"recovery_surface": [
         {"name": "acquire", "kind": "inverse", "register": "keyed"}]}
     after = {"recovery_surface": []}
 
-    lines = _completeness_guard(before, after)
-    assert len(lines) == 1
-    assert lines[0].fact == "audit-path:recovery_surface"
+    # consumed now: the guard no longer surfaces it.
+    assert _completeness_guard(before, after) == []
 
     doc = _build_changelog(EMPTY_DELTA,
                            {"bump": "patch", "changes": [], "nextVersion": None},
                            before, after, "v1", "v2", None, degraded=False)
-    assert doc["breaking"] == [] and doc["added"] == [] and doc["internal"] == []
+    assert len(doc["breaking"]) == 1
+    assert doc["breaking"][0]["fact"] == "recovery.dropped:acquire:inverse"
+    assert doc["breaking"][0]["lede"] is True
+    assert doc["unclassified"] == []
+    # the dropped inverse FLOORS the headline to major even though version /
+    # crossings / reach all read PATCH.
+    assert doc["headline"]["clean"] is True
+    assert doc["headline"]["bump"] == "major"
+    assert "marker" not in doc["headline"]
+
+
+def test_a_genuinely_unclassified_surface_still_honesty_lines_and_floors():
+    """The guard survives Slice 2: a surface NO differ reads (`distributability`)
+    still honesty-lines and still forces the headline non-clean, so Slice 2
+    shrinks the residual set without ever letting a real change go silent."""
+    before = {"distributability": {"S": "splittable"}}
+    after = {"distributability": {"S": "co-located"}}
+    lines = _completeness_guard(before, after)
+    assert len(lines) == 1
+    assert lines[0].fact == "audit-path:distributability"
+    assert lines[0].category == "unclassified"
+    assert lines[0].changed is True
+
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
     assert len(doc["unclassified"]) == 1
     assert doc["headline"]["clean"] is False
-    assert doc["headline"]["bump"] == "patch"
     assert "PATCH?" in doc["headline"]["marker"]
 
 
@@ -236,6 +307,43 @@ def _resolvable_facts(before_ir: dict, after_ir: dict) -> set[str]:
         facts.add(f"reach.weakened:{token.split(':', 1)[-1]}")
     for token in reach["reach_tightened"]:
         facts.add(f"reach.tightened:{token.split(':', 1)[-1]}")
+    # Slice 2 audit-surface differs, reconstructed independently.
+    scopes = audit_diff.diff_capability_scopes(ba, aa)
+    for token in scopes["scope_widened"]:
+        _, comp, label = token.split(":", 2)
+        facts.add(f"scope.widened:{comp}:{label}")
+    for token in scopes["scope_tightened"]:
+        _, comp, label = token.split(":", 2)
+        facts.add(f"scope.tightened:{comp}:{label}")
+    backends = audit_diff.diff_backends(ba, aa)
+    for token in backends["backends_added"]:
+        _, name, backend = token.split(":", 2)
+        facts.add(f"backend.added:{name}:{backend}")
+    for token in backends["backends_removed"]:
+        _, name, backend = token.split(":", 2)
+        facts.add(f"backend.removed:{name}:{backend}")
+    recovery = audit_diff.diff_recovery(ba, aa)
+    for token in recovery["recovery_dropped"]:
+        _, name, kind = token.split(":", 2)
+        facts.add(f"recovery.dropped:{name}:{kind}")
+    for token in recovery["recovery_weakened"]:
+        _, name, kind = token.split(":", 2)
+        facts.add(f"recovery.weakened:{name}:{kind}")
+    for token in recovery["recovery_added"]:
+        _, name, kind = token.split(":", 2)
+        facts.add(f"recovery.added:{name}:{kind}")
+    registers = audit_diff.diff_registers(ba, aa)
+    for token in registers["registers_weakened"]:
+        facts.add(f"register.weakened:{token.split(':', 1)[-1]}")
+    for token in registers["registers_strengthened"]:
+        facts.add(f"register.strengthened:{token.split(':', 1)[-1]}")
+    cardinality = audit_diff.diff_cardinality(ba, aa)
+    for token in cardinality["cardinality_widened"]:
+        _, comp, cap = token.split(":", 2)
+        facts.add(f"cardinality.widened:{comp}:{cap}")
+    for token in cardinality["cardinality_tightened"]:
+        _, comp, cap = token.split(":", 2)
+        facts.add(f"cardinality.tightened:{comp}:{cap}")
     for name in delta["components"]["added"]:
         facts.add(f"component.added:{name}")
     for name in delta["components"]["removed"]:
