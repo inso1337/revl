@@ -434,10 +434,17 @@ class _FlowChecker:
                  endorse_label: str = "", enforce: bool = True,
                  known_callables: frozenset = frozenset(), any_sink: bool = False,
                  state_env: dict | None = None,
-                 state_names: frozenset = frozenset()) -> None:
+                 state_names: frozenset = frozenset(),
+                 untrusted: bool = False) -> None:
         self.model = model
         self.filename = filename
         self.line = line
+        # item 274: whether the AUTHOR is untrusted (the untrusted-author
+        # profile). Under it the author cannot mint a declassifier
+        # (`no_declassify`), so a G9 sink refusal has no author-side path — the
+        # navigable map collapses to the single non-discriminating `blocked`
+        # verdict rather than teaching a declassifier that would itself refuse.
+        self.untrusted = untrusted
         self.signatures = signatures or {}
         self.infer = infer
         self.qualname = qualname
@@ -573,8 +580,9 @@ class _FlowChecker:
             return
         if not self.enforce:
             return
-        origins = ", ".join(sorted(o for o in arg_taint.origins
-                                   if _param_index(o) is None))
+        concrete_origins = sorted(o for o in arg_taint.origins
+                                  if _param_index(o) is None)
+        origins = ", ".join(concrete_origins)
         chain_parts = arg_taint.via + internal_via
         chain = " -> ".join(chain_parts) if chain_parts else "an untrusted value"
         raise RevlError(
@@ -589,7 +597,55 @@ class _FlowChecker:
                  "policy-forbiddable downgrade the enclosing declaration must "
                  f"grant. The tainting path is {chain}.",
             code="G9", category="taint-flow",
+            navigate=self._sink_navigate(sink_name, kind, concrete_origins),
         )
+
+    def _sink_navigate(self, sink_name: str, kind: str, origins: list) -> dict:
+        """The taint-sink family's nearest allowed (item 274, design §2.1),
+        computed from the model in hand: the in-scope declassifiers, the endorse
+        form with the concrete origin, and blocked-when-forbidden.
+
+        Under the untrusted-author profile (`no_declassify`), the author cannot
+        mint or reach its own declassifier, so there is no author-side path: the
+        record collapses to the single non-discriminating `blocked` verdict, and
+        the honest hint is to return the untrusted value to the harness. On the
+        trusted view the alternatives are enumerated."""
+        from . import navigate as nav  # noqa: PLC0415 — lazy, additive
+        origin = origins[0] if origins else "<origin>"
+        if self.untrusted:
+            # `no_declassify`: no author-side path exists, and the record must be
+            # byte-identical to every other policy-family refusal under this
+            # profile so the author cannot tell which gate fired (design §4).
+            return nav.collapsed()
+        alts = []
+        # the in-scope declassifiers, by name. A `verified fn` returning
+        # `Trusted[T]` is exactly what the sink accepts, so routing the value
+        # through one clears THIS gate by construction — the declassifier being
+        # in scope is a static fact at the refusal site (immutable operand).
+        for dname in sorted(self.model.declassifiers):
+            alts.append(nav.alternative(
+                enacts=nav.ENACTS_AUTHOR,
+                action=(f"parse it through the in-scope declassifier "
+                        f"`{dname}` (a `verified fn` returning `Trusted[T]`) "
+                        f"before the sink"),
+                ref=dname, clears=True))
+        # the endorse form with the concrete origin. Whether the enclosing
+        # declaration already grants `endorse[origin]` decides the marker: a
+        # granted slot clears the gate; an ungranted one needs the author to add
+        # the slot first, so it is a `candidate`.
+        granted = origin in self.endorse_allowed
+        alts.append(nav.alternative(
+            enacts=nav.ENACTS_AUTHOR,
+            action=(f"endorse it at a declared point: "
+                    f"`endorse[{origin}](<value>, reason = \"...\")`"
+                    + ("" if granted
+                       else f" (declare the slot first: `endorse[{origin}] "
+                            f"fn ...` on the enclosing declaration)")),
+            ref=f"endorse[{origin}]", clears=granted))
+        return nav.record(
+            family="taint-sink",
+            refused={"sink": sink_name, "kind": kind, "origins": origins},
+            blocked=False, alternatives=alts, profile=None)
 
     # -- the scoped declassifier (Slice C) -------------------------------------
     def _endorse(self, node, arg_taints: list) -> Taint:
@@ -1193,9 +1249,13 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
 
 
 def check_taint(program, fns, components, model: TaintModel,
-                filename: str) -> None:
+                filename: str, untrusted: bool = False) -> None:
     """Refuse any untrusted value that reaches a sink without a declassifier
     (G9). No-op — and byte-identical — when the program uses no qualifier.
+
+    `untrusted` (item 274) marks the untrusted-author profile: a G9 sink
+    refusal then carries the collapsed navigable verdict instead of teaching a
+    declassifier the profile's `no_declassify` would itself refuse.
 
     Slice B: taint propagates across call boundaries. First infer a per-callable
     taint signature to a least fixed point, then make one refusal pass in which
@@ -1223,7 +1283,8 @@ def check_taint(program, fns, components, model: TaintModel,
                                endorse_allowed=model.declared_endorse.get(
                                    fn["name"], frozenset()),
                                endorse_label=fn["name"],
-                               known_callables=known, any_sink=any_sink)
+                               known_callables=known, any_sink=any_sink,
+                               untrusted=untrusted)
         env: dict = {}
         seeded = model.untrusted_params.get(fn["name"], {})
         for i, param in enumerate(fn.get("params") or []):
@@ -1282,7 +1343,8 @@ def check_taint(program, fns, components, model: TaintModel,
                      if state_names else {})
         reaches, declassified, records, approvals = _walk_component_methods(
             comp_body, model, source, line, signatures,
-            comp.get("name") or "", known, any_sink, state_env, state_names)
+            comp.get("name") or "", known, any_sink, state_env, state_names,
+            untrusted=untrusted)
         # item 249, Finding 2: fold the provenance of every top-level fn washer
         # this component reaches onto its own surface, so a declassification done
         # inside a helper fn is not invisible to the audit token / policy.
@@ -1350,7 +1412,8 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                             known: frozenset = frozenset(),
                             any_sink: bool = False,
                             state_env: dict | None = None,
-                            state_names: frozenset = frozenset()
+                            state_names: frozenset = frozenset(),
+                            untrusted: bool = False
                             ) -> tuple[set, set, list, set]:
     reaches: set = set()
     declassified: set = set()
@@ -1369,7 +1432,7 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                     endorse_allowed=model.declared_endorse.get(mname, frozenset()),
                     endorse_label=label, known_callables=known, any_sink=any_sink,
                     state_env=state_env if state_env is not None else {},
-                    state_names=state_names)
+                    state_names=state_names, untrusted=untrusted)
                 env: dict = {}
                 seeded = model.untrusted_params.get(mname, {})
                 for i, pname in enumerate(method.get("params") or []):
