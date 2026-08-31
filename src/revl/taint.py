@@ -46,14 +46,24 @@ from .typecheck import parse_type, format_type, FN_HEAD
 
 # a qualifier head standing on its own (not the tail of a longer identifier such
 # as a user type `MyTrusted[T]`), used only as the byte-identity fast-path guard
-_QUALIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])(?:Untrusted|Trusted)\[")
+_QUALIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])(?:Untrusted|Trusted|Secret)\[")
 
-# The two qualifier heads. Orthogonal to the base type (open question 2).
-_QUALIFIERS = ("Untrusted", "Trusted")
+# The three qualifier heads. Orthogonal to the base type (open question 2).
+# `Secret` (item 256 Slice 3) is the confidentiality qualifier of section 7: a
+# `Secret[T]` value is a real, projectable value the language reads and computes
+# with, fenced not by an absent eliminator but by the flow walk refusing it at
+# disclosure sinks (the `confidential` origin, DISJOINT from the bound key's
+# `secret`).
+_QUALIFIERS = ("Untrusted", "Trusted", "Secret")
 
 # Coarse origin classes the static half tracks (Decision 2). The exact host in
-# `web:example.com` is a runtime refinement filled by Slice B.
-_ORIGIN_CLASSES = {"web", "net", "fs", "model", "input", "secret"}
+# `web:example.com` is a runtime refinement filled by Slice B. `secret` (item 256
+# Slice 1, the bound provider key) and `confidential` (item 256 Slice 3, the
+# `Secret[T]` value qualifier) are DISJOINT: no sink and no declassifier admits
+# both, which is what keeps the permissive `Secret[T]` receiver rule unreachable
+# by a bound key and the total-refusal bound-key rule unreachable by a `Secret[T]`
+# value (CRITICAL 1 fix, §4a / §7).
+_ORIGIN_CLASSES = {"web", "net", "fs", "model", "input", "secret", "confidential"}
 
 # Slice D: the two DERIVED classes. Sink-ness and source-ness are read off the
 # granting side's declared capability scope, never from an author qualifier —
@@ -177,15 +187,26 @@ class TaintModel:
     # which merely nests the secret and is caught at the container's own crossing.
     secret_caps: frozenset = field(default_factory=frozenset)
     extern_names: frozenset = field(default_factory=frozenset)
+    # item 256 Slice 3: callable name -> the param indices declared `Secret[T]`,
+    # the DECLARED disclosure receivers (§7b). A `confidential` value crosses a
+    # boundary only where the receiving side declares it here, the dual of 249's
+    # `Trusted[T]` sink; everywhere else a `confidential` value is refused. This is
+    # kept DISJOINT from `sinks`: a `Secret[T]` param is not an authority sink (it
+    # never refuses an `Untrusted[T]` value), it is a confidentiality receiver. A
+    # `secret`-origin bound key is NEVER admitted here (only `confidential` is),
+    # which is the A8 / CRITICAL 1 guarantee.
+    secret_receivers: dict[str, set[int]] = field(default_factory=dict)
 
     @property
     def active(self) -> bool:
         """Whether any taint surface exists at all. A program with no qualifier
         and no endorse slot engages nothing — the flow walk is skipped and stays
         byte-identical. A bound secret mints a `secret` source, so it engages the
-        walk through `sources` (item 256)."""
+        walk through `sources` (item 256); a `Secret[T]` receiver engages it
+        through `secret_receivers` (item 256 Slice 3)."""
         return bool(self.sources or self.sinks or self.untrusted_params
-                    or self.declassifiers or self.declared_endorse)
+                    or self.declassifiers or self.declared_endorse
+                    or self.secret_receivers)
 
 
 def _sink_kind_for(name: str, capabilities) -> str:
@@ -236,6 +257,11 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 model.sinks.setdefault(name, {})[index] = strip_qualifiers(type_str)
             elif qual == "Untrusted":
                 model.untrusted_params.setdefault(name, {})[index] = _origin_of(())
+            elif qual == "Secret":
+                # item 256 Slice 3: a declared `Secret[T]` receiver (§7b). A
+                # `confidential` value is ADMITTED here and refused everywhere
+                # else — the dual of a `Trusted[T]` sink, on a disjoint origin.
+                model.secret_receivers.setdefault(name, set()).add(index)
             clean = strip_qualifiers(type_str)
             if clean != type_str:
                 setter(clean)
@@ -245,6 +271,13 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     for ext in getattr(program, "externs", ()):
         if top_qualifier(ext.returns) == "Untrusted":
             model.sources[ext.name] = _origin_of(ext.capabilities)
+        elif top_qualifier(ext.returns) == "Secret":
+            # item 256 Slice 3: a `Secret[T]` return mints the `confidential`
+            # origin where the value enters the value world (§7a) — the payment
+            # token an emission hands back. DISJOINT from `secret`: the bound-key
+            # override at the bottom of this loop can still stamp `secret` for a
+            # bound emission cap, but the two never collapse onto one token.
+            model.sources[ext.name] = CONFIDENTIAL_ORIGIN
         params = []
         for i, p in enumerate(ext.params):
             params.append((i, p.type, _fnparam_setter(p)))
@@ -309,6 +342,12 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                     model.sink_kind[method.name] = _sink_kind_for(method.name, ())
                 elif qual == "Untrusted":
                     model.untrusted_params.setdefault(method.name, {})[i] = "input"
+                elif qual == "Secret":
+                    # item 256 Slice 3: a `Secret[T]` service-operation parameter
+                    # is a declared disclosure receiver — the ONE crossing that
+                    # admits a `confidential` value (§7b). Keyed by the operation
+                    # name, so an `emit s.take(x)` call site resolves to it.
+                    model.secret_receivers.setdefault(method.name, set()).add(i)
                 new_params.append((pname, clean))
             method.params = new_params
             # Slice D (D1/D3): a shell/exec/terminal-scoped service operation is a
@@ -382,6 +421,15 @@ CLEAN = Taint()
 # parameter marker, so a plain membership test finds it in any joined origin set.
 SECRET_ORIGIN = "secret"
 
+# item 256 Slice 3: the origin a `Secret[T]` value carries. DISJOINT from
+# `secret` (the bound key) and from every 249 provenance origin. Its policy is
+# the opposite of `secret`'s total refusal: a `confidential` value IS admitted at
+# a declared `Secret[T]` receiver (§7b) and IS declassifiable at a declared
+# `endorse[confidential]` (§7c). Keeping the two on disjoint strings is exactly
+# what makes the permissive receiver rule unreachable by a bound key and the
+# no-declassifier bound-key rule unreachable by a `Secret[T]` value.
+CONFIDENTIAL_ORIGIN = "confidential"
+
 
 def _carries_secret(t: Taint) -> bool:
     """Whether a value's origin set carries the bound-secret origin (item 256),
@@ -389,6 +437,14 @@ def _carries_secret(t: Taint) -> bool:
     thread it into the container's origin union, so a nested secret is caught at
     whichever crossing the container reaches - 4a.2 kind 5)."""
     return SECRET_ORIGIN in t.origins
+
+
+def _carries_confidential(t: Taint) -> bool:
+    """Whether a value's origin set carries the `Secret[T]` `confidential` origin
+    (item 256 Slice 3), directly or nested in a record/variant/generic (it rides
+    the same value-graph joins as `secret`, so a generic round-trip or a nested
+    field does NOT launder it — the A2 no-launder-through-generic case)."""
+    return CONFIDENTIAL_ORIGIN in t.origins
 
 
 def _join(a: Taint, b: Taint) -> Taint:
@@ -555,6 +611,12 @@ class _FlowChecker:
         # can record the taint that flows OUTBOUND across the boundary (Decision 5)
         # — not only the emission's return, which is clean for a value-passing send.
         self._emit_args: list | None = None
+        # item 256 Slice 3: the param indices of that same call the callee declares
+        # `Secret[T]` — the disclosure-receiver positions. The `emit` arm consults
+        # this so a `confidential` argument landing on a declared `Secret[T]`
+        # receiver is ADMITTED, while one crossing to an undeclared receiver (an
+        # LLM prompt, an un-approved realm, a plain service op) is refused (§7b).
+        self._emit_secret_receivers: set = set()
 
     # -- callee-name extraction across the two IR dialects ---------------------
     @staticmethod
@@ -678,6 +740,36 @@ class _FlowChecker:
                  f"reflecting path is {chain} "
                  "(docs/design/256-capability-bound-secrets.md §4).",
             code="G-SECRET", category="taint-secret",
+        )
+
+    def _refuse_confidential(self, sink_name: str, kind: str, index: int | None,
+                             arg_taint: Taint, node) -> None:
+        """A `Secret[T]` value (origin `confidential`, item 256 Slice 3) has
+        reached a DISCLOSURE sink (§7b): a log, an ordinary JSON serialization, an
+        LLM prompt, an MCP tool return, an un-approved realm crossing, or a
+        capability crossing whose receiver does not declare `Secret[T]`. Refused
+        with G-SECRET-FLOW. Unlike `secret`, a `confidential` value is NOT refused
+        everywhere: it is admitted at a declared `Secret[T]` receiver (the caller
+        checks that before reaching here) and declassifiable at a declared
+        `endorse[confidential]` (§7c)."""
+        chain_parts = arg_taint.via + (sink_name,)
+        chain = " -> ".join(chain_parts) if chain_parts else "a Secret[T] value"
+        where = (f" at argument {index + 1} of `{sink_name}`"
+                 if index is not None else f" of `{sink_name}`")
+        raise RevlError(
+            self.filename, self._line_of(node),
+            f"a Secret[T] value flows into {kind}{where} - a confidential value "
+            f"may not reach a disclosure sink (a log, an ordinary serialization, "
+            f"an LLM prompt, an MCP tool return, or a capability crossing whose "
+            f"receiver does not declare `Secret[T]`) (G-SECRET-FLOW)",
+            hint="a `Secret[T]` value crosses a boundary ONLY where the receiving "
+                 "side declares a `Secret[T]` parameter (the dual of a `Trusted[T]` "
+                 "sink), and downgrades ONLY at a declared, audited "
+                 "`endorse[confidential](<value>, reason = \"...\")` slot. Route it "
+                 "through a declared `Secret[T]` receiver, or endorse it at a "
+                 f"declared point. The disclosing path is {chain} "
+                 "(docs/design/256-capability-bound-secrets.md §7).",
+            code="G-SECRET-FLOW", category="taint-secret-flow",
         )
 
     def _sink_navigate(self, sink_name: str, kind: str, origins: list) -> dict:
@@ -974,6 +1066,11 @@ class _FlowChecker:
         # remember the outermost call's arguments so an enclosing `emit` records
         # the taint crossing the boundary (set last, so the outer call wins).
         self._emit_args = arg_taints
+        # item 256 Slice 3: and the receiver positions the outermost call declares
+        # `Secret[T]`, so the `emit` arm can admit a `confidential` argument that
+        # lands on one. Resolved against the DIRECT callee (a required-service op
+        # or extern named at this call site), never a runtime label.
+        self._emit_secret_receivers = self.model.secret_receivers.get(callee, set())
 
         # Slice B4: an indirect call `g(x)` where `g` names a known callable
         # (`let g = upper`) carries that callable's signature/sink; resolve it.
@@ -990,6 +1087,15 @@ class _FlowChecker:
             for index, at in enumerate(arg_taints):
                 if _carries_secret(at):
                     self._refuse_secret(
+                        "an unnameable callable",
+                        "a first-class function value revl cannot name",
+                        index, at, node)
+                # item 256 Slice 3: an unnameable callable cannot DECLARE a
+                # `Secret[T]` receiver (what cannot be named cannot be shown to
+                # admit a confidential value), so a `confidential` argument to it
+                # is a disclosure crossing with no declaration - refused (§7b).
+                if _carries_confidential(at):
+                    self._refuse_confidential(
                         "an unnameable callable",
                         "a first-class function value revl cannot name",
                         index, at, node)
@@ -1011,6 +1117,25 @@ class _FlowChecker:
             return result
 
         callee = resolved
+
+        # item 256 Slice 3 (§7b): a `confidential` argument reaching a REAL extern
+        # host call is a disclosure crossing (a log, a serialization, an LLM
+        # prompt) UNLESS the extern declares a `Secret[T]` receiver at this
+        # position. Checked HERE, before the `model.sources` early return below, so
+        # a confidential value handed to a bound emission (itself a `model.*`
+        # source that returns early) is still refused - the bound-key §4b
+        # same-capability re-emission admits a `secret` value back into its own
+        # emission, never a `confidential` one (the two rules never cross). The
+        # `secret` refusal stays AFTER the sources return, so §4b keeps admitting
+        # the bound key's own re-entry.
+        if (not self.infer and self.enforce
+                and callee in self.model.extern_names):
+            receivers = self.model.secret_receivers.get(callee, set())
+            for index, at in enumerate(arg_taints):
+                if _carries_confidential(at) and index not in receivers:
+                    self._refuse_confidential(
+                        callee, "an extern host call (a disclosure sink)",
+                        index, at, node)
 
         # sink checks (both tiers): a directly-declared `Trusted[T]` parameter,
         # and a parameter a callee's inferred signature reaches transitively.
@@ -1084,6 +1209,12 @@ class _FlowChecker:
                 if _carries_secret(at):
                     self._refuse_secret(callee, "an extern host call", index, at,
                                         node)
+                    # the `confidential` disclosure refusal for this same crossing
+                    # ran earlier (before the `model.sources` early return), so a
+                    # bound emission that returns early is still fenced. The
+                    # DISJOINTNESS (A8): a `secret` bound key is refused here even
+                    # at a `Secret[T]` receiver position - the receiver admits
+                    # `confidential` only, never `secret`.
 
         # an ordinary opaque call (an extern with no declared source, a builtin):
         # the result is tainted iff any argument is — the static
@@ -1144,6 +1275,18 @@ class _FlowChecker:
                 self._refuse_secret("this provide method",
                                     "a provide-method return across the "
                                     "service / MCP bridge", None, result, stmt)
+            if (step == "return" and self.provide_return
+                    and self.enforce and not self.infer
+                    and _carries_confidential(result)):
+                # item 256 Slice 3 (§7b): an MCP tool return is a disclosure sink.
+                # A `provide` method returning a `confidential` value hands it
+                # across the service / MCP bridge to a client that never declared
+                # a `Secret[T]` receiver, so it is refused. (Route the value to a
+                # declared `Secret[T]` receiver, or endorse it, before returning.)
+                self._refuse_confidential(
+                    "this provide method",
+                    "a provide-method return across the service / MCP bridge "
+                    "(an MCP tool return)", None, result, stmt)
             if step == "emit":
                 # the taint crossing the boundary here (Decision 5): the emission's
                 # return AND the arguments it carries outward — a value-passing send
@@ -1165,6 +1308,25 @@ class _FlowChecker:
                     self._refuse_secret("this emission",
                                         "an emission crossing", None,
                                         outbound, stmt)
+                # item 256 Slice 3 (§7b): the emission crossing for a `Secret[T]`
+                # value - an LLM prompt (an argument to a `model.*` emission), an
+                # un-approved realm crossing, or a capability-boundary crossing
+                # whose receiver did not declare `Secret[T]`. A `confidential`
+                # argument landing on a declared `Secret[T]` receiver position is
+                # ADMITTED (that is the ONE crossing that does not refuse); every
+                # other unadmitted `confidential` value crossing here is refused.
+                if self.enforce and not self.infer:
+                    receivers = self._emit_secret_receivers or set()
+                    unadmitted = CLEAN
+                    for i, at in enumerate(self._emit_args or ()):
+                        if i not in receivers and _carries_confidential(at):
+                            unadmitted = _join(unadmitted, at)
+                    if CONFIDENTIAL_ORIGIN in unadmitted.origins:
+                        self._refuse_confidential(
+                            "this emission",
+                            "an emission crossing (an LLM prompt / a capability "
+                            "boundary without a declared `Secret[T]` receiver)",
+                            None, unadmitted, stmt)
                 if real:
                     # An *absolute-refusal* sink already raised above; what remains
                     # is the policy-gated tier (e.g. web-taint into `send.*`) —
