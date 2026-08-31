@@ -69,6 +69,13 @@ class MethodDecl:
     # every existing emission's IR is byte-identical; emission-only and
     # non-`Unit`-returning, checked in lower next to the sibling modifier rules.
     validated: bool = False
+    # item 257 (Slice 2): the `retry N` validation-retry budget (§5.2), attempts
+    # BEYOND the first, on a `validated` emission whose response is malformed. `0`
+    # means the clause is absent (one attempt, a validation fault is terminal), so
+    # every existing method's IR is byte-identical; `retry N` sets it to a positive
+    # literal. Legal only alongside `validated` (there is no validation fault to
+    # retry without it), checked in lower next to the sibling modifier rules.
+    retry: int = 0
 
 
 @dataclass
@@ -579,6 +586,11 @@ class ExternDecl:
     # their IR is byte-identical; emission-only and non-`Unit`-returning, checked
     # in lower next to the sibling modifier rules.
     validated: bool = False
+    # item 257 (Slice 2): the `retry N` validation-retry budget (§5.2) on a
+    # `validated` emission extern. `0` when the clause is absent (byte-identical
+    # IR); `retry N` sets it to a positive literal. Legal only alongside
+    # `validated`, checked in lower.
+    retry: int = 0
 
 
 @dataclass
@@ -1541,6 +1553,13 @@ class Parser:
         # used `validated` as an ordinary name is broken and the lexer needs no
         # sync. Validity (emission-only, non-`Unit`) is enforced in lower.
         validated = False
+        # item 257 (Slice 2): `retry N`, a CONTEXTUAL keyword (matched on the
+        # ident, like `validated`/`deferred`) recognised only in this modifier
+        # slot, so no program using `retry` as an ordinary name is broken and the
+        # lexer needs no sync. `N` is a positive integer literal; the "legal only
+        # with `validated`" rule is enforced in lower.
+        retry_budget = 0
+        retry_seen = False
         while True:
             if self.at("kw", "async") and not async_:
                 self.next()
@@ -1551,6 +1570,10 @@ class Parser:
             elif self.at("ident", "validated") and not validated:
                 self.next()
                 validated = True
+            elif self.at("ident", "retry") and not retry_seen:
+                self.next()
+                retry_budget = self._retry_budget()
+                retry_seen = True
             elif self.at("kw", "idempotent") and not idempotent:
                 self.next()
                 idempotent = True
@@ -1693,7 +1716,27 @@ class Parser:
                           reach=reach, config=config, colour_poly=colour_poly,
                           undo_idempotent=undo_idempotent, idempotent=idempotent,
                           idempotency_key=idempotency_key, cache=cache,
-                          validated=validated)
+                          validated=validated, retry=retry_budget)
+
+    def _retry_budget(self) -> int:
+        """The positive integer literal after a `retry` modifier (item 257 §5.2).
+
+        `retry N` sets the validation-retry budget (attempts beyond the first) on
+        a `validated` emission. `N` must be a positive literal — a `retry 0` (or a
+        negative / non-integer) is refused here, because absent-clause already
+        means zero and a written budget that does nothing is a mistake, not a
+        no-op. The "legal only alongside `validated`" rule is enforced in lower,
+        next to the sibling modifier-validity checks."""
+        ntok = self.expect(
+            "int", what="a positive integer retry budget after `retry` "
+                        "(the attempts beyond the first, item 257 §5.2)")
+        if ntok.value < 1:
+            raise self.err(
+                ntok.line,
+                f"`retry` budget must be a positive integer, found {ntok.value}",
+                hint="`retry N` sets the attempts BEYOND the first; omit the "
+                     "clause for no retry (the budget defaults to 0, one attempt)")
+        return ntok.value
 
     def _reach_clause(self) -> tuple[str, str]:
         """`(confined: <param>)` after an emission classification — item 373.
@@ -1959,15 +2002,25 @@ class Parser:
             # slot (matched on the ident, like `endorse`), so `validated` stays a
             # legal ordinary name elsewhere. Emission-only, non-`Unit`, in lower.
             method_validated = False
+            # item 257 (Slice 2): `retry N` in the method modifier slot, a
+            # contextual keyword (matched on the ident, like `validated`). `0` is
+            # the absent clause (byte-identical); `retry N` is a positive literal.
+            # Legal only alongside `validated`, checked in lower.
+            method_retry = 0
             mline = self.peek().line
             while (self.at("kw") and self.peek().value in ("emission", "async", "commutative", "idempotent")) \
-                    or self.at("ident", "endorse") or self.at("ident", "validated"):
+                    or self.at("ident", "endorse") or self.at("ident", "validated") \
+                    or self.at("ident", "retry"):
                 if self.at("ident", "endorse"):
                     endorse_origins = endorse_origins | self._endorse_slot()
                     continue
                 if self.at("ident", "validated"):
                     self.next()
                     method_validated = True
+                    continue
+                if self.at("ident", "retry"):
+                    self.next()
+                    method_retry = self._retry_budget()
                     continue
                 modifier = self.next().value
                 if modifier == "emission":
@@ -2029,7 +2082,7 @@ class Parser:
                 mname, params, returns, emission, mline, async_=async_,
                 commutative=method_commutative, idempotent=method_idempotent,
                 capabilities=capabilities, endorse_origins=endorse_origins,
-                cache=cache, validated=method_validated,
+                cache=cache, validated=method_validated, retry=method_retry,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)

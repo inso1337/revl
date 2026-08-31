@@ -2449,16 +2449,47 @@ def _validated_response_schema(name: str, returns: str | None, is_emission: bool
     return schema
 
 
+def _validated_retry_ir(name: str, validated: bool, retry: int, filename: str,
+                        line: int, kind_word: str) -> dict:
+    """Item 257 (Slice 2, §5.2): the additive `retry` IR key for a `validated`
+    emission's validation-retry budget, or `{}` (byte-identical) when no `retry`
+    clause was written (budget 0, one attempt).
+
+    `retry N` is legal ONLY alongside `validated`: there is no validation fault to
+    re-issue on a non-`validated` emission, and it must never ride item 44's
+    idempotent-delivery path (a completion is not idempotent, §5.1). A `retry`
+    without `validated` is refused here, the same place the sibling
+    modifier-validity rules live."""
+    if retry <= 0:
+        return {}
+    if not validated:
+        raise RevlError(
+            filename, line,
+            f"`retry` {kind_word} `{name}` is not `validated`",
+            hint="`retry N` sets the VALIDATION-retry budget of a `validated` "
+                 "emission (re-issue the completion on a malformed response, §5.2); "
+                 "without `validated` there is no validation fault to retry. It is "
+                 "NOT item 44's idempotent-delivery retry — a completion is a read "
+                 "with a cost, not an idempotent write "
+                 "(docs/design/257-typed-model-boundary.md, §5.1)",
+            code="G4", category="validated")
+    return {"retry": retry}
+
+
 def _method_validated_ir(m, types: dict, filename: str) -> dict:
-    """Item 257: the additive `validated` + `response_schema` IR keys for a
-    service-method emission, or `{}` (byte-identical) when the method is not
-    `validated`. Refuses an unexpressible return type at compile time. `m.returns`
-    is already qualifier-stripped in place by `extract_and_normalize`."""
+    """Item 257: the additive `validated` + `response_schema` (+ Slice 2 `retry`)
+    IR keys for a service-method emission, or `{}` (byte-identical) when the method
+    is neither `validated` nor carries a `retry` clause. Refuses an unexpressible
+    return type, and a `retry` without `validated`, at compile time. `m.returns` is
+    already qualifier-stripped in place by `extract_and_normalize`."""
+    retry_ir = _validated_retry_ir(
+        m.name, getattr(m, "validated", False), getattr(m, "retry", 0),
+        filename, m.line, "operation")
     if not getattr(m, "validated", False):
         return {}
     schema = _validated_response_schema(
         m.name, m.returns, m.emission, types, filename, m.line, "operation")
-    return {"validated": True, "response_schema": schema}
+    return {"validated": True, "response_schema": schema, **retry_ir}
 
 
 def _lower_externs(program: Program, filename: str, types: dict,
@@ -2655,6 +2686,11 @@ def _lower_externs(program: Program, filename: str, types: dict,
             validated_schema = _validated_response_schema(
                 decl.name, decl.returns, decl.classification == "emission",
                 types, filename, decl.line, "extern")
+        # item 257 (Slice 2): the `retry N` budget, legal only alongside
+        # `validated` (refused otherwise), byte-identical when absent.
+        validated_retry_ir = _validated_retry_ir(
+            decl.name, decl.validated, getattr(decl, "retry", 0),
+            filename, decl.line, "extern")
         # witnessed-inverse externs (docs/design/243-witnessed-externs.md). A
         # witnessed mutation is a transaction, not a bracket: its declared `undo`
         # is auto-registered by the accumulator and replays on abort only. The
@@ -2998,6 +3034,9 @@ def _lower_externs(program: Program, filename: str, types: dict,
             # `validated`, so every existing extern's IR is byte-identical.
             **({"validated": True, "response_schema": validated_schema}
                if decl.validated else {}),
+            # item 257 (Slice 2): the retry budget (§5.2), a static crossing
+            # attribute. Absent unless `retry N` was written, so byte-identical.
+            **validated_retry_ir,
         }
         if decl.classification == "witnessed":
             # The witnessed descriptor the Slice-2 runtime teardown loop reads
