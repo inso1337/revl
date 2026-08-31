@@ -190,6 +190,18 @@ def _run_profile(args) -> int:
         print(f"error: cannot profile: {error}", file=sys.stderr)
         return 1
 
+    # --patch (item 307): reuse the same declared-vs-observed profile, but emit
+    # the proposed least-authority repair patch rather than the profile itself.
+    # It is a SUGGESTION, never a gate, so it always exits 0 (even with --strict:
+    # the patch is what you apply to *clear* a strict failure, not the check).
+    if getattr(args, "patch", False):
+        patch = _profile.compute_repair_patch(computed)
+        if args.json:
+            print(json.dumps(patch, indent=2))
+        else:
+            print(_profile.render_patch(patch))
+        return 0
+
     if args.json:
         print(json.dumps(computed, indent=2))
     else:
