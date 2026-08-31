@@ -431,8 +431,22 @@ def _key_binding(key: str) -> str:
 # A3: identifiers that must never appear verbatim in emitted code on either
 # host. Python keywords come from the keyword module; the rest is a curated
 # union of TS reserved words and backend-adapter names.
+#
+# item 406 (cross-tier consistency): every name the TS emitter reserves for its
+# own scaffolding (backends/typescript/emit.py `EMITTER_RESERVED` = ctx, config,
+# rawConfig, host, Context) is renamed HERE, at the tier-agnostic frontend, so a
+# user binding of one of them is made host-safe once and compiles uniformly on
+# every tier. `ctx`/`config` were always in this set; `rawConfig`/`host`/
+# `Context` were not, so a component/fn binding one of them (e.g. `let host = …`,
+# as selfhost/emit_java.rvl itself does) type-checked and ran on py/rust/java/go/
+# wasm but died LATE at TS emit with "collides with emitter scaffolding". They
+# are the cross-tier analogue of the py emitter's own reserved bare-names, made
+# to compile by item 160's aliasing rather than refused: a name that only a
+# backend's scaffolding claims is renamed, never rejected, because it is a
+# perfectly ordinary identifier the author is entitled to use.
 _HOST_RESERVED = {
     "ctx", "config", "frame", "fiber", "self",
+    "rawConfig", "host", "Context",
     "function", "var", "let", "const", "new", "class", "this", "typeof",
     "delete", "in", "of", "instanceof", "void", "export", "default",
     "require", "module", "exports", "import", "yield", "async", "await",

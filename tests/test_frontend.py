@@ -382,6 +382,50 @@ def test_a3_host_colliding_names_are_renamed():
     assert body[0]["undo"]["target"]["id"] == "frame_"
 
 
+def test_ts_emitter_scaffolding_names_are_renamed_cross_tier():
+    """item 406: every name the TS emitter reserves for its scaffolding
+    (`EMITTER_RESERVED` = ctx, config, rawConfig, host, Context) is made
+    host-safe at the tier-agnostic frontend, so a user binding of one compiles
+    UNIFORMLY on every tier instead of type-checking and running on py while
+    dying LATE at TS emit with "collides with emitter scaffolding".
+
+    `ctx`/`config` were always in the frontend's `_HOST_RESERVED`; `rawConfig`/
+    `host`/`Context` were the gap. They are the cross-tier analogue of the py
+    emitter's own reserved bare-names (items 156/160): a name only a backend's
+    scaffolding claims is RENAMED, not refused, because it is an ordinary
+    identifier the author is entitled to use (selfhost/emit_java.rvl itself
+    binds `host`)."""
+    import importlib.util
+    from pathlib import Path
+
+    from revl import compile_source
+
+    root = Path(__file__).resolve().parents[1]
+
+    def emitter(tier):
+        spec = importlib.util.spec_from_file_location(
+            f"revl_{tier}_emit_406", root / "backends" / tier / "emit.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    for name in ("host", "rawConfig", "Context"):
+        ir = compile_source(
+            f"component C {{ let {name} = effect Map.new() undo {name}.drop() }}"
+        )
+        binds = [step["bind"] for step in ir["components"][0]["body"]]
+        assert binds == [f"{name}_"], f"`{name}` must be frontend-renamed (item 406)"
+        # the payoff: the same IR now emits on py AND ts (the tier that used to
+        # fail late). Both fully support the `Map` host root.
+        for tier in ("python", "typescript"):
+            emitter(tier).emit(ir)  # must not raise
+
+    # additivity: a program using none of these names is untouched.
+    ir = compile_source(
+        "component D { let store = effect Map.new() undo store.drop() }")
+    assert [s["bind"] for s in ir["components"][0]["body"]] == ["store"]
+
+
 def test_foreign_hash_comment_redirects():
     """item 384: `#` (Python/shell line comment) is redirected to `//` at the
     lexer. It cannot be a corpus rejection fixture because `#` is
