@@ -546,7 +546,6 @@ def test_bundle_ref_program_clean_refusal(tmp_path):
 def test_audit_surfaces_ref_provenance(tmp_path):
     """`revl audit` shows the ref path and symbol for a ref extern, and a
     ref-only extern's backend (not "none")."""
-    from revl.__main__ import _boundary
     _write(tmp_path / "host" / "engine.py", "def do_engine(x):\n    return x\n")
     m = _write(tmp_path / "m.rvl",
                "extern emission fn engine(x: Str) -> Str\n"
