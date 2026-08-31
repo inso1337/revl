@@ -157,11 +157,12 @@ not yet a defense an adversary has to beat, for the three reasons above.
 
 ## Hole 1, proved by construction: the unannotated relay
 
-This program compiles today. It is the canonical injection flow, a fetched
-page reaching a shell command, laundered through nothing more than an
-unannotated service method in the middle:
+This program compiled clean before Slice B. It is the canonical injection
+flow, a fetched page reaching a shell command, laundered through nothing more
+than an unannotated service method in the middle; Slice B now refuses it at G9
+(the `reject G9` fence below):
 
-```revl
+```revl reject G9
 extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py { return "" }
 extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }
 service Relay { emission fn pass_on(s: Str) }
@@ -179,14 +180,16 @@ component Agent requires relay: Relay provides ops: Ops {
 }
 ```
 
-Why it passes: the sink check fires at a call site keyed on the *callee's*
-declared `Trusted[T]` parameters. `Relay.pass_on` declares plain `Str`, so the
-call from `Agent` checks nothing; and `Middle`'s own body walk seeds `s` clean
-because nothing declared it `Untrusted`. Taint dies at the boundary. The
-direct flow (`emit run(page)` in one body) and the pure-helper flow
-(`run(ident(page))`) are both refused today; one hop of service indirection
-defeats the checker. Slice B exists to kill exactly this program, and its
-first exit test is this block flipping to a `reject G9` marker.
+Why it passed before Slice B: the Slice A sink check fired at a call site keyed
+on the *callee's* declared `Trusted[T]` parameters. `Relay.pass_on` declares
+plain `Str`, so the call from `Agent` checked nothing; and `Middle`'s own body
+walk seeded `s` clean because nothing declared it `Untrusted`. Taint died at
+the boundary. The direct flow (`emit run(page)` in one body) and the
+pure-helper flow (`run(ident(page))`) were both refused already; one hop of
+service indirection defeated the checker. Slice B kills exactly this program:
+it infers that `Middle.pass_on` carries its parameter into `run`, and refuses
+at `Agent`'s `emit relay.pass_on(page)` with the cross-component via chain
+`fetch() -> Middle.pass_on -> run`.
 
 The same per-body limit shows up three more ways, all in scope for B:
 
