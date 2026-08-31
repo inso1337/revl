@@ -542,7 +542,13 @@ def _tool_gauntlet(arguments: dict) -> dict:
     if arguments.get("source") is None and not arguments.get("files"):
         return _session_error("provide `source` or `files` — the gauntlet "
                               "grades a candidate component")
-    return _gauntlet.run(SESSION, arguments)
+    dossier = _gauntlet.run(SESSION, arguments)
+    # item 290, §4: retain an admissible session dossier so a `mcp requires
+    # evidence [gauntlet admissible]` admission can read this operator-run
+    # evidence (no attestation root needed — the operator produced it here).
+    if hasattr(SESSION, "record_gauntlet"):
+        SESSION.record_gauntlet(dossier)
+    return dossier
 
 
 def _tool_quarantine(arguments: dict) -> dict:

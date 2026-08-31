@@ -307,6 +307,95 @@ def _run_erase_report(args, ir: dict) -> int:
     return 1 if (residue_bad or breached) else 0
 
 
+def _run_policy(args) -> int:
+    """`revl policy evaluate` (item 290) — the dry-run explain verb. Runs the
+    SAME `policy.evaluate` and reports, per component, which rules select it and
+    which clauses pass/fail with the recorded fact vs the threshold. Never
+    admits, refuses, or mutates: exit 0 clean, 1 when anything would be refused,
+    2 on a parse/usage error."""
+    from .audit_diff import audit_report  # noqa: PLC0415
+    from .compiler import compile_source  # noqa: PLC0415
+    from .policy import (PolicyError, explain, load_policy,  # noqa: PLC0415
+                         render_explain)
+
+    try:
+        policy = load_policy(args.policy_file)
+    except (PolicyError, RevlError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    key = None
+    if getattr(args, "key", None):
+        from .attest import load_key  # noqa: PLC0415
+        key = load_key(args.key)
+    trusted = frozenset(getattr(args, "trusted_publisher", []) or [])
+
+    evidence: dict = {}
+    origins: dict = {}
+    evidence_ir: dict = {}
+
+    try:
+        if getattr(args, "registry", None):
+            # registry mode: evaluate a published entry as if admitted (§7).
+            from . import registry as reg  # noqa: PLC0415
+            if not args.candidate:
+                print("error: --registry needs --candidate NAME",
+                      file=sys.stderr)
+                return 2
+            registry = reg.Registry.from_dir(args.registry)
+            entry = next((e for e in registry.entries
+                          if e.name == args.candidate), None)
+            if entry is None:
+                print(f"error: no registry entry named {args.candidate!r}",
+                      file=sys.stderr)
+                return 2
+            ir = compile_source(entry.source, "component.rvl")
+            audit = audit_report(ir)
+            name = next(iter(audit.get("boundary") or {}), args.candidate)
+            evidence[name] = entry.evidence_bundle or reg.EvidenceBundle()
+            origins[name] = "registry"
+            evidence_ir[name] = reg._normalize_ir_for_attest(
+                compile_source(entry.source, "component.rvl"))
+        else:
+            if not args.files:
+                print("error: policy evaluate needs a POLICY and PROGRAM.rvl "
+                      "(or --registry --candidate)", file=sys.stderr)
+                return 2
+            ir = compile_files(args.files)
+            audit = audit_report(ir)
+            comps = list(audit.get("boundary") or {})
+            for name in comps:
+                origins[name] = "source"
+            if getattr(args, "evidence", None):
+                from . import registry as reg  # noqa: PLC0415
+                bundle = reg.load_evidence_bundle(args.evidence)
+                target = args.component or (comps[0] if len(comps) == 1 else None)
+                if target is None:
+                    print("error: --evidence needs --component NAME when the "
+                          "composition has more than one component",
+                          file=sys.stderr)
+                    return 2
+                evidence[target] = bundle
+                origins[target] = "registry"
+                evidence_ir[target] = reg._normalize_ir_for_attest(ir)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    scope = getattr(args, "mcp_scope", []) or []
+    mcp_components = (frozenset(audit.get("boundary") or {})
+                     if "*" in scope else frozenset(scope))
+
+    result = explain(policy, audit, mcp_components, evidence=evidence,
+                     origins=origins, trusted_publishers=trusted, key=key,
+                     evidence_ir=evidence_ir, component=args.component)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(render_explain(result))
+    return 1 if result["refused"] else 0
+
+
 def _run_audit(args, ir: dict) -> int:
     """`revl audit` — composition manifest + G8 boundary surface, with the
     item-33 policy gate (`--policy`) and the authority-drift gate (`--diff`)."""
@@ -323,7 +412,29 @@ def _run_audit(args, ir: dict) -> int:
         scope = args.mcp_scope
         mcp_components = (frozenset(audit.get("boundary") or {})
                          if "*" in scope else frozenset(scope))
-        violations = evaluate(policy, audit, mcp_components=mcp_components)
+        # item 290 plumbing: give the gate the evidence bundle, key, and trust
+        # set when the policy carries evidence rules. Absent otherwise, so a
+        # policy with none evaluates exactly as before.
+        evidence: dict = {}
+        origins: dict = {}
+        evidence_ir: dict = {}
+        key = None
+        if getattr(args, "key", None):
+            from .attest import load_key  # noqa: PLC0415
+            key = load_key(args.key)
+        trusted = frozenset(getattr(args, "trusted_publisher", []) or [])
+        if getattr(args, "evidence", None):
+            from . import registry as reg  # noqa: PLC0415
+            comps = list(audit.get("boundary") or {})
+            target = comps[0] if len(comps) == 1 else None
+            if target is not None:
+                evidence[target] = reg.load_evidence_bundle(args.evidence)
+                origins[target] = "registry"
+                evidence_ir[target] = reg._normalize_ir_for_attest(ir)
+        violations = evaluate(policy, audit, mcp_components=mcp_components,
+                              evidence=evidence, origins=origins,
+                              trusted_publishers=trusted, key=key,
+                              evidence_ir=evidence_ir)
         if args.json:
             print(json.dumps(
                 {"policy": args.policy,
@@ -675,6 +786,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "query" and args.query_command in ("emitted-between",
                                                            "touched"):
         return _run_history_query(args)
+
+    # `revl policy evaluate` (item 290) compiles its own sources (or reads a
+    # registry entry), so it is routed before the shared compile step, like the
+    # history query.
+    if args.command == "policy":
+        return _run_policy(args)
 
     try:
         profile = None

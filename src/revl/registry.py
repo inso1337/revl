@@ -219,14 +219,22 @@ def _gauntlet_status(dossier: dict | None) -> str:
 
 
 def _attestation_status(att: dict | None, *, key: bytes | None,
-                        ir: dict | None) -> str:
+                        ir: dict | None,
+                        bundle: "EvidenceBundle | None" = None) -> str:
     """Grade an attestation (revl.attest shape).
 
     Without a key an attestation can only be checked for *well-formedness*
     (`present`); with a key it is cryptographically verified against the rebuilt
     IR and is `valid` or `invalid`. A malformed record is `invalid`, never
     `present` - a resolve must not read a broken attestation as merely
-    unverified."""
+    unverified.
+
+    When the attestation carries per-facet dossier bindings (item 290, §6.2), a
+    `valid` grade additionally requires every bound dossier in `bundle` to hash
+    to its signed value: a forged or copied dossier riding an honest signature
+    grades the whole attestation `invalid`, so it can never vouch for evidence
+    it does not cover. An attestation with no bindings is unaffected (the
+    dossiers it does not cover simply stay self-attested)."""
     if att is None:
         return "unavailable"
     if not isinstance(att, dict) or "signature" not in att \
@@ -235,7 +243,11 @@ def _attestation_status(att: dict | None, *, key: bytes | None,
     if key is not None:
         from .attest import verify_attestation  # noqa: PLC0415
         ok, _ = verify_attestation(att, key, ir)
-        return "valid" if ok else "invalid"
+        if not ok:
+            return "invalid"
+        if bundle is not None and binding_mismatch(att, bundle) is not None:
+            return "invalid"
+        return "valid"
     return "present"
 
 
@@ -264,7 +276,8 @@ def assess_evidence(bundle: EvidenceBundle, *, key: bytes | None = None,
     only ranks the already-compatible set.
     """
     sweep, coverage = _sweep_status(bundle.fault_sweep)
-    attestation = _attestation_status(bundle.attestation, key=key, ir=ir)
+    attestation = _attestation_status(bundle.attestation, key=key, ir=ir,
+                                      bundle=bundle)
     inverse = _inverse_status(bundle.inverse_roundtrip)
     gauntlet = _gauntlet_status(bundle.gauntlet)
     publisher = _publisher_status(bundle.provenance, trusted_publishers)
@@ -296,6 +309,62 @@ def assess_evidence(bundle: EvidenceBundle, *, key: bytes | None = None,
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# The facets whose dossiers an attestation binds (item 290, §6.2): the runtime-
+# tested and enumerated evidence a `attestation valid` clause can root. Keyed by
+# facet name (the same names `assess_evidence` reports), mapped to the bundle
+# attribute the dossier is loaded into.
+_BOUND_FACETS = {
+    "fault-sweep": "fault_sweep",
+    "inverse-roundtrip": "inverse_roundtrip",
+    "gauntlet": "gauntlet",
+    "capabilities": "capabilities",
+}
+
+
+def _facet_hash(doc) -> str:
+    """The content hash of one evidence dossier, folded into the signed
+    attestation payload (item 290, §6.2). Canonical (sorted keys, compact
+    separators) so the hash is a pure function of the dossier's data, never of
+    its on-disk formatting — the publish side and the admission side compute the
+    same value from the same dict."""
+    canonical = json.dumps(doc, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def evidence_bindings(bundle: "EvidenceBundle") -> dict:
+    """The per-facet dossier hashes for the dossiers a bundle actually carries —
+    what `build_evidence` signs into the attestation so admission can prove the
+    dossiers were not forged after signing (item 290, §6.2)."""
+    out: dict = {}
+    for facet, attr in _BOUND_FACETS.items():
+        doc = getattr(bundle, attr, None)
+        if doc is not None:
+            out[facet] = _facet_hash(doc)
+    return out
+
+
+def binding_mismatch(att: dict | None, bundle: "EvidenceBundle") -> str | None:
+    """The first bound facet whose dossier in `bundle` does not hash to the
+    value signed into `att`, or None when every binding matches (or the
+    attestation binds nothing). A mismatch — or a bound dossier that is absent
+    from the bundle — is a tamper: the signed payload vouched for bytes that are
+    no longer there (item 290, §6.2, exit test 5)."""
+    if not isinstance(att, dict):
+        return None
+    bindings = att.get("evidence_bindings")
+    if not isinstance(bindings, dict):
+        return None
+    for facet, signed_hash in sorted(bindings.items()):
+        attr = _BOUND_FACETS.get(facet)
+        doc = getattr(bundle, attr, None) if attr else None
+        if doc is None:
+            return facet          # bound but not present: a dropped dossier
+        if _facet_hash(doc) != signed_hash:
+            return facet          # present but altered: a forged/copied dossier
+    return None
 
 
 def _capabilities_of(boundary: dict) -> tuple[tuple[str, ...], int]:
@@ -531,46 +600,56 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
         manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         facets: list[str] = []
 
-        # capabilities - the G8 boundary surface, reproducible with no runtime.
-        _write_evidence_file(entry_dir, EVIDENCE_CAPABILITIES,
-                             {"kind": "revl.capabilities",
-                              "boundary": _boundary(ir)}, write=write)
-        facets.append("capabilities")
+        # The dossiers are computed BEFORE the attestation is signed (item 290,
+        # §6.2), because the attestation binds their hashes into its signed
+        # payload; a dossier written after signing could never be bound. capsule
+        # + provenance are always reproducible with no runtime; the runtime-
+        # tested facets are honestly skipped (left unavailable) when cordis-py is
+        # absent, never faked.
+        dossiers: dict[str, tuple[str, dict]] = {}
+        dossiers["capabilities"] = (
+            EVIDENCE_CAPABILITIES,
+            {"kind": "revl.capabilities", "boundary": _boundary(ir)})
+        from . import fault  # noqa: PLC0415
+        try:
+            dossiers["fault-sweep"] = (EVIDENCE_FAULT_SWEEP,
+                                       fault.sweep_dossier(ir))
+        except (ModuleNotFoundError, ImportError):
+            pass  # cordis-py absent: honestly unavailable, never faked
+        try:
+            dossiers["inverse-roundtrip"] = (EVIDENCE_INVERSE_ROUNDTRIP,
+                                             fault.roundtrip_dossier(ir))
+        except (ModuleNotFoundError, ImportError):
+            pass
 
-        # provenance - reproducible source/build facts.
+        # write the bound dossiers, and collect their hashes for the signature.
+        bindings: dict = {}
+        for facet, (filename, doc) in sorted(dossiers.items()):
+            _write_evidence_file(entry_dir, filename, doc, write=write)
+            facets.append(facet)
+            if facet in _BOUND_FACETS:
+                bindings[facet] = _facet_hash(doc)
+
+        # provenance - reproducible source/build facts (not itself bound: it
+        # carries the source/manifest hashes the composition hash already roots).
         _write_evidence_file(
             entry_dir, EVIDENCE_PROVENANCE,
             _provenance_document(source, manifest, manifest_text, publisher),
             write=write)
         facets.append("provenance")
 
-        # attestation - a signed admission record, when a key is supplied.
+        # attestation - a signed admission record binding the dossier hashes,
+        # when a key is supplied (item 127 + item 290, §6.2).
         if key is not None:
             from .attest import make_attestation  # noqa: PLC0415
             att = make_attestation(_normalize_ir_for_attest(ir), bytes(key),
-                                   now=now, signer=signer)
+                                   now=now, signer=signer,
+                                   evidence_bindings=bindings or None)
             _write_evidence_file(entry_dir, EVIDENCE_ATTESTATION, att,
                                  write=write)
             facets.append("attestation")
 
-        # fault-sweep - the runtime-tested no-residue sweep (item 30/125).
-        from . import fault  # noqa: PLC0415
-        try:
-            _write_evidence_file(entry_dir, EVIDENCE_FAULT_SWEEP,
-                                 fault.sweep_dossier(ir), write=write)
-            facets.append("fault-sweep")
-        except (ModuleNotFoundError, ImportError):
-            pass  # cordis-py absent: honestly unavailable, never faked
-
-        # inverse-roundtrip - verified-effect reversibility (item 26).
-        try:
-            _write_evidence_file(entry_dir, EVIDENCE_INVERSE_ROUNDTRIP,
-                                 fault.roundtrip_dossier(ir), write=write)
-            facets.append("inverse-roundtrip")
-        except (ModuleNotFoundError, ImportError):
-            pass
-
-        produced[name] = facets
+        produced[name] = sorted(facets)
     return produced
 
 
