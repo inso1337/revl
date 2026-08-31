@@ -618,9 +618,14 @@ class _FlowChecker:
                                 if _param_index(o) is not None)
             if not markers:
                 # a body-minted origin (a source called inside the body) endorsed
-                # here: a legitimate declared sanitizer, cleaned out as before. No
-                # marker means no argument-derived flow to record a `clears` for.
-                return CLEAN
+                # here. No marker means no argument-derived flow to record a
+                # `clears` for, but the endorse still only clears its own declared
+                # origin: mirror the enforcing residual so a non-matching
+                # `endorse[X]` over a body-minted foreign origin does not launder
+                # it clean. A matching endorse (X over an X value) still clears to
+                # empty and returns CLEAN.
+                residual = frozenset(o for o in value_taint.origins if o != origin)
+                return Taint(residual, value_taint.via) if residual else CLEAN
             for m in markers:
                 self.endorse_clears.setdefault(_param_index(m), set()).add(origin)
             # keep the markers flowing (the parameter still reaches the return);
