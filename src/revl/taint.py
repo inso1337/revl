@@ -372,18 +372,26 @@ class _Signature:
     * `reaches_sink`: parameter index -> `(sink_name, sink_kind, via)`, the sinks
       an argument reaches transitively through any chain of calls, with the
       cross-body naming chain for the G9 diagnostic.
+    * `clears`: parameter index -> the set of concrete origins a body-internal
+      `endorse[<origin>]` on that parameter's flow-to-return path downgrades
+      (item 249, Finding 1). Origin-precise: a call site subtracts exactly these
+      origins from the concrete argument before propagating it, so `endorse[web]`
+      on a `web` argument clears `web` while a `fs`/`secret`/... argument still
+      launders through NOTHING — the boundary is no longer a blanket declassifier.
     """
 
     flows_to_return: set = field(default_factory=set)
     mints: set = field(default_factory=set)
     reaches_sink: dict = field(default_factory=dict)
+    clears: dict = field(default_factory=dict)
 
-    def merge(self, flows: set, mints: set, sink_hits: dict) -> bool:
+    def merge(self, flows: set, mints: set, sink_hits: dict,
+              clears: dict | None = None) -> bool:
         """Fold one body-walk's findings in. Returns whether the monotone part
-        (the parameter sets and the sink key set) grew — the fixed point's
-        `changed` signal. A shorter `via` for an already-known sink refines the
-        message in place WITHOUT signalling change, so via refinement cannot
-        make the iteration oscillate."""
+        (the parameter sets, the per-parameter cleared-origin sets, and the sink
+        key set) grew — the fixed point's `changed` signal. A shorter `via` for an
+        already-known sink refines the message in place WITHOUT signalling change,
+        so via refinement cannot make the iteration oscillate."""
         changed = False
         if not flows <= self.flows_to_return:
             self.flows_to_return |= flows
@@ -391,6 +399,12 @@ class _Signature:
         if not mints <= self.mints:
             self.mints |= mints
             changed = True
+        for index, cleared in (clears or {}).items():
+            prev = self.clears.get(index, frozenset())
+            grown = prev | frozenset(cleared)
+            if grown != prev:
+                self.clears[index] = grown
+                changed = True
         for index, hit in sink_hits.items():
             prev = self.reaches_sink.get(index)
             if prev is None:
@@ -473,6 +487,12 @@ class _FlowChecker:
         # the naming chain behind it.
         self.return_taint: Taint = CLEAN
         self.sink_hits: dict[int, tuple] = {}
+        # inference-mode accumulator (item 249, Finding 1): per parameter index,
+        # the concrete origins a body-internal `endorse[<origin>]` on that
+        # parameter downgrades. Folded into the callable's `_Signature.clears` so
+        # a call site subtracts exactly these origins — the scoped, origin-precise
+        # declassification is honoured ACROSS the call, not silently blanket-cleaned.
+        self.endorse_clears: dict[int, set] = {}
         # the argument taints of the most-recently-walked call, so an `emit` step
         # can record the taint that flows OUTBOUND across the boundary (Decision 5)
         # — not only the emission's return, which is clean for a value-passing send.
@@ -575,12 +595,38 @@ class _FlowChecker:
     def _endorse(self, node, arg_taints: list) -> Taint:
         """A scoped `endorse[<origin>](v, reason=...)`: authorise the downgrade
         against the enclosing declaration's declared slot, record it on the audit
-        surface, and return CLEAN. In inference mode it is a pure clean-out (the
-        signature fixed point does not enforce or record)."""
+        surface, and return CLEAN.
+
+        In INFERENCE mode the fixed point neither enforces nor records the audit
+        surface, but it MUST stay origin-precise across the call boundary (item
+        249, Finding 1). A scoped `endorse[<origin>]` is NOT a blanket sanitizer:
+        it clears only its own declared origin. So the parameter markers on the
+        argument's flow-to-return path are KEPT (the parameter still `flows_to_return`),
+        while the concrete `origin` is recorded, per marker, as CLEARED for that
+        parameter. The call site then subtracts exactly that origin from the
+        concrete argument — a `web` endorse over a `fs`/`secret`/... argument
+        launders nothing, so a one-hop helper can no longer act as a total
+        declassifier for every origin. A bare (originless) endorse is the only
+        full clean-out, matching the enforcing pass's blanket-clean fallback."""
         meta = node.get("endorse") if isinstance(node, dict) else None
         origin = meta.get("origin") if isinstance(meta, dict) else None
         if self.infer:
-            return CLEAN
+            value_taint = arg_taints[0] if arg_taints else CLEAN
+            if origin is None:
+                return CLEAN
+            markers = frozenset(o for o in value_taint.origins
+                                if _param_index(o) is not None)
+            if not markers:
+                # a body-minted origin (a source called inside the body) endorsed
+                # here: a legitimate declared sanitizer, cleaned out as before. No
+                # marker means no argument-derived flow to record a `clears` for.
+                return CLEAN
+            for m in markers:
+                self.endorse_clears.setdefault(_param_index(m), set()).add(origin)
+            # keep the markers flowing (the parameter still reaches the return);
+            # drop the seeded concrete origins, whose precise per-origin
+            # contribution the call site reconstructs from the real argument.
+            return Taint(markers, value_taint.via)
         # the state-collection sweeps (Slice B3, enforce=False) re-walk method
         # bodies only to discover state writes and carry no declared-endorse slot;
         # the undeclared-endorse refusal belongs to the enforcing pass alone.
@@ -825,7 +871,16 @@ class _FlowChecker:
             via: tuple = (f"{callee}()",) if sig.mints else ()
             for index in sig.flows_to_return:
                 if index < len(arg_taints) and arg_taints[index].dirty:
-                    origins = origins | arg_taints[index].origins
+                    # item 249, Finding 1: subtract the origins the callee's
+                    # scoped `endorse[<origin>]` cleared FOR THIS PARAMETER. The
+                    # matching-origin case (`endorse[web]` over a `web` argument)
+                    # cancels to clean; a cross-origin argument (`fs`, `secret`,
+                    # ...) is unaffected and still propagates to the sink.
+                    contributed = arg_taints[index].origins - sig.clears.get(
+                        index, frozenset())
+                    if not contributed:
+                        continue
+                    origins = origins | contributed
                     if not via:
                         via = arg_taints[index].via + (f"{callee}()",)
             if origins:
@@ -1126,7 +1181,8 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
                      if _param_marker(i) in checker.return_taint.origins}
             mints = {o for o in checker.return_taint.origins
                      if _param_index(o) is None}
-            if signatures[key].merge(flows, mints, checker.sink_hits):
+            if signatures[key].merge(flows, mints, checker.sink_hits,
+                                     checker.endorse_clears):
                 changed = True
     return signatures
 
@@ -1148,7 +1204,14 @@ def check_taint(program, fns, components, model: TaintModel,
     any_sink = bool(model.sinks)
     signatures = _infer_signatures(fns, components, model, filename, known, any_sink)
 
-    # top-level pure fns (lowered IR): seed params declared `Untrusted[T]`
+    # top-level pure fns (lowered IR): seed params declared `Untrusted[T]`, run
+    # the refusal pass, AND collect each fn's declassification/reach provenance
+    # (item 249, Finding 2). A top-level `fn` declassifier — `endorse[web] fn
+    # wash(...)` — is not owned by a component, so without this its downgrade is
+    # invisible to the `declassify:` audit token, `may not declassify` policy, and
+    # `audit --diff`. Every component that (transitively) reaches the washer folds
+    # its provenance onto its own boundary entry, exactly as a provide method's is.
+    fn_prov: dict[str, tuple[set, list, set]] = {}
     for fn in fns:
         checker = _FlowChecker(model, fn.get("source") or filename,
                                fn.get("line") or 0, signatures=signatures,
@@ -1163,6 +1226,37 @@ def check_taint(program, fns, components, model: TaintModel,
             if i in seeded:
                 env[pname] = Taint(frozenset({seeded[i]}), (pname,))
         checker.run(fn.get("body") or [], env)
+        if checker.declassified or checker.reaches:
+            fn_prov[fn["name"]] = (set(checker.declassified),
+                                   list(checker.declassify_records),
+                                   set(checker.reaches))
+
+    # the fn -> fn call graph, walked only when a top-level fn actually declassifies
+    # (empty otherwise, so an endorse-free program stays byte-identical). Lets a
+    # component fold the provenance of every washer it reaches, directly or through
+    # another fn.
+    fn_names = {fn.get("name") for fn in fns}
+    fn_calls: dict[str, set] = {}
+    if fn_prov:
+        from .emission_analysis import _calls_in  # noqa: PLC0415 — lazy, avoids cycle
+        for fn in fns:
+            called: set = set()
+            _calls_in(fn.get("body") or [], called)
+            fn_calls[fn["name"]] = {c for c in called if c in fn_names}
+
+    def _reached_fns(body) -> set:
+        """Top-level fn names a component body reaches, transitively."""
+        direct: set = set()
+        _calls_in(body, direct)
+        seen: set = set()
+        stack = [c for c in direct if c in fn_names]
+        while stack:
+            name = stack.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            stack.extend(fn_calls.get(name, ()))
+        return seen
 
     # the IR carries no per-body line, so fall back to the component's declared
     # line (from the AST) — better than 0 for a component-body refusal.
@@ -1184,6 +1278,17 @@ def check_taint(program, fns, components, model: TaintModel,
         reaches, declassified, records, approvals = _walk_component_methods(
             comp_body, model, source, line, signatures,
             comp.get("name") or "", known, any_sink, state_env, state_names)
+        # item 249, Finding 2: fold the provenance of every top-level fn washer
+        # this component reaches onto its own surface, so a declassification done
+        # inside a helper fn is not invisible to the audit token / policy.
+        if fn_prov:
+            for name in _reached_fns(comp_body):
+                fp = fn_prov.get(name)
+                if fp is None:
+                    continue
+                declassified |= fp[0]
+                records.extend(fp[1])
+                reaches |= fp[2]
         # fold the per-component provenance onto the IR entry (Decision 5), so
         # `_boundary` can emit `taint:`/`declassify:` tokens. Additive: absent
         # when the component touches no taint, so its IR stays byte-identical.
