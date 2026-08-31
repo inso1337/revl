@@ -107,6 +107,17 @@ class ReplayError(RuntimeError):
     """The timeline cannot do what was asked."""
 
 
+class WALIntegrityError(RuntimeError):
+    """A WAL failed an integrity gate on read (item 413).
+
+    The py backend's own copy of the reader gate, kept behaviourally identical
+    to :class:`revl.wal.WALIntegrityError`. Raised for an unsupported header
+    ``walVersion`` or for MID-FILE corruption (an unparseable line with valid
+    records after it); a torn TRAILING line stays tolerated. Fails closed rather
+    than silently dropping a committed record on the cleanup path.
+    """
+
+
 class IrreversibleStep(ReplayError):
     """Stepping back would cross an emission that has no compensation.
 
@@ -1029,6 +1040,10 @@ class Recorder:
 
 WAL_VERSION = 1
 
+#: The versions this reader understands. Kept in step with :mod:`revl.wal`'s
+#: ``SUPPORTED_WAL_VERSIONS`` (item 413); the agreement test pins the readers.
+SUPPORTED_WAL_VERSIONS = frozenset({WAL_VERSION})
+
 #: The single sentence recovery is allowed to claim.  Deliberately narrow, in
 #: the same spirit as :data:`GUARANTEE`.
 WAL_GUARANTEE = (
@@ -1503,28 +1518,51 @@ class WriteAheadLog:
         present.  A trailing half-written line (a genuine ``kill -9`` can leave
         one) is tolerated and reported as ``torn`` rather than crashing the
         recovery that exists to handle exactly that.
+
+        Two integrity gates run first (item 413), fail-closed via
+        :class:`WALIntegrityError`: a header ``walVersion`` outside
+        :data:`SUPPORTED_WAL_VERSIONS` is refused, and an unparseable line is
+        tolerated only when it is the last line in the file (mid-file corruption
+        is refused rather than silently dropping a committed record). Kept
+        behaviourally identical to :func:`revl.wal.read_wal`, which the
+        agreement test pins.
         """
         header: dict = {}
         records: list = []
         complete = False
         torn = False
         with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
+            lines = [line.strip() for line in handle]
+        last_content = max((i for i, line in enumerate(lines) if line),
+                           default=-1)
+        for index, line in enumerate(lines):
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                if index == last_content:
+                    torn = True   # a partial FINAL record: the crash itself
                     continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    torn = True   # a partial final record — the crash itself
-                    continue
-                kind = entry.get("record")
-                if kind == "header":
-                    header = entry
-                elif kind == "activation-complete":
-                    complete = True
-                    records.append(entry)
-                else:
-                    records.append(entry)
+                raise WALIntegrityError(
+                    f"WAL {path} is corrupt at line {index + 1}: an unparseable "
+                    f"record with {last_content - index} line(s) after it. This "
+                    "is mid-file corruption, not a crash-torn trailing line."
+                ) from None
+            kind = entry.get("record")
+            if kind == "header":
+                header = entry
+                version = header.get("walVersion")
+                if version not in SUPPORTED_WAL_VERSIONS:
+                    raise WALIntegrityError(
+                        f"WAL {path} declares walVersion {version!r}, which this "
+                        "reader does not support (supported: "
+                        f"{sorted(SUPPORTED_WAL_VERSIONS)})."
+                    )
+            elif kind == "activation-complete":
+                complete = True
+                records.append(entry)
+            else:
+                records.append(entry)
         return {"header": header, "records": records,
                 "complete": complete, "torn": torn}
