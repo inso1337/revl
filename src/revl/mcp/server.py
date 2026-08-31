@@ -963,11 +963,24 @@ def _tool_resolve(arguments: dict) -> dict:
         return {"ok": True, "query": "resolve", "candidates": [],
                 "assumptions": [f"no registry index at {registry_dir}; "
                                 "set `registry` or $REVL_REGISTRY"]}
+    verify_required = bool(arguments.get("verifyRequired"))
+    trusted_publishers = tuple(arguments.get("trustedPublishers") or ())
+    key = None
+    if verify_required:
+        # a verify-required resolve needs the signer secret to cryptographically
+        # check the attestations it gates on.
+        from ..attest import resolve_key  # noqa: PLC0415
+        try:
+            key = resolve_key(None)
+        except RevlError as error:
+            return report(error)
     try:
         registry = Registry.from_dir(registry_dir)
         return registry_resolve(registry, need,
                                 manifest=arguments.get("manifest"),
-                                limit=int(arguments.get("limit", 5)))
+                                limit=int(arguments.get("limit", 5)),
+                                verify_required=verify_required, key=key,
+                                trusted_publishers=trusted_publishers)
     except RevlError as error:
         return report(error)
 
@@ -1733,7 +1746,16 @@ TOOLS.append({
                    "'compatible somewhere' to 'admissible here': a key the "
                    "composition already provides is withheld (G2). Ranking is "
                    "least-authority-first (smallest capability set, then tighter "
-                   "interface fit, then stronger evidence, then smaller source).",
+                   "interface fit), and then by EVIDENCE QUALITY (item 293): among "
+                   "the interface-compatible candidates, one with a fuller fault "
+                   "sweep, a valid attestation, a trusted publisher, or an "
+                   "inverse-roundtrip pass ranks higher. Each candidate carries an "
+                   "`evidence` summary and the winner's `why` names the evidence it "
+                   "won on. Interface compatibility is a HARD filter; a missing "
+                   "evidence file is `unavailable` (ranked below present-and-valid), "
+                   "never read as valid. Set `verifyRequired` (with a signer key in "
+                   "$REVL_ATTEST_KEY/$REVL_ATTEST_KEY_FILE) to filter any candidate "
+                   "lacking a cryptographically valid attestation.",
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -1747,6 +1769,13 @@ TOOLS.append({
             "registry": {"type": "string",
                          "description": "registry directory (default $REVL_REGISTRY "
                                         "or the repo's registry/)"},
+            "verifyRequired": {"type": "boolean",
+                               "description": "filter candidates without a "
+                                              "cryptographically valid attestation "
+                                              "(needs a signer key in the env)"},
+            "trustedPublishers": {"type": "array", "items": {"type": "string"},
+                                  "description": "publisher ids whose provenance "
+                                                 "lifts a candidate in the ranking"},
         },
         "required": ["need"],
     },
