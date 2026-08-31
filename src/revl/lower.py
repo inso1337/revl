@@ -32,6 +32,7 @@ from .typecheck import (
     render_type,
     mark_tparams,
     check_type_wellformed,
+    check_config_field_is_data,
     compatible,
     format_type,
     host_check,
@@ -930,9 +931,43 @@ def _validate_declared_types(program: Program, filename: str) -> None:
             check_type_wellformed(filename, field.line, field.type)
         for case in decl.cases:
             check_type_wellformed(filename, case.line, case.payload)
-    for comp in program.components:
-        for cfg in comp.config:
+    # item 378: a config value is injected as static data at plug/spawn/load
+    # time, so a config field's declared type must be built, transitively, out of
+    # data, never an arrow type (a live callable) or a `service` (a capability).
+    # Resolve nominal record/ADT/alias heads through a lightweight type-table and
+    # the set of declared service names. A duplicate type/field is reported by the
+    # dedicated lowering pass; `setdefault` here just avoids raising twice.
+    service_names = {svc.name for svc in program.services}
+    config_type_defs: dict[str, dict] = {}
+    for decl in program.type_decls:
+        if decl.fields:
+            config_type_defs.setdefault(
+                decl.name,
+                {"kind": "record",
+                 "fields": {f.name: f.type for f in decl.fields}})
+        else:
+            config_type_defs.setdefault(
+                decl.name,
+                {"kind": "variant",
+                 "cases": [{"name": c.name, "payload": c.payload}
+                           for c in decl.cases]})
+
+    def _check_config(owner: str, fields) -> None:
+        for cfg in fields:
             check_type_wellformed(filename, cfg.line, cfg.type)
+            check_config_field_is_data(
+                filename, cfg.line, cfg.name, owner, cfg.type,
+                service_names=service_names, type_defs=config_type_defs)
+
+    for comp in program.components:
+        _check_config(f"component `{comp.name}`", comp.config)
+    # item 379: an extern's typed config schema was NEVER wellformed-checked, so
+    # `extern pure fn thing(x) config { handler: (Str) -> Str }` compiled and its
+    # body could invoke the injected callable past every authority fold. Check it
+    # at the same data-only bar as a component's config.
+    for ext in program.externs:
+        if ext.config:
+            _check_config(f"extern `{ext.name}`", ext.config)
 
 
 def _lower_type_decls(program: Program, filename: str) -> dict:
@@ -7391,6 +7426,12 @@ def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:
                 f"`{field}` is not a config field of {expr.component}",
                 hint="spawn config carries the target's declared `config { }` fields",
             )
+        # item 378: type-check the config VALUE against the (data-only) declared
+        # config type, exactly as `load C with { … }` does. Without this the
+        # producer seam was open: a spawn config value was lowered with no
+        # check_ast, so a wrong-typed (or callable-carrying) value smuggled in.
+        check_ast(vexpr, tconfig[field].type, env.type_env, env.types,
+                  env.filename, f"config field `{field}` of {expr.component}")
         lowered_cfg[field] = _lower_expr(vexpr, env, "setup")
     for f in target.config:
         if f.default is None and f.name not in expr.config:
