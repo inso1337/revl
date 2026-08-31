@@ -363,7 +363,8 @@ def compile_source(source: str, filename: str = "<string>",
                      "ref against, and `compile_source` reads nothing from disk "
                      "(item 396 option B)")
         document = check_and_lower(
-            program, taint_strict=bool(profile and profile.taint_strict))
+            program, taint_strict=bool(profile and profile.taint_strict),
+            untrusted=bool(profile and profile.untrusted))
         _enforce_document(document, profile)
         return document
 
@@ -560,7 +561,8 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             merged.fn_decls,
             _included_host_externs(included), profile)
     document = check_and_lower(
-        merged, ambient, taint_strict=bool(profile and profile.taint_strict))
+        merged, ambient, taint_strict=bool(profile and profile.taint_strict),
+        untrusted=bool(profile and profile.untrusted))
     # the allowlist half — refuse a reach outside the granted service set, on the
     # lowered document's resolved requires/provides.
     _enforce_document(document, profile)

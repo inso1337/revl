@@ -92,6 +92,16 @@ class AdmissionProfile:
         return (self.no_extern or self.granted is not None
                 or self.no_declassify or self.taint_strict)
 
+    @property
+    def untrusted(self) -> bool:
+        """Whether the AUTHOR is untrusted — the redaction trigger for navigable
+        refusals (item 274). True for the `untrusted_author` profile (which sets
+        `no_extern`, a `granted` allowlist, and `no_declassify`); False for a
+        trusted author, even one compiling with `--taint-strict` alone, since
+        that flag hardens the taint analysis without distrusting the author."""
+        return (self.no_extern or self.granted is not None
+                or self.no_declassify)
+
 
 def check_no_extern(root_programs: list[Program], profile: AdmissionProfile) -> None:
     """(a) Refuse if the untrusted-authored source declares any `extern`.

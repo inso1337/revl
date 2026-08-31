@@ -4705,7 +4705,7 @@ def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
 
 
 def check_and_lower(program: Program, ambient: dict | None = None,
-                    taint_strict: bool = False) -> dict:
+                    taint_strict: bool = False, untrusted: bool = False) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
     (a running manifest, DESIGN §4's runtime-admission gate): ambient services
     are in scope without redeclaration, and G2/G3 are checked over the union
@@ -4717,6 +4717,11 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     `taint_strict` (item 249, Slice D) turns on derived taint sinks and sources —
     off by default and byte-identical when off, on under the untrusted-author
     profile or `revl compile --taint-strict`.
+
+    `untrusted` (item 274) marks the untrusted-author profile so a G9 sink
+    refusal carries the collapsed navigable verdict (no author-side declassify
+    path exists under `no_declassify`). Purely additive: it changes only the
+    optional `navigate` field of the refusal, never the verdict or the IR.
     """
     ambient = ambient or {}
 
@@ -4998,7 +5003,8 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     # Taint/provenance verdict (item 249, Slice A): refuse any untrusted-origin
     # value that reaches a `Trusted[T]` sink without a declassifier on its path
     # (G9). No-op and byte-identical when the program declared no qualifier.
-    _collect(check_taint, program, fns, live_components, taint_model, program.filename)
+    _collect(check_taint, program, fns, live_components, taint_model,
+             program.filename, untrusted=untrusted)
 
     # state hand-off admission (roadmap item 53): a candidate provider that
     # *accepts* a `handoff` on a key some running provider *exports* must accept

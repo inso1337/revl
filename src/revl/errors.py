@@ -13,7 +13,7 @@ class RevlError(Exception):
     def __init__(self, filename: str, line: int, message: str, hint: str | None = None,
                  code: str | None = None, category: str | None = None,
                  expected: str | None = None, actual: str | None = None,
-                 why: WhyTrace | None = None):
+                 why: WhyTrace | None = None, navigate: dict | None = None):
         self.filename = filename
         self.line = line
         self.message = message
@@ -24,6 +24,12 @@ class RevlError(Exception):
         self.category = category
         self.expected = expected
         self.actual = actual
+        # item 274: the navigable-refusal map — the nearest allowed space this
+        # refusal enumerates, computed from the tables that refused (navigate.py).
+        # A structured field ONLY: it rides on the `classify()`/`--json` record
+        # and is DELIBERATELY not rendered into the text below, so the first line
+        # and the multi-error census render stay byte-identical (design §5/§7).
+        self.navigate = navigate
         # the derivation behind the verdict, where the check ran a search
         # (G4's fixed point, G3's cycle, G2's provider table) — see why.py.
         # It is appended *after* the message and hint so the first line of
@@ -60,7 +66,8 @@ class RevlErrors(RevlError):
         first = self.errors[0]
         super().__init__(first.filename, first.line, first.message,
                          hint=first.hint, code=first.code, category=first.category,
-                         expected=first.expected, actual=first.actual, why=first.why)
+                         expected=first.expected, actual=first.actual, why=first.why,
+                         navigate=first.navigate)
 
     def __str__(self) -> str:
         # A single refusal renders exactly as a plain `RevlError` would: no
