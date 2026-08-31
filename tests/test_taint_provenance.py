@@ -81,12 +81,23 @@ def test_verified_parser_declassifies_and_flows_clean():
 
 
 def test_endorse_declassifies_and_flows_clean():
-    """The audited escape hatch (Decision 3.2): `endorse(<value>)` produces a
-    `Trusted[T]` and flows clean."""
-    src = _agent(
-        "      let page = emit fetch(url)\n"
-        "      let safe = endorse(page)\n"
-        "      emit run(safe)")
+    """The audited escape hatch (Slice C): a declared, scoped
+    `endorse[<origin>](<value>, reason = "...")` produces a `Trusted[T]` and
+    flows clean. The declaration owns the downgrade — the service operation
+    declares the `endorse[web]` slot."""
+    src = (
+        _PRELUDE
+        + "service Ops { emission endorse[web] fn go(url: Str) }\n"
+        + "component Agent provides ops: Ops {\n"
+        + "  provide ops {\n"
+        + "    fn go(url) {\n"
+        + "      let page = emit fetch(url)\n"
+        + "      let safe = endorse[web](page, reason = \"operator-reviewed\")\n"
+        + "      emit run(safe)\n"
+        + "    }\n"
+        + "  }\n"
+        + "}\n"
+    )
     compile_source(src, "endorsed.rvl")  # must not raise
 
 
@@ -435,13 +446,13 @@ def test_taint_and_declassify_tokens_reach_the_audit_surface():
         "extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py { return \"\" }\n"
         "extern emission[net] fn send(body: Str) = @py { return }\n"
         "extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }\n"
-        "service Ops { emission fn go(url: Str) }\n"
+        "service Ops { emission endorse[web] fn go(url: Str) }\n"
         "component Agent provides ops: Ops {\n"
         "  provide ops {\n"
         "    fn go(url) {\n"
         "      let page = emit fetch(url)\n"
         "      emit send(page)\n"          # web taint reaches a send: recorded
-        "      let safe = endorse(page)\n"  # a declassification: recorded
+        "      let safe = endorse[web](page, reason = \"reviewed\")\n"  # recorded
         "      emit run(safe)\n"
         "    }\n"
         "  }\n"

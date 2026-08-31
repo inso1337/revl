@@ -52,6 +52,12 @@ class MethodDecl:
     # capability" — which is what every pre-capability source means, so
     # existing programs keep their meaning.
     capabilities: tuple[str, ...] | None = None
+    # taint declassification slot (roadmap item 249, Slice C): the origins a
+    # provider of this operation may `endorse[<origin>]` in its body. Declared on
+    # the service operation because a provide method is a plain `fn` that inherits
+    # its authority (emission-ness, and now declassification rights) from the
+    # service declaration. Empty unless the operation declares an endorse slot.
+    endorse_origins: frozenset = field(default_factory=frozenset)
 
 
 @dataclass
@@ -498,6 +504,12 @@ class FnDecl:
     # 6). Empty for the implicit form. Fed into the same tparam machinery the
     # implicit single-uppercase heuristic uses; never reaches the IR.
     type_params: list[str] = field(default_factory=list)
+    # taint declassification slot (roadmap item 249, Slice C): the origins this
+    # fn is DECLARED to be allowed to `endorse[<origin>]` in its body. An
+    # `endorse[o]` whose origin is not in this set is refused at admission, so a
+    # downgrade must appear in the enclosing declaration — never ambient. Empty
+    # for a fn that declares no endorse slot (byte-identical to before).
+    endorse_origins: frozenset = field(default_factory=frozenset)
 
 
 # pure-expression AST (§3.2 — the TS-subset stratum)
@@ -512,6 +524,26 @@ class ExprLit:
 class ExprVar:
     name: str
     line: int
+
+
+@dataclass
+class ExprEndorse:
+    """`endorse[<origin>](<value>, reason = "...")` [`with <appr>`] — the scoped,
+    reasoned taint declassifier (roadmap item 249, Slice C).
+
+    Supersedes Slice A's ambient `endorse(v)`. Three properties, each on the node:
+    `origin` names the coarse taint class being downgraded (and must appear in the
+    enclosing declaration's endorse slot); `reason` is the mandatory audit string
+    that lands in the boundary table's declassify record; `approval` is the name
+    of an `Approval[declassify.<origin>]` value threaded through `with`, so an
+    endorse under a `capability declassify.<origin> requires approval` policy rule
+    is covered (item 246 surface). It is identity on its argument's base type and
+    is spliced out of the IR after the taint verdict, so no emitter sees it."""
+    origin: str
+    expr: object
+    reason: str
+    line: int
+    approval: str | None = None
 
 
 @dataclass
@@ -1158,11 +1190,15 @@ class Parser:
                 if self.at("kw", "commutative"):
                     self.next()
                     commutative = True
+                # item 249 Slice C: an `endorse[<origin>]` declaration slot may
+                # sit before `fn`, exactly where `emission[cap]` sits on an
+                # extern — it names the taint classes the body may declassify.
+                endorse_origins = self._endorse_slot()
                 if self.at("kw", "fn"):
                     if commutative:
                         tok = self.peek()
                         raise self.err(tok.line, f"expected `service` after `commutative`, found {tok.value!r}")
-                    program.fn_decls.append(self.fn_decl(True, verified))
+                    program.fn_decls.append(self.fn_decl(True, verified, endorse_origins))
                 elif self.at("kw", "type"):
                     if commutative:
                         tok = self.peek()
@@ -1190,13 +1226,28 @@ class Parser:
                     raise self.err(tok.line, f"expected `fn`, `type`, `service`, or `extern` after `pub`, found {tok.value!r}")
             elif self.at("kw", "verified"):
                 self.next()
+                endorse_origins = self._endorse_slot()  # item 249 Slice C
                 if self.at("kw", "fn"):
-                    program.fn_decls.append(self.fn_decl(False, True))
+                    program.fn_decls.append(self.fn_decl(False, True, endorse_origins))
                 else:
                     tok = self.peek()
                     raise self.err(tok.line, f"expected `fn` after `verified`, found {tok.value!r}")
             elif self.at("kw", "extern"):
                 program.externs.append(self.extern_decl(False))
+            elif self.at("ident", "endorse"):
+                # item 249 Slice C: a top-level `endorse[<origin>] [verified] fn`
+                # — the declassification slot before `fn`, mirroring `emission`.
+                endorse_origins = self._endorse_slot()
+                verified = False
+                if self.at("kw", "verified"):
+                    self.next()
+                    verified = True
+                if not self.at("kw", "fn"):
+                    tok = self.peek()
+                    raise self.err(tok.line, f"expected `fn` after `endorse[...]`, found {tok.value!r}",
+                                   hint="the `endorse[<origin>]` slot names what a `fn` body "
+                                        "may declassify — it can only precede a `fn` (item 249)")
+                program.fn_decls.append(self.fn_decl(False, verified, endorse_origins))
             elif self.at("kw", "fn"):
                 program.fn_decls.append(self.fn_decl(False))
             elif self.at("kw", "test"):
@@ -1542,6 +1593,27 @@ class Parser:
                      "per-call ticket, not a typed `Approval`")
         return token
 
+    def _endorse_slot(self) -> frozenset:
+        """Consume zero or more `endorse[<origin>[, <origin>...]]` declaration
+        modifiers (roadmap item 249, Slice C) and return the declared origin set.
+
+        The slot is spelled in the same bracket style as `emission[cap]`, so a
+        declaration reads its declassification rights the way it reads its
+        emission scope. `endorse` is not a reserved keyword (it is an ident whose
+        expression form is intercepted in `_primary`), so the modifier is matched
+        on the ident, not a kw."""
+        origins: set[str] = set()
+        while self.at("ident", "endorse"):
+            self.next()
+            self.expect("[", what="`[<origin>]` after `endorse` (the taint class "
+                             "this declaration may declassify, item 249)")
+            origins.add(self.expect("ident").value)
+            while self.at(","):
+                self.next()
+                origins.add(self.expect("ident").value)
+            self.expect("]")
+        return frozenset(origins)
+
     def service(self, commutative: bool = False) -> ServiceDecl:
         line = self.expect("kw", "service").line
         name = self.expect("ident").value
@@ -1550,11 +1622,16 @@ class Parser:
         while not self.at("}"):
             emission = False
             capabilities: tuple[str, ...] | None = None
+            endorse_origins: frozenset = frozenset()
             async_ = False
             method_commutative = False
             method_idempotent = False
             mline = self.peek().line
-            while self.at("kw") and self.peek().value in ("emission", "async", "commutative", "idempotent"):
+            while (self.at("kw") and self.peek().value in ("emission", "async", "commutative", "idempotent")) \
+                    or self.at("ident", "endorse"):
+                if self.at("ident", "endorse"):
+                    endorse_origins = endorse_origins | self._endorse_slot()
+                    continue
                 modifier = self.next().value
                 if modifier == "emission":
                     emission = True
@@ -1602,7 +1679,7 @@ class Parser:
             methods[mname] = MethodDecl(
                 mname, params, returns, emission, mline, async_=async_,
                 commutative=method_commutative, idempotent=method_idempotent,
-                capabilities=capabilities,
+                capabilities=capabilities, endorse_origins=endorse_origins,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)
@@ -2432,7 +2509,8 @@ class Parser:
                                 "at least one parameter: `fn id[T](x: T) -> T`")
         return names
 
-    def fn_decl(self, public: bool, verified: bool = False) -> FnDecl:
+    def fn_decl(self, public: bool, verified: bool = False,
+                endorse_origins: frozenset = frozenset()) -> FnDecl:
         line = self.expect("kw", "fn").line
         name = self.expect("ident").value
         type_params = self._type_param_list()
@@ -2479,7 +2557,8 @@ class Parser:
             body.append(self.fn_stmt())
         self.expect("}")
         return FnDecl(name, params, returns, body, public, line, verified,
-                      source=self.filename, type_params=type_params)
+                      source=self.filename, type_params=type_params,
+                      endorse_origins=endorse_origins)
 
     def test_decl(self, lifecycle: bool = False) -> TestDecl:
         line = self.expect("kw", "test").line
@@ -3348,6 +3427,58 @@ class Parser:
                  "`match` or `??` before the next access",
         )
 
+    def _endorse_expr(self) -> ExprEndorse:
+        """`endorse[<origin>](<value>, reason = "...")` [`with <appr>`] — the
+        scoped, reasoned declassifier (item 249, Slice C).
+
+        The ambient single-argument `endorse(v)` of Slice A is superseded: it is
+        refused here with a migration hint, so a downgrade is always scoped and
+        reasoned. The `reason` string is mandatory (it lands in the audit's
+        declassify record); an optional `with <appr>` threads an approval."""
+        line = self.next().line  # consume `endorse`
+        if not self.at("["):
+            raise self.err(
+                line,
+                "the ambient `endorse(v)` is superseded — a declassification must "
+                "name the taint class it downgrades and carry a reason",
+                hint="write `endorse[<origin>](v, reason = \"...\")` (e.g. "
+                     "`endorse[web](page, reason = \"operator-reviewed\")`), and "
+                     "declare the slot on the enclosing `fn`/operation "
+                     "(`endorse[web] fn ...`) (item 249, Slice C)")
+        self.next()  # `[`
+        origin = self.expect("ident", what="the taint class `endorse[<origin>]` "
+                             "downgrades (e.g. `web`, `net`, `fs`)").value
+        self.expect("]")
+        self.expect("(", what="`(value, reason = \"...\")` after `endorse[<origin>]`")
+        value = self.pure_expr()
+        reason = None
+        if self.at(","):
+            self.next()
+            self.expect("ident", "reason",
+                        what="`reason = \"...\"` — the mandatory audit reason for "
+                             "an `endorse` (item 249, Slice C)")
+            self.expect("=")
+            rtok = self.peek()
+            if rtok.kind != "string":
+                raise self.err(rtok.line,
+                               f"`endorse` reason must be a string literal, found "
+                               f"{rtok.value!r}",
+                               hint="e.g. `reason = \"operator-reviewed template\"`")
+            reason = self.next().value
+        self.expect(")")
+        approval = None
+        if self.at("kw", "with"):
+            self.next()
+            approval = self.expect("ident", what="the `Approval[declassify.<origin>]` "
+                                   "value to thread through `with` (item 249/246)").value
+        if reason is None:
+            raise self.err(
+                line,
+                "an `endorse` must carry a reason",
+                hint="write `endorse[<origin>](v, reason = \"...\")` — the reason "
+                     "is recorded on the audit's declassify surface (item 249)")
+        return ExprEndorse(origin, value, reason, line, approval)
+
     def _hole_expr(self) -> ExprHole:
         """`hole` [`[` Type `]`] [StringLit] — docs/holes.md.
 
@@ -3561,6 +3692,14 @@ class Parser:
                 hint="an anonymous function is an arrow `x => …` "
                      "(e.g. `xs.map(x => x + 1)`) (syntax-2.0 §3.2)",
             )
+        # item 249 Slice C: the scoped declassifier `endorse[<origin>](v, reason
+        # = "...")`. `endorse` is an ident, intercepted before the plain
+        # variable-reference path when it heads a `[` or `(` (its call/scope
+        # forms); a bare `endorse` used as a value name is untouched.
+        if (tok.kind == "ident" and tok.value == "endorse"
+                and self.pos + 1 < len(self.toks)
+                and self.toks[self.pos + 1].kind in ("[", "(")):
+            return self._endorse_expr()
         if self._is_name_tok(tok):
             # item 158: a variable *reference* is a name position too — a param
             # (or record field) named with a contextual noun must be usable, and

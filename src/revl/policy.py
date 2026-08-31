@@ -128,12 +128,18 @@ class Policy:
     leases_enforced: bool = False            # `leases enforced` (item 61)
     quarantine_required: bool = False        # `quarantine required` (item 45)
     approval_rules: tuple[ApprovalRule, ...] = ()  # `requires approval` (246)
+    # item 249, Slice C: `<subject> may not declassify <origin>[, ...]` — the
+    # operator's power to forbid a taint downgrade for a component/realm. A
+    # deny-list `Rule` (allow=False) whose `patterns` are origin tokens, checked
+    # against the `declassify:<origin>` audit surface.
+    declassify_rules: tuple[Rule, ...] = ()
     source: str | None = None                # file path, for messages
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
             and self.mcp_allow is None and not self.leases_enforced \
-            and not self.quarantine_required and not self.approval_rules
+            and not self.quarantine_required and not self.approval_rules \
+            and not self.declassify_rules
 
     def requires_approval(self) -> bool:
         """Whether this policy names any approval-required capability — the
@@ -179,6 +185,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     leases_enforced = False
     quarantine_required = False
     approval_rules: list[ApprovalRule] = []
+    declassify_rules: list[Rule] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -186,6 +193,28 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         low = line.lower()
         if low == "tenants never reach each other":
             tenants = True
+            continue
+        # item 249, Slice C: `<subject> may not declassify <origin>[, ...]` — the
+        # operator forbids a taint downgrade. `<subject>` is `component <glob>`
+        # or `realm <name>`, exactly as the reach rules. Checked before the
+        # reach-verb loop so `declassify` is not mistaken for a capability token.
+        if "may not declassify" in low:
+            idx = low.find("may not declassify")
+            head = line[:idx].strip()
+            origins = _split_caps(line[idx + len("may not declassify"):])
+            if not origins:
+                raise PolicyError(source, lineno,
+                                  f"policy line names no taint origin: "
+                                  f"{raw.strip()!r}")
+            parts = head.split()
+            if len(parts) == 2 and parts[0].lower() == "component":
+                declassify_rules.append(Rule("component", parts[1], False, origins))
+            elif len(parts) == 2 and parts[0].lower() == "realm":
+                declassify_rules.append(Rule("realm", parts[1], False, origins))
+            else:
+                raise PolicyError(source, lineno,
+                                  f"unrecognised declassify subject {head!r} — "
+                                  f"expected `component <glob>` or `realm <name>`")
             continue
         # the approval gate (item 246, Slice 2): `capability <glob> requires
         # approval [ttl <D>]`. Operator-owned — an author cannot waive it by
@@ -256,7 +285,8 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             raise PolicyError(source, lineno,
                               f"unrecognised policy line: {raw.strip()!r}")
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
-                  quarantine_required, tuple(approval_rules), source)
+                  quarantine_required, tuple(approval_rules),
+                  tuple(declassify_rules), source)
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -306,8 +336,19 @@ def _parse_json(text: str, source: str | None) -> Policy:
             except ValueError as exc:
                 raise PolicyError(source, 1, str(exc))
         approval_rules.append(ApprovalRule(cap, ttl_ms))
+    declassify_rules: list[Rule] = []
+    for entry in doc.get("declassify") or []:
+        sel = entry.get("component") or entry.get("realm")
+        scope = "realm" if entry.get("realm") else "component"
+        origins = entry.get("deny") or entry.get("origins")
+        if not sel or not origins:
+            raise PolicyError(source, 1,
+                              "a declassify rule needs a `component`/`realm` "
+                              "selector and a `deny`/`origins` list")
+        declassify_rules.append(Rule(scope, sel, False, tuple(origins)))
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
-                  quarantine_required, tuple(approval_rules), source)
+                  quarantine_required, tuple(approval_rules),
+                  tuple(declassify_rules), source)
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:
@@ -478,6 +519,36 @@ def evaluate(policy: Policy, audit: dict,
                 violations.append(
                     _allow_violation(manifest, name, r, sandbox, "mcp-sandbox"))
 
+        # item 249, Slice C: a forbidden taint downgrade. Read the origins this
+        # component declassifies off the `declassify:` audit surface and refuse
+        # any a matching `may not declassify` rule forbids.
+        taint = ((audit.get("boundary") or {}).get(name) or {}).get("taint", {})
+        if policy.declassify_rules:
+            for origin in taint.get("declassify") or []:
+                for rule in policy.declassify_rules:
+                    if rule.selects(name, realms) and \
+                            _matches_any(origin, rule.patterns):
+                        violations.append(
+                            _declassify_violation(manifest, name, origin, rule))
+
+        # item 249, Slice C (C2): an endorse under a `capability
+        # declassify.<origin> requires approval` rule must carry a covering
+        # `Approval[declassify.<origin>]` edge — the third declassifier, on the
+        # landed item-246 surface. The endorse's approval edge is recorded on
+        # its declassify record (`approved`).
+        if policy.approval_rules:
+            for record in taint.get("declassify_records") or []:
+                origin = record.get("origin")
+                token = f"declassify.{origin}"
+                rule = policy.approval_rule_for(token)
+                if rule is None:
+                    continue
+                approved = record.get("approved")
+                if approved is None or not _approval_edge_covers(approved, token):
+                    violations.append(
+                        _declassify_approval_violation(manifest, name, origin,
+                                                       token))
+
     if policy.tenants_isolated:
         violations.extend(_tenant_violations(audit, manifest))
     return violations
@@ -514,6 +585,55 @@ def _deny_violation(manifest: dict, name: str, reach: Reach,
     why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
                    steps=_reach_step(manifest, name, reach))
     return Violation("deny", name, reach.token, message, why)
+
+
+def _declassify_violation(manifest: dict, name: str, origin: str,
+                          rule: Rule) -> Violation:
+    """A component declassifies an origin a `may not declassify` rule forbids
+    (item 249, Slice C)."""
+    where = (f"realm `{rule.selector}`" if rule.scope == "realm"
+             else f"components matching `{rule.selector}`")
+    file, _ = _location(manifest, name)
+    message = (f"policy violation: {where} may not declassify "
+               f"[{', '.join(rule.patterns)}], but `{name}` declassifies "
+               f"`{origin}` taint — the downgrade is forbidden; admission "
+               f"refused (boundary policy, item 249 Slice C)")
+    steps = [
+        TraceStep(name, "component", file, None,
+                  f"declassifies `{origin}` taint (an `endorse[{origin}]`)"),
+        TraceStep(origin, "declassify", None, None, "forbidden downgrade",
+                  (origin,)),
+    ]
+    why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
+                   steps=steps)
+    return Violation("declassify", name, origin, message, why)
+
+
+def _approval_edge_covers(edge_scope: str, token: str) -> bool:
+    """Whether an endorse's threaded `Approval[edge_scope]` covers a required
+    `declassify.<origin>` token — the same glob/equality rule the emit approval
+    coverage uses."""
+    return fnmatchcase(token, edge_scope) or edge_scope == token
+
+
+def _declassify_approval_violation(manifest: dict, name: str, origin: str,
+                                   token: str) -> Violation:
+    file, _ = _location(manifest, name)
+    message = (f"policy violation: capability `{token}` requires approval, but "
+               f"component `{name}` endorses `{origin}` taint with no covering "
+               f"`with` approval edge — admission refused (item 249 Slice C, on "
+               f"the item 246 surface). Acquire an approval (`let a = await "
+               f"approval[{token}] {{ ... }}`) and thread it "
+               f"(`endorse[{origin}](v, reason = \"...\") with a`)")
+    steps = [
+        TraceStep(name, "component", file, None,
+                  f"endorses `{origin}` taint without approval"),
+        TraceStep(token, "declassify", None, None, "approval-required downgrade",
+                  (token,)),
+    ]
+    why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
+                   steps=steps)
+    return Violation("declassify-approval", name, token, message, why)
 
 
 def _tenant_violations(audit: dict, manifest: dict) -> list[Violation]:
