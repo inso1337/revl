@@ -17,7 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..adapt import bridge_plan, derivation_hash, render_adapter
+from ..adapt import (bridge_plan, derivation_hash, navigate_for_refusals,
+                     render_adapter)
 from ..admission import _service_from_ir
 from ..compiler import compile_source
 
@@ -70,6 +71,9 @@ def _run_adapt(args) -> int:
                  "transformation": r.transformation, "clause": r.clause,
                  "reason": r.reason, "hint": r.hint}
                 for r in res.refusals],
+            # item 274: the same refusal list projected into the shared
+            # `navigate` record (family `adapter`), so a harness reads one shape.
+            "navigate": navigate_for_refusals(res.refusals),
         }
         print(json.dumps(out, indent=2))
         return 1
