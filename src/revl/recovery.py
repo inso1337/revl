@@ -557,6 +557,14 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
     # at-most-once hold across abort-then-crash and any number of recovery runs.
     fenced_seqs: set = {r.get("seq") for r in wal["records"]
                         if r.get("record") == "replay-fence"}
+    # item 309 follow-up: the in-process abort's COMPLETION record. A fence means
+    # "fenced-before-attempt, outcome UNKNOWN" only when the process died mid-abort
+    # (no `aborted` record). When the `aborted` completion record IS present, the
+    # in-process abort ran Phase 1 to completion, so every fenced inverse's apply
+    # DID run — the outcome is KNOWN (clean), not unknown. The report surfaces this
+    # same signal as `abortCompleted`.
+    abort_completed: bool = any(r.get("record") == "aborted"
+                                for r in wal["records"])
     fenced_deferred: list = []
     # Phase 1: transactional inverses, reverse-seq, skipping discharged seqs.
     for d in sorted(transactional, key=lambda x: x.get("seq", 0), reverse=True):
@@ -572,6 +580,18 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
                                        "retained": True})
             continue
         declared_idempotent = bool(d.get("undo_idempotent"))
+        if not declared_idempotent and seq in fenced_seqs and abort_completed:
+            # item 309 follow-up: a COMPLETED in-process abort. The `aborted`
+            # completion record is present, so the abort's Phase 1 ran this fenced
+            # inverse's apply to completion — its outcome is KNOWN (it ran), not
+            # unknown. So it is RESOLVED: count it as cleanly rolled back, keep
+            # residue clean, and do NOT re-apply it (that would be a double-apply;
+            # a completed abort is never re-run on recover). Only the crash case
+            # below — no `aborted` record — is genuine fenced-residue.
+            transactional_rolled_back.append({"seq": seq, "referent": referent,
+                                              "op": call,
+                                              "replay": "abort-phase1"})
+            continue
         if not declared_idempotent and seq in fenced_seqs:
             # item 309 §3a: an UNDECLARED inverse whose single at-most-once
             # attempt was already spent on another apply path (the headline
