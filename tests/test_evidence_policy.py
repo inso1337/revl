@@ -19,7 +19,6 @@ worst-wins with the shipped rule families. These tests pin the deliverable:
   * an evidence-free policy is byte-identical to today.
 """
 
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path

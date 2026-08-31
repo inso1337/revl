@@ -8209,7 +8209,6 @@ def _widening_reason(cap: "object", held: set) -> str | None:
     held but the VALUATION widens it (the item 294 case). Names the parameter
     and the direction; returns None when the token itself is absent (today's
     missing-boundary case, whose message is enough)."""
-    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
     same_token = [h for h in held if h.token == cap.token and h.token != "*"]
     if not same_token:
         return None
