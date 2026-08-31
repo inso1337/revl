@@ -1515,6 +1515,14 @@ class _ComponentEmitter:
                        f"_revl_ctx, {key!r}, {realms!r}, {strategy!r})")
         out.add(0)
         out.add(1, f"{'async def' if is_async else 'def'} _body():")
+        # item 247 second-pass (F1): two sentinel yields bracket the ordinary
+        # steps (mirrors the ts/go tiers). `begin` yielded FIRST -> disposed
+        # LAST (cordis LIFO): the Phase-2 post-unwind hook, at the bottom of the
+        # unwind stack, so a POST-activation abort's activation-body offsets —
+        # which enqueue only when cordis disposes them, BELOW `drain` — are
+        # drained after Phase 1 completes instead of being lost. `drain` yielded
+        # LAST -> disposed FIRST, the commit signal every earlier entry reads.
+        out.add(2, "yield _revl_frame.begin")
         for step in self.ir.get("body") or []:
             self._body_step(out, 2, step, where)
         out.add(2, "yield _revl_frame.drain")
