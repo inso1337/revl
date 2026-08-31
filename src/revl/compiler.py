@@ -9,6 +9,7 @@ from . import parser as _ast
 from ._paths import stdlib_root
 from .admit_profile import AdmissionProfile
 from .admit_profile import check_no_extern as _check_no_extern
+from .admit_profile import check_no_host_extern_reach as _check_no_host_extern_reach
 from .admit_profile import enforce_document as _enforce_document
 from .admit_profile import enforce_source as _enforce_source
 from .errors import RevlError
@@ -192,8 +193,10 @@ class _ModuleLoader:
             # BEFORE any body file is resolved, read, or stat'd, so the refusal
             # is byte-identical whether or not the named file exists (no
             # existence oracle, re-review F4). Root-scoped: an imported module
-            # is a pre-granted dependency and may declare externs. The
-            # whole-graph enforcement in compile_files stays as the backstop.
+            # is a pre-granted dependency and may declare externs. A root that
+            # IMPORTS a pre-granted module's host extern and reaches it directly
+            # is the separate import/reach bypass, refused by
+            # `check_no_host_extern_reach` in compile_files (item 330).
             is_root = abs_path in self._root_paths
             if (is_root and self._profile is not None
                     and self._profile.no_extern):
@@ -533,6 +536,14 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # imported closure). Inert without a profile, so a trusted compile is
     # byte-identical.
     _enforce_source([m.program for m in root_modules], profile)
+    # item 330: the import/reach bypass of the no-extern check — a root that
+    # `use`s a pre-granted module's host extern and reaches it directly. Built
+    # from the loader's resolved imports (only it knows which imported names
+    # resolve to a host-body extern), and refused before lowering runs a body.
+    if profile is not None and profile.no_extern:
+        _check_no_host_extern_reach(
+            [m.program for m in root_modules],
+            _imported_host_externs(root_modules, loader), profile)
     document = check_and_lower(
         merged, ambient, taint_strict=bool(profile and profile.taint_strict))
     # the allowlist half — refuse a reach outside the granted service set, on the
@@ -827,6 +838,32 @@ def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
         for kind, part in expr.parts:
             if kind == "expr":
                 recur(part)
+
+
+def _imported_host_externs(root_modules: list[_LoadedModule],
+                           loader: _ModuleLoader) -> dict:
+    """item 330: map every host-body extern NAME a ROOT imports by name to
+    `(decl, module_path)`.
+
+    Only named imports (`use "..." { sh }`) can put an extern in a body's scope
+    as a bare callable — an alias import exposes only public fns (lower rejects an
+    alias-qualified extern call), so an alias `use` reaches no extern. A resolved
+    `public_externs` entry with a non-empty `bodies` list is verbatim host code
+    (item 24, the gate does not sandbox it); a bodyless extern is a deploy-wired
+    host requirement, not host code smuggled through the import, so it is not
+    collected. The loader is already warm from the compose load, so re-resolving a
+    root `use` hits its cache."""
+    result: dict = {}
+    for module in root_modules:
+        for use in module.program.uses:
+            if use.names is None:
+                continue
+            used = loader.load(loader.resolve_use(module.dir, module.path, use))
+            for name in use.names:
+                decl = used.public_externs.get(name)
+                if decl is not None and decl.bodies:
+                    result[name] = (decl, used.path)
+    return result
 
 
 def _load_root(loader: _ModuleLoader, path: str) -> _LoadedModule:

@@ -164,3 +164,102 @@ def test_inert_profile_is_a_noop():
     b = compile_source(_TURN_COMPOSES_KV, "<turn>.rvl", manifest=_base_ir(),
                        profile=AdmissionProfile())
     assert a == b
+
+
+# --------------------------------------------------------------------------- #
+# (a2) no-extern, import/reach bypass — item 330. `check_no_extern` refuses a
+# root that DECLARES an extern, but a root that IMPORTS a pre-granted module's
+# host extern and CALLS it reaches the SAME verbatim host code by another door.
+# An untrusted author composes granted SERVICES; it may not reach a host extern.
+# --------------------------------------------------------------------------- #
+
+# A pre-granted tool module that ships a host-body emission extern, exactly the
+# stdlib shape (`stdlib/shell.rvl`'s `pub extern emission fn sh`). Supplied
+# in-memory so the proof does not couple to the real stdlib's contents.
+_SHELL_TOOL = """
+pub extern emission fn sh(cmd: Str) -> Str
+  = @py { import os; os.system(cmd); return "" }
+"""
+
+# The untrusted turn imports that host extern and reaches it directly — the
+# reviewer-reproduced bypass. It DECLARES no extern, so `check_no_extern` is
+# silent; the reach of the IMPORTED host extern is what must be refused.
+_TURN_IMPORTS_AND_REACHES_SH = """
+use "shelltool.rvl" { sh }
+service Pwn { emission fn go() -> Str }
+component Pwned provides pwn: Pwn {
+  provide pwn { fn go() = emit sh("id > /tmp/PWNED_BY_UNTRUSTED_TURN") }
+}
+"""
+
+
+def test_importing_a_host_extern_and_reaching_it_is_refused():
+    with pytest.raises(RevlError) as exc:
+        compile_source(_TURN_IMPORTS_AND_REACHES_SH, "turn.rvl",
+                       manifest=_base_ir(), modules={"shelltool.rvl": _SHELL_TOOL},
+                       profile=AdmissionProfile.untrusted_author(set()))
+    msg = str(exc.value)
+    assert "reaching host code" in msg
+    assert "sh" in msg
+    assert getattr(exc.value, "code", None) == "G8"
+
+
+def test_reaching_an_imported_host_extern_via_a_root_helper_is_refused():
+    # The reach may hop through a root-local helper fn; the call site still lives
+    # in a root body, so the bare-name sweep of the root fns catches it.
+    src = """
+    use "shelltool.rvl" { sh }
+    fn reach_it() -> Str { return sh("id") }
+    service Pwn { emission fn go() -> Str }
+    component Pwned provides pwn: Pwn { provide pwn { fn go() = emit reach_it() } }
+    """
+    with pytest.raises(RevlError) as exc:
+        compile_source(src, "turn.rvl", manifest=_base_ir(),
+                       modules={"shelltool.rvl": _SHELL_TOOL},
+                       profile=AdmissionProfile.untrusted_author(set()))
+    assert getattr(exc.value, "code", None) == "G8"
+    assert "sh" in str(exc.value)
+
+
+def test_trusted_composition_importing_a_host_extern_still_admits():
+    # The SAME source is normal usage for a TRUSTED author — the refusal is a
+    # property of the profile, not the composition. No profile => admits.
+    doc = compile_source(_TURN_IMPORTS_AND_REACHES_SH, "turn.rvl",
+                         manifest=_base_ir(),
+                         modules={"shelltool.rvl": _SHELL_TOOL})
+    assert {c["name"] for c in doc["components"]} == {"Pwned"}
+    assert any(e["name"] == "sh" for e in doc.get("externs") or [])
+
+
+def test_untrusted_importing_a_pure_fn_still_admits():
+    # Additivity: an untrusted turn may still import and call a plain `pub fn`
+    # from a module — only an imported HOST EXTERN is a reach. The tool module
+    # here exposes a pure helper, no host body, so the turn admits.
+    tool = "pub fn greet(n: Str) -> Str { return \"hi\" }\n"
+    src = """
+    use "helper.rvl" { greet }
+    service Turn { fn run() -> Str }
+    component TurnComp provides turn: Turn { provide turn { fn run() = greet("x") } }
+    """
+    doc = compile_source(src, "turn.rvl", manifest=_base_ir(),
+                         modules={"helper.rvl": tool},
+                         profile=AdmissionProfile.untrusted_author(set()))
+    assert {c["name"] for c in doc["components"]} == {"TurnComp"}
+
+
+def test_real_stdlib_shell_import_and_emit_is_refused():
+    # Fidelity to the reviewer's exact probe: the REAL stdlib `sh` extern,
+    # resolved off the item-319 search path, imported and emitted by an
+    # empty-grant untrusted turn — refused at admission before any host body runs.
+    src = (
+        'use "stdlib/shell.rvl" { sh }\n'
+        "service Pwn { emission fn go() -> Str }\n"
+        "component Pwned provides pwn: Pwn {\n"
+        '  provide pwn { fn go() = emit sh("id > /tmp/PWNED_BY_UNTRUSTED_TURN") }\n'
+        "}\n"
+    )
+    with pytest.raises(RevlError) as exc:
+        compile_source(src, "turn.rvl", manifest=_base_ir(),
+                       profile=AdmissionProfile.untrusted_author(set()))
+    assert getattr(exc.value, "code", None) == "G8"
+    assert "sh" in str(exc.value)
