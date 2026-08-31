@@ -615,3 +615,79 @@ def test_404_valid_provide_method_still_compiles():
         "  }\n"
         "}\n"
     )
+
+
+# ---------------------------------------------------------------- item 405
+#
+# The residual of the item-404 check-coverage class, found BY the 404 work.
+# After 404 routed provide-method bodies through the fn-body raising sweep, two
+# hazards stayed refused in a `fn`/`test` body (stratum 1, `infer_ast`) but clean
+# in a `provide` method (stratum 3, `infer_ir`) because `infer_ir` had no node
+# case for them: `?.` on a non-optional (no `optfield`/`optcall` case, so it
+# inferred to None) and a structural / anonymous-record field read (no `record`
+# case, so the binding stayed untyped and the read was never field-checked).
+# `infer_ir` now gains those node cases, mirroring `infer_ast` exactly.
+
+_UNIFORM_REFUSALS_405 = [
+    ("`?.` on a non-optional (optfield)",
+     "let z = s?.length\n return n", "",
+     "`?.` needs an optional on the left"),
+    ("`?.` on a non-optional (optcall)",
+     "let z = s?.charAt(n)\n return n", "",
+     "`?.` needs an optional on the left"),
+    ("structural / anonymous-record read of an absent field",
+     'let a = { h: "x" }\n let z = a.missing\n return n',
+     "", "has no field `missing`"),
+]
+
+
+@pytest.mark.parametrize("name,body,extra,substr", _UNIFORM_REFUSALS_405,
+                         ids=[c[0] for c in _UNIFORM_REFUSALS_405])
+def test_405_refusal_fires_uniformly_in_fn_provide_and_test(name, body, extra, substr):
+    # Each is a stratum-1 (`infer_ast`) refusal that item 405 makes fire
+    # uniformly in a provide-method body (stratum 3, `infer_ir`) too — the same
+    # diagnostic in all three contexts.
+    from revl import compile_source
+    for label, wrap in (("fn", _fn_body), ("provide", _provide_body),
+                        ("test", _test_body)):
+        with pytest.raises(RevlError) as excinfo:
+            compile_source(wrap(body, extra))
+        assert substr in str(excinfo.value), \
+            f"{name}: {label} body did not raise the expected diagnostic"
+
+
+def test_405_valid_optchain_and_record_read_still_compile():
+    # Additivity: a `?.` on a genuine `Opt` and a read of a field the anonymous
+    # record does declare must still compile in a provide method — the new node
+    # cases add refusals, they do not narrow the accepted language.
+    from revl import compile_source
+    compile_source(
+        "service Reader { fn read(n: Int) -> Int }\n"
+        "component Parser provides reader: Reader {\n"
+        "  provide reader {\n"
+        "    fn read(n) {\n"
+        "      let o: Opt[Str] = None\n"
+        "      let z = o?.length\n"          # `?.` on a real Opt: fine
+        "      let a = { h: 7 }\n"
+        "      let b = a.h\n"                 # a declared structural field: fine
+        "      return b\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def test_405_record_literal_return_still_compiles():
+    # Additivity guard for the new `record` node case: naming a structural type
+    # for an anonymous literal must not make a valid record-literal return (whose
+    # structural type meets the declared nominal record at the boundary) refuse.
+    from revl import compile_source
+    compile_source(
+        "type Pt = { x: Int, y: Int }\n"
+        "service Maker { fn mk(n: Int) -> Pt }\n"
+        "component C provides maker: Maker {\n"
+        "  provide maker {\n"
+        "    fn mk(n) { return { x: n, y: 2 } }\n"
+        "  }\n"
+        "}\n"
+    )
