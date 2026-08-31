@@ -63,6 +63,12 @@ class MethodDecl:
     # cache to the seam. `None` unless the method declares one, so every existing
     # method's IR is byte-identical (docs/design/310-capability-aware-caching.md).
     cache: "CacheClause | None" = None
+    # item 257: the `validated` modifier on an `emission` operation: opt into
+    # boundary validation of the completion against a schema derived from the
+    # return type (docs/design/257-typed-model-boundary.md). Off by default, so
+    # every existing emission's IR is byte-identical; emission-only and
+    # non-`Unit`-returning, checked in lower next to the sibling modifier rules.
+    validated: bool = False
 
 
 @dataclass
@@ -566,6 +572,13 @@ class ExternDecl:
     # args, so the seam gate cannot act pre-execution. `None` unless written, so
     # every existing extern's IR is byte-identical.
     cache: "CacheClause | None" = None
+    # item 257: the `validated` modifier on an `emission` extern: the boundary
+    # validates the completion against a schema derived from the return type
+    # (docs/design/257-typed-model-boundary.md). Sits in the same modifier slot
+    # as `async`/`deferred`/`idempotent`. `False` for every existing extern, so
+    # their IR is byte-identical; emission-only and non-`Unit`-returning, checked
+    # in lower next to the sibling modifier rules.
+    validated: bool = False
 
 
 @dataclass
@@ -1523,6 +1536,11 @@ class Parser:
         deferred = False
         idempotent = False
         idempotency_key: str | None = None
+        # item 257: `validated`, a CONTEXTUAL keyword (matched on the ident, like
+        # `deferred`) recognised only in this modifier slot, so no program that
+        # used `validated` as an ordinary name is broken and the lexer needs no
+        # sync. Validity (emission-only, non-`Unit`) is enforced in lower.
+        validated = False
         while True:
             if self.at("kw", "async") and not async_:
                 self.next()
@@ -1530,6 +1548,9 @@ class Parser:
             elif self.at("ident", "deferred") and not deferred:
                 self.next()
                 deferred = True
+            elif self.at("ident", "validated") and not validated:
+                self.next()
+                validated = True
             elif self.at("kw", "idempotent") and not idempotent:
                 self.next()
                 idempotent = True
@@ -1671,7 +1692,8 @@ class Parser:
                           deferred=deferred, requires_approval=requires_approval,
                           reach=reach, config=config, colour_poly=colour_poly,
                           undo_idempotent=undo_idempotent, idempotent=idempotent,
-                          idempotency_key=idempotency_key, cache=cache)
+                          idempotency_key=idempotency_key, cache=cache,
+                          validated=validated)
 
     def _reach_clause(self) -> tuple[str, str]:
         """`(confined: <param>)` after an emission classification — item 373.
@@ -1933,11 +1955,19 @@ class Parser:
             async_ = False
             method_commutative = False
             method_idempotent = False
+            # item 257: `validated`, a contextual keyword in the method modifier
+            # slot (matched on the ident, like `endorse`), so `validated` stays a
+            # legal ordinary name elsewhere. Emission-only, non-`Unit`, in lower.
+            method_validated = False
             mline = self.peek().line
             while (self.at("kw") and self.peek().value in ("emission", "async", "commutative", "idempotent")) \
-                    or self.at("ident", "endorse"):
+                    or self.at("ident", "endorse") or self.at("ident", "validated"):
                 if self.at("ident", "endorse"):
                     endorse_origins = endorse_origins | self._endorse_slot()
+                    continue
+                if self.at("ident", "validated"):
+                    self.next()
+                    method_validated = True
                     continue
                 modifier = self.next().value
                 if modifier == "emission":
@@ -1999,7 +2029,7 @@ class Parser:
                 mname, params, returns, emission, mline, async_=async_,
                 commutative=method_commutative, idempotent=method_idempotent,
                 capabilities=capabilities, endorse_origins=endorse_origins,
-                cache=cache,
+                cache=cache, validated=method_validated,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)

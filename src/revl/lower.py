@@ -51,7 +51,18 @@ from .typecheck import (
     _is_wildcard,
     _check_method_namespace_disjoint,
 )
-from .taint import extract_and_normalize, check_taint, splice_declassifiers
+from .taint import (
+    extract_and_normalize,
+    check_taint,
+    splice_declassifiers,
+    strip_qualifiers,
+)
+from .mcp.schema import (
+    expressibility_reason,
+    fully_expressible,
+    has_revl_stub,
+    json_schema_for,
+)
 from .resources import (
     NO_HANDLE_RETURNS,
     acquire_return_is_nominal_handle,
@@ -2376,6 +2387,80 @@ def _refuse_teardown_bound_externs_in_fn_body(program: Program, filename: str) -
             _walk(stmt, f"the body of test `{test.name}`")
 
 
+def _validated_response_schema(name: str, returns: str | None, is_emission: bool,
+                               types: dict, filename: str, line: int,
+                               kind_word: str) -> dict:
+    """Item 257 (§2, §3): check a `validated` emission and derive its boundary
+    schema, refusing at COMPILE TIME when the response type is not fully
+    expressible.
+
+    Two surface rules (the same place the sibling modifier-validity rules live):
+    `validated` is EMISSION-ONLY (a `pure`/`acquire`/`witnessed` classification
+    has no response to validate at a one-way boundary), and a validated emission
+    must declare a NON-`Unit` return type (there is nothing to validate
+    otherwise). Then the return type must be `fully_expressible` (§3.3), derived
+    on the QUALIFIER-STRIPPED type (§3.1, HIGH-2) so the secure default spelling
+    `-> Untrusted[AgentTurn] validated` derives the same union as
+    `-> AgentTurn validated`. `extract_and_normalize` already strips the
+    qualifier in place before lowering; `strip_qualifiers` here is idempotent and
+    makes the derivation self-documenting and order-robust.
+    """
+    if not is_emission:
+        raise RevlError(
+            filename, line,
+            f"`validated` {kind_word} `{name}` is not an emission",
+            hint="`validated` opts a boundary crossing into response validation, "
+                 "so it is emission-only: a pure/acquire/witnessed classification "
+                 "has no one-way response to validate "
+                 "(docs/design/257-typed-model-boundary.md, §2)",
+            code="G4", category="validated")
+    stripped = strip_qualifiers(returns)
+    if not stripped or stripped == "Unit":
+        raise RevlError(
+            filename, line,
+            f"`validated` emission `{name}` must declare a non-`Unit` return type",
+            hint="a validated emission validates its RESPONSE against a schema "
+                 "derived from the return type; a `Unit` (or absent) return has "
+                 "nothing to validate (§2)",
+            code="G4", category="validated")
+    if not fully_expressible(stripped, types):
+        reason = expressibility_reason(stripped, types) or "is not expressible"
+        raise RevlError(
+            filename, line,
+            f"`validated` emission `{name}` has response type `{stripped}`, which "
+            f"{reason}",
+            hint="a validating boundary refuses a response type it cannot derive an "
+                 "EXACT schema for (an unconstrained or ambiguous schema validates "
+                 "nothing while reading as safe). Refuse it at compile time rather "
+                 "than ship a vacuous guarantee "
+                 "(docs/design/257-typed-model-boundary.md, §3.3)",
+            code="G4", category="validated")
+    schema = json_schema_for(stripped, types, validated=True)
+    # Defense in depth (§3.3): the `fully_expressible` predicate already accepted
+    # this type, so the renderer must leave no unconstrained `x-revlType` stub. A
+    # firing here means the predicate and the renderer have drifted (a renderer
+    # bug), caught loudly rather than shipping an unconstrained boundary.
+    if has_revl_stub(schema):
+        raise RevlError(
+            filename, line,
+            f"internal: `validated` emission `{name}` derived an unconstrained "
+            f"schema for `{stripped}` despite passing the expressibility gate "
+            f"(renderer/predicate drift, item 257 §3.3)")
+    return schema
+
+
+def _method_validated_ir(m, types: dict, filename: str) -> dict:
+    """Item 257: the additive `validated` + `response_schema` IR keys for a
+    service-method emission, or `{}` (byte-identical) when the method is not
+    `validated`. Refuses an unexpressible return type at compile time. `m.returns`
+    is already qualifier-stripped in place by `extract_and_normalize`."""
+    if not getattr(m, "validated", False):
+        return {}
+    schema = _validated_response_schema(
+        m.name, m.returns, m.emission, types, filename, m.line, "operation")
+    return {"validated": True, "response_schema": schema}
+
+
 def _lower_externs(program: Program, filename: str, types: dict,
                    fns: list | None = None) -> list:
     externs: list[dict] = []
@@ -2561,6 +2646,15 @@ def _lower_externs(program: Program, filename: str, types: dict,
                          "serializable scalar (`Str` or `Int`), not a host handle "
                          "or a compound type (item 309, §1b)",
                     code="G4", category="idempotent")
+        # item 257: a `validated` emission extern. Check emission-only + non-Unit
+        # and derive the boundary schema on the qualifier-stripped return type
+        # (already stripped in place by extract_and_normalize; re-stripped for
+        # order-robustness). Refuses an unexpressible return type at compile time.
+        validated_schema: dict | None = None
+        if decl.validated:
+            validated_schema = _validated_response_schema(
+                decl.name, decl.returns, decl.classification == "emission",
+                types, filename, decl.line, "extern")
         # witnessed-inverse externs (docs/design/243-witnessed-externs.md). A
         # witnessed mutation is a transaction, not a bracket: its declared `undo`
         # is auto-registered by the accumulator and replays on abort only. The
@@ -2898,6 +2992,12 @@ def _lower_externs(program: Program, filename: str, types: dict,
             # IR is byte-identical.
             **({"config": [{"name": f.name, "type": f.type, "default": f.default}
                            for f in decl.config]} if decl.config else {}),
+            # item 257: the `validated` flag and the derived response schema, a
+            # compile-time-constant dict the emit-side validate seam checks the
+            # completion against. ADDITIVE: absent unless the author wrote
+            # `validated`, so every existing extern's IR is byte-identical.
+            **({"validated": True, "response_schema": validated_schema}
+               if decl.validated else {}),
         }
         if decl.classification == "witnessed":
             # The witnessed descriptor the Slice-2 runtime teardown loop reads
@@ -5267,6 +5367,10 @@ def check_and_lower(program: Program, ambient: dict | None = None,
                         # method declares `cache`, so every existing method's IR
                         # is byte-identical.
                         **({"cache": _cache_ir(m.cache)} if m.cache else {}),
+                        # item 257: `validated` + the derived `response_schema`,
+                        # additive (byte-identical when absent). The gate refuses
+                        # an unexpressible return type at compile time.
+                        **_method_validated_ir(m, types, program.filename),
                     }
                     for m in svc.methods.values()
                 },
