@@ -269,8 +269,14 @@ def lex(source: str, filename: str) -> list[Token]:
             i, value = _lex_string(source, i + 1, line, filename, quote="'")
             tokens.append(Token("string", value, line))
         elif c == '`':
-            i, parts, line = _lex_template(source, i + 1, line, filename)
-            tokens.append(Token("template", parts, line))
+            i, parts, line, suspect = _lex_template(source, i + 1, line, filename)
+            tok = Token("template", parts, line)
+            if suspect is not None:
+                # Side-band marker for the parser's stray-backtick diagnostic
+                # (item 365). Not a Token field, so token equality and every
+                # accepted program lex identically; only the error path reads it.
+                tok.stray_backtick = suspect
+            tokens.append(tok)
         elif c.isalpha() or c == "_":
             j = i
             while j < n and (source[j].isalnum() or source[j] == "_"):
@@ -531,24 +537,86 @@ def _lex_triple_string(source: str, i: int, line: int, filename: str):
         filename, start_line, "unterminated triple-quoted string literal")
 
 
+def _closing_backtick_is_stray(source: str, body_start: int, close: int) -> bool:
+    """Heuristic for item 365: does the backtick at `source[close]` look like a
+    STRAY backtick that closed the template early rather than its real end?
+
+    revl backtick templates most often carry a host language (JS/HTML/CSS), and
+    a host `//` line comment or `/* … */` block comment can legitimately contain
+    a backtick — ``// read the `answer` field``. Since the template has no
+    backtick escape, that first embedded backtick closes the template and the
+    host tail reparses as revl. We flag the close as suspect when BOTH hold:
+
+    * the closing backtick's own line, within the template body, opens a host
+      comment before the backtick — a `//` on the line, or an unclosed `/*`
+      anywhere earlier in the body — so the backtick sits *inside* a comment; and
+    * host text still trails the backtick on the same physical line, which a
+      normally-terminated template almost never leaves.
+
+    Both conditions are about the ERROR shape only: the return value is read
+    solely when the surrounding parse has already failed, so a false positive
+    can at worst reword a genuine error and can never reject accepted source.
+    """
+    line_start = source.rfind("\n", body_start, close) + 1
+    if line_start < body_start:
+        line_start = body_start
+    line_before = source[line_start:close]
+
+    # A `//` on the closing line, or an as-yet-unclosed `/*` from earlier in the
+    # body, means the backtick is inside a host comment.
+    in_line_comment = "//" in line_before
+    open_block = _has_open_block_comment(source, body_start, close)
+    if not (in_line_comment or open_block):
+        return False
+
+    # Live host text must trail the backtick on the same physical line.
+    line_end = source.find("\n", close + 1)
+    trailing = source[close + 1: line_end if line_end != -1 else len(source)]
+    return trailing.strip() != ""
+
+
+def _has_open_block_comment(source: str, start: int, end: int) -> bool:
+    """True when the last `/*` before `end` (at or after `start`) has no closing
+    `*/` before `end` — i.e. a host block comment is still open at `end`."""
+    last_open = source.rfind("/*", start, end)
+    if last_open == -1:
+        return False
+    return source.find("*/", last_open + 2, end) == -1
+
+
 def _lex_template(source: str, i: int, line: int, filename: str):
     """Backtick template with `${expr}` interpolation; bare `$` is literal.
 
-    Returns (index-after-closing-backtick, parts, line) where parts is a list
-    of ("text", str) and ("expr", raw_source) segments. The `${...}` body is
-    captured as raw source with balanced braces; the parser re-parses it into
+    Returns (index-after-closing-backtick, parts, line, suspect) where parts is
+    a list of ("text", str) and ("expr", raw_source) segments. The `${...}` body
+    is captured as raw source with balanced braces; the parser re-parses it into
     a full expression (§3.2).
+
+    `suspect` is `None`, or `(start_line, close_line)` when the closing backtick
+    looks like a STRAY backtick that closed the template early — one sitting
+    inside a host-language `//` line comment or an open `/*` block comment, with
+    live host text still trailing it on the same line (item 365). revl has no
+    backtick escape, so a contributor's `` // read the `answer` field `` closes
+    the template at the first embedded backtick and its tail reparses as revl
+    declarations; the parser turns this flag into a diagnostic that points back
+    here instead of naming the unrelated identifier the tail happens to hold.
+    The flag never changes what LEXES — it only lets the parser reword an error
+    it was already going to raise on the mis-parsed tail.
     """
     parts: list[tuple[str, str]] = []
     buf: list[str] = []
     n = len(source)
     start_line = line
+    body_start = i
     while i < n:
         c = source[i]
         if c == '`':
             if buf:
                 parts.append(("text", "".join(buf)))
-            return i + 1, parts, line
+            suspect = None
+            if _closing_backtick_is_stray(source, body_start, i):
+                suspect = (start_line, line)
+            return i + 1, parts, line, suspect
         if c == "\n":
             buf.append(c)
             line += 1
