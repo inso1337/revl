@@ -78,6 +78,15 @@ TOOL_VERB = {
     # component, so a subject-scoped `may approve on payments` grant governs who
     # may take a grant BACK exactly as it governs who may mint one.
     "revl_revoke": "approve",
+    # item 251: applying or revoking a distilled `AutoApproveRule` installs (or
+    # withdraws) a STANDING auto-approve - the same authority as granting the
+    # underlying yeses, so both gate under `approve`. `_approve_targets` resolves
+    # the offer/rule to the components its glob selects, so a subject-scoped
+    # `may approve on payments` grant governs distillation over payments exactly as
+    # it governs a mint. `revl_distillation_offers` is read-only (propose-only) and
+    # deliberately ungated (absent from this map).
+    "revl_apply_distillation": "approve",
+    "revl_revoke_distillation": "approve",
 }
 
 # friendly verb aliases the profile author may write (canonical on the right)
@@ -447,11 +456,55 @@ def _approve_targets(session, arguments: dict) \
             components = {t["component"] for t in resolved}
             if len(components) == 1:
                 name = next(iter(components))
+    elif arguments.get("offerId") is not None \
+            or arguments.get("rule") is not None:
+        # item 251: apply/revoke a distilled rule - scope to the components the
+        # rule's glob selects, so the operator must hold `approve` over EVERY one
+        # (all-or-nothing, like a multi-component swap). An offer resolves through
+        # the session's fold; a bare rule string resolves through its glob. When no
+        # component matches (nothing live under the glob), defer.
+        return _distillation_targets(session, arguments)
     if name is None:
         return None  # unknown hash/id / ambiguous capability — handler refuses it
     manifest = (session.ir or {}).get("manifest") or {}
     realms = component_realms(manifest, name)
     return [(name or WHOLE, frozenset({name or WHOLE}) | frozenset(realms))]
+
+
+def _distillation_targets(session, arguments: dict) \
+        -> list[tuple[str, frozenset[str]]] | None:
+    """The components an `apply_distillation` / `revoke_distillation` touches: the
+    live members of the rule's component glob (item 251, gated by `approve`). An
+    offer id resolves to its rule's glob; a bare `rule` string parses to its glob.
+    Returns one `(name, labels)` per selected component (all-or-nothing gating), or
+    None to defer when nothing resolves (the handler refuses it)."""
+    from ..policy import component_realms  # noqa: PLC0415
+    glob = None
+    offer_id = arguments.get("offerId")
+    if offer_id is not None and hasattr(session, "_offer_by_id"):
+        offer = session._offer_by_id(offer_id)
+        if offer is not None:
+            glob = offer.rule.component
+    if glob is None and arguments.get("rule") is not None:
+        try:
+            from ..policy import parse_policy  # noqa: PLC0415
+            rules = parse_policy(arguments["rule"]).auto_approve_rules
+            if rules:
+                glob = rules[0].component
+        except Exception:  # noqa: BLE001 - a non-DSL fragment defers
+            glob = None
+    if glob is None:
+        return None
+    members = sorted(session._glob_members(glob)) \
+        if hasattr(session, "_glob_members") else []
+    if not members:
+        return None
+    manifest = (session.ir or {}).get("manifest") or {}
+    out = []
+    for name in members:
+        realms = component_realms(manifest, name)
+        out.append((name, frozenset({name}) | frozenset(realms)))
+    return out
 
 
 def _refusal(operator: Operator, verb: str,

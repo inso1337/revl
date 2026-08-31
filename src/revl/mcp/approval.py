@@ -35,6 +35,7 @@ import hashlib
 import json
 
 from .. import cap_order
+from ..policy import TAINT_FOLD_ORIGINS, component_realms
 from ..query import Composition, SHARED_REALM
 
 # worst-class ordering: (c) > (b) > (a) > none. One prompt covers the whole call
@@ -308,6 +309,77 @@ class ClassMap:
                    if c in self._semantic]
         return _sha(_canon(entries))
 
+    # -- item 251 Slice 2: the resource / realm / taint projections ---------
+
+    def _declaring_extern(self, token: str) -> dict | None:
+        """The extern that declares a class-(c) capability `token`, so its
+        `params` name the resource dimensions (host/path/table) the crossing
+        binds. A capability-scoped emission (`emission[gateway.send]`) is declared
+        by an extern whose `capabilities` list carries the token; a bare emission
+        keys on the extern name itself. None for a service-op key (no extern), so
+        it keys bare and a resource-scoped rule cannot cover it (fail-closed)."""
+        ext = self.index.externs.get(token)
+        if ext is not None:
+            return ext
+        for ext in self.index.externs.values():
+            if token in (ext.get("capabilities") or []):
+                return ext
+        return None
+
+    def bind_resource_scope(self, token: str, args) -> str | None:
+        """Bind the RUNTIME resource args into the crossing capability `token`,
+        turning bare `gateway.send` into `gateway.send(host="api.stripe.com")` at
+        ticket time (design §6 N1). The registered-resource projection: for each
+        of the declaring extern's parameters whose NAME is a `cap_order._REGISTRY`
+        resource kind (host/path/table, never a ceiling), bind the positional arg
+        at that parameter's index. Returns the canonical spelling, or None when the
+        token exposes no resource param or no arg is bound (it then keys bare, byte
+        for byte as before). Only the registered-resource projection is bound, NOT
+        the whole argsDigest, so the ledger carries a STRUCTURED target."""
+        ext = self._declaring_extern(token)
+        if ext is None or not args:
+            return None
+        pairs: list[tuple[str, object]] = []
+        for index, param in enumerate(ext.get("params") or []):
+            name = param.get("name")
+            if name is None or not cap_order.is_registered(name) \
+                    or cap_order.is_ceiling(name):
+                continue
+            if index >= len(args):
+                continue
+            value = args[index]
+            if not isinstance(value, str):
+                continue        # a resource value is a string literal; skip else
+            pairs.append((name, value))
+        if not pairs:
+            return None
+        try:
+            return cap_order.make_cap(token, pairs).to_str()
+        except cap_order.CapError:
+            return None
+
+    def component_realm(self, component: str) -> str:
+        """The single item-33 realm the crossing component is isolated into, or
+        the shared realm (`""`) as its own bucket (design §1.2). A component
+        isolated into exactly one realm keys on it; the shared / multi-realm case
+        keys shared, exactly as the distiller's single-string shape key expects."""
+        manifest = (self.ir or {}).get("manifest") or {}
+        realms = component_realms(manifest, component) - {SHARED_REALM}
+        return next(iter(realms)) if len(realms) == 1 else SHARED_REALM
+
+    def static_taint(self, component: str) -> frozenset[str]:
+        """The static item-249 taint over-approximation for a crossing component:
+        the post-endorsement origins (declassification already folded into
+        `comp["taint"]["reaches"]`) that reach a sink, intersected with the five
+        taint-fold origins (design §2.2). This is the honest recorded taint on a
+        tier with the static audit and the admission floor on a tier without
+        runtime value taint. Empty when the component touches no taint."""
+        for comp in self.ir.get("components") or []:
+            if comp.get("name") == component:
+                reaches = (comp.get("taint") or {}).get("reaches") or []
+                return frozenset(reaches) & TAINT_FOLD_ORIGINS
+        return frozenset()
+
     # -- the ticket ---------------------------------------------------------
 
     def build_ticket(self, reach: dict, args=None) -> dict:
@@ -337,5 +409,41 @@ class ClassMap:
         # before this field existed. `_find_standing_grant` reads it to require
         # EVERY class-(c) capability covered, never the worst-class `capabilities`
         # fold — the 245/246-F1 fix.
-        body["classCCapabilities"] = sorted(reach.get("classC") or [])
+        #
+        # item 251 Slice 2 (§6 N1): bind the runtime resource args into each
+        # class-(c) capability, so `gateway.send` carries the destination it
+        # crossed (`gateway.send(host="api.stripe.com")`). The bound spelling
+        # replaces the bare token in `classCCapabilities` (so the resource-scope
+        # `covers` check the auto-approve gate runs sees a STRUCTURED target, and a
+        # host-scoped rule can never admit a send to another host), and
+        # `resourceScopes` maps token -> spelling for the ledger's structured
+        # target. A token with no resource param keys bare, byte for byte as
+        # before, so a composition that crosses no registered resource is
+        # unchanged. All three fields land AFTER the hash, additive.
+        resource_scopes: dict[str, str] = {}
+        bound_class_c: list[str] = []
+        for token in sorted(reach.get("classC") or []):
+            spelling = self.bind_resource_scope(token, args)
+            if spelling is not None:
+                resource_scopes[token] = spelling
+                bound_class_c.append(spelling)
+            else:
+                bound_class_c.append(token)
+        body["classCCapabilities"] = sorted(bound_class_c)
+        if resource_scopes:
+            body["resourceScopes"] = resource_scopes
+        # item 251 Slice 2: the crossing's realm and its post-endorsement taint,
+        # for the ledger's shape key (the distiller reads these; a recorded taint
+        # set is KNOWN, closing the Slice-1 "taint-unknown" fail-close) and for the
+        # auto-approve realm scope and taint-subset gate. Taint is recorded ONLY
+        # when non-empty: a clean crossing OMITS `taintOrigins` so the distiller
+        # reads it as known-clean, NOT as the empty-but-relevant set the H2 floor
+        # deliberately treats as all five (an empty recorded set is reserved for
+        # the enforcement-tier red flag, design §3.3).
+        component = reach.get("component")
+        if component is not None:
+            body["realm"] = self.component_realm(component)
+            taint = self.static_taint(component)
+            if taint:
+                body["taintOrigins"] = sorted(taint)
         return body
