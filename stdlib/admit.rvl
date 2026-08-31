@@ -25,13 +25,20 @@ service Admission {
   // admitting a per-turn source CHANGES what will run: the canonical emission,
   // so `emit` is forced at every call site (a consumer of `Admission` sees from
   // the declaration alone that calling it can alter the running world).
-  emission fn admit(source: Str, granted: List[Str]) -> Str
+  //
+  // item 249, Slice D: `source` is deliberately NOT a sink — admitting untrusted
+  // source is this crossing's whole purpose, and the item-329 profile is its
+  // validator. `granted` IS a sink (`Trusted[List[Str]]`): the granted list is
+  // authority selection, and no gate downstream of it can un-grant what injected
+  // text chose, so untrusted data must never reach it.
+  emission fn admit(source: Str, granted: Trusted[List[Str]]) -> Str
 }
 
 // The single classified host body behind the crossing (revl.mcp.admit_bridge).
 // It is opaque to revl and therefore enumerated on the G8 audit surface — the
-// honest place for "this component can admit and run new code".
-extern emission fn host_admit(source: Str, granted: List[Str]) -> Str
+// honest place for "this component can admit and run new code". `granted` carries
+// the same `Trusted[List[Str]]` sink as the service operation above (item 249).
+extern emission fn host_admit(source: Str, granted: Trusted[List[Str]]) -> Str
   = @py { from revl.mcp.admit_bridge import admit; return admit(source, granted) }
 
 // Compose this file as a ROOT module of the composition (components are never

@@ -55,6 +55,29 @@ _QUALIFIERS = ("Untrusted", "Trusted")
 # `web:example.com` is a runtime refinement filled by Slice B.
 _ORIGIN_CLASSES = {"web", "net", "fs", "model", "input", "secret"}
 
+# Slice D: the two DERIVED classes. Sink-ness and source-ness are read off the
+# granting side's declared capability scope, never from an author qualifier —
+# `_sink_of`/`_origin_of` are the derivation, `_SINK_CLASS_SCOPES` the sink-class
+# set of residual-risk 5. `policy` binds the moment a policy-writing crossing
+# exists in-language (none does today; the scope is reserved so the row is ready).
+_SINK_CLASS_SCOPES = {"shell", "exec", "terminal", "policy"}
+# scopes whose emission return mints a source under taint-strict mode. `secret`
+# is deliberately excluded — it arrives with item 256's own bound-emission rule,
+# not the generic strict derivation.
+_SOURCE_CLASS_SCOPES = {"web", "net", "fs", "model", "input"}
+
+
+def _sink_of(capabilities) -> str | None:
+    """The derived sink-class a crossing's capability scope grants (Slice D), or
+    `None` when the scope is not a sink. Sibling of `_origin_of`: a shell / exec /
+    terminal-scoped crossing is a sink even with no `Trusted[T]` qualifier, because
+    sink-ness comes from the side that grants authority, not from the author."""
+    for cap in capabilities or ():
+        head = str(cap).split(".", 1)[0]
+        if head in _SINK_CLASS_SCOPES:
+            return head
+    return None
+
 
 # --------------------------------------------------------------- type surgery
 
@@ -168,10 +191,17 @@ def _sink_kind_for(name: str, capabilities) -> str:
     return f"the trusted sink `{name}`"
 
 
-def extract_and_normalize(program) -> TaintModel:
+def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     """Read the qualifier surface off every declaration, build the `TaintModel`,
     and STRIP the qualifiers from the declared types in place so the base checker
     and every emitter see bare types (orthogonality / byte-identity).
+
+    `taint_strict` (Slice D, D3) turns on DERIVED sinks and sources: with no
+    qualifier at all, a shell/exec/terminal-scoped crossing's parameters become
+    sinks and a web/net/fs/model/input-scoped emission's return mints its origin.
+    Off by default and byte-identical when off; on only under the untrusted-author
+    profile or an explicit `revl compile --taint-strict`, so plain programs never
+    move (the permanent additivity line, docs/design/249-taint-provenance.md).
 
     Mutates `program` — safe because a program is freshly parsed per compile.
     """
@@ -199,6 +229,18 @@ def extract_and_normalize(program) -> TaintModel:
         for i, p in enumerate(ext.params):
             params.append((i, p.type, _fnparam_setter(p)))
         _note_params(ext.name, params)
+        # Slice D (D1/D3): derive sinks and sources from the crossing's declared
+        # capability scope, under strict mode, for any parameter/return the author
+        # left unqualified. Additive to the annotated surface above — an already
+        # `Trusted[T]`/`Untrusted[T]` slot keeps its annotation.
+        if taint_strict and getattr(ext, "classification", None) == "emission":
+            if _sink_of(ext.capabilities) is not None:
+                for i, p in enumerate(ext.params):
+                    model.sinks.setdefault(ext.name, {}).setdefault(i, p.type)
+            if ext.capabilities:
+                origin = _origin_of(ext.capabilities)
+                if origin in _SOURCE_CLASS_SCOPES and ext.name not in model.sources:
+                    model.sources[ext.name] = origin
         if ext.name in model.sinks:
             model.sink_kind[ext.name] = _sink_kind_for(ext.name, ext.capabilities)
         ext.returns = strip_qualifiers(ext.returns)
@@ -240,6 +282,16 @@ def extract_and_normalize(program) -> TaintModel:
                     model.untrusted_params.setdefault(method.name, {})[i] = "input"
                 new_params.append((pname, clean))
             method.params = new_params
+            # Slice D (D1/D3): a shell/exec/terminal-scoped service operation is a
+            # derived sink under strict mode, exactly as an extern is — a granted
+            # tool surface annotates nothing yet still refuses untrusted input.
+            if taint_strict and getattr(method, "emission", False) \
+                    and _sink_of(getattr(method, "capabilities", None)) is not None:
+                for i, (pname, ptype) in enumerate(new_params):
+                    model.sinks.setdefault(method.name, {}).setdefault(i, ptype)
+                model.sink_kind.setdefault(
+                    method.name,
+                    _sink_kind_for(method.name, getattr(method, "capabilities", None)))
             method.returns = strip_qualifiers(method.returns)
 
     return model
@@ -365,13 +417,38 @@ class _FlowChecker:
     def __init__(self, model: TaintModel, filename: str, line: int,
                  signatures: dict | None = None, infer: bool = False,
                  qualname: str = "", endorse_allowed: frozenset = frozenset(),
-                 endorse_label: str = "") -> None:
+                 endorse_label: str = "", enforce: bool = True,
+                 known_callables: frozenset = frozenset(), any_sink: bool = False,
+                 state_env: dict | None = None,
+                 state_names: frozenset = frozenset()) -> None:
         self.model = model
         self.filename = filename
         self.line = line
         self.signatures = signatures or {}
         self.infer = infer
         self.qualname = qualname
+        # whether a sink refusal actually raises. Off during the state fixpoint's
+        # collection sweeps (Slice B3), where a body is re-walked only to discover
+        # what taint it writes into component state — the refusal pass runs after.
+        self.enforce = enforce
+        # Slice B4: the names that resolve to a callable the checker can NAME
+        # (top-level fns, externs, service ops, constructors). A `{kind:call}`
+        # through a `var` callee that is none of these and resolves to no known
+        # fn value is an UNNAMEABLE indirect call — over-approximated as a sink on
+        # every argument when the program has any sink at all (`any_sink`).
+        self.known_callables = known_callables
+        self.any_sink = any_sink
+        # Slice B4: local bindings that hold a reference to a NAMED callable
+        # (`let g = upper`), so an indirect call `g(x)` carries `upper`'s signature.
+        self.fn_refs: dict[str, str] = {}
+        # Slice B3: the per-component state world. `state_names` are the activation
+        # bindings shared across every provide method; `state_env` is their
+        # accumulated taint (join over all writers, computed to a fixpoint before
+        # the refusal pass). `state_writes` records what THIS walk wrote, folded
+        # back by the fixpoint driver.
+        self.state_env: dict = state_env if state_env is not None else {}
+        self.state_names = state_names
+        self.state_writes: dict[str, Taint] = {}
         # Slice C: the origins the enclosing declaration is allowed to `endorse`,
         # and a human label for the declassify record (the fn / `Component.method`
         # name). An `endorse[o]` with `o` not in `endorse_allowed` is refused.
@@ -382,6 +459,11 @@ class _FlowChecker:
         # the walk proceeds; folded onto the component's IR entry by the caller.
         self.reaches: set[str] = set()
         self.declassified: set[str] = set()
+        # Slice D (D2): the approval scopes threaded on emits that CARRIED taint —
+        # the `with a` capability on a tainted outbound send. The policy-gated tier
+        # (`web-taint may not reach net without approval`) reads these to decide
+        # whether a forbidden flow is covered by an approval (the item-246 surface).
+        self.reach_approvals: set[str] = set()
         # Slice C: the enriched declassify records — `{origin, method, reason,
         # line, approved}` — that ride beside the coarse `declassify:` token so
         # the audit surface shows why each downgrade was granted.
@@ -391,6 +473,10 @@ class _FlowChecker:
         # the naming chain behind it.
         self.return_taint: Taint = CLEAN
         self.sink_hits: dict[int, tuple] = {}
+        # the argument taints of the most-recently-walked call, so an `emit` step
+        # can record the taint that flows OUTBOUND across the boundary (Decision 5)
+        # — not only the emission's return, which is clean for a value-passing send.
+        self._emit_args: list | None = None
 
     # -- callee-name extraction across the two IR dialects ---------------------
     @staticmethod
@@ -406,8 +492,10 @@ class _FlowChecker:
             return node["name"]
         if node.get("kind") == "call":
             callee = node.get("callee")
-            if isinstance(callee, dict) and callee.get("kind") == "var":
-                return callee.get("name")
+            # a pure-fn or fn-value call, across both IR dialects: `{kind:var,
+            # name}` (top-level fn bodies) and `{kind:name, id}` (component bodies).
+            if isinstance(callee, dict) and callee.get("kind") in ("var", "name"):
+                return callee.get("name") or callee.get("id")
             if isinstance(node.get("method"), str):
                 return node["method"]
         return None
@@ -463,6 +551,8 @@ class _FlowChecker:
                 if prev is None or len(via) < len(prev[2]):
                     self.sink_hits[pidx] = (sink_name, kind, via)
             return
+        if not self.enforce:
+            return
         origins = ", ".join(sorted(o for o in arg_taint.origins
                                    if _param_index(o) is None))
         chain_parts = arg_taint.via + internal_via
@@ -491,6 +581,15 @@ class _FlowChecker:
         origin = meta.get("origin") if isinstance(meta, dict) else None
         if self.infer:
             return CLEAN
+        # the state-collection sweeps (Slice B3, enforce=False) re-walk method
+        # bodies only to discover state writes and carry no declared-endorse slot;
+        # the undeclared-endorse refusal belongs to the enforcing pass alone.
+        if not self.enforce:
+            value_taint = arg_taints[0] if arg_taints else CLEAN
+            if origin is None:
+                return CLEAN
+            residual = frozenset(o for o in value_taint.origins if o != origin)
+            return Taint(residual, value_taint.via) if residual else CLEAN
         # the declared-slot authorisation: the enclosing fn / operation must
         # declare `endorse[<origin>]`, or the downgrade is refused at admission —
         # a declassification is never ambient (Slice C, the whole claim).
@@ -557,10 +656,25 @@ class _FlowChecker:
         if kind in ("lit", "int", "float", "string", "str", "bool", "config"):
             return CLEAN
 
+        # a read of / write into a component STATE world (Slice B3): a call whose
+        # receiver is a state binding (`store.get(k)`, `store.insert(k, v)`) reads
+        # the world's accumulated taint and records any tainted argument as a write.
+        if kind == "call" and self.state_names:
+            target = node.get("target")
+            if isinstance(target, dict):
+                tname = target.get("id") or target.get("name")
+                if tname in self.state_names:
+                    return self._taint_of_state_access(tname, node, env)
+
         # a call / emission: check its sinks, then compute the result's taint
         callee = self._callee_name(node)
         if callee is not None:
-            return self._taint_of_call(callee, node.get("args") or [], env, node)
+            callee_node = node.get("callee")
+            indirect = (node.get("kind") == "call"
+                        and isinstance(callee_node, dict)
+                        and callee_node.get("kind") in ("var", "name"))
+            return self._taint_of_call(callee, node.get("args") or [], env, node,
+                                       indirect=indirect)
 
         # record construction is field-granular (Slice B): each field carries its
         # own taint, so a later read of a clean field stays clean even when a
@@ -617,8 +731,65 @@ class _FlowChecker:
             result = _join(result, self.taint_of(value, env))
         return result
 
-    def _taint_of_call(self, callee: str, args, env: dict, node) -> Taint:
+    def _taint_of_state_access(self, name: str, node, env: dict) -> Taint:
+        """A call whose receiver is a component-state world (Slice B3). Every such
+        call is treated at the whole-container grain: a tainted argument is a WRITE
+        that joins into the world's taint (methods run in unknown order, so the
+        join over all writers is the only sound seed), and the call READS the
+        world's accumulated taint (a `.get()` returns whatever any writer stored).
+        Sound and coarse — precise element tracking is Slice E's runtime tag."""
+        arg_taints = [self.taint_of(a, env) for a in (node.get("args") or [])]
+        combined = CLEAN
+        for t in arg_taints:
+            combined = _join(combined, t)
+        if combined.dirty:
+            real = frozenset(o for o in combined.origins if _param_index(o) is None)
+            if real:
+                write = Taint(real, combined.via)
+                self.state_writes[name] = _join(
+                    self.state_writes.get(name, CLEAN), write)
+        return _join(self.state_env.get(name, CLEAN), combined)
+
+    def _is_unnameable(self, name: str) -> bool:
+        """Whether an indirect-call callee resolves to no callable the checker can
+        name (Slice B4): not a top-level fn/extern/service op/constructor, not a
+        known signature, not a source/sink/declassifier, not a named fn value."""
+        return (name not in self.known_callables
+                and name not in self.signatures
+                and name not in self.model.sinks
+                and name not in self.model.sources
+                and name not in self.model.declassifiers
+                and name != "endorse")
+
+    def _taint_of_call(self, callee: str, args, env: dict, node,
+                       indirect: bool = False) -> Taint:
         arg_taints = [self.taint_of(a, env) for a in args]
+        # remember the outermost call's arguments so an enclosing `emit` records
+        # the taint crossing the boundary (set last, so the outer call wins).
+        self._emit_args = arg_taints
+
+        # Slice B4: an indirect call `g(x)` where `g` names a known callable
+        # (`let g = upper`) carries that callable's signature/sink; resolve it.
+        resolved = self.fn_refs.get(callee, callee) if indirect else callee
+
+        # Slice B4: an indirect call the checker cannot name is over-approximate —
+        # every argument position is a sink (what cannot be named cannot be proven
+        # safe), but only when the program has a sink at all, so a sink-free program
+        # is unaffected. This mirrors G4's `*` for a first-class dispatch.
+        if indirect and self.any_sink and self._is_unnameable(resolved):
+            kind = "an unnameable call (a first-class function value)"
+            for index, at in enumerate(arg_taints):
+                if at.origins:
+                    self._on_sink("an unnamed callable", kind, index, at, node,
+                                  ("a first-class function value",))
+            result = CLEAN
+            for t in arg_taints:
+                result = _join(result, t)
+            if result.dirty:
+                result = Taint(result.origins, result.via + (f"{callee}()",))
+            return result
+
+        callee = resolved
 
         # sink checks (both tiers): a directly-declared `Trusted[T]` parameter,
         # and a parameter a callee's inferred signature reaches transitively.
@@ -688,20 +859,47 @@ class _FlowChecker:
             return
         step = stmt.get("step")
         if step == "let":
-            env[stmt["name"]] = self.taint_of(stmt.get("value"), env)
+            value = stmt.get("value")
+            env[stmt["name"]] = self.taint_of(value, env)
+            self._note_fn_ref(stmt.get("name"), value)
+            return
+        if step == "assign":
+            # a `var` reassignment carries taint across the binding (and, inside a
+            # loop, across the back edge — the loop fixpoint below re-walks until
+            # the joined environment stabilises).
+            value = stmt.get("value")
+            env[stmt["name"]] = self.taint_of(value, env)
+            self._note_fn_ref(stmt.get("name"), value)
+            return
+        if step in ("while", "for"):
+            self._loop(stmt, env)
             return
         if step in ("return", "emit", "expr", "fail"):
+            self._emit_args = None
             result = self.taint_of(stmt.get("expr") or stmt.get("value"), env)
             if step == "return" and self.infer:
                 # inference mode: the return value's taint (parameter markers
                 # and minted origins) feeds `flows_to_return` and `mints`.
                 self.return_taint = _join(self.return_taint, result)
-            if step == "emit" and result.dirty:
-                # a value of these origins reaches an emission here (Decision 5).
-                # An *absolute-refusal* sink already raised above; what remains is
-                # the policy-gated tier (e.g. web-taint into `send.*`) — recorded,
-                # so `audit --diff` sees a newly-routed exfiltration edge widen.
-                self.reaches |= result.origins
+            if step == "emit":
+                # the taint crossing the boundary here (Decision 5): the emission's
+                # return AND the arguments it carries outward — a value-passing send
+                # returns clean but still exfiltrates its tainted argument.
+                outbound = result
+                for at in (self._emit_args or ()):
+                    outbound = _join(outbound, at)
+                real = {o for o in outbound.origins if _param_index(o) is None}
+                if real:
+                    # An *absolute-refusal* sink already raised above; what remains
+                    # is the policy-gated tier (e.g. web-taint into `send.*`) —
+                    # recorded, so `audit --diff` sees the exfiltration edge widen.
+                    self.reaches |= real
+                    # Slice D (D2): if this tainted send is approval-covered
+                    # (`with a`), remember the scope so `<origin>-taint may not
+                    # reach <cap> without approval` admits the approved flow.
+                    approval = stmt.get("approval")
+                    if isinstance(approval, dict) and approval.get("capability"):
+                        self.reach_approvals.add(approval["capability"])
             return
         # any other statement shape: walk every child so nested calls (and their
         # sink checks) are visited, and any nested block threads the same env.
@@ -715,6 +913,54 @@ class _FlowChecker:
                     self._stmt(value, env)
                 else:
                     self.taint_of(value, env)
+
+    def _note_fn_ref(self, name, value) -> None:
+        """Record `let <name> = <var:known-callable>` (Slice B4), so a later
+        indirect call `name(x)` carries the referenced callable's signature. Only
+        a bare reference to a NAMEABLE callable is tracked; a closure or an
+        unresolved value stays unnameable (and is over-approximated at the call)."""
+        if not isinstance(name, str) or not isinstance(value, dict):
+            return
+        if value.get("kind") in ("var", "name"):
+            ref = value.get("name") or value.get("id")
+            if isinstance(ref, str) and not self._is_unnameable(ref):
+                self.fn_refs[name] = ref
+            else:
+                self.fn_refs.pop(name, None)
+        else:
+            self.fn_refs.pop(name, None)
+
+    def _loop(self, stmt, env: dict) -> None:
+        """A `while`/`for` body walked to a fixed point (Slice B3, body-local back
+        edges): a binding rebound to a tainted value on the back edge must be seen
+        tainted on its reads, not clean on the first pass. Iterate the body,
+        JOINING the environment across passes (a may-analysis over the loop), until
+        no binding's taint grows — monotone over the finite lattice, so it stops."""
+        body = stmt.get("body") or []
+        if stmt.get("step") == "for":
+            # the loop variable carries the iterable's element taint (coarse: the
+            # iterable's join), so a tainted collection taints every iteration.
+            it = self.taint_of(stmt.get("iterable"), env)
+            if stmt.get("bind"):
+                env[stmt["bind"]] = it
+        else:
+            self.taint_of(stmt.get("cond"), env)  # visit the condition's sinks
+        merged = dict(env)
+        bound = 2 * (len(body) + 1) + 4
+        while bound > 0:
+            bound -= 1
+            trial = dict(merged)
+            self.run(body, trial)
+            grew = False
+            for key, value in trial.items():
+                old = merged.get(key)
+                joined = value if old is None else _join(old, value)
+                if old is None or joined.origins != old.origins:
+                    merged[key] = joined
+                    grew = True
+            if not grew:
+                break
+        env.update(merged)
 
 
 def _param_names(params) -> list[str]:
@@ -746,7 +992,101 @@ def _callables(fns, components, filename: str):
                        method.get("body") or [], source, method.get("line") or 0)
 
 
-def _infer_signatures(fns, components, model: TaintModel, filename: str) -> dict:
+# constructor / builtin callables that may appear as a bare callee but are not a
+# user fn — nameable, so never over-approximated as an unnameable indirect call.
+_BUILTIN_CALLABLE_NAMES = frozenset({"Ok", "Err", "Some", "None", "endorse"})
+
+
+def _known_callables(program, fns, components, model: TaintModel) -> frozenset:
+    """Every name that resolves to a callable the checker can NAME (Slice B4):
+    top-level fns, externs, service operations, constructors, and everything the
+    taint model already knows. A `var`-callee outside this set (and unresolved by
+    a fn-value binding) is an unnameable indirect call, over-approximated as a
+    sink on every argument."""
+    known: set = set(_BUILTIN_CALLABLE_NAMES)
+    known |= {fn.get("name") for fn in fns if fn.get("name")}
+    for ext in getattr(program, "externs", ()) or ():
+        known.add(ext.name)
+    for svc in getattr(program, "services", ()) or ():
+        known |= set(getattr(svc, "methods", {}) or {})
+    known |= set(model.sources) | set(model.sinks) | set(model.declassifiers)
+    return frozenset(n for n in known if n)
+
+
+def _state_bindings(body) -> frozenset:
+    """The component-state world names (Slice B3): every activation-body binding
+    that holds live, cross-method state — an effect-acquired world (`let store =
+    effect ...`, an IR `bind`) or a mutable var. A plain immutable `let` (an
+    approval, a config read) is not shared mutable state and is excluded. A `let`
+    inside a provide method is method-local and is never one of these."""
+    names: set = set()
+    for step in body or []:
+        if not isinstance(step, dict) or step.get("step") == "provide":
+            continue
+        bind = step.get("bind")           # an effect-acquired world (`let-effect`)
+        if isinstance(bind, str):
+            names.add(bind)
+        name = step.get("name")           # a mutable activation var
+        if isinstance(name, str) and step.get("mutable"):
+            names.add(name)
+    return frozenset(names)
+
+
+def _infer_state_env(body, model: TaintModel, source: str, line: int,
+                     signatures: dict, state_names: frozenset,
+                     known: frozenset, any_sink: bool) -> dict:
+    """The per-component state environment (Slice B3), to a fixed point: seed each
+    world from its activation binding, then join in every tainted write from every
+    method (methods run in unknown order, so the join over all writers is the only
+    sound seed). Non-enforcing — the refusal pass runs afterwards with this env."""
+    state_env: dict = {}
+    act_steps = [s for s in body
+                 if isinstance(s, dict) and s.get("step") != "provide"]
+    act = _FlowChecker(model, source, line, signatures=signatures, enforce=False,
+                       known_callables=known, any_sink=any_sink,
+                       state_env=state_env, state_names=state_names)
+    act_env: dict = {}
+    act.run(act_steps, act_env)
+    for name in state_names:
+        seeded = act_env.get(name)
+        if seeded is not None and seeded.dirty:
+            real = frozenset(o for o in seeded.origins if _param_index(o) is None)
+            if real:
+                state_env[name] = Taint(real, seeded.via)
+
+    methods: list = []
+    for step in body or []:
+        if isinstance(step, dict) and step.get("step") == "provide":
+            methods += step.get("methods") or []
+    bound = 2 * len(methods) + 6
+    changed = True
+    while changed and bound > 0:
+        changed = False
+        bound -= 1
+        for method in methods:
+            mname = method.get("name")
+            checker = _FlowChecker(
+                model, source, method.get("line") or line, signatures=signatures,
+                enforce=False, known_callables=known, any_sink=any_sink,
+                state_env=state_env, state_names=state_names)
+            env: dict = {}
+            seeded = model.untrusted_params.get(mname, {})
+            for i, pname in enumerate(method.get("params") or []):
+                if i in seeded:
+                    env[pname] = Taint(frozenset({seeded[i]}), (pname,))
+            checker.run(method.get("body") or [], env)
+            for name, taint in checker.state_writes.items():
+                old = state_env.get(name, CLEAN)
+                joined = _join(old, taint)
+                if joined.origins != old.origins:
+                    state_env[name] = joined
+                    changed = True
+    return state_env
+
+
+def _infer_signatures(fns, components, model: TaintModel, filename: str,
+                      known: frozenset = frozenset(),
+                      any_sink: bool = False) -> dict:
     """Infer a `_Signature` for every callable, as a least fixed point over the
     same call graph the emission analysis walks (`_emitting_capabilities`).
 
@@ -772,7 +1112,8 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str) -> dict
         bound -= 1
         for qual, key, params, body, source, line in callables:
             checker = _FlowChecker(model, source, line, signatures=signatures,
-                                   infer=True, qualname=qual)
+                                   infer=True, qualname=qual,
+                                   known_callables=known, any_sink=any_sink)
             env: dict = {}
             seeded = model.untrusted_params.get(key, {})
             for i, pname in enumerate(params):
@@ -803,7 +1144,9 @@ def check_taint(program, fns, components, model: TaintModel,
     if not model.active:
         return
 
-    signatures = _infer_signatures(fns, components, model, filename)
+    known = _known_callables(program, fns, components, model)
+    any_sink = bool(model.sinks)
+    signatures = _infer_signatures(fns, components, model, filename, known, any_sink)
 
     # top-level pure fns (lowered IR): seed params declared `Untrusted[T]`
     for fn in fns:
@@ -811,7 +1154,8 @@ def check_taint(program, fns, components, model: TaintModel,
                                fn.get("line") or 0, signatures=signatures,
                                endorse_allowed=model.declared_endorse.get(
                                    fn["name"], frozenset()),
-                               endorse_label=fn["name"])
+                               endorse_label=fn["name"],
+                               known_callables=known, any_sink=any_sink)
         env: dict = {}
         seeded = model.untrusted_params.get(fn["name"], {})
         for i, param in enumerate(fn.get("params") or []):
@@ -828,10 +1172,18 @@ def check_taint(program, fns, components, model: TaintModel,
     # component provide-method bodies (lowered IR)
     for comp in components:
         source = comp.get("source") or filename
-        reaches, declassified, records = _walk_component_methods(
-            comp.get("body") or [], model, source,
-            comp_lines.get(comp.get("name"), 0), signatures,
-            comp.get("name") or "")
+        comp_body = comp.get("body") or []
+        line = comp_lines.get(comp.get("name"), 0)
+        # Slice B3: thread taint through component state — compute each world's
+        # accumulated taint to a fixed point before the refusal pass, so a value
+        # stored by one method is seen tainted when another reads it.
+        state_names = _state_bindings(comp_body)
+        state_env = (_infer_state_env(comp_body, model, source, line, signatures,
+                                      state_names, known, any_sink)
+                     if state_names else {})
+        reaches, declassified, records, approvals = _walk_component_methods(
+            comp_body, model, source, line, signatures,
+            comp.get("name") or "", known, any_sink, state_env, state_names)
         # fold the per-component provenance onto the IR entry (Decision 5), so
         # `_boundary` can emit `taint:`/`declassify:` tokens. Additive: absent
         # when the component touches no taint, so its IR stays byte-identical.
@@ -839,6 +1191,11 @@ def check_taint(program, fns, components, model: TaintModel,
             comp["taint"] = {
                 "reaches": sorted(reaches),
                 "declassify": sorted(declassified),
+                # Slice D (D2): approval scopes threaded on tainted sends, so the
+                # `<origin>-taint may not reach <cap> without approval` tier can
+                # tell an approved flow from a bare one. Present only when a
+                # tainted send is approval-covered, so it never moves a plain surface.
+                **({"reach_approvals": sorted(approvals)} if approvals else {}),
                 # Slice C: the enriched declassify records ride beside the coarse
                 # `declassify:<origin>` token (which stays the stable diff key).
                 # Sorted for a deterministic audit surface.
@@ -879,10 +1236,16 @@ def splice_declassifiers(node):
 def _walk_component_methods(body, model: TaintModel, source: str,
                             line: int = 0,
                             signatures: dict | None = None,
-                            component: str = "") -> tuple[set, set, list]:
+                            component: str = "",
+                            known: frozenset = frozenset(),
+                            any_sink: bool = False,
+                            state_env: dict | None = None,
+                            state_names: frozenset = frozenset()
+                            ) -> tuple[set, set, list, set]:
     reaches: set = set()
     declassified: set = set()
     records: list[dict] = []
+    approvals: set = set()
     for step in body:
         if not isinstance(step, dict):
             continue
@@ -894,7 +1257,9 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                     model, source, method.get("line") or line,
                     signatures=signatures,
                     endorse_allowed=model.declared_endorse.get(mname, frozenset()),
-                    endorse_label=label)
+                    endorse_label=label, known_callables=known, any_sink=any_sink,
+                    state_env=state_env if state_env is not None else {},
+                    state_names=state_names)
                 env: dict = {}
                 seeded = model.untrusted_params.get(mname, {})
                 for i, pname in enumerate(method.get("params") or []):
@@ -904,4 +1269,5 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                 reaches |= checker.reaches
                 declassified |= checker.declassified
                 records.extend(checker.declassify_records)
-    return reaches, declassified, records
+                approvals |= checker.reach_approvals
+    return reaches, declassified, records, approvals
