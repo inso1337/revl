@@ -32,6 +32,11 @@
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/distributabilityVerdict" }
     },
+    "cardinality": {
+      "description": "Optional (item 260). Per-component per-capability crossing-count ceiling per activation, keyed by component name. Present only for components that cross an emission boundary, so a crossing-free composition carries an empty object. A capability whose multiplicity is not statically provable (a loop, any recursion, a first-class emitting arrow, a crossing behind a host extern) is `unbounded` with `bound: null` and a `reason`; the component `verdict` rolls the tokens up with `unbounded` dominating.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/cardinalityEntry" }
+    },
     "gauntlet": {
       "description": "Optional. A gauntlet dossier (docs/gauntlet.md) carried in the same envelope. Its proved/tested/claimed/pending sections reuse the manifest+boundary vocabulary defined here, so item 31's dossier composes into this format without a schema change. Left open (additionalProperties) so the dossier can evolve independently.",
       "type": "object"
@@ -153,6 +158,41 @@
         "reasons": {
           "type": "array",
           "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "cardinalityEntry": {
+      "description": "One component's crossing-count ceiling (item 260).",
+      "type": "object",
+      "required": ["per_capability", "verdict"],
+      "properties": {
+        "per_capability": {
+          "description": "Capability token -> its per-activation crossing ceiling.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["bound", "kind"],
+            "properties": {
+              "bound": {
+                "description": "The proved per-activation maximum, or null when unbounded.",
+                "type": ["integer", "null"]
+              },
+              "kind": {
+                "type": "string",
+                "enum": ["bounded", "bounded-symbolic", "unbounded"]
+              },
+              "reason": {
+                "description": "Present when kind is unbounded: why the multiplicity is not statically provable.",
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "verdict": {
+          "type": "string",
+          "enum": ["bounded", "bounded-symbolic", "unbounded"]
         }
       },
       "additionalProperties": true
