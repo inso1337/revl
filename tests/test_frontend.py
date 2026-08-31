@@ -176,6 +176,14 @@ REJECTIONS = {
     # the same context-scoping gap as the earlier `.length`-in-provide-method
     # bug. The refusal is now applied uniformly in `infer_ir`'s field case.
     "t30_field_read_on_any_provide_method.rvl": "field read `.kind` on a value of type `Any` — an erased value has no known fields",
+    # item 404: the broader provide-method context-scoping class (sibling of
+    # 392). A definite operator/index/builtin misuse that a `fn`/`test` body
+    # (stratum 1, `infer_ast`) refuses used to compile clean inside a `provide`
+    # method body, which was lowered through a stratum-3 path that ran the type
+    # oracle only in its NON-raising mode. The provide-method body now runs the
+    # SAME raising sweep the activation-setup body uses, so a non-`Int` list
+    # index (like `~n`, `-s`, and the Any-field-read) is refused uniformly.
+    "t31_index_non_int_provide_method.rvl": "index expects `Int`, got `Str`",
     # errata harvest, checker side (docs/v2.0-roadmap.md 75(b)(c)):
     # 75(b) a stdlib-named method on a receiver whose provenance no
     #       constructor pins used to lower as that builtin and misdispatch at
@@ -510,3 +518,100 @@ def test_int_min_has_no_spelling():
         _compile_return("-9223372036854775808")
     assert "Int literal `9223372036854775808` is outside the 64-bit range" \
         in str(excinfo.value)
+
+
+# ---------------------------------------------------------------- item 404
+#
+# The provide-method body context-scoping class (sibling of item 392). A
+# provide-method body is stratum-3 lowered code that used to run `infer_ir`
+# only in its NON-raising oracle mode, so a definite operator / index / unary /
+# builtin misuse that a `fn`/`test` body (stratum 1, `infer_ast`) refuses
+# compiled clean inside a `provide` method. The fix routes the provide-method
+# body through the SAME raising sweep the activation-setup body uses (the
+# `_sweep` mirror in `lower.py`), and brings `infer_ir`'s per-node checks
+# (unary `~`/`-`, non-`Int` index, record-field existence) to parity with
+# `infer_ast`. Test blocks are stratum 1 already, so they were never a gap.
+
+def _fn_body(body: str, extra: str = "") -> str:
+    return f"{extra}\npub fn M(s: Str, n: Int) -> Int {{ {body} }}"
+
+
+def _provide_body(body: str, extra: str = "") -> str:
+    return (
+        f"{extra}\n"
+        "service Reader { fn read(s: Str, n: Int) -> Int }\n"
+        "component Parser provides reader: Reader {\n"
+        "  provide reader {\n"
+        f"    fn read(s, n) {{ {body} }}\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def _test_body(body: str, extra: str = "") -> str:
+    return (
+        f"{extra}\n"
+        'test "t" {\n'
+        '  let s: Str = "x"\n'
+        "  let n: Int = 1\n"
+        f"  {body}\n"
+        "  assert true\n"
+        "}\n"
+    )
+
+
+# Each entry is a stratum-1 refusal that item 404 makes fire uniformly in a
+# provide-method body too. `substr` is the diagnostic that must appear in all
+# three contexts; `extra` supplies any prelude a body needs.
+_UNIFORM_REFUSALS = [
+    ("non-Int list index",
+     "let xs: List[Int] = [1, 2]\n let z = xs[s]\n return n", "",
+     "index expects `Int`, got `Str`"),
+    ("Str has no index operator",
+     "let z = s[n]\n return n", "",
+     "`Str` has no index operator"),
+    ("unary ~ on non-Int32",
+     "let z = ~n\n return n", "",
+     "`~` requires an `Int32` operand"),
+    ("unary - on non-numeric",
+     "let z = -s\n return n", "",
+     "operand of unary `-` expects `Int`"),
+    ("field read on Any (item 392, still fires)",
+     "let v: Any = jp(s)\n let z = v.k\n return n",
+     "pub extern pure fn jp(s: Str) -> Any = @py { return {} } = @ts { return {} }",
+     "an erased value has no known fields"),
+]
+
+
+@pytest.mark.parametrize("name,body,extra,substr", _UNIFORM_REFUSALS,
+                         ids=[c[0] for c in _UNIFORM_REFUSALS])
+def test_404_refusal_fires_uniformly_in_all_three_contexts(name, body, extra, substr):
+    from revl import compile_source
+    for label, wrap in (("fn", _fn_body), ("provide", _provide_body),
+                        ("test", _test_body)):
+        with pytest.raises(RevlError) as excinfo:
+            compile_source(wrap(body, extra))
+        assert substr in str(excinfo.value), \
+            f"{name}: {label} body did not raise the expected diagnostic"
+
+
+def test_404_valid_provide_method_still_compiles():
+    # Additivity: the sweep must not newly refuse a currently-valid provide
+    # method. A method that indexes a list with an Int, reads a declared record
+    # field, and returns the pinned type stays clean.
+    from revl import compile_source
+    compile_source(
+        "type Pt = { x: Int, y: Int }\n"
+        "service Reader { fn read(n: Int) -> Int }\n"
+        "component Parser provides reader: Reader {\n"
+        "  provide reader {\n"
+        "    fn read(n) {\n"
+        "      let xs: List[Int] = [10, 20, 30]\n"
+        "      let p: Pt = { x: 1, y: 2 }\n"
+        "      let a = xs[n]\n"
+        "      let b = p.x\n"
+        "      return a + b\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )

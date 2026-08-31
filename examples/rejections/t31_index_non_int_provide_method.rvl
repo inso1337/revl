@@ -1,0 +1,29 @@
+// REJECTED — the provide-method twin of the fn-body index-type refusal
+// (roadmap item 404, sibling of item 392). A `List` index must be an `Int`; a
+// bare `fn`/`test` body (stratum 1, `infer_ast`) refuses `xs[s]` where `s: Str`,
+// but the SAME expression inside a `provide` method body was lowered through a
+// different stratum (`_lower_component_pure_expr` + `infer_ir`) that ran the
+// type oracle only in its NON-raising mode, so it compiled clean — the same
+// context-scoping gap item 392 closed for the Any-field-read.
+//
+// item 404 routes the provide-method body through the SAME raising oracle the
+// activation-setup body and the `fn`/`test` bodies use (the `_sweep` mirror), so
+// a definite operator / index / builtin misuse now fires uniformly wherever the
+// expression sits.
+//
+// expected error:
+//   index expects `Int`, got `Str`
+
+service Reader {
+  fn read(s: Str) -> Int
+}
+
+component Parser provides reader: Reader {
+  provide reader {
+    fn read(s) {
+      let xs: List[Int] = [1, 2, 3]
+      let n = xs[s]
+      return n
+    }
+  }
+}

@@ -2042,9 +2042,33 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         rt = infer_ir(node.get("right"), tenv, types, services, filename, line)
         return _binop_type(node.get("op"), lt, rt, filename, line)
     if kind == "un":
-        if node.get("op") == "!":
+        # item 404: bring the lowered-node unary checks to parity with
+        # `infer_ast`'s `ExprUn` (stratum 1). Before this, `!` returned `Bool`
+        # unconditionally and `~`/`-` returned the operand type unchecked, so a
+        # provide-method (stratum 3) accepted `~n` on a non-`Int32` or `-s` on a
+        # non-numeric that a `fn`/`test` body refuses — the item-392 class.
+        op = node.get("op")
+        t = infer_ir(node.get("operand"), tenv, types, services, filename, line)
+        if op == "!":
+            if filename and t and t != "Bool":
+                raise mismatch(filename, line, "operand of `!`", "Bool", t)
             return "Bool"
-        return infer_ir(node.get("operand"), tenv, types, services, filename, line)
+        if op == "~":
+            # Bitwise complement is Int32-only (item 366), matching the binary
+            # bitwise operators; it does not trap. `~x == -x - 1` in 32-bit range.
+            if filename and t and parse_type(t)[0] != "Int32":
+                is_int = parse_type(t)[0] == "Int"
+                raise RevlError(
+                    filename, line,
+                    f"`~` requires an `Int32` operand, got `{render_type(t)}`",
+                    hint=("bitwise `~` is Int32-only — narrow with `.to_int32()` "
+                          "(docs/arithmetic.md)") if is_int else
+                         "bitwise `~` is Int32-only (docs/arithmetic.md)",
+                    code="T1", category="type-mismatch")
+            return "Int32"
+        if filename and t and t not in _NUMERIC:
+            raise mismatch(filename, line, "operand of unary `-`", "Int", t)
+        return t
     if kind == "len":
         return "Int"
     if kind == "field":
@@ -2080,10 +2104,20 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
                 code="T1", category="type-mismatch")
         spec = types.get(target or "")
         if spec is not None and spec.get("kind") == "record":
-            return spec.get("fields", {}).get(name)
+            fields = spec.get("fields", {})
+            # item 404: a read of a field a known record does not declare is
+            # refused in a `fn`/`test` body (`infer_ast`); apply the same
+            # refusal here so a provide-method body (stratum 3) no longer
+            # accepts `p.missing` on a record `p`.
+            if filename and name not in fields:
+                raise RevlError(filename, line,
+                                f"`{render_type(target)}` has no field `{name}` "
+                                f"(fields: {', '.join(sorted(fields)) or 'none'})")
+            return fields.get(name)
         return None
     if kind == "index":
         target = infer_ir(node.get("target"), tenv, types, services, filename, line)
+        it = infer_ir(node.get("index"), tenv, types, services, filename, line)
         thead, targs = parse_type(target)
         if filename and thead == "Opt":
             raise opt_escape_error(filename, line, "index `[...]`", target,
@@ -2097,6 +2131,11 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
                      "— docs/stdlib-2.0.md",
                 code="T1", category="type-mismatch",
             )
+        # item 404: a non-`Int` index is refused in a `fn`/`test` body
+        # (`infer_ast`); apply the same refusal here so a provide-method body
+        # (stratum 3) no longer accepts `xs[s]` where a bare `fn` refuses it.
+        if filename and it and thead in ("List", "Str") and it != "Int":
+            raise mismatch(filename, line, "index", "Int", it)
         if thead == "List":
             return targs[0] if targs else None
         if thead == "Str":
