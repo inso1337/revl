@@ -8,7 +8,7 @@ changes no compiler code; it records what already exists and how far it
 already goes, the one architectural move the item turns on (isolation is a
 third per-process placement dimension, not a new boundary), the manifest
 surface, the per-rung boundary transport, the two-layer capability
-enforcement model and its plan-time gate, the trust boundary stated
+enforcement model and its advisory plan-time gate, the trust boundary stated
 precisely, the guarantee accounting, the isolation ladder, the mixed-arch use
 case, the conductor's sandbox-runtime driver, a staged plan, and exit tests
 an implementation agent can pick up.
@@ -116,17 +116,26 @@ BETWEEN the process and the operating system.
 
 ### The capability model, and the one precedent that is almost this item
 
-Item 119 is worth singling out, because its rule is 411's gate in embryo: a
-host (process) declares the capabilities it OFFERS, and a component that
-requires a capability may be placed only on a host that offers it, refused at
-plan time naming component, capability, and host
+Item 119 is worth singling out, because its refusal SHAPE is the template
+for 411's gate: a host (process) declares the capabilities it OFFERS, and a
+component that requires a capability may be placed only on a host that
+offers it, refused at plan time naming component, capability, and host
 (`docs/capability-realm-placement.md`; `capability_realm_diagnostic`,
-`placement.py:532`). That is exactly the subset check 411 needs. What 119
-does not do is make the offering MEAN anything at runtime: a host that
-offers only `seal` does not, by any mechanism, deny the network to a
-component placed on it. 411 is item 119 with teeth: the offering becomes a
-grant the conductor translates into enforced confinement, and the refusal
-stays where 119 put it.
+`placement.py:532`). The analogy has a sharp limit, and 411's gate must not
+be described as 119's check transplanted. 119 compares required keys against
+offered keys, both sides drawn from checked declarations; 411's gate
+compares reached extern names against an author-declared `[sandbox.needs]`
+table that nothing verifies (G8 keeps the bodies opaque), so the gate is
+ADVISORY: it catches honest mismatches early and proves nothing about a
+body that lies or an entry that is missing. What 119 also does not do is
+make the offering MEAN anything at runtime: a host that offers only `seal`
+does not, by any mechanism, deny the network to a component placed on it.
+411 supplies the teeth, but they are the ENVELOPE's, not the gate's: on the
+container and microVM rungs the confinement the isolation runtime applies
+is the security boundary, and the gate is a courtesy check in front of it.
+Item 294 (IR-derived, resource-bounded needs) is the only path to a gate
+that is a real subset check; until it lands, the refusal stays where 119
+put it and claims no more.
 
 The other capability rules stack unchanged underneath: G4 bounds a provider
 to its declaration, attenuation (item 66) bounds spawned lineage (and closes
@@ -197,20 +206,31 @@ reach (the G4 fixed point, closed over spawns per item 66):
   the seam; that is the composition working as designed, and it is what
   makes a sandboxed component USEFUL rather than merely inert (the 329 note
   named severed tool reach as pure confinement's failure mode,
-  `docs/design/329-untrusted-author-profile.md:87-88`).
+  `docs/design/329-untrusted-author-profile.md:87-88`). The flip side: the
+  reach a component gains through such a key is the PROVIDER's reach, so
+  the boot summary states it per key (the gate section) rather than letting
+  the component's own envelope be read as its effective reach.
 - **Host-rooted capabilities**: extern names the component reaches, plus
   `*` for the opaque residue (a bare `emission`, a host reach no key can
   name). These are the ones that touch the OS from INSIDE the boundary, and
   they are what the grant is about.
 
-The static layer checks names: a host-rooted capability whose declared
-resource needs exceed the sandbox grant is refused at plan time, the item
-119/363 discipline. The runtime layer enforces resources: whatever any host
-body actually attempts, named, opaque, or lying, is bounded by the envelope
-the isolation runtime applied. The two layers are deliberately redundant in
-one direction: the static gate catches honest mistakes before anything
-spawns; the envelope catches everything else, loudly, at the attempt. The
-trust-boundary section states who enforces what and who is trusted.
+The static layer checks claims: a host-rooted capability whose
+AUTHOR-DECLARED resource needs (`[sandbox.needs]`, below) exceed the
+sandbox grant is refused at plan time. That layer is advisory. The needs
+table is not verified against the bodies, and an extern with a missing or
+understated entry defaults to "needs nothing" and is admitted at plan time
+even when its body reaches the network or the filesystem; the gate is an
+honest-mistake catcher, not a subset proof (item 294 is the only path to
+the latter). The runtime layer enforces resources: whatever any host body
+actually attempts, named, opaque, or lying, is bounded by the envelope the
+isolation runtime applied. On the container and microVM rungs the ENVELOPE,
+not the gate, is the security boundary. The redundancy runs in one
+direction only: the gate catches honest declared mismatches before anything
+spawns; the envelope catches everything, loudly, at the attempt. And the
+envelope's own vocabulary is deliberately narrow, filesystem and network
+only, a scope the surface section states precisely. The trust-boundary
+section states who enforces what and who is trusted.
 
 ## Surface: how a component declares its sandbox and envelope
 
@@ -239,6 +259,27 @@ A process without a `sandbox` table is byte-identical to today, the
 342/363/396 additivity discipline. Every component in a sandboxed process
 shares the envelope (stated above); an author who wants distinct envelopes
 writes distinct processes.
+
+**The envelope's vocabulary is fs and net, and only fs and net.** The
+derived flags (`--network=none --read-only --cap-drop=ALL`, the mount list,
+the VM network config) confine what the process reaches on the network and
+the filesystem; they do not confine host authority with no fs/net analogue.
+A body inside a deny-all container can still read its process environment,
+exec a binary present in the image, signal a pid in its namespace, read
+what /proc shows it, use shared memory within the boundary, and consult the
+clock and RNG; none of that is named by the grant and none of it is denied
+by 411. Two consequences are load-bearing rather than footnotes. First,
+secrets: an env-injected credential (an `os.environ["DB_PASSWORD"]` read)
+survives every flag above, which is why the spec/config narrowing in the
+boundary section is a stage-1 REQUIREMENT of this item rather than an
+optional tightening: the only defense for a secret is that it never enters
+the boundary, because inside the boundary nothing withholds it. Second,
+honesty in restatement: "sandboxed" in 411 means fs and net are confined;
+env, exec, ipc, and device authority are NOT enforced by this item, and
+every summary of the feature must carry that scope or it overclaims.
+Correspondingly, `[sandbox.needs]` may only name resources the envelope can
+enforce; an entry outside that vocabulary is a plan-time refusal (the
+fail-closed rule stated with the table below).
 
 ### The `[tiers]` form (sugar)
 
@@ -276,14 +317,26 @@ scratch  = ["fs:/scratch:rw"]
 ```
 
 An absent entry means "this extern's body needs nothing beyond CPU and
-memory". That default is deliberate: forcing an entry for every reached
-stdlib extern (`json`, `str` helpers) would bury the signal in boilerplate,
-and a wrong or missing entry is not a hole, because the entry is a CLAIM the
-runtime envelope does not consult; a body whose undeclared reach exceeds the
-grant fails loudly inside the sandbox at the attempt (the enforcement
-section). The needs table exists so the gate can refuse the honest
-mismatches at plan time and so `revl audit` can print, per sandboxed
-component, which reached externs are vouched self-contained.
+memory". That default is deliberate (forcing an entry for every reached
+stdlib extern, `json`, `str` helpers, would bury the signal in boilerplate)
+and it is also the table's honest limit: the entry is an unverified
+authorial CLAIM, and a host-rooted extern with a missing or understated
+entry defaults to "needs nothing" and is ADMITTED at plan time even when
+its body reaches the network or the filesystem. The gate over this table is
+therefore advisory, an honest-mistake catcher, not a security check; the
+security boundary on the container and microVM rungs is the envelope, which
+does not consult the table at all, and a body whose undeclared reach
+exceeds the grant fails loudly inside the sandbox at the attempt (the
+enforcement section). Item 294 (IR-derived, resource-bounded needs) is the
+only path to making this table authoritative. One rule about the table IS
+fail-closed today: an entry naming a resource the driver cannot map to an
+enforceable grant on the chosen rung (`env`, `exec`, anything outside the
+fs/net vocabulary) is a plan-time REFUSAL naming the entry and the
+unmappable need, never a silently unenforced ignore. The needs table exists
+so the gate can refuse the honest declared mismatches at plan time and so
+`revl audit` can print, per sandboxed component, which reached externs are
+vouched self-contained, where "vouched" means exactly "claimed by the
+manifest author", nothing more.
 
 ### The rejected source-level spelling
 
@@ -357,19 +410,66 @@ Per rung:
   no config channel; `backends/wasm/emit.py:29-41`), checked at plan time
   by extending the 363 dry-run gate to run `backends/wasm/emit.py` over the
   cell component's slice, the same oracle discipline with the same
-  no-second-list rationale.
+  no-second-list rationale. Two cell-only refusals fall out of the dry-run
+  and the gate: a component whose reach includes `*` (opaque, first-class
+  dispatched emitting reach) has no representable generated import set and
+  is refused at plan time, and a component whose host bodies are @py or @ts
+  (anything the wasm emitter cannot compile) cannot enter a cell at all;
+  both refusals name the container rung as the alternative. The cell's
+  confinement is `no_extern` plus the generated import set, not an fs/net
+  OS envelope: the `fs`/`net` keys grant nothing a wasm instance could use,
+  so non-default values under a cell are refused as unmappable rather than
+  accepted as decoration.
 
-One boundary rule is new and matters: a sandboxed process's spec must not
-carry secrets the envelope pretends to withhold. The spec file today is
-written into the placement directory and handed to the runner
-(`placement.py:1640-1642`); for a sandboxed process the driver passes only
-that process's spec through the mount, and config values destined for OTHER
-processes never enter the boundary (they already do not; the per-process
-spec carries the shared `config` table today, `placement.py:1442`, and
-narrowing it to the process's own components' config is a small,
-independently landable tightening this item takes as a stage-1 side task,
-because handing a confined untrusted component the whole composition's
-config would undercut the point).
+Three boundary rules are new and matter.
+
+**The resource-type crossing check is structural at a sandboxed seam.**
+363's `cross_tier_boundary_check` matches resource types by NAME over the
+top-level signature string (the `_resource_in` regex in
+`src/revl/distribute.py`), which misses a handle nested in a record or ADT
+field: an operation returning `Conn` where `record Conn { sock: Socket }`
+passes the name check while carrying a live OS resource across the seam.
+At an ISOLATION boundary that is not a wart but a breach: the smuggled
+handle re-confers inside the sandbox exactly the authority the envelope
+denied. The sandboxed-seam check therefore does not inherit 363's check
+unexamined: it walks the crossing type STRUCTURALLY (every record field,
+every ADT arm, transitively) and refuses on any embedded resource type,
+and a type it cannot resolve refuses rather than passes (fail-closed). A
+fix to 363's own name-based check is in flight; the sandboxed-seam rule is
+structural regardless of where that fix lands.
+
+**Approval crosses the boundary as a first-class channel.** A class-(c)
+operation awaits human approval (item 246), and a sandboxed process has no
+tty and no channel except the seam. Left unspecified, the prompt either
+hangs to the seam deadline, making sandbox death (withdrawal) the outcome
+of every LEGITIMATE approval-gated operation, or the operation runs
+unprompted, silently weakening 246, the opposite of this item's 249/329
+payoff. 411 therefore specifies the transport: the conductor serves
+approval as a conductor-served seam channel, one more key on the process's
+socket set, carrying the request out to wherever approvals surface today
+and the verdict back in. It is counted by the gate and printed by the
+audit and the boot summary like any other seam-served key, so "this
+sandboxed process can raise approval prompts" is a visible, reviewable
+fact. The channel carries its own human-scale deadline, distinct from the
+per-operation seam deadline, so an operator taking a minute to decide is
+not misread as a wedged peer. The underlying principle is unchanged:
+confinement never changes an operation's effect class (a/b/c); what it
+changes is approval REACHABILITY, and this channel is what keeps class (c)
+reachable from inside a boundary.
+
+**A sandboxed process's spec must not carry secrets the envelope cannot
+withhold.** The spec file today is written into the placement directory and
+handed to the runner (`placement.py:1640-1642`); for a sandboxed process
+the driver passes only that process's spec through the mount, and config
+values destined for OTHER processes never enter the boundary. The
+per-process spec carries the shared `config` table today
+(`placement.py:1442`); narrowing it to the process's own components'
+config is a stage-1 REQUIREMENT of this item, load-bearing rather than a
+side task, because the envelope does not confine environment or spec reads
+inside the boundary (the vocabulary scope in the surface section): the
+only line of defense for a secret is that it never enters the boundary at
+all. Handing a confined untrusted component the whole composition's config
+would not undercut the point; it would void it.
 
 ## Capability enforcement and the plan-time gate
 
@@ -382,10 +482,14 @@ anything spawns. For each sandboxed process P with envelope E:
    and partition: seam-served (required keys owned by another process, read
    off the same `owner` map the proxies use, `placement.py:1144`) versus
    host-rooted (reached extern names, plus `*`).
-2. **Subset check, the refusal.** For every NAMED host-rooted capability
-   `c`, look up `[sandbox.needs]`; if the declared needs of `c` are not
-   covered by E (a `net` need against `net = "none"`, an `fs:path` need
-   with no covering mount), refuse at plan time naming the component, the
+2. **Advisory needs check, two refusals.** For every NAMED host-rooted
+   capability `c`, look up `[sandbox.needs]`. If the entry names a
+   resource the driver cannot map to an enforceable grant on the chosen
+   rung, refuse at plan time naming the entry and the unmappable need
+   (the fail-closed rule from the surface section; never a silently
+   unenforced ignore). If the declared needs of `c` are not covered by E
+   (a `net` need against `net = "none"`, an `fs:path` need with no
+   covering mount), refuse at plan time naming the component, the
    capability, the need, and the missing grant:
 
    ```
@@ -395,22 +499,43 @@ anything spawns. For each sandboxed process P with envelope E:
           instead, or move the component out of the sandbox
    ```
 
-   This is item 119's refusal shape (`placement.py:561-567`) with the offer
-   made enforceable, and 363's gate discipline (refuse at plan, name the
-   parties, never a runtime stack trace as the user-visible surface).
-3. **The opaque residue, reported not refused.** `*` in the host-rooted set
-   (an unscoped `emission`, a body no name bounds) is never a refusal under
-   a sandbox, because bounding it is exactly what the envelope is FOR: the
-   static layer cannot say what an opaque body needs, and does not have to,
-   since the runtime envelope binds it regardless. The boot summary
-   (extending `placement.py:1594-1595`) prints it:
+   This borrows item 119's refusal shape (`placement.py:561-567`) and
+   363's gate discipline (refuse at plan, name the parties, never a
+   runtime stack trace as the user-visible surface), and claims 119's
+   authority for neither: the needs side is an unverified authorial claim,
+   so admission here is advisory, and the envelope remains the boundary
+   (the crux section).
+3. **The opaque residue: reported on the OS rungs, refused on the cell.**
+   On the container and microVM rungs, `*` in the host-rooted set (an
+   unscoped `emission`, a body no name bounds) is a report, not a refusal,
+   because bounding it is exactly what the envelope is FOR: the static
+   layer cannot say what an opaque body needs, and does not have to, since
+   the runtime envelope binds it regardless. Under a `wasm-cell`, `*` is a
+   plan-time REFUSAL: the cell's confinement is a generated import set,
+   and an opaque first-class-dispatched reach has no representable import
+   (the boundary and ladder sections). The boot summary (extending
+   `placement.py:1594-1595`) prints the residue AND the effective reach of
+   every seam-served key, because the envelope alone misstates reach: a
+   no-net sandboxed component whose `http` is seam-served by an
+   unsandboxed sibling has, through that key, the sibling's full network.
+   Effective reach is the envelope UNION the transitive authority of every
+   seam-served provider, and the summary says so per key:
 
    ```
    placement: worker[py, container: net=none fs=none]=[Untrusted]
-     sandbox worker: reach * (opaque host surface), bounded only by the
-     envelope; seam-served: db, log; vouched self-contained: json_parse
+     sandbox worker: envelope confines fs+net only; env/exec/ipc unenforced
+       reach * (opaque host surface), bounded only by the envelope
+       seam-served: db -> store[py, unsandboxed: full host reach]
+                    log -> logger[py, container: net=all fs=none]
+                    approval -> conductor (human-scale deadline)
+       vouched self-contained (claimed, unverified): json_parse
+     note: net=none bounds this process's own egress, not the reach of
+           its seam-served providers
    ```
 
+   `revl audit` prints the same per-key provider-reach lines, so
+   `net=none` is never readable as a total-egress claim about the
+   composition.
 4. **Attenuation composes for free.** A sandboxed component's spawned
    children run in its process, inside its envelope; item 66 already
    refuses a child reaching beyond the parent (`lower.py:7972`), and reach
@@ -433,21 +558,31 @@ the placement manifest as the policy.
 Item 294, when it lands, upgrades step 2 without changing its shape:
 resource-bounded capability declarations (`network.call(host=...)`) would
 make `[sandbox.needs]` derivable from the IR instead of author-declared,
-and the subset check becomes bounded subsumption. The gate is written
-against "declared needs of c", which is exactly the slot 294 refines.
+and the advisory check becomes bounded subsumption over verified needs,
+which is the only route by which this gate ever becomes a real subset
+check. The gate is written against "declared needs of c", which is exactly
+the slot 294 refines; until then the gate stays advisory and the envelope
+stays the boundary.
 
 ## The trust boundary, precisely
 
 This section is the honesty the item demands, stated once and cited from
 everywhere else.
 
-**What revl guarantees.** The plan-time gate: a placement whose declared
+**What revl guarantees.** The plan-time gate: a placement whose DECLARED
 capability needs exceed the sandbox grant never spawns, with a diagnostic
-naming component and missing grant. The request: the conductor derives the
-exact confinement flags from the manifest (`--network=none`, `--read-only`,
-the mount list, `--cap-drop=ALL`; the VM network config; the wasm import
-set) and prints them in the boot summary, so what was REQUESTED is
-reviewable and diffable, the same audit discipline as G8. The seam: the stub
+naming component and missing grant; the gate is advisory over the author's
+declarations and guarantees nothing about undeclared reach, which is the
+envelope's job. The request: the conductor derives the exact confinement
+flags from the manifest (`--network=none`, `--read-only`, the mount list,
+`--cap-drop=ALL`; the VM network config; the wasm import set) and prints
+them in the boot summary, so what was REQUESTED is reviewable and
+diffable, the same audit discipline as G8. The canary: the runner probes
+its own confinement from inside the boundary at boot (the driver section)
+and self-terminates if a should-be-denied attempt succeeds, so on the fs
+and net axes what was APPLIED, not only what was requested, is observable,
+and a silently weaker grant is fail-closed withdrawal rather than a quiet
+run at ambient authority. The seam: the stub
 dispatches only declared methods, values cross by copy, deadlines bound
 every crossing, and sandbox death is withdrawal. And on the wasm rung, the
 grant-to-import derivation, which is checkable by reading the emitted
@@ -461,7 +596,15 @@ not a new kind of trust; it is the same kind extended to one more party.
 Today every guarantee revl states already rides on an unverified CPython,
 Node, JVM, and OS ("the gate defends the declaration, not the runtime",
 `docs/threat-model.md:131-140`); the sandbox runtime joins that list, one
-line lower in the stack. The practical mitigations are operational and
+line lower in the stack. The boot canary narrows this trust on one axis
+without discharging it: a daemon that applies LESS than requested (a
+rootless runtime without a network namespace, a docker context pointed at
+a permissive remote daemon, a shimmed binary on PATH) would otherwise
+succeed as a process with the envelope never applied, because an unknown
+flag errors but weaker-than-asked enforcement does not error at all; the
+canary converts that silent class into fail-closed death at boot. It
+probes examples, not the policy: detection of gross non-enforcement, not
+verification of the enforcer. The practical mitigations are operational and
 named, not guaranteed: pin images by digest (a mutable tag is an arbitrary
 code vector; the image is trusted input at the level of the placement file),
 prefer the stronger rung for the more hostile component (the ladder), and
@@ -488,11 +631,17 @@ component WITH its host bodies, place it in a deny-all sandbox (the wasm
 cell for a per-turn compile, a container for a longer-lived component), and
 wire its granted tool surface as seam-served keys. The G8 sentence changes
 from "we cannot see inside the host body, review it" to "we cannot see
-inside the host body, and it does not matter for reach: the body holds no
-authority beyond the granted seam". An opaque or actively malicious body
-confined to `net = "none"`, `fs = []` can compute, call its granted
-proxies, and nothing else; its escape attempt is a refused syscall or a
-trap, not an incident. The granted-tool-reach problem that made pure
+inside the host body, and it does not matter for fs and net reach: the
+body holds no filesystem or network authority beyond the granted seam and
+envelope". An opaque or actively malicious body confined to
+`net = "none"`, `fs = []` can compute, call its granted proxies (whose own
+reach the boot summary states per key), read what shipped inside its
+boundary (the image, its narrowed spec), and nothing that touches the
+filesystem or the network beyond the grant; its escape attempt on those
+axes is a refused syscall or a trap, not an incident. The scope from the
+surface section applies verbatim here: authority outside the fs/net
+vocabulary (env, exec within the image, ipc) is not confined, which is why
+the spec narrowing is load-bearing. The granted-tool-reach problem that made pure
 quarantine unusable (`329-untrusted-author-profile.md:87-88`) is solved by
 the seam being the one granted channel: severed from the host, connected to
 the composition.
@@ -502,13 +651,19 @@ reasons about where untrusted data flows; its class-(a) sinks and witnessed
 operations assume the component boundary means something at runtime. A
 sandbox gives the analysis a floor it can cite: a witnessed or
 class-(a)-handling component placed in a no-net sandbox cannot leak the
-value through an unanalyzed host path, because there is no host path; the
-only egress is the seam, which the analysis DOES see (seam crossings are
-declared operations on declared services). Concretely: today a component
-that endorses untrusted input relies on its own host bodies being honest;
-sandboxed, the endorsement boundary's TCB shrinks to the declared surface
-plus the isolation runtime. 249's residual (misuse of granted channels)
-remains 249's, stated above; what 411 removes is the UNDECLARED channel.
+value through an undeclared network or filesystem path, because the
+envelope leaves none; the analyzable egress is the seam, which the
+analysis DOES see (seam crossings are declared operations on declared
+services, and the boot summary states each seam-served key's provider
+reach). Concretely: today a component that endorses untrusted input relies
+on its own host bodies being honest; sandboxed, the endorsement boundary's
+TCB shrinks to the declared surface plus the isolation runtime. 249's
+residual (misuse of granted channels) remains 249's, stated above; what
+411 removes is the undeclared fs/net channel, and channels outside the
+envelope's vocabulary (env, timing) sit outside this floor as well.
+Approval-gated (class-c) operations keep their prompt inside a sandbox via
+the conductor-served approval channel (the boundary section), so
+confinement strengthens 246 rather than silently bypassing it.
 
 Neither item's checks weaken or change: 411 adds an enforcement layer under
 them, it does not replace a line of either.
@@ -550,22 +705,32 @@ Parity with 363, restated tersely with the one new cause:
 
 ## The isolation ladder
 
-One capability contract (the `sandbox` block, the needs table, the gate),
-three enforcement strengths. The `isolation` key picks the rung; nothing
-else in the surface changes.
+One manifest surface (the `sandbox` block, the needs table, the gate's
+diagnostics), three enforcement strengths whose semantics differ where the
+rungs differ (read the honesty paragraph below). The `isolation` key picks
+the rung; nothing else in the surface changes.
 
 | rung | boundary | strength | cost | when |
 |---|---|---|---|---|
-| `wasm-cell` | wasm instantiation inside a py host process | reach is statically absent (no import, no call): the strongest STATIC story, item 289's chain realized; but in-process, so a wasmtime bug is a host compromise, and the wasm tier's emit restrictions bound what can live there | near-zero launch cost; per-call marshal at the import boundary; sync base calculus | per-turn untrusted-author code (329), small pure-ish logic, high-churn admission |
+| `wasm-cell` | wasm instantiation inside a py host process | reach is statically absent (no import, no call): the strongest STATIC story, item 289's chain realized; the real confinement is no-extern plus the seam-only generated import set, NOT an fs/net OS envelope (those keys bind nothing here and non-default values are refused as unmappable); in-process, so a wasmtime bug is a host compromise | near-zero launch cost; per-call marshal at the import boundary; sync base calculus; only wasm-emittable components (no @py/@ts host bodies, no `*` reach) | per-turn untrusted-author code (329) that the wasm emitter accepts, small pure-ish logic, high-churn admission |
 | `container` | OS namespaces, shared kernel | kernel-enforced fs/net/pid isolation; whole-tier artifacts run unchanged (any backend, full stdlib) | image build/pull, ~100ms-1s launch; shared-kernel attack surface | opaque third-party host bodies, mixed-arch wrapping, the default hostile-component rung |
 | `microvm` | own kernel under a VM monitor | strongest OS-level boundary; hostile-multitenant grade | slowest launch, memory floor per VM, seam over TCP+mTLS only, network-role tier limits | regulated/multi-tenant isolation, code you assume is actively escaping |
 
-Reading the ladder honestly: strength is not totally ordered. The cell is
-weakest against a runtime bug (in-process) and strongest against ambient
-reach (no syscall surface at all); the microVM inverts both. The contract
-being uniform is the point: an author hardens a component by changing one
-manifest word, and the gate, seam, and guarantees are identical on every
-rung.
+Reading the ladder honestly: strength is not totally ordered, and the
+contract is not fully uniform across rungs. The cell is weakest against a
+runtime bug (in-process) and strongest against ambient reach (no syscall
+surface at all); the microVM inverts both. And the cell is not the
+container minus weight: it REFUSES what the container reports (`*` reach),
+it can host only components the wasm emitter accepts (a @py or @ts host
+body cannot run in a cell at all, so the 329 confined-host-body payoff on
+this rung applies only to wasm-emittable code, and a @py body needs the
+container rung), and its confinement is a generated import set rather than
+an OS grant, with the `fs`/`net` keys inert and refused when non-default.
+What IS uniform: the manifest surface, the seam, the gate's diagnostic
+discipline, and the guarantee accounting. An author hardens a component by
+changing one manifest word, and where a rung cannot honor the word, the
+answer is a plan-time refusal naming the gap, never the same word quietly
+meaning something weaker.
 
 ## Mixed-arch compositions (item 337 and the distribution model)
 
@@ -611,6 +776,19 @@ is a translation layer at the three existing seams:
   MicroVM: the monitor process is the child, same shape. Wasm cell: no
   wrapper at all; the py runner receives a `cell` spec key and instantiates
   the module with the generated import set.
+- **Boot canary** (in-sandbox, fail-closed): before serving its socket,
+  the runner probes its own confinement from inside the boundary: under
+  `net = "none"` it attempts one TCP connect to a conductor-designated,
+  known-reachable address, and under a read-only or empty `fs` grant it
+  attempts one write outside its writable mounts; if any should-be-denied
+  probe SUCCEEDS, the runner prints the finding and self-terminates. This
+  closes the silently-weaker-grant hole named in the trust boundary: a
+  daemon that applies less than requested succeeds as a process while the
+  envelope was never applied, and no flag error tells anyone; the canary
+  turns that into child death at boot, which the pump reads as DOWN and
+  the cascade as withdrawal. The canary's verdict line is part of the boot
+  output, so the audit records enforcement OBSERVED, not just flags
+  requested.
 - **Health**: no new mechanism. Sandbox death is client-process death; the
   pump and the existing poll see it; withdrawal follows. The driver adds
   one hardening: a teardown-path `docker rm -f <name>` (and the VM
@@ -656,22 +834,30 @@ byte-identical throughout (the 342/363/396 additivity discipline).
 
 - **Stage 1 (surface + gate).** Parse `[processes.<p>.sandbox]`, the
   `[tiers]`-form `[sandbox]` table and its expansion, `[sandbox.needs]`;
-  the plan-time capability gate (reach partition, subset refusal, opaque
-  report); the per-process config narrowing; boot-summary and `revl run
-  --plan` lines; `revl audit` prints the envelope and the vouched list.
-  Running a sandboxed placement is a clean refusal naming the gap (the 396
-  discipline) until stage 2. Exit: the no-net-vs-net-need refusal names
-  component, capability, and grant; a sandbox-free placement is
-  byte-identical through specs, builds, and boot output.
+  the plan-time advisory gate (reach partition, declared-needs refusal,
+  the unmappable-needs fail-closed refusal, opaque report with the cell
+  carve-out); the structural resource-type walk for sandboxed seams; the
+  per-process config/spec narrowing (load-bearing, the boundary section);
+  boot-summary and `revl run --plan` lines including the per-key
+  seam-served provider-reach lines and the approval channel's row; `revl
+  audit` prints the envelope, the per-key reach, and the claimed-vouched
+  list. Running a sandboxed placement is a clean refusal naming the gap
+  (the 396 discipline) until stage 2. Exit: the no-net-vs-net-need refusal
+  names component, capability, and grant; an out-of-vocabulary needs entry
+  refuses; a sandbox-free placement is byte-identical through specs,
+  builds, and boot output.
 - **Stage 2 (container boundary, py tier).** The driver's launch wrapper
   for `isolation = "container"` on py processes: envelope-to-flags
   derivation, the private seam mount, uid mapping, preflight, teardown
-  sweep; a first-party runner image recipe. Exit: a sandboxed py component
-  composes with an unsandboxed process, a probe's call crosses the
-  boundary and returns; `docker kill` on the sandbox withdraws the
-  consumer (R2/R3) and teardown proves no residue; an exfil-attempt body
-  (socket connect) inside `net = "none"` fails loudly in its extern frame
-  while the composition keeps running.
+  sweep; the in-sandbox boot canary; the conductor-served approval channel
+  with its human-scale deadline; a first-party runner image recipe. Exit:
+  a sandboxed py component composes with an unsandboxed process, a probe's
+  call crosses the boundary and returns; `docker kill` on the sandbox
+  withdraws the consumer (R2/R3) and teardown proves no residue; an
+  exfil-attempt body (socket connect) inside `net = "none"` fails loudly
+  in its extern frame while the composition keeps running; a launch with
+  the envelope flags stripped (a stand-in for a non-enforcing daemon) dies
+  at the canary and withdraws.
 - **Stage 3 (all compiled tiers + mixed-arch).** The wrapper generalized to
   node/rust/go/java runner images; `platform` and the emulation preflight;
   the boot-summary emulation note. Exit: a foreign-platform container
@@ -683,7 +869,10 @@ byte-identical throughout (the 342/363/396 additivity discipline).
   dry-run for cell components; the import-section conformance check (the
   289 chain, asserted by reading the emitted module). Exit: a cell
   component calls a seam-served key and cannot name any other import; an
-  ungranted-reach body fails at instantiation, not at call time.
+  ungranted-reach body fails at instantiation, not at call time; `*` reach
+  or a @py/@ts host body under a cell is refused at plan time naming the
+  container rung; non-default `fs`/`net` keys under a cell refuse as
+  unmappable.
 - **Stage 5 (microVM).** The TCP+mTLS seam variant inside the VM network
   config, conductor-minted identities, the monitor as child process; the
   per-role tier restatement. This stage is the largest and may split; if
@@ -702,13 +891,41 @@ byte-identical throughout (the 342/363/396 additivity discipline).
   is refused before anything spawns, naming component, capability, need,
   and grant; the same manifest with `net = "all"`, or with the extern's
   provider moved out of the sandbox, boots.
+- **Unmappable needs refuse:** a `[sandbox.needs]` entry naming a resource
+  outside the fs/net vocabulary (`env`, `exec`), or one the chosen rung
+  cannot enforce, is a plan-time refusal naming the entry and the need,
+  never a silent ignore.
+- **The gate is advisory, the envelope is not:** a host body whose reach
+  is UNDECLARED in `[sandbox.needs]` passes the gate (no refusal) and is
+  stopped by the envelope at the attempt; the enforcement test below runs
+  exactly this body, and no diagnostic text describes the gate as a
+  subset proof.
 - **Composition across the boundary:** a sandboxed component and an
   unsandboxed one compose over the seam; a `--once` probe's cross-boundary
   call returns its value; teardown proves no residue on both sides.
+- **Approval crosses the boundary:** a sandboxed component's class-(c)
+  operation raises its prompt through the conductor-served approval
+  channel and completes when approved, refuses when denied; an operator
+  delay longer than the per-operation seam deadline breaches nothing,
+  because the channel's own human-scale deadline governs; the approval key
+  appears in the boot summary's seam-served lines.
+- **Structural crossing:** an operation on a sandboxed seam returning
+  `Conn` where `record Conn { sock: Socket }` is refused at plan time by
+  the structural walk, identically to the same resource at top level; an
+  unresolvable crossing type refuses rather than passes.
 - **Enforcement is real:** a deny-all sandboxed component whose host body
   attempts a network connect gets a host-native loud failure inside its
   extern frame; the compositions's other processes are unaffected; nothing
   silently succeeds.
+- **The canary catches a weak grant:** launching the runner with the
+  envelope flags stripped (a stand-in for a daemon that applies less than
+  asked) dies at the boot canary and withdraws; with the flags applied,
+  the canary's probes fail as they should and boot proceeds, with the
+  verdict line in the boot output.
+- **Seam-served reach is printed:** the boot summary and `revl audit`
+  name, for each seam-served key of a sandboxed process, the providing
+  process and its reach; a no-net sandbox consuming an unsandboxed
+  provider's key shows that provider's full host reach on the key's line.
 - **Sandbox death is withdrawal:** killing the container withdraws the
   consumer reactively (R2/R3); a replacement re-activates it; a wedged
   seam call breaches its deadline as the distinguishable error, not a
@@ -726,6 +943,9 @@ byte-identical throughout (the 342/363/396 additivity discipline).
   exactly the seam proxies plus granted host functions (asserted by
   parsing the module); an ungranted host reach is a missing import at
   instantiation.
+- **Cell refusals:** `*` reach, a @py/@ts host body, or a non-default
+  `fs`/`net` key under `isolation = "wasm-cell"` is a plan-time refusal
+  naming the gap and the container rung as the alternative.
 - **Swap refusal:** `revl swap` naming a sandboxed component is refused
   with the named gap; the running composition is untouched.
 - **`test_doc_examples` stays green:** the one proposed-syntax block in
@@ -739,24 +959,31 @@ The item's good fortune is 363's: the boundary, the seam, the gate
 discipline, and the per-process conductor all exist, so the design is a
 fourth placement column, a translation layer at spawn, and one new
 plan-time check, and every guarantee statement above is parity with the
-cross-process status quo. The genuinely hard residues are four. First, the
+cross-process status quo. The genuinely hard residues are five. First, the
 vocabulary bridge: revl capabilities are boundary names and OS grants are
 resources, and the mapping between them (`[sandbox.needs]`) is an
 author-declared claim G8 prevents anyone from verifying statically; the
-design's answer is layered honesty (the gate refuses declared mismatches
-early, the envelope bounds undeclared ones loudly at runtime), and that
-answer must be kept from quietly inverting into "the needs table is
-checked, so it must be true". Second, the trusted enforcer: revl requests
-confinement and cannot verify it was applied, and this note's precision
-("trusted the way the OS is today") will be under pressure to blur into a
-stronger claim in every summary of the feature; the trust-boundary section
-exists to be cited against that. Third, the net allowlist gap: the most
-requested envelope ("only api.example.com") is exactly the one container
-runtimes do not natively enforce, so v1 ships `none`/`all` and a named
-follow-on, and holding that refusal against the obvious pressure to fake it
-with an unenforced flag is a scope discipline, not an oversight. Fourth,
-the microVM rung inherits every network-placement limit at once (py-only
-listener, py/node consumers, cert plumbing), which makes the strongest rung
-the most constrained one for now; the plan isolates it in its own stage so
-the container and cell rungs, which carry the security payoff for 329/249,
-never wait on it.
+design's answer is to say plainly that the gate over that table is
+advisory and the envelope is the boundary, and that framing must be kept
+from quietly inverting into "the needs table is checked, so it must be
+true"; item 294 is the only exit. Second, the envelope's scope: fs and net
+are what an OS sandbox can be asked for in one manifest word, and
+everything outside that vocabulary (env, exec, ipc, devices) is unconfined
+by 411, which is why the spec narrowing is load-bearing, why unmappable
+needs refuse instead of passing, and why every restatement of the feature
+must carry the scope or overclaim it. Third, the trusted enforcer: revl
+requests confinement and cannot verify it was applied; the boot canary
+makes gross non-enforcement fail-closed, which is detection, not
+verification, and this note's precision ("trusted the way the OS is
+today") will be under pressure to blur into a stronger claim in every
+summary of the feature; the trust-boundary section exists to be cited
+against that. Fourth, the net allowlist gap: the most requested envelope
+("only api.example.com") is exactly the one container runtimes do not
+natively enforce, so v1 ships `none`/`all` and a named follow-on, and
+holding that refusal against the obvious pressure to fake it with an
+unenforced flag is a scope discipline, not an oversight. Fifth, the
+microVM rung inherits every network-placement limit at once (py-only
+listener, py/node consumers, cert plumbing), which makes the strongest
+rung the most constrained one for now; the plan isolates it in its own
+stage so the container and cell rungs, which carry the security payoff for
+329/249, never wait on it.
