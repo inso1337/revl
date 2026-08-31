@@ -378,6 +378,40 @@ def covers(a: Cap, b: Cap) -> bool:
     return True
 
 
+def disjoint(a: Cap, b: Cap) -> bool:
+    """Whether two capabilities can never touch the same declared resource
+    (item 259, S2.2). Defined on the SAME partial order `covers` uses, so the
+    algebra stays in one place; the parallel-emission partition (`parallel.py`)
+    consumes it to prove two emissions independent.
+
+    Slice 1 is (D1) only:
+
+      * (D1) DISTINCT TOKENS. Capabilities under different tokens are
+        incomparable in the order (`covers` clause 1: parameterization never
+        bridges tokens), so `send.email` and `db.write` can never name the same
+        boundary. Distinct tokens are therefore disjoint. This is the whole of
+        slice 1's independence proof.
+
+    `*` (top of the order, an unnameable reach) is disjoint from NOTHING,
+    including another `*`: it may reach any boundary, so it is never provably
+    independent of anything. Any pair touching `*` returns False.
+
+    NOT-YET (D2, deferred to a later slice). Two capabilities under the SAME
+    token are disjoint when their resource valuations have no common lower bound
+    (two sibling paths `path="/a"` vs `path="/b"`, neither a prefix of the other
+    under `_leq_path`; two distinct discrete values `host="x"` vs `host="y"`),
+    after projecting out ceiling parameters with `split_ceilings`. Until (D2)
+    lands, this predicate treats EVERY same-token pair as NOT disjoint (returns
+    False), which is fail-safe: (D2) can only ever ADD parallelism, never remove
+    a sequential guarantee."""
+    if a.token == "*" or b.token == "*":
+        return False
+    # (D1) distinct tokens are incomparable, hence disjoint. (D2) same-token
+    # sibling-cone disjointness is deferred (see NOT-YET above), so a same-token
+    # pair is conservatively NOT disjoint for now.
+    return a.token != b.token
+
+
 def covered_by_any(held: "list[Cap] | set[Cap]", c: Cap) -> bool:
     """Whether some held capability covers `c` (the per-child existential scan
     the attenuation fold runs)."""
