@@ -1391,11 +1391,12 @@ def resource_crossing_refusal(ir: dict, requires: dict, provides: dict,
                 return (
                     f"service `{service}` (key {key!r}) crosses the {boundary} "
                     f"but is address-space-bound: {', '.join(resource_reasons)}. "
-                    "A resource handle's lifetime is tied to a fiber in one "
-                    "process; it cannot cross a process seam by copy (same tier "
-                    "or across tiers), and a witnessed rollback across a seam is "
-                    "out of scope (parity with the `revl swap` gate, "
-                    "docs/interop-bridge.md §3-4).")
+                    "An OWNED resource handle's bracket lives in the providing "
+                    "process (item 308); it cannot cross a process seam by copy "
+                    "(same tier or across tiers) — a copy is a dead handle "
+                    "detached from its undo/teardown contract — and a witnessed "
+                    "rollback across a seam is out of scope (parity with the "
+                    "`revl swap` gate, docs/interop-bridge.md §3-4).")
     return None
 
 

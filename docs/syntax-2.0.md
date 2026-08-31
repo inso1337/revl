@@ -503,23 +503,25 @@ level — the handle is not nameable there. The slot still has to parse (G4),
 so it names the inverse operation against a placeholder:
 
 ```revl fragment
-// the extern undo NAMES the inverse; the literal `1` can never be the real
-// descriptor the acquisition returned — this slot is documentation
-extern acquire fn log_open(path: Str) -> Int undo log_close(1)
+// an `acquire` return is a NOMINAL OPAQUE HANDLE type (`LogHandle`), never a
+// bare primitive: the handle carries the identity ownership tracks (item 308).
+// the extern undo NAMES the inverse over the implicit `result` binding
+extern acquire fn log_open(path: Str) -> LogHandle undo log_close(result)
   = @py { ... }
 ```
 
 The real, revertible release is one level up, in the component that performs
 the acquisition. There the acquired handle *is* in scope — it is the effect's
 own binding — so the component's `undo` closes exactly the descriptor that was
-opened. Thread the handle through:
+opened. It is the acquiring binding's OWN undo, so item 308's own-undo
+exemption admits its call to the declared inverse. Thread the handle through:
 
 ```revl
-extern pure fn log_close(fd: Int) = @py { return None }
+extern pure fn log_close(fd: LogHandle) = @py { return None }
 
-extern pure fn log_write(fd: Int, line: Str) -> Int = @py { return 0 }
+extern pure fn log_write(fd: LogHandle, line: Str) -> Int = @py { return 0 }
 
-extern acquire fn log_open(path: Str) -> Int undo log_close(1)
+extern acquire fn log_open(path: Str) -> LogHandle undo log_close(result)
   = @py { return 1 }
 
 service AuditLog { emission fn record(line: Str) -> Int }
@@ -528,7 +530,7 @@ component FileAuditLog provides audit: AuditLog {
   config { path: Str }
 
   // `fd` is the descriptor `log_open` returned, in scope here — so this undo
-  // closes the handle that was really opened, unlike the extern's `log_close(1)`
+  // closes the handle that was really opened (the acquiring binding's own undo)
   let fd = effect log_open(config.path) undo log_close(fd)
 
   provide audit {
@@ -538,13 +540,14 @@ component FileAuditLog provides audit: AuditLog {
 ```
 
 `log_close(fd)` on the component effect is what the lifecycle machinery runs on
-teardown and what `no_residue` checks reverted; `log_close(1)` on the extern
-never runs against the live handle. The rule: **an `acquire` extern's `undo`
-documents the inverse; the component's `effect … undo …` performs it, with the
-acquired handle threaded through.** The worked, compiling, runtime-tested
-version — with real `os.open`/`os.write`/`os.close` bodies and a `lifecycle
-test` that opens the log, records a line, unloads, and asserts `no_residue` —
-is `examples/durable_log.rvl` (pinned by `tests/test_durable_log_example.py`).
+teardown and what `no_residue` checks reverted. The rule: **an `acquire`
+extern's `undo` names the inverse over its `result` handle; the component's
+`effect … undo …` performs the release with the acquired handle threaded
+through, and only that acquiring binding's own undo may call the inverse (item
+308, O1).** The worked, compiling, runtime-tested version — with real
+`os.open`/`os.write`/`os.close` bodies and a `lifecycle test` that opens the
+log, records a line, unloads, and asserts `no_residue` — is
+`examples/durable_log.rvl` (pinned by `tests/test_durable_log_example.py`).
 
 One ergonomic that *used* to complicate this is gone: a multi-line `@py`/`@ts`
 extern body no longer has to start in column 0 — the py and ts emitters

@@ -186,11 +186,15 @@ Unclassified → no compile. The inverse/compensation slots sit on the
 *declaration*, between the return type and the first host body:
 
 ```revl
-extern pure fn close_ledger(h: Int) = @py { pass }
+extern pure fn close_ledger(h: LedgerHandle) = @py { pass }
 
-extern acquire fn open_ledger(path: Str) -> Int undo close_ledger(1)
+extern acquire fn open_ledger(path: Str) -> LedgerHandle undo close_ledger(result)
   = @py { return abs(hash(path)) % 100000 }
 ```
+
+An `acquire` return is a NOMINAL OPAQUE HANDLE type (`LedgerHandle`), never a
+bare primitive: the handle carries the identity the ownership checks track
+(item 308). The `undo` names the inverse over the implicit `result` binding.
 
 | classification | `undo <expr>` | `compensate <expr>` |
 |---|---|---|
