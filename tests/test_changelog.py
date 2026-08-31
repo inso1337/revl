@@ -26,8 +26,9 @@ from revl import compile_source  # noqa: E402
 from revl import audit_diff, composition_diff, version  # noqa: E402
 from revl.audit_diff import audit_report, diff_reach  # noqa: E402
 from revl.changelog import (  # noqa: E402
-    CONSUMED_PATHS, ChangelogLine, _build_changelog, _completeness_guard,
-    derive_changelog, render_markdown)
+    CONSUMED_PATHS, FORMATS, SECTIONS, ChangelogLine, _build_changelog,
+    _completeness_guard, derive_changelog, render, render_markdown,
+    render_plain)
 
 
 # an empty structural delta, for the pure-core headline tests that inject only
@@ -480,3 +481,97 @@ def test_no_semver_withholds_the_headline_and_states_it():
     assert "interface table" in doc["headline"]["note"]
     # the structural axis survives the degrade
     assert any(ln["fact"] == "component.added:Metrics" for ln in doc["added"])
+
+
+# ------------------------------------------------------ Slice 3: formats + skeleton
+
+def test_markdown_is_a_stable_skeleton_even_with_no_changes():
+    """The Markdown form is a CONTRACT release tooling splices into: every
+    `SECTIONS` heading is present, in the fixed order, even when the composition
+    did not change at all - an empty section carries `_None._`, it never
+    vanishes."""
+    doc = _changelog(BASE, BASE)  # identical inputs: nothing changed
+    md = render_markdown(doc)
+    last = -1
+    for _key, heading in SECTIONS:
+        anchor = f"## {heading}"
+        idx = md.find(anchor)
+        assert idx != -1, f"stable skeleton dropped the {heading!r} heading"
+        assert idx > last, "skeleton headings must keep the SECTIONS order"
+        last = idx
+    # an empty section is present-but-placeholdered, not absent
+    assert "_None._" in md
+
+
+def test_markdown_skeleton_carries_real_entries_and_moved_paths():
+    before = compile_source(BASE)
+    after = compile_source(BASE + """
+    component Metrics requires cache: Cache { }
+    """)
+    doc = derive_changelog(before, after)
+    md = render_markdown(doc)
+    assert "## Added / relaxed (compatible)" in md
+    assert "- component Metrics added" in md
+    # every section heading still present (the skeleton is stable regardless
+    # of which buckets are populated)
+    for _key, heading in SECTIONS:
+        assert f"## {heading}" in md
+
+
+def test_plain_has_no_markdown_markup_but_same_skeleton():
+    """`plain` is the same stable skeleton with the Markdown decoration stripped
+    - for a log line or a release tool that renders its own presentation."""
+    before = compile_source(BASE)
+    after = compile_source(BASE + """
+    component Metrics requires cache: Cache { }
+    """)
+    doc = derive_changelog(before, after)
+    plain = render_plain(doc)
+    assert "Release impact:" in plain
+    assert not plain.startswith("**")
+    for line in plain.splitlines():
+        assert not line.startswith("#"), "plain output must carry no Markdown headings"
+        assert not line.lstrip().startswith("- "), "plain output must carry no Markdown bullets"
+        assert "**" not in line, "plain output must carry no Markdown bold"
+    # the same section headings appear, in order, as plain labels
+    for _key, heading in SECTIONS:
+        assert f"{heading}:" in plain
+    assert "component Metrics added" in plain
+
+
+def test_render_dispatches_on_format():
+    doc = _changelog(BASE, BASE)
+    assert render(doc, fmt="markdown") == render_markdown(doc)
+    assert render(doc, fmt="plain") == render_plain(doc)
+    assert json.loads(render(doc, fmt="json")) == doc
+    # legacy as_json path still works when no fmt is given
+    assert render(doc, as_json=True) == render(doc, fmt="json")
+    assert render(doc) == render(doc, fmt="markdown")
+
+
+def test_render_rejects_an_unknown_format():
+    doc = _changelog(BASE, BASE)
+    try:
+        render(doc, fmt="rst")
+    except ValueError as error:
+        assert "rst" in str(error)
+    else:
+        raise AssertionError("render must reject an unknown format")
+
+
+def test_formats_constant_matches_the_dispatch():
+    assert FORMATS == ("markdown", "json", "plain")
+
+
+def test_plain_and_markdown_are_deterministic():
+    before = compile_source(BASE)
+    after = compile_source(BASE + """
+    component Metrics requires cache: Cache { }
+    """)
+    reser_before = json.loads(json.dumps(before, sort_keys=True))
+    reser_after = json.loads(json.dumps(after, sort_keys=True))
+    for renderer in (render_plain, render_markdown):
+        first = renderer(derive_changelog(before, after))
+        second = renderer(derive_changelog(before, after))
+        third = renderer(derive_changelog(reser_before, reser_after))
+        assert first == second == third

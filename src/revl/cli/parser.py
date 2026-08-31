@@ -237,9 +237,16 @@ def build_parser() -> argparse.ArgumentParser:
     changelog_cmd.add_argument(
         "--to", dest="to", metavar="NEW", required=True,
         help="the later composition (same accepted forms as --from)")
+    changelog_cmd.add_argument(
+        "--format", dest="format", choices=("markdown", "json", "plain"),
+        default="markdown",
+        help="the output form: `markdown` (the stable release-note skeleton, "
+             "default), `json` (the structured document a registry or bot "
+             "consumes), or `plain` (the skeleton with no Markdown markup)")
     changelog_cmd.add_argument("--json", action="store_true",
-                               help="the structured changelog document a "
-                                    "registry or bot can consume")
+                               help="alias for `--format json`; the structured "
+                                    "changelog document a registry or bot can "
+                                    "consume")
     changelog_cmd.add_argument(
         "--no-semver", action="store_true",
         help="skip the interface-diff semver headline (structural + authority "
