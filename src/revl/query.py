@@ -204,6 +204,16 @@ class Composition:
                 if target is not None:
                     out.append({"scope": target, "key": call["key"],
                                 "method": call["method"]})
+            # the spawn/instance seam: a `s.<key>.<method>(...)` call resolves
+            # to the spawned component's own provide-method scope directly (the
+            # template component keeps its scopes even though it is excluded
+            # from the static composition), so the reach fold attributes the
+            # spawned emission's class and capabilities to the caller the same
+            # way a `req` crossing does (item 246).
+            for call in scope["facts"]["spawnCalls"]:
+                if call["scope"] in self.scopes:
+                    out.append({"scope": call["scope"], "key": call["key"],
+                                "method": call["method"]})
             self.edges[scope_id] = out
 
     # -- graph --------------------------------------------------------
@@ -238,6 +248,15 @@ class Composition:
         nodes = scope["nodes"]
         emissions: dict = {}
         calls: dict = {}
+        # provision-method calls off a spawn handle (`s.<key>.<method>(...)`).
+        # These cross the spawn/instance seam, not the requires-wired service
+        # seam, so they carry no `req` target and are invisible to the `req`
+        # detection below. They are recorded separately here purely so the
+        # edge builder can wire the reach fold to the spawned component's
+        # matching provide-method scope (item 246): without this, an emission
+        # reached through a supervised spawn handle folds as class none at the
+        # caller and fires with no approval prompt.
+        spawn_calls: dict = {}
         awaits = 0
         compensated = 0
 
@@ -259,6 +278,13 @@ class Composition:
                 calls[(key, method)] = bool(spec.get("emission"))
                 if spec.get("emission"):
                     emissions.setdefault((key, method), False)
+            inst = self._spawn_call_target(node)
+            if inst is not None:
+                target_component, key, method, service = inst
+                sid = f"{target_component}:{key}.{method}"
+                decl = (((self.services.get(service) or {}).get("methods") or {})
+                        .get(method) or {})
+                spawn_calls[(sid, key, method)] = bool(decl.get("emission"))
 
         # host code: externs called directly, plus everything the pure fns
         # this scope calls reach transitively (lower/`__main__` own that walk)
@@ -290,9 +316,44 @@ class Composition:
             ],
             "calls": [{"key": key, "method": method, "emission": flag}
                       for (key, method), flag in sorted(calls.items())],
+            # spawn-seam edges the reach fold must follow (item 246). Not part
+            # of the `req` service seam and never serialized into a query
+            # result: consumed only by the edge builder in `__init__`.
+            "spawnCalls": [{"scope": sid, "key": key, "method": method,
+                            "emission": flag}
+                           for (sid, key, method), flag
+                           in sorted(spawn_calls.items())],
             "awaits": awaits,
             "compensated": compensated,
         }
+
+    def _spawn_call_target(self, node: dict):
+        """`(component, key, method, service)` if `node` is a provision-method
+        call read off a spawn handle (`s.<key>.<method>(...)`), else None.
+
+        A provision call does not lower to a `req`-target call: the pure
+        expression stratum lowers `s.<key>` to an `instance-get` node (with the
+        spawned `component`, the provision `key`, and the `service` the key
+        yields frozen inline by `lower._lower_instance_get`), and the trailing
+        `.<method>(...)` wraps it in a `field` callee. So the crossing is
+        reached through `callee`, not the `target` slot a required-service call
+        uses, and every `req`-only predicate on the reach surface misses it.
+        This reads the frozen `instance-get` node lower already produced rather
+        than re-deriving the spawn graph (mirrors `lower._instance_get_call`)."""
+        if node.get("kind") != "call":
+            return None
+        callee = node.get("callee")
+        if not (isinstance(callee, dict) and callee.get("kind") == "field"):
+            return None
+        recv = callee.get("target")
+        if not (isinstance(recv, dict) and recv.get("kind") == "instance-get"):
+            return None
+        component = recv.get("component")
+        key = recv.get("key")
+        method = callee.get("name")
+        if component is None or key is None or method is None:
+            return None
+        return (component, key, method, recv.get("service"))
 
     def _method_spec(self, comp: dict, key, method) -> dict:
         service = (comp.get("requires") or {}).get(key)
