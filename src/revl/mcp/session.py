@@ -1700,9 +1700,21 @@ class Session:
         if self.recorder is not None:
             self.recorder.set_origin({"phase": "call", "key": key,
                                       "method": method, "args": list(args or [])})
+        # item 245/246-F2: the session owner must be the process-global owner
+        # WHILE the call runs, so any Frame a spawn-in-call builds captures a live
+        # owner at `Frame.__init__` and joins its live-frame registry — the
+        # commit/abort gate target and the runtime class-(c) crossing check.
+        # Without it a frame created during the call captures a cleared ambient
+        # owner (None) and takes the fail-open path (an unchecked class-(c)
+        # crossing + a lost revert), the sibling of the swap-owner bug. Scoped
+        # exactly as `load` and `_wire_turn` scope it: installed here, cleared in
+        # the finally, so no later stray frame joins this session's registry.
+        runtime_mod = driver.runtime
+        runtime_mod.set_session_owner(self._owner)
         try:
             result = self._run(invoke())
         finally:
+            runtime_mod.clear_session_owner()
             if self.recorder is not None:
                 self.recorder.activation_origin()
         # item 330: a per-turn source admitted through the in-language crossing
@@ -1815,9 +1827,10 @@ class Session:
         # semantic identity covers ANY class-(c) call reaching it (differing
         # args included), so the shell-escape shape auto-approves against one
         # mint instead of prompting per call.
-        grant = self._find_standing_grant(ticket)
-        if grant is not None:
-            self._consume_grant(grant)         # durable spend before the fire
+        grants = self._find_standing_grant(ticket)
+        if grants is not None:
+            for g in grants:                   # every class-(c) cap is covered
+                self._consume_grant(g)         # durable spend before the fire
             return
         self._tickets[ticket["hash"]] = ticket
         if self._owner is not None:
@@ -1843,9 +1856,10 @@ class Session:
             if standing is not None:
                 self._consume_approval(standing)
                 continue
-            grant = self._find_standing_grant(ticket)   # item 344
-            if grant is not None:
-                self._consume_grant(grant)
+            grants = self._find_standing_grant(ticket)   # item 344
+            if grants is not None:
+                for g in grants:            # every class-(c) cap is covered
+                    self._consume_grant(g)
                 continue
             self._tickets[ticket["hash"]] = ticket
             if self._owner is not None:
@@ -1915,28 +1929,37 @@ class Session:
 
     # -- item 344: session-scoped standing capability grants ----------------
 
-    def _find_standing_grant(self, ticket: dict):
-        """The first LIVE standing grant covering this class-(c) ticket: the
-        grant's capability is in the ticket's reach capability set, the reach-
-        closure candidate hash matches the LIVE generation, the component and
-        session match, it is unexpired (clock checked HERE, not at mint), and it
-        has uses remaining. None when nothing covers it — the crossing then
-        prompts single-use exactly as before (fail-closed). A swap that changed
-        the closure recomputes a different candidate hash, so a stale grant fails
-        here with no revocation bookkeeping (invariant 4, the same trick as the
-        Slice-1 token)."""
-        now = self._now_ms()
+    def _grant_covers(self, grant: dict, capability: str) -> bool:
+        """The ONE grant-coverage predicate, shared by `_find_standing_grant`
+        (auto-approve) and `revoke_standing_grant` (retire). A standing grant
+        covers a capability iff it was minted for that EXACT capability — identity
+        on the minted key. A grant for A does not cover B (the item-344 invariant),
+        so "auto-approve what is granted" and "revoke what covers this" can never
+        disagree: the 245/246 over-coverage hole and the revocation no-op both
+        close on this single line. Coverage is capability identity ONLY — grant
+        liveness (component / candidate hash / session / expiry / uses) is a
+        separate axis, applied by `_live_grant_for` at the crossing."""
+        return grant["capability"] == capability
+
+    def _live_grant_for(self, capability: str, ticket: dict, now: int):
+        """The first LIVE standing grant covering `capability` under this ticket's
+        live closure: `_grant_covers` on the minted key, the same component and
+        reach-closure candidate hash (invariants 4/5), the same session, unexpired
+        (clock checked HERE, not at mint — invariant 3), and uses remaining. None
+        when nothing live covers it. A swap that changed the closure recomputes a
+        different candidate hash, so a stale grant fails here with no revocation
+        bookkeeping (the same trick as the Slice-1 token)."""
         for g in self._grants:
             if g["consumed"]:
                 continue
+            if not self._grant_covers(g, capability):
+                continue                 # a grant for A does not cover B
             if g["component"] != ticket["component"]:
                 continue                 # invariant 5: minted for another deputy
             if g["candidateHash"] != ticket["candidateHash"]:
                 continue                 # invariant 4: the closure changed under it
             if g["session"] != self._session_id:
                 continue                 # invariant 5: cross-session replay
-            if g["capability"] not in (ticket.get("capabilities") or []):
-                continue                 # a grant for A does not cover B
             exp = g.get("expiresAt")
             if exp is not None and now > exp:
                 continue                 # invariant 3: expired at the crossing
@@ -1945,6 +1968,37 @@ class Session:
                 continue                 # uses exhausted
             return g
         return None
+
+    def _find_standing_grant(self, ticket: dict):
+        """Every LIVE standing grant needed to JOINTLY cover this class-(c)
+        ticket, or None when even one class-(c) capability the ticket reaches has
+        no live covering grant (fail-closed: the crossing then prompts single-use
+        exactly as before). Returns a LIST (possibly one element) so the caller
+        can spend a use of each grant involved.
+
+        The ticket's class-(c) capability set is derived from its CROSSINGS
+        (`classCCapabilities`), NOT the worst-class-over-reach `capabilities` fold.
+        So a grant minted for one capability can never silently authorize a
+        DISTINCT un-granted class-(c) capability the same call also reaches — the
+        245/246-F1 over-coverage hole. Coverage per capability is `_grant_covers`,
+        the identical predicate `revoke_standing_grant` retires by. Class-(a)/(b)
+        capabilities need no grant (they are absent from `classCCapabilities`).
+        Several live grants MAY jointly cover a multi-capability call, but EVERY
+        class-(c) capability must be covered by some live grant."""
+        class_c = ticket.get("classCCapabilities") or []
+        if not class_c:
+            return None  # no class-(c) capability to cover (fail-closed)
+        now = self._now_ms()
+        grants: list[dict] = []
+        seen: set[int] = set()
+        for cap in class_c:
+            g = self._live_grant_for(cap, ticket, now)
+            if g is None:
+                return None  # a class-(c) capability with no live grant -> prompt
+            if id(g) not in seen:
+                seen.add(id(g))
+                grants.append(g)
+        return grants
 
     def _consume_grant(self, grant: dict) -> None:
         """Spend one use of a standing grant durably BEFORE the crossing fires
@@ -2138,6 +2192,27 @@ class Session:
                 "or a `requestId` (the id the mint returned) to revoke one "
                 "specific grant (item 379)")
 
+        # item 379 / revocation-F5b: a capability-wide revoke must carry the SAME
+        # ambiguity refusal a proactive `mint_standing_grant(capability=...)` has.
+        # A capability reachable via more than one distinct closure (component)
+        # is ungated at the operator layer — `_approve_targets` cannot scope it to
+        # one crossing component, so it defers (None) and `decide` lets it through
+        # on the assumption the handler refuses. That is true for mint but was
+        # FALSE for revoke, so a subject-scoped operator (e.g. `may approve on
+        # payments`) could revoke grants on components outside its scope. Refuse
+        # the ambiguous capability-wide revoke here, exactly as mint does; retiring
+        # one grant of an ambiguous capability is still available by `requestId`.
+        if capability is not None and self._class_map is not None:
+            targets = self._class_map.crossings_for_capability(capability)
+            comps = sorted({t["component"] for t in targets})
+            if len(comps) > 1:
+                raise SessionError(
+                    f"capability {capability!r} is reachable via {len(comps)} "
+                    f"distinct closures (components {', '.join(comps)}) — a "
+                    f"capability-wide revoke would cross operator scopes. Revoke "
+                    f"one grant by `requestId` (the id the mint returned), exactly "
+                    f"as an ambiguous proactive mint is refused (item 379)")
+
         revoked_ids: list[str] = []
         for g in self._grants:
             if g.get("revoked") or g["consumed"]:
@@ -2146,8 +2221,8 @@ class Session:
                 continue                     # invariant 5: this session's grants
             if request_id is not None and g["requestId"] != request_id:
                 continue
-            if capability is not None and g["capability"] != capability:
-                continue
+            if capability is not None and not self._grant_covers(g, capability):
+                continue                     # the shared predicate: find/revoke agree
             g["revoked"] = True
             g["consumed"] = True             # so _find_standing_grant skips it
             revoked_ids.append(g["requestId"])
