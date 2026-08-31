@@ -262,7 +262,20 @@ def _mangle(name: str) -> str:
 def _ident(name: Any, what: str) -> str:
     if not isinstance(name, str) or not name.isidentifier():
         raise EmitError(f"{what} {name!r} is not a usable Python identifier")
-    if name in _RESERVED or name.startswith("_"):
+    # The emitter's scaffolding lives in the `_revl*` namespace (`_revl_ctx`,
+    # `_revl_config`, the `__revl_destructure_*` temps, the `_IMPORT_ALIAS`
+    # `_revl_<name>` aliases): a user identifier that enters it would collide.
+    # That is the ONLY leading-underscore namespace the emitter claims. A plain
+    # leading-underscore name (`_v`, `_x`) is an ordinary Python identifier and
+    # the well-worn "bound but unused" idiom (e.g. a match arm that ignores its
+    # payload, `Some(_v) => ...`); it is a valid Python local, does NOT collide,
+    # and already emits verbatim on the module-`fn` path and on the other tiers
+    # (a go regression, examples/regressions/fuzz_go_ead437e4.rvl, pins it).
+    # Reserving ALL of `_*` refused it LATE here with a raw `EmitError`
+    # traceback for a program the checker and every other tier accept (roadmap
+    # item 408). Narrow the guard to the namespace actually reserved so the
+    # component/method binding path emits it verbatim like the rest.
+    if name in _RESERVED or (name.startswith("_") and name.lstrip("_").startswith("revl")):
         raise EmitError(f"{what} {name!r} collides with emitter scaffolding")
     return _mangle(name)
 
