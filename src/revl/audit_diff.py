@@ -310,6 +310,221 @@ def diff_crossings(prev: dict, new: dict) -> dict:
     }
 
 
+# --------------------------------------------------------------------------
+# Slice 2 (item 261 §7 / item 64 debt): the audit-surface differs that HARDEN
+# the `audit_diff` foundation. Today `diff_crossings` and `diff_reach` are the
+# only two differs; the surfaces below (`boundary[*].capabilities`,
+# `externs[*].backends`, `recovery_surface`, `capability_registers`,
+# `cardinality`) were carried in `audit_report` but differenced by nothing, so a
+# scope widening on a STABLE crossing, a new backend host body, a dropped
+# recovery inverse, a weakened idempotency register, and a raised emission
+# ceiling all escaped the crossing/reach diff. Each helper below closes one such
+# blind spot. Every bucket is sorted, so the diff is a pure, deterministic
+# function of the two audits (§4, the determinism invariant). Each mirrors the
+# `diff_reach` shape: a WIDENED bucket (the dangerous direction) and a TIGHTENED
+# bucket (the safe direction), keyed by structured tokens the changelog renders.
+
+
+def _scope_covers(wide, narrow) -> bool:
+    """True when the capability scope `wide` reaches everything `narrow` does:
+    every token in `narrow` is matched by some glob token in `wide`. `send.*`
+    covers `send.mail`; `*` (an unscoped bare emission) covers everything. This
+    is the same `fnmatchcase` glob semantics `lower._approval_covers` and
+    `policy` use, so scope comparison never invents a second order."""
+    from fnmatch import fnmatchcase  # noqa: PLC0415 - stdlib, no cycle
+    return all(any(fnmatchcase(n, w) for w in wide) for n in narrow)
+
+
+def _capability_scopes(audit: dict) -> dict[tuple[str, str], list]:
+    """`(component, emission-label) -> declared capability scope`, read off the
+    per-component `boundary[*].capabilities` map (`__main__._boundary` builds it,
+    ~234). This is the NESTED leaf a scope-free `emit:C:label` crossing token
+    cannot carry, so `diff_crossings` is blind to a widening here."""
+    out: dict[tuple[str, str], list] = {}
+    for comp, stats in (audit.get("boundary") or {}).items():
+        for label, scope in (stats.get("capabilities") or {}).items():
+            out[(comp, label)] = scope
+    return out
+
+
+def diff_capability_scopes(prev: dict, new: dict) -> dict:
+    """Diff the per-emission capability SCOPE of every crossing present in BOTH
+    audits (the HIGH/CRITICAL: `send.mail -> send.*` on a stable `emit:C:notify`).
+
+    Scope is not in the crossing token, so a widening on a crossing that STAYS is
+    invisible to `diff_crossings`. Only labels present in both are compared: a
+    brand-new emission is already a `diff_crossings` addition. A scope that grows
+    (the after-scope covers strictly more) is a WIDENING; one that shrinks is a
+    tightening; a scope that MOVED to an incomparable set is treated as a
+    widening (the conservative direction, as `diff_reach` treats a moved bound).
+    """
+    prev_scopes = _capability_scopes(prev)
+    new_scopes = _capability_scopes(new)
+    widened: list[str] = []
+    tightened: list[str] = []
+    for comp, label in prev_scopes.keys() & new_scopes.keys():
+        before, after = prev_scopes[(comp, label)], new_scopes[(comp, label)]
+        if before == after:
+            continue
+        after_covers = _scope_covers(after, before)
+        before_covers = _scope_covers(before, after)
+        if after_covers and before_covers:
+            continue  # same reach, tokens merely reordered
+        if after_covers:
+            widened.append(f"scope:{comp}:{label}")
+        elif before_covers:
+            tightened.append(f"scope:{comp}:{label}")
+        else:
+            # moved to an incomparable scope: conservatively a widening.
+            widened.append(f"scope:{comp}:{label}")
+    return {"scope_widened": sorted(widened),
+            "scope_tightened": sorted(tightened)}
+
+
+def diff_backends(prev: dict, new: dict) -> dict:
+    """Diff the `backends` host-body set of every extern present in BOTH audits
+    (the CRITICAL second instance: `backends: ["rust"] -> ["py","rust"]`).
+
+    A newly-added backend is NEW reachable host code (a real widening) that
+    `diff_reach` cannot see - it reads only `reach`. Only externs in both are
+    compared: a brand-new extern is already flagged by its `host:` crossing.
+    A dropped backend is a narrowing (host code given up).
+    """
+    prev_be = {ext["name"]: set(ext.get("backends") or [])
+               for ext in prev.get("externs") or []}
+    new_be = {ext["name"]: set(ext.get("backends") or [])
+              for ext in new.get("externs") or []}
+    added: list[str] = []
+    removed: list[str] = []
+    for name in prev_be.keys() & new_be.keys():
+        for backend in new_be[name] - prev_be[name]:
+            added.append(f"backend:{name}:{backend}")
+        for backend in prev_be[name] - new_be[name]:
+            removed.append(f"backend:{name}:{backend}")
+    return {"backends_added": sorted(added),
+            "backends_removed": sorted(removed)}
+
+
+def diff_recovery(prev: dict, new: dict) -> dict:
+    """Diff the `recovery_surface` between two audits (the CRITICAL: a dropped
+    inverse turns a reversible effect irreversible - item 273's class change).
+
+    Each recovery entry is `{name, kind, register}`; entries are keyed by
+    `(name, kind)`. An entry that DISAPPEARS is a dropped recovery (the reversible
+    effect can no longer be undone) - the most security-relevant delta a release
+    can carry, and invisible to every crossing/reach/interface differ. An entry
+    whose idempotency `register` WEAKENS (a lower `_REGISTER_RANK`, or lost
+    entirely) is a weakened recovery. A newly-appearing entry is a GAINED recovery
+    (safe). Buckets are sorted, so the diff is deterministic over the unhashable
+    `list[dict]` surface without ever hashing a dict.
+    """
+    from .lower import _REGISTER_RANK  # noqa: PLC0415 - the register partial order
+    prev_r = {(e["name"], e["kind"]): e.get("register")
+              for e in prev.get("recovery_surface") or []}
+    new_r = {(e["name"], e["kind"]): e.get("register")
+             for e in new.get("recovery_surface") or []}
+    dropped: list[str] = []
+    weakened: list[str] = []
+    added: list[str] = []
+    for name, kind in prev_r.keys() - new_r.keys():
+        dropped.append(f"recovery:{name}:{kind}")
+    for name, kind in new_r.keys() - prev_r.keys():
+        added.append(f"recovery:{name}:{kind}")
+    for key in prev_r.keys() & new_r.keys():
+        before = _REGISTER_RANK.get(prev_r[key], -1)
+        after = _REGISTER_RANK.get(new_r[key], -1)
+        if after < before:
+            weakened.append(f"recovery:{key[0]}:{key[1]}")
+    return {"recovery_dropped": sorted(dropped),
+            "recovery_weakened": sorted(weakened),
+            "recovery_added": sorted(added)}
+
+
+def diff_registers(prev: dict, new: dict) -> dict:
+    """Diff the `capability_registers` idempotency-floor map (item 309/290).
+
+    Each entry maps a capability token to its declaration register. A register
+    that DROPS in strength (`keyed -> declared`, or a token that loses its floor
+    entirely) is a WEAKENED floor - a running consumer that relied on the
+    stronger idempotency guarantee may now double-apply. A register that rises,
+    or a newly-declared floor, is a strengthening (safe). Rank via the same
+    `_REGISTER_RANK` partial order `_capability_registers` builds the map with.
+    """
+    from .lower import _REGISTER_RANK  # noqa: PLC0415 - the register partial order
+    prev_reg = prev.get("capability_registers") or {}
+    new_reg = new.get("capability_registers") or {}
+    weakened: list[str] = []
+    strengthened: list[str] = []
+    for token in prev_reg.keys() & new_reg.keys():
+        before = _REGISTER_RANK.get(prev_reg[token], -1)
+        after = _REGISTER_RANK.get(new_reg[token], -1)
+        if after < before:
+            weakened.append(f"register:{token}")
+        elif after > before:
+            strengthened.append(f"register:{token}")
+    for token in prev_reg.keys() - new_reg.keys():
+        weakened.append(f"register:{token}")      # a floor removed = weakened
+    for token in new_reg.keys() - prev_reg.keys():
+        strengthened.append(f"register:{token}")  # a new floor = tightened
+    return {"registers_weakened": sorted(weakened),
+            "registers_strengthened": sorted(strengthened)}
+
+
+def _card_direction(before: dict, after: dict) -> str | None:
+    """`"widened"` when `after` admits MORE crossings than `before`, `"tightened"`
+    when fewer, else None. `unbounded` is the widest ceiling; a bounded count is
+    ordered by its integer. Never orders two ceilings it cannot compare."""
+    before_unbounded = before.get("kind") == "unbounded"
+    after_unbounded = after.get("kind") == "unbounded"
+    if after_unbounded and not before_unbounded:
+        return "widened"
+    if before_unbounded and not after_unbounded:
+        return "tightened"
+    if before_unbounded and after_unbounded:
+        return None
+    before_bound, after_bound = before.get("bound"), after.get("bound")
+    if before_bound is None or after_bound is None:
+        return None
+    if after_bound > before_bound:
+        return "widened"
+    if after_bound < before_bound:
+        return "tightened"
+    return None
+
+
+def diff_cardinality(prev: dict, new: dict) -> dict:
+    """Diff the per-capability emission `cardinality` ceilings (item 260).
+
+    Each `cardinality[comp].per_capability[token]` is `{bound, kind}`
+    (a proved count, or `unbounded`). A ceiling that WIDENS (`<= 3` becomes
+    `unbounded`, or a larger bound) admits more crossings per activation - a
+    widened cost/authority signal the crossing/reach diff cannot see. A ceiling
+    that shrinks is a tightening (safe). Only `(comp, token)` pairs present in
+    both are compared; a brand-new crossing is already a `diff_crossings`
+    addition.
+    """
+    def _per_cap(audit: dict) -> dict[tuple[str, str], dict]:
+        out: dict[tuple[str, str], dict] = {}
+        for comp, entry in (audit.get("cardinality") or {}).items():
+            for token, cell in (entry.get("per_capability") or {}).items():
+                out[(comp, token)] = cell
+        return out
+
+    prev_card = _per_cap(prev)
+    new_card = _per_cap(new)
+    widened: list[str] = []
+    tightened: list[str] = []
+    for comp, token in prev_card.keys() & new_card.keys():
+        direction = _card_direction(prev_card[(comp, token)],
+                                    new_card[(comp, token)])
+        if direction == "widened":
+            widened.append(f"cardinality:{comp}:{token}")
+        elif direction == "tightened":
+            tightened.append(f"cardinality:{comp}:{token}")
+    return {"cardinality_widened": sorted(widened),
+            "cardinality_tightened": sorted(tightened)}
+
+
 def evaluate(prev: dict, new: dict, accepted: set[str] | None = None,
              accept_all: bool = False) -> dict:
     """The gate decision. `unacknowledged` are the additions that fail.
