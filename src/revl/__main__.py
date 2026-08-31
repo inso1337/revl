@@ -459,6 +459,8 @@ def _run_audit(args, ir: dict) -> int:
         return 1 if result["widened"] else 0
     boundary = _boundary(ir)
     distribution = distributability(ir)
+    from .cardinality import cardinality  # noqa: PLC0415
+    card = cardinality(ir)
     manifest = ir.get("manifest") or {}
     declared_externs = [
         {"name": ext["name"], "class": ext.get("class"),
@@ -492,12 +494,17 @@ def _run_audit(args, ir: dict) -> int:
         # byte-for-byte unstamped audit report (test_version_is_additive_body_unchanged).
         from .audit_diff import (  # noqa: PLC0415
             _capability_registers, _recovery_surface)
+        from .cardinality import cardinality  # noqa: PLC0415
         print(json.dumps(stamp(
             {"manifest": manifest, "boundary": boundary,
              "externs": declared_externs,
              "distributability": distribution,
              "capability_registers": _capability_registers(ir),
-             "recovery_surface": _recovery_surface(ir)}), indent=2))
+             "recovery_surface": _recovery_surface(ir),
+             # item 260: the per-component crossing-count ceilings, next to
+             # distributability. Must match audit_report byte-for-byte
+             # (test_version_is_additive_body_unchanged), so it is the same call.
+             "cardinality": cardinality(ir)}), indent=2))
         return 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
     for entry in manifest.get("components") or []:
@@ -555,6 +562,23 @@ def _run_audit(args, ir: dict) -> int:
 
                 rendered = ", ".join(_host_extern(e) for e in host)
                 detail.append(f"host code: {rendered}")
+            # item 260: the per-capability crossing-count ceiling, under the
+            # capabilities line. Bounded tokens join one clause; every unbounded
+            # token is loud on its own clause, never folded into a comma list
+            # (docs/design/260 §1.2).
+            card_entry = card.get(name)
+            if card_entry:
+                per_cap = card_entry.get("per_capability") or {}
+                bounded = [f"{token} <= {info['bound']} per activation"
+                           for token, info in per_cap.items()
+                           if info.get("kind") == "bounded"]
+                if bounded:
+                    detail.append(f"cardinality: {', '.join(bounded)}")
+                for token, info in per_cap.items():
+                    if info.get("kind") == "unbounded":
+                        detail.append(
+                            f"cardinality: {token} UNBOUNDED "
+                            f"({info.get('reason')})")
             print(f"  boundary: {'; '.join(detail)}")
         else:
             print("  boundary: none — fully revertible (G8)")
