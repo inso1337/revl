@@ -487,6 +487,17 @@ def _safe_name(name: str, taken: set[str]) -> str:
     return candidate
 
 
+# item 274: a minimal profile marker `navigate.is_untrusted` reads as the
+# untrusted-author view, so a body-level refusal can collapse its navigable map
+# without threading the whole `AdmissionProfile` down every lowering path. The
+# lowering layer only ever needs the one bit (`env.untrusted`).
+class _UntrustedProfile:
+    untrusted = True
+
+
+_UntrustedMark = _UntrustedProfile()
+
+
 class Env:
     def __init__(self, component: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                  types: dict | None = None):
@@ -494,6 +505,10 @@ class Env:
         self.services = services
         self.filename = filename
         self.types = types or {}
+        # item 274: whether this compile is under the untrusted-author profile, so
+        # a body-level navigable refusal (approval, ownership, ...) redacts its
+        # nearest-allowed map to the collapsed verdict. Set by `_lower_component`.
+        self.untrusted = False
         # names whose call reaches an irreversible host effect (set by
         # check_and_lower once externs/fns are lowered)
         self.emitting_fns: set = set()
@@ -2560,6 +2575,7 @@ def _lower_externs(program: Program, filename: str, types: dict,
         if (decl.classification == "acquire" and decl.returns is not None
                 and decl.returns not in NO_HANDLE_RETURNS
                 and not acquire_return_is_nominal_handle(decl.returns)):
+            from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
             raise RevlError(
                 filename, decl.line,
                 f"acquire extern `{decl.name}` returns `{decl.returns}`, which is "
@@ -2569,6 +2585,13 @@ def _lower_externs(program: Program, filename: str, types: dict,
                      "handle type (a bare nominal like `LogHandle`) and return "
                      "that, not a primitive or a structural carrier "
                      "(`Result[..]`, `Opt[..]`, `List[..]`, a function type)",
+                # R0 is unreachable under the untrusted-author profile (no_extern
+                # refuses any extern declaration before lowering), so the trusted
+                # view (profile=None) is the only one that can arise here.
+                navigate=_nav.ownership_navigate(
+                    kind="r0", returns=decl.returns,
+                    handle_name=decl.name[:1].upper() + decl.name[1:],
+                    profile=None),
             )
         if decl.classification == "pure" and (decl.undo is not None or decl.compensate is not None):
             raise RevlError(
@@ -3237,10 +3260,13 @@ def _cache_token_resolves(token: str, crossable: set[str]) -> bool:
     return False
 
 
-def _check_cache_freshness(cache, filename: str, line: int, what: str) -> None:
+def _check_cache_freshness(cache, filename: str, line: int, what: str,
+                           untrusted: bool = False) -> None:
     """The per-class freshness rules (design §"The freshness clauses"), class-
     local (no reach needed). Shared by fn/method/extern so one word means one
     thing on every surface."""
+    from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+    _prof = _UntrustedMark if untrusted else None
     has_inval = bool(cache.invalidated_by)
     has_ttl = cache.ttl_ms is not None
     if cache.cls == "pure" and (has_inval or has_ttl):
@@ -3251,7 +3277,9 @@ def _check_cache_freshness(cache, filename: str, line: int, what: str) -> None:
                  "category error (and probably a misclassified external read) — "
                  "drop the clause, or declare `cache external` "
                  "(docs/design/310-capability-aware-caching.md)",
-            code="G4", category="cache")
+            code="G4", category="cache",
+            navigate=_nav.cache_navigate(kind="drop", what=what,
+                                         clause="freshness", profile=_prof))
     if cache.cls == "capability" and has_inval:
         raise RevlError(
             filename, line,
@@ -3260,7 +3288,9 @@ def _check_cache_freshness(cache, filename: str, line: int, what: str) -> None:
                  "a capability result's freshness bound IS its authorizing scope "
                  "(the grant + generation liveness), narrowable only by `ttl`. "
                  "Drop `invalidated_by`, or declare `cache external` (item 310)",
-            code="G4", category="cache")
+            code="G4", category="cache",
+            navigate=_nav.cache_navigate(kind="drop", what=what,
+                                         clause="invalidated_by", profile=_prof))
     if cache.cls == "external" and not (has_inval or has_ttl):
         raise RevlError(
             filename, line,
@@ -3268,11 +3298,13 @@ def _check_cache_freshness(cache, filename: str, line: int, what: str) -> None:
             "`invalidated_by <token>` and/or `ttl <duration>`: an external "
             "result changes without notice, so an unbounded cache serves the "
             "past as the present",
-            code="G4", category="cache")
+            code="G4", category="cache",
+            navigate=_nav.cache_navigate(kind="add", what=what, profile=_prof))
 
 
 def _check_cache_resource(cache, filename: str, line: int, what: str,
-                          param_types, return_type, resources: set[str]) -> None:
+                          param_types, return_type, resources: set[str],
+                          untrusted: bool = False) -> None:
     """The structural resource-in-entry refusal (design, laundering point 8, the
     E x 7 shape). An entry copies a result (and digests args) into a store that
     outlives the call; a resource handle stored in an entry would be stored
@@ -3284,6 +3316,7 @@ def _check_cache_resource(cache, filename: str, line: int, what: str,
                        *(("parameter", t) for t in param_types)):
         hit = resource_in(tstr, resources)
         if hit is not None:
+            from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
             raise RevlError(
                 filename, line,
                 f"cache on {what} would store a resource handle `{hit}` "
@@ -3293,11 +3326,16 @@ def _check_cache_resource(cache, filename: str, line: int, what: str,
                      "copy, so a cached one is stored authority re-deliverable to "
                      "a later access (item 310, surface E). Return/accept a value "
                      "type, not a resource handle",
-                code="G4", category="cache")
+                code="G4", category="cache",
+                navigate=_nav.cache_navigate(
+                    kind="blocked", what=what,
+                    category=f"it stores the resource handle `{hit}`",
+                    profile=(_UntrustedMark if untrusted else None)))
 
 
 def _check_cache_declarations(program: Program, externs: list, types: dict,
-                              emitting_caps: dict, filename: str) -> None:
+                              emitting_caps: dict, filename: str,
+                              untrusted: bool = False) -> None:
     """The item-310 admission checks, run once the emission fixed point and the
     type/extern tables are known. Refuses in every case the seam-method slice
     cannot soundly cache; the surviving declarations flow their `cache` metadata
@@ -3315,6 +3353,8 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
         and the structural resource walk apply. The full worst-over-reach
         applicability fold over the provider closure (surface H) and the
         distributed-placement refusal run at load, where the class map exists."""
+    from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+    _prof = _UntrustedMark if untrusted else None
     resources = resource_taint(externs, types)
     crossable = None  # computed lazily, only when an `invalidated_by` appears
 
@@ -3354,7 +3394,10 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
                      "registration its teardown depends on, so an abort would "
                      "replay an incomplete history (G7). `cache` reads, it does "
                      "not mutate (item 310, §witnessed teardown)",
-                code="G7", category="cache")
+                code="G7", category="cache",
+                navigate=_nav.cache_navigate(
+                    kind="blocked", what=f"a `{cls}` extern `{decl.name}`",
+                    category=f"a {noun}, not a read", profile=_prof))
         if cls == "emission" and getattr(decl, "deferred", False):
             raise RevlError(
                 filename, decl.line,
@@ -3362,7 +3405,11 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
                 hint="a deferred emission is a QUEUED write; a hit that skips the "
                      "firing skips the enqueue, so the commit would flush an "
                      "incomplete history (G7). `cache` is read-shaped (item 310)",
-                code="G7", category="cache")
+                code="G7", category="cache",
+                navigate=_nav.cache_navigate(
+                    kind="blocked",
+                    what=f"a `deferred` emission extern `{decl.name}`",
+                    category="a queued write, not a read", profile=_prof))
         if cls == "emission" and decl.compensate is not None:
             raise RevlError(
                 filename, decl.line,
@@ -3373,7 +3420,11 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
                      "registration, so an abort after a hit replays an incomplete "
                      "offset history (G7). `cache` reads, it does not write "
                      "(item 310, §witnessed teardown)",
-                code="G7", category="cache")
+                code="G7", category="cache",
+                navigate=_nav.cache_navigate(
+                    kind="blocked",
+                    what=f"a `compensate`-declaring emission extern `{decl.name}`",
+                    category="a compensated write, not a read", profile=_prof))
         # every other extern: grammar-forward, enforcement-honest.
         raise RevlError(
             filename, decl.line,
@@ -3384,7 +3435,10 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
                  "only on a SEAM SERVICE METHOD where the call is the crossing. "
                  "An interior extern crossing needs a crossing-level ledger "
                  "transaction that is a later slice (item 310, §enforcement)",
-            code="G4", category="cache")
+            code="G4", category="cache",
+            navigate=_nav.cache_navigate(
+                kind="blocked", what=f"an interior extern crossing `{decl.name}`",
+                category="an interior crossing, not a seam method", profile=_prof))
 
     # -- plain fns: `cache pure` only, crossing-free only
     for fn in program.fn_decls:
@@ -3392,7 +3446,8 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
         if cache is None:
             continue
         what = f"fn `{fn.name}`"
-        _check_cache_freshness(cache, fn.source or filename, fn.line, what)
+        _check_cache_freshness(cache, fn.source or filename, fn.line, what,
+                               untrusted)
         crosses = fn.name in emitting_caps
         if cache.cls in ("capability", "external"):
             named = sorted(c for c in (emitting_caps.get(fn.name) or ()) if c != "*")
@@ -3428,7 +3483,7 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
             if cache is None:
                 continue
             what = f"`{svc.name}.{m.name}`"
-            _check_cache_freshness(cache, filename, m.line, what)
+            _check_cache_freshness(cache, filename, m.line, what, untrusted)
             if cache.cls == "pure" and m.emission:
                 raise RevlError(
                     filename, m.line,
@@ -3450,7 +3505,7 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
                     code="G4", category="cache")
             param_types = [t for _, t in m.params]
             _check_cache_resource(cache, filename, m.line, what,
-                                  param_types, m.returns, resources)
+                                  param_types, m.returns, resources, untrusted)
             check_invalidated_by(cache, m.line, what)
 
 
@@ -5048,7 +5103,7 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     # slice cannot soundly cache; survivors flow their `cache` IR below. Inert for
     # any program declaring no `cache` clause, so byte-identity holds.
     _check_cache_declarations(program, externs, types, emitting_caps,
-                              program.filename)
+                              program.filename, untrusted=untrusted)
 
     # item 187: default-parameter values must be pure and well-typed. Checked
     # here, once the emission fixed point is known, so an effectful default is
@@ -5188,7 +5243,7 @@ def check_and_lower(program: Program, ambient: dict | None = None,
                                             async_colored, witnessed_externs,
                                             colour_polymorphic, sync_monomorphs,
                                             poly_extern_names, extern_colour_instances,
-                                            errors=errors)
+                                            errors=errors, untrusted=untrusted)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
             # async coloring (docs/design/async-extern.md §3, "Component
@@ -5265,7 +5320,7 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     # the per-instance attenuation chain for the G8 audit surface.
     attenuation_chain = _collect(_check_spawn_attenuation,
                                  live_components, services, spawn_reg,
-                                 program.filename)
+                                 program.filename, untrusted=untrusted)
 
     # Emission budgets, static check (item 260 §3.2): a declared `budget.requests`
     # / `calls` ceiling that the proved cardinality max exceeds is a red compile,
@@ -7041,6 +7096,7 @@ def _o1_check(node, env: "Env", filename: str, line: int, *,
                 continue
             owned = _node_local_name(arg) in _owned_handles(env)
             mode = "owned" if owned else "borrowed"
+            from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
             raise RevlError(
                 filename, line,
                 f"`{name}(...)` is a declared inverse (a close) of a resource; "
@@ -7052,7 +7108,22 @@ def _o1_check(node, env: "Env", filename: str, line: int, *,
                      "have yet (only the acquiring binding's own `undo` may name "
                      "its inverse)",
                 code="G7", category="ownership",
+                navigate=_nav.ownership_navigate(
+                    kind="o1", resource=rt, mode=mode,
+                    binding=_node_local_name(arg),
+                    profile=(_UntrustedMark if env.untrusted else None)),
             )
+
+
+def _b1_navigate(env: "Env", clause: str, mode: str, rt: str) -> dict:
+    """The B1 borrow-escape family's navigable map (item 274, design §2.5): the
+    author-side reshape that keeps the borrow in scope. All author-enacted,
+    `candidate` (the compiler does not re-synthesize the rewrite to re-run the
+    gate); collapses under the untrusted-author profile."""
+    from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+    return _nav.ownership_navigate(
+        kind="b1", resource=rt, mode=mode, clause=clause,
+        profile=(_UntrustedMark if env.untrusted else None))
 
 
 def _b1_no_resource(node, env: "Env", filename: str, line: int, *,
@@ -7081,14 +7152,16 @@ def _b1_no_resource(node, env: "Env", filename: str, line: int, *,
             continue
         mode = "owned" if _is_owned(sub) else "borrowed"
         raise RevlError(filename, line, _b1_message(clause, mode, rt),
-                        hint=_b1_hint(clause), code="G7", category="ownership")
+                        hint=_b1_hint(clause), code="G7", category="ownership",
+                        navigate=_b1_navigate(env, clause, mode, rt))
     # a borrowed value with no local name (a bare call result / field read) is
     # still a resource by type; catch it when the whole node is the resource.
     rt = _node_resource(node, env, taint)
     if rt and not (borrows_only and _is_owned(node)):
         mode = "owned" if _is_owned(node) else "borrowed"
         raise RevlError(filename, line, _b1_message(clause, mode, rt),
-                        hint=_b1_hint(clause), code="G7", category="ownership")
+                        hint=_b1_hint(clause), code="G7", category="ownership",
+                        navigate=_b1_navigate(env, clause, mode, rt))
 
 
 _B1_CLAUSE_TEXT = {
@@ -7117,7 +7190,8 @@ def _b1_flag_if_borrow(v, env: "Env", taint: set, owned: set, filename: str,
     rt = _node_resource(v, env, taint)
     if rt and _node_local_name(v) not in owned:
         raise RevlError(filename, line, _b1_message(clause, "borrowed", rt),
-                        hint=_b1_hint(clause), code="G7", category="ownership")
+                        hint=_b1_hint(clause), code="G7", category="ownership",
+                        navigate=_b1_navigate(env, clause, "borrowed", rt))
 
 
 def _b1_body_scan(node, env: "Env", filename: str, line: int) -> None:
@@ -7218,7 +7292,8 @@ def _b1_witnessed_check(acquire, env: "Env", filename: str, line: int) -> None:
             mode = "owned" if _node_local_name(a) in owned else "borrowed"
             raise RevlError(filename, line, _b1_message("witnessed", mode, rt),
                             hint=_b1_hint("witnessed"), code="G7",
-                            category="ownership")
+                            category="ownership",
+                            navigate=_b1_navigate(env, "witnessed", mode, rt))
 
 
 def _all_free_names(expr, bound: set[str]) -> set[str]:
@@ -7267,9 +7342,15 @@ def _b1_capture_check(arrow, type_env: dict, types: dict, filename: str,
         t = type_env.get(name)
         rt = resource_in(t, taint) if t else None
         if rt:
+            from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
             raise RevlError(
                 filename, line, _b1_message("capture", "borrowed", rt),
-                hint=_b1_hint("capture"), code="G7", category="ownership")
+                hint=_b1_hint("capture"), code="G7", category="ownership",
+                # this site has no `Env`; capture reveals only the author's own
+                # closure (no operator topology), so the trusted map is sound.
+                navigate=_nav.ownership_navigate(
+                    kind="b1", resource=rt, mode="borrowed", clause="capture",
+                    profile=None))
 
 
 def _b1_return_admitted(node, env: "Env", taint: set) -> bool:
@@ -7367,8 +7448,10 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      sync_monomorphs: dict | None = None,
                      poly_externs: set | None = None,
                      extern_colour_instances: dict | None = None,
-                     errors: list | None = None) -> dict:
+                     errors: list | None = None,
+                     untrusted: bool = False) -> dict:
     env = Env(comp, services, filename, types)
+    env.untrusted = untrusted
     env.emitting_fns = emitting_fns or set()
     env.emitting_caps = emitting_caps or {}
     env.emission_evidence = emission_evidence
@@ -8095,7 +8178,9 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                         filename, mstmt.line,
                         _b1_message("return", "borrowed", _ret_res),
                         hint=_b1_hint("return"), code="G7",
-                        category="ownership")
+                        category="ownership",
+                        navigate=_b1_navigate(env, "return", "borrowed",
+                                              _ret_res))
                 # item 404: sweep the returned value with the raising oracle so
                 # an internal operator/index/builtin misuse is refused uniformly
                 # with a `fn`/`test` body, not only the return-type mismatch.
@@ -8438,6 +8523,8 @@ def _lower_emit_approval(stmt: EmitStmt, node: dict, step: dict, env: Env) -> No
         if token not in required:
             continue
         if edge_scope is None or not _approval_covers(edge_scope, token):
+            from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+            _prof = _UntrustedMark if env.untrusted else None
             raise RevlError(
                 env.filename, stmt.line,
                 f"crossing capability `{token}` requires approval, but this "
@@ -8445,7 +8532,8 @@ def _lower_emit_approval(stmt: EmitStmt, node: dict, step: dict, env: Env) -> No
                 hint=f"acquire an approval — `let a = await approval[{token}] "
                      f"{{ ... }}` — and thread it: `emit … with a` (item 246, "
                      f"Decision 3, unreachable-without)",
-                code="G4", category="approval")
+                code="G4", category="approval",
+                navigate=_nav.approval_navigate(token=token, profile=_prof))
 
 
 def _lower_endorse_approval(expr: "ExprEndorse", env: Env, scope: dict,
@@ -9569,7 +9657,8 @@ def _ceiling_attenuation_check(held: set, child_reach: set) -> "list[dict]":
 
 
 def _check_spawn_attenuation(components: list[dict], services: dict,
-                             spawn_reg: dict, filename: str) -> list[dict]:
+                             spawn_reg: dict, filename: str,
+                             untrusted: bool = False) -> list[dict]:
     """Capability attenuation on spawn (item 66, extended by item 294): a
     spawned child's capability set must be a **checked subset** of its
     spawner's (monotone shrinkage, the direction §5 admits for purity). A spawn
@@ -9631,6 +9720,8 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
                 reasons = [r for r in (_widening_reason(c, held_res)
                                        for c in extra) if r is not None]
                 extra_hint = ("; " + "; ".join(reasons)) if reasons else ""
+                from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+                _prof = _UntrustedMark if untrusted else None
                 raise RevlError(
                     comp.get("source") or filename, line,
                     f"`{comp['name']}` spawns `{child}`, granting it {offending}, "
@@ -9645,6 +9736,13 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
                          "(monotone shrinkage: narrowing is sound, widening is "
                          "not)" + extra_hint,
                     code="G4", category="capability-attenuation",
+                    # a resource crossing (path/host) held set is a STATIC fact at
+                    # the refusal site, so narrowing the child to it clears the
+                    # gate; raising the bound is operator-enacted at `comp`.
+                    navigate=_nav.ceiling_navigate(
+                        param=offending, child_value=offending,
+                        parent_bound=held_str, bound_site=f"`{comp['name']}`",
+                        is_budget=False, profile=_prof),
                 )
             # DEDICATED budget/ceiling attenuation (item 260 §3.3, the HIGH
             # correction): the crossing-coverage fold above is ceiling-blind, so
@@ -9661,6 +9759,9 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
                      f"`{v['cap'].to_str()}` widens `{v['param']}` to "
                      f"{v['child']} over the parent's {v['parent']}")
                     for v in budget_bad)
+                from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+                _prof = _UntrustedMark if untrusted else None
+                _bad0 = budget_bad[0]
                 raise RevlError(
                     comp.get("source") or filename, line,
                     f"`{comp['name']}` spawns `{child}` with a wider resource "
@@ -9674,6 +9775,17 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
                          "unbounded); narrow the budget on the child, or widen "
                          f"`{comp['name']}`'s own declared budget",
                     code="G4", category="capability-attenuation",
+                    # a budget ceiling is a LIVE `remainingUses`/lease counter
+                    # (item 294/260): the in-bounds number may already be spent at
+                    # the retry (TOCTOU), so the narrowing is `candidate`/`live`,
+                    # never `clears-this-gate` (the HIGH fix / soundness sweep).
+                    navigate=_nav.ceiling_navigate(
+                        param=str(_bad0["param"]),
+                        child_value=("(dropped)" if _bad0["child"] is None
+                                     else str(_bad0["child"])),
+                        parent_bound=str(_bad0["parent"]),
+                        bound_site=f"`{comp['name']}`",
+                        is_budget=True, profile=_prof),
                 )
             edge = (comp["name"], child)
             if edge in seen:

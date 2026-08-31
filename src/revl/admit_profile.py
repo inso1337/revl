@@ -45,6 +45,54 @@ from .errors import RevlError
 from .parser import Program
 
 
+# ---------------------------------------------------- item 274: navigable map
+#
+# The admit-profile family is the ONE §4 exception: it does NOT collapse under
+# the untrusted-author profile. Its refusals fire ONLY under that profile, and
+# the granted set is the AUTHOR'S OWN CONTRACT (design §2.9), already fully
+# observable from the admitted program's successes, so enumerating it leaks
+# nothing. Hence every builder here passes `profile=None` (the trusted rendering)
+# even though the author is untrusted. The `no_declassify` door is the sole
+# `blocked` case: this profile has no author-side declassify path at all.
+
+def _granted_navigate(granted, *, reached: str | None = None) -> dict:
+    """Enumerate the granted service set as author-enactable alternatives: reach a
+    granted service, or provide it internally. `candidate` (whether a granted
+    service does the job is a judgment the compiler does not hold). The covering-
+    granted-service-by-interface match (§2.9) is an authority-derivation surface
+    gated on its item-414 harness row and is out of this slice; the granted-set
+    enumeration is the base deliverable."""
+    from . import navigate as nav  # noqa: PLC0415 — lazy, avoids a cycle
+    alts = []
+    for svc in sorted(granted or ()):
+        alts.append(nav.alternative(
+            enacts=nav.ENACTS_AUTHOR,
+            action=f"reach the granted service `{svc}` instead", ref=svc))
+    alts.append(nav.alternative(
+        enacts=nav.ENACTS_AUTHOR,
+        action=("or provide the service internally (a service the turn's own "
+                "components provide is not an outward reach)"),
+        ref="provide-internally"))
+    refused = {"granted": sorted(granted or ())}
+    if reached is not None:
+        refused["reached"] = reached
+    # profile=None on purpose: the granted set is the author's own contract (§4).
+    return nav.record(family="admit-profile", refused=refused, blocked=False,
+                      alternatives=alts, profile=None)
+
+
+def _no_declassify_navigate() -> dict:
+    """A `no_declassify` refusal is `blocked` for this author: the profile has no
+    author-side declassify path, and teaching `endorse` would be a hint that then
+    also refuses (design §2.9)."""
+    from . import navigate as nav  # noqa: PLC0415 — lazy, avoids a cycle
+    return nav.blocked_record(
+        family="admit-profile",
+        reason=("this profile cannot declassify; return the untrusted value to "
+                "the harness, or reach a granted checked parser"),
+        profile=None)
+
+
 @dataclass(frozen=True)
 class AdmissionProfile:
     """How much to trust the AUTHOR of the source being admitted.
@@ -133,6 +181,7 @@ def check_no_extern(root_programs: list[Program], profile: AdmissionProfile) -> 
                      "its own host code — remove the extern and reach a granted "
                      "service instead",
                 code="G8", category="admission",
+                navigate=_granted_navigate(profile.granted),
             )
 
 
@@ -248,6 +297,7 @@ def check_no_host_extern_reach(root_programs: list[Program],
                  "granted services, never reach a host extern; drop the import "
                  "and reach a granted service instead (items 330, 329/transitive)",
             code="G8", category="admission",
+            navigate=_granted_navigate(profile.granted, reached=name),
         )
 
 
@@ -296,7 +346,8 @@ def check_no_declassify(root_programs: list[Program],
                          "untrusted author may not mint its own declassifier. "
                          "Reach a granted checked parser, or gate the downgrade on "
                          "a human approval (item 249, Slice C)",
-                    code="G9", category="admission")
+                    code="G9", category="admission",
+                    navigate=_no_declassify_navigate())
         # door 2: an `endorse` anywhere in the admitted source.
         endorses: list = []
         _iter_endorse(program.fn_decls, endorses)
@@ -312,7 +363,8 @@ def check_no_declassify(root_programs: list[Program],
                      "pre-granted closure (a granted checked parser) or a human "
                      "approval, never from the turn's own `endorse` (item 249, "
                      "Slice C)",
-                code="G9", category="admission")
+                code="G9", category="admission",
+                navigate=_no_declassify_navigate())
 
 
 def check_allowlist(document: dict, profile: AdmissionProfile) -> None:
@@ -349,6 +401,7 @@ def check_allowlist(document: dict, profile: AdmissionProfile) -> None:
                      f"nothing else; an admitted turn may only reach a granted "
                      f"service or one it provides itself (item 329 allowlist)",
                 code="R2", category="admission",
+                navigate=_granted_navigate(granted, reached=service),
             )
 
 
