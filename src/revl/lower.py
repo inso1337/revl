@@ -70,6 +70,7 @@ from .parser import (
     ExprBin,
     ExprBlockArm,
     ExprCall,
+    ExprEndorse,
     ExprField,
     ExprHole,
     ExprIf,
@@ -669,6 +670,22 @@ _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 # on its argument's base type (typed and unwrapped as such), so after the taint
 # verdict runs it is spliced out of the IR and no emitter ever sees it.
 _DECLASSIFY_BUILTINS = {"endorse"}
+
+
+def _endorse_node(inner: dict, expr: "ExprEndorse", approval: dict | None) -> dict:
+    """Build the IR node for a scoped `endorse[<origin>](v, reason=...)` (item
+    249, Slice C). It keeps the SAME `call`-to-`endorse` shape Slice A produced —
+    so base typing (identity on the argument), the callable resolution, and the
+    post-verdict splice are all unchanged — and rides an additive `endorse`
+    metadata dict the taint checker reads: the declared origin it downgrades, its
+    mandatory reason, its source line, and any `with` approval edge. The whole
+    node splices out before any emitter sees it, metadata and all."""
+    meta: dict = {"origin": expr.origin, "reason": expr.reason,
+                  "line": expr.line}
+    if approval is not None:
+        meta["approval"] = approval
+    return {"kind": "call", "callee": {"kind": "var", "name": "endorse"},
+            "args": [inner], "endorse": meta}
 
 
 # Builtin heads a `type X = Y` right-hand side may name. `Any`/`Never` are the
@@ -3545,6 +3562,20 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
     types = types if types is not None else {}
     if isinstance(expr, ExprHole):
         return _lower_hole(expr, filename)
+    if isinstance(expr, ExprEndorse):
+        inner = _lower_pure_expr(expr.expr, scope, callables, alias_fns, filename,
+                                 type_env, types)
+        if expr.approval is not None:
+            # approvals are acquired in a component activation body (item 246),
+            # not in a top-level `fn`; a `with` here has nothing to bind.
+            raise RevlError(
+                filename, expr.line,
+                "`endorse ... with <approval>` is only available in a component "
+                "or provide-method body — a top-level `fn` cannot acquire an "
+                "`Approval[C]`",
+                hint="move the approval-gated endorse into the provide method, or "
+                     "drop the `with` clause (item 246/249)")
+        return _endorse_node(inner, expr, None)
     # ADT construction (Result / user variants) lowers to a tagged `adt` node
     # (Opt's Some/None are not tagged — handled as identity/null downstream).
     _cases = types.get(CASES_KEY) or {}
@@ -4747,6 +4778,11 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
 
     if isinstance(expr, ExprHole):
         return _lower_hole(expr, filename)
+
+    if isinstance(expr, ExprEndorse):
+        inner = _lower_component_pure_expr(expr.expr, env, scope, callables, pure_only)
+        approval = _lower_endorse_approval(expr, env, scope, callables, pure_only)
+        return _endorse_node(inner, expr, approval)
 
     # ADT construction (Result / user variants) — same tagged `adt` node as
     # the pure-fn path; Opt's Some/None stay untagged.
@@ -7099,6 +7135,32 @@ def _lower_emit_approval(stmt: EmitStmt, node: dict, step: dict, env: Env) -> No
                      f"{{ ... }}` — and thread it: `emit … with a` (item 246, "
                      f"Decision 3, unreachable-without)",
                 code="G4", category="approval")
+
+
+def _lower_endorse_approval(expr: "ExprEndorse", env: Env, scope: dict,
+                            callables: set, pure_only: bool) -> dict | None:
+    """Resolve an `endorse[...](...) with <appr>` approval edge (item 249 Slice C,
+    on the item 246 surface). `<appr>` must type `Approval[C]`; the recorded edge
+    `{capability: C}` is what a `capability declassify.<origin> requires approval`
+    policy rule checks coverage against, exactly as an `emit … with a` edge is.
+
+    Returns None when the endorse carries no `with`."""
+    if expr.approval is None:
+        return None
+    from .parser import ExprVar as _EV  # noqa: PLC0415 — lazy, avoids cycle
+    appr_node = _lower_component_pure_expr(_EV(expr.approval, expr.line), env,
+                                           scope, callables, pure_only)
+    appr_type = infer_ir(appr_node, env.type_env, env.types, env.services)
+    edge_scope = _approval_scope_of(appr_type)
+    if edge_scope is None:
+        raise RevlError(
+            env.filename, expr.line,
+            f"`endorse ... with` expects an `Approval[C]` value, but "
+            f"`{expr.approval}` has type {appr_type or 'unknown'}",
+            hint="thread the value produced by `await approval[declassify."
+                 f"{expr.origin}] {{ ... }}` — nothing else produces an approval "
+                 "(item 246/249)")
+    return {"capability": edge_scope, "expr": appr_node}
 
 
 def _lower_timer_step(stmt: TimerStmt, env: Env) -> dict:

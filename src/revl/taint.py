@@ -141,13 +141,19 @@ class TaintModel:
     declassifiers: set[str] = field(default_factory=set)
     # a human sink label for the diagnostic, keyed by callable name
     sink_kind: dict[str, str] = field(default_factory=dict)
+    # Slice C: callable name -> the origins it is DECLARED to be allowed to
+    # `endorse[<origin>]` in its body (the `endorse[web] fn ...` slot, or the
+    # slot on the service operation a provide method implements). An `endorse`
+    # whose origin is not in this set is refused at admission.
+    declared_endorse: dict[str, frozenset] = field(default_factory=dict)
 
     @property
     def active(self) -> bool:
         """Whether any taint surface exists at all. A program with no qualifier
-        engages nothing — the flow walk is skipped and stays byte-identical."""
+        and no endorse slot engages nothing — the flow walk is skipped and stays
+        byte-identical."""
         return bool(self.sources or self.sinks or self.untrusted_params
-                    or self.declassifiers)
+                    or self.declassifiers or self.declared_endorse)
 
 
 def _sink_kind_for(name: str, capabilities) -> str:
@@ -202,6 +208,9 @@ def extract_and_normalize(program) -> TaintModel:
     for fn in getattr(program, "fn_decls", ()):
         if getattr(fn, "verified", False) and _mentions_trusted(fn.returns):
             model.declassifiers.add(fn.name)
+        endorse_origins = getattr(fn, "endorse_origins", frozenset())
+        if endorse_origins:
+            model.declared_endorse[fn.name] = frozenset(endorse_origins)
         params = []
         for i, p in enumerate(fn.params):
             params.append((i, p.type, _fnparam_setter(p)))
@@ -214,6 +223,12 @@ def extract_and_normalize(program) -> TaintModel:
     # required key; qualifiers are stripped from the (name, type) tuples.
     for svc in getattr(program, "services", ()):
         for method in svc.methods.values():
+            endorse_origins = getattr(method, "endorse_origins", frozenset())
+            if endorse_origins:
+                # keyed by the operation name — a provide method implementing it
+                # resolves to the same key (see `_callables`), so the method
+                # inherits the operation's declared declassification rights.
+                model.declared_endorse[method.name] = frozenset(endorse_origins)
             new_params = []
             for i, (pname, ptype) in enumerate(method.params):
                 qual = top_qualifier(ptype)
@@ -349,18 +364,28 @@ class _FlowChecker:
 
     def __init__(self, model: TaintModel, filename: str, line: int,
                  signatures: dict | None = None, infer: bool = False,
-                 qualname: str = "") -> None:
+                 qualname: str = "", endorse_allowed: frozenset = frozenset(),
+                 endorse_label: str = "") -> None:
         self.model = model
         self.filename = filename
         self.line = line
         self.signatures = signatures or {}
         self.infer = infer
         self.qualname = qualname
+        # Slice C: the origins the enclosing declaration is allowed to `endorse`,
+        # and a human label for the declassify record (the fn / `Component.method`
+        # name). An `endorse[o]` with `o` not in `endorse_allowed` is refused.
+        self.endorse_allowed = endorse_allowed
+        self.endorse_label = endorse_label
         # provenance for the G8 audit surface (Decision 5): the origins that
         # reach an emission here, and the origins declassified here. Populated as
         # the walk proceeds; folded onto the component's IR entry by the caller.
         self.reaches: set[str] = set()
         self.declassified: set[str] = set()
+        # Slice C: the enriched declassify records — `{origin, method, reason,
+        # line, approved}` — that ride beside the coarse `declassify:` token so
+        # the audit surface shows why each downgrade was granted.
+        self.declassify_records: list[dict] = []
         # inference-mode accumulators (Slice B): the taint that reaches a return
         # statement, and, per parameter index, the sink an argument reaches with
         # the naming chain behind it.
@@ -449,11 +474,67 @@ class _FlowChecker:
             f"create authority (G9)",
             hint="declassify it on the way in: parse it with a `verified fn` that "
                  "returns `Trusted[T]` (the failure branch is a typed `Result`, "
-                 "not a smuggled string), or wrap it in `endorse(<value>)` — an "
-                 "audited, policy-forbiddable downgrade. The tainting path is "
-                 f"{chain}.",
+                 "not a smuggled string), or endorse it at a declared point — "
+                 "`endorse[<origin>](<value>, reason = \"...\")`, an audited, "
+                 "policy-forbiddable downgrade the enclosing declaration must "
+                 f"grant. The tainting path is {chain}.",
             code="G9", category="taint-flow",
         )
+
+    # -- the scoped declassifier (Slice C) -------------------------------------
+    def _endorse(self, node, arg_taints: list) -> Taint:
+        """A scoped `endorse[<origin>](v, reason=...)`: authorise the downgrade
+        against the enclosing declaration's declared slot, record it on the audit
+        surface, and return CLEAN. In inference mode it is a pure clean-out (the
+        signature fixed point does not enforce or record)."""
+        meta = node.get("endorse") if isinstance(node, dict) else None
+        origin = meta.get("origin") if isinstance(meta, dict) else None
+        if self.infer:
+            return CLEAN
+        # the declared-slot authorisation: the enclosing fn / operation must
+        # declare `endorse[<origin>]`, or the downgrade is refused at admission —
+        # a declassification is never ambient (Slice C, the whole claim).
+        if origin is not None and origin not in self.endorse_allowed:
+            where = self.endorse_label or "this declaration"
+            declared = ", ".join(f"`endorse[{o}]`"
+                                 for o in sorted(self.endorse_allowed)) or "none"
+            raise RevlError(
+                self.filename, self._line_of(meta if isinstance(meta, dict) else node),
+                f"undeclared declassification: `endorse[{origin}]` is used in "
+                f"`{where}`, but its declaration does not grant it — a downgrade "
+                f"must appear in the enclosing declaration (G9)",
+                hint=f"declare the slot on the enclosing `fn`/operation — "
+                     f"`endorse[{origin}] fn ...` (or `emission endorse[{origin}] "
+                     f"fn ...` on the service operation). It declares {declared} "
+                     f"today. A declared endorse is auditable and "
+                     f"policy-forbiddable (item 249, Slice C).",
+                code="G9", category="taint-declassify",
+            )
+        # record the downgraded origin on the audit surface (Decision 5).
+        value_taint = arg_taints[0] if arg_taints else CLEAN
+        if origin is not None:
+            self.declassified.add(origin)
+        else:
+            self.declassified |= {o for o in value_taint.origins
+                                  if _param_index(o) is None}
+        if isinstance(meta, dict):
+            approval = meta.get("approval") or {}
+            self.declassify_records.append({
+                "origin": origin,
+                "method": self.endorse_label,
+                "reason": meta.get("reason"),
+                "line": meta.get("line"),
+                **({"approved": approval.get("capability")}
+                   if approval.get("capability") else {}),
+            })
+        # origin-precise downgrade: `endorse[<origin>]` clears ONLY the declared
+        # origin, so a value carrying a second, un-endorsed origin is still
+        # refused at a sink (a downgrade is scoped, never a blanket clean). A
+        # bare (originless) endorse falls back to a full clean.
+        if origin is None:
+            return CLEAN
+        residual = frozenset(o for o in value_taint.origins if o != origin)
+        return Taint(residual, value_taint.via) if residual else CLEAN
 
     # -- expression taint ------------------------------------------------------
     def taint_of(self, node, env: dict) -> Taint:
@@ -548,11 +629,18 @@ class _FlowChecker:
             origin = self.model.sources[callee]
             return Taint(frozenset({origin}), (f"{callee}()",))
 
-        # a declassifier (verified-fn parser, or the `endorse` builtin): clean.
-        # Record the origins it downgrades onto the audit surface (Decision 5) —
-        # a `declassify:` token an auditor and `revl audit --diff` can see. Only
-        # real origins are recorded; inference markers are internal bookkeeping.
-        if callee in self.model.declassifiers or callee == "endorse":
+        # the scoped `endorse[<origin>]` declassifier (Slice C): the downgrade is
+        # granted only where the enclosing declaration declared the slot, its
+        # reason lands on the audit surface, and the origin token feeds
+        # `audit --diff` / `may not declassify` policy exactly as before.
+        if callee == "endorse":
+            return self._endorse(node, arg_taints)
+
+        # a declassifier (verified-fn parser): clean. Record the origins it
+        # downgrades onto the audit surface (Decision 5) — a `declassify:` token
+        # an auditor and `revl audit --diff` can see. Only real origins are
+        # recorded; inference markers are internal bookkeeping.
+        if callee in self.model.declassifiers:
             for t in arg_taints:
                 self.declassified |= {o for o in t.origins if _param_index(o) is None}
             return CLEAN
@@ -720,7 +808,10 @@ def check_taint(program, fns, components, model: TaintModel,
     # top-level pure fns (lowered IR): seed params declared `Untrusted[T]`
     for fn in fns:
         checker = _FlowChecker(model, fn.get("source") or filename,
-                               fn.get("line") or 0, signatures=signatures)
+                               fn.get("line") or 0, signatures=signatures,
+                               endorse_allowed=model.declared_endorse.get(
+                                   fn["name"], frozenset()),
+                               endorse_label=fn["name"])
         env: dict = {}
         seeded = model.untrusted_params.get(fn["name"], {})
         for i, param in enumerate(fn.get("params") or []):
@@ -737,9 +828,10 @@ def check_taint(program, fns, components, model: TaintModel,
     # component provide-method bodies (lowered IR)
     for comp in components:
         source = comp.get("source") or filename
-        reaches, declassified = _walk_component_methods(
+        reaches, declassified, records = _walk_component_methods(
             comp.get("body") or [], model, source,
-            comp_lines.get(comp.get("name"), 0), signatures)
+            comp_lines.get(comp.get("name"), 0), signatures,
+            comp.get("name") or "")
         # fold the per-component provenance onto the IR entry (Decision 5), so
         # `_boundary` can emit `taint:`/`declassify:` tokens. Additive: absent
         # when the component touches no taint, so its IR stays byte-identical.
@@ -747,6 +839,14 @@ def check_taint(program, fns, components, model: TaintModel,
             comp["taint"] = {
                 "reaches": sorted(reaches),
                 "declassify": sorted(declassified),
+                # Slice C: the enriched declassify records ride beside the coarse
+                # `declassify:<origin>` token (which stays the stable diff key).
+                # Sorted for a deterministic audit surface.
+                **({"declassify_records": sorted(
+                    records, key=lambda r: (str(r.get("origin")),
+                                            str(r.get("method")),
+                                            r.get("line") or 0))}
+                   if records else {}),
             }
 
 
@@ -778,23 +878,30 @@ def splice_declassifiers(node):
 
 def _walk_component_methods(body, model: TaintModel, source: str,
                             line: int = 0,
-                            signatures: dict | None = None) -> tuple[set, set]:
+                            signatures: dict | None = None,
+                            component: str = "") -> tuple[set, set, list]:
     reaches: set = set()
     declassified: set = set()
+    records: list[dict] = []
     for step in body:
         if not isinstance(step, dict):
             continue
         if step.get("step") == "provide":
             for method in step.get("methods") or []:
-                checker = _FlowChecker(model, source,
-                                       method.get("line") or line,
-                                       signatures=signatures)
+                mname = method.get("name")
+                label = f"{component}.{mname}" if component else (mname or "")
+                checker = _FlowChecker(
+                    model, source, method.get("line") or line,
+                    signatures=signatures,
+                    endorse_allowed=model.declared_endorse.get(mname, frozenset()),
+                    endorse_label=label)
                 env: dict = {}
-                seeded = model.untrusted_params.get(method.get("name"), {})
+                seeded = model.untrusted_params.get(mname, {})
                 for i, pname in enumerate(method.get("params") or []):
                     if i in seeded:
                         env[pname] = Taint(frozenset({seeded[i]}), (pname,))
                 checker.run(method.get("body") or [], env)
                 reaches |= checker.reaches
                 declassified |= checker.declassified
-    return reaches, declassified
+                records.extend(checker.declassify_records)
+    return reaches, declassified, records
