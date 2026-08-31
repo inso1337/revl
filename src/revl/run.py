@@ -201,6 +201,47 @@ def _resolve_extern_config(ir: dict, config: dict) -> dict:
     return resolved
 
 
+def _secret_rows(ir: dict) -> list[dict]:
+    """The bound secrets a composition declares (item 256): name + capability
+    rows, never a value (the value lives only in the driver's `_REVL_SECRETS` at
+    run time). Empty for every composition that binds none, so the driver's
+    secret path is byte-identical there."""
+    return list(ir.get("secrets") or [])
+
+
+def _resolve_secrets(ir: dict, source: dict | None = None) -> dict:
+    """Resolve each bound secret's VALUE once at plug (item 256, §3), keyed by the
+    secret NAME. Sourced from `source` (a caller-supplied name->value store) or,
+    by default, the environment variable `REVL_SECRET_<NAME>` (NAME upper-cased),
+    so a secret store or a `--secret-file` seam can front it later without moving
+    the injection point.
+
+    Fail-loud, no defaults: a declared secret with no resolvable value RAISES here
+    at plug, naming the secret but NEVER its value - there is no silent fallback
+    for a provider key (unlike config's defaults path). The resolved value is
+    installed into the emitted module's `_REVL_SECRETS` and never logged, never
+    echoed by `--plan`, and never serialized into any trace."""
+    rows = _secret_rows(ir)
+    if not rows:
+        return {}
+    resolved: dict[str, str] = {}
+    for row in rows:
+        name = row["name"]
+        if source is not None and name in source:
+            resolved[name] = source[name]
+            continue
+        env_key = "REVL_SECRET_" + name.upper()
+        if env_key in os.environ:
+            resolved[name] = os.environ[env_key]
+            continue
+        # never name the value or a guessed default - a bound key has none.
+        raise RuntimeError(
+            f"capability-bound secret `{name}` has no value at plug: set the "
+            f"environment variable `{env_key}` (or supply it through the driver's "
+            f"secret source). There is no default for a secret (item 256).")
+    return resolved
+
+
 def _load_order(ir: dict) -> list[str]:
     manifest = ir.get("manifest") or {}
     return manifest.get("loadOrder") or [c["name"] for c in _components(ir)]
@@ -417,9 +458,14 @@ class _Driver:
     def __init__(self, ir, config, emit, runtime_mod, Context, FiberState,
                  record: bool = False, trace_path: str | None = None,
                  withdraw: str | None = None, wal_path: str | None = None,
-                 root_dirs: list | None = None):
+                 root_dirs: list | None = None, secrets: dict | None = None):
         self.ir = ir
         self.config = config
+        # item 256 Slice 1: an optional caller-supplied secret store (name ->
+        # value), consulted before the environment at plug. `None` means "source
+        # every bound secret from the environment" (`REVL_SECRET_<NAME>`). Never
+        # logged, never echoed by `--plan`.
+        self.secrets = secrets
         self.emit = emit
         # item 396 option B: the composition's root compile directories, the
         # import roots a `= @py ref` file must be reachable through at deploy.
@@ -596,6 +642,16 @@ class _Driver:
         extern_config = _resolve_extern_config(ir, self.config)
         if extern_config and hasattr(module, "_REVL_EXTERN_CONFIG"):
             module._REVL_EXTERN_CONFIG.update(extern_config)
+        # item 256 Slice 1: resolve each bound secret's value once at plug and
+        # install it into the module's `_REVL_SECRETS` map, so a bound extern body
+        # reads the key as its first local at the sanctioned seam - resolved ONCE
+        # here, never per call, never logged. A composition with no bound secret
+        # leaves the map (which the emitter only defines when one exists)
+        # untouched. Sourced from `self.secrets` (the caller-supplied store) or the
+        # environment; fail-loud when a declared secret has no value.
+        secrets = _resolve_secrets(ir, getattr(self, "secrets", None))
+        if secrets and hasattr(module, "_REVL_SECRETS"):
+            module._REVL_SECRETS.update(secrets)
         if self.recorder is not None:
             # between emit and plugin: recording replaces each component's
             # `apply`, and the fiber's context chain is fixed at plugin time
