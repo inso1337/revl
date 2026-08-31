@@ -1024,6 +1024,20 @@ class PropTestDecl:
 
 
 @dataclass
+class SecretDecl:
+    """A capability-bound secret declaration (roadmap item 256):
+    `secret NAME for CAP`. The NAME is the manifest-visible handle the runtime
+    resolves a value against; CAP is the emission capability token whose extern
+    bodies the value is injected into, and nowhere else. The value is NEVER in
+    the source or the IR - only the name and the capability are (the split from
+    config is a hard rule, docs/design/256-capability-bound-secrets.md §1b)."""
+
+    name: str
+    capability: str
+    line: int
+
+
+@dataclass
 class Program:
     filename: str
     services: list[ServiceDecl] = field(default_factory=list)
@@ -1032,6 +1046,7 @@ class Program:
     fn_decls: list[FnDecl] = field(default_factory=list)
     uses: list[UseDecl] = field(default_factory=list)
     externs: list[ExternDecl] = field(default_factory=list)
+    secrets: list[SecretDecl] = field(default_factory=list)
     tests: list[TestDecl] = field(default_factory=list)
     fault_tests: list[FaultTestDecl] = field(default_factory=list)
     prop_tests: list[PropTestDecl] = field(default_factory=list)
@@ -1358,6 +1373,17 @@ class Parser:
                 # KEYWORDS table needs no sync).
                 program.fault_tests.append(self.fault_test_decl())
 
+            elif self.at("ident", "secret") \
+                    and self.toks[self.pos + 1].kind == "ident" \
+                    and self.toks[self.pos + 2].kind == "kw" \
+                    and self.toks[self.pos + 2].value == "for":
+                # `secret` is a *contextual* keyword (roadmap item 256), the same
+                # discipline `witnessed`/`deferred`/`fault`/`prop` use: it heads a
+                # declaration ONLY in the shape `secret NAME for CAP`, so no program
+                # that used `secret` as an ordinary identifier breaks and the
+                # self-hosted lexer's KEYWORDS table needs no sync.
+                program.secrets.append(self.secret_decl())
+
             elif self.at("ident", "prop") and self.toks[self.pos + 1].kind == "kw" \
                     and self.toks[self.pos + 1].value == "test":
                 # `prop` is a *contextual* keyword: like `fault`, it only heads a
@@ -1410,6 +1436,21 @@ class Parser:
             tok = self.peek()
             raise self.err(tok.line, f"expected `{{` or `as` after `use` path, found {tok.value!r}")
         return UseDecl(path, names, alias, line)
+
+    def secret_decl(self) -> SecretDecl:
+        """`secret NAME for CAP` (roadmap item 256). NAME is an ordinary
+        identifier (the manifest-visible handle); CAP is a dotted capability
+        token, the same grammar an `emission[...]` scope names. The value never
+        appears here - only the name and the capability
+        (docs/design/256-capability-bound-secrets.md §1)."""
+        line = self.expect("ident", value="secret").line
+        name = self.expect("ident", what="a secret name").value
+        self.expect("kw", "for", what="`for` after a secret name")
+        parts = [self.expect("ident", what="a capability name").value]
+        while self.at("."):
+            self.next()
+            parts.append(self.expect("ident").value)
+        return SecretDecl(name, ".".join(parts), line)
 
     def extern_decl(self, public: bool) -> ExternDecl:
         line = self.expect("kw", "extern").line

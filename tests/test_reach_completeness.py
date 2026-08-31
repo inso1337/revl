@@ -255,6 +255,89 @@ def _taint_reach(kinds: frozenset[str]) -> frozenset[str]:
 
 
 # ===========================================================================
+# 2b'. THE SECRET-RAISE ZOO - a capability-bound secret (item 256) refused at
+#      each crossing kind. Distinct from the taint origin fold: the secret raise
+#      is a REFUSAL at the crossing, not a recorded origin, so its differential is
+#      "the crossing raises G-SECRET WITH the key and compiles WITHOUT it" rather
+#      than a reach set. The five §4a.2 crossings map onto the enumeration:
+#        req        -> the `emit` arm (a `secret` crossing a req emission)
+#        extern     -> the plain (non-declared-sink) extern host call
+#        firstclass -> the unnameable indirect / `*` callable
+#        nested_res -> a `secret` nested in a record, caught at the container's
+#                      own crossing
+#        spawn      -> the provide-method return across the service / MCP bridge,
+#                      exercised through a spawned child's `s.<key>.<method>()`
+#      `seam` is the one exempt kind (the taint fold, of which the secret raise is
+#      a part, is tier-agnostic - a secret relayed across a cross-tier seam
+#      propagates identically via the signature fixed point).
+SECRET_KINDS = frozenset({"req", "extern", "firstclass", "nested_res", "spawn"})
+
+_SECRET_PRELUDE = (
+    "secret openai_key for model.complete\n"
+    "extern emission[model.complete] fn complete(p: Str) -> Str = @py { return p }\n"
+    "service Ops { emission fn go(u: Str) -> Int }\n"
+)
+_SECRET_FC_PRELUDE = (
+    "secret openai_key for model.complete\n"
+    "extern emission[model.complete] fn complete(p: Str) -> Str = @py { return p }\n"
+    "service Ops { emission fn go(cb: (Str) -> Int, u: Str) -> Int }\n"
+)
+
+
+def _secret_zoo(kind: str, tainted: bool) -> str:
+    """revl source whose `Agent` crosses a bound key exactly one way (`kind`).
+
+    `tainted` toggles whether the crossed value is the bound key (`complete(u)`,
+    whose return is minted `secret`) or a clean parameter (`u`). WITH the key the
+    crossing raises G-SECRET; WITHOUT it the identical crossing compiles - the
+    discriminating pair that proves the raise genuinely depends on this crossing."""
+    crossed = "complete(u)" if tainted else "u"
+    if kind == "firstclass":
+        return (_SECRET_FC_PRELUDE
+                + "component Agent provides ops: Ops {\n  provide ops {\n"
+                + "    fn go(cb, u) {\n      let s = " + crossed
+                + "\n      let y = cb(s)\n      return 0\n    }\n  }\n}\n")
+    if kind == "spawn":
+        return (_SECRET_PRELUDE
+                + "service Worker { emission fn run(u: Str) -> Str }\n"
+                + "component Child provides worker: Worker {\n  provide worker {\n"
+                + "    fn run(u) {\n      return " + crossed + "\n    }\n  }\n}\n"
+                + "component Agent provides ops: Ops {\n"
+                + "  let c = effect spawn Child with { } undo c.dispose()\n"
+                + "  provide ops {\n    fn go(u) {\n      let r = emit c.worker.run(u)\n"
+                + "      return 0\n    }\n  }\n}\n")
+    decl, reqs = "", ""
+    body = "      let s = " + crossed + "\n"
+    if kind == "req":
+        decl = "service Sink { emission fn out(s: Str) -> Int }\n"
+        reqs = "requires snk: Sink "
+        body += "      emit snk.out(s)\n"
+    elif kind == "extern":
+        decl = "extern emission fn host_sink(s: Str) -> Int = @py { return 0 }\n"
+        body += "      let x = host_sink(s)\n"
+    elif kind == "nested_res":
+        decl = ("type Box = { key: Str, tag: Str }\n"
+                "extern emission fn host_box(b: Box) -> Int = @py { return 0 }\n")
+        body += "      let r = { key: s, tag: \"t\" }\n      let x = host_box(r)\n"
+    else:
+        raise AssertionError(f"unknown secret kind {kind!r}")
+    return (_SECRET_PRELUDE + decl + "component Agent " + reqs
+            + "provides ops: Ops {\n  provide ops {\n    fn go(u) {\n"
+            + body + "      return 0\n    }\n  }\n}\n")
+
+
+def _secret_raises(kind: str, tainted: bool) -> bool:
+    """Surface: the item-256 secret raise. True if the crossing refuses the bound
+    key with G-SECRET, False if it compiles."""
+    try:
+        compile_source(_secret_zoo(kind, tainted), "secret.rvl")
+        return False
+    except RevlError as exc:
+        assert getattr(exc, "code", None) == "G-SECRET", exc
+        return True
+
+
+# ===========================================================================
 # 2c. THE UNTRUSTED-AUTHOR fixtures - the reach sweep raises G8 the moment an
 #     untrusted turn reaches a host extern, by any door.
 # ===========================================================================
@@ -443,6 +526,21 @@ SURFACES: dict[str, dict[str, str]] = {
                 "seam propagates identically to a same-process service emit via the "
                 "signature fixed point, so the seam is not a distinct taint axis",
     },
+    # item 256: the capability-bound secret raise (G-SECRET). The bound key is
+    # refused at EVERY crossing kind, with no declassifier - the §4a.4 guardrail
+    # against a fold that visits one crossing and misses another. This row asserts
+    # the raise fires at all five §4a.2 crossings.
+    "secret_raise": {
+        "req": IN_SCOPE,        # the `emit` arm
+        "extern": IN_SCOPE,     # the plain (non-declared-sink) extern host call
+        "firstclass": IN_SCOPE,  # the unnameable indirect / `*` callable
+        "nested_res": IN_SCOPE,  # a secret nested in a record, caught at the crossing
+        "spawn": IN_SCOPE,      # the provide-method return across the service/MCP bridge
+        "seam": "the secret raise is part of the tier-agnostic taint fold; a bound "
+                "key relayed across a cross-tier seam propagates identically via "
+                "the signature fixed point, so the seam is not a distinct secret "
+                "axis (the same reasoning as the `taint` surface's seam exemption)",
+    },
 }
 
 
@@ -545,6 +643,30 @@ def test_taint_fold_visits_every_in_scope_kind():
         assert introduced, (
             f"taint fold did not change when {kind!r} ({CROSSING_KINDS[kind]}) was "
             f"removed - a tainted value crossing this way is a false-clean")
+
+
+# --- the item-256 secret raise ------------------------------------------------
+
+def test_secret_raise_fires_at_every_in_scope_crossing_kind():
+    """The §4a.4 guardrail: the bound-key raise fires at ALL five §4a.2 crossings
+    - the `emit` arm, the plain extern call, the unnameable indirect / `*`
+    callable, the provide-method return across the service/MCP bridge, and a
+    secret nested in a record. Each cell is DIFFERENTIAL: the crossing raises
+    G-SECRET WITH the key and compiles WITHOUT it, so a fold that stopped visiting
+    a crossing (the recurring bug shape) would compile the tainted program and
+    turn this RED. This is what makes "refused at every crossing" load-bearing
+    rather than a spot check that could silently rot as new crossings are added."""
+    scoped = _in_scope("secret_raise")
+    assert scoped == SECRET_KINDS, (
+        f"secret_raise in_scope kinds {sorted(scoped)} must match the secret-zoo "
+        f"kinds {sorted(SECRET_KINDS)}")
+    for kind in sorted(scoped):
+        assert _secret_raises(kind, tainted=True), (
+            f"the bound key was NOT refused at {kind!r} ({CROSSING_KINDS[kind]}) - "
+            f"a fold missed this crossing (a security hole: the key can leave)")
+        assert not _secret_raises(kind, tainted=False), (
+            f"the {kind!r} crossing refused even a CLEAN value - the raise does not "
+            f"depend on the bound key (a non-discriminating cell)")
 
 
 # --- the untrusted-author reach sweep -----------------------------------------
