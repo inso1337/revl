@@ -10,6 +10,16 @@ on:
   # changes; this only lets the workflow be `uses:`-called from the tag build.
   workflow_call:
 
+# Go module resolution resilience. The go cross-tier tests download the pinned
+# stc-go module during `go test`, which intermittently fails verifying it against
+# the online checksum database (sum.golang.org stream errors) and reddens CI on a
+# network hiccup, not a defect. `-mod=mod` lets go resolve modules; GOSUMDB=off
+# skips the online checksum-DB round-trip (the module version is pinned in go.mod,
+# and local go.sum verification is unaffected).
+env:
+  GOFLAGS: -mod=mod
+  GOSUMDB: "off"
+
 jobs:
   # roadmap 110d: lint gate. The repo's `# noqa` discipline is F-level
   # (Pyflakes: unused imports/locals, undefined names, empty f-strings) but no
