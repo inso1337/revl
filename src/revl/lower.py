@@ -2060,7 +2060,8 @@ def _check_deferred_not_in_teardown(program, filename: str) -> None:
             _scan(decl.compensate, decl.name, "compensate")
 
 
-def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
+def _check_witnessed_inverse(decl, extern_class: dict, emitting_fns: set,
+                             emitting_witness: dict, filename: str) -> None:
     """Rule 3 (docs/design/243-witnessed-externs.md): a witnessed extern's
     declared inverse must be classified **non-emission AND non-witnessed**.
 
@@ -2074,7 +2075,19 @@ def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
     `mode="undo"` machinery only checks the callee is *declared*), so this walk
     is the explicit close: every extern a witnessed `undo` calls is held to the
     rule, which also fences the latent acquire hole the same expression opens.
-    """
+
+    The extern-name check alone was an escape (the 330->329-transitive shape on
+    the teardown path): a callee that is a plain top-level `fn` is not in
+    `extern_class`, so it passed, yet a `fn` body may itself reach an emission
+    (a legal emitting fn), so the emission still fires on abort, invisible to
+    every fold and the approval gate. `emitting_fns` is the emission-reach fixed
+    point over the fn call graph (emission_analysis.py): a fn is in it iff its
+    call transitively reaches an `emission`/`witnessed` extern. Refusing a
+    callee found there follows fn calls transitively, so a fn-wrapped emission in
+    an inverse is refused exactly like a direct one. `compensate` is walked
+    alongside `undo` so the same escape cannot open on that slot when a backend
+    wires it. A pure/local fn (no emission reach) is in neither table and still
+    passes."""
     from .parser import ExprCall, ExprVar
 
     def _walk(e):
@@ -2098,6 +2111,30 @@ def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
                              f"(docs/design/243-witnessed-externs.md)",
                         code="G5", category="witnessed",
                     )
+                if bad is None and name in emitting_fns:
+                    # a plain top-level `fn` whose body transitively reaches an
+                    # emission: the same boundary crossing as a direct emission
+                    # inverse, one `fn` indirection later. Name the reached
+                    # boundary and the fn path so the author reads the derivation.
+                    chain = _emission_chain(name, emitting_witness)
+                    reached = chain[-1]
+                    term = extern_class.get(reached)
+                    kind = ("an emission" if term == "emission"
+                            else "itself witnessed")
+                    path = " -> ".join(chain)
+                    raise RevlError(
+                        filename, e.line,
+                        f"the inverse of witnessed extern `{decl.name}` calls "
+                        f"`{name}`, a fn that reaches {kind} `{reached}` "
+                        f"(through {path}), so a witnessed inverse must be a "
+                        f"host-local restore (G5)",
+                        hint="emissions are one-way boundary crossings and may "
+                             "not run in teardown, even through a fn wrapper "
+                             "(G5); declare the inverse `pure` or `acquire`, or "
+                             "route no emission through it "
+                             "(docs/design/243-witnessed-externs.md)",
+                        code="G5", category="witnessed",
+                    )
             for a in e.args:
                 _walk(a)
             return
@@ -2111,6 +2148,8 @@ def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
                         _walk(x)
 
     _walk(decl.undo)
+    if decl.compensate is not None:
+        _walk(decl.compensate)
 
 
 def _witnessed_extern_names(program: Program) -> set[str]:
@@ -2236,7 +2275,8 @@ def _refuse_teardown_bound_externs_in_fn_body(program: Program, filename: str) -
             _walk(stmt, f"the body of test `{test.name}`")
 
 
-def _lower_externs(program: Program, filename: str, types: dict) -> list:
+def _lower_externs(program: Program, filename: str, types: dict,
+                   fns: list | None = None) -> list:
     externs: list[dict] = []
     # name -> first declaring file, so a cross-module duplicate names BOTH files
     # (roadmap 394), same as `_lower_fns`. Externs carry provenance in
@@ -2248,6 +2288,27 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
     # a witnessed inverse is infinite regress. Built before the loop so an
     # inverse may name an extern declared later in the file.
     extern_class = {d.name: d.classification for d in program.externs}
+    # G5 transitive teardown guard: a witnessed inverse that calls a plain `fn`
+    # which itself reaches an emission is as much a teardown emission as a direct
+    # one (the 330->329-transitive shape on the teardown path). Reuse the
+    # emission-reach fixed point over the lowered fn bodies (emission_analysis.py),
+    # seeded from the extern classifications, so `_check_witnessed_inverse` can
+    # follow fn calls transitively instead of inspecting extern names only.
+    # Computed once, lazily, and only when a witnessed extern actually declares an
+    # inverse, so every other program stays byte-identical and pays nothing.
+    _inverse_reach: dict = {}
+
+    def _witnessed_inverse_reach():
+        if not _inverse_reach:
+            witness: dict[str, str] = {}
+            extern_seed = [
+                {"name": d.name, "class": d.classification,
+                 "capabilities": list(d.capabilities or [])}
+                for d in program.externs]
+            reach = set(_emitting_capabilities(fns or [], extern_seed, witness))
+            _inverse_reach["fns"] = reach
+            _inverse_reach["witness"] = witness
+        return _inverse_reach["fns"], _inverse_reach["witness"]
     # item 245: a deferred emission may not appear in any extern's teardown slot
     # (a whole-program check, so an `undo`/`compensate` naming a deferred extern
     # declared later in the file is still caught).
@@ -2687,7 +2748,9 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             # Classification of the inverse before its arg types: a witnessed or
             # emission inverse is refused on principle, whatever it is applied to.
             if decl.classification == "witnessed":
-                _check_witnessed_inverse(decl, extern_class, filename)
+                reach, reach_witness = _witnessed_inverse_reach()
+                _check_witnessed_inverse(decl, extern_class, reach,
+                                         reach_witness, filename)
             _check_extern_undo(decl.undo, decl.name, "undo", types, filename,
                                result_type=undo_result_type)
             entry["undo"] = _lower_extern_expr(decl.undo, filename)
@@ -4237,7 +4300,7 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
-    externs = _lower_externs(program, program.filename, types)
+    externs = _lower_externs(program, program.filename, types, fns)
     # item 388: the poly externs (`fn|async`), pre-seeded above as async IR
     # entries. `extern_colour_instances` is the shared registry each provide
     # method fills with the colour its call sites of a poly extern requested (the
