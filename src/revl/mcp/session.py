@@ -2170,6 +2170,27 @@ class Session:
         op = getattr(self, "operator", None)
         return getattr(op, "token", "") if op is not None else ""
 
+    def _wal_ledger_records(self) -> list:
+        """Every record currently flushed to the approval WAL file (item 251 Slice
+        3, the time axis). The WAL outlives a session and, when successive sessions
+        share a path, accumulates their `approval-granted` / `distillation-applied`
+        records side by side, so this is the CROSS-session ledger the
+        prompts-per-session series and `distillationImpact` fold over - not the
+        in-memory `_approval_records`, which resets each session. Empty (never an
+        error) when no WAL is open or the file is unreadable: the metric degrades
+        to a single-session view rather than failing `state()`."""
+        wal = self._approval_wal()
+        path = getattr(wal, "path", None)
+        if path is None:
+            return []
+        import os  # noqa: PLC0415 — stdlib
+        if not os.path.exists(path):
+            return []
+        try:
+            return replay_module().WriteAheadLog.read(path)["records"]
+        except Exception:  # noqa: BLE001 — a metric never crashes state()
+            return []
+
     def _distillation_ledger_fields(self, ticket: dict) -> dict:
         """The item-251 shape-key fields a grant record carries so the distiller
         folds it (design §1.1, §2.1): the crossing's realm, its bound resource
@@ -2179,7 +2200,11 @@ class Session:
         present-on-the-ticket fields are copied, so a bare crossing records exactly
         as before plus the realm and operator."""
         fields: dict = {"realm": ticket.get("realm", ""),
-                        "operator": self._operator_token()}
+                        "operator": self._operator_token(),
+                        # item 251 Slice 3: the grant's session (invariant 5) so
+                        # the WAL, read back across sessions sharing a path, groups
+                        # the per-session prompt series the time axis folds (§4).
+                        "session": self._session_id}
         if ticket.get("classCCapabilities"):
             fields["classCCapabilities"] = ticket["classCCapabilities"]
         if ticket.get("resourceScopes"):
@@ -3215,6 +3240,86 @@ class Session:
             self._distillation_seq += 1
         return {"revoked": True, "count": len(removed), "rules": removed}
 
+    # -- item 251 Slice 3: the time axis over the persisted ledger -----------
+
+    # a "prompt" in the series is a human decision the ledger recorded: a yes
+    # (`approval-granted`) or a no (`approval-denied`). A crossing a standing
+    # grant or a distilled rule auto-approved writes neither, so it never counts
+    # here - which is exactly why the series falls as distillation lands.
+    _PROMPT_RECORDS = ("approval-granted", "approval-denied")
+
+    def _prompts_per_session_series(self, records: list) -> list:
+        """The persisted per-session prompt tally (§4, the time axis): one entry
+        per session that raised at least one class-(c) approval prompt, in the
+        order the sessions FIRST appear in the WAL. The WAL is append-ordered and
+        fsync'd per record, so first-appearance order is a stable wall-clock
+        ordering with no timestamp tie to break - deterministic across reads.
+
+        Distillation is what bends the series down: a crossing a distilled rule
+        now auto-approves stops writing an `approval-granted`, so that session's
+        count trends toward the irreducible floor instead of resetting each
+        session (the item-248 headline made measurable over time)."""
+        order: list = []
+        counts: dict = {}
+        for rec in records:
+            if rec.get("record") not in self._PROMPT_RECORDS:
+                continue
+            sid = str(rec.get("session", ""))
+            if sid not in counts:
+                counts[sid] = 0
+                order.append(sid)
+            counts[sid] += 1
+        return [{"session": sid, "prompts": counts[sid]} for sid in order]
+
+    def _distillation_impact(self, records: list) -> dict:
+        """The before/after prompt reduction each applied rule achieved, plus the
+        irreducible floor (§4). Both are computed from the SAME WAL the series
+        reads and the SAME predicates the runtime consent path enforces:
+
+          * `perRule`: one entry per `distillation-applied` record, in ledger
+            order. `before` is the count of recorded prompts of the rule's shape
+            that fell BEFORE the apply point, `after` the count that fell after -
+            using `distill.blast_radius`, the runtime coverage predicate, so a
+            prompt counts iff the rule would have covered it. A settled rule drives
+            `after` to zero: the matching crossings now auto-approve and write no
+            prompt, so `reduced = before - after` is the prompts the rule removed.
+          * `floor`: the count of distinct shape keys the distiller CANNOT distill
+            (seen in one session, mixed-operator, taint-varying, or spanning
+            resource values with no common cone) - the irreducible count of
+            genuinely novel decisions the series converges on, not a rhetorical
+            target."""
+        from ..distill import blast_radius, distill  # noqa: PLC0415 — pure, lazy
+        from ..policy import parse_policy  # noqa: PLC0415
+        # keep each prompt's WAL POSITION, not the dict, so two shape-identical
+        # prompts never collide the way `list.index` (value equality) would.
+        prompts = [(i, r) for i, r in enumerate(records)
+                   if r.get("record") in self._PROMPT_RECORDS]
+        per_rule: list = []
+        for idx, rec in enumerate(records):
+            if rec.get("record") != "distillation-applied":
+                continue
+            text = str(rec.get("rule", ""))
+            try:
+                rules = parse_policy(text).auto_approve_rules
+            except Exception:  # noqa: BLE001 — a malformed record is not a metric
+                continue
+            if not rules:
+                continue
+            rule = rules[0]
+            before_win = [r for pos, r in prompts if pos < idx]
+            after_win = [r for pos, r in prompts if pos > idx]
+            before = blast_radius(rule, before_win).covered
+            after = blast_radius(rule, after_win).covered
+            per_rule.append({
+                "rule": rule.to_dsl(),
+                "before": before,
+                "after": after,
+                "reduced": before - after,
+                "appliedAt": rec.get("appliedAt"),
+            })
+        floor = len(distill(records).refusals)
+        return {"floor": floor, "perRule": per_rule}
+
     def approval_metrics(self) -> dict | None:
         """The auto-approve headline numbers for `session.state()` (Decision 6):
         the posture tally, percent auto-approved-with-proof, prompts-per-session,
@@ -3227,6 +3332,9 @@ class Session:
             else {"silent": 0, "atCommit": 0, "prompted": 0}
         prompts = dict(owner.prompts) if owner is not None else {}
         percent = owner.percent_auto_approved() if owner is not None else None
+        # item 251 Slice 3: the persisted time axis, folded from the WAL (which
+        # outlives the session) rather than the in-memory single-session ledger.
+        ledger = self._wal_ledger_records()
         return {
             "policy": self.approval_policy,
             "approvals": approvals,
@@ -3254,6 +3362,14 @@ class Session:
                  # live set; this bit distinguishes them for the audit.
                  "revoked": g.get("revoked", False)}
                 for g in self._grants],
+            # item 251 Slice 3: the TIME AXIS. `promptsPerSessionSeries` is the
+            # per-session prompt tally read from the WAL (deterministic, ordered by
+            # first appearance), and `distillationImpact` carries the before/after
+            # prompt reduction each applied rule achieved plus the irreducible
+            # floor (§4). Both fold the persisted ledger, so prompts-per-session
+            # trends toward the floor ACROSS sessions instead of resetting.
+            "promptsPerSessionSeries": self._prompts_per_session_series(ledger),
+            "distillationImpact": self._distillation_impact(ledger),
         }
 
     # -- backwards replay (docs/replay.md) ---------------------------------
