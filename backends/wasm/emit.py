@@ -1893,6 +1893,20 @@ class _ComponentEmitter:
             lines.append(
                 f'  (import "instance:{component}" "{key}.{op}" '
                 f'(func $inst_{component}_{key}_{op} (param i32){sig}{result}))')
+        # item 289, the wasm tier's `host imports subset-of declared caps` leg:
+        # every capability-bearing host import (`coeffect:<key>`, `route:<key>`)
+        # names a required key. This holds BY CONSTRUCTION -- `_coeffect_op_spec`
+        # and `_route_op_spec` refuse an unrequired key outright, so an import is
+        # only ever created while lowering a `req` on a resolved `requires` key
+        # -- and we re-assert it against the finished import set so a silent
+        # emitter regression becomes a named refusal rather than an ungranted
+        # host import. This leg is decidable only here: the wasm import set is
+        # statically knowable, where a @py/@ts host body is G8-opaque.
+        _assert_imports_within_requires(
+            self.name,
+            {key for (key, _op) in self.imports} | set(self.route_ops),
+            set(self.requires),
+        )
         if needs_memory:
             lines.append('  (memory (export "memory") 1)')
             for offset, data in self.v3.data_segments:
@@ -2342,6 +2356,25 @@ def _wat_bytes(data: bytes) -> str:
         else:
             parts.append(f"\\{byte:02x}")
     return "".join(parts)
+
+
+def _assert_imports_within_requires(name: str, import_keys: set, require_keys: set) -> None:
+    """Item 289: `host imports subset-of declared caps` at the wasm tier.
+
+    Every capability-bearing host import a component emits names a key it
+    declares in `requires`. The emitter only ever adds one while lowering a
+    `req` on a resolved key, so the import set is a subset of the declared
+    capability surface BY CONSTRUCTION; this re-asserts the invariant against
+    the finished set. A failure is an emitter regression, not an author error,
+    so it names the leg that broke rather than pointing at the source.
+    """
+    extra = sorted(import_keys - require_keys)
+    if extra:
+        raise EmitError(
+            f"least-authority (289): component {name!r} would import host "
+            f"capability {extra[0]!r} it does not declare in `requires` -- the "
+            f"wasm import set must be a subset of the declared capabilities "
+            f"(host imports subset-of declared caps)")
 
 
 def test_export_names(tests: list) -> list[tuple[str, str]]:

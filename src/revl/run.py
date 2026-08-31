@@ -1178,8 +1178,21 @@ def run_command(args) -> int:
         if backend == "go":
             from .run_go import run_go  # noqa: PLC0415 — lazy: no go toolchain needed to compile/plan
             return run_go(ir, config, args.files, once=once, interactive=interactive)
+        # item 289: with a boundary policy in force, the wasm tier enforces the
+        # full least-authority chain (host imports subset-of declared caps
+        # subset-of policy-allowed) before booting; all three sets are
+        # statically decidable for a wasm module.
+        policy = None
+        if getattr(args, "policy", None):
+            from .policy import load_policy  # noqa: PLC0415
+            try:
+                policy = load_policy(args.policy)
+            except (RevlError, OSError) as exc:
+                print(f"error: cannot load policy: {exc}", file=sys.stderr)
+                return 1
         from .run_wasm import run_wasm  # noqa: PLC0415 — lazy: no wasmtime needed to compile/plan
-        return run_wasm(ir, config, args.files, once=once, interactive=interactive)
+        return run_wasm(ir, config, args.files, once=once,
+                        interactive=interactive, policy=policy)
 
     backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:
