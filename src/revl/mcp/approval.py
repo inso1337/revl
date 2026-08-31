@@ -34,12 +34,28 @@ from __future__ import annotations
 import hashlib
 import json
 
+from .. import cap_order
 from ..query import Composition, SHARED_REALM
 
 # worst-class ordering: (c) > (b) > (a) > none. One prompt covers the whole call
 # or none of it — the same all-or-nothing rule admission and the operator gate
 # already use (Decision 1).
 _ORDER = {None: 0, "a": 1, "b": 2, "c": 3}
+
+
+def _cap_covers(wide: str, narrow: str) -> bool:
+    """Whether the declared capability spelling `wide` COVERS `narrow` in the
+    item-294 partial order (narrow at or below wide). The single point where the
+    class map speaks the order; fails closed and additive (an identical spelling
+    or an unparseable one reduces to string equality, so a parameter-free class
+    map is bit-for-bit unchanged)."""
+    if wide == narrow:
+        return True
+    try:
+        return cap_order.covers(cap_order.parse_cap(wide),
+                                cap_order.parse_cap(narrow))
+    except cap_order.CapError:
+        return False
 
 
 def worse(x: str | None, y: str | None) -> str | None:
@@ -231,21 +247,31 @@ class ClassMap:
         return {**reach, "component": provider, "key": key, "method": method}
 
     def crossings_for_capability(self, capability: str) -> list[dict]:
-        """Every LIVE class-(c) crossing whose reach capability set includes
-        `capability`, deduplicated by (component, reach-closure candidate hash).
-        The standing-grant path (roadmap item 344, fork b) reads this to mint a
+        """Every LIVE class-(c) crossing whose declared reach COVERS `capability`,
+        deduplicated by (component, reach-closure candidate hash). The
+        standing-grant path (roadmap item 344, fork b) reads this to mint a
         capability-scoped grant against the semantic identity of the crossing —
         not one ticket hash — and the operator verb gate reads it to scope the
         `approve` verb when a grant is minted proactively (no outstanding
         ticket). A capability reachable only via distinct closures yields one
         entry per closure, so a proactive mint over an ambiguous capability is
-        visible to the caller as more than one target."""
+        visible to the caller as more than one target.
+
+        Item 294 Slice 2: a declared crossing capability matches `capability` when
+        it COVERS it in the one partial order (`capability` at or below a declared
+        `(T, P)`), not by string equality. So a narrow mint spelling
+        `fs.write(path="/tmp")` resolves against a crossing declared bare
+        `fs.write` (or any wider `path=`) that covers it — mint-narrow works
+        instead of being refused dead on arrival — while a mint WIDER than every
+        declared crossing matches nothing and is refused (a grant may only narrow
+        the declaration, never widen it). Bare-token capabilities match exactly as
+        before (`covers` on empty valuations is string identity)."""
         seen: dict = {}
         for sid, reach in self._reach.items():
             if reach["class"] != "c":
                 continue
             caps = reach["capabilities"]
-            if capability not in caps:
+            if not any(_cap_covers(declared, capability) for declared in caps):
                 continue
             component = self.index.scopes[sid]["component"]
             chash = self.candidate_hash(reach["closureComponents"])

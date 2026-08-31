@@ -93,6 +93,7 @@ from .parser import (
     Interp,
     InterceptStmt,
     IsolateStmt,
+    LeaseAcquire,
     LetApprovalStmt,
     LetEffect,
     LetPatternStmt,
@@ -6346,7 +6347,17 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 "`spawn` must be bound to a handle: "
                 f"`let s = effect spawn {stmt.acquire.component} … undo s.dispose()`",
             )
-        if isinstance(stmt, LetEffect):
+        if isinstance(stmt, LetEffect) and isinstance(stmt.acquire, LeaseAcquire):
+            # item 294 Slice 2: a capability lease. The acquire is not a host
+            # call but a class-(c)-gated, ticket-mediated mint of a standing grant
+            # over the capability's cone (session._enforce_lease_gate raises the
+            # ticket before boot; an ungated run refuses). It lowers to a reserved
+            # runtime acquisition returning a lease handle, and the site `undo
+            # l.revoke()` retires that grant on the LIFO teardown. Duration/uses
+            # reuse the grant's expiresAt/remainingUses; nothing here mints — the
+            # grant is minted from the approved ticket, never self-minted.
+            body.append(_lower_lease_step(stmt, env, filename))
+        elif isinstance(stmt, LetEffect):
             if stmt.setup:
                 saved_locals = dict(env.locals)
                 saved_taken = set(env._taken)
@@ -7392,6 +7403,50 @@ def _is_emission_call(node: dict, env: Env) -> bool:
     svc = env.services[env.requires[target["name"]]]
     decl = svc.methods.get(node["method"])
     return decl is not None and decl.emission
+
+
+def _lower_lease_step(stmt: "LetEffect", env: Env, filename: str) -> dict:
+    """Lower `let l = effect lease <cap> [ttl <d>] [uses <n>] undo l.revoke()`
+    (item 294 Slice 2) to a `let-effect` step whose acquire is the reserved
+    runtime lease acquisition and whose undo is the own-handle revoke.
+
+    Two dedicated IR nodes keep the lease off the host-verb surface: `lease-
+    acquire` emits `_revl_frame.acquire_lease(...)` (the gate mints the grant
+    from an approved ticket; the acquire only binds a handle to it), and `lease-
+    revoke` emits `<handle>.revoke()` (retiring the grant by its OWN requestId on
+    the LIFO teardown — the always-safe direction, revoking your own authority).
+    The disposer MUST be exactly `<bind>.revoke()`: the design's scoped exemption
+    is the own-requestId revoke only; any other disposer would name a grant the
+    scope did not mint and belongs on the ordinary 379 gate, which no source form
+    reaches."""
+    acq: LeaseAcquire = stmt.acquire            # type: ignore[assignment]
+    from .parser import ExprCall, ExprField, ExprVar  # noqa: PLC0415
+    undo = stmt.undo
+    ok = (isinstance(undo, ExprCall) and not undo.args
+          and isinstance(undo.callee, ExprField)
+          and undo.callee.name == "revoke"
+          and isinstance(undo.callee.target, ExprVar)
+          and undo.callee.target.name == stmt.bind)
+    if not ok:
+        raise RevlError(
+            filename, acq.line,
+            f"a lease's `undo` must be `{stmt.bind}.revoke()` — its own revoke",
+            hint="a lease is torn down by revoking the grant it acquired; the "
+                 "own-requestId revoke is the only exempt disposer (item 294). "
+                 "A disposer naming another grant goes through the operator "
+                 "revoke gate (item 379), which no source form reaches",
+            code="G4", category="capability")
+    safe = env.bind_local(stmt.bind, stmt.line)
+    step = {
+        "step": "let-effect",
+        "bind": safe,
+        "lease": {"capability": acq.capability,
+                  "ttlMs": acq.ttl_ms, "uses": acq.uses},
+        "acquire": {"kind": "lease-acquire", "capability": acq.capability,
+                    "ttlMs": acq.ttl_ms, "uses": acq.uses, "line": acq.line},
+        "undo": {"kind": "lease-revoke", "handle": safe, "line": acq.line},
+    }
+    return step
 
 
 def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:

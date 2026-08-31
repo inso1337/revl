@@ -975,6 +975,23 @@ class _ComponentEmitter:
                 for k, v in (expr.get("config") or {}).items()) + "}"
             realms = tuple(expr.get("realms") or ())
             return f"{_runtime_ref('spawn')}(_revl_ctx, {target}, {cfg}, {realms!r})"
+        if kind == "lease-acquire":
+            # capability lease (item 294 Slice 2): the acquire binds a lease
+            # HANDLE to the standing grant the session already minted from the
+            # approved ticket (session._enforce_lease_gate raised it before boot).
+            # `_revl_frame.acquire_lease` resolves the live lease grant for this
+            # component + capability cone and returns the handle; the disposer's
+            # `lease-revoke` retires it on the LIFO teardown.
+            cap = expr.get("capability")
+            ttl = expr.get("ttlMs")
+            uses = expr.get("uses")
+            return (f"_revl_frame.acquire_lease({cap!r}, "
+                    f"{ttl!r}, {uses!r})")
+        if kind == "lease-revoke":
+            handle = expr.get("handle")
+            if not isinstance(handle, str) or not handle.isidentifier():
+                raise EmitError(f"{where}: bad lease handle {handle!r}")
+            return f"{handle}.revoke()"
         if kind == "instance-get":
             # instance-parametric components (docs/design-v2-instances.md):
             # `s.<key>` reads a provision off a spawn handle. The handle

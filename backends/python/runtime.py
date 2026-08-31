@@ -45,7 +45,8 @@ _ENTRY_STAMP = itertools.count()
 
 __all__ = [
     "Clock", "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
-    "JobHandle", "Map", "Pool", "PoolError", "SessionCommitError", "SessionOwner",
+    "JobHandle", "LeaseHandle", "LeaseRefused", "Map", "Pool", "PoolError",
+    "SessionCommitError", "SessionOwner",
     "SpawnHandle", "StateIncompatible",
     "TimerHandle", "TransientError", "add_trace", "arm_fault_probe", "clear_session_owner",
     "disarm_fault_probe",
@@ -1366,6 +1367,33 @@ class Frame:
         return {"capability": capability, "requestId": entry.get("requestId"),
                 "passthrough": False}
 
+    def acquire_lease(self, capability: str, ttl_ms: Any, uses: Any) -> Any:
+        """`let l = effect lease <cap> …` at runtime (item 294 Slice 2). The
+        standing grant was already minted from the operator's approved ticket by
+        the load-time lease gate; this resolves the live lease grant for THIS
+        component and capability cone and returns the handle whose `.revoke()`
+        retires it on teardown. Fails closed when no session owner backs the lease
+        (an ungated raw run) — the load gate refuses that upstream, and this is the
+        defensive twin so no self-mint ever happens with no ticket behind it."""
+        owner = self._owner
+        acquire = getattr(owner, "lease_acquire", None) if owner is not None \
+            else None
+        if acquire is None:
+            raise LeaseRefused(
+                capability,
+                "no session grant ledger backs this lease — an unenforceable "
+                "lease is not a lease (item 294, honest sentence 2). A lease "
+                "must be acquired under an approval policy that raised and "
+                "approved its ticket")
+        request_id = acquire(self.name, capability, ttl_ms, uses)
+        if request_id is None:
+            raise LeaseRefused(
+                capability,
+                "no live standing grant was minted for this lease — the "
+                "operator ticket for the lease was not approved (fail-closed: "
+                "a lease never self-mints)")
+        return LeaseHandle(capability, request_id, owner.lease_revoke)
+
     def approval_crossing(self, handle: Any, capability: str,
                           fire: Callable[[], Any]) -> Any:
         """`emit <call> with a` at runtime (item 246, Decision 3). The frame
@@ -1599,6 +1627,40 @@ class ApprovalCrossingRefused(RuntimeError):
         self.reason = reason
 
 
+class LeaseRefused(RuntimeError):
+    """A capability lease (`effect lease …`, item 294 Slice 2) that cannot be
+    acquired at runtime because no session driver / grant ledger backs it. The
+    load-time gate (`Session._enforce_lease_gate`) already refuses an ungated
+    lease before boot; this is the defensive twin, so a hand-built IR or a raw
+    backend run cannot silently self-mint a grant with no operator ticket behind
+    it (the self-mint consent bypass the design closes)."""
+
+    def __init__(self, capability: str, reason: str) -> None:
+        super().__init__(
+            f"lease refused for capability `{capability}`: {reason}")
+        self.capability = capability
+        self.reason = reason
+
+
+class LeaseHandle:
+    """The value bound by `let l = effect lease …`. It names the standing grant
+    the session minted from the approved ticket (by `requestId`) and carries the
+    single scoped revoke exemption: `l.revoke()` retires THAT grant (its own,
+    always-safe: revoking your own authority only narrows), riding the LIFO
+    teardown. It names no other grant."""
+
+    __slots__ = ("capability", "request_id", "_revoke_cb")
+
+    def __init__(self, capability: str, request_id: str,
+                 revoke_cb: "Callable[[str], Any]") -> None:
+        self.capability = capability
+        self.request_id = request_id
+        self._revoke_cb = revoke_cb
+
+    def revoke(self) -> Any:
+        return self._revoke_cb(self.request_id)
+
+
 def _default_now_ms() -> int:
     import time  # noqa: PLC0415 — stdlib
     return int(time.time() * 1000)
@@ -1728,6 +1790,14 @@ class SessionOwner:
         # an injectable clock (ms since epoch) so expiry (invariant 3) is testable
         # without sleeping; defaults to the wall clock.
         self.now_ms: Callable[[], int] = _default_now_ms
+        # item 294 Slice 2: the session's lease acquire/revoke bridge. A lease
+        # `effect lease …` acquisition resolves the already-minted standing grant
+        # through `lease_acquire`, and its disposer's own-requestId revoke rides
+        # `lease_revoke`. Both are set by the session at owner install; None (and
+        # inert) for a session with no lease-bearing program, so byte-identity
+        # holds for every existing composition.
+        self.lease_acquire: Optional[Callable[..., Any]] = None
+        self.lease_revoke: Optional[Callable[[str], Any]] = None
 
     def _wal(self) -> Optional[Any]:
         return self._wal_getter() if self._wal_getter is not None else None

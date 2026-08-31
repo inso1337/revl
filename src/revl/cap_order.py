@@ -132,6 +132,36 @@ def registered_names() -> list[str]:
     return sorted(_REGISTRY)
 
 
+def is_ceiling(name: str) -> bool:
+    """Whether a registered parameter is ceiling-kind (`calls`, `size`): compared
+    declaration-to-declaration and mint-vs-declaration, ERASED from a grant's
+    valuation at mint (translated into `remainingUses`), and EXEMPT from
+    crossing-coverage. Resource kinds (`path`, `host`, `table`) are compared at
+    crossings (Slice 2)."""
+    return name in _REGISTRY and _REGISTRY[name][0] == _CEILING
+
+
+def split_ceilings(cap: "Cap") -> "tuple[Cap, dict[str, int]]":
+    """Split a `Cap` into its resource-only projection and its ceiling map.
+
+    A CROSSING binds no ceiling parameter (one call is one call), so a grant
+    that kept `calls=N` in its valuation would cover no crossing ever. At mint
+    the ceiling params are stripped from the stored capability (so the grant's
+    cone is compared on its resource parameters alone) and returned separately;
+    the gate translates `calls` into the shipped `remainingUses` counter. The
+    resource projection re-canonicalizes through `Cap`, so a grant spelled
+    `model.complete(calls=3)` stores as bare `model.complete` with `{calls: 3}`
+    peeled off."""
+    ceilings: dict[str, int] = {}
+    kept: list[tuple[str, object]] = []
+    for name, value in cap.params:
+        if is_ceiling(name):
+            ceilings[name] = value  # already an int by canonicalization
+        else:
+            kept.append((name, value))
+    return Cap(cap.token, tuple(kept)), ceilings
+
+
 def _canon_value(name: str, value: object) -> object:
     """Canonicalize (and validate) a raw parameter value for its registered
     order. String literals are expected for resource kinds, integers for
