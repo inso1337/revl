@@ -2145,6 +2145,32 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
         return f"{target}.startsWith({args[0]})"
     if method == "endsWith":
         return f"{target}.endsWith({args[0]})"
+    # Single-character ASCII classification (item 233, docs/stdlib-2.0.md
+    # §Str.is_alnum), mirroring the python backend's native forms
+    # (backends/python/emit.py §is_digit/is_alpha/is_alnum/is_space) and the
+    # rust backend (backends/rust/emit.py). JS `<=`/`<` on strings is UTF-16
+    # code-unit lexicographic order, and code-unit order IS code-point order
+    # for ASCII, so it matches python's chained string comparison exactly. It
+    # stays total the same way: an empty receiver compares less than `"0"`, so
+    # the verdict is `false` rather than a fault, and multi-character input
+    # (outside the per-character contract) never raises. The receiver is bound
+    # once by an arrow IIFE (`_rc`) — correct even when it has side effects,
+    # since these builtins re-reference it — with no revl-fn call.
+    if method == "is_digit":
+        return f'((_rc: string) => "0" <= _rc && _rc <= "9")({target})'
+    if method == "is_alpha":
+        return (f'((_rc: string) => ("a" <= _rc && _rc <= "z") '
+                f'|| ("A" <= _rc && _rc <= "Z"))({target})')
+    if method == "is_alnum":
+        return (f'((_rc: string) => ("0" <= _rc && _rc <= "9") '
+                f'|| ("a" <= _rc && _rc <= "z") '
+                f'|| ("A" <= _rc && _rc <= "Z"))({target})')
+    # is_space: space, tab, LF, CR — equality with each element (python uses
+    # tuple membership; a `String.includes` would wrongly match the empty
+    # receiver, which is a substring of every string).
+    if method == "is_space":
+        return (f'((_rc: string) => _rc === " " || _rc === "\\t" '
+                f'|| _rc === "\\n" || _rc === "\\r")({target})')
     # The Map value type (docs/stdlib-2.0.md §Map): the built-in JS Map,
     # copied on write. There is no expression-form copy, so `set` goes
     # through an immediately-applied closure: operands evaluate exactly
