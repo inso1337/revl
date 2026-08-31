@@ -171,10 +171,12 @@ _SELF_ATTESTING_FACETS = frozenset({"fault-sweep", "inverse-roundtrip",
                                     "gauntlet"})
 
 # The declaration-strength floors (item 290, §3.2, adopting 309's partial
-# order). Slice 1 records only `declared` in the IR, so a higher floor is a
-# parse error until 309's ledger lands (`_REGISTER_RECORDABLE`).
+# order). Item 309 now records `declared`/`keyed`/`shape-proven` in the IR
+# (lower.py `_idempotent_register`), so every floor is recordable: `declared` is
+# the trust-me floor, `keyed` and `shape-proven` are the strong peers, and
+# `strong` is the floor meaning "any strong register" (keyed OR shape-proven).
 _REGISTER_LEVELS = ("declared", "keyed", "shape-proven", "strong")
-_REGISTER_RECORDABLE = frozenset({"declared"})
+_REGISTER_RECORDABLE = frozenset(_REGISTER_LEVELS)
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,17 @@ class RegisterRule:
 
 
 @dataclass(frozen=True)
+class TeardownRule:
+    """A ``requires idempotent-teardown[(strength: <level>)]`` rule (item 309,
+    §"question 4" point 3): the operator's unattended-recovery floor. Refuses a
+    composition whose recovery surface (any inverse, deferred emission, or
+    compensation) contains an entry whose register is below the strength floor,
+    under 309's partial order. The bare form is ``strength = "declared"``:
+    refuse a fenced/unregistered entry, admit any of the three registers."""
+    strength: str                     # "declared" | "keyed" | "shape-proven" | "strong"
+
+
+@dataclass(frozen=True)
 class Policy:
     """A parsed boundary policy: rules, the tenants switch, the sandbox."""
     rules: tuple[Rule, ...] = ()
@@ -242,6 +255,10 @@ class Policy:
     # every existing policy file parses byte-identically and evaluates the same.
     evidence_rules: tuple[EvidenceRule, ...] = ()
     register_rules: tuple[RegisterRule, ...] = ()
+    # item 309: `requires idempotent-teardown[(strength: <level>)]` — the
+    # unattended-recovery floor over the recovery surface. Empty by default so
+    # every existing policy parses/evaluates byte-identically.
+    teardown_rules: tuple[TeardownRule, ...] = ()
     evidence_root_local: bool = False        # `evidence-root: local` (§6.3)
 
     def is_empty(self) -> bool:
@@ -250,6 +267,7 @@ class Policy:
             and not self.quarantine_required and not self.approval_rules \
             and not self.declassify_rules and not self.taint_flow_rules \
             and not self.evidence_rules and not self.register_rules \
+            and not self.teardown_rules \
             and not self.evidence_root_local
 
     def requires_approval(self) -> bool:
@@ -401,14 +419,31 @@ def _parse_register_level(level: str, source, lineno) -> str:
             source, lineno,
             f"unknown register level {lvl!r} — expected one of "
             f"[{', '.join(_REGISTER_LEVELS)}] (item 290/309)")
-    if lvl not in _REGISTER_RECORDABLE:
+    if lvl not in _REGISTER_RECORDABLE:  # pragma: no cover — all levels recordable
         raise PolicyError(
             source, lineno,
-            f"register level {lvl!r} is not yet recordable; lands with 309's "
-            f"ledger. Slice 1 records only `declared` in the IR, so a `{lvl}` "
-            f"floor would be an unconditional deny wearing a register costume — "
-            f"it is rejected until 309 records the register (item 290, §3.2)")
+            f"register level {lvl!r} is not recordable (item 290, §3.2)")
     return lvl
+
+
+def _parse_teardown_strength(tail: str, source, lineno) -> str:
+    """Parse the `(strength: <level>)` argument of `requires idempotent-teardown`
+    (item 309). The bare rule (no argument) is `declared`; an explicit argument
+    names a level in `_REGISTER_LEVELS`."""
+    inner = tail.strip()
+    if not (inner.startswith("(") and inner.endswith(")")):
+        raise PolicyError(
+            source, lineno,
+            f"`requires idempotent-teardown` takes either no argument or "
+            f"`(strength: <level>)`, got {tail.strip()!r} (item 309)")
+    inner = inner[1:-1].strip()
+    key, _, level = inner.partition(":")
+    if key.strip().lower() != "strength" or not level.strip():
+        raise PolicyError(
+            source, lineno,
+            f"the `requires idempotent-teardown` argument is "
+            f"`(strength: <level>)`, got `({inner})` (item 309)")
+    return _parse_register_level(level.strip(), source, lineno)
 
 
 def _validate_evidence_rooting(rules, root_local: bool) -> None:
@@ -454,6 +489,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     taint_flow_rules: list[TaintFlowRule] = []
     evidence_rules: list[EvidenceRule] = []
     register_rules: list[RegisterRule] = []
+    teardown_rules: list[TeardownRule] = []
     evidence_root_local = False
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
@@ -505,6 +541,20 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                     f"{raw.strip()!r}")
             level = _parse_register_level(tail.strip(), source, lineno)
             register_rules.append(RegisterRule(parts[1], level))
+            continue
+        # item 309 §"question 4", point 3: `requires idempotent-teardown` and its
+        # `requires idempotent-teardown(strength: <level>)` form — the operator's
+        # unattended-recovery floor. Document-global: it refuses a composition
+        # whose recovery surface (an inverse, a deferred emission, a compensation)
+        # contains an entry below the named strength floor. The bare form means
+        # `strength: declared` (refuse a fenced/unregistered entry).
+        if "requires idempotent-teardown" in low:
+            _, _, tail = line.partition("requires idempotent-teardown")
+            tail = tail.strip()
+            strength = "declared"
+            if tail:
+                strength = _parse_teardown_strength(tail, source, lineno)
+            teardown_rules.append(TeardownRule(strength))
             continue
         # item 249, Slice D (D2): `<origin>-taint may not reach <cap>[, ...]
         # [without approval]`. Checked before the generic `may not reach` loop
@@ -622,6 +672,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                   quarantine_required, tuple(approval_rules),
                   tuple(declassify_rules), tuple(taint_flow_rules), source,
                   tuple(evidence_rules), tuple(register_rules),
+                  tuple(teardown_rules),
                   evidence_root_local)
 
 
@@ -739,11 +790,17 @@ def _parse_json(text: str, source: str | None) -> Policy:
         level = _parse_register_level(
             str(entry.get("atLeast") or entry.get("at_least") or ""), source, 1)
         register_rules.append(RegisterRule(cap, level))
+    teardown_rules: list[TeardownRule] = []
+    for entry in doc.get("idempotentTeardown") or []:
+        strength = _parse_register_level(
+            str(entry.get("strength") or "declared"), source, 1)
+        teardown_rules.append(TeardownRule(strength))
     _validate_evidence_rooting(evidence_rules, evidence_root_local)
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
                   quarantine_required, tuple(approval_rules),
                   tuple(declassify_rules), tuple(taint_flow_rules), source,
                   tuple(evidence_rules), tuple(register_rules),
+                  tuple(teardown_rules),
                   evidence_root_local)
 
 
@@ -913,6 +970,19 @@ class RuleReport:
         return [c for c in self.clauses if not c.passed]
 
 
+def _register_clause(token: str, actual: str | None, floor: str) -> "ClauseVerdict":
+    """One capability token's register verdict against a `requires register`
+    floor (item 309/290 §3.2). Reads 309's partial order via lower's
+    `_register_satisfies`; a token with no idempotency claim (`actual is None`)
+    fails every floor. The clause carries the token in `facet` so the violation
+    names WHICH capability fell short."""
+    from .lower import _register_satisfies  # noqa: PLC0415 — the partial order
+    ok = _register_satisfies(actual, floor)
+    fact = actual or "unregistered"
+    return ClauseVerdict(f"register:{token}", floor, fact, ok, "verified",
+                         "" if ok else f"{fact} is below the `{floor}` floor")
+
+
 def _component_origin(audit: dict, origins, name: str) -> str | None:
     """A component's admission ORIGIN (`registry` for a registry-resolved
     admission, `source` for bare-source), recorded by the admission path and
@@ -1037,6 +1107,8 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
     key_bytes = bytes(key) if key is not None else None
     trusted = frozenset(trusted_publishers or ())
     manifest = audit.get("manifest") or {}
+    # item 309/290 §3.2: the per-capability-token register floor input.
+    cap_registers = audit.get("capability_registers") or {}
     out: dict = {}
     for name in _components(audit):
         realms = component_realms(manifest, name)
@@ -1088,21 +1160,19 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
             ev_reports.append(RuleReport(rule.scope, rule.selector, rule.origin,
                                          rule.self_attested, True, tuple(clauses)))
         for rrule in policy.register_rules:
-            # TODO(309): when the ledger records `keyed`/`shape-proven` in the
-            # IR, read the per-token register off `audit["capability_registers"]`
-            # (§3.2) and refuse below the floor with the weakest-declaration
-            # why-trace. Slice 1 parses only `declared`, always satisfied here.
-            selected = any(fnmatchcase(tok, rrule.capability)
-                           for tok in reach_tokens if tok != UNBOUNDED)
-            # slice 1: only `declared` is parseable, and every declaration meets
-            # the bare `declared` floor, so a selected register rule always holds
-            # (the higher floors land with 309's ledger; §3.2).
-            clause = (ClauseVerdict("register", rrule.at_least, "declared",
-                                    True, "verified",
-                                    "declared floor (309 ledger pending)"),)
+            # item 309 §3.2: read the per-token register off the audit's
+            # `capability_registers` map (built from the IR's declared registers)
+            # and refuse a selected token whose register is below the floor, under
+            # 309's partial order (`declared < keyed`, `declared < shape-proven`;
+            # the two strong forms are peers, `strong` names either).
+            matched = [tok for tok in reach_tokens
+                       if tok != UNBOUNDED and fnmatchcase(tok, rrule.capability)]
+            selected = bool(matched)
+            clauses = tuple(
+                _register_clause(tok, cap_registers.get(tok), rrule.at_least)
+                for tok in sorted(matched))
             reg_reports.append(RuleReport("capability", rrule.capability, None,
-                                          False, selected,
-                                          clause if selected else ()))
+                                          False, selected, clauses))
         out[name] = {"evidence": ev_reports, "registers": reg_reports}
     return out
 
@@ -1118,6 +1188,75 @@ def _evidence_violations(policy: Policy, reports: dict, manifest: dict) \
             for clause in report.failed():
                 violations.append(
                     _evidence_violation(manifest, name, report, clause))
+    return violations
+
+
+def _teardown_violations(policy: Policy, audit: dict, manifest: dict) \
+        -> list[Violation]:
+    """Refuse a composition whose recovery surface contains an entry below the
+    strongest `requires idempotent-teardown` floor (item 309 §"question 4",
+    point 3). Document-global: a single below-floor inverse/emission fails
+    admission, so unattended recovery auto-replays only what the floor permits."""
+    from .lower import _REGISTER_RANK, _register_satisfies  # noqa: PLC0415
+    floor = max((r.strength for r in policy.teardown_rules),
+                key=lambda s: _REGISTER_RANK.get(s, 0))
+    violations: list[Violation] = []
+    for entry in audit.get("recovery_surface") or []:
+        register = entry.get("register")
+        if _register_satisfies(register, floor):
+            continue
+        name = entry.get("name")
+        kind = entry.get("kind")
+        fact = register or "unregistered (fenced)"
+        message = (
+            f"policy violation: {kind} `{name}` has register `{fact}`, below the "
+            f"required `idempotent-teardown` strength `{floor}` — admission "
+            f"refused (unattended-recovery floor, item 309). Declare `undo "
+            f"idempotent` or add an `idempotent(key: ...)` so recovery can "
+            f"auto-replay it")
+        steps = [
+            TraceStep(name, "extern", None, None,
+                      f"{kind}: register `{fact}`"),
+            TraceStep(f"idempotent-teardown {floor}", "teardown", None, None,
+                      "required strength floor", (name,)),
+        ]
+        why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
+                       steps=steps)
+        violations.append(Violation("teardown", name, name, message, why))
+    return violations
+
+
+def _register_violations(policy: Policy, reports: dict, manifest: dict) \
+        -> list[Violation]:
+    """Turn every failing register clause into a refuse-only `Violation` (item
+    309/290 §3.2). A `capability <glob> requires register <level>` floor refuses
+    a selected capability token whose declaration register is below the floor
+    under 309's partial order."""
+    violations: list[Violation] = []
+    for name, entry in reports.items():
+        for report in entry["registers"]:
+            if not report.selected:
+                continue
+            for clause in report.failed():
+                file, _ = _location(manifest, name)
+                token = clause.facet.split(":", 1)[-1]
+                message = (
+                    f"policy violation: capability `{token}` on `{name}` has "
+                    f"register `{clause.fact}`, below the required "
+                    f"`{clause.threshold}` floor — admission refused "
+                    f"(declaration-strength floor, item 309/290 §3.2). Declare "
+                    f"`undo idempotent` or an `idempotent(key: ...)` so the "
+                    f"register meets the floor")
+                steps = [
+                    TraceStep(name, "component", file, None,
+                              f"register:{token}: recorded `{clause.fact}`"),
+                    TraceStep(f"register {clause.threshold}", "register", None,
+                              None, "required floor", (token,)),
+                ]
+                why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
+                               steps=steps)
+                violations.append(
+                    Violation("register", name, token, message, why))
     return violations
 
 
@@ -1243,6 +1382,10 @@ def evaluate(policy: Policy, audit: dict,
     if policy.tenants_isolated:
         violations.extend(_tenant_violations(audit, manifest))
 
+    # item 309: the unattended-recovery floor over the recovery surface.
+    if policy.teardown_rules:
+        violations.extend(_teardown_violations(policy, audit, manifest))
+
     # item 290: the confidence/evidence admission rules. Refuse-only and
     # additive — a policy with no evidence/register rules skips this entirely and
     # the result is byte-identical to before. The reports are the single
@@ -1253,6 +1396,7 @@ def evaluate(policy: Policy, audit: dict,
             trusted_publishers=trusted_publishers, key=key,
             evidence_ir=evidence_ir)
         violations.extend(_evidence_violations(policy, reports, manifest))
+        violations.extend(_register_violations(policy, reports, manifest))
 
     # item 249, Finding 3: a taint policy rule over an audit with NO taint surface
     # is inert — the derived-source walk is off (an unannotated, no-profile

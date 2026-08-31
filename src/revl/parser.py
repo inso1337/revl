@@ -511,6 +511,27 @@ class ExternDecl:
     # env vars. Empty for every extern that declares no `config` clause, so
     # their parse/IR/goldens stay byte-identical.
     config: list[ConfigField] = field(default_factory=list)
+    # item 309: `undo idempotent <inverse>(result)` — the inverse-side claim
+    # that re-running the declared inverse a second time with the same bound
+    # `result` leaves the world where the first run left it (`undo(undo(s)) =
+    # undo(s)`). `False` unless the author wrote `idempotent` in the undo slot,
+    # so every existing extern's IR is byte-identical. Reuses item-44's shipped
+    # `idempotent` kw token (no lexer change) in a new position; carried onto the
+    # IR + WAL discharge-descriptor so recovery reads the register in a fresh
+    # process (docs/design/309-idempotent-inverse.md, §1a).
+    undo_idempotent: bool = False
+    # item 309: bare `idempotent` in the extern modifier slot — item-44's
+    # emission delivery claim extended from service methods to externs (the
+    # author asserts the remote treats re-delivery as delivery). Emission-only,
+    # combinable with `async`/`deferred`; checked in lower. `False` for every
+    # existing extern.
+    idempotent: bool = False
+    # item 309: `idempotent(key: <param>)` — the by-construction claim, naming
+    # WHICH declared parameter carries the idempotency key the remote dedups on
+    # (a 373-style parameter role, NOT a 294 capability valuation — §1c). `None`
+    # unless the keyed form was written; lower checks the parameter exists and is
+    # scalar-serializable, and threads the value into the WAL descriptor.
+    idempotency_key: str | None = None
 
 
 @dataclass
@@ -1412,8 +1433,16 @@ class Parser:
         # is broken (the same discipline `witnessed` uses above). Their pairwise
         # validity (`deferred` is emission-only and async-exclusive) is enforced
         # in lower with honest messages, not the parser.
+        # item 309: bare `idempotent` (and its `idempotent(key: p)` keyed form)
+        # join the same modifier slot as `async`/`deferred`. `idempotent` is a
+        # reserved keyword (item 44), so the lexer needs no change; the confined
+        # reach clause is consumed above, so a `(` after `idempotent` here can
+        # only be the key role bracket (no ambiguity, design §1). Validity
+        # (emission-only, param exists + scalar) is enforced in lower.
         async_ = False
         deferred = False
+        idempotent = False
+        idempotency_key: str | None = None
         while True:
             if self.at("kw", "async") and not async_:
                 self.next()
@@ -1421,6 +1450,11 @@ class Parser:
             elif self.at("ident", "deferred") and not deferred:
                 self.next()
                 deferred = True
+            elif self.at("kw", "idempotent") and not idempotent:
+                self.next()
+                idempotent = True
+                if self.at("("):
+                    idempotency_key = self._idempotency_key_clause()
             else:
                 break
         self.expect("kw", "fn")
@@ -1455,9 +1489,18 @@ class Parser:
             self.next()
             returns = self.type_()
         undo = None
+        undo_idempotent = False
         compensate = None
         if self.at("kw", "undo"):
             self.next()
+            # item 309: an optional `idempotent` between `undo` and the inverse
+            # expression. The word is reserved (item 44) and an inverse fn named
+            # `idempotent` is impossible, so accepting the kw token here is
+            # unambiguous (design §1a). It scopes the `undo(undo(s)) = undo(s)`
+            # claim to this inverse, not the forward mutation.
+            if self.at("kw", "idempotent"):
+                self.next()
+                undo_idempotent = True
             undo = self.pure_expr()
         if self.at("kw", "compensate"):
             self.next()
@@ -1538,7 +1581,9 @@ class Parser:
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
                           capabilities=capabilities, type_params=type_params, async_=async_,
                           deferred=deferred, requires_approval=requires_approval,
-                          reach=reach, config=config, colour_poly=colour_poly)
+                          reach=reach, config=config, colour_poly=colour_poly,
+                          undo_idempotent=undo_idempotent, idempotent=idempotent,
+                          idempotency_key=idempotency_key)
 
     def _reach_clause(self) -> tuple[str, str]:
         """`(confined: <param>)` after an emission classification — item 373.
@@ -1560,6 +1605,27 @@ class Parser:
                                             "confined to").value
         self.expect(")")
         return (kind, target)
+
+    def _idempotency_key_clause(self) -> str:
+        """`(key: <param>)` after `idempotent` in the extern modifier slot — the
+        keyed idempotency role, item 309 §1b.
+
+        Names WHICH declared parameter carries the value the remote dedups on.
+        This is the item-373 `confined:` precedent (a role annotation on the
+        signature, checked against the parameter list in lower — NOT resolved
+        here, since the parameters are parsed just below). `key` is a contextual
+        word recognised only in this slot, so the lexer's KEYWORDS set needs no
+        sync. The value is per-call DYNAMIC data that flows to the host, not a
+        294 capability valuation (design §1c)."""
+        self.expect("(")
+        self.expect("ident", "key",
+                    what="`key` — the idempotency key role (`idempotent(key: "
+                         "<param>)`, item 309)")
+        self.expect(":", what="`:` after `key`")
+        target = self.expect("ident",
+                             what="the parameter carrying the idempotency key").value
+        self.expect(")")
+        return target
 
     def _capability_list(self, kind: str = "emission") -> tuple[str, ...]:
         """`[a, b]` after `emission`/`witnessed` — the boundaries this operation
@@ -1727,6 +1793,11 @@ class Parser:
                 elif modifier == "commutative":
                     method_commutative = True
                 else:
+                    # TODO(309-slice1): accept the `idempotent(key: p)` keyed form
+                    # on a service-method emission too (design §1b, "extends to
+                    # service-method emissions for symmetry with item 44"). The
+                    # extern modifier slot already parses it; the service-method
+                    # register is `declared` until this lands.
                     method_idempotent = True
             # `idempotent` is a delivery property, and only an emission is
             # delivered: a plain `fn` never crosses the boundary, so it has
