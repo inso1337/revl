@@ -158,7 +158,18 @@ class _ModuleLoader:
                 # REVL_IMPORT_PATH entry or the stdlib default), so it is
                 # install-origin and any ref it declares jails to THIS entry's
                 # tree. Record the resolving entry keyed by the module's abspath.
-                self._install_root_of.setdefault(os.path.abspath(candidate), base)
+                #
+                # `use.path` is unvalidated (the parser only rejects empty), so a
+                # `..`-escaping path can join this base yet resolve OUTSIDE it.
+                # Only record install-origin when the resolved file's realpath is
+                # actually CONTAINED in the matching base's realpath (compare both
+                # sides: the default search path does not realpath its entries).
+                # An escaping `use` falls through to user-origin, so its refs jail
+                # to the user root and an install-tree ref is refused by 396(B) —
+                # it can no longer forge stdlib-origin.
+                if _contained(os.path.realpath(candidate),
+                              os.path.realpath(base)):
+                    self._install_root_of.setdefault(os.path.abspath(candidate), base)
                 return candidate
         hint = "`use` resolves paths relative to the importing file"
         if self._search_path:
