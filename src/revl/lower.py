@@ -515,6 +515,13 @@ class Env:
         # binding -> the qualified wiring key it resolves against; for an
         # unqualified requirement this is the binding itself (docs/namespacing.md)
         self.require_keys: dict[str, str] = dict()
+        # item 296: alias token carry-over. binding -> the consumer-facing
+        # capability tokens an emission crossing through this alias contributes
+        # (from the `carrying(...)` clause). Empty for every ordinary require,
+        # so emission attribution is byte-identical for programs that do not
+        # use the feature.
+        self.require_carry: dict[str, tuple[str, ...]] = dict()
+        _carry_src = getattr(component, "require_carry", None) or {}
         for key, svc, line in component.requires:
             if svc not in services:
                 raise RevlError(filename, line, f"unknown service `{svc}` in `requires` of {component.name}")
@@ -524,6 +531,9 @@ class Env:
             self.requires[binding] = svc
             self.require_keys[binding] = key
             self.type_env[f"req.{binding}"] = svc
+            carried = _carry_src.get(key) or _carry_src.get(binding)
+            if carried:
+                self.require_carry[binding] = tuple(carried)
         self.locals: dict[str, str] = {}  # surface name -> host-safe IR name (A3)
         self.params: dict[str, str] = {}
         self._taken: set[str] = set()

@@ -37,6 +37,33 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("code", help="a diagnostic code, e.g. G4 (case-insensitive)")
     exp.add_argument("--json", action="store_true", help="machine-readable output")
 
+    # item 296: propose a safe adapter between a consumer's required service and
+    # a candidate's provided service (proposed, not silent).
+    adapt = sub.add_parser(
+        "adapt",
+        help="propose a safe contract adapter between a required and a "
+             "provided service (item 296)")
+    adapt.add_argument("need", help=".rvl file declaring the required service")
+    adapt.add_argument("candidate",
+                       help=".rvl file declaring the candidate's provided service")
+    adapt.add_argument("--need-service", default=None,
+                       help="name the required service (default: the sole one)")
+    adapt.add_argument("--candidate-service", default=None,
+                       help="name the candidate service (default: the sole one)")
+    adapt.add_argument("--adapt", default=None, metavar="JSON_FILE",
+                       help="opt-in map `D` (defaults, drops, merges, pairings)")
+    adapt.add_argument("--emit", action="store_true",
+                       help="also render the synthesized adapter .rvl source "
+                            "(the artifact to commit)")
+    adapt.add_argument("--name", default="Adapter",
+                       help="component name for --emit (default: Adapter)")
+    adapt.add_argument("--provide-key", default=None,
+                       help="provided key for --emit (default: the need "
+                            "service name, lowercased)")
+    adapt.add_argument("--require-key", default="backing",
+                       help="alias the candidate is required under for --emit "
+                            "(default: backing)")
+
     doctor = sub.add_parser(
         "doctor",
         help="diagnose each backend tier, runtime and dependency (OK/WARN/"
