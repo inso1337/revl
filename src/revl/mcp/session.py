@@ -359,6 +359,13 @@ class Session:
         # the first call. A no-op import cost for a composition that never admits.
         from . import admit_bridge as _admit_bridge  # noqa: PLC0415
         _admit_bridge.bind(self)
+        # roadmap item 403: bind this session as the live target of the
+        # un-privileged in-language `resolved_keys()` reflection query
+        # (stdlib/reflect.rvl), so a composition that composes it reflects THIS
+        # running session. A pure read — no frame, no approval — bound alongside
+        # admit so both in-language seams see the same live session.
+        from . import reflect_bridge as _reflect_bridge  # noqa: PLC0415
+        _reflect_bridge.bind(self)
         self.recorder = replay_module().Recorder(ir) if record else None
         self._generation = 1
         self._history = []
@@ -1463,6 +1470,12 @@ class Session:
         from . import admit_bridge as _admit_bridge  # noqa: PLC0415
         if _admit_bridge.current() is self:
             _admit_bridge.bind(None)
+        # item 403: likewise drop the reflection-query binding so a torn-down
+        # session is never reachable through `stdlib/reflect.rvl` (only the live
+        # one is).
+        from . import reflect_bridge as _reflect_bridge  # noqa: PLC0415
+        if _reflect_bridge.current() is self:
+            _reflect_bridge.bind(None)
         self._driver = None
         self._owner = None
         self.ir = None
