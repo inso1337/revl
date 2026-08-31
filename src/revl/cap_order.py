@@ -105,39 +105,91 @@ def _canon_discrete(raw: str) -> str:
     return raw
 
 
+# 1024-based byte units and millisecond-based duration units for the emission
+# budget ceilings (item 260, Slice 3): `bytes="10MB"` canonicalizes to
+# `10485760`, `time="2s"` to `2000` (ms). Wall-clock and payload size are
+# runtime quantities; the static order only compares the declared ceilings.
+_BYTE_UNITS: dict[str, int] = {
+    "b": 1, "kb": 1024, "mb": 1024 ** 2, "gb": 1024 ** 3, "tb": 1024 ** 4}
+_DURATION_UNITS: dict[str, int] = {
+    "ms": 1, "s": 1000, "m": 60_000, "h": 3_600_000}
+
+
+def _parse_suffixed(raw: str, units: dict[str, int], name: str,
+                    what: str, example: str) -> int:
+    """Canonicalize a `<int><unit>` budget literal (`"10MB"`, `"2s"`) to its base
+    integer (bytes / milliseconds). The suffix is matched longest-first so `ms`
+    wins over `s` and `kb` over `b`; the numeric prefix is a non-negative
+    integer. A bare integer arrives as a python `int` and never reaches here."""
+    low = raw.strip().lower()
+    for unit in sorted(units, key=len, reverse=True):
+        if low.endswith(unit):
+            num = low[:-len(unit)].strip()
+            if num:
+                try:
+                    return int(num) * units[unit]
+                except ValueError:
+                    break
+            break
+    raise CapError(
+        f"capability parameter `{name}` value `{raw}` is not {what}",
+        hint=f"write e.g. `{example}` (an integer with a unit suffix; "
+             f"units: {', '.join(sorted(units))})")
+
+
 # name -> (kind, order-key). The order-key selects the value order in
 # `_param_leq`; canonicalization is applied at parse by `_canon_value`.
 #
 # TODO(294-slice2): symbolic values (`path=config.job_root`), comparable only to
 # the identical symbol until a spawn-site `with { }` literal binding substitutes
 # them (per-instance attenuation).
-# TODO(294-slice3): ceiling-kind parameters ERASE at mint into a grant's
-# `remainingUses` counter and are EXEMPT from crossing-coverage; slice 1 only
-# compares them declaration-to-declaration (the static order). The gate side
-# (`mcp/session.py`) owns the erasure and the cone-aware grant lookups.
+# Ceiling-kind parameters ERASE at mint into a grant's `remainingUses` counter
+# and are EXEMPT from crossing-coverage (a crossing binds no ceiling): the
+# spawn-attenuation surface strips them (`split_ceilings`) before `covers_set`,
+# and the DEDICATED ceiling-attenuation check (item 260, `lower._check_spawn_
+# attenuation`) compares them separately over the unstripped pairs. The gate side
+# (`mcp/session.py`) owns the mint-time erasure and the cone-aware grant lookups.
 _REGISTRY: dict[str, tuple[str, str]] = {
     "path": (_RESOURCE, "path"),
     "host": (_RESOURCE, "discrete"),
     "table": (_RESOURCE, "discrete"),
     "calls": (_CEILING, "ceiling"),
-    "size": (_CEILING, "ceiling"),
+    "size": (_CEILING, "bytes"),
+    "time": (_CEILING, "duration"),
+}
+
+# Budget sugar (item 260 §3.1): `budget.requests`/`budget.bytes` reconcile onto
+# the ceiling params `covers` already orders. `requests` is an ALIAS of `calls`
+# (the same quantity cardinality proves, so the static check is exactly
+# "proved-max <= declared calls"); `bytes` an alias of `size`. The alias is
+# resolved at parse so both spellings canonicalize to one stored param.
+_ALIASES: dict[str, str] = {
+    "requests": "calls",
+    "bytes": "size",
 }
 
 
+def _normalize(name: str) -> str:
+    """Resolve a budget alias (`requests` -> `calls`, `bytes` -> `size`) to its
+    canonical stored parameter name; every other name is returned unchanged."""
+    return _ALIASES.get(name, name)
+
+
 def is_registered(name: str) -> bool:
-    return name in _REGISTRY
+    return _normalize(name) in _REGISTRY
 
 
 def registered_names() -> list[str]:
-    return sorted(_REGISTRY)
+    return sorted(set(_REGISTRY) | set(_ALIASES))
 
 
 def is_ceiling(name: str) -> bool:
-    """Whether a registered parameter is ceiling-kind (`calls`, `size`): compared
-    declaration-to-declaration and mint-vs-declaration, ERASED from a grant's
-    valuation at mint (translated into `remainingUses`), and EXEMPT from
-    crossing-coverage. Resource kinds (`path`, `host`, `table`) are compared at
-    crossings (Slice 2)."""
+    """Whether a registered parameter is ceiling-kind (`calls`/`requests`,
+    `size`/`bytes`, `time`): compared declaration-to-declaration and
+    mint-vs-declaration, ERASED from a grant's valuation at mint (translated into
+    `remainingUses`), and EXEMPT from crossing-coverage. Resource kinds (`path`,
+    `host`, `table`) are compared at crossings (Slice 2)."""
+    name = _normalize(name)
     return name in _REGISTRY and _REGISTRY[name][0] == _CEILING
 
 
@@ -180,6 +232,28 @@ def _canon_value(name: str, value: object) -> object:
                 hint="a ceiling is a count of at most N; write a non-negative "
                      "integer")
         return value
+    if order in ("bytes", "duration"):
+        # a byte or duration budget ceiling: a bare integer (base unit, or a
+        # re-read canonical value) passes through; a suffixed string literal
+        # (`"10MB"`, `"2s"`) canonicalizes to its base integer.
+        if isinstance(value, bool):
+            raise CapError(
+                f"capability parameter `{name}` expects a size/duration ceiling")
+        if isinstance(value, int):
+            if value < 0:
+                raise CapError(
+                    f"capability parameter `{name}={value}` is negative",
+                    hint="a ceiling is at most N; write a non-negative value")
+            return value
+        if isinstance(value, str):
+            if order == "bytes":
+                return _parse_suffixed(value, _BYTE_UNITS, name,
+                                       "a byte size", 'bytes="10MB"')
+            return _parse_suffixed(value, _DURATION_UNITS, name,
+                                   "a duration", 'time="2s"')
+        raise CapError(
+            f"capability parameter `{name}` expects an integer or a "
+            "unit-suffixed string")
     # resource kinds take a string literal
     if not isinstance(value, str):
         raise CapError(
@@ -224,7 +298,9 @@ class Cap:
 
 def _render_value(name: str, value: object) -> str:
     _kind, order = _REGISTRY[name]
-    if order == "ceiling":
+    if _kind == _CEILING:
+        # every ceiling stores its canonical integer (a count, bytes, or ms);
+        # rendering it as the bare integer round-trips through `_canon_value`.
         return str(value)
     if order == "path":
         return '"/' + "/".join(value) + '"'
@@ -250,13 +326,17 @@ def _make_cap(token: str, raw_params: list[tuple[str, object]]) -> Cap:
             "`*` takes no capability parameters",
             hint="an unnameable reach cannot be bounded by name (the same rule "
                  "that refuses approving `*`); drop the parameter list")
-    for name, value in raw_params:
+    for raw_name, value in raw_params:
+        # resolve a budget alias to its canonical stored name FIRST, so
+        # `requests`/`calls` (and `bytes`/`size`) are one parameter: binding both
+        # is a duplicate, and both canonicalize to a single stored spelling.
+        name = _normalize(raw_name)
         if name in seen:
             raise CapError(
-                f"duplicate capability parameter `{name}`",
+                f"duplicate capability parameter `{raw_name}`",
                 hint="bind each parameter once")
         seen.add(name)
-        if not is_registered(name):
+        if not is_registered(raw_name):
             names = ", ".join(f"`{n}`" for n in registered_names())
             raise CapError(
                 f"unknown capability parameter `{name}`",
@@ -345,7 +425,7 @@ def _param_leq(name: str, narrow: object, wide: object) -> bool:
     _kind, order = _REGISTRY[name]
     if order == "path":
         return _leq_path(narrow, wide)
-    if order == "ceiling":
+    if order in ("ceiling", "bytes", "duration"):
         return narrow <= wide          # a smaller ceiling is narrower
     return narrow == wide               # discrete: equality only
 
