@@ -387,7 +387,16 @@ def test_residue_surface_enumerates_aborted_crossings(workspace, tmp_path, monke
                   _effect("rm", "stale.txt")], abort=True)), record=True)
     assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
 
-    session.recorder.wal.close()                  # crash: no activation-complete
+    # Finalize the in-process abort the way the session lifecycle does: the
+    # activation failed and reverted its witnessed inverses in-process, and the
+    # session abort durably records that COMPLETION (the `aborted` record, item
+    # 309/5b191fd) before the process dies. Then no `activation-complete` marker
+    # is written — the crash point recover() reads. Closing the recorder directly
+    # here instead would skip the abort finalization, leaving fenced-before-apply
+    # records with no completion proof: recover() would then honestly (item 309's
+    # at-most-once contract) report the two undeclared inverses as fenced-residue
+    # of UNKNOWN outcome, not as rolled back — which is the design, not a defect.
+    session.abort()                               # crash: no activation-complete
 
     loaded = replay.WriteAheadLog.read(wal_path)
     descriptors = [r for r in loaded["records"]
