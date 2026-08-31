@@ -252,6 +252,58 @@ def validate_response(value, schema, where: str = "", constructors=None):
     return value
 
 
+def validate_retry(make_call, budget: int, schema, where: str = "",
+                   constructors=None):
+    """Item 257 (Slice 2, §5.2): the read-with-a-cost validation-retry loop.
+
+    Fire ``make_call`` — the model completion call, and ONLY it — and validate its
+    response with :func:`validate_response`. On a
+    :class:`ResponseValidationError` (the malformed value is discarded before the
+    body ever sees it, §5.3) re-issue the completion up to ``budget`` times, then
+    surface the fault. Total attempts are ``budget + 1`` (the first plus ``budget``
+    retries), a hard ceiling: exhaustion is the SAME terminal typed fault the body
+    observes under `retry 0`, never an unbounded loop (§8, attack 4).
+
+    The seam sits at the forward crossing, so a retry re-crosses the one-way model
+    boundary again and re-incurs ONLY that crossing (another token charge); no
+    downstream `emit` fired on the malformed value and no teardown entry was
+    registered from it, so a re-issue doubles nothing the system executes (§5.3).
+    This is keyed on ONE fault kind — the validation fault; a `TransientError` or
+    any other host error is NOT retried here (a completion is not idempotent, §5.1)
+    and propagates immediately."""
+    attempt = 0
+    while True:
+        value = make_call()
+        try:
+            return validate_response(value, schema, where, constructors)
+        except ResponseValidationError:  # noqa: PERF203 — retry is the point
+            if attempt >= budget:
+                raise
+            attempt += 1
+
+
+async def validate_retry_async(make_call, budget: int, schema, where: str = "",
+                               constructors=None):
+    """Item 257 (Slice 2, §5.2): the async colour of :func:`validate_retry`.
+
+    ``make_call`` returns a FRESH coroutine per attempt (the emitter passes the
+    un-awaited completion call as the thunk), so awaiting it re-issues the one-way
+    crossing each retry. Identical bound and fault semantics to the sync form: up
+    to ``budget + 1`` attempts, only a :class:`ResponseValidationError` is
+    retried, and exhaustion surfaces the terminal typed fault."""
+    attempt = 0
+    while True:
+        result = make_call()
+        if inspect.isawaitable(result):
+            result = await result
+        try:
+            return validate_response(result, schema, where, constructors)
+        except ResponseValidationError:  # noqa: PERF203 — retry is the point
+            if attempt >= budget:
+                raise
+            attempt += 1
+
+
 # ---------------------------------------------------------------------------
 # v2: realm placement (docs/design-v2-realms.md)
 # ---------------------------------------------------------------------------

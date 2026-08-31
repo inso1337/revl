@@ -44,6 +44,22 @@ import math
 # --------------------------------------------------------------------------
 
 
+def _retry_mult(spec: dict) -> int:
+    """Item 257 (Slice 2, HIGH-1): a `validated retry N` emission crossing may
+    fire up to `N + 1` times per activation (the first attempt plus N validation
+    retries), so its contribution to the cardinality count is multiplied by
+    `N + 1`.
+
+    This is a STATIC MULTIPLIER on the SINGLE crossing node, NOT a loop and NOT a
+    recursion: the retry is a constant factor on one countable crossing, so item
+    260's bounded-iteration recognizer is not involved and no decreasing-fuel
+    certification is needed. The exact `<= N + 1` ceiling is therefore
+    by-construction, closing the false-LOW `<= 1` the 257 review flagged. A
+    non-retry crossing (no `retry` key, the byte-identical default) multiplies by
+    1, exactly as before."""
+    return (spec.get("retry") or 0) + 1
+
+
 def _int_lit(node) -> int | None:
     """The integer a `{kind: lit}` node carries, or None. `bool` is not an int
     literal here (revl has no bool<->int coercion in a fuel position)."""
@@ -492,9 +508,9 @@ def cardinality(ir: dict) -> dict:
         def count_expr(node, requires=requires):
             total: dict[str, int] = {}
 
-            def _add(caps):
+            def _add(caps, mult=1):
                 for cap in caps:
-                    total[cap] = total.get(cap, 0) + 1
+                    total[cap] = total.get(cap, 0) + mult
 
             if isinstance(node, dict):
                 resolved = resolutions.get(id(node))
@@ -511,7 +527,8 @@ def cardinality(ir: dict) -> dict:
                             .get(node.get("method")) or {})
                     if spec.get("emission"):
                         declared = spec.get("capabilities")
-                        _add(sorted(declared) if declared is not None else ["*"])
+                        _add(sorted(declared) if declared is not None else ["*"],
+                             _retry_mult(spec))
                 # arm 2: a spawn-handle provision-method call
                 # `s.<key>.<method>(...)` reached through an `instance-get`
                 # (item 246). This is the MEDIUM count-soundness fix.
@@ -528,7 +545,8 @@ def cardinality(ir: dict) -> dict:
                             if spec.get("emission"):
                                 declared = spec.get("capabilities")
                                 _add(sorted(declared)
-                                     if declared is not None else ["*"])
+                                     if declared is not None else ["*"],
+                                     _retry_mult(spec))
                 # branch nodes take the MAX over arms (a proved upper bound must
                 # hold on every path, so the worst arm is the ceiling); the
                 # scrutinee/cond is evaluated once, so it SUMS.
