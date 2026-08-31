@@ -2583,6 +2583,24 @@ class Parser:
             if nxt.kind == "ident" and nxt.value == "no_residue":
                 self.next()
                 return ResidueStmt(tok.line)
+            if nxt.kind == "ident" and nxt.value == "call":
+                # `assert call key.op(...) ...` (roadmap item 407). A witnessed
+                # `call` is the effectful driver of the composition (it is
+                # recorded for teardown and residue checking), while an `assert`
+                # is a pure observation over the test's `let` bindings. Letting
+                # the call be evaluated inside the assertion would hide a
+                # witnessed effect from the timeline the checker walks, so it
+                # stays a statement. Redirect to the one-line hoist rather than
+                # letting `pure_expr` read `call` as a bare variable and fail
+                # further along with an opaque "expected a lifecycle statement".
+                raise self.err(
+                    tok.line,
+                    "a witnessed `call` cannot be evaluated inside an `assert`: "
+                    "the call is an effect, the assert is a pure observation",
+                    hint="hoist the call to its own step, then assert over the "
+                         f"binding: `let result = {self._peek_call_suggestion()}` "
+                         "then `assert result == ...` (syntax-2.0 §7.1)",
+                )
             # anything else is a pure Bool expression over the test's `let`
             # bindings; an unbound bare word is caught in lowering, where the
             # binding scope is known, and reported as an unknown assertion
@@ -2629,6 +2647,23 @@ class Parser:
                                 f"space, e.g. `advance {num.value}s`")
         self.next()
         return num.value * self._DURATION_UNITS[unit_tok.value]
+
+    def _peek_call_suggestion(self) -> str:
+        """Best-effort `call key.op(...)` reconstruction for the item-407
+        redirect, read WITHOUT consuming tokens. Falls back to a generic shape
+        when the tokens after `call` do not look like `key.op(`."""
+        toks = self.toks
+        i = self.pos  # points at the `call` token
+        if not (i < len(toks) and toks[i].kind == "ident" and toks[i].value == "call"):
+            return "call key.op(...)"
+        key_tok = toks[i + 1] if i + 1 < len(toks) else None
+        dot_tok = toks[i + 2] if i + 2 < len(toks) else None
+        op_tok = toks[i + 3] if i + 3 < len(toks) else None
+        if (key_tok is not None and key_tok.kind == "ident"
+                and dot_tok is not None and dot_tok.kind == "."
+                and op_tok is not None and op_tok.kind == "ident"):
+            return f"call {key_tok.value}.{op_tok.value}(...)"
+        return "call key.op(...)"
 
     def _call_stmt(self, bind: str | None) -> CallStmt:
         tok = self.peek()
