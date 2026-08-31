@@ -62,8 +62,9 @@ FIXES = {
     "G8": "keep the boundary enumerable — declare host code as an `extern` with a "
           "`pure`/`acquire`/`emission` classification",
     "G9": "an untrusted value cannot directly create authority — declassify it "
-          "first: parse it with a `verified fn` that returns `Trusted[T]`, wrap it "
-          "in `endorse(...)`, or gate it on a human approval",
+          "first: parse it with a `verified fn` that returns `Trusted[T]`, endorse "
+          "it at a declared point (`endorse[<origin>](v, reason = \"...\")`), or "
+          "gate it on a human approval",
     "A1": "`await` is an iteration boundary and exists only during activation — "
           "move it into the component body",
     "A2": "acquire everything before the first `provide`",
