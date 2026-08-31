@@ -329,6 +329,15 @@ class ComponentDecl:
     body: list
     line: int
     source: str = ""  # provenance: the file this component was parsed from
+    # item 296: alias token carry-over. A require binding may declare the
+    # capability tokens its emission crossings contribute (`requires backing:
+    # VendorCache carrying(cache)`), so a crossing through the alias is
+    # attributed to the consumer-facing tokens it stands in for, not the local
+    # key name. Keyed by local (alias) name -> carried token tuple. Empty for
+    # every require with no `carrying(...)` clause, so programs that do not use
+    # the feature are byte-identical. This is a GENERAL wiring feature (a
+    # hand-written wrapper uses it too, not an adapter special case).
+    require_carry: dict = field(default_factory=dict)
 
 
 # --- v2.0: types & pure functions (docs/syntax-2.0.md §2–§3) ----------------
@@ -1851,6 +1860,7 @@ class Parser:
         name = self.expect("ident").value
         requires: list[tuple[str, str, int]] = []
         provides: list[tuple[str, str, int]] = []
+        require_carry: dict = {}
         while self.at("kw", "requires") or self.at("kw", "provides"):
             kw = self.next().value
             target = requires if kw == "requires" else provides
@@ -1860,6 +1870,13 @@ class Parser:
                 self.expect(":")
                 svc = self.expect("ident").value
                 target.append((local, svc, bline))
+                # item 296: an optional `carrying(tok, ...)` clause on a
+                # *require* binding declares the capability tokens this alias's
+                # emission crossings contribute (alias token carry-over). A
+                # contextual ident so no keyword is added.
+                if kw == "requires" and self.at("ident", "carrying"):
+                    self.next()
+                    require_carry[local] = self._carry_tokens()
                 # a comma continues the same clause; `requires`/`provides`/`{` end it
                 if self.at(","):
                     self.next()
@@ -1879,7 +1896,34 @@ class Parser:
             else:
                 body.append(self.stmt(in_method=False))
         self.expect("}")
-        return ComponentDecl(name, config, requires, provides, body, line)
+        return ComponentDecl(name, config, requires, provides, body, line,
+                             require_carry=require_carry)
+
+    def _carry_tokens(self) -> tuple[str, ...]:
+        """`(cache, log)` after `carrying` on a require binding (item 296) — the
+        consumer-facing capability tokens an aliased crossing contributes.
+
+        The same wiring-name grammar as `emission[...]` (dotted tokens allowed),
+        but parenthesised, since it annotates a require binding rather than an
+        operation classification."""
+        line = self.expect("(").line
+        names: list[str] = []
+        while not self.at(")"):
+            parts = [self.expect("ident", what="a capability name").value]
+            while self.at("."):
+                self.next()
+                parts.append(self.expect("ident").value)
+            names.append(".".join(parts))
+            if self.at(","):
+                self.next()
+        self.expect(")")
+        if not names:
+            raise self.err(
+                line,
+                "`carrying()` names no capability token",
+                hint="a require that carries no token is an ordinary require — "
+                     "drop the `carrying(...)` clause (item 296)")
+        return tuple(names)
 
     def config_block(self) -> list[ConfigField]:
         self.expect("kw", "config")
