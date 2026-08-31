@@ -315,6 +315,21 @@ def _run_recover(args) -> int:
             return 1
         from ..mcp.session import Session  # noqa: PLC0415 — lazy: cordis only if resuming
         session = Session()
+        # re-establish the operator-flag approval posture the snapshot was taken
+        # under (item 246). Without it, `persist.restore` refuses a policy-recorded
+        # snapshot rather than boot the recovered generation ungated; with it, the
+        # activation gate re-arms and a class-(c) crossing re-prompts on resume
+        # exactly as on first boot.
+        if getattr(args, "policy", None):
+            from ..policy import PolicyError, load_policy  # noqa: PLC0415
+            try:
+                session.sandbox = load_policy(args.policy)
+            except (OSError, PolicyError) as error:
+                print(f"error: cannot load policy {args.policy}: {error}",
+                      file=sys.stderr)
+                return 1
+        if getattr(args, "approval_policy", None):
+            session.approval_policy = args.approval_policy
 
     try:
         report = recover(args.wal, session=session, snapshot=snapshot)

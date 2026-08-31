@@ -208,16 +208,47 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
                      if r.get("record") == "activation-complete"), {})
     resumed = None
     if session is not None and snapshot is not None:
+        from .mcp.approval import ApprovalRequired  # noqa: PLC0415
         from .mcp.persist import resume, RestoreError  # noqa: PLC0415
         try:
             resumed = resume(session, snapshot)
+        except ApprovalRequired as pending:
+            # the re-established approval policy re-armed the activation gate and
+            # the recovered generation's activation body reaches a class-(c)
+            # crossing: recovery held it rather than firing it, exactly as on
+            # first boot. Recovery never auto-answers a human's ticket, so this
+            # is a fail-closed verdict a human must clear, not a silent resume.
+            ticket = getattr(pending, "ticket", {}) or {}
+            return {
+                "verdict": "roll-forward-needs-approval",
+                "decision": ("activation completed before the crash, but the "
+                             "recovered generation's activation body reaches a "
+                             "class-(c) crossing under the re-established approval "
+                             "policy. Recovery re-armed the gate and did NOT fire "
+                             "it — a human must approve it, exactly as on first "
+                             "boot (item 246)."),
+                "ticket": {k: ticket.get(k)
+                           for k in ("hash", "component", "kind", "capabilities")},
+                "residue": {
+                    "clean": False,
+                    "outstanding": [ticket.get("component")],
+                    "proof": "a class-(c) activation crossing is held at the gate "
+                             "pending approval; recovery never auto-fires it.",
+                },
+                "guarantee": _guarantee(),
+            }
         except RestoreError as error:
-            # a snapshot the *current* checker rejects does not resume silently
+            # a snapshot the *current* checker rejects — OR one whose approval
+            # posture the recovering session does not carry (a policy-recorded
+            # snapshot into a policy-less session) — does not resume silently.
+            # The refusal message carries the reason and, for the posture case,
+            # the flag to pass so the gate re-arms on resume.
             return {
                 "verdict": "roll-forward-refused",
                 "decision": "activation completed, but the persisted generation "
                             "no longer passes the gate — item 15's restore "
                             "refused it, so it is not re-admitted",
+                "message": str(error),
                 "diagnostic": error.diagnostic,
                 "guarantee": _guarantee(),
             }
@@ -644,7 +675,15 @@ def render(report: dict) -> str:
         lines.append(f"  components: {', '.join(report['components']) or '(none)'}")
         lines.append(f"  resumed persisted generation: {report['resumed']}")
     elif report["verdict"] == "roll-forward-refused":
-        lines.append("  the persisted generation no longer passes the gate")
+        lines.append("  " + (report.get("message")
+                             or "the persisted generation no longer passes the gate"))
+        lines.append("")
+        lines.append(f"guarantee: {report['guarantee']}")
+        return "\n".join(lines)
+    elif report["verdict"] == "roll-forward-needs-approval":
+        ticket = report.get("ticket") or {}
+        lines.append(f"  class-(c) activation crossing held for approval: "
+                     f"{ticket.get('component') or '(component)'}")
     else:
         for entry in report.get("ran") or []:
             op = entry.get("op") or {}
