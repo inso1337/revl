@@ -257,6 +257,42 @@ def test_grant_for_capability_a_does_not_cover_capability_b(sink):
 
 
 # ---------------------------------------------------------------------------
+# 245/246-F1: a grant for ONE reached class-(c) cap does not cover a SIBLING
+# ---------------------------------------------------------------------------
+
+@needs_cordis
+def test_partial_grant_does_not_over_cover_a_multi_capability_call(sink):
+    """The over-coverage hole (245/246-F1). `pay` reaches TWO distinct class-(c)
+    capabilities, `charge` AND `refund` (emit + compensate). A standing grant for
+    `charge` ALONE must NOT auto-approve pay: the old gate tested single-membership
+    of the grant's cap against the WHOLE reach fold (`charge in {charge, refund}`),
+    so it fired pay — and with it the un-granted `refund` crossing — on the back of
+    a charge-only grant (the shell-covers-shell+mail shape). The fix requires EVERY
+    class-(c) cap covered, so pay prompts and the charge grant is NOT spent.
+
+    Granting BOTH capabilities lets the SAME pay auto-approve, jointly covered,
+    spending one use of each grant — no over-refusal."""
+    from revl.mcp.approval import ApprovalRequired
+    session = _session()
+    session.load(_ir(), record=True)
+    session.mint_standing_grant(capability="charge", uses=5)
+
+    with pytest.raises(ApprovalRequired) as exc:
+        session.call("ops", "pay", [sink, "one"])   # refund un-granted -> prompt
+    assert set(exc.value.ticket["capabilities"]) == {"charge", "refund"}
+    assert _lines(sink) == []                        # nothing fired: no over-coverage
+    assert session._grants_consumed == 0             # the charge grant not spent
+    assert session._grants[0]["remainingUses"] == 5  # untouched
+
+    # widen to cover the whole class-(c) reach; now the SAME pay auto-approves
+    session.mint_standing_grant(capability="refund", uses=5)
+    session.call("ops", "pay", [sink, "two"])
+    assert _lines(sink) == ["charge:two"]            # forward emission fired
+    assert session._owner.prompts["perCall"] == 1    # only the first, honest prompt
+    assert session._grants_consumed == 2             # one use of charge + one of refund
+
+
+# ---------------------------------------------------------------------------
 # Invariant 4: a swap that changes the closure invalidates the grant
 # ---------------------------------------------------------------------------
 
