@@ -1,4 +1,4 @@
-"""Navigable refusals — the machine-facing map a policy deny carries beside its
+"""Navigable refusals - the machine-facing map a policy deny carries beside its
 verdict (roadmap item 274).
 
 Where `diagnostics.classify` (item 286) attaches the STATIC per-code `fix`
@@ -9,14 +9,14 @@ evaluates nothing at runtime (design §4).
 
 Two invariants dominate the shape, both from the adversarial review:
 
-  * HIGH — a `clears-this-gate` proof marker is sound ONLY on a predicate whose
+  * HIGH - a `clears-this-gate` proof marker is sound ONLY on a predicate whose
     operands are immutable at the refusal site. A predicate over a
     runtime-mutable operand (a lease/ceiling counter, a standing-grant ledger
     membership, any leased/time-bounded value) is TOCTOU and must be
     `candidate`. `alternative()` enforces this: pass `mutable_operand=True` and
     a requested `clears-this-gate` is forced down to `candidate`.
 
-  * CRITICAL — under the untrusted-author profile, a POLICY-family refusal must
+  * CRITICAL - under the untrusted-author profile, a POLICY-family refusal must
     not let the author reconstruct the operator's policy topology. `record()`
     collapses every such refusal to ONE non-discriminating verdict (`blocked:
     true`, a generic reason, no true family, no proof, no alternatives), so a
@@ -37,7 +37,7 @@ FAMILIES = frozenset({
     "ownership", "evidence", "adapter", "cache", "admit-profile",
 })
 
-# who enacts an alternative — the field a harness routes on (design §3).
+# who enacts an alternative - the field a harness routes on (design §3).
 ENACTS_AUTHOR = "author"
 ENACTS_OPERATOR = "operator"
 ENACTS_RUNTIME_APPROVAL = "runtime-approval"
@@ -105,7 +105,7 @@ def _order_key(alt: dict) -> tuple:
 def collapsed() -> dict:
     """The single non-discriminating verdict an untrusted author sees for ANY
     policy-family refusal (design §4). No true family, no gate-specific reason,
-    no proof, no alternatives — so every family is mutually indistinguishable and
+    no proof, no alternatives - so every family is mutually indistinguishable and
     a redacted-operator-only refusal is byte-identical to a genuine block. A
     fresh dict each call so callers may not mutate a shared one."""
     return {
@@ -123,7 +123,7 @@ def record(*, family: str, refused: dict | None = None,
     """Assemble a `navigate` record for a policy-family refusal.
 
     Under the untrusted-author profile every policy-family refusal collapses to
-    `_collapsed_untrusted()` (design §4, CRITICAL): the redaction is by fact
+    `collapsed()` (design §4, CRITICAL): the redaction is by fact
     class, and for the wired families no author-enactable-and-non-discriminating
     alternative survives, so the list is empty and the family is hidden.
 
