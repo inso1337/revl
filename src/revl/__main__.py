@@ -487,10 +487,17 @@ def _run_audit(args, ir: dict) -> int:
         # `schema_version`/`kind` header additively, over the same body
         # earlier consumers already read.
         from .interchange import stamp  # noqa: PLC0415
+        # item 309 added capability_registers + recovery_surface to
+        # audit_report; the interchange body must carry them too so it stays the
+        # byte-for-byte unstamped audit report (test_version_is_additive_body_unchanged).
+        from .audit_diff import (  # noqa: PLC0415
+            _capability_registers, _recovery_surface)
         print(json.dumps(stamp(
             {"manifest": manifest, "boundary": boundary,
              "externs": declared_externs,
-             "distributability": distribution}), indent=2))
+             "distributability": distribution,
+             "capability_registers": _capability_registers(ir),
+             "recovery_surface": _recovery_surface(ir)}), indent=2))
         return 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
     for entry in manifest.get("components") or []:
