@@ -570,3 +570,112 @@ def test_placement_accepts_ts_as_an_alias_for_node(tmp_path, monkeypatch):
     # the alias is normalized in the spec the child receives too
     assert procs["consumer"].spec["backend"] == "node"
 
+
+
+# ---------------------------------------------------------------------------
+# item 414: swap admission gates BOTH seam directions + re-gates after re-tier.
+# The provides-only loop left an inbound seam ungated: a service the moving
+# component REQUIRES from a component staying behind becomes cross-process when
+# the component re-tiers, and a resource crossing it must be refused. And
+# do_swap re-runs the plan-time gate over the post-swap topology.
+# ---------------------------------------------------------------------------
+
+_INBOUND_RES_APP = """
+type Sock = { fd: Int }
+extern pure fn close_sock(h: Int) = @py { return None }
+extern acquire fn open_sock() -> Sock undo close_sock(0) = @py { return {"fd": 1} }
+service Pool { async fn lease() -> Sock }
+service App { async fn run() -> Str }
+
+component Backend provides pool: Pool {
+  provide pool { async fn lease() = open_sock() }
+}
+component Worker requires pool: Pool provides app: App {
+  provide app { async fn run() = "ok" }
+}
+"""
+
+# same shape but the required service is value-typed, so no resource crosses and
+# the identical swap must ADMIT (guards against over-refusal).
+_INBOUND_VAL_APP = _INBOUND_RES_APP.replace(
+    "async fn lease() -> Sock", "async fn lease() -> Str"
+).replace("async fn lease() = open_sock()", 'async fn lease() = "s"')
+
+_INBOUND_PLACEMENT = """
+[processes.backend]
+components = ["Backend"]
+
+[processes.worker]
+components = ["Worker"]
+"""
+
+
+def test_admission_refuses_an_inbound_resource_seam(tmp_path):
+    """Worker REQUIRES `pool: Pool` (resource-carrying) from Backend, which
+    stays behind. Moving Worker to a new tier makes that INBOUND seam cross-
+    process; a resource handle cannot cross it, so the swap is refused naming
+    the required service and the resource, the direction the old provides-only
+    loop never looked at."""
+    src = _write(tmp_path, "app.rvl", _INBOUND_RES_APP)
+    running = compile_files([src])
+    candidate, error = swap_admission([src], running, "Worker", "go",
+                                      from_backend="py")
+    assert candidate is None
+    assert error is not None
+    assert "Pool" in error and "pool" in error and "Sock" in error
+
+
+def test_admission_admits_a_swap_that_opens_no_new_resource_seam(tmp_path):
+    """The same inbound-seam shape with a value-typed required service opens no
+    resource crossing in either direction and stays within tier caps, so the
+    swap still admits; the both-directions check does not over-refuse."""
+    src = _write(tmp_path, "app.rvl", _INBOUND_VAL_APP)
+    running = compile_files([src])
+    candidate, error = swap_admission([src], running, "Worker", "go",
+                                      from_backend="py")
+    assert error is None, error
+    assert candidate is not None
+
+
+# NOTE on why the inbound-resource case is a swap_admission UNIT test, not a
+# full do_swap integration test: through do_swap a `--to` swap re-uses the SAME
+# source, so a pure tier swap never changes a component's requires/provides. Any
+# inbound resource seam therefore already exists at PLAN time, where the
+# tier-agnostic `resource_crossing_refusal` (the seam-hardening fix, Finding A)
+# refuses it before the swap REPL is ever reached. The both-directions check in
+# swap_admission is the standalone gate (and defense in depth for a
+# candidate-differs caller); the materially NEW do_swap re-gate is the
+# tier-capability gate over the post-swap tier, exercised below.
+
+
+_RETIER_PYONLY_APP = """
+extern pure fn py_only(x: Str) -> Str = @py { return x }
+service Pool { async fn lease() -> Str }
+service App { async fn run() -> Str }
+
+component Backend provides pool: Pool {
+  provide pool { async fn lease() = "s" }
+}
+component Worker requires pool: Pool provides app: App {
+  provide app { async fn run() = py_only("x") }
+}
+"""
+
+
+def test_conductor_refuses_a_swap_whose_new_tier_cannot_emit_the_component(
+        tmp_path, monkeypatch, capsys):
+    """Worker admits (no new resource seam, value-typed both ways) but its body
+    reaches a `@py`-only extern the `node` tier cannot emit. do_swap re-runs the
+    plan-time tier-capability gate over the POST-SWAP topology, so the re-tier is
+    refused before any build; the parity the docstring now names, made real."""
+    app = _write(tmp_path, "retier.rvl", _RETIER_PYONLY_APP)
+    plc = _write(tmp_path, "retier.toml", _INBOUND_PLACEMENT)
+    procs = _wire_conductor(tmp_path, monkeypatch, ["swap Worker --to node", ":q"])
+
+    rc = _placement.run_placement([app], plc, once=False)
+    assert rc == 0
+
+    assert not [n for n in procs if "__t" in n], list(procs)
+    assert set(procs) == {"backend", "worker"}
+    out = capsys.readouterr().out
+    assert "swap refused" in out and "Worker" in out and "node" in out
