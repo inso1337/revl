@@ -108,6 +108,16 @@ class ClassMap:
         cls: str | None = None
         crossings: list[dict] = []
         caps: set[str] = set()
+        # the CLASS-(c) subset of `caps`: the capabilities this scope reaches via
+        # a class-(c) crossing specifically, kept apart from the worst-class fold
+        # `caps` (which also holds class-(a)/(b) capabilities). The standing-grant
+        # gate reads THIS set, not `caps`, so a grant can only auto-approve the
+        # class-(c) capabilities it actually covers and never a distinct un-granted
+        # one the same call reaches (245/246-F1). Resolved here, where the extern
+        # token resolution happens, because a crossing dict alone does not carry
+        # its resolved capability (an `emission[token]` extern's cap is its token,
+        # not its name).
+        class_c: set[str] = set()
         comp = scope["component"]
 
         # direct service-op emissions fire AT the call: class (c). Deferral is an
@@ -117,6 +127,7 @@ class ClassMap:
         for fact in facts["emissions"]:
             cls = worse(cls, "c")
             caps.add(fact["key"])
+            class_c.add(fact["key"])
             crossings.append({
                 "kind": "emission", "component": comp, "scope": scope["kind"],
                 "key": fact["key"], "method": fact["method"], "actionClass": "c",
@@ -138,6 +149,8 @@ class ClassMap:
                 for cap in (self.index.externs.get(name) or {}).get(
                         "capabilities") or [name]:
                     caps.add(cap)
+                    if c == "c":
+                        class_c.add(cap)  # a deferred (b) emission needs no grant
                 crossings.append({
                     "kind": "extern", "component": comp, "scope": scope["kind"],
                     "name": name, "class": klass, "actionClass": c})
@@ -162,6 +175,7 @@ class ClassMap:
         if self._value_widens(scope["nodes"]):
             cls = worse(cls, "c")
             caps.add("*")
+            class_c.add("*")
             crossings.append({
                 "kind": "widening", "component": comp, "scope": scope["kind"],
                 "capability": "*", "actionClass": "c",
@@ -169,7 +183,8 @@ class ClassMap:
                         "boundary it may reach cannot be named (`*`), so it "
                         "cannot be proven reversible"})
 
-        return {"class": cls, "crossings": crossings, "capabilities": caps}
+        return {"class": cls, "crossings": crossings, "capabilities": caps,
+                "classC": class_c}
 
     def _value_widens(self, nodes) -> bool:
         """Whether this scope references an emitting callable in value position
@@ -187,6 +202,7 @@ class ClassMap:
         cls = direct["class"]
         crossings = list(direct["crossings"])
         caps = set(direct["capabilities"])
+        class_c = set(direct["classC"])
         comps = {self.index.scopes[sid]["component"]}
         for reached in self.index.closure(sid):
             rsid = reached["scope"]
@@ -194,9 +210,10 @@ class ClassMap:
             cls = worse(cls, rdirect["class"])
             crossings += rdirect["crossings"]
             caps |= rdirect["capabilities"]
+            class_c |= rdirect["classC"]
             comps.add(self.index.scopes[rsid]["component"])
         return {"class": cls, "crossings": crossings, "capabilities": caps,
-                "closureComponents": comps}
+                "classC": class_c, "closureComponents": comps}
 
     # -- lookups ------------------------------------------------------------
 
@@ -297,4 +314,10 @@ class ClassMap:
             "candidateHash": chash,
         }
         body["hash"] = _sha(_canon(body))
+        # the class-(c) capability subset, added AFTER the hash so the ticket hash
+        # (the outstanding-ticket key and ledger binding) is byte-identical to
+        # before this field existed. `_find_standing_grant` reads it to require
+        # EVERY class-(c) capability covered, never the worst-class `capabilities`
+        # fold — the 245/246-F1 fix.
+        body["classCCapabilities"] = sorted(reach.get("classC") or [])
         return body

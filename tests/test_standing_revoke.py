@@ -219,20 +219,27 @@ def test_revoke_unknown_request_id_is_a_clean_noop():
 
 @needs_cordis
 def test_revoke_is_capability_scoped(sink):
-    """`announce` and `charge` share Agent's reach-closure candidate hash, so the
-    CAPABILITY is the discriminator on revoke exactly as on mint: revoking
-    `announce` leaves a `charge` grant untouched — pay still auto-approves."""
+    """`announce`, `charge`, and `refund` share Agent's reach-closure candidate
+    hash, so the CAPABILITY is the discriminator on revoke exactly as on mint:
+    revoking `announce` leaves the pay grants untouched — pay still auto-approves.
+
+    `pay` reaches BOTH `charge` AND `refund` (emit + compensate), each a distinct
+    class-(c) capability, so a fully-silent pay needs a grant for EACH (245/246-F1:
+    a `charge` grant alone does not cover the `refund` crossing). Granting both
+    and revoking only `announce` proves the revoke is capability-scoped without
+    relying on one grant over-covering a sibling capability."""
     from revl.mcp.approval import ApprovalRequired
     session = _session()
     session.load(_ir(), record=True)
     session.mint_standing_grant(capability="announce", uses=5)
     session.mint_standing_grant(capability="charge", uses=5)
+    session.mint_standing_grant(capability="refund", uses=5)
 
     session.revoke_standing_grant(capability="announce")
 
     with pytest.raises(ApprovalRequired):                # announce revoked -> prompt
         session.call("ops", "shout", [sink, "hi"])
-    session.call("ops", "pay", [sink, "invoice"])        # charge still granted
+    session.call("ops", "pay", [sink, "invoice"])        # charge+refund still granted
     assert _lines(sink) == ["charge:invoice"]            # shout blocked, pay fired
 
 
@@ -330,3 +337,159 @@ def test_revoke_needs_a_selector():
     session.load(_ir(), record=True)
     with pytest.raises(SessionError, match="capability"):
         session.revoke_standing_grant()
+
+
+# ---------------------------------------------------------------------------
+# revocation-F1: revoke-by-capability retires the grant that COVERS the cap,
+# using the SAME predicate auto-approve uses — find and revoke can never disagree
+# ---------------------------------------------------------------------------
+
+@needs_cordis
+def test_revoke_by_capability_retires_the_covering_grant_multi_cap(sink):
+    """`pay` reaches TWO class-(c) capabilities, `charge` and `refund`; grants for
+    both make pay silent. `revl_revoke refund` must RETIRE the refund grant — count
+    1, not the silent `count: 0` no-op the minted-key mismatch used to return — and
+    the next pay prompts again because `refund` is no longer covered, even though
+    the `charge` grant is still live. The coverage predicate `revoke` retires by is
+    the identical one `_find_standing_grant` auto-approves by, so "revoke what is
+    firing" and "auto-approve what is granted" agree by construction."""
+    from revl.mcp.approval import ApprovalRequired
+    session = _session()
+    session.load(_ir(), record=True)
+    session.mint_standing_grant(capability="charge", uses=9)
+    session.mint_standing_grant(capability="refund", uses=9)
+
+    session.call("ops", "pay", [sink, "a"])             # jointly covered -> silent
+    assert _lines(sink) == ["charge:a"]
+    assert session._owner.prompts["perCall"] == 0
+
+    out = session.revoke_standing_grant(capability="refund")
+    assert out["count"] == 1                            # NOT a no-op
+    assert out["capability"] == "refund"
+
+    with pytest.raises(ApprovalRequired) as exc:        # refund uncovered -> prompt
+        session.call("ops", "pay", [sink, "b"])
+    assert set(exc.value.ticket["capabilities"]) == {"charge", "refund"}
+    assert _lines(sink) == ["charge:a"]                 # the second pay fired nothing
+    assert session._owner.prompts["perCall"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 245/246-F2: a spawn created DURING a call is owner-installed, so its frame
+# joins the session's live-frame registry (the commit/abort gate target)
+# ---------------------------------------------------------------------------
+
+_SOURCE_SPAWN = (
+    "service Job { fn run() -> Int }\n"
+    "service Boss { async fn hire() -> Int }\n"
+    "component Worker provides job: Job {\n"
+    "  let m = effect Map.new() undo m.drop()\n"
+    "  provide job { fn run() = 0 }\n"
+    "}\n"
+    "component Manager provides boss: Boss {\n"
+    "  provide boss {\n"
+    "    async fn hire() {\n"
+    "      let w = effect spawn Worker with { } undo w.dispose()\n"
+    "      return 1\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+@needs_cordis
+def test_spawn_in_call_frame_joins_the_owner_registry():
+    """A frame created DURING a `call` (a spawn-in-call) must capture a LIVE session
+    owner at `Frame.__init__` and join its live-frame registry — the commit/abort
+    gate target and the runtime class-(c) crossing check. The call path used never
+    to install the owner (it was cleared after load), so a spawn-in-call frame
+    captured a cleared ambient owner (None) and took the fail-open path: an
+    unchecked class-(c) crossing and a lost revert, the sibling of the swap-owner
+    bug. Installing the owner across the call fixes it, proven here by the spawned
+    Worker frame calling `register_frame` on THIS session's owner during the call."""
+    from revl.mcp.session import Session
+    session = Session()
+    session.approval_policy = "auto"
+    session.load(compile_source(_SOURCE_SPAWN, "spawn_in_call.rvl"), record=True)
+
+    owner = session._owner
+    registered: list = []
+    original = owner.register_frame
+    owner.register_frame = lambda frame: (registered.append(frame),
+                                          original(frame))[1]
+
+    before = len(owner._registry)
+    out = session.call("boss", "hire", [])
+    assert out["result"] == 1
+    # the spawn-in-call Worker frame joined the registry (0 without the owner
+    # install — the fail-open regression this guards).
+    assert len(registered) >= 1
+    assert len(owner._registry) > before
+
+
+# ---------------------------------------------------------------------------
+# revocation-F5b: a capability-wide revoke of an AMBIGUOUS capability is refused
+# exactly as an ambiguous proactive mint is — a subject-scoped operator cannot
+# use it to retire grants on components outside its scope
+# ---------------------------------------------------------------------------
+
+_SOURCE_AMBIGUOUS = (
+    "extern emission[net.send] fn wireA(sink: Str, msg: Str) = @py {\n"
+    "    with open(sink, 'a') as _f:\n"
+    "        _f.write('A:' + msg + '\\n')\n"
+    "    return\n"
+    "}\n"
+    "extern emission[net.send] fn wireB(sink: Str, msg: Str) = @py {\n"
+    "    with open(sink, 'a') as _f:\n"
+    "        _f.write('B:' + msg + '\\n')\n"
+    "    return\n"
+    "}\n"
+    "service GwA { emission fn send(sink: Str, msg: Str) }\n"
+    "service GwB { emission fn send(sink: Str, msg: Str) }\n"
+    "component GateA provides a: GwA {\n"
+    "  provide a { fn send(sink, msg) { emit wireA(sink, msg) } }\n"
+    "}\n"
+    "component GateB provides b: GwB {\n"
+    "  provide b { fn send(sink, msg) { emit wireB(sink, msg) } }\n"
+    "}\n"
+)
+
+
+@needs_cordis
+def test_ambiguous_capability_wide_revoke_is_refused_like_mint(sink):
+    """The capability `net.send` is emitted by TWO components (GateA and GateB), so
+    it resolves to two distinct closures. A proactive `mint(capability=net.send)` is
+    already refused for that ambiguity; a capability-wide REVOKE had no such guard,
+    so a subject-scoped operator (`may approve on payments`) could `revl_revoke
+    net.send` UNGATED — the operator layer defers an ambiguous capability (it cannot
+    scope it to one component) on the assumption the handler refuses, true for mint,
+    false for revoke — and retire grants on components outside its scope. The fix
+    gives revoke the same ambiguity refusal mint has. Retiring one grant by
+    `requestId` stays available (the precise, scope-safe shape)."""
+    from revl.mcp.approval import ApprovalRequired
+    from revl.mcp.session import SessionError
+    session = _session()
+    session.load(compile_source(_SOURCE_AMBIGUOUS, "ambiguous_send.rvl"),
+                 record=True)
+
+    # a proactive mint is refused for the ambiguity (baseline, unchanged)
+    with pytest.raises(SessionError, match="distinct closures"):
+        session.mint_standing_grant(capability="net.send", uses=3)
+
+    # mint one grant per component off its own outstanding ticket
+    with pytest.raises(ApprovalRequired) as exc_a:
+        session.call("a", "send", [sink, "x"])
+    g_a = session.mint_standing_grant(
+        ticket_hash=exc_a.value.ticket["hash"], capability="net.send", uses=3)
+    with pytest.raises(ApprovalRequired) as exc_b:
+        session.call("b", "send", [sink, "y"])
+    session.mint_standing_grant(
+        ticket_hash=exc_b.value.ticket["hash"], capability="net.send", uses=3)
+
+    # the capability-wide revoke is now refused (would cross operator scopes)
+    with pytest.raises(SessionError, match="distinct closures"):
+        session.revoke_standing_grant(capability="net.send")
+
+    # the precise per-grant shape still works and touches only the named grant
+    out = session.revoke_standing_grant(request_id=g_a["requestId"])
+    assert out["count"] == 1 and out["requestIds"] == [g_a["requestId"]]
