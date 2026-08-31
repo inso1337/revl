@@ -320,15 +320,20 @@ def test_resource_type_crossing_a_tier_boundary_is_refused(tmp_path):
     assert "Sock" in problem and "Db" in problem
 
 
-def test_resource_crossing_a_same_tier_seam_is_untouched(tmp_path):
+def test_resource_crossing_a_same_tier_seam_is_refused(tmp_path):
+    # Finding A: a resource crossing two SAME-TIER (py<->py) processes used to be
+    # admitted (the check short-circuited same-tier seams), so a handle crossed
+    # ungated. The refusal is now tier-agnostic: a same-tier cross-process
+    # resource crossing is refused at plan time, naming the service and resource.
     ir = compile_files([_write(tmp_path, "res.rvl", _RESOURCE_APP)])
     requires = {"c": {"db": "Db"}}
     provides = {"c": {"ctl": "Ctl"}, "w": {"db": "Db"}}
     owner = {"db": "w", "ctl": "c"}
-    backends = {"c": "py", "w": "py"}   # same tier: byte-identical to today
+    backends = {"c": "py", "w": "py"}   # same tier: now still refused
     problem, _ = cross_tier_boundary_check(
         ir, requires, provides, owner, backends, ir.get("services") or {})
-    assert problem is None
+    assert problem is not None
+    assert "Sock" in problem and "Db" in problem
 
 
 def test_sync_cross_tier_seam_is_permitted_and_named(tmp_path):
