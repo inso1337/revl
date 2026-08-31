@@ -79,7 +79,37 @@ def audit_report(ir: dict) -> dict:
         # are NOT extended, so a crossing-free component's boundary entry stays
         # byte-identical (§1, Exit-5).
         "cardinality": cardinality(ir),
+        # item 259 slice 1 (docs/design/259-checked-parallel-emissions.md): the
+        # derived parallelizable partition of each component's straight-line
+        # emission runs. ADDITIVE and PRESENT ONLY when some component has a
+        # group of size > 1 (a body with no parallelizable group renders
+        # byte-identically to before - the common case must not perturb the
+        # audit surface or its goldens). Each group is `{"group": [indices]}`,
+        # the emission-step indices a later slice's runtime may fire
+        # concurrently; a singleton group is a plain sequential emission and is
+        # elided from the render (only components carrying a real parallel group
+        # appear). This is the slice-1 exit surface: the derivation is
+        # inspectable before any runtime consumes it.
+        **_parallel_plan_surface(ir),
     }
+
+
+def _parallel_plan_surface(ir: dict) -> dict:
+    """The additive `parallel_plan` audit key, or `{}` when nothing is
+    parallelizable (so the surface is byte-identical for the common case). Only
+    components with a group of size > 1 are listed, each group wrapped
+    `{"group": [indices]}` in the derived plan order (item 259 §8, S2.4)."""
+    from .parallel import has_parallel_group, parallel_plan  # noqa: PLC0415
+
+    plan = parallel_plan(ir)
+    if not has_parallel_group(plan):
+        return {}
+    surface = {
+        comp: [{"group": group} for group in groups]
+        for comp, groups in plan.items()
+        if any(len(group) > 1 for group in groups)
+    }
+    return {"parallel_plan": surface}
 
 
 def _recovery_surface(ir: dict) -> list:
