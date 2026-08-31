@@ -10,24 +10,27 @@ ordered, classified, honest document -
     `audit_diff.diff_crossings`);
   * `version.derive` (item 64): the computed semver bump and its per-operation
     major/minor classification;
-  * `audit_diff.diff_reach` (item 373): the reach drift a crossing-set diff
-    cannot see.
+  * `audit_diff.diff_reach` (item 373) plus the Slice-2 audit-surface differs
+    (`diff_capability_scopes`, `diff_backends`, `diff_recovery`, `diff_registers`,
+    `diff_cardinality`): the authority drift a crossing-set diff cannot see.
 
 Every rendered line carries a mandatory provenance `fact` token drawn from one
 of those differs. A line with no backing fact is a defect, not a feature, and
 `ChangelogLine` refuses to construct one.
 
-Slice 1 is honest-but-incomplete. The `audit_diff` foundation differences only
-crossings and reach today; the other authority surfaces `audit_report` carries
-(`recovery_surface`, `capability_registers`, `cardinality`, the per-component
-`boundary[*].capabilities` scope map, and `externs[*].{backends,class,...}`) have
-no differ yet. So the completeness guard (`_completeness_guard`) structurally
-diffs the WHOLE `audit_report(before)` against `audit_report(after)`, subtracts
-the exact leaf paths a differ demonstrably reads (`CONSUMED_PATHS`), and emits
-one UNCLASSIFIED honesty line per residual differing path. A non-empty
-unclassified bucket also forces the headline non-clean (it may claim a definite
-bump level only when the bucket is empty). Slice 2 will add the missing differs
-to `audit_diff.py` and move each honesty line to its real class.
+Slice 2 hardens item 64's `audit_diff` foundation: the audit surfaces that Slice
+1 could only HONESTY-LINE (`recovery_surface`, `capability_registers`,
+`cardinality`, the per-component `boundary[*].capabilities` scope map, and
+`externs[*].backends`) are now CLASSIFIED by their own differ - a widened scope,
+a new backend host body, a dropped recovery inverse, a weakened register floor,
+and a raised emission ceiling each become a first-class BREAKING line, and their
+leaf paths move into `CONSUMED_PATHS` so the guard no longer double-reports them.
+The completeness guard (`_completeness_guard`) still structurally diffs the WHOLE
+`audit_report(before)` against `audit_report(after)` and honesty-lines any
+RESIDUAL differing path (a surface no differ yet reads - `parallel_plan`,
+`distributability`, `externs[*].{class,register,...}`), so a genuinely
+unclassified change is still never dropped and still forces the headline
+non-clean.
 """
 
 from __future__ import annotations
@@ -35,7 +38,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from .audit_diff import audit_report, diff_reach
+from .audit_diff import (
+    audit_report, diff_backends, diff_capability_scopes, diff_cardinality,
+    diff_reach, diff_recovery, diff_registers)
 from .composition_diff import diff as composition_diff
 
 # --------------------------------------------------------------------------
@@ -99,6 +104,14 @@ CONSUMED_PATHS: dict[tuple, tuple[str, str]] = {
     ("secrets", _STAR, "name"): ("audit_diff", "crossings"),
     # read by `audit_diff.diff_reach` (via `_reach_map`):
     ("externs", _STAR, "reach"): ("audit_diff", "_reach_map"),
+    # Slice 2: the audit-surface differs now READ these nested leaves, so a delta
+    # on them is a CLASSIFIED line, not a guard honesty line. Each entry names
+    # the differ whose source `test_every_consumed_path_*` asserts reads the leaf.
+    ("boundary", _STAR, "capabilities"): ("audit_diff", "_capability_scopes"),
+    ("externs", _STAR, "backends"): ("audit_diff", "diff_backends"),
+    ("recovery_surface",): ("audit_diff", "diff_recovery"),
+    ("capability_registers",): ("audit_diff", "diff_registers"),
+    ("cardinality",): ("audit_diff", "diff_cardinality"),
     # the composition membership/wiring surface, owned by `composition_diff`
     # (which reports every component add/remove/change and provide/require edge
     # from `_components`); the audit `manifest` is the same membership data, so
@@ -321,6 +334,98 @@ def _classify_crossings(delta: dict, reach: dict) -> list[ChangelogLine]:
     return lines
 
 
+def _classify_audit_surfaces(before_audit: dict,
+                             after_audit: dict) -> list[ChangelogLine]:
+    """The Slice-2 authority surfaces (§7), each read by its own `audit_diff`
+    differ. Every WIDENING is a breaking line with `lede=True` (an authority
+    reach that grew - the operator's lede); every safe direction (a narrowed
+    scope, a dropped backend, a gained recovery, a strengthened register, a
+    tightened ceiling) is added/relaxed. These were Slice-1 honesty lines; now
+    that their leaves are in `CONSUMED_PATHS`, the guard no longer surfaces them
+    and they render classified here instead."""
+    lines: list[ChangelogLine] = []
+
+    # capability scope (boundary[*].capabilities): send.mail -> send.* on a
+    # STABLE crossing is a widening the scope-free `emit:` token cannot carry.
+    scopes = diff_capability_scopes(before_audit, after_audit)
+    for token in scopes["scope_widened"]:
+        _kind, comp, label = token.split(":", 2)
+        lines.append(ChangelogLine(
+            fact=f"scope.widened:{comp}:{label}", category="breaking", lede=True,
+            text=f"{comp} widened the capability scope of emission {label}"))
+    for token in scopes["scope_tightened"]:
+        _kind, comp, label = token.split(":", 2)
+        lines.append(ChangelogLine(
+            fact=f"scope.tightened:{comp}:{label}", category="added",
+            text=f"{comp} narrowed the capability scope of emission {label}"))
+
+    # backends (externs[*].backends): a new host body is new reachable host code.
+    backends = diff_backends(before_audit, after_audit)
+    for token in backends["backends_added"]:
+        _kind, name, backend = token.split(":", 2)
+        lines.append(ChangelogLine(
+            fact=f"backend.added:{name}:{backend}", category="breaking",
+            lede=True,
+            text=(f"extern {name} gained a {backend} host body "
+                  f"(new reachable host code)")))
+    for token in backends["backends_removed"]:
+        _kind, name, backend = token.split(":", 2)
+        lines.append(ChangelogLine(
+            fact=f"backend.removed:{name}:{backend}", category="added",
+            text=f"extern {name} dropped its {backend} host body"))
+
+    # recovery_surface: a dropped inverse turns a reversible effect irreversible.
+    recovery = diff_recovery(before_audit, after_audit)
+    for token in recovery["recovery_dropped"]:
+        _kind, name, rkind = token.split(":", 2)
+        lines.append(ChangelogLine(
+            fact=f"recovery.dropped:{name}:{rkind}", category="breaking",
+            lede=True,
+            text=(f"extern {name} lost its {rkind} recovery "
+                  f"(a reversible effect became irreversible)")))
+    for token in recovery["recovery_weakened"]:
+        _kind, name, rkind = token.split(":", 2)
+        lines.append(ChangelogLine(
+            fact=f"recovery.weakened:{name}:{rkind}", category="breaking",
+            lede=True,
+            text=(f"extern {name} weakened the idempotency register of its "
+                  f"{rkind} recovery")))
+    for token in recovery["recovery_added"]:
+        _kind, name, rkind = token.split(":", 2)
+        lines.append(ChangelogLine(
+            fact=f"recovery.added:{name}:{rkind}", category="added",
+            text=f"extern {name} gained a {rkind} recovery"))
+
+    # capability_registers: a weakened idempotency floor lets a consumer that
+    # relied on the stronger guarantee double-apply.
+    registers = diff_registers(before_audit, after_audit)
+    for token in registers["registers_weakened"]:
+        cap = token.split(":", 1)[-1]
+        lines.append(ChangelogLine(
+            fact=f"register.weakened:{cap}", category="breaking", lede=True,
+            text=f"idempotency register floor of {cap} weakened"))
+    for token in registers["registers_strengthened"]:
+        cap = token.split(":", 1)[-1]
+        lines.append(ChangelogLine(
+            fact=f"register.strengthened:{cap}", category="added",
+            text=f"idempotency register floor of {cap} strengthened"))
+
+    # cardinality: a raised emission ceiling admits more crossings per activation.
+    cardinality = diff_cardinality(before_audit, after_audit)
+    for token in cardinality["cardinality_widened"]:
+        _kind, comp, cap = token.split(":", 2)
+        lines.append(ChangelogLine(
+            fact=f"cardinality.widened:{comp}:{cap}", category="breaking",
+            lede=True,
+            text=f"{comp} raised its emission ceiling for {cap}"))
+    for token in cardinality["cardinality_tightened"]:
+        _kind, comp, cap = token.split(":", 2)
+        lines.append(ChangelogLine(
+            fact=f"cardinality.tightened:{comp}:{cap}", category="added",
+            text=f"{comp} tightened its emission ceiling for {cap}"))
+    return lines
+
+
 def _classify_semver(version_result: dict | None) -> list[ChangelogLine]:
     """The interface axis (§2 table), read off `version.derive`'s `changes`.
 
@@ -452,6 +557,7 @@ def _build_changelog(delta: dict, version_result: dict | None,
 
     lines: list[ChangelogLine] = []
     lines += _classify_crossings(delta, reach)
+    lines += _classify_audit_surfaces(before_audit, after_audit)
     lines += _classify_semver(version_result)
     lines += _classify_structural(delta)
 

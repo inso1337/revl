@@ -310,3 +310,174 @@ def test_cli_json_body_carries_secrets_identically_to_audit_report(tmp_path,
     assert body == audit_report(compile_files([str(src)]))
     assert body["secrets"] == [
         {"name": "openai_key", "capability": "model.complete"}]
+
+
+# --------------------------- Slice 2: the audit-surface differs (item 261 §7)
+#
+# These HARDEN item 64's `audit_diff` foundation, which shipped differencing
+# ONLY crossings (`diff_crossings`) and reach (`diff_reach`). Each new differ
+# closes one blind spot the changelog's completeness guard could previously only
+# honesty-line: a capability-scope widening on a STABLE crossing, a new backend
+# host body, a dropped/weakened recovery inverse, a weakened idempotency register
+# floor, and a raised emission ceiling. Each mirrors `diff_reach`'s WIDENED /
+# TIGHTENED shape and sorts every bucket.
+
+from revl.audit_diff import (  # noqa: E402
+    diff_backends, diff_capability_scopes, diff_cardinality, diff_recovery,
+    diff_registers)
+
+
+def test_diff_capability_scopes_flags_a_widening_on_a_stable_crossing():
+    # send.mail -> send.* on a crossing whose `emit:C:notify` token is UNCHANGED.
+    before = {"boundary": {"C": {"emissions": ["notify"],
+                                 "capabilities": {"notify": ["send.mail"]}}}}
+    after = {"boundary": {"C": {"emissions": ["notify"],
+                                "capabilities": {"notify": ["send.*"]}}}}
+    result = diff_capability_scopes(before, after)
+    assert result["scope_widened"] == ["scope:C:notify"]
+    assert result["scope_tightened"] == []
+
+
+def test_diff_capability_scopes_narrowing_is_the_safe_direction():
+    before = {"boundary": {"C": {"capabilities": {"notify": ["send.*"]}}}}
+    after = {"boundary": {"C": {"capabilities": {"notify": ["send.mail"]}}}}
+    result = diff_capability_scopes(before, after)
+    assert result["scope_widened"] == []
+    assert result["scope_tightened"] == ["scope:C:notify"]
+
+
+def test_diff_capability_scopes_stable_scope_is_clean():
+    audit = {"boundary": {"C": {"capabilities": {"notify": ["send.mail"]}}}}
+    assert diff_capability_scopes(audit, audit) == {
+        "scope_widened": [], "scope_tightened": []}
+
+
+def test_diff_capability_scopes_unscoped_star_covers_everything():
+    # a bare emission (`*`) is the widest scope: narrowing FROM `*` is safe,
+    # widening TO `*` is breaking.
+    star = {"boundary": {"C": {"capabilities": {"n": ["*"]}}}}
+    mail = {"boundary": {"C": {"capabilities": {"n": ["send.mail"]}}}}
+    assert diff_capability_scopes(star, mail)["scope_tightened"] == ["scope:C:n"]
+    assert diff_capability_scopes(mail, star)["scope_widened"] == ["scope:C:n"]
+
+
+def test_diff_backends_flags_a_new_host_body():
+    before = {"externs": [{"name": "x", "backends": ["rust"]}]}
+    after = {"externs": [{"name": "x", "backends": ["py", "rust"]}]}
+    result = diff_backends(before, after)
+    assert result["backends_added"] == ["backend:x:py"]
+    assert result["backends_removed"] == []
+
+
+def test_diff_backends_dropped_body_is_safe():
+    before = {"externs": [{"name": "x", "backends": ["py", "rust"]}]}
+    after = {"externs": [{"name": "x", "backends": ["rust"]}]}
+    result = diff_backends(before, after)
+    assert result["backends_removed"] == ["backend:x:py"]
+    assert result["backends_added"] == []
+
+
+def test_diff_backends_is_sorted_over_several_moves():
+    before = {"externs": [{"name": "b", "backends": ["rust"]},
+                          {"name": "a", "backends": ["rust"]}]}
+    after = {"externs": [{"name": "b", "backends": ["py", "rust"]},
+                         {"name": "a", "backends": ["go", "rust"]}]}
+    added = diff_backends(before, after)["backends_added"]
+    assert added == ["backend:a:go", "backend:b:py"] == sorted(added)
+
+
+def test_diff_recovery_flags_a_dropped_inverse():
+    before = {"recovery_surface": [
+        {"name": "acquire", "kind": "inverse", "register": "keyed"}]}
+    after = {"recovery_surface": []}
+    result = diff_recovery(before, after)
+    assert result["recovery_dropped"] == ["recovery:acquire:inverse"]
+    assert result["recovery_added"] == []
+    assert result["recovery_weakened"] == []
+
+
+def test_diff_recovery_flags_a_weakened_register_on_a_surviving_inverse():
+    before = {"recovery_surface": [
+        {"name": "a", "kind": "inverse", "register": "keyed"}]}
+    after = {"recovery_surface": [
+        {"name": "a", "kind": "inverse", "register": "declared"}]}
+    result = diff_recovery(before, after)
+    assert result["recovery_weakened"] == ["recovery:a:inverse"]
+    assert result["recovery_dropped"] == []
+
+
+def test_diff_recovery_gained_inverse_is_safe():
+    before = {"recovery_surface": []}
+    after = {"recovery_surface": [
+        {"name": "a", "kind": "inverse", "register": "keyed"}]}
+    result = diff_recovery(before, after)
+    assert result["recovery_added"] == ["recovery:a:inverse"]
+    assert result["recovery_dropped"] == []
+
+
+def test_diff_registers_flags_a_weakened_floor():
+    before = {"capability_registers": {"send.mail": "keyed"}}
+    after = {"capability_registers": {"send.mail": "declared"}}
+    result = diff_registers(before, after)
+    assert result["registers_weakened"] == ["register:send.mail"]
+    assert result["registers_strengthened"] == []
+
+
+def test_diff_registers_removed_floor_is_weakened():
+    before = {"capability_registers": {"send.mail": "keyed"}}
+    after = {"capability_registers": {}}
+    assert diff_registers(before, after)["registers_weakened"] == [
+        "register:send.mail"]
+
+
+def test_diff_registers_new_or_stronger_floor_is_safe():
+    before = {"capability_registers": {"send.mail": "declared"}}
+    after = {"capability_registers": {"send.mail": "keyed", "send.sms": "keyed"}}
+    result = diff_registers(before, after)
+    assert result["registers_strengthened"] == [
+        "register:send.mail", "register:send.sms"]
+    assert result["registers_weakened"] == []
+
+
+def test_diff_cardinality_flags_a_raised_ceiling_to_unbounded():
+    before = {"cardinality": {"C": {"per_capability": {
+        "send.mail": {"bound": 3, "kind": "bounded"}}}}}
+    after = {"cardinality": {"C": {"per_capability": {
+        "send.mail": {"bound": None, "kind": "unbounded"}}}}}
+    result = diff_cardinality(before, after)
+    assert result["cardinality_widened"] == ["cardinality:C:send.mail"]
+    assert result["cardinality_tightened"] == []
+
+
+def test_diff_cardinality_larger_bound_is_a_widening():
+    before = {"cardinality": {"C": {"per_capability": {
+        "send.mail": {"bound": 3, "kind": "bounded"}}}}}
+    after = {"cardinality": {"C": {"per_capability": {
+        "send.mail": {"bound": 5, "kind": "bounded"}}}}}
+    assert diff_cardinality(before, after)["cardinality_widened"] == [
+        "cardinality:C:send.mail"]
+
+
+def test_diff_cardinality_tightened_ceiling_is_safe():
+    before = {"cardinality": {"C": {"per_capability": {
+        "send.mail": {"bound": None, "kind": "unbounded"}}}}}
+    after = {"cardinality": {"C": {"per_capability": {
+        "send.mail": {"bound": 2, "kind": "bounded"}}}}}
+    result = diff_cardinality(before, after)
+    assert result["cardinality_tightened"] == ["cardinality:C:send.mail"]
+    assert result["cardinality_widened"] == []
+
+
+def test_slice2_differs_tolerate_a_partial_audit_dict():
+    # a hand-built or interchange audit that omits a surface must not crash any
+    # differ - each reads its own surface defensively.
+    assert diff_capability_scopes({}, {}) == {
+        "scope_widened": [], "scope_tightened": []}
+    assert diff_backends({}, {}) == {
+        "backends_added": [], "backends_removed": []}
+    assert diff_recovery({}, {}) == {
+        "recovery_dropped": [], "recovery_weakened": [], "recovery_added": []}
+    assert diff_registers({}, {}) == {
+        "registers_weakened": [], "registers_strengthened": []}
+    assert diff_cardinality({}, {}) == {
+        "cardinality_widened": [], "cardinality_tightened": []}
