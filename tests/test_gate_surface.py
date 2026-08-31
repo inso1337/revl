@@ -32,9 +32,11 @@ from revl.gate import (
     GateRefused,
     Verdict,
     admit,
+    admit_into,
     compile_to,
     gate_version,
 )
+from revl.holes import refuse_admission
 
 _ROOT = Path(__file__).resolve().parents[1]
 _BACKEND = _ROOT / "backends" / "python"
@@ -72,6 +74,30 @@ _REFUSED = (
     "  provide s { fn f(x) = x }\n"
     "}\n"
 )
+# A DRAFT: it compiles (the checker gives a verdict on the parts written) but
+# carries an open typed hole, so the admission gate (`refuse_admission`, T3)
+# refuses to let it run. `compile_source` alone ACCEPTS it; every admission
+# entrypoint must REFUSE it (docs/holes.md).
+_HOLE_DRAFT = (
+    "service Cache { fn get(key: Str) -> Str }\n"
+    "component C provides c: Cache {\n"
+    '  provide c { fn get(key) = hole "look up in the store" }\n'
+    "}\n"
+)
+# A second post-check_and_lower admission refusal: two open holes in one draft,
+# a different service, exercising the same gate with a different message body.
+_HOLE_DRAFT_TWO = (
+    "service Store {\n"
+    "  fn get(key: Str) -> Str\n"
+    "  fn put(key: Str, val: Str) -> Str\n"
+    "}\n"
+    "component D provides d: Store {\n"
+    "  provide d {\n"
+    '    fn get(key) = hole "the read path"\n'
+    '    fn put(key, val) = hole "the write path"\n'
+    "  }\n"
+    "}\n"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -106,6 +132,59 @@ def test_admit_matches_reference_on_a_refused_program_verbatim():
     # and the message is the reference diagnostic VERBATIM.
     assert verdict.message == ref_message
     assert verdict.code == ref_code
+
+
+def _refusal(fn):
+    """Run `fn` and return the (code, message) of the RevlError it raises, or
+    None if it did not raise. Used to compare admission verdicts across
+    entrypoints byte for byte."""
+    try:
+        fn()
+    except RevlError as error:
+        return (getattr(error, "code", None), str(error))
+    return None
+
+
+@pytest.mark.parametrize("draft", [_HOLE_DRAFT, _HOLE_DRAFT_TWO])
+def test_admit_refuses_hole_draft_agreeing_with_every_admission_gate(draft):
+    """The item-332 false-admit fix (adversarial review): `admit` must apply the
+    admission gate it claims to be, not just `compile_source`. A draft with an
+    open typed hole compiles but may never run; `refuse_admission`, `admit_into`
+    (`compile_source(..., manifest=...)`), and `revl run` all REFUSE it, so
+    `admit` must too, with the SAME verdict verbatim (the security clause).
+
+    Differential: `admit`, `admit_into`, and `refuse_admission` produce the
+    IDENTICAL (code, message), and `Gate.load` also refuses (via the session
+    layer, which carries its own hole diagnostic)."""
+    # the reference the draft compiles as: an accepted DRAFT, one open hole.
+    document = compile_source(draft)  # does not raise — a draft is checkable.
+
+    # 1) refuse_admission — the admission gate itself.
+    gate_refusal = _refusal(lambda: refuse_admission(document))
+    assert gate_refusal is not None, "refuse_admission must refuse a hole draft"
+    code, message = gate_refusal
+    assert code == "T3"
+
+    # 2) admit_into — the runtime-admission entrypoint (manifest = the draft's
+    #    own document, a running composition to admit into).
+    into = admit_into(draft, document)
+    assert into.admitted is False
+    assert (into.code, into.message) == (code, message)
+
+    # 3) admit — the layer-1 entrypoint under test. Before the fix it ADMITTED
+    #    this draft (the false-admit); now it refuses with the SAME verdict.
+    verdict = admit(draft)
+    assert verdict.admitted is False, (
+        "admit must never admit what the reference refuses to run")
+    assert (verdict.code, verdict.message) == (code, message)
+
+
+def test_admit_is_not_admitted_by_compile_source_alone():
+    """The defect in one line: `compile_source` ACCEPTS the hole draft (it is a
+    checkable draft), and `admit` — which used to be exactly that call — now
+    REFUSES it. The two verdicts must diverge, or the admission gate is absent."""
+    compile_source(_HOLE_DRAFT)  # a draft compiles: no raise.
+    assert admit(_HOLE_DRAFT).admitted is False
 
 
 def test_compile_to_emits_reference_target_source():
@@ -360,6 +439,50 @@ def test_second_live_gate_is_refused():
     # after close, a fresh Gate constructs cleanly.
     second = Gate()
     second.close()
+
+
+def test_dropped_gate_without_close_does_not_block_construction():
+    """Finding 3 (robustness): a Gate constructed and dropped WITHOUT `close()`
+    must not soft-brick the process. The single-gate slot is a weak reference,
+    so a collected gate frees the slot on its own — a subsequent `Gate()`
+    constructs cleanly instead of refusing forever."""
+    g = Gate()
+    del g  # no close(): the only strong reference is gone, so it is collected.
+
+    # the slot is now free (the weak reference is dead); a fresh gate constructs.
+    survivor = Gate()
+    try:
+        assert survivor.loaded is False
+    finally:
+        survivor.close()
+
+
+def test_dropped_gate_frees_the_slot_but_a_live_gate_still_blocks():
+    """The liveness fix must NOT weaken the single-gate invariant: a gate that
+    is still LIVE (referenced) blocks a second construction exactly as before;
+    only a dropped-and-collected gate frees the slot."""
+    live = Gate()
+    try:
+        with pytest.raises(GateError) as exc:
+            Gate()
+        assert "single-gate-per-process" in str(exc.value)
+    finally:
+        live.close()
+
+
+@needs_cordis
+def test_gate_load_refuses_the_hole_draft():
+    """`Gate.load` (the layer-2 admission entrypoint) refuses a draft with an
+    open typed hole — the same draft `admit`/`admit_into`/`refuse_admission`
+    refuse. Its message comes from the session layer (docs/holes.md), but the
+    refusal is the same admission decision, and it names the open hole."""
+    gate = Gate()
+    try:
+        with pytest.raises(GateError) as exc:
+            gate.load(_HOLE_DRAFT)
+        assert "hole" in str(exc.value).lower()
+    finally:
+        gate.close()
 
 
 def test_public_import_surface_is_pinned():
