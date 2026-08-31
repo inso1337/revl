@@ -209,3 +209,245 @@ def test_merge_max_is_max_not_sum():
     total = {"db": 1}                       # the scrutinee/cond side sums in
     _merge_max(total, [{"db": 2}, {"db": 1}, {"model": 3}])
     assert total == {"db": 3, "model": 3}   # 1 (base) + max(2,1)=2 -> 3; model 3
+
+
+# ==========================================================================
+# Slice 2 - bounded-iteration certification (docs/design/260 §2.2)
+# ==========================================================================
+
+# The harness `run_loop` shape: a single-fn self-recursion whose fuel `n`
+# strictly decreases by 1, dominated by a base guard, invoking an emitting arrow
+# once per iteration. The crossing rides the arrow (a pure top-level fn cannot
+# emit through a required key), so the linear ceiling is `max_iters * per_iter`.
+_HEAD = """
+service Model { emission[model] fn complete(m: List[Str]) -> Str }
+service Loop { emission[model] fn run(s: Str) -> Str }
+"""
+
+_RUN_LOOP = """
+fn run_loop(msgs: List[Str], step: (List[Str]) -> Str, n: Int) -> Str {
+  if (n <= 0) { return "stop" }
+  let r = step(msgs)
+  return run_loop(msgs, step, n - 1)
+}
+"""
+
+
+def test_linear_self_recursion_literal_fuel_certifies_to_a_finite_ceiling():
+    """A single-self-call `run_loop(n)`, fuel `n` decreasing by 1 under a base
+    guard, invoking an emitting arrow once per iteration, certifies to the exact
+    `caps x max-iters` ceiling: model crossed at most N0 times per activation."""
+    card = _card(_HEAD + _RUN_LOOP + """
+component Agent requires model: Model provides agent: Loop {
+  provide agent { fn run(s) -> Str {
+    let msgs = [s]
+    return run_loop(msgs, msgs2 => emit model.complete(msgs2), 5)
+  } }
+}
+""")
+    assert card["Agent"]["verdict"] == "bounded"
+    # max_iters = ceil((5 - 0) / 1) = 5; per_iter arrow invocations = 1
+    assert card["Agent"]["per_capability"]["model"] == {"bound": 5,
+                                                        "kind": "bounded"}
+
+
+def test_linear_self_recursion_config_fuel_is_bounded_symbolic():
+    """When the initial fuel is a `config` field (not yet pinned), the ceiling is
+    symbolic: `bounded-symbolic`, carrying the config expr and per-iteration
+    crossings, resolved to an integer only once the manifest pins the field
+    (docs/design/260 §2.2)."""
+    card = _card(_HEAD + _RUN_LOOP + """
+component Agent requires model: Model provides agent: Loop {
+  config { max_steps: Int }
+  provide agent { fn run(s) -> Str {
+    let msgs = [s]
+    return run_loop(msgs, msgs2 => emit model.complete(msgs2), config.max_steps)
+  } }
+}
+""")
+    assert card["Agent"]["verdict"] == "bounded-symbolic"
+    assert card["Agent"]["per_capability"]["model"] == {
+        "bound": None, "kind": "bounded-symbolic",
+        "expr": "config.max_steps", "per_iter": 1}
+
+
+def test_certified_ceiling_scales_with_the_decrement():
+    """The ceiling is `ceil((N0 - c) / k)`: fuel decreasing by 2 from 8 crosses
+    at most 4 times, not 8. A false linear form blind to `k` would over- or
+    under-count."""
+    card = _card(_HEAD + """
+fn run_loop(msgs: List[Str], step: (List[Str]) -> Str, n: Int) -> Str {
+  if (n <= 0) { return "stop" }
+  let r = step(msgs)
+  return run_loop(msgs, step, n - 2)
+}
+component Agent requires model: Model provides agent: Loop {
+  provide agent { fn run(s) -> Str {
+    let msgs = [s]
+    return run_loop(msgs, msgs2 => emit model.complete(msgs2), 8)
+  } }
+}
+""")
+    assert card["Agent"]["per_capability"]["model"] == {"bound": 4,
+                                                        "kind": "bounded"}
+
+
+# --------------------------------------------------------------------------
+# THE CRITICAL (docs/design/260 §2.2 clause 4, Exit-3): branching / tree
+# recursion fans out to ~2^n and MUST report `unbounded`, never `<= n`.
+# --------------------------------------------------------------------------
+
+def test_CRITICAL_branching_recursion_host_extern_is_unbounded():
+    """The exact case from the design brief: `f(n){ if(n<=0){return}; emit_once();
+    f(n-1); f(n-1) }`. Two self-calls on one path fan out exponentially; the
+    capability MUST be `unbounded`, never a linear ceiling `<= n`."""
+    card = _card("""
+service Svc { emission fn run() -> Int }
+extern emission fn emit_once() -> Int = @py { return 1 }
+fn f(n: Int) -> Int {
+  if (n <= 0) { return 0 }
+  let a = emit_once()
+  let b = f(n - 1)
+  return f(n - 1)
+}
+component C provides svc: Svc {
+  provide svc { fn run() -> Int { return f(5) } }
+}
+""")
+    assert card["C"]["verdict"] == "unbounded"
+    entry = card["C"]["per_capability"]["emit_once"]
+    assert entry["bound"] is None
+    assert entry["kind"] == "unbounded"
+    # never a finite ceiling of any kind
+    assert "bound" not in entry or entry["bound"] is None
+
+
+def test_CRITICAL_branching_arrow_mediated_is_unbounded_not_linear():
+    """The sharper CRITICAL: the fan-out rides an emitting ARROW, so the crossing
+    is otherwise countable and a clause-4-blind recognizer WOULD certify a false
+    `model <= n`. It reaches two self-calls on a path, so it MUST be `unbounded`
+    with the fan-out reason, never `bounded` and never `bounded-symbolic`."""
+    card = _card(_HEAD + """
+fn tree(step: (List[Str]) -> Str, msgs: List[Str], n: Int) -> Str {
+  if (n <= 0) { return "stop" }
+  let x = step(msgs)
+  let a = tree(step, msgs, n - 1)
+  return tree(step, msgs, n - 1)
+}
+component Agent requires model: Model provides agent: Loop {
+  provide agent { fn run(s) -> Str {
+    let msgs = [s]
+    return tree(msgs2 => emit model.complete(msgs2), msgs, 5)
+  } }
+}
+""")
+    entry = card["Agent"]["per_capability"]["model"]
+    assert card["Agent"]["verdict"] == "unbounded"
+    assert entry["kind"] == "unbounded"          # NOT bounded, NOT symbolic
+    assert entry["bound"] is None
+    # the reason names the fan-out and clause 4 - the CRITICAL fix
+    assert "fans out" in entry["reason"]
+    assert "clause 4" in entry["reason"]
+
+
+# --------------------------------------------------------------------------
+# the recognizer is narrow: every shape it cannot certify stays `unbounded`
+# --------------------------------------------------------------------------
+
+def _agent_model_verdict(src_body: str, callsite: str, config: str = "") -> dict:
+    card = _card(_HEAD + src_body + f"""
+component Agent requires model: Model provides agent: Loop {{
+  {config}
+  provide agent {{ fn run(s) -> Str {{
+    let msgs = [s]
+    return {callsite}
+  }} }}
+}}
+""")
+    return card["Agent"]
+
+
+def test_non_decreasing_fuel_stays_unbounded():
+    """A self-call that passes `n` unchanged (no strict decrease) fails clause 1
+    and stays `unbounded`, never certified (docs/design/260 §2.2 clause 1)."""
+    agent = _agent_model_verdict("""
+fn r(msgs: List[Str], step: (List[Str]) -> Str, n: Int) -> Str {
+  if (n <= 0) { return "s" }
+  let x = step(msgs)
+  return r(msgs, step, n)
+}""", "r(msgs, msgs2 => emit model.complete(msgs2), 5)")
+    assert agent["verdict"] == "unbounded"
+    assert agent["per_capability"]["model"]["kind"] == "unbounded"
+
+
+def test_no_base_guard_stays_unbounded():
+    """A recursion with no dominating base guard fails clause 2 and stays
+    `unbounded` (docs/design/260 §2.2 clause 2)."""
+    agent = _agent_model_verdict("""
+fn r(msgs: List[Str], step: (List[Str]) -> Str, n: Int) -> Str {
+  let x = step(msgs)
+  return r(msgs, step, n - 1)
+}""", "r(msgs, msgs2 => emit model.complete(msgs2), 5)")
+    assert agent["verdict"] == "unbounded"
+    assert agent["per_capability"]["model"]["kind"] == "unbounded"
+
+
+def test_non_resolvable_initial_fuel_stays_unbounded():
+    """A bounded-SHAPED recursion whose initial fuel is neither a literal nor a
+    config field (here `config.max_steps + 1`, an arithmetic expression) has the
+    right shape but no provable ceiling, so it stays `unbounded` (clause 3)."""
+    agent = _agent_model_verdict("""
+fn r(msgs: List[Str], step: (List[Str]) -> Str, n: Int) -> Str {
+  if (n <= 0) { return "s" }
+  let x = step(msgs)
+  return r(msgs, step, n - 1)
+}""", "r(msgs, msgs2 => emit model.complete(msgs2), config.max_steps + 1)",
+        config="config { max_steps: Int }")
+    assert agent["verdict"] == "unbounded"
+    entry = agent["per_capability"]["model"]
+    assert entry["kind"] == "unbounded"
+    assert "initial fuel" in entry["reason"]
+
+
+def test_mutual_recursion_stays_unbounded():
+    """Multi-fn / mutual recursion is out of scope this slice (§5.2 OPEN):
+    certification is single-fn self-recursion only, so a mutual SCC stays
+    `unbounded` (sound, never over-claiming)."""
+    agent = _agent_model_verdict("""
+fn ping(msgs: List[Str], step: (List[Str]) -> Str, n: Int) -> Str {
+  if (n <= 0) { return "s" }
+  let x = step(msgs)
+  return pong(msgs, step, n - 1)
+}
+fn pong(msgs: List[Str], step: (List[Str]) -> Str, n: Int) -> Str {
+  if (n <= 0) { return "s" }
+  return ping(msgs, step, n - 1)
+}""", "ping(msgs, msgs2 => emit model.complete(msgs2), 5)")
+    assert agent["verdict"] == "unbounded"
+    assert agent["per_capability"]["model"]["kind"] == "unbounded"
+    assert "mutual" in agent["per_capability"]["model"]["reason"]
+
+
+def test_certified_symbolic_renders_on_text_audit(tmp_path):
+    """The bounded-symbolic ceiling renders under `capabilities:` as
+    `model <= config.max_steps per activation (1 per iteration)` (§1.2)."""
+    src = _HEAD + _RUN_LOOP + """
+component Agent requires model: Model provides agent: Loop {
+  config { max_steps: Int }
+  provide agent { fn run(s) -> Str {
+    let msgs = [s]
+    return run_loop(msgs, msgs2 => emit model.complete(msgs2), config.max_steps)
+  } }
+}
+"""
+    path = tmp_path / "agent.rvl"
+    path.write_text(src)
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = main(["audit", str(path)])
+    assert code == 0
+    out = buf.getvalue()
+    assert "cardinality: model <= config.max_steps per activation" in out
+    assert "(1 per iteration)" in out
