@@ -1,0 +1,18 @@
+{
+  "boundary": {
+    "UserCache": {
+      "awaits": 0,
+      "capabilities": {
+        "db.execute": [
+          "*"
+        ]
+      },
+      "compensated": 0,
+      "emissions": [
+        "db.execute"
+      ],
+      "externs": []
+    }
+  },
+  "kind": "revl.capabilities"
+}
