@@ -1241,6 +1241,11 @@ fn component_body(comp: Any) -> List[Str] {
   out = out.push(line(1, `_revl_frame = _revl_Frame(_revl_ctx, ${py_repr(name)})`))
   out = out.push("")
   out = out.push(line(1, "def _body():"))
+  // item 247 second-pass (F1): `begin` yielded FIRST -> disposed LAST (cordis
+  // LIFO), the Phase-2 post-unwind hook at the bottom of the unwind stack, so a
+  // post-activation abort's activation-body offsets are drained after Phase 1
+  // instead of lost. Mirrors backends/python/emit.py (byte-agreement oracle).
+  out = out.push(line(2, "yield _revl_frame.begin"))
   let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0)
   out = out.concat(e.lines)
   out = out.push(line(2, "yield _revl_frame.drain"))
