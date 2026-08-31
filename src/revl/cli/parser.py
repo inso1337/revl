@@ -568,6 +568,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "runtime is a skip with a reason and a nonzero exit")
     run.add_argument("--config", default=None,
                      help="TOML/JSON file of `component-name = { ... }` config tables")
+    run.add_argument("--policy", default=None, metavar="POLICY",
+                     help="boundary policy file (item 33). With --backend wasm it "
+                          "enforces the item-289 least-authority chain (host "
+                          "imports subset-of declared caps subset-of policy-allowed) "
+                          "before booting; a wasm cell exceeding the allow-list is "
+                          "refused (docs/boundary-policy.md)")
     run.add_argument("--watch", action="store_true",
                      help="watch the sources and recompile on change; a rejected edit is refused, the run keeps going")
     run.add_argument("--record", action="store_true",
