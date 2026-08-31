@@ -365,5 +365,9 @@ def _run_changelog(args) -> int:
         previous_version=getattr(args, "current_version", None),
         no_semver=getattr(args, "no_semver", False),
         from_label=args.from_, to_label=args.to)
-    print(render(doc, title=getattr(args, "title", None), as_json=args.json))
+    # `--json` is the legacy alias; when it is set it forces JSON regardless of
+    # `--format`, otherwise `--format` (default `markdown`) chooses the form.
+    fmt = "json" if getattr(args, "json", False) else getattr(args, "format",
+                                                              "markdown")
+    print(render(doc, title=getattr(args, "title", None), fmt=fmt))
     return 0
