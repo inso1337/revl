@@ -5228,6 +5228,13 @@ def check_and_lower(program: Program, ambient: dict | None = None,
                                  live_components, services, spawn_reg,
                                  program.filename)
 
+    # Emission budgets, static check (item 260 §3.2): a declared `budget.requests`
+    # / `calls` ceiling that the proved cardinality max exceeds is a red compile,
+    # and a finite ceiling over an `unbounded`/symbolic body is unprovable. Gated
+    # on a declared ceiling, so a budget-free composition is byte-identical.
+    _collect(_check_declared_ceilings, live_components, services, fns, externs,
+             program.filename)
+
     fault_tests = _collect(_lower_fault_tests, program, live_components,
                            program.filename)
 
@@ -9381,6 +9388,147 @@ def _cap_sorted_strs(caps: set) -> list[str]:
     return sorted(c.to_str() for c in caps)
 
 
+def _declares_calls_ceiling(services: dict) -> bool:
+    """Whether ANY emission method declares a static `calls`/`requests` budget
+    ceiling. The static budget check (`_check_declared_ceilings`) is gated on
+    this so a budget-free composition runs no cardinality pass and is
+    byte-identical: the whole feature is inert unless a program opts in."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    for svc in services.values():
+        for m in svc.methods.values():
+            for capstr in (m.capabilities or ()):
+                try:
+                    _, ceils = cap_order.split_ceilings(cap_order.parse_cap(capstr))
+                except cap_order.CapError:
+                    continue
+                if "calls" in ceils:
+                    return True
+    return False
+
+
+def _check_declared_ceilings(components: list[dict], services: dict,
+                             fns: list, externs: list, filename: str) -> None:
+    """The STATIC budget check (item 260 §3.2): `budget.requests`/`calls`
+    reconciles onto the SAME quantity the cardinality analysis (§2) proves, so
+    the check is exactly "proved-max <= declared calls".
+
+    For every component capability that declares a `calls` ceiling, refuse when
+    the proved per-activation maximum EXCEEDS it (a G4 count-axis refusal,
+    sharpening G4's set bound, §4), and refuse a declared FINITE ceiling over a
+    body whose count is `unbounded` or only `bounded-symbolic`, an unprovable
+    ceiling (§3.2: "a runaway loop becomes a red compile"). Gated by
+    `_declares_calls_ceiling`, so a budget-free program never reaches here."""
+    if not _declares_calls_ceiling(services):
+        return
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    from .cardinality import cardinality  # noqa: PLC0415 - lazy, avoids a cycle
+
+    # the minimal IR projection `cardinality` reads: components, the services'
+    # emission/capabilities, and the fn/extern reach it folds over.
+    services_ir = {
+        name: {"methods": {
+            m.name: {"emission": m.emission,
+                     **({"capabilities": list(m.capabilities)}
+                        if m.capabilities is not None else {})}
+            for m in svc.methods.values()}}
+        for name, svc in services.items()}
+    card_ir: dict = {"components": components, "services": services_ir}
+    if fns:
+        card_ir["functions"] = fns
+    if externs:
+        card_ir["externs"] = externs
+
+    report = cardinality(card_ir)
+    comp_line = {c["name"]: c.get("line", 1) for c in components}
+    comp_src = {c["name"]: c.get("source") for c in components}
+    for cname in sorted(report):
+        entry = report[cname]
+        for token, cell in entry["per_capability"].items():
+            _, ceils = cap_order.split_ceilings(cap_order.parse_cap(token))
+            declared = ceils.get("calls")
+            if declared is None:
+                continue
+            bare = cap_order.split_ceilings(cap_order.parse_cap(token))[0].to_str()
+            line = comp_line.get(cname, 1)
+            src = comp_src.get(cname) or filename
+            if cell["kind"] == "bounded" and cell["bound"] > declared:
+                raise RevlError(
+                    src, line,
+                    f"`{cname}` may cross `{bare}` up to {cell['bound']} times "
+                    f"per activation but its declaration caps `calls={declared}`",
+                    hint="a `budget.requests`/`calls` ceiling bounds the proved "
+                         "per-activation crossing count (item 260 §3.2); lower "
+                         "the number of crossings, or raise the declared ceiling "
+                         "to at least the proved maximum",
+                    code="G4", category="emission-budget",
+                )
+            if cell["kind"] in ("unbounded", "bounded-symbolic"):
+                why = (cell.get("reason") if cell["kind"] == "unbounded"
+                       else "its ceiling is symbolic until composition pins the "
+                            f"config field `{cell.get('expr')}`")
+                raise RevlError(
+                    src, line,
+                    f"`{cname}` declares a finite budget `calls={declared}` on "
+                    f"`{bare}` but its per-activation crossing count is not "
+                    f"statically provable ({why})",
+                    hint="a declared finite `calls` ceiling requires a proved "
+                         "cardinality bound (item 260 §3.2); make the crossing "
+                         "bounded (a decreasing-fuel iteration, §2.2) or drop "
+                         "the ceiling and rely on the runtime counter",
+                    code="G4", category="emission-budget",
+                )
+
+
+def _strip_ceilings(caps: set) -> set:
+    """The resource-only projection of a Cap set (item 260 §3.3): every ceiling
+    parameter (`calls`, `size`, `time`) removed. A crossing binds no ceiling, so
+    the crossing-coverage fold `covers_set` runs is ceiling-BLIND; budget
+    attenuation is a separate question handled by `_ceiling_attenuation_check`
+    over the UNSTRIPPED pairs. Byte-identical for a budget-free program (no cap
+    carries a ceiling, so nothing is stripped)."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    return {cap_order.split_ceilings(c)[0] for c in caps}
+
+
+def _ceiling_attenuation_check(held: set, child_reach: set) -> "list[dict]":
+    """The DEDICATED budget/ceiling attenuation check (item 260 §3.3, the HIGH
+    correction). `covers_set` deliberately STRIPS ceilings, so it never sees a
+    budget: a child budget WIDER than its parent's would slip past the
+    crossing-coverage fold. This parallel check reads the UNSTRIPPED `(T, P)`
+    pairs and refuses, per ceiling param `p`, any `child_ceiling(p) >
+    parent_ceiling(p)`, and a child that DROPS a ceiling its parent declares,
+    since a missing child ceiling reads as `+inf` (unbounded, hence wider). It
+    reuses the SAME `_param_leq` ceiling order `covers` would have used.
+
+    The parent's held ceiling for a token is its DECLARED ceiling (the §5.3
+    conservative first cut: the parent's own pre-spawn spend is NOT yet
+    subtracted). When a parent holds several caps under one token, its budget for
+    a param is the most generous (`max`) it declares. Returns a list of
+    violations `{cap, param, child, parent}`; empty means the child attenuates."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    # parent budget per (token -> param -> declared ceiling), max over held caps.
+    parent: dict[str, dict[str, int]] = {}
+    for h in held:
+        _, ceils = cap_order.split_ceilings(h)
+        if not ceils:
+            continue
+        row = parent.setdefault(h.token, {})
+        for p, v in ceils.items():
+            row[p] = v if p not in row else max(row[p], v)
+    violations: list[dict] = []
+    for c in child_reach:
+        budget = parent.get(c.token)
+        if not budget:
+            continue                         # parent declares no ceiling here
+        _, child_ceils = cap_order.split_ceilings(c)
+        for p, wide in budget.items():
+            narrow = child_ceils.get(p)      # None == dropped == +inf == wider
+            if narrow is None or not cap_order._param_leq(p, narrow, wide):
+                violations.append({"cap": c, "param": p,
+                                   "child": narrow, "parent": wide})
+    return violations
+
+
 def _check_spawn_attenuation(components: list[dict], services: dict,
                              spawn_reg: dict, filename: str) -> list[dict]:
     """Capability attenuation on spawn (item 66, extended by item 294): a
@@ -9422,15 +9570,27 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
         for spawn in _activation_spawn_sites(comp):
             child = spawn.get("component")
             child_reach = reachable.get(child, set())
-            extra = cap_order.covers_set(held, child_reach)
             line = spawn.get("line", comp.get("line", 1))
+            # Crossing coverage (item 66/294): does the child reach only
+            # boundaries the parent holds? Ceilings are EXEMPT from this question
+            # (a narrower `calls` must not make one crossing "cover" another), so
+            # the fold runs over the resource-only projection, ceiling-BLIND by
+            # construction (item 260 §3.3). Budget attenuation is the separate
+            # `_ceiling_attenuation_check` below.
+            held_res = _strip_ceilings(held)
+            extra = cap_order.covers_set(held_res, _strip_ceilings(child_reach))
             if extra:
                 extra = sorted(extra, key=lambda c: c.to_str())
                 held_str = ", ".join(
-                    f"`{s}`" for s in _cap_sorted_strs(held)) or "no capabilities"
+                    f"`{s}`" for s in _cap_sorted_strs(held_res)) \
+                    or "no capabilities"
                 offending = ", ".join(_cap_offending(c) for c in extra)
-                reasons = [r for r in (_widening_reason(c, held) for c in extra)
-                           if r is not None]
+                # the reason reads the resource-only held set: a ceiling param
+                # is not a resource-widening cause (that is the dedicated
+                # ceiling check below), so it must not surface here as a
+                # spurious "drops `calls`" hint.
+                reasons = [r for r in (_widening_reason(c, held_res)
+                                       for c in extra) if r is not None]
                 extra_hint = ("; " + "; ".join(reasons)) if reasons else ""
                 raise RevlError(
                     comp.get("source") or filename, line,
@@ -9445,6 +9605,35 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
                          f"the capability on `{child}` "
                          "(monotone shrinkage: narrowing is sound, widening is "
                          "not)" + extra_hint,
+                    code="G4", category="capability-attenuation",
+                )
+            # DEDICATED budget/ceiling attenuation (item 260 §3.3, the HIGH
+            # correction): the crossing-coverage fold above is ceiling-blind, so
+            # a child budget WIDER than the parent's, or a DROPPED budget clause
+            # that silently widens to unbounded, is refused HERE, over the
+            # unstripped pairs, never by `covers_set`.
+            budget_bad = _ceiling_attenuation_check(held, child_reach)
+            if budget_bad:
+                budget_bad.sort(key=lambda v: (v["cap"].to_str(), v["param"]))
+                offending = ", ".join(
+                    (f"`{v['cap'].to_str()}` drops the `{v['param']}` budget "
+                     f"(a missing ceiling is unbounded, hence wider)"
+                     if v["child"] is None else
+                     f"`{v['cap'].to_str()}` widens `{v['param']}` to "
+                     f"{v['child']} over the parent's {v['parent']}")
+                    for v in budget_bad)
+                raise RevlError(
+                    comp.get("source") or filename, line,
+                    f"`{comp['name']}` spawns `{child}` with a wider resource "
+                    f"budget than it holds: {offending}. A spawned child's "
+                    "budget may only narrow, never widen (attenuation, item "
+                    "66/294/260)",
+                    hint="a budget ceiling (`requests`/`calls`, `bytes`/`size`, "
+                         "`time`) attenuates on delegation: the child's ceiling "
+                         "must be <= the parent's, and a child may not DROP a "
+                         "ceiling the parent declares (that widens it to "
+                         "unbounded); narrow the budget on the child, or widen "
+                         f"`{comp['name']}`'s own declared budget",
                     code="G4", category="capability-attenuation",
                 )
             edge = (comp["name"], child)
