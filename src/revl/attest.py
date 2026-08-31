@@ -114,12 +114,17 @@ def key_id(key: bytes) -> str:
 
 
 def attested_guarantees() -> list[str]:
-    """The guarantee codes an `admitted` verdict proves — the composition-level
-    G-rules G1..G8 (DESIGN §4), drawn live from `diagnostics.GUARANTEES` so this
-    list cannot drift from the catalog. The lifecycle A-rules and type T-rules
-    are checked too, but the G-codes are the boundary/composition guarantees an
-    attestation is about, so those are what it records."""
-    return sorted(code for code in GUARANTEES if code.startswith("G"))
+    """The guarantee codes an `admitted` verdict proves — the numbered
+    composition-level G-rules G1..G9 (DESIGN §4), drawn live from
+    `diagnostics.GUARANTEES` so this list cannot drift from the catalog. The
+    lifecycle A-rules and type T-rules are checked too, but the G-codes are the
+    boundary/composition guarantees an attestation is about, so those are what it
+    records. Only the numbered G-rules are universal: a named guarantee like
+    `G-SECRET` (item 256) holds conditionally, for a composition that declares a
+    secret, so it is a diagnostic code but not part of the invariant set every
+    admitted verdict attests. Matching `G` followed by digits keeps it out."""
+    return sorted(code for code in GUARANTEES
+                  if code.startswith("G") and code[1:].isdigit())
 
 
 def _now_iso(now) -> str:

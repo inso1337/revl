@@ -148,7 +148,7 @@ neither's policy can be reached by the other's value.
 
 A secret is declared at the top level of a document, against a capability token:
 
-```revl
+```revl fragment
 secret openai_key for model.complete
 secret stripe_key for payment.charge
 ```
