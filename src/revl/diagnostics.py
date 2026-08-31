@@ -31,6 +31,8 @@ GUARANTEES = {
     "G7": "derived LIFO teardown",
     "G8": "the boundary surface is enumerable",
     "G9": "untrusted data cannot create authority without a declared declassification",
+    "G-SECRET": "a capability-bound secret never leaves its capability's own "
+                "extern bodies through any revl construct or declared crossing",
     "A1": "iteration boundaries exist only during activation",
     "A2": "no acquisition after a provision",
     "A3": "host-safe identifiers",
@@ -65,6 +67,10 @@ FIXES = {
           "first: parse it with a `verified fn` that returns `Trusted[T]`, endorse "
           "it at a declared point (`endorse[<origin>](v, reason = \"...\")`), or "
           "gate it on a human approval",
+    "G-SECRET": "a bound provider key has no declassifier and no allowed sink "
+                "except a re-emission through its own bound capability - stop "
+                "reflecting it into a revl value; a `secret NAME for CAP` value is "
+                "a host-scope local handed straight to CAP's provider call",
     "A1": "`await` is an iteration boundary and exists only during activation — "
           "move it into the component body",
     "A2": "acquire everything before the first `provide`",

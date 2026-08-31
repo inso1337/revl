@@ -169,12 +169,21 @@ class TaintModel:
     # slot on the service operation a provide method implements). An `endorse`
     # whose origin is not in this set is refused at admission.
     declared_endorse: dict[str, frozenset] = field(default_factory=dict)
+    # item 256: the capability tokens that carry a bound secret, and the names of
+    # every declared extern. `secret_caps` is non-empty exactly when the program
+    # binds a secret (so it engages the flow walk, and only then); `extern_names`
+    # lets the crossing raises tell a real host-extern crossing (which must refuse
+    # a `secret` argument) from a builtin constructor (`Ok`/`Some`/record/list),
+    # which merely nests the secret and is caught at the container's own crossing.
+    secret_caps: frozenset = field(default_factory=frozenset)
+    extern_names: frozenset = field(default_factory=frozenset)
 
     @property
     def active(self) -> bool:
         """Whether any taint surface exists at all. A program with no qualifier
         and no endorse slot engages nothing — the flow walk is skipped and stays
-        byte-identical."""
+        byte-identical. A bound secret mints a `secret` source, so it engages the
+        walk through `sources` (item 256)."""
         return bool(self.sources or self.sinks or self.untrusted_params
                     or self.declassifiers or self.declared_endorse)
 
@@ -206,6 +215,17 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     Mutates `program` — safe because a program is freshly parsed per compile.
     """
     model = TaintModel()
+
+    # item 256: the capabilities that carry a bound secret, and every extern name.
+    # A bound emission extern (its declared capability is in `secret_caps`) mints
+    # the `secret` origin on its return UNCONDITIONALLY below - a bound key is a
+    # security-critical origin whose containment is not opt-in, so it is not gated
+    # on `taint_strict` the way the generic derived sources are (4a.1).
+    secret_caps = frozenset(
+        s.capability for s in getattr(program, "secrets", ()) or () if s.capability)
+    model.secret_caps = secret_caps
+    model.extern_names = frozenset(
+        ext.name for ext in getattr(program, "externs", ()) or ())
 
     def _note_params(name: str, typed_params) -> None:
         """`typed_params` is a list of (index, type_string, setter). Records
@@ -241,6 +261,15 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 origin = _origin_of(ext.capabilities)
                 if origin in _SOURCE_CLASS_SCOPES and ext.name not in model.sources:
                     model.sources[ext.name] = origin
+        # item 256 (4a.1): a bound emission's return is minted `secret`,
+        # unconditionally and overriding any `Untrusted[T]`/derived source. The
+        # bound key is the one origin whose containment is not opt-in; matching is
+        # by the DECLARED capability token (an emission with no scope names itself),
+        # resolved at emit, never a runtime label (A6).
+        if secret_caps and ext.classification == "emission":
+            ext_caps = ext.capabilities or (ext.name,)
+            if any(cap in secret_caps for cap in ext_caps):
+                model.sources[ext.name] = SECRET_ORIGIN
         if ext.name in model.sinks:
             model.sink_kind[ext.name] = _sink_kind_for(ext.name, ext.capabilities)
         ext.returns = strip_qualifiers(ext.returns)
@@ -347,6 +376,20 @@ class Taint:
 
 CLEAN = Taint()
 
+# item 256: the origin a capability-bound secret carries. Disjoint from every
+# other origin and from the section-7 `confidential` qualifier, so no sink and no
+# declassifier that admits another origin can admit this one. It is never a
+# parameter marker, so a plain membership test finds it in any joined origin set.
+SECRET_ORIGIN = "secret"
+
+
+def _carries_secret(t: Taint) -> bool:
+    """Whether a value's origin set carries the bound-secret origin (item 256),
+    directly or through a record/variant/generic join (`_join`/`_union_children`
+    thread it into the container's origin union, so a nested secret is caught at
+    whichever crossing the container reaches - 4a.2 kind 5)."""
+    return SECRET_ORIGIN in t.origins
+
 
 def _join(a: Taint, b: Taint) -> Taint:
     """Set-union join (Decision 2). The `via` chain follows whichever side
@@ -435,7 +478,8 @@ class _FlowChecker:
                  known_callables: frozenset = frozenset(), any_sink: bool = False,
                  state_env: dict | None = None,
                  state_names: frozenset = frozenset(),
-                 untrusted: bool = False) -> None:
+                 untrusted: bool = False,
+                 provide_return: bool = False) -> None:
         self.model = model
         self.filename = filename
         self.line = line
@@ -445,6 +489,13 @@ class _FlowChecker:
         # navigable map collapses to the single non-discriminating `blocked`
         # verdict rather than teaching a declassifier that would itself refuse.
         self.untrusted = untrusted
+        # item 256 (4a.2 kind 4): this checker walks a `provide` method body, so a
+        # return whose taint carries `secret` hands the bound key across the
+        # service / MCP bridge and is refused at the method return. Off for module
+        # `fn` bodies (a plain fn return is not itself a crossing - the secret
+        # propagates through the fn's signature and is caught at whatever crossing
+        # the caller reaches).
+        self.provide_return = provide_return
         self.signatures = signatures or {}
         self.infer = infer
         self.qualname = qualname
@@ -600,6 +651,35 @@ class _FlowChecker:
             navigate=self._sink_navigate(sink_name, kind, concrete_origins),
         )
 
+    def _refuse_secret(self, sink_name: str, kind: str, index: int | None,
+                       arg_taint: Taint, node) -> None:
+        """A capability-bound secret (item 256) has reached a boundary crossing.
+        Refuse it unconditionally - the bound key is refused at EVERY crossing kind
+        (4a.2), with no declassifier (4a.3). The one crossing that does NOT refuse
+        is a re-entry into an extern body of the same bound capability, which is
+        handled upstream by the `model.sources` early return (a call to a bound
+        emission returns before any raise - 4b), never here."""
+        chain_parts = arg_taint.via + (sink_name,)
+        chain = " -> ".join(chain_parts) if chain_parts else "the bound key"
+        where = (f" at argument {index + 1} of `{sink_name}`"
+                 if index is not None else f" of `{sink_name}`")
+        raise RevlError(
+            self.filename, self._line_of(node),
+            f"a capability-bound secret flows into {kind}{where} - a bound "
+            f"provider key can never leave its capability's own extern bodies, "
+            f"and no revl construct or declared crossing may carry it out "
+            f"(G-SECRET)",
+            hint="a `secret NAME for CAP` value is confined to CAP's emission "
+                 "bodies by construction: it has NO declassifier (`endorse[secret]` "
+                 "is refused) and no allowed sink except a re-emission through the "
+                 "same bound capability. If a host body reflected the injected key "
+                 "into a return, stop reflecting it - the key is a host-scope local "
+                 "handed straight to the provider call, never a revl value. The "
+                 f"reflecting path is {chain} "
+                 "(docs/design/256-capability-bound-secrets.md §4).",
+            code="G-SECRET", category="taint-secret",
+        )
+
     def _sink_navigate(self, sink_name: str, kind: str, origins: list) -> dict:
         """The taint-sink family's nearest allowed (item 274, design §2.1),
         computed from the model in hand: the in-scope declassifiers, the endorse
@@ -697,6 +777,26 @@ class _FlowChecker:
                 return CLEAN
             residual = frozenset(o for o in value_taint.origins if o != origin)
             return Taint(residual, value_taint.via) if residual else CLEAN
+        # item 256 (4a.3): `endorse[secret]` is refused UNCONDITIONALLY, before
+        # the declared-slot check, so no declaration can ever grant it. A bound
+        # provider key has no "I know what I am doing" downgrade edge - this is the
+        # sharp line from the section-7 `confidential` origin, which DOES have a
+        # declared, audited downgrade. The two carry disjoint origins precisely so
+        # no declassifier can confuse them (CRITICAL 1 fix).
+        if origin == SECRET_ORIGIN:
+            raise RevlError(
+                self.filename,
+                self._line_of(meta if isinstance(meta, dict) else node),
+                "`endorse[secret]` is refused: a capability-bound secret has no "
+                "declassifier - a bound provider key can never be downgraded "
+                "(G-SECRET)",
+                hint="there is no audited downgrade for a bound key, by design. "
+                     "Remove the `endorse[secret]`; the key belongs only in its "
+                     "capability's own extern bodies as a host-scope local, never "
+                     "as a revl value (docs/design/256-capability-bound-secrets.md "
+                     "§4a.3).",
+                code="G-SECRET", category="taint-secret",
+            )
         # the declared-slot authorisation: the enclosing fn / operation must
         # declare `endorse[<origin>]`, or the downgrade is refused at admission —
         # a declassification is never ambient (Slice C, the whole claim).
@@ -879,6 +979,20 @@ class _FlowChecker:
         # (`let g = upper`) carries that callable's signature/sink; resolve it.
         resolved = self.fn_refs.get(callee, callee) if indirect else callee
 
+        # item 256 (4a.2 kind 3): the unnameable indirect / `*` callable. A
+        # first-class emitting callable revl cannot name must refuse a `secret`
+        # argument INDEPENDENTLY of `any_sink` - what cannot be named cannot be
+        # proven to re-emit through the bound capability, so it cannot be the 4b
+        # same-capability re-entry. This fires even in a sink-free program (a bound
+        # secret is itself the reason the flow walk is active).
+        if (indirect and self._is_unnameable(resolved)
+                and not self.infer and self.enforce):
+            for index, at in enumerate(arg_taints):
+                if _carries_secret(at):
+                    self._refuse_secret(
+                        "an unnameable callable",
+                        "a first-class function value revl cannot name",
+                        index, at, node)
         # Slice B4: an indirect call the checker cannot name is over-approximate —
         # every argument position is a sink (what cannot be named cannot be proven
         # safe), but only when the program has a sink at all, so a sink-free program
@@ -919,6 +1033,15 @@ class _FlowChecker:
         # an auditor and `revl audit --diff` can see. Only real origins are
         # recorded; inference markers are internal bookkeeping.
         if callee in self.model.declassifiers:
+            # item 256 (4a.3): a `verified fn` returning `Trusted[T]` does NOT
+            # launder a `secret`-carrying argument - the parser-declassifier clean
+            # is SKIPPED for the bound key and the crossing is refused. There is no
+            # declassifier for a bound provider key, verified-fn or otherwise.
+            if not self.infer and self.enforce:
+                for index, at in enumerate(arg_taints):
+                    if _carries_secret(at):
+                        self._refuse_secret(callee, "a verified-fn declassifier",
+                                            index, at, node)
             for t in arg_taints:
                 self.declassified |= {o for o in t.origins if _param_index(o) is None}
             return CLEAN
@@ -947,6 +1070,20 @@ class _FlowChecker:
             if origins:
                 return Taint(origins, via)
             return CLEAN
+
+        # item 256 (4a.2 kind 2): a plain (non-declared-sink, non-source) extern
+        # call is a host crossing. A `secret`-carrying argument to it is refused -
+        # an ordinary extern that is neither the same bound capability's re-entry
+        # (which returned above via `model.sources`) nor an emit still must not
+        # receive the bound key. Gated on a REAL extern name, so a builtin
+        # constructor (`Ok`/`Some`) merely nests the secret and is caught at the
+        # container's own crossing (kind 5), not here.
+        if (not self.infer and self.enforce
+                and callee in self.model.extern_names):
+            for index, at in enumerate(arg_taints):
+                if _carries_secret(at):
+                    self._refuse_secret(callee, "an extern host call", index, at,
+                                        node)
 
         # an ordinary opaque call (an extern with no declared source, a builtin):
         # the result is tainted iff any argument is — the static
@@ -997,6 +1134,16 @@ class _FlowChecker:
                 # inference mode: the return value's taint (parameter markers
                 # and minted origins) feeds `flows_to_return` and `mints`.
                 self.return_taint = _join(self.return_taint, result)
+            if (step == "return" and self.provide_return
+                    and self.enforce and not self.infer
+                    and _carries_secret(result)):
+                # item 256 (4a.2 kind 4): a `provide` method returning a
+                # `secret`-carrying value hands the bound key across the service /
+                # MCP bridge. Refused at the method return (the crossing is the
+                # return, not an `emit` or an extern call).
+                self._refuse_secret("this provide method",
+                                    "a provide-method return across the "
+                                    "service / MCP bridge", None, result, stmt)
             if step == "emit":
                 # the taint crossing the boundary here (Decision 5): the emission's
                 # return AND the arguments it carries outward — a value-passing send
@@ -1005,6 +1152,19 @@ class _FlowChecker:
                 for at in (self._emit_args or ()):
                     outbound = _join(outbound, at)
                 real = {o for o in outbound.origins if _param_index(o) is None}
+                # item 256 (4a.2 kind 1): the emit arm. A `secret`-carrying value
+                # crossing an emission is refused here rather than merely recorded -
+                # this is the model-prompt / outbound-send crossing. The 4b
+                # same-capability re-emission never reaches this arm: the bound key
+                # is a host-scope local handed straight to the provider call inside
+                # the extern body (never a revl value), and a re-entry into the
+                # bound extern returns via `model.sources` before any emit records
+                # its argument. So a `secret` reaching the emit arm is always an
+                # exfiltration to a crossing that is not the bound body itself.
+                if (SECRET_ORIGIN in real and self.enforce and not self.infer):
+                    self._refuse_secret("this emission",
+                                        "an emission crossing", None,
+                                        outbound, stmt)
                 if real:
                     # An *absolute-refusal* sink already raised above; what remains
                     # is the policy-gated tier (e.g. web-taint into `send.*`) —
@@ -1432,7 +1592,8 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                     endorse_allowed=model.declared_endorse.get(mname, frozenset()),
                     endorse_label=label, known_callables=known, any_sink=any_sink,
                     state_env=state_env if state_env is not None else {},
-                    state_names=state_names, untrusted=untrusted)
+                    state_names=state_names, untrusted=untrusted,
+                    provide_return=True)
                 env: dict = {}
                 seeded = model.untrusted_params.get(mname, {})
                 for i, pname in enumerate(method.get("params") or []):

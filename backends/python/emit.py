@@ -2308,6 +2308,27 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
 
 def _emit_externs(externs: list) -> "_Lines":
     out = _Lines()
+    # item 256 Slice 1: the composition secrets map, keyed by secret name, and a
+    # FAIL-LOUD lookup. The driver (src/revl/run.py) resolves each bound secret's
+    # value once at plug and installs it here; a body reads the key as its FIRST
+    # local (`openai_key = _revl_secret("openai_key")`, injected below). Emitted
+    # ONLY when some emission extern carries a bound secret, so a secret-free
+    # program is byte-identical. The value is NEVER logged, defaulted, or echoed:
+    # the helper names the secret but never its value, and there is no defaults
+    # path (unlike config) - a bound key with no installed value is a hard error
+    # at the extern call, never a silent None (§3).
+    if any(ext.get("secrets") for ext in externs):
+        out.add(0, "_REVL_SECRETS = {}")
+        out.add(0)
+        out.add(0, "def _revl_secret(_name):")
+        out.add(1, "if _name not in _REVL_SECRETS:")
+        out.add(2, "raise RuntimeError(")
+        out.add(3, "\"capability-bound secret `\" + _name + \"` was not \"")
+        out.add(3, "\"installed before its extern body ran; the run driver \"")
+        out.add(3, "\"must resolve it at plug (item 256). No default exists \"")
+        out.add(3, "\"for a secret.\")")
+        out.add(1, "return _REVL_SECRETS[_name]")
+        out.add(0)
     # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md: the
     # composition config map for document-global config externs, keyed by extern
     # name. The driver (src/revl/run.py) resolves each config extern's schema
@@ -2370,6 +2391,16 @@ def _emit_externs(externs: list) -> "_Lines":
         # A non-async extern stays a blocking `def`, unchanged.
         kw = "async def" if ext.get("async") else "def"
         out.add(0, f"{kw} {name}({params}):")
+        # item 256 Slice 1: a bound secret is injected as the FIRST body local of
+        # every emission extern whose declared capability it is bound to, and
+        # NOWHERE else (a component/service method body has no `_revl_secret` call
+        # emitted into it, so the name resolves nowhere outside a bound body - the
+        # "nowhere else" property, enforced by construction here in the extern
+        # emitter loop, §3). The verbatim @py body then reads the key as a
+        # host-scope local and hands it straight to its provider call. Emitted only
+        # for a bound extern, so a non-bound extern's `def`/body is byte-identical.
+        for _sname in ext.get("secrets") or []:
+            out.add(1, f"{_ident(_sname, 'secret name')} = _revl_secret({_sname!r})")
         # item 379: a config extern binds `_revl_config` in its body scope as the
         # first local, mirroring how a component method binds it (emit.py:1425,
         # read at emit.py:734). The verbatim @py body then reads typed config
@@ -2394,7 +2425,7 @@ def _emit_externs(externs: list) -> "_Lines":
         if body:
             for line in body.splitlines() or [""]:
                 out.add(1, line)
-        elif not ext.get("config"):
+        elif not ext.get("config") and not ext.get("secrets"):
             out.add(1, "pass")
         out.add(0)
     return out
