@@ -1358,6 +1358,12 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         }
         if decl.verified:
             entry["verified"] = True
+        # item 310: a `cache pure` fn memoizes on its structural args digest. The
+        # metadata rides the IR (validated in `_check_cache_declarations` — only
+        # `cache pure`, crossing-free, survives to here). Absent unless declared,
+        # so every existing fn's IR is byte-identical.
+        if getattr(decl, "cache", None) is not None:
+            entry["cache"] = _cache_ir(decl.cache)
         if decl.source:
             _retarget_holes(entry["body"], decl.source)
         fns.append(entry)
@@ -2939,6 +2945,281 @@ def _lower_externs(program: Program, filename: str, types: dict,
     return externs
 
 
+# item 310: capability-aware caching (docs/design/310-capability-aware-caching.md).
+# The source class words map to the roadmap IR vocabulary; `cache` lowers to
+# metadata the emission fixed point NEVER reads (so every 414 static fold sees a
+# cached crossing identically hit and miss).
+_CACHE_IR_CLASS = {"pure": "pure_fn",
+                   "capability": "capability_result",
+                   "external": "external_effect"}
+
+
+def _cache_ir(cache) -> dict:
+    """The IR descriptor for a `CacheClause`. Additive: absent unless a
+    declaration carries `cache`, so every existing IR is byte-identical."""
+    entry = {"class": _CACHE_IR_CLASS[cache.cls]}
+    if cache.invalidated_by:
+        entry["invalidated_by"] = list(cache.invalidated_by)
+    if cache.ttl_ms is not None:
+        entry["ttl_ms"] = cache.ttl_ms
+    return entry
+
+
+def _crossable_cache_tokens(program: Program) -> set[str]:
+    """Every capability TOKEN a crossing in this composition can fire, for the
+    item-310 `invalidated_by` resolution check. An emission extern contributes
+    its declared scope tokens (or its name when unscoped); a scoped emission
+    service method contributes its declared tokens. A misspelled `invalidated_by`
+    token that matches none of these is a freshness claim that can never come
+    true, so it is refused rather than failing open into an effectively-ttl-less
+    cache (design §`invalidated_by`)."""
+    tokens: set[str] = set()
+    for ext in program.externs:
+        if ext.classification == "emission":
+            for cap in (ext.capabilities or (ext.name,)):
+                tokens.add(cap)
+    for svc in program.services:
+        for m in svc.methods.values():
+            if m.emission and m.capabilities:
+                for cap in m.capabilities:
+                    tokens.add(cap)
+    return tokens
+
+
+def _cache_token_resolves(token: str, crossable: set[str]) -> bool:
+    """Whether an `invalidated_by` token names a crossing the composition can
+    fire — exact match or covered in the item-294 capability partial order (a
+    wider declared token covers a narrower subscription)."""
+    if token in crossable:
+        return True
+    from . import cap_order  # noqa: PLC0415
+    for declared in crossable:
+        try:
+            if cap_order.covers(cap_order.parse_cap(declared),
+                                cap_order.parse_cap(token)):
+                return True
+        except cap_order.CapError:
+            continue
+    return False
+
+
+def _check_cache_freshness(cache, filename: str, line: int, what: str) -> None:
+    """The per-class freshness rules (design §"The freshness clauses"), class-
+    local (no reach needed). Shared by fn/method/extern so one word means one
+    thing on every surface."""
+    has_inval = bool(cache.invalidated_by)
+    has_ttl = cache.ttl_ms is not None
+    if cache.cls == "pure" and (has_inval or has_ttl):
+        raise RevlError(
+            filename, line,
+            f"`cache pure` on {what} cannot declare a freshness bound",
+            hint="a pure result cannot go stale, so `ttl`/`invalidated_by` is a "
+                 "category error (and probably a misclassified external read) — "
+                 "drop the clause, or declare `cache external` "
+                 "(docs/design/310-capability-aware-caching.md)",
+            code="G4", category="cache")
+    if cache.cls == "capability" and has_inval:
+        raise RevlError(
+            filename, line,
+            f"`cache capability` on {what} cannot declare `invalidated_by`",
+            hint="`invalidated_by` names the staleness event of an EXTERNAL read; "
+                 "a capability result's freshness bound IS its authorizing scope "
+                 "(the grant + generation liveness), narrowable only by `ttl`. "
+                 "Drop `invalidated_by`, or declare `cache external` (item 310)",
+            code="G4", category="cache")
+    if cache.cls == "external" and not (has_inval or has_ttl):
+        raise RevlError(
+            filename, line,
+            "cache external requires a freshness bound: declare "
+            "`invalidated_by <token>` and/or `ttl <duration>`: an external "
+            "result changes without notice, so an unbounded cache serves the "
+            "past as the present",
+            code="G4", category="cache")
+
+
+def _check_cache_resource(cache, filename: str, line: int, what: str,
+                          param_types, return_type, resources: set[str]) -> None:
+    """The structural resource-in-entry refusal (design, laundering point 8, the
+    E x 7 shape). An entry copies a result (and digests args) into a store that
+    outlives the call; a resource handle stored in an entry would be stored
+    authority, re-deliverable to a later access. The walk is STRUCTURAL over the
+    resource-taint closure (nested records, variants, generic instantiations),
+    never a type-name match, so a resource renamed or wrapped two levels deep
+    refuses identically."""
+    for role, tstr in (("result", return_type),
+                       *(("parameter", t) for t in param_types)):
+        hit = resource_in(tstr, resources)
+        if hit is not None:
+            raise RevlError(
+                filename, line,
+                f"cache on {what} would store a resource handle `{hit}` "
+                f"(in the {role} type `{tstr}`)",
+                hint="a cache entry outlives the call and re-delivers its stored "
+                     "value; a resource handle crosses a seam by proxy, never by "
+                     "copy, so a cached one is stored authority re-deliverable to "
+                     "a later access (item 310, surface E). Return/accept a value "
+                     "type, not a resource handle",
+                code="G4", category="cache")
+
+
+def _check_cache_declarations(program: Program, externs: list, types: dict,
+                              emitting_caps: dict, filename: str) -> None:
+    """The item-310 admission checks, run once the emission fixed point and the
+    type/extern tables are known. Refuses in every case the seam-method slice
+    cannot soundly cache; the surviving declarations flow their `cache` metadata
+    into the IR (service-method and — grammar-forward — extern sites).
+
+    Layered exactly as the design scopes the slice:
+      * externs: the interior-crossing crossing is NOT the seam method's direct
+        body, so the whole extern surface is admission-refused — an escrow-shaped
+        reach (witnessed/acquire/deferred/compensate) with its specific G7 reason,
+        every other extern with the "later slice" reason (design §enforcement).
+      * plain `fn`: only `cache pure` is legal, and only when the fn crosses
+        nothing; a crossing reach or a capability/external class is refused.
+      * service methods: the class must match the method's declared reach shape
+        (`emission fn` <-> capability/external, plain `fn` <-> pure); freshness
+        and the structural resource walk apply. The full worst-over-reach
+        applicability fold over the provider closure (surface H) and the
+        distributed-placement refusal run at load, where the class map exists."""
+    resources = resource_taint(externs, types)
+    crossable = None  # computed lazily, only when an `invalidated_by` appears
+
+    def check_invalidated_by(cache, line, what):
+        nonlocal crossable
+        if not cache.invalidated_by:
+            return
+        if crossable is None:
+            crossable = _crossable_cache_tokens(program)
+        for token in cache.invalidated_by:
+            if not _cache_token_resolves(token, crossable):
+                raise RevlError(
+                    filename, line,
+                    f"`invalidated_by {token}` on {what} names a token no "
+                    f"crossing in this composition can fire",
+                    hint="a subscription nothing can fire is a freshness claim "
+                         "that can never come true; a misspelled token must not "
+                         "fail open into an effectively-ttl-less cache. Name an "
+                         "emission token some extern or service method crosses "
+                         "(item 310, §invalidated_by)",
+                    code="G4", category="cache")
+
+    # -- externs: the interior-crossing surface, admission-refused in this slice
+    for decl in program.externs:
+        cache = getattr(decl, "cache", None)
+        if cache is None:
+            continue
+        cls = decl.classification
+        # escrow-shaped reach: a hit would skip an escrow registration (G7).
+        if cls in ("witnessed", "acquire"):
+            noun = ("witnessed mutation" if cls == "witnessed"
+                    else "acquired resource")
+            raise RevlError(
+                filename, decl.line,
+                f"cache on a `{cls}` extern `{decl.name}` is refused",
+                hint=f"a {noun} is not a read — caching it would skip the escrow "
+                     "registration its teardown depends on, so an abort would "
+                     "replay an incomplete history (G7). `cache` reads, it does "
+                     "not mutate (item 310, §witnessed teardown)",
+                code="G7", category="cache")
+        if cls == "emission" and getattr(decl, "deferred", False):
+            raise RevlError(
+                filename, decl.line,
+                f"cache on a `deferred` emission extern `{decl.name}` is refused",
+                hint="a deferred emission is a QUEUED write; a hit that skips the "
+                     "firing skips the enqueue, so the commit would flush an "
+                     "incomplete history (G7). `cache` is read-shaped (item 310)",
+                code="G7", category="cache")
+        if cls == "emission" and decl.compensate is not None:
+            raise RevlError(
+                filename, decl.line,
+                f"cache on a `compensate`-declaring emission extern "
+                f"`{decl.name}` is refused",
+                hint="a compensated emission registers a compensation escrow entry "
+                     "at fire time; a hit that skips the firing skips the "
+                     "registration, so an abort after a hit replays an incomplete "
+                     "offset history (G7). `cache` reads, it does not write "
+                     "(item 310, §witnessed teardown)",
+                code="G7", category="cache")
+        # every other extern: grammar-forward, enforcement-honest.
+        raise RevlError(
+            filename, decl.line,
+            f"cache on an interior crossing (extern `{decl.name}`) is not yet "
+            f"enforceable; declare it on the seam method",
+            hint="the seam consent gate decides the hit/miss transaction at the "
+                 "call, before execution, so `cache` is enforceable this slice "
+                 "only on a SEAM SERVICE METHOD where the call is the crossing. "
+                 "An interior extern crossing needs a crossing-level ledger "
+                 "transaction that is a later slice (item 310, §enforcement)",
+            code="G4", category="cache")
+
+    # -- plain fns: `cache pure` only, crossing-free only
+    for fn in program.fn_decls:
+        cache = getattr(fn, "cache", None)
+        if cache is None:
+            continue
+        what = f"fn `{fn.name}`"
+        _check_cache_freshness(cache, fn.source or filename, fn.line, what)
+        crosses = fn.name in emitting_caps
+        if cache.cls in ("capability", "external"):
+            named = sorted(c for c in (emitting_caps.get(fn.name) or ()) if c != "*")
+            raise RevlError(
+                fn.source or filename, fn.line,
+                f"`cache {cache.cls}` on {what} is not allowed on a plain `fn`",
+                hint="freshness belongs on the boundary, not on a caller of it "
+                     "(two callers could declare contradictory staleness for one "
+                     "crossing). Declare `cache pure` to memoize a pure fn, or "
+                     "move the clause to the `emission` service method or extern "
+                     "that reads the boundary"
+                     + (f" ({', '.join(named)})" if named else "")
+                     + " (item 310)",
+                code="G4", category="cache")
+        if crosses:  # cache pure on a crossing reach
+            named = sorted(c for c in (emitting_caps.get(fn.name) or ()) if c != "*") \
+                or ["a boundary"]
+            raise RevlError(
+                fn.source or filename, fn.line,
+                f"the reach of {what} crosses {named[0]}: a crossing result is "
+                f"not pure",
+                hint="`cache pure` memoizes a function whose reach crosses "
+                     "nothing; move the clause to the emission that reads the "
+                     "boundary, as `cache capability` or `cache external` "
+                     "(item 310)",
+                code="G4", category="cache")
+        check_invalidated_by(cache, fn.line, what)
+
+    # -- service methods: class must match the declared reach shape
+    for svc in program.services:
+        for m in svc.methods.values():
+            cache = getattr(m, "cache", None)
+            if cache is None:
+                continue
+            what = f"`{svc.name}.{m.name}`"
+            _check_cache_freshness(cache, filename, m.line, what)
+            if cache.cls == "pure" and m.emission:
+                raise RevlError(
+                    filename, m.line,
+                    f"the reach of {what} crosses a boundary (it is an "
+                    f"`emission` method): a crossing result is not pure",
+                    hint="declare `cache capability` (a capability-backed "
+                         "deterministic read) or `cache external` (an external "
+                         "read, which requires a freshness bound); `cache pure` "
+                         "is only for a method that crosses nothing (item 310)",
+                    code="G4", category="cache")
+            if cache.cls in ("capability", "external") and not m.emission:
+                raise RevlError(
+                    filename, m.line,
+                    f"the reach of {what} crosses nothing (a plain `fn` method): "
+                    f"declare `cache pure`",
+                    hint="`cache capability`/`external` name a boundary read; a "
+                         "non-emission method reads no boundary, so its only sound "
+                         "cache is pure memoization (item 310)",
+                    code="G4", category="cache")
+            param_types = [t for _, t in m.params]
+            _check_cache_resource(cache, filename, m.line, what,
+                                  param_types, m.returns, resources)
+            check_invalidated_by(cache, m.line, what)
+
+
 def _lower_tests(program: Program, filename: str, types: dict,
                  services: dict | None = None) -> list:
     """Lower `test` and `lifecycle test` blocks to IR v3 test units (§7/§7.1).
@@ -4515,6 +4796,15 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
 
+    # item 310: the capability-aware caching admission checks, run here once the
+    # emission fixed point and the type/extern tables are known (a `cache pure`
+    # crossing-reach refusal reads `emitting_caps`; the structural resource walk
+    # reads the extern/type tables). Refuses every declaration the seam-method
+    # slice cannot soundly cache; survivors flow their `cache` IR below. Inert for
+    # any program declaring no `cache` clause, so byte-identity holds.
+    _check_cache_declarations(program, externs, types, emitting_caps,
+                              program.filename)
+
     # item 187: default-parameter values must be pure and well-typed. Checked
     # here, once the emission fixed point is known, so an effectful default is
     # refused before any call site expands it.
@@ -4862,6 +5152,14 @@ def check_and_lower(program: Program, ambient: dict | None = None,
                         # delivery semantics (roadmap item 44): the checked
                         # right for the runtime to auto-retry this emission
                         **({"idempotent": True} if m.idempotent else {}),
+                        # item 310: the capability-aware cache descriptor, the
+                        # interface contract every provider inherits. Metadata the
+                        # emission fixed point never reads (so every 414 static
+                        # fold sees a cached crossing identically on both paths);
+                        # the seam gate reads it at the call. Absent unless the
+                        # method declares `cache`, so every existing method's IR
+                        # is byte-identical.
+                        **({"cache": _cache_ir(m.cache)} if m.cache else {}),
                     }
                     for m in svc.methods.values()
                 },

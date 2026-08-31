@@ -58,6 +58,11 @@ class MethodDecl:
     # its authority (emission-ness, and now declassification rights) from the
     # service declaration. Empty unless the operation declares an endorse slot.
     endorse_origins: frozenset = field(default_factory=frozenset)
+    # item 310: the `cache` trailing clause on a service method — the interface
+    # contract every provider of the method inherits, so audit attributes the
+    # cache to the seam. `None` unless the method declares one, so every existing
+    # method's IR is byte-identical (docs/design/310-capability-aware-caching.md).
+    cache: "CacheClause | None" = None
 
 
 @dataclass
@@ -66,6 +71,29 @@ class ServiceDecl:
     methods: dict[str, MethodDecl]
     line: int
     commutative: bool = False  # service-wide order-independence opt-in
+
+
+@dataclass
+class CacheClause:
+    """A `cache` trailing clause on a `fn`, extern, or service-method declaration
+    (roadmap item 310, docs/design/310-capability-aware-caching.md).
+
+    `cache (pure|capability|external) (invalidated_by <tok> (, <tok>)*)? (ttl <dur>)?`
+    trails the return type. `cache` is a CONTEXTUAL keyword recognised only in
+    this post-return-type slot (the discipline `witnessed`/`deferred`/`confined`
+    use), so the lexer's KEYWORDS set is untouched and no program using `cache`
+    as an ordinary name (a provided KEY, a require alias — examples/handoff_cache.rvl)
+    is broken. `cls` is the source spelling (`pure`/`capability`/`external`),
+    lowered to the IR vocabulary (`pure_fn`/`capability_result`/`external_effect`).
+    `invalidated_by` is the shared dotted capability namespace (`_capability_token`);
+    `ttl_ms` reuses `policy._parse_ttl`'s duration value (bare number = seconds),
+    `None` when no `ttl` clause is written. The per-class freshness rules
+    (external requires a bound, pure forbids one) and the applicability fold are
+    checked in lower, not the parser."""
+    cls: str
+    invalidated_by: tuple[str, ...]
+    ttl_ms: int | None
+    line: int
 
 
 @dataclass
@@ -532,6 +560,12 @@ class ExternDecl:
     # unless the keyed form was written; lower checks the parameter exists and is
     # scalar-serializable, and threads the value into the WAL descriptor.
     idempotency_key: str | None = None
+    # item 310: the `cache` trailing clause on an extern. Grammar-legal from slice
+    # 1, but admission-refused (the interior-crossing slice is unshipped): an
+    # extern crossing is INTERIOR to a called body, where only the runtime sees the
+    # args, so the seam gate cannot act pre-execution. `None` unless written, so
+    # every existing extern's IR is byte-identical.
+    cache: "CacheClause | None" = None
 
 
 @dataclass
@@ -568,6 +602,11 @@ class FnDecl:
     # downgrade must appear in the enclosing declaration — never ambient. Empty
     # for a fn that declares no endorse slot (byte-identical to before).
     endorse_origins: frozenset = field(default_factory=frozenset)
+    # item 310: the `cache` trailing clause. Only `cache pure` is legal on a plain
+    # `fn` (a plain fn whose reach crosses a boundary gets the mismatch refusal
+    # pointing at the emission that should carry the declaration). `None` unless
+    # written, so every existing fn's IR is byte-identical.
+    cache: "CacheClause | None" = None
 
 
 # pure-expression AST (§3.2 — the TS-subset stratum)
@@ -1488,6 +1527,14 @@ class Parser:
         if self.at("arrow"):
             self.next()
             returns = self.type_()
+        # item 310: the `cache` trailing clause, after the return type and before
+        # the teardown clauses (design §Surface: "before `=` or `undo`"). Grammar-
+        # legal but admission-refused for externs until the interior-crossing slice
+        # lands (the extern crossing is interior to a called body). `cache` is a
+        # contextual keyword, so an extern with no clause is byte-identical.
+        cache = None
+        if self.at("ident", "cache"):
+            cache = self._cache_clause()
         undo = None
         undo_idempotent = False
         compensate = None
@@ -1583,7 +1630,7 @@ class Parser:
                           deferred=deferred, requires_approval=requires_approval,
                           reach=reach, config=config, colour_poly=colour_poly,
                           undo_idempotent=undo_idempotent, idempotent=idempotent,
-                          idempotency_key=idempotency_key)
+                          idempotency_key=idempotency_key, cache=cache)
 
     def _reach_clause(self) -> tuple[str, str]:
         """`(confined: <param>)` after an emission classification — item 373.
@@ -1740,6 +1787,78 @@ class Parser:
                      "per-call ticket, not a typed `Approval`")
         return token
 
+    def _cache_clause(self) -> "CacheClause":
+        """`cache (pure|capability|external) (invalidated_by <tok> (, <tok>)*)?
+        (ttl <dur>)?` — the item-310 trailing clause after a return type.
+
+        `cache` is a CONTEXTUAL keyword: the caller checks `at("ident", "cache")`
+        in the post-return-type slot only, so a `cache` used as an ordinary name
+        elsewhere is untouched (examples/handoff_cache.rvl). The class word is
+        `pure` (a reserved keyword) or `capability`/`external` (contextual idents).
+        `invalidated_by` takes shared dotted capability tokens; because it always
+        consumes at least one token immediately, `... invalidated_by ttl ttl 5m`
+        reads the FIRST `ttl` as the token then the SECOND as the clause head (the
+        namespaces overlap, design §Surface). The per-class validity (freshness
+        rules, class-vs-reach) is checked in lower, not here."""
+        line = self.next().line   # consume the contextual `cache`
+        if self.at("kw", "pure"):
+            self.next()
+            cls = "pure"
+        elif self.at("ident", "capability"):
+            self.next()
+            cls = "capability"
+        elif self.at("ident", "external"):
+            self.next()
+            cls = "external"
+        else:
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"`cache` must name a class — `pure`, `capability`, or "
+                f"`external` — found {tok.value!r}",
+                hint="`cache pure` memoizes a pure function; `cache capability` "
+                     "a capability-backed deterministic read; `cache external` "
+                     "an external read (which requires a freshness bound) "
+                     "(docs/design/310-capability-aware-caching.md)")
+        invalidated_by: list[str] = []
+        if self.at("ident", "invalidated_by"):
+            self.next()
+            invalidated_by.append(self._capability_token(
+                what="an `invalidated_by` capability token"))
+            while self.at(","):
+                self.next()
+                invalidated_by.append(self._capability_token(
+                    what="an `invalidated_by` capability token"))
+        ttl_ms: int | None = None
+        if self.at("ident", "ttl"):
+            self.next()
+            ttl_ms = self._cache_duration()
+        # duplicate-token guard, so a mis-typed `invalidated_by a, a` is caught
+        # at parse (the same posture `_capability_list` takes on the scope list)
+        seen: set[str] = set()
+        for tok in invalidated_by:
+            if tok in seen:
+                raise self.err(
+                    line, f"duplicate `invalidated_by` token `{tok}`")
+            seen.add(tok)
+        return CacheClause(cls, tuple(invalidated_by), ttl_ms, line)
+
+    def _cache_duration(self) -> int:
+        """A `ttl` duration in the clause slot — `<n>[ms|s|m|h]`, bare number
+        seconds. The rvl lexer has no duration token, so `5m` arrives as an `int`
+        `5` then the `ident` `m`, and `500ms` as `int 500` then `ident ms`. The
+        value is funnelled through `policy._parse_ttl` so the source surface and
+        the policy-string surface cannot drift (design §`ttl`)."""
+        from . import policy  # noqa: PLC0415 - lazy, avoids an import cycle
+        ntok = self.expect("int", what="a `ttl` duration count (an integer)")
+        unit = ""
+        if self.at("ident") and self.peek().value in ("ms", "s", "m", "h"):
+            unit = self.next().value
+        try:
+            return policy._parse_ttl(f"{ntok.value}{unit}")
+        except ValueError as exc:
+            raise self.err(ntok.line, str(exc)) from None
+
     def _endorse_slot(self) -> frozenset:
         """Consume zero or more `endorse[<origin>[, <origin>...]]` declaration
         modifiers (roadmap item 249, Slice C) and return the declared origin set.
@@ -1826,12 +1945,20 @@ class Parser:
             if self.at("arrow"):
                 self.next()
                 returns = self.type_()
+            # item 310: the `cache` trailing clause, after the return type. `cache`
+            # is a contextual keyword recognised only here, so a method with no
+            # cache clause is byte-identical and a service using `cache` as a key
+            # name elsewhere is untouched.
+            cache = None
+            if self.at("ident", "cache"):
+                cache = self._cache_clause()
             if mname in methods:
                 raise self.err(mline, f"duplicate method `{mname}` in service {name}")
             methods[mname] = MethodDecl(
                 mname, params, returns, emission, mline, async_=async_,
                 commutative=method_commutative, idempotent=method_idempotent,
                 capabilities=capabilities, endorse_origins=endorse_origins,
+                cache=cache,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)
@@ -2835,6 +2962,12 @@ class Parser:
         if self.at("arrow"):
             self.next()
             returns = self.type_()
+        # item 310: the `cache` trailing clause, between the return type and the
+        # body. Only `cache pure` is legal on a plain `fn` (checked in lower); the
+        # clause slot is unambiguous (a fn body opens with `{`, never `cache`).
+        cache = None
+        if self.at("ident", "cache"):
+            cache = self._cache_clause()
         self.expect("{")
         body = []
         while True:
@@ -2845,7 +2978,7 @@ class Parser:
         self.expect("}")
         return FnDecl(name, params, returns, body, public, line, verified,
                       source=self.filename, type_params=type_params,
-                      endorse_origins=endorse_origins)
+                      endorse_origins=endorse_origins, cache=cache)
 
     def test_decl(self, lifecycle: bool = False) -> TestDecl:
         line = self.expect("kw", "test").line
