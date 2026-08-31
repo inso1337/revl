@@ -129,6 +129,27 @@ class EffectStmt:
 
 
 @dataclass
+class LeaseAcquire:
+    """The acquisition head of `effect lease <cap> [ttl <dur>] [uses <n>]` (item
+    294 Slice 2, docs/design/294-parameterized-capabilities.md).
+
+    Not an ordinary `acquire` expression: a lease acquisition is a class-(c)-
+    GATED, ticket-mediated mint of a standing grant over `capability`'s cone,
+    bounded by `ttl_ms` and/or `uses`. It rides the same `effect … undo …`
+    stratum (the undo is `l.revoke()`, riding the LIFO teardown) but lowers to a
+    reserved runtime acquisition, so it travels as this dedicated node rather
+    than as a call the emitter would treat as a host body. `capability` is the
+    canonical `(T, P)` spelling `cap_order` produces (a bare or parameterized
+    token). At least one of `ttl_ms`/`uses` bounds the grant; an unbounded lease
+    is refused at parse (consent stays bounded, the item-344 rule)."""
+
+    capability: str
+    ttl_ms: object            # int milliseconds, or None
+    uses: object              # int count, or None
+    line: int
+
+
+@dataclass
 class TimerStmt:
     """`every <n><unit> { <emit>* }` / `after <n><unit> { <emit>* }` — a timer
     (docs/time-coeffect.md, roadmap item 57).
@@ -2176,6 +2197,36 @@ class Parser:
             self.next()
             undo = self.pure_expr()
             return acquire, undo, line, [], is_async
+        # capability leases: `effect lease fs.write(path="/tmp") ttl 10m undo
+        # l.revoke()` (item 294 Slice 2). A lease is a ticket-gated acquisition of
+        # a standing grant over the capability's cone; its inverse is its own
+        # revoke, so an `undo` is required exactly as for `spawn`. The acquired
+        # value is a lease handle, and `undo l.revoke()` retires the grant on the
+        # LIFO teardown. `lease` is a CONTEXTUAL keyword, not reserved: the lease
+        # form is `effect lease <ident…>` (the capability's first segment is an
+        # ident), so `effect lease()`, `effect lease.m()`, and any other use of a
+        # binding named `lease` stay ordinary acquisition expressions. `await`
+        # does not combine with a lease (it is gated at load, not a suspension).
+        if self.at("ident", "lease") and self.toks[self.pos + 1].kind == "ident":
+            if is_async:
+                raise self.err(
+                    line,
+                    "`effect await lease …` — a lease acquisition is gated at "
+                    "load, not an await suspension source (item 294)",
+                    hint="write `let l = effect lease <cap> ttl <dur> undo "
+                         "l.revoke()` without `await`")
+            self.next()                       # consume `lease`
+            acquire = self._lease_acquire(line)
+            if not self.at("kw", "undo"):
+                raise self.err(
+                    line,
+                    "a `lease` acquisition needs `undo l.revoke()`",
+                    hint="a lease is an acquisition whose inverse is its own "
+                         "revoke; write `let l = effect lease "
+                         f"{acquire.capability} … undo l.revoke()` (G4, item 294)")
+            self.next()
+            undo = self.pure_expr()
+            return acquire, undo, line, [], is_async
         setup: list = []
         if self.at("{"):
             self.next()
@@ -2236,6 +2287,76 @@ class Parser:
         self.next()
         undo = self.pure_expr()
         return acquire, undo, line, setup, is_async
+
+    def _lease_acquire(self, line: int) -> "LeaseAcquire":
+        """`<cap> [ttl <n><unit>] [uses <n>]` after `effect lease` (item 294).
+
+        The capability is the standard parameterized token grammar (a bare or
+        parameterized dotted token, funneled through `cap_order` at
+        `_capability_params`, so `*` and unregistered parameters refuse exactly as
+        in an `emission[...]` scope). `ttl`/`uses` are bare-ident qualifiers (not
+        reserved words); order-free, each at most once. At least one must bound the
+        grant — an unbounded lease is refused here, the item-344 mandatory-bound
+        rule enforced at the source instead of only at mint."""
+        captok = self.peek()
+        if captok.value == "*":
+            raise self.err(captok.line,
+                           "`*` is not a leasable capability — an unnameable "
+                           "reach cannot be granted (item 294, the `*` row)",
+                           hint="name the boundary the lease grants")
+        parts = [self.expect("ident", what="a capability token after "
+                             "`effect lease`").value]
+        while self.at("."):
+            self.next()
+            parts.append(self.expect("ident").value)
+        capability = self._capability_params(".".join(parts))
+        ttl_ms = None
+        uses = None
+        while self.at("ident", "ttl") or self.at("ident", "uses"):
+            qual = self.next().value
+            if qual == "ttl":
+                if ttl_ms is not None:
+                    raise self.err(line, "duplicate `ttl` on a lease")
+                ttl_ms = self._duration_ms()
+            else:
+                if uses is not None:
+                    raise self.err(line, "duplicate `uses` on a lease")
+                ntok = self.peek()
+                if ntok.kind != "int" or ntok.value < 1:
+                    raise self.err(
+                        ntok.line,
+                        f"`uses` on a lease needs a positive whole count, found "
+                        f"{ntok.value!r}",
+                        hint="write `uses 3` — the number of class-(c) crossings "
+                             "the lease may auto-approve")
+                self.next()
+                uses = ntok.value
+        if ttl_ms is None and uses is None:
+            raise self.err(
+                line,
+                "a lease must be bounded — give `ttl <dur>` and/or `uses <n>`",
+                hint="an unbounded lease would convert prompt-per-call into "
+                     "prompt-never forever; consent stays bounded (item 344/294)")
+        return LeaseAcquire(capability, ttl_ms, uses, line)
+
+    def _duration_ms(self) -> int:
+        """`<n><unit>` (e.g. `10m`, `30s`, `250ms`) -> milliseconds, reusing the
+        timer duration units. The unit is a bare ident token following the count."""
+        num = self.peek()
+        if num.kind != "int" or num.value < 1:
+            raise self.err(num.line,
+                           f"expected a positive whole-number duration, found "
+                           f"{num.value!r}",
+                           hint="a duration is `<n><unit>`, e.g. `10m` "
+                                "(units: ms, s, m, h, d)")
+        self.next()
+        unit = self.peek()
+        if unit.kind != "ident" or unit.value not in self._DURATION_UNITS:
+            raise self.err(unit.line,
+                           f"expected a duration unit (ms, s, m, h, d), found "
+                           f"{unit.value!r}")
+        self.next()
+        return num.value * self._DURATION_UNITS[unit.value]
 
     # duration units -> milliseconds. `ms` before `m` and `s` in the lexer's
     # eyes is moot — the unit is a whole ident token here, matched verbatim.

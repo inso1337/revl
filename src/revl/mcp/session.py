@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
+from .. import cap_order
 from .._paths import backends_root
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
@@ -28,6 +29,58 @@ from .approval import ApprovalRequired
 
 class SessionError(RuntimeError):
     """The session cannot do what was asked (no runtime, nothing loaded…)."""
+
+
+def _cap_covers(wide: str, narrow: str) -> bool:
+    """`covers(wide, narrow)` over the two stored capability spellings: does the
+    `wide` cone contain `narrow` (narrow at or below wide in the one order)?
+
+    The single point where the gate speaks the item-294 partial order (the
+    representation mandate: one relation, one implementation in `cap_order`).
+    Both arguments are canonical stored spellings (bare dotted tokens, or the
+    `token(name=value,...)` form the parser and `cap_order` emit). Fails CLOSED
+    and ADDITIVE: a spelling `cap_order` cannot parse (never produced by the
+    frontend, but a hand-passed verb argument might be malformed) falls back to
+    byte-identical string equality, exactly the pre-Slice-2 predicate, so a
+    parameter-free gate is bit-for-bit unchanged and no malformed string is ever
+    silently widened into a match."""
+    if wide == narrow:
+        return True                     # the fast path: identical stored spelling
+    try:
+        return cap_order.covers(cap_order.parse_cap(wide),
+                                cap_order.parse_cap(narrow))
+    except cap_order.CapError:
+        return False                    # unparseable -> only exact-string matches
+
+
+def _collect_lease_requests(ir: dict) -> list:
+    """Every `effect lease` acquisition in a composition's activation bodies
+    (item 294 Slice 2). A lease step is a `let-effect` step carrying a `lease`
+    marker (`{capability, ttlMs, uses}`); the lowering is the only producer.
+    Returns `[{component, capability, ttlMs, uses}]` for the gate to raise a
+    ticket per un-satisfied lease. A composition with no lease step yields the
+    empty list, so the gate is inert (byte-identity)."""
+    out: list = []
+
+    def _walk(steps, component):
+        for step in steps or []:
+            if not isinstance(step, dict):
+                continue
+            lease = step.get("lease")
+            if lease is not None:
+                out.append({"component": component,
+                            "capability": lease.get("capability"),
+                            "ttlMs": lease.get("ttlMs"),
+                            "uses": lease.get("uses")})
+            # leases only appear at activation-body top level (a `let l = effect
+            # lease …` prelude), but walk nested `if` branches defensively.
+            for key in ("then", "else"):
+                if step.get(key):
+                    _walk(step[key], component)
+
+    for comp in ir.get("components", []) or []:
+        _walk(comp.get("body"), comp.get("name"))
+    return out
 
 
 class AdmitVerdict:
@@ -345,6 +398,12 @@ class Session:
         # policy is configured, so nothing below runs and the load is byte-identical.
         self._class_map = self._build_class_map(ir)
         self._enforce_activation_gate(ir)
+        # item 294 Slice 2: the capability-lease gate, alongside the activation
+        # gate and BEFORE any runtime is touched. A `let l = effect lease …`
+        # acquisition is class-(c)-gated and ticket-mediated: an ungated run
+        # refuses it (no operator to consent), and a gated run raises ONE ticket
+        # the operator mints the standing grant from — never a silent self-mint.
+        self._enforce_lease_gate(ir)
         emit, runtime_mod, Context, FiberState = _backend()
         driver_class = _capturing_driver_class()
         self.config = config or {}
@@ -477,6 +536,11 @@ class Session:
         # frame check). No-op unless the program uses the surface, so a session
         # without typed approvals is byte-identical.
         self._configure_owner_approvals(ir)
+        # item 294 Slice 2: the lease acquire/revoke bridge. Inert unless the
+        # program acquires a lease; the acquisition resolves the grant the lease
+        # gate already minted, and its disposer's own-requestId revoke rides here.
+        self._owner.lease_acquire = self._runtime_lease_acquire
+        self._owner.lease_revoke = self._runtime_lease_revoke
         runtime_mod.set_session_owner(self._owner)
 
     def _configure_owner_approvals(self, ir: dict) -> None:
@@ -1867,6 +1931,150 @@ class Session:
             self._count_posture("c")
             raise ApprovalRequired(ticket)
 
+    # -- item 294 Slice 2: the capability-lease gate ------------------------
+
+    def _enforce_lease_gate(self, ir: dict) -> None:
+        """Gate every `effect lease` acquisition BEFORE boot (item 294 Slice 2).
+
+        A lease is a class-(c)-gated, ticket-mediated acquisition, NEVER a silent
+        self-mint: this is the consent bypass the design closes. Two outcomes per
+        un-satisfied lease:
+
+          * UNGATED run (no approval policy loaded): refuse the lease outright.
+            There is no operator to raise the ticket to, and an unenforceable
+            lease is not a lease (honest sentence 2). A program cannot self-convert
+            prompt-per-call into prompt-never by declaring a lease off-policy.
+          * GATED run: if a live standing grant already covers the lease cone
+            (the post-approval retry, or a pre-minted grant), the lease is
+            satisfied and boot proceeds. Otherwise raise ONE ticket naming the
+            lease's capability cone and ttl/uses; the operator mints the grant
+            FROM that ticket (`mint_standing_grant(ticket_hash=…)`) and re-loads.
+            The one prompt moves from the first crossing to the acquisition — the
+            item-248 economics (3 prompts to 1), never to 0.
+
+        Inert for every composition with no lease step, so byte-identity holds."""
+        leases = _collect_lease_requests(ir)
+        if not leases:
+            return
+        if self.approval_policy is None:
+            names = ", ".join(sorted({lz["capability"] for lz in leases}))
+            raise SessionError(
+                f"`effect lease` refused: no approval policy is loaded, so there "
+                f"is no operator to consent to the lease(s) [{names}]. A lease "
+                f"acquisition is class-(c)-gated and ticket-mediated — an ungated "
+                f"run cannot silently mint the grant (item 294: a program may not "
+                f"self-convert prompt-per-call into prompt-never). Load under "
+                f"`--approval-policy` so the lease raises a ticket to approve")
+        from .approval import ApprovalRequired  # noqa: PLC0415
+        for lz in leases:
+            cap = lz["capability"]
+            component = lz["component"]
+            if self._live_lease_grant(component, cap) is not None:
+                continue  # already minted from an approved ticket (retry / pre-mint)
+            ticket = self._build_lease_ticket(lz)
+            self._tickets[ticket["hash"]] = ticket
+            if self._owner is not None:
+                self._owner.prompts["perCall"] += 1
+            self._count_posture("c")
+            raise ApprovalRequired(ticket)
+
+    def _build_lease_ticket(self, lz: dict) -> dict:
+        """A class-(c) lease ticket the operator mints the standing grant from.
+
+        Resolves the lease capability to its live class-(c) crossing (cone-aware,
+        so a narrow lease resolves against a wider declared crossing) to bind the
+        grant's component and reach-closure candidate hash — the same identity a
+        proactive mint binds, so the minted grant is live for the body's crossings
+        under the same closure. Refuses a lease over a capability the composition
+        does not cross as class-(c) (nothing to grant) or one reachable via more
+        than one closure (ambiguous — mirrors the mint/F5b guard)."""
+        import hashlib  # noqa: PLC0415
+        import json  # noqa: PLC0415
+        cap = lz["capability"]
+        targets = self._class_map.crossings_for_capability(cap) \
+            if self._class_map is not None else []
+        if not targets:
+            raise SessionError(
+                f"`effect lease {cap}` names a capability that is not a live "
+                f"class-(c) crossing in this composition — there is nothing to "
+                f"lease (a lease grants a boundary the code actually crosses)")
+        comps = sorted({t["component"] for t in targets})
+        if len(comps) > 1:
+            raise SessionError(
+                f"`effect lease {cap}` is reachable via {len(comps)} distinct "
+                f"closures (components {', '.join(comps)}) — an ambiguous lease "
+                f"cone (item 294 / F5b). Narrow the lease capability so it binds "
+                f"one crossing")
+        component = targets[0]["component"]
+        candidate_hash = targets[0]["candidateHash"]
+        body = {
+            "component": component,
+            "candidateHash": candidate_hash,
+            "capabilities": [cap],
+            "classCCapabilities": [cap],
+            "kind": "lease",
+            "leaseTtlMs": lz["ttlMs"],
+            "leaseUses": lz["uses"],
+            "leaseComponent": lz["component"],
+        }
+        body["hash"] = hashlib.sha256(
+            json.dumps(body, sort_keys=True).encode()).hexdigest()
+        return body
+
+    def _live_lease_grant(self, component: str, capability: str):
+        """The live standing grant minted for the lease over `capability` bound to
+        the crossing `component`, or None. Matched by the `lease` tag, the session
+        (invariant 5), un-consumed/un-revoked, and cone coverage of the lease
+        capability. Used both by the gate (has this lease already been minted?)
+        and by the runtime acquire (which grant does the handle name?)."""
+        for g in self._grants:
+            if not g.get("lease"):
+                continue
+            if g.get("consumed") or g.get("revoked"):
+                continue
+            if g.get("session") != self._session_id:
+                continue
+            if g.get("component") != component:
+                continue
+            if _cap_covers(g["capability"], capability):
+                return g
+        return None
+
+    def _runtime_lease_acquire(self, component: str, capability: str,
+                               ttl_ms, uses) -> str | None:
+        """The runtime `_revl_frame.acquire_lease` bridge: resolve the standing
+        grant the lease gate minted and return its `requestId` (the handle names
+        it). None if no live lease grant backs it — the frame then fails closed
+        (a lease never self-mints). `ttl_ms`/`uses` are informational here; the
+        bounds live on the already-minted grant (its `expiresAt`/`remainingUses`).
+
+        The grant's own component is the CROSSING component the ticket bound
+        (`crossings_for_capability`), which may differ from the acquiring
+        activation body's component; match on the crossing component so the handle
+        names the grant the body's crossings actually consume against."""
+        g = self._live_lease_grant(component, capability)
+        if g is None:
+            # the acquiring body's component is not the crossing component (the
+            # lease grant was bound to the provider). Fall back to a cone match
+            # ignoring component — still this session, still lease-tagged.
+            for cand in self._grants:
+                if cand.get("lease") and not cand.get("consumed") \
+                        and not cand.get("revoked") \
+                        and cand.get("session") == self._session_id \
+                        and _cap_covers(cand["capability"], capability):
+                    g = cand
+                    break
+        return g["requestId"] if g is not None else None
+
+    def _runtime_lease_revoke(self, request_id: str) -> dict:
+        """The lease disposer's own-requestId revoke (item 294, the scoped
+        exemption). Retires the grant the acquiring scope minted, by id, on the
+        LIFO teardown — the always-safe direction (revoking your OWN authority
+        only narrows). It bypasses the operator gate because it names only the
+        grant it owns; a disposer naming any other grant never reaches here (the
+        lowering refuses a lease `undo` that is not `l.revoke()`)."""
+        return self.revoke_standing_grant(request_id=request_id)
+
     def _ticket_ttl_ms(self, ticket: dict) -> int | None:
         """The tightest ttl a bound policy imposes on this ticket's capabilities,
         or None (item 246, Slice 2). A ticket covering several capabilities is
@@ -1930,16 +2138,36 @@ class Session:
     # -- item 344: session-scoped standing capability grants ----------------
 
     def _grant_covers(self, grant: dict, capability: str) -> bool:
-        """The ONE grant-coverage predicate, shared by `_find_standing_grant`
-        (auto-approve) and `revoke_standing_grant` (retire). A standing grant
-        covers a capability iff it was minted for that EXACT capability — identity
-        on the minted key. A grant for A does not cover B (the item-344 invariant),
-        so "auto-approve what is granted" and "revoke what covers this" can never
-        disagree: the 245/246 over-coverage hole and the revocation no-op both
-        close on this single line. Coverage is capability identity ONLY — grant
-        liveness (component / candidate hash / session / expiry / uses) is a
-        separate axis, applied by `_live_grant_for` at the crossing."""
-        return grant["capability"] == capability
+        """The grant-coverage predicate for the AUTO-APPROVE path
+        (`_find_standing_grant` via `_live_grant_for`). A standing grant covers a
+        class-(c) crossing capability iff the crossing is AT OR BELOW the grant in
+        the one partial order (`cap_order.covers(grant, crossing)`): same token,
+        and the crossing narrows every parameter the grant binds.
+
+        Item 294 Slice 2 widens this WITHIN a token's cone only. A grant minted
+        for `fs.write(path="/tmp")` covers a `fs.write(path="/tmp/job-42")`
+        crossing (containment) and does NOT cover bare `fs.write` (that would be
+        widening). The F1 property is preserved by clause 1 (token identity): a
+        grant for token A never covers token B, distinct tokens stay discrete. A
+        bare-token grant `Cap(T, ())` tops its cone, so it covers every crossing
+        on token T — bit-for-bit today's identity comparison for the parameter-
+        free grants every existing test mints. Grant liveness (component /
+        candidate hash / session / expiry / uses) is a separate axis, applied by
+        `_live_grant_for` at the crossing."""
+        return _cap_covers(grant["capability"], capability)
+
+    def _grant_within(self, grant: dict, capability: str) -> bool:
+        """The grant-coverage predicate for the REVOKE path
+        (`revoke_standing_grant`). A revoke SPELLING retires a grant iff the grant
+        is AT OR BELOW the revoke spelling (`cap_order.covers(spelling, grant)`):
+        revoking `fs.write(path="/tmp")` retires every grant at or below it (its
+        whole sub-cone: `fs.write(path="/tmp/job-42")`) and no other — not bare
+        `fs.write` (wider) and not a sibling `fs.write(path="/etc")`. Revoking the
+        bare token retires the whole cone (every narrow grant under it). This is
+        the SAME `covers` relation as `_grant_covers`, evaluated with the roles
+        swapped, so find and revoke agree on the parameter-free grants exactly as
+        the identity predicate did before Slice 2."""
+        return _cap_covers(capability, grant["capability"])
 
     def _live_grant_for(self, capability: str, ticket: dict, now: int):
         """The first LIVE standing grant covering `capability` under this ticket's
@@ -2061,6 +2289,7 @@ class Session:
         component: str | None = None
         candidate_hash: str | None = None
         policy_ttl: int | None = None
+        is_lease = False
 
         if ticket_hash is not None:
             ticket = self._tickets.get(ticket_hash)
@@ -2071,6 +2300,17 @@ class Session:
                     f"ticket table was replaced). Re-issue the call for a fresh "
                     f"ticket, then mint the grant against that (item 246, the "
                     f"outstanding-ticket table)")
+            # item 294 Slice 2: a lease ticket carries the lease's own bounds
+            # (`leaseTtlMs`/`leaseUses`) so approving it mints a grant bounded
+            # exactly as the source `effect lease … ttl … uses …` declared,
+            # without the operator re-spelling them. The grant is tagged `lease`
+            # so the acquire resolves it and the disposer revokes it.
+            if ticket.get("kind") == "lease":
+                is_lease = True
+                if uses is None:
+                    uses = ticket.get("leaseUses")
+                if ttl_ms is None:
+                    ttl_ms = ticket.get("leaseTtlMs")
             caps = ticket.get("capabilities") or []
             if capability is None:
                 if len(caps) != 1:
@@ -2079,11 +2319,13 @@ class Session:
                         f"({', '.join(caps) or 'none'}) — name which one to "
                         f"widen into a standing grant via `capability`")
                 capability = caps[0]
-            elif capability not in caps:
+            elif not any(_cap_covers(c, capability) for c in caps):
                 raise SessionError(
                     f"capability {capability!r} is not on this ticket's reach "
-                    f"({', '.join(caps) or 'none'}) — a grant may only widen a "
-                    f"capability the crossing actually reaches")
+                    f"({', '.join(caps) or 'none'}) — a grant may only narrow a "
+                    f"capability the crossing actually reaches, never widen past "
+                    f"the declaration (item 294: the mint must be at or below a "
+                    f"declared crossing cone)")
             component = ticket["component"]
             candidate_hash = ticket["candidateHash"]
             policy_ttl = self._ticket_ttl_ms(ticket)
@@ -2114,6 +2356,29 @@ class Session:
                 "grant, or a ticket `hash` to mint one from an outstanding "
                 "class-(c) ticket")
 
+        # item 294 Slice 2: erase a ceiling parameter (`calls=N`) from the
+        # grant's stored valuation and translate it into the shipped
+        # `remainingUses` counter. A CROSSING binds no `calls` (one call is one
+        # call), so a grant that kept `calls=N` in its cone would cover no
+        # crossing ever; the ceiling governs the mint, not per-crossing matching.
+        # The coverage checks above ran on the FULL spelling (ceiling included in
+        # the mint-vs-declaration bound), so erasure happens only now, for
+        # storage. `calls` sets `remainingUses` (the tighter of it and any
+        # explicit `uses`); other ceiling kinds (`size`) are dropped from the
+        # cone with no counter — revl does not meter bytes (scoped to a later
+        # item), so an unmetered ceiling leaves boundedness to `uses`/`ttl`.
+        try:
+            minted_cap = cap_order.parse_cap(capability)
+        except cap_order.CapError:
+            minted_cap = None
+        if minted_cap is not None and not minted_cap.is_bare():
+            resource_cap, ceilings = cap_order.split_ceilings(minted_cap)
+            calls = ceilings.get("calls")
+            if calls is not None:
+                uses = calls if uses is None else min(uses, calls)
+            if ceilings:
+                capability = resource_cap.to_str()
+
         effective_ttl = ttl_ms if ttl_ms is not None else policy_ttl
         if uses is None and effective_ttl is None:
             raise SessionError(
@@ -2137,6 +2402,7 @@ class Session:
             "remainingUses": uses,          # None = bounded only by TTL/session
             "consumed": False,
             "revoked": False,               # item 379: set by an early revoke
+            "lease": is_lease,              # item 294: minted from an effect lease
         }
         self._grants.append(entry)
         wal = self._approval_wal()
@@ -2221,8 +2487,8 @@ class Session:
                 continue                     # invariant 5: this session's grants
             if request_id is not None and g["requestId"] != request_id:
                 continue
-            if capability is not None and not self._grant_covers(g, capability):
-                continue                     # the shared predicate: find/revoke agree
+            if capability is not None and not self._grant_within(g, capability):
+                continue                     # retire the revoke spelling's whole sub-cone
             g["revoked"] = True
             g["consumed"] = True             # so _find_standing_grant skips it
             revoked_ids.append(g["requestId"])
