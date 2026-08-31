@@ -40,7 +40,11 @@ naming it, then closing the holes the implicit model does not cover.
    TYPECHECKER has no notion of a resource type at all (verified against
    `src/revl/typecheck.py`: the only mention of `acquire` is a comment).
    308's core mechanical move is promoting resource-typedness from a seam
-   analysis into the frontend.
+   analysis into the frontend. That promotion is NOT safe verbatim: the
+   base set is `ext["returns"]` as written, primitives included, and the
+   corpus contains `extern acquire fn log_open(path: Str) -> Int`
+   (examples/durable_log.rvl). Rule R0 below fixes the base before the
+   closure moves.
 
 3. **In-process handle flow is deliberately ungated.** `placement.py` says
    it in so many words: two components co-located in one process pass a
@@ -61,12 +65,21 @@ naming it, then closing the holes the implicit model does not cover.
 5. **Closures capture by value** (docs/closures.md), which protects G7/A8
    inverse stability but does NOT confine a handle: a by-value capture of a
    handle copies the reference to host state, and the closure can outlive
-   the frame that owns the bracket.
+   the frame that owns the bracket. Worse, the closure's TYPE erases the
+   capture: a `() -> Int` value carrying a captured `Sock` is not
+   resource-typed under the taint fixpoint, so a returned closure launders
+   the handle across a service signature into another activation (the 414
+   crossing catalogue, kind 8). B1 clause 2 exists for this.
 
-6. **`spawn` is already an owned resource.** The parser forces `spawn C ...
-   undo s.dispose()` (parser.py, the G4 hint at the spawn effect form): the
-   spawning frame owns the spawned component and its teardown. 308's
-   vocabulary applies to it unchanged; nothing new is needed there in v1.
+6. **`spawn` is already an owned resource, but its config is a crossing.**
+   The parser forces `spawn C ... undo s.dispose()` (parser.py, the G4
+   hint at the spawn effect form): the spawning frame owns the spawned
+   component and its teardown. 308's vocabulary applies to the spawn
+   HANDLE unchanged; nothing new is needed for it in v1. Spawn CONFIG is
+   different: `spawn C with { conn: conn }` seats a value in the child's
+   activation for the child's whole lifetime (414 crossing kind 2), which
+   is an escape by any name. B1 clause 6 refuses it for resource-tainted
+   values.
 
 What the implicit model does NOT prevent, today, in admitted programs:
 
@@ -80,6 +93,20 @@ What the implicit model does NOT prevent, today, in admitted programs:
 - **A stored borrow outliving its owner under swap** (point 4 above), or a
   handle parked in a closure or a long-lived container and used after the
   bracket replayed.
+- **A borrow escaping through the teardown machinery itself.** An
+  effect-form `undo` expression captures arbitrary locals and lives on the
+  per-activation LIFO stack until teardown: `undo conn.reset()` on a
+  borrowed `conn` escapes into the borrower's teardown and replays after
+  the owner was swapped out (use-after-free through the accumulator).
+  Witnessed effect arguments and `emit ... compensate <expr>` arguments
+  are the same shape. Compensations are worse: they run in teardown Phase
+  2, AFTER Phase 1 closed every bracket, so a resource in compensation
+  args is use-after-close in the plain same-frame case, no swap needed.
+- **`handoff` re-seating a dead handle.** `handoff db: Session` with
+  `Session = { conn: Sock }` re-seats the predecessor's resource vector on
+  the successor, gated only by shape compatibility, while the
+  predecessor's teardown closes `conn`: the successor starts warm with a
+  dead handle.
 
 So the honest answer to "new invariant or formalization?" is: BOTH, split
 cleanly. Owner-runs-the-final-inverse is a formalization of what the
@@ -102,7 +129,10 @@ add one.
   owner's own body (rule O1 below). The owner MAY freely store its own
   handle in its own activation state and return it from its provide
   methods; both stay within the frame the bracket lives in, and returning
-  is exactly how a borrow is created.
+  is exactly how a borrow is created. Ownership is not exemption from
+  every rule: the owner may not capture its handle in a closure (B1
+  clause 2) and may not place it in compensation arguments (B1 clause 5),
+  because both positions outlive or outrun the bracket.
 - **Runtime consequence:** none new. The existing `bracket` entry (or
   `transactional` for witnessed effects) IS owned-mode teardown: LIFO at
   the owner's frame, exactly once, G5-infallible by contract.
@@ -110,15 +140,29 @@ add one.
 ### `borrowed`
 
 - **Who:** every other position a resource-typed value reaches: a service
-  method parameter, a call result received from another component's provide
-  method, a resource-typed field of a record handed over.
+  method parameter, a `fn` parameter, ANY call result (a provide method's
+  or a plain `fn`'s), a resource-typed field of a record handed over.
+- **Positional, not dataflow, identity.** Parameters and call results are
+  ALWAYS borrows, even when they are dataflow-identical to a handle the
+  receiving activation owns. The inference is positional because that is
+  the safe direction: every wrong answer it can give is a false positive
+  (a refusal of a program that happened to be fine), never an unsound
+  admission, EXCEPT in positions the flow walk does not visit at all,
+  which is exactly what B1 clauses 5-7 close. The named casualty: a
+  checkout/checkin pool where the owner's provide method `checkin(c:
+  Sock)` receives its own handle back. Positionally `c` is a borrow, so
+  clause 1 refuses re-storing it, and no v1 analysis proves the round
+  trip. That shape is deliberately inexpressible in v1: the owner keeps a
+  free list keyed by an id, not by the handle, and lends per call.
 - **Static discipline:** use, do not close, do not keep. (a) Rule O1
   applies (a borrower cannot invoke the declared inverse). (b) The borrow
   is confined to the receiving scope: it may not be stored into
   activation-level state, captured by a closure, returned onward from a
-  provide method, or inserted into a container or record that escapes the
-  scope (rule B1 below). Passing it further DOWN a call chain is fine; the
-  callee's parameter is just another borrow.
+  provide method, inserted into a container or record that escapes the
+  scope, placed in an undo, witnessed-argument, or compensate position,
+  seated in spawn config, or carried by a handoff type (rule B1 below).
+  Passing it further DOWN a call chain is fine; the callee's parameter is
+  just another borrow.
 - **Runtime consequence:** none, and that is the point. A borrow registers
   nothing in any accumulator; teardown of the borrower's frame does not
   touch the handle. "Cannot outlive the owner" is then a corollary: the
@@ -151,7 +195,9 @@ add one.
     task lease already rides the verified LIFO disposer chain and is
     ttl-backstopped on a crash that skips teardown. A shared handle's
     teardown is then a lease bound to a holder count: releases consume,
-    exhaustion (count zero, or ttl on crash) triggers the inverse.
+    and exhaustion (count zero, or a liveness-confirmed expiry after a
+    crash; see S1 on why bare ttl is not enough for teardown) triggers
+    the inverse.
 - **Recommendation: defer shared out of v1 entirely,** and when it lands,
   build it as the 294 lease binding, not a bespoke refcount. The lease
   runtime already solved the two hard parts (durable consume-before-fire
@@ -217,15 +263,65 @@ Precondition for all of them: lift the resource-type closure into the
 frontend. `_resource_taint` (the acquire-return base set plus the
 record/variant fixpoint) moves to a shared module the checker calls, and
 `distribute.py` imports it from there. One implementation; the seam
-refusal and the new frontend refusals cannot drift apart.
+refusal and the new frontend refusals cannot drift apart. But the base
+set must be repaired first (R0), or the lift poisons the checker.
+
+### R0: acquire returns are nominal handle types (the taint base repair)
+
+**The problem.** `_resource_types` takes `ext["returns"]` verbatim, and
+`_resource_in` matches the name by word-boundary regex over type strings.
+The corpus already contains `extern acquire fn log_open(path: Str) -> Int`
+(examples/durable_log.rvl). Promote that base set into the frontend
+unmodified and `Int` is a resource type: every integer in the program is a
+borrowed handle, O1 and B1 refuse arithmetic, and the language is
+unwritable. This is not a corpus curiosity to carve out later; it is a
+poisoned foundation, and slice 0 MUST decide it, because the report-only
+sweep will otherwise present as a wall of false positives rather than a
+reviewable carve-out list. (Independent of 308: the verbatim base set is
+arguably a live over-taint at the seam TODAY, since `Int` in any
+signature already trips the seam analysis's resource matching. R0 fixes
+that too.)
+
+**The two candidate fixes.**
+
+- (a) **Nominal handles, RECOMMENDED.** An `acquire` (or `witnessed`)
+  extern's return must be a NOMINAL opaque handle type: primitive and
+  structural returns are refused at the declaration, with a diagnostic
+  naming the fix (declare an opaque handle type and return that).
+  Migration for durable_log: a nominal `LogHandle` wrapping the
+  descriptor, threaded through the effect and its undo exactly as the
+  `Int` is today. The handle type carries identity, which is what
+  ownership tracks; a primitive cannot.
+- (b) **Primitive exclusion.** Keep primitive returns legal but exclude
+  primitives from the frontend base set, with an explicit note that
+  primitive-handled resources get NO 308 protection (no O1, no B1, no
+  mode). Rejected as the default: it silently exempts exactly the
+  resources most likely to be raw file descriptors, and the exemption is
+  invisible at the use site.
+
+Option (a) is the recommendation. It costs one corpus migration and buys
+a base set that means what the checker needs it to mean. The regex-based
+`_resource_in` matcher should be replaced by structural type matching in
+the shared module at the same time; nominal handles make that trivial.
 
 ### O1: no hand-call of a declared inverse (owner and borrower alike)
 
 **Rule.** The set of closing operations is DEFINED as: the declared `undo`
 callees of `acquire` (and `witnessed`) externs, plus `dispose` on a spawn
 handle. A call to any of these, in any body position (pure call, effect
-acquisition, emission), on a resource-typed argument, is refused. The
-accumulator owns the final inverse; source code never performs it.
+acquisition, emission), AND in any undo or compensate expression, on a
+resource-typed argument, is refused. The accumulator owns the final
+inverse; source code never performs it, and it cannot be smuggled into an
+unrelated binding's undo or an emission's compensate either.
+
+**The mandatory exemption.** The undo clause of the binding that acquires
+THIS handle literally IS the declared inverse call: `let fd = effect
+log_open(p) undo log_close(fd)` is the corpus acquire form
+(examples/durable_log.rvl), and without an exemption O1 refuses every
+acquire in the corpus. The exemption is exactly: the inverse call in the
+acquiring binding's own undo clause, applied to the handle that binding
+binds, scoped to that one binding. The same inverse called in any OTHER
+binding's undo, or on any other handle, stays refused.
 
 **Refusal.**
 
@@ -253,18 +349,66 @@ has lied to it. Named here, not solved here.
 ### B1: a borrow does not escape its scope
 
 **Rule.** A resource-typed value whose mode is borrowed (any resource-typed
-value the current activation did not itself acquire) may not:
+value the current activation did not itself acquire) may not do any of the
+following; clause 2 and the compensate half of clause 5 additionally bind
+OWNED values, as noted inline:
 
 1. be assigned or `effect`-inserted into activation-level state (a
    component `let`/`var` binding, or a container acquired at activation
    level);
-2. be captured by a closure (any closure; v1 does not distinguish escaping
-   from non-escaping closures);
-3. be returned from a provide method (only the OWNER returning its own
-   handle is admitted; that return is the borrow-creating move);
-4. be placed into a record or collection value that then does any of 1-3
-   (the resource-taint fixpoint already identifies which types carry
-   handles, so this is the same check applied to the carrying value).
+2. be captured by a closure. This clause binds the OWNER too: a closure
+   value's type (`() -> Int`) erases the capture, so a closure carrying a
+   handle is invisible to the taint fixpoint and launders the handle
+   across any signature (414 crossing kind 8), and an owner's closure
+   returned across a service boundary outlives the owner's frame exactly
+   like a stored borrow. Two candidate rules: taint the closure VALUE at
+   arrow creation when any capture is tainted, then apply every B1 clause
+   to tainted closure values regardless of the capturer's mode; or refuse
+   closure capture of any resource-typed value outright, owner included.
+   RECOMMENDED for v1: the outright refusal. It is a strictly smaller
+   check, it has no closure-value plumbing to get wrong, and the sweep
+   (slice 0) will show whether any legitimate capture exists; the
+   closure-value taint is the later refinement if one does;
+3. be returned from a provide method or a `fn` (only the OWNER returning
+   its own handle from a provide method is admitted; that return is the
+   borrow-creating move). Implementation note: the check keys on the
+   TAINTED return type, not the bare handle type, or a `Session`
+   wrapping a `Sock` walks out unrefused;
+4. be placed into a record or collection value that then does any of the
+   other clauses (the resource-taint fixpoint already identifies which
+   types carry handles, so this is the same check applied to the carrying
+   value). Implementation note: both orders must be caught,
+   insert-then-store AND store-then-insert; a container already parked in
+   activation state that later receives a borrow is the same escape as a
+   loaded container being parked;
+5. appear in an undo expression, in a witnessed effect's argument list,
+   or in a compensate expression. An undo captures its free locals and
+   lives on the per-activation LIFO stack until teardown: `undo
+   conn.reset()` on a borrowed `conn` escapes into the borrower's
+   teardown and replays after the owner is swapped out. Witnessed
+   arguments ride the same accumulator. Compensations are stricter still:
+   they run in teardown Phase 2, after Phase 1 has closed every bracket,
+   so a resource-typed value in compensation arguments is use-after-close
+   by phase ordering alone, same frame, no swap required. The compensate
+   half of this clause therefore binds OWNED values too, not just
+   borrows. It also has a WAL angle: a host handle serialized into
+   compensation args is unreconstructible residue on crash recovery, a
+   dead number in the log. (The one undo position exempt from this clause
+   is the same one O1 exempts: the acquiring binding's own undo, on its
+   own handle, which is the bracket being created, not an escape.);
+6. appear as a spawn config value. `spawn C with { conn: conn }` seats
+   the value in the child's activation for the child's whole lifetime
+   (414 crossing kind 2), a per-invocation borrow escalated to an
+   activation-lifetime hold. A child that needs a handle acquires its
+   own, or calls the owner's service per use;
+7. appear in a handoff type. `handoff db: Session` with `Session = {
+   conn: Sock }` re-seats the predecessor's resource vector on the
+   successor, gated only by shape compatibility, while the predecessor's
+   teardown closes the handle: the successor starts warm holding a dead
+   descriptor. v1 refuses a resource-tainted handoff type at admission,
+   from the same shared taint module. A real handle transfer is "the
+   bracket migrates", which is exactly what the deferred `transfer`
+   marker means (next section); handoff shape-compat cannot express it.
 
 Passing the borrow DOWN (as an argument to a `fn` or a further service
 call) is admitted; the callee's parameter is a borrow with the same rules.
@@ -282,41 +426,86 @@ error: cache.rvl:57: borrowed resource `conn: Sock` (acquired by
 **Can revl express does-not-outlive without a lifetime system?** Yes, at
 this granularity, because the frame/scope structure already stratifies
 lifetimes coarsely: activation state lives to the frame's teardown,
-method-scope bindings live per invocation, closures are the only value
-that packages a scope up and moves it. B1's four clauses are exactly the
-three widening channels plus the transitive-carrier closure. The check is
-a per-scope flow walk in the checker, the same shape as the existing
-Opt-escape analysis, not a constraint solver. What this coarse
-stratification CANNOT express is a borrow legitimately parked across
-method invocations but still shorter-lived than the owner; v1 refuses
-that shape deliberately (restructure so the owner holds it). If real
-programs hit that wall, the escape hatch is a later, finer analysis, not
-a v1 loosening.
+method-scope bindings live per invocation, and a fixed set of constructs
+package a scope up and move it. The clause list is that set: storage
+widening (1), scope packaging (2), signature crossing (3), carriers (4),
+the teardown machinery's own capture positions (5), and the two
+activation-seating constructs (6, 7). The check is a per-scope flow walk
+in the checker, the same shape as the existing Opt-escape analysis, not a
+constraint solver. The list is a closed-world claim over the language's
+crossing constructs (the 414 catalogue is the checklist); a future
+construct that seats a value in another activation must add its clause
+here, and the S1 holder count shares this same enumeration. What this
+coarse stratification CANNOT express is a borrow legitimately parked
+across method invocations but still shorter-lived than the owner; v1
+refuses that shape deliberately (restructure so the owner holds it). If
+real programs hit that wall, the escape hatch is a later, finer analysis,
+not a v1 loosening.
 
-**Owner carve-out, stated explicitly.** The owner storing its OWN handle
+**Owner carve-out, stated precisely.** The owner storing its OWN handle
 in its OWN activation state is admitted (same frame, the bracket and the
 store tear down together under G7 LIFO), and is the normal pool pattern:
-acquire at activation, store, lend per call. B1 binds borrows only.
+acquire at activation, store, lend per call. The carve-out is provable
+only where identity is syntactically evident: the flow from the acquiring
+binding itself. A handle that leaves and comes back is a parameter or a
+call result, hence a borrow by position (the checkin pool above), and
+clauses 2 and 5's compensate half bind the owner regardless. B1's other
+clauses bind borrows only.
+
+**The honest limitation: retaining externs.** The flow walk sees revl
+positions. An `emission fn register(c: Conn)` that retains the handle
+host-side, or a bridge-implemented service that stores a borrow in its
+host runtime, escapes through a surface no clause can see; the
+declaration does not say "retains". This is the same declaration-is-the-
+proof-surface line O1 draws for out-of-band closes. Cheap audit-only
+mitigation, worth shipping with slice 2: `revl audit` lists every
+resource-typed argument reaching a non-inverse extern or a
+bridge-implemented service, so a human can review the retention surface
+even though the checker cannot refuse it.
 
 ### S1: shared teardown, exactly once at last release (deferred with shared)
 
-**Rule (specced now, implemented with the shared slice).** A `shared`
-acquire registers, in each holder's frame, a release entry; the declared
-inverse is bound to the count's zero crossing and runs exactly once, in
-the frame that performed the last release. Static side: `shared` is only
-admitted at an acquire binding; holders are counted at the points the
-handle crosses into another activation's scope (each crossing is a lease
-consume in 294 vocabulary). Crash honesty: the count rides the 294 grant
-ledger (durable consume-before-fire), and the ttl backstop bounds a
-holder that died without releasing; without that backstop a refcount
-turns one SIGKILL into a permanently pinned handle, which is why the
-bespoke-refcount option loses.
+**Rule (direction fixed here; the shared slice finishes the spec).** A
+`shared` acquire registers, in each holder's frame, a release entry; the
+declared inverse is bound to the count's zero crossing and runs exactly
+once, in the frame that performed the last release. Static side: `shared`
+is only admitted at an acquire binding; holders are counted at the points
+the handle crosses into another activation's scope (each crossing is a
+lease consume in 294 vocabulary). The counting enumeration is B1's
+crossing enumeration, the same module: a crossing B1 cannot see is a
+holder S1 never counts, so every gap in one is a gap in the other, and a
+clause added to B1 is a counted crossing in S1 by construction.
 
-**Exactly-once under G7.** The zero-crossing inverse joins the last
-releaser's LIFO stack as an ordinary bracket entry at release time, so
-G5/G7 hold unchanged: no new teardown phase, no emission in teardown, and
-the residue schema (teardown-contract.md) needs no new record kind for it;
-a failed shared inverse is a `bracket-fault` like any bracket.
+**Crash honesty, liveness-gated.** The count rides the 294 grant ledger
+(durable consume-before-fire); without a backstop a refcount turns one
+SIGKILL into a permanently pinned handle, which is why the
+bespoke-refcount option loses. But the 294 grant ttl cannot be reused
+bare: expiring a GRANT on wall-clock is fail-safe (the holder loses an
+authority and re-requests), while firing an INVERSE on wall-clock is
+fail-dangerous (it closes a handle a slow-but-alive holder still holds,
+manufacturing exactly the use-after-close 308 exists to refuse). The
+backstop is therefore liveness-gated: ttl lapse ARMS the reclaim,
+and the inverse fires only once the runtime confirms the holder is gone
+(process dead, activation torn down without release). A slow holder pins
+the handle until it releases or dies; that is the correct bias for
+teardown.
+
+**Exactly-once under G7, with one named exception.** On the orderly path
+the zero-crossing inverse joins the last releaser's LIFO stack as an
+ordinary bracket entry at release time, so G5/G7 hold unchanged there: no
+new teardown phase, no emission in teardown, and the residue schema
+(teardown-contract.md) needs no new record kind; a failed shared inverse
+is a `bracket-fault` like any bracket. The crash path is the exception,
+and it must be named rather than waved at: a liveness-confirmed expiry
+has NO releaser frame, so no LIFO stack exists to join. The executor is
+the lease runtime's own reclaim step (the 294 ledger's expiry sweep,
+which already runs out-of-frame for grant lapses), running the inverse
+outside any activation. That IS a new out-of-frame teardown surface,
+narrow as it is, and it needs its own residue record (a lease-lapse close
+is not a `bracket-fault`; the audit surface must report it as a reclaim).
+The earlier draft's blanket "no new teardown phase" claim held only for
+the orderly path; the shared slice's spec owes the crash path this
+executor, its residue kind, and its WAL entry.
 
 ## Reconciling with the seam (and the realm boundary)
 
@@ -368,17 +557,26 @@ from its undo contract. Per mode:
 | no double-close | writable in admitted programs | refused (O1) |
 | borrower cannot close | writable | refused (O1) |
 | borrow cannot outlive owner | by construction for static topology (R3/G7); broken by stored copies under swap; closures can smuggle | refused (B1), including the swap shape |
-| shared teardown exactly once | no shared notion at all | specced (S1), deferred to the 294 lease |
+| no resource in teardown-phase positions | writable; compensations are use-after-close by phase order | refused (B1 clause 5) |
+| no borrow seated in another activation | writable via spawn config and handoff | refused (B1 clauses 6, 7) |
+| shared teardown exactly once | no shared notion at all | direction fixed (S1, liveness-gated backstop, crash executor owed), deferred to the 294 lease |
 | owned cannot cross a seam | refused (363/F1) | unchanged, mode-named diagnostic |
 
-Relation to the arc: G5 is untouched (no new teardown-time surface; the
-shared inverse is an ordinary bracket entry). G7's guarantee strengthens
-from "the accumulated inverses replay LIFO-completely" to "and the
-accumulated inverses are the ONLY closes, so the replay set is the whole
-close-set". 247 compensations are orthogonal (they offset emissions, they
-never close resources; no interaction). 243 witnessed handles are covered
-because witnessed externs sit in the same externs table and their
-declared `undo` joins O1's closing set. The 295 schedule-testing note
+Relation to the arc: G5 is untouched in v1 (checker-only, no new
+teardown-time surface; the orderly shared inverse is an ordinary bracket
+entry, and the one out-of-frame exception is the deferred S1 crash
+reclaim, named there). G7's guarantee strengthens from "the accumulated
+inverses replay LIFO-completely" to "and the accumulated inverses are the
+ONLY closes, so the replay set is the whole close-set". 247 compensations
+are NOT orthogonal: compensations run in teardown Phase 2, after Phase 1
+has closed every bracket, so any resource-typed value in compensation
+arguments is use-after-close by phase ordering alone, and a handle
+serialized into the compensation WAL is unreconstructible residue on
+recovery. B1 clause 5 refuses resource-typed values (owned or borrowed)
+in compensate positions for exactly this reason. 243 witnessed handles
+are covered because witnessed externs sit in the same externs table and
+their declared `undo` joins O1's closing set, and clause 5 keeps borrows
+out of witnessed argument lists. The 295 schedule-testing note
 (route shared-witnessed-resource interleaving findings into this design)
 lands in the shared slice: interleaved release orders across fibers are
 exactly what the S1 exit test permutes.
@@ -391,18 +589,34 @@ The minimal cut that pays for itself immediately:
 
 **v1 = owned + borrowed, zero new grammar.**
 
-1. Promote the resource-taint closure into the frontend (shared module;
+1. R0: nominal-handle rule for acquire returns (declaration-site refusal
+   of primitive/structural returns; durable_log migration), THEN promote
+   the resource-taint closure into the frontend (shared module;
    distribute.py imports it).
-2. O1: no hand-call of a declared inverse.
-3. B1: borrow does-not-escape (the four clauses, with the owner
-   carve-out).
+2. O1: no hand-call of a declared inverse, in body, undo, or compensate
+   positions, with the own-undo exemption.
+3. B1: borrow does-not-escape (the seven clauses, with the owner
+   carve-out as bounded above).
 4. Mode-named diagnostics, including upgrading the seam refusal's message.
+5. The retention audit: `revl audit` lists resource-typed arguments
+   reaching non-inverse externs and bridge services (report-only, the B1
+   limitation's mitigation).
+6. The method-scope acquire decision, driven by the slice-0 corpus count
+   (see the staged plan): either the early-release surface lands with
+   slice 1, or v1 refuses method-scope acquires with a diagnostic naming
+   the restructure. Not deciding is not an option: O1 plus
+   activation-lifetime brackets makes a method-scope acquire
+   leak-until-unload with no recourse, which is a worse behavior than
+   either explicit choice.
 
 Deferred, each with its landing place named: `shared` (a 294 lease
-binding; spec S1 above), explicit `transfer` and realm-crossing moves (new
-source marker, WAL migration), early release (an explicit-release surface
-that discharges the bracket; interacts with 245 session commit), remote
-borrows (a service, not a proxy, is the answer until proven otherwise).
+binding; spec S1 above, crash-path executor owed), explicit `transfer`
+and realm-crossing moves (new source marker, WAL migration; also the only
+honest future for handoff of resource-carrying state, per clause 7),
+early release IF the slice-0 count comes back zero (an explicit-release
+surface that discharges the bracket; interacts with 245 session commit),
+remote borrows (a service, not a proxy, is the answer until proven
+otherwise).
 
 **Migration risk, stated.** B1 is conservative and could refuse an
 existing admitted program that parks a received handle in activation
@@ -428,25 +642,52 @@ lower.rvl. Decide at slice 2, do not let it be discovered by a red oracle.
 Slices are additive and land in order; each leaves the suite green and
 per-backend goldens byte-identical (checker-only until the shared slice).
 
-- **Slice 0: shared resource-type module + report-only sweep.** Move
-  `_resource_taint` (and `_resource_types`, `_resource_in`) to a frontend
-  module; distribute.py re-exports. A `revl audit` report-only listing of
-  would-be O1/B1 hits over the corpus. Exit: distribute/placement tests
-  unchanged; sweep output reviewed and carve-outs (if any) amended here.
+- **Slice 0: R0 decision + shared resource-type module + report-only
+  sweep + the method-scope count.** First, land R0 (nominal acquire
+  returns refused-at-declaration for primitives/structurals; migrate
+  durable_log to a nominal `LogHandle`); the sweep is meaningless before
+  this, because a primitive-poisoned base presents every `Int` as a
+  borrow. Then move `_resource_taint` (and `_resource_types`,
+  `_resource_in`, restated structurally) to a frontend module;
+  distribute.py re-exports. A `revl audit` report-only listing of
+  would-be O1/B1 hits over the corpus. Also: COUNT the method-scope
+  acquire forms in the corpus (acquire effect forms not at activation
+  scope); this count decides the F9 question (early-release sequenced
+  with slice 1, or method-scope acquires refused in v1). Exit:
+  distribute/placement tests unchanged; durable_log admitted under its
+  migrated handle type; sweep output reviewed and carve-outs (if any)
+  amended here; the method-scope decision recorded in this doc.
 - **Slice 1: O1.** Exit tests:
   - owner closes ok: the standard bracket program unchanged, inverse runs
     once at teardown (existing TCK behavior re-pinned, goldens
     byte-identical);
+  - the exemption holds: the corpus acquire form (`let fd = effect
+    log_open(p) undo log_close(fd)`) stays admitted (positive fixture;
+    this is the fixture that catches an O1 written without the
+    exemption, which refuses every acquire in the corpus);
   - borrower closes refused: a component receiving a `Sock` parameter
     calls the declared `close`; rejection fixture in
     examples/rejections/ naming O1;
   - owner hand-close refused: the owner's own body calls its own declared
-    inverse mid-session; rejection fixture (the double-close shape).
+    inverse mid-session; rejection fixture (the double-close shape);
+  - smuggled close refused: the declared inverse called inside an
+    UNRELATED binding's undo expression, and inside a compensate
+    expression; one rejection fixture each (the O1 position extension).
 - **Slice 2: B1.** Exit tests:
-  - borrowed escapes owner scope refused, one fixture per clause: store
-    into activation state; closure capture; non-owner return; insertion
-    into an escaping record/collection (the transitive-carrier shape,
-    exercising the taint fixpoint);
+  - borrowed escapes owner scope refused, ONE REJECTION FIXTURE PER
+    CLAUSE: store into activation state (1); closure capture, both a
+    borrow and the owner's own handle (2); non-owner return, keyed on a
+    tainted carrier type, not just the bare handle (3); insertion into
+    an escaping record/collection in both orders, insert-then-store and
+    store-then-insert (4); a borrow in an undo expression, a borrow in a
+    witnessed argument list, an OWNED handle in compensate args (5); a
+    resource-tainted spawn config value (6); a resource-tainted handoff
+    type (7);
+  - phase-ordering premise pinned at runtime: a trace test (runs on py)
+    demonstrating that Phase 1 brackets close before Phase 2
+    compensations run in the same frame. Clause 5's compensate half rests
+    on this ordering; the trace pins it so a future teardown-phase
+    reordering cannot silently invalidate the rule's justification;
   - owner pool pattern still admitted: acquire at activation, store in
     own state, lend per provide call (positive fixture, runs on py);
   - swap shape covered: the consumer-stores-provider-handle program that
@@ -465,10 +706,17 @@ per-backend goldens byte-identical (checker-only until the shared slice).
 
 ## Open questions (left deliberately)
 
-1. **Early release.** O1 refuses mid-session close with a hint pointing at
-   a surface that does not exist. Is an explicit `release conn` statement
-   (run the inverse now, discharge the bracket entry) worth a small
-   follow-up item, and how does it interact with 245's session escrow?
+1. **Early release: no longer open-ended, decided by the slice-0 count.**
+   O1 refuses mid-session close with a hint pointing at a surface that
+   does not exist, and O1 plus activation-lifetime brackets makes a
+   method-scope acquire leak-until-unload with no recourse. The decision
+   procedure: slice 0 counts method-scope acquire forms in the corpus. If
+   the count is nonzero, either the explicit-release surface (`release
+   conn`: run the inverse now, discharge the bracket entry; interacts
+   with 245's session escrow) is sequenced WITH slice 1, or v1 refuses
+   method-scope acquires with a diagnostic naming the restructure (hoist
+   the acquire to activation scope). If zero, early release defers as a
+   follow-up item and the hint stands.
 2. **Borrow-across-await.** An async provide method holding a borrow
    across an `await` extends the borrow's real duration without widening
    its scope. B1 admits it; whether the schedule-testing work (295) can
