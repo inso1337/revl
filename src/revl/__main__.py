@@ -146,6 +146,29 @@ def _boundary(ir: dict) -> dict:
                         declared = spec.get("capabilities")
                         stats["capabilities"][label] = (
                             sorted(declared) if declared is not None else ["*"])
+                # the spawn/instance seam: a provision-method call read off a
+                # spawn handle (`s.<key>.<method>(...)`) carries no `req` target.
+                # The receiver is an `instance-get` reached through `callee`,
+                # not the `target` slot. Resolve the crossing to the spawned
+                # component's own service method the same way the `req` arm
+                # resolves a required method, so a granted-service emission
+                # routed through a spawned worker is still enumerated at C's
+                # boundary (item 246, G8 audit surface).
+                if node.get("kind") == "call":
+                    callee = node.get("callee")
+                    if isinstance(callee, dict) and callee.get("kind") == "field":
+                        recv = callee.get("target")
+                        if isinstance(recv, dict) and recv.get("kind") == "instance-get":
+                            service = recv.get("service")
+                            mname = callee.get("name")
+                            spec = (((ir.get("services") or {}).get(service) or {})
+                                    .get("methods") or {}).get(mname) or {}
+                            if spec.get("emission"):
+                                label = f"{recv.get('key')}.{mname}"
+                                stats["emissions"].add(label)
+                                declared = spec.get("capabilities")
+                                stats["capabilities"][label] = (
+                                    sorted(declared) if declared is not None else ["*"])
                 for value in node.values():
                     walk_expr(value)
             elif isinstance(node, list):
