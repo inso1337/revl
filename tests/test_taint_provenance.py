@@ -219,6 +219,174 @@ def test_taint_reaching_a_service_method_sink_is_refused():
     assert classify(excinfo.value)["code"] == "G9"
 
 
+# --- 3b. Slice B: interprocedural propagation across call boundaries -----------
+
+def test_unannotated_cross_component_relay_is_refused_with_via_chain():
+    """The headline Slice B exit test (Hole 1, docs/design/249-taint-provenance.md).
+    A fetched page laundered through an UNANNOTATED service method (`Relay.pass_on`
+    declares plain `Str`) into a shell sink used to compile clean because taint
+    died at the boundary. Slice B infers that `pass_on` carries its parameter into
+    `run` and refuses at the CALL SITE, naming the cross-component via chain."""
+    src = (
+        "extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py { return \"\" }\n"
+        "extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }\n"
+        "service Relay { emission fn pass_on(s: Str) }\n"
+        "service Ops { emission fn go(url: Str) }\n"
+        "component Middle provides relay: Relay {\n"
+        "  provide relay { fn pass_on(s) { emit run(s) } }\n"
+        "}\n"
+        "component Agent requires relay: Relay provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(url) {\n"
+        "      let page = emit fetch(url)\n"
+        "      emit relay.pass_on(page)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "relay_exploit.rvl")
+    err = excinfo.value
+    assert classify(err)["code"] == "G9"
+    # the via chain crosses the component boundary: source -> relay method -> sink
+    assert "Middle.pass_on -> run" in err.hint
+    assert "fetch()" in err.hint
+
+
+def test_taint_propagates_through_a_two_hop_pure_helper_chain():
+    """B1: taint flows argument-to-return along a chain of inferred signatures.
+    `h2` calls `h1` which returns its parameter, so `h2(page)` is untrusted and
+    the direct sink refuses."""
+    src = (
+        _PRELUDE
+        + "fn h1(s: Str) -> Str { return s }\n"
+        + "fn h2(s: Str) -> Str { return h1(s) }\n"
+        + "service Ops { emission fn go(url: Str) }\n"
+        + "component Agent provides ops: Ops {\n"
+        + "  provide ops {\n"
+        + "    fn go(url) {\n"
+        + "      let page = emit fetch(url)\n"
+        + "      let x = h2(page)\n"
+        + "      emit run(x)\n"
+        + "    }\n"
+        + "  }\n"
+        + "}\n"
+    )
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "twohop.rvl")
+    assert classify(excinfo.value)["code"] == "G9"
+
+
+def test_a_helper_that_discards_its_argument_flows_clean():
+    """Signatures are precise, not just over-approximate: a fn whose inferred
+    signature shows the parameter does NOT flow to the return launders nothing —
+    the result is clean and the sink accepts it. Sound (the parameter genuinely
+    cannot appear in the return) and additive (engages only under qualifiers)."""
+    src = (
+        _PRELUDE
+        + "fn discard(s: Str) -> Str { return \"safe\" }\n"
+        + "service Ops { emission fn go(url: Str) }\n"
+        + "component Agent provides ops: Ops {\n"
+        + "  provide ops {\n"
+        + "    fn go(url) {\n"
+        + "      let page = emit fetch(url)\n"
+        + "      let x = discard(page)\n"
+        + "      emit run(x)\n"
+        + "    }\n"
+        + "  }\n"
+        + "}\n"
+    )
+    compile_source(src, "discard.rvl")  # must not raise
+
+
+def test_field_read_of_an_untrusted_record_field_is_refused():
+    """B3, field-granular records: reading the untrusted field of a mixed record
+    is untrusted, so the sink refuses."""
+    src = _agent(
+        "      let page = emit fetch(url)\n"
+        "      let r = { a: page, b: \"safe\" }\n"
+        "      let x = r.a\n"
+        "      emit run(x)")
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "dirty_field.rvl")
+    assert classify(excinfo.value)["code"] == "G9"
+
+
+def test_field_read_of_a_clean_sibling_field_flows_clean():
+    """B3: a clean sibling field of a partly-untrusted record stays clean — a
+    field read takes the field's own taint, not the whole-record join."""
+    src = _agent(
+        "      let page = emit fetch(url)\n"
+        "      let r = { a: page, b: \"safe\" }\n"
+        "      let y = r.b\n"
+        "      emit run(y)")
+    compile_source(src, "clean_field.rvl")  # must not raise
+
+
+def test_the_signature_fixpoint_terminates_on_mutual_recursion():
+    """The interprocedural fixed point converges over mutual recursion, exactly
+    as G4's emission fixed point does: a finite lattice and a monotone transfer.
+    `ping`/`pong` call each other; the compile terminates."""
+    src = (
+        "extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py { return \"\" }\n"
+        "fn ping(s: Str) -> Str { return pong(s) }\n"
+        "fn pong(s: Str) -> Str { return ping(s) }\n"
+        "service Ops { emission fn go(url: Str) }\n"
+        "component Agent provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(url) { let page = emit fetch(url)  let x = ping(page) }\n"
+        "  }\n"
+        "}\n"
+    )
+    compile_source(src, "mutual.rvl")  # must terminate and (no sink) compile
+
+
+def test_recursive_chain_that_reaches_a_sink_still_refuses():
+    """Soundness of the fixed point: taint carried around a recursive helper
+    chain that ends at a sink is still refused."""
+    src = (
+        _PRELUDE
+        + "fn relay(s: Str) -> Str { return step(s) }\n"
+        + "fn step(s: Str) -> Str { return s }\n"
+        + "service Ops { emission fn go(url: Str) }\n"
+        + "component Agent provides ops: Ops {\n"
+        + "  provide ops {\n"
+        + "    fn go(url) {\n"
+        + "      let page = emit fetch(url)\n"
+        + "      emit run(relay(page))\n"
+        + "    }\n"
+        + "  }\n"
+        + "}\n"
+    )
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "recursive_sink.rvl")
+    assert classify(excinfo.value)["code"] == "G9"
+
+
+def test_qualifier_free_cross_component_relay_still_compiles():
+    """Additivity across Slice B: the same two-component relay with NO qualifier
+    anywhere engages nothing — the propagation fixed point is skipped and the
+    program compiles exactly as before item 249."""
+    src = (
+        "extern emission[web] fn fetch(url: Str) -> Str = @py { return \"\" }\n"
+        "extern emission[shell] fn run(cmd: Str) = @py { return }\n"
+        "service Relay { emission fn pass_on(s: Str) }\n"
+        "service Ops { emission fn go(url: Str) }\n"
+        "component Middle provides relay: Relay {\n"
+        "  provide relay { fn pass_on(s) { emit run(s) } }\n"
+        "}\n"
+        "component Agent requires relay: Relay provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(url) {\n"
+        "      let page = emit fetch(url)\n"
+        "      emit relay.pass_on(page)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    compile_source(src, "plain_relay.rvl")  # must not raise — no taint surface
+
+
 # --- 4. byte-identity: the qualifier is stripped, no runtime feature -----------
 
 def test_program_without_qualifiers_is_untouched():
