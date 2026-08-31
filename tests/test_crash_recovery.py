@@ -397,3 +397,109 @@ def test_roll_forward_resumes_the_persisted_generation(session, tmp_path):
     finally:
         if fresh.loaded:
             fresh.unload()
+
+
+# --------------------------------- roll-forward carries the approval posture
+
+
+def _c_activation_source(sink: str) -> str:
+    """A composition whose ACTIVATION body reaches a class-(c) emission (a plain
+    process crossing with no checked inverse) — the crossing an enabled approval
+    policy prompts on before boot."""
+    return (
+        "extern emission fn announce(sink: Str, msg: Str) = @py {\n"
+        "    with open(sink, 'a') as _f:\n"
+        "        _f.write('announce:' + msg + '\\n')\n"
+        "    return\n"
+        "}\n"
+        "service Ops { fn ping() -> Int }\n"
+        "component Quiet provides ops: Ops {\n"
+        f'  emit announce("{sink}", "boot")\n'
+        "  provide ops { fn ping() = 1 }\n"
+        "}\n"
+    )
+
+
+def _sink_lines(sink: str) -> list:
+    p = Path(sink)
+    return p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+
+
+@needs_cordis
+def test_a_class_c_activation_body_does_not_refire_unprompted_on_resume(tmp_path):
+    """The HIGH hole: roll-forward resume must NOT boot the recovered generation
+    into a policy-less session, or a class-(c) activation crossing that prompted a
+    human on first boot re-fires UNPROMPTED on recovery, past an approval already
+    spent. Restore refuses a policy-recorded snapshot into a policy-less session;
+    re-establishing the posture re-arms the gate so the crossing re-prompts."""
+    from revl.mcp.approval import ApprovalRequired
+    from revl.mcp import persist
+
+    sink = str(tmp_path / "sink.log")
+    src = _c_activation_source(sink)
+    ir = compile_source(src, "<boot>.rvl")
+
+    # first boot under the operator-flag approval policy: the class-(c) activation
+    # crossing turns the load itself into the ticket two-step and PROMPTS. Nothing
+    # crosses the boundary yet.
+    live = Session()
+    live.approval_policy = "auto"
+    with pytest.raises(ApprovalRequired) as first:
+        live.load(ir, record=True, origin={"source": src})
+    assert first.value.ticket["kind"] == "activation"
+    assert _sink_lines(sink) == []
+
+    # human approves; the re-issued load boots and the emission fires exactly once.
+    live.approve_ticket(first.value.ticket["hash"])
+    live.load(ir, record=True, origin={"source": src})
+    assert _sink_lines(sink) == ["announce:boot"]
+
+    # the snapshot must record the approval posture that governed admission.
+    snap = live.snapshot()
+    assert snap["meta"]["approval"]["policy"] == "auto"
+    live.unload()  # the process "died"; only snapshot + WAL survive
+
+    path = str(tmp_path / "done.wal")
+    with replay.WriteAheadLog(path, ir={}, generation=1) as wal:
+        wal.commit_activation(["Quiet"])
+
+    # (the hole) resume into a POLICY-LESS session would silently re-fire the
+    # activation crossing. (the fix) restore REFUSES, naming the missing policy,
+    # and the sink is untouched — the boundary was NOT crossed a second time.
+    bare = Session()
+    report = recover(path, session=bare, snapshot=snap)
+    assert report["verdict"] == "roll-forward-refused"
+    assert "approval policy" in report["message"]
+    assert "--approval-policy" in report["message"]
+    assert not bare.loaded
+    assert _sink_lines(sink) == ["announce:boot"]  # NOT re-fired
+
+    # re-establish the posture: `restore` re-arms the activation gate, so the
+    # class-(c) crossing RE-PROMPTS on resume exactly as on first boot — the
+    # ticket is raised, the boundary is not crossed.
+    armed = Session()
+    armed.approval_policy = "auto"
+    try:
+        with pytest.raises(ApprovalRequired) as reprompt:
+            persist.restore(armed, snap)
+        assert reprompt.value.ticket["kind"] == "activation"
+        assert not armed.loaded
+        assert _sink_lines(sink) == ["announce:boot"]  # still not re-fired
+    finally:
+        if armed.loaded:
+            armed.unload()
+
+    # and through the `recover` CLI seam the same posture yields a fail-closed
+    # verdict a human must clear — recovery NEVER auto-answers the ticket.
+    armed2 = Session()
+    armed2.approval_policy = "auto"
+    try:
+        report2 = recover(path, session=armed2, snapshot=snap)
+        assert report2["verdict"] == "roll-forward-needs-approval"
+        assert report2["residue"]["clean"] is False
+        assert report2["ticket"]["component"] == "Quiet"
+        assert not armed2.loaded
+        assert _sink_lines(sink) == ["announce:boot"]  # still not re-fired
+    finally:
+        if armed2.loaded:
+            armed2.unload()
