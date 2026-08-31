@@ -489,6 +489,20 @@ def _run_audit(args, ir: dict) -> int:
             verdict = distribution[name]
             print(f"  {name:<{width}}  {verdict['verdict']:<20} "
                   f"{'; '.join(verdict['reasons'])}")
+    # item 411, Slice 1: the sandbox envelope + effective reach per sandboxed
+    # process, when a placement is supplied. `net=none` is printed alongside
+    # each seam-served key's provider reach, so it is never readable as a
+    # total-egress claim about the composition.
+    if getattr(args, "placement", None):
+        from .placement import _load_placement, sandbox_audit_view  # noqa: PLC0415
+        lines, sb_err = sandbox_audit_view(ir, _load_placement(args.placement))
+        if sb_err:
+            print(f"\nsandbox placement: error: {sb_err}")
+            return 1
+        if lines:
+            print()
+            for line in lines:
+                print(line)
     return 0
 
 
