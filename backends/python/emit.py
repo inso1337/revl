@@ -77,6 +77,8 @@ _IMPORT_ALIAS = {
     "set_trace": "_revl_set_trace",
     "retry_idempotent": "_revl_retry_idempotent",
     "validate_response": "_revl_validate",
+    "validate_retry": "_revl_validate_retry",
+    "validate_retry_async": "_revl_validate_retry_async",
     "Clock": "_revl_Clock",
     "SessionOwner": "_revl_SessionOwner",
     "set_session_owner": "_revl_set_session_owner",
@@ -827,7 +829,25 @@ class _ComponentEmitter:
             # `validated` call: `_validated_call` returns None.
             validated = self._validated_call(expr)
             if validated is not None:
-                schema, ctors = validated
+                schema, ctors, retry = validated
+                if retry:
+                    # item 257 (Slice 2, §5.2): the read-with-a-cost retry loop.
+                    # On a `ResponseValidationError` the loop re-fires ONLY the
+                    # model completion call (`rendered`, a fresh coroutine per
+                    # attempt in the async case), up to `retry` times, then
+                    # surfaces the typed fault. The validate seam sits at the
+                    # forward crossing BEFORE the value binds, so no downstream
+                    # `emit`/witnessed effect exists to double (§5.3). Passing the
+                    # call as a thunk (not the already-`settled` value) is what
+                    # lets the loop re-issue the completion and nothing else.
+                    if awaited:
+                        self.uses.add("validate_retry_async")
+                        return (f"(await _revl_validate_retry_async("
+                                f"lambda: {rendered}, {retry}, {schema!r}, "
+                                f"{where!r}, {ctors}))")
+                    self.uses.add("validate_retry")
+                    return (f"_revl_validate_retry(lambda: {rendered}, {retry}, "
+                            f"{schema!r}, {where!r}, {ctors})")
                 self.uses.add("validate_response")
                 return (f"_revl_validate({settled}, {schema!r}, {where!r}, "
                         f"{ctors})")
@@ -1160,12 +1180,13 @@ class _ComponentEmitter:
 
     def _validated_call(self, expr: dict):
         """Item 257: if this `call` node is an `emit` on a `validated` service
-        emission (through a req key), return `(schema, ctors)` for the validate
-        seam; else None. `schema` is the derived boundary schema carried on the
-        method IR; `ctors` is a Python dict-literal mapping each case tag to its
-        emitted ADT case class (or `None` when the validated return is not a
-        tagged variant, e.g. a record or primitive, and the validated value is
-        used as-is)."""
+        emission (through a req key), return `(schema, ctors, retry)` for the
+        validate seam; else None. `schema` is the derived boundary schema carried
+        on the method IR; `ctors` is a Python dict-literal mapping each case tag to
+        its emitted ADT case class (or `None` when the validated return is not a
+        tagged variant, e.g. a record or primitive, and the validated value is used
+        as-is); `retry` is the Slice-2 validation-retry budget (§5.2), `0` when no
+        `retry` clause was declared (one attempt, the Slice-1 seam)."""
         target = expr.get("target")
         if not (isinstance(target, dict) and target.get("kind") == "req"):
             return None
@@ -1174,7 +1195,9 @@ class _ComponentEmitter:
                 .get(expr.get("method")) or {})
         if not spec.get("validated"):
             return None
-        return spec.get("response_schema"), self._ctor_map(spec.get("response_schema"))
+        return (spec.get("response_schema"),
+                self._ctor_map(spec.get("response_schema")),
+                spec.get("retry") or 0)
 
     def _ctor_map(self, schema) -> str:
         """The tag -> ADT-case-class dict literal for a discriminated-union
