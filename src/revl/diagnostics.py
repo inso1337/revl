@@ -33,6 +33,11 @@ GUARANTEES = {
     "G9": "untrusted data cannot create authority without a declared declassification",
     "G-SECRET": "a capability-bound secret never leaves its capability's own "
                 "extern bodies through any revl construct or declared crossing",
+    "G-SECRET-FLOW": "a Secret[T] value never reaches a disclosure sink (a log, a "
+                     "serialization, an LLM prompt, an MCP return, an unapproved "
+                     "realm or an undeclared receiver); it crosses only at a "
+                     "declared Secret[T] receiver and downgrades only at a "
+                     "declared endorse[confidential]",
     "A1": "iteration boundaries exist only during activation",
     "A2": "no acquisition after a provision",
     "A3": "host-safe identifiers",
@@ -71,6 +76,11 @@ FIXES = {
                 "except a re-emission through its own bound capability - stop "
                 "reflecting it into a revl value; a `secret NAME for CAP` value is "
                 "a host-scope local handed straight to CAP's provider call",
+    "G-SECRET-FLOW": "a Secret[T] value crosses a boundary only where the "
+                     "receiving side declares a `Secret[T]` parameter (the dual of "
+                     "a `Trusted[T]` sink), and downgrades only at a declared, "
+                     "audited `endorse[confidential](v, reason = \"...\")` - route "
+                     "it through a declared receiver, or endorse it there",
     "A1": "`await` is an iteration boundary and exists only during activation — "
           "move it into the component body",
     "A2": "acquire everything before the first `provide`",
