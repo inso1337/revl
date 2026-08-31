@@ -50,6 +50,7 @@ import warnings
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 
+from . import cap_order
 from .errors import RevlError
 from .why import CHAIN, SET, TraceStep, WhyTrace
 
@@ -144,6 +145,259 @@ class TaintFlowRule:
     origin: str
     patterns: tuple[str, ...]
     without_approval: bool = False
+
+
+# --------------------------------------------- item 251: approval distillation
+#
+# The five taint-fold origins an `AutoApproveRule` may `admit` - exactly the set
+# the item-249 taint fold enforces (`taint._SOURCE_CLASS_SCOPES`, the set
+# `test_taint_fold_visits_every_in_scope_kind` asserts). `secret` is NOT one of
+# them: `taint._ORIGIN_CLASSES` lists it, but it is enforced by the separate
+# G-SECRET mechanism (item 256) as a REFUSAL at the crossing, never a recorded
+# origin, so it can never appear in a `taintOrigins` set and is never
+# `admit`-able by any rule (design §2.1, §3.2). Kept here rather than imported
+# from `taint` to avoid pulling the type-checker into the policy parser; the
+# 414 taint row pins the two to the same five.
+TAINT_FOLD_ORIGINS: frozenset[str] = frozenset(
+    {"web", "net", "fs", "model", "input"})
+
+
+@dataclass(frozen=True)
+class AutoApproveRule:
+    """A distilled standing-auto-approve rule (roadmap item 251, Slice 1).
+
+    The typed policy diff item 251 emits: a rule an operator could have written
+    by hand, scoped over exactly the tuple an item-33 rule scopes over - a
+    component glob, an optional realm, one or more item-294 capability spellings
+    (each carrying its resource scope, `gateway.send(host="api.stripe.com")`),
+    and the taint origins it `admit`s. Slice 1 is PARSE-ONLY: the rule round-trips
+    (`to_dsl`/`to_json` re-parse equal) and is added to `Policy`, but no
+    evaluation is wired (that is Slice 2's runtime consume path).
+
+    DSL:
+
+        component <glob> may auto-approve <cap>[, <cap> ...]
+            [in realm <name>]
+            [admitting <origin>-taint[, <origin>-taint ...]]
+            [ttl <D>] [uses <N>]
+
+    `caps` are canonical `cap_order` spellings (parsed and re-rendered through
+    `Cap`, so two spellings of one cone compare equal). `admitting` ranges over
+    the five taint-fold origins only; `admitting secret-taint` is REFUSED at
+    parse - `secret` is structurally never admit-able. Every origin not named is
+    excluded (the negative guarantee, design §3.2). `ttl_ms`/`uses` bound the
+    rule's lifetime exactly as a 344 grant's do."""
+    component: str                          # glob over component names
+    caps: tuple[str, ...]                   # canonical capability spellings
+    realm: str | None = None                # the item-33 `in realm <name>` scope
+    admitting: frozenset[str] = frozenset()  # admitted taint origins (of the five)
+    ttl_ms: int | None = None
+    uses: int | None = None
+
+    def negative_guarantee(self) -> frozenset[str]:
+        """The taint origins this rule can NEVER admit - the complement of
+        `admitting` over the five taint-fold origins (design §3.2). `secret` is
+        not in this set: it is refused by G-SECRET at the crossing, an absolute
+        the render sources separately, not one of five symmetric origins."""
+        return TAINT_FOLD_ORIGINS - self.admitting
+
+    def to_dsl(self) -> str:
+        """Render the rule back to its canonical DSL line (round-trips through
+        `parse_policy`). `ttl` is emitted in milliseconds (`<n>ms`), the one
+        form `_parse_ttl` reads back without unit ambiguity."""
+        out = [f"component {self.component} may auto-approve {', '.join(self.caps)}"]
+        if self.realm is not None:
+            out.append(f"in realm {self.realm}")
+        if self.admitting:
+            origins = ", ".join(f"{o}-taint" for o in sorted(self.admitting))
+            out.append(f"admitting {origins}")
+        if self.ttl_ms is not None:
+            out.append(f"ttl {self.ttl_ms}ms")
+        if self.uses is not None:
+            out.append(f"uses {self.uses}")
+        return " ".join(out)
+
+    def to_json(self) -> dict:
+        """Render the rule to its JSON entry (round-trips through
+        `parse_policy`). Origins are the bare names, not the `-taint` spelling."""
+        entry: dict = {"component": self.component, "capabilities": list(self.caps)}
+        if self.realm is not None:
+            entry["realm"] = self.realm
+        if self.admitting:
+            entry["admitting"] = sorted(self.admitting)
+        if self.ttl_ms is not None:
+            entry["ttl"] = f"{self.ttl_ms}ms"
+        if self.uses is not None:
+            entry["uses"] = self.uses
+        return entry
+
+
+def _canon_cap_spelling(text: str, source, lineno) -> str:
+    """Parse one capability spelling through `cap_order` and return its canonical
+    string, so a hand-written `gateway.send(host="api.stripe.com")` and the
+    distiller's projection of the same cone render byte-identically and compare
+    equal. A malformed spelling is a `PolicyError`, not a silent pass-through."""
+    try:
+        return cap_order.parse_cap(text.strip()).to_str()
+    except cap_order.CapError as exc:
+        raise PolicyError(source, lineno,
+                          f"malformed auto-approve capability {text.strip()!r}: "
+                          f"{exc}") from exc
+
+
+def _parse_admitting(origins: tuple[str, ...], source, lineno) -> frozenset[str]:
+    """Parse an `admitting <origin>-taint, ...` list to a validated origin set.
+
+    Each entry is `<origin>-taint`; `<origin>` must be one of the five taint-fold
+    origins. `admitting secret-taint` is REFUSED: `secret` is enforced by G-SECRET
+    at the crossing and is structurally never admit-able (design §2.1, §3.2)."""
+    out: set[str] = set()
+    for raw in origins:
+        token = raw.strip()
+        low = token.lower()
+        # the DSL spells `<origin>-taint`; JSON carries the bare origin name.
+        # Accept both, so the two forms round-trip to the same rule.
+        origin = low[:-len("-taint")] if low.endswith("-taint") else low
+        if origin == "secret":
+            raise PolicyError(
+                source, lineno,
+                "`admitting secret-taint` is refused - a bound-secret crossing is "
+                "refused by G-SECRET (item 256) at the crossing regardless of any "
+                "rule, so no auto-approve rule can ever admit `secret`; it is not "
+                "one of the five admit-able taint-fold origins")
+        if origin not in TAINT_FOLD_ORIGINS:
+            allowed = ", ".join(f"{o}-taint" for o in sorted(TAINT_FOLD_ORIGINS))
+            raise PolicyError(
+                source, lineno,
+                f"unknown admitting origin {token!r} - an `admitting` clause names "
+                f"the taint-fold origins {allowed}")
+        out.add(origin)
+    return frozenset(out)
+
+
+def _split_top_level(text: str) -> list[str]:
+    """Split a capability list on the top-level commas - the commas NOT inside a
+    capability's own `(...)` parameter list or a quoted value. A naive comma
+    split would tear `gateway.send(host="a",path="/x")` apart."""
+    parts: list[str] = []
+    depth = 0
+    in_str = False
+    current: list[str] = []
+    for ch in text:
+        if ch == '"':
+            in_str = not in_str
+            current.append(ch)
+        elif ch == "(" and not in_str:
+            depth += 1
+            current.append(ch)
+        elif ch == ")" and not in_str:
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and not in_str and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    return [p.strip() for p in parts if p.strip()]
+
+
+# the clause keywords that terminate the capability list of an `auto-approve`
+# line, in the order the grammar writes them. `in realm` is a two-word marker.
+_AUTO_APPROVE_CLAUSES = ("in realm", "admitting", "ttl", "uses")
+
+
+def _parse_auto_approve(head: str, tail: str, source, lineno) -> AutoApproveRule:
+    """Parse one ``component <glob> may auto-approve ...`` line (item 251).
+
+    `head` is the text before ` may auto-approve`; `tail` is the caps list and
+    its optional `in realm` / `admitting` / `ttl` / `uses` clauses. The clauses
+    are located by their keyword markers so the caps list (which may carry
+    resource params with their own commas) is not mis-split."""
+    parts = head.split()
+    if len(parts) != 2 or parts[0].lower() != "component":
+        raise PolicyError(
+            source, lineno,
+            f"an auto-approve rule names one component glob: `component <glob> "
+            f"may auto-approve <cap>[, ...] [in realm <r>] [admitting "
+            f"<o>-taint,...] [ttl <D>] [uses <N>]`, got {head.strip()!r}")
+    component = parts[1]
+
+    # carve the tail into the caps segment and each named clause, scanning the
+    # lowercased text for the earliest remaining clause marker.
+    segments: dict[str, str] = {}
+    rest = tail.strip()
+    order: list[str] = ["caps"]
+    # find clause positions
+    low = rest.lower()
+    marks: list[tuple[int, str, str]] = []  # (index, clause-key, literal)
+    for clause in _AUTO_APPROVE_CLAUSES:
+        idx = 0
+        while True:
+            found = low.find(clause, idx)
+            if found < 0:
+                break
+            # a marker is a whole word (bounded by start/space on the left, space
+            # on the right), so a `ttl`/`uses` substring inside a value is ignored.
+            left_ok = found == 0 or low[found - 1].isspace()
+            right = found + len(clause)
+            right_ok = right >= len(low) or low[right].isspace()
+            if left_ok and right_ok:
+                marks.append((found, clause, rest[found:found + len(clause)]))
+                break
+            idx = found + len(clause)
+    marks.sort()
+    caps_end = marks[0][0] if marks else len(rest)
+    caps_text = rest[:caps_end].strip()
+    for i, (start, clause, _literal) in enumerate(marks):
+        body_start = start + len(clause)
+        body_end = marks[i + 1][0] if i + 1 < len(marks) else len(rest)
+        segments[clause] = rest[body_start:body_end].strip()
+        order.append(clause)
+
+    caps_raw = _split_top_level(caps_text)
+    if not caps_raw:
+        raise PolicyError(source, lineno,
+                          f"an auto-approve rule names at least one capability: "
+                          f"{head.strip()!r} may auto-approve <cap>[, ...]")
+    caps = tuple(_canon_cap_spelling(c, source, lineno) for c in caps_raw)
+
+    realm: str | None = None
+    if "in realm" in segments:
+        realm_body = segments["in realm"].split()
+        if len(realm_body) != 1:
+            raise PolicyError(source, lineno,
+                              f"`in realm` names exactly one realm, got "
+                              f"{segments['in realm']!r}")
+        realm = realm_body[0]
+
+    admitting: frozenset[str] = frozenset()
+    if "admitting" in segments:
+        admitting = _parse_admitting(
+            tuple(_split_top_level(segments["admitting"])), source, lineno)
+
+    ttl_ms: int | None = None
+    if "ttl" in segments:
+        ttl_body = segments["ttl"].split()
+        if len(ttl_body) != 1:
+            raise PolicyError(source, lineno,
+                              f"`ttl` names exactly one duration, got "
+                              f"{segments['ttl']!r}")
+        try:
+            ttl_ms = _parse_ttl(ttl_body[0])
+        except ValueError as exc:
+            raise PolicyError(source, lineno, str(exc))
+
+    uses: int | None = None
+    if "uses" in segments:
+        uses_body = segments["uses"].split()
+        if len(uses_body) != 1 or not uses_body[0].isdigit():
+            raise PolicyError(source, lineno,
+                              f"`uses` names one positive integer, got "
+                              f"{segments['uses']!r}")
+        uses = int(uses_body[0])
+
+    return AutoApproveRule(component, caps, realm, admitting, ttl_ms, uses)
 
 
 # ---------------------------------------------- item 290: evidence / register
@@ -260,6 +514,10 @@ class Policy:
     # every existing policy parses/evaluates byte-identically.
     teardown_rules: tuple[TeardownRule, ...] = ()
     evidence_root_local: bool = False        # `evidence-root: local` (§6.3)
+    # item 251, Slice 1: distilled `component <glob> may auto-approve <caps>`
+    # rules. PARSE-ONLY this slice (no evaluation wiring); empty by default so
+    # every existing policy parses/evaluates byte-identically.
+    auto_approve_rules: tuple[AutoApproveRule, ...] = ()
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
@@ -268,6 +526,7 @@ class Policy:
             and not self.declassify_rules and not self.taint_flow_rules \
             and not self.evidence_rules and not self.register_rules \
             and not self.teardown_rules \
+            and not self.auto_approve_rules \
             and not self.evidence_root_local
 
     def requires_approval(self) -> bool:
@@ -490,6 +749,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     evidence_rules: list[EvidenceRule] = []
     register_rules: list[RegisterRule] = []
     teardown_rules: list[TeardownRule] = []
+    auto_approve_rules: list[AutoApproveRule] = []
     evidence_root_local = False
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
@@ -638,6 +898,15 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         if low in ("leases enforced", "leases are enforced"):
             leases_enforced = True
             continue
+        # item 251, Slice 1: `component <glob> may auto-approve <caps> [in realm
+        # <r>] [admitting <o>-taint,...] [ttl <D>] [uses <N>]`. Checked before the
+        # `may reach` loop (it shares neither verb, but this keeps the distilled
+        # tier visibly separate). Parse-only this slice - no evaluation wiring.
+        if "may auto-approve" in low:
+            head, _, tail = line.partition(" may auto-approve")
+            auto_approve_rules.append(
+                _parse_auto_approve(head.strip(), tail, source, lineno))
+            continue
         # <head> may [not] reach <caps>
         for verb, allow in (("may not reach", False), ("may reach", True)):
             idx = low.find(verb)
@@ -673,7 +942,8 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                   tuple(declassify_rules), tuple(taint_flow_rules), source,
                   tuple(evidence_rules), tuple(register_rules),
                   tuple(teardown_rules),
-                  evidence_root_local)
+                  evidence_root_local,
+                  tuple(auto_approve_rules))
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -795,13 +1065,39 @@ def _parse_json(text: str, source: str | None) -> Policy:
         strength = _parse_register_level(
             str(entry.get("strength") or "declared"), source, 1)
         teardown_rules.append(TeardownRule(strength))
+    # item 251, Slice 1: the `autoApprovals` array, the JSON equivalent of the
+    # `may auto-approve` DSL line. Parse-only, additive.
+    auto_approve_rules: list[AutoApproveRule] = []
+    for entry in doc.get("autoApprovals") or []:
+        component = entry.get("component")
+        caps_raw = entry.get("capabilities") or entry.get("caps")
+        if not component or not caps_raw:
+            raise PolicyError(source, 1,
+                              "an auto-approve rule needs a `component` glob and a "
+                              "non-empty `capabilities` list")
+        caps = tuple(_canon_cap_spelling(str(c), source, 1) for c in caps_raw)
+        realm = entry.get("realm")
+        admitting = _parse_admitting(
+            tuple(str(o) for o in (entry.get("admitting") or [])), source, 1)
+        ttl_ms = None
+        if entry.get("ttl") is not None:
+            try:
+                ttl_ms = _parse_ttl(str(entry["ttl"]))
+            except ValueError as exc:
+                raise PolicyError(source, 1, str(exc))
+        uses = entry.get("uses")
+        if uses is not None:
+            uses = int(uses)
+        auto_approve_rules.append(
+            AutoApproveRule(component, caps, realm, admitting, ttl_ms, uses))
     _validate_evidence_rooting(evidence_rules, evidence_root_local)
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
                   quarantine_required, tuple(approval_rules),
                   tuple(declassify_rules), tuple(taint_flow_rules), source,
                   tuple(evidence_rules), tuple(register_rules),
                   tuple(teardown_rules),
-                  evidence_root_local)
+                  evidence_root_local,
+                  tuple(auto_approve_rules))
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:
