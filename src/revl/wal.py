@@ -43,6 +43,9 @@ The record schema a durable WAL speaks (all a tier must emit to be recoverable):
 from __future__ import annotations
 
 import json
+import os
+import sys
+import tempfile
 
 #: The on-disk WAL format version. Bump only on a breaking schema change; the
 #: header carries it so a reader can refuse a version it does not understand.
@@ -161,3 +164,58 @@ def _check_version(header: dict, path: str) -> None:
             f"not support (supported: {sorted(SUPPORTED_WAL_VERSIONS)}). Refusing "
             "to read an incompatible WAL as if it were the current format."
         )
+
+
+def default_wal_dir() -> str:
+    """The durable, per-user directory the approval WAL defaults into (item 413).
+
+    "The gate's authority is the WAL", yet the default lived under
+    :func:`tempfile.gettempdir`: reboot-wiped (a crash-plus-reboot lost the very
+    recovery record recovery exists to read) and world-traversable on a shared
+    host. This returns a per-user STATE directory that survives a reboot and is
+    created owner-only (mode ``0o700``), so another local account can neither
+    read nor splice the gate's authority:
+
+    * ``$REVL_WAL_DIR`` when the embedder set it (an explicit host override);
+    * else ``$XDG_STATE_HOME/revl/approval-wal`` when ``XDG_STATE_HOME`` is set;
+    * else ``~/Library/Application Support/revl/approval-wal`` on macOS;
+    * else ``~/.local/state/revl/approval-wal`` (the XDG state default).
+
+    It always returns a directory that exists. If none of the durable candidates
+    can be created (a read-only or absent HOME), it falls back to the process
+    tempdir: a reboot-wiped WAL is worse than a durable one, but a gate that
+    cannot open a WAL at all is worse than either, and the fail-closed load path
+    (``session.load`` refuses a policy load with no recording) still holds.
+    """
+    override = os.environ.get("REVL_WAL_DIR")
+    if override:
+        candidates = [override]
+    else:
+        candidates = []
+        xdg_state = os.environ.get("XDG_STATE_HOME")
+        if xdg_state:
+            candidates.append(os.path.join(xdg_state, "revl", "approval-wal"))
+        elif sys.platform == "darwin":
+            candidates.append(os.path.expanduser(
+                "~/Library/Application Support/revl/approval-wal"))
+        # Always keep the XDG state default as a final durable candidate so a
+        # macOS host with an unwritable Application Support still lands durable.
+        candidates.append(os.path.expanduser("~/.local/state/revl/approval-wal"))
+    for directory in candidates:
+        try:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            return directory
+        except OSError:
+            continue
+    return tempfile.gettempdir()
+
+
+def default_wal_path(session_id: str) -> str:
+    """The default durable WAL file for one session under :func:`default_wal_dir`.
+
+    The filename keeps the ``revl-approval-<session>.wal`` spelling the tempdir
+    default used, so nothing downstream that globs approval WALs needs to change;
+    only the directory moves from the reboot-wiped, world-traversable tempdir to
+    the owner-only per-user state directory (item 413).
+    """
+    return os.path.join(default_wal_dir(), f"revl-approval-{session_id}.wal")
