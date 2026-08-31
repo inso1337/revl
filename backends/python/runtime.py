@@ -27,12 +27,21 @@ This module is everything an emitted component imports.  It has two halves:
 from __future__ import annotations
 
 import inspect
+import itertools
 import json
 import os
 import re
 import time
 import weakref
 from typing import Any, Callable, Optional
+
+# item 247 second-pass (F5): a process-monotonic registration index stamped on
+# every transactional/compensation entry at construction, so the escrow can be
+# replayed LIFO (reverse registration) even when no WAL is attached and every
+# `seq` is None. Reverse-`seq` alone collapses to a stable-sort no-op there,
+# leaving a data-losing FIFO replay of overlapping idempotent-total inverses
+# (the item-369 hazard). See `SessionOwner.finalize_abort`.
+_ENTRY_STAMP = itertools.count()
 
 __all__ = [
     "Clock", "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
@@ -560,7 +569,7 @@ class _Transactional:
     known when the effect runs — it depends on whether a LATER step aborts."""
 
     __slots__ = ("frame", "witness", "_undo", "discharged", "replayed", "seq",
-                 "_escrowed")
+                 "_escrowed", "stamp")
 
     def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any) -> None:
         self.frame = frame
@@ -568,6 +577,9 @@ class _Transactional:
         self.witness = witness
         self.discharged = False   # committed: inverse skipped, mutation persists
         self.replayed = False     # aborted: inverse ran, mutation reverted
+        # item 247 second-pass (F5): process-monotonic registration index, so an
+        # escrow with no WAL (every seq is None) still replays LIFO.
+        self.stamp = next(_ENTRY_STAMP)
         # the WAL discharge-descriptor's `seq` this entry was registered under
         # (bridge slice: connects Slice 2a to the WAL/recover foundation), or
         # `None` when no WriteAheadLog is attached (a plain run) — see
@@ -686,7 +698,7 @@ class _Compensation:
     every disposer in one synchronous stack-position pass."""
 
     __slots__ = ("frame", "fn", "discharged", "ran", "failed", "error", "seq",
-                 "_escrowed", "component", "method")
+                 "_escrowed", "component", "method", "stamp")
 
     def __init__(self, frame: "Frame", fn: Callable[[], Any],
                  method: Optional[str] = None) -> None:
@@ -709,6 +721,9 @@ class _Compensation:
         self.seq: Optional[int] = None
         # item 245: escrowed under a session owner with a pending verdict.
         self._escrowed = False
+        # item 247 second-pass (F5): process-monotonic registration index, so an
+        # escrow with no WAL (every seq is None) still replays LIFO.
+        self.stamp = next(_ENTRY_STAMP)
 
     def __call__(self) -> Any:
         if _hold_for_session(self):
@@ -1382,6 +1397,34 @@ class Frame:
                                          self.name)
         return result
 
+    def begin(self) -> None:
+        """Yielded FIRST by the emitted body -> disposed LAST (cordis LIFO), so
+        it sits at the BOTTOM of this activation's unwind stack.
+
+        item 247 second-pass (F1, data loss): this is the Phase-2 POST-UNWIND
+        hook for an activation whose body ran to completion and is aborted
+        LATER — a session-level reject (`Frame.abort()` + unload, or
+        `Session.abort()`), not a mid-body raise. In that case `drain` (yielded
+        last, disposed FIRST) runs at the TOP of the stack, and the activation-
+        body `_Compensation` disposers — yielded BEFORE `drain`, so disposed
+        AFTER it — enqueue themselves onto `_pending_compensations` only once
+        cordis reaches them, strictly BELOW `drain`. Draining Phase 2 in
+        `drain`'s tail therefore runs before those compensations exist and
+        silently loses the offset. `begin`, at the bottom of the stack, is the
+        one disposer guaranteed to run AFTER every earlier entry has been
+        disposed — Phase 1 complete, `_pending_compensations` fully populated —
+        so it is the correct place to drain Phase 2 (mirrors the go
+        `runCompensationPhase` / ts `begin` post-unwind hook).
+
+        A no-op on a clean commit (`_committed` — nothing was enqueued, the
+        offsets discharged), and idempotent with `install`'s except hook: both
+        call `_drain_phase2`, which single-flights `_pending_compensations` by
+        swapping it to `[]`, so whichever runs first drains and the other finds
+        nothing."""
+        if self._committed:
+            return
+        self._drain_phase2()
+
     def drain(self) -> Any:
         """Dispose every adopted effect, newest first (yielded last by the
         emitted body, so the runtime runs it first on unload).
@@ -1494,22 +1537,18 @@ class Frame:
         deferred_comp, self._deferred_compensations = self._deferred_compensations, []
         for entry in reversed(deferred_comp):
             entry()
-        adopted = self._dispose_adopted()
-        # item 247 (method-body compensate remainder): Phase 2 — actually invoke the enqueued compensations, guarded
-        # and residue-collected (`_drain_phase2`), only AFTER every proof inverse
-        # in this activation has completed: the transactional replay above AND the
-        # adopted bracket disposal. This is the two-phase ordering item 247's
-        # activation-body path gets from `install`'s post-unwind hook; a method
-        # body has no such generator, so `drain` sequences the phases itself.
-        # `_drain_phase2` is a no-op when nothing was enqueued (a commit, or a
-        # compensation-free activation), so this is byte-inert for those.
-        if adopted is not None:
-            async def _drain_after(_co=adopted):
-                await _co
-                self._drain_phase2()
-            return _drain_after()
-        self._drain_phase2()
-        return None
+        # item 247 second-pass (F1): Phase 2 is NOT drained here. This `drain`
+        # is disposed FIRST (yielded last), at the TOP of the unwind stack; the
+        # activation-body `_Compensation` disposers are yielded BEFORE it, so
+        # they are disposed AFTER it and enqueue onto `_pending_compensations`
+        # only once cordis reaches them — draining here would run before they
+        # exist and lose the offset (the F1 data-loss hole). The method-body
+        # deferred compensations enqueued just above are in the same queue.
+        # `begin` — yielded FIRST, disposed LAST, at the BOTTOM of the stack —
+        # is the post-unwind hook that drains the whole queue as Phase 2,
+        # strictly after every Phase-1 inverse in this activation, including the
+        # async adopted disposal cordis awaits from the coroutine returned here.
+        return self._dispose_adopted()
 
     def _dispose_adopted(self) -> Any:
         adopted, self._adopted = self._adopted, []
@@ -1921,8 +1960,17 @@ class SessionOwner:
         replayed: list = []
         # escrow replays reverse-seq, in its own two phases (transactional
         # inverses, then owed compensations) — the contract's phase rules.
+        # item 247 second-pass (F5): the sort key carries the process-monotonic
+        # `stamp` as a tiebreaker AFTER `seq`, so LIFO holds even in a NON-
+        # recorded session where every `seq` is None: without it the key
+        # collapsed to a constant 0, the stable sort kept insertion order
+        # (oldest-first), and a FIFO replay of overlapping idempotent-total
+        # inverses destroyed pre-session data while reporting `noResidue: true`
+        # (the item-369 hazard). With a WAL, `seq` still dominates (it is
+        # monotonic with registration too), so the recorded ordering is
+        # unchanged.
         escrow = sorted(self._escrow,
-                        key=lambda e: (e.seq if e.seq is not None else 0),
+                        key=lambda e: (e.seq if e.seq is not None else 0, e.stamp),
                         reverse=True)
         transactional = [e for e in escrow if isinstance(e, _Transactional)]
         compensations = [e for e in escrow if isinstance(e, _Compensation)]
