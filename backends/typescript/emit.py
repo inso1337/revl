@@ -3070,8 +3070,73 @@ def _emit_ts_ref_thunk(name: str, params_decl: str, arg_names: str,
     return lines
 
 
+def _ts_extern_config_scaffold() -> list[str]:
+    """Module-level config seam for document-global config externs (item 378,
+    Stage 5). Mirrors the py tier's `_REVL_EXTERN_CONFIG` map + fail-loud
+    `_revl_extern_config` helper (backends/python/emit.py `_emit_externs`): a
+    mutable module-global config map, keyed by extern name, that a composition
+    driver fills at plug time, and a lookup that THROWS, naming the extern,
+    when a required (non-defaulted) field is absent, instead of handing the body
+    an empty object that fails late with an opaque `undefined`. A defaults-only
+    extern still resolves to its defaults driver-free. Emitted only when a
+    config extern is present, so a no-config program is byte-identical.
+    """
+    return [
+        "export const _REVL_EXTERN_CONFIG: "
+        "Record<string, Record<string, unknown>> = {};",
+        "",
+        "function _revlExternConfig(",
+        "  name: string, required: string[], "
+        "defaults: Record<string, unknown>,",
+        "): Record<string, unknown> {",
+        "  const cfg = _REVL_EXTERN_CONFIG[name];",
+        "  if (cfg === undefined) {",
+        "    if (required.length > 0) {",
+        "      throw new Error(",
+        '        "config extern `" + name + "` called before plug-time " +',
+        '        "configuration was installed (required config: " +',
+        '        required.join(", ") + "); configure it through the run " +',
+        "        \"driver's config seam\",",
+        "      );",
+        "    }",
+        "    return { ...defaults };",
+        "  }",
+        "  const missing = required.filter((f) => !(f in cfg));",
+        "  if (missing.length > 0) {",
+        "    throw new Error(",
+        '      "config extern `" + name + "` called before plug-time " +',
+        '      "configuration was installed (missing required config: " +',
+        '      missing.join(", ") + ")",',
+        "    );",
+        "  }",
+        "  return { ...defaults, ...cfg };",
+        "}",
+        "",
+    ]
+
+
+def _ts_extern_config_bind(ext: dict) -> str:
+    """The `const _revl_config = ...` first-body line for a config extern, or
+    None. Passes the required (non-defaulted) field names and the resolved
+    defaults from the schema to the fail-loud helper, mirroring the py bind."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    name = ext.get("name")
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = {f["name"]: f["default"] for f in schema
+                if f.get("default") is not None}
+    return (f"const _revl_config = _revlExternConfig("
+            f"{json.dumps(name)}, {json.dumps(required)}, "
+            f"{json.dumps(defaults)});")
+
+
 def _emit_ts_externs(externs: list) -> list[str]:
     lines: list[str] = []
+    # item 378 Stage 5: emit the config seam once, before the externs, when any
+    # extern carries a config schema (byte-identical when none do).
+    if any(ext.get("config") for ext in externs):
+        lines.extend(_ts_extern_config_scaffold())
     for ext in externs:
         name = _ident(ext.get("name"), "extern name")
         params = ", ".join(
@@ -3099,9 +3164,15 @@ def _emit_ts_externs(externs: list) -> list[str]:
         # use `await`. Every admitted call site awaits it (see `_expr`). The
         # signature form mirrors the async service-op interface typing at
         # emit.py:2137/2222.
+        # item 378 Stage 5: a config extern binds `_revl_config` as the first
+        # body line, mirroring the py bind (backends/python/emit.py). None for a
+        # no-config extern, so its body splices byte-identically.
+        config_bind = _ts_extern_config_bind(ext)
         if ext.get("async"):
             lines.append(
                 f"export async function {name}({params}): Promise<{returns}> {{")
+            if config_bind:
+                lines.append("  " + config_bind)
             body = textwrap.dedent(bodies["ts"].strip("\n"))
             if body:
                 for line in body.splitlines() or [""]:
@@ -3112,6 +3183,8 @@ def _emit_ts_externs(externs: list) -> list[str]:
             lines.append("")
             continue
         lines.append(f"export function {name}({params}): {returns} {{")
+        if config_bind:
+            lines.append("  " + config_bind)
         body = textwrap.dedent(bodies["ts"].strip("\n"))
         if body:
             for line in body.splitlines() or [""]:

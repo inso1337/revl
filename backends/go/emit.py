@@ -4344,8 +4344,89 @@ def _emit_v3_go_types(types: dict) -> list[str]:
     return out
 
 
+# item 378 Stage 5: package-level config seam for document-global config
+# externs. Mirrors the py tier's `_REVL_EXTERN_CONFIG` map + fail-loud
+# `_revl_extern_config` helper: a mutable package-global config map, keyed by
+# extern name, that a composition driver fills at plug time, and a lookup that
+# PANICS, naming the extern, when a required (non-defaulted) field is absent,
+# instead of handing the body a zero value that fails opaquely later. A
+# defaults-only extern still resolves to its defaults driver-free. The string
+# joins are open-coded so the seam needs no `strings` import (the extern body's
+# own imports are hoisted separately). Emitted only when a config extern is
+# present, so a no-config program is byte-identical.
+_GO_EXTERN_CONFIG_SCAFFOLD = [
+    "var _REVL_EXTERN_CONFIG = map[string]map[string]any{}",
+    "",
+    "func _revlExternConfig(name string, required []string, "
+    "defaults map[string]any) map[string]any {",
+    "\tout := map[string]any{}",
+    "\tfor k, v := range defaults {",
+    "\t\tout[k] = v",
+    "\t}",
+    "\tcfg, ok := _REVL_EXTERN_CONFIG[name]",
+    "\tif !ok {",
+    "\t\tif len(required) > 0 {",
+    "\t\t\tmsg := \"\"",
+    "\t\t\tfor i, f := range required {",
+    "\t\t\t\tif i > 0 {",
+    "\t\t\t\t\tmsg += \", \"",
+    "\t\t\t\t}",
+    "\t\t\t\tmsg += f",
+    "\t\t\t}",
+    "\t\t\tpanic(\"config extern `\" + name + \"` called before plug-time \" +",
+    "\t\t\t\t\"configuration was installed (required config: \" + msg + \"); \" +",
+    "\t\t\t\t\"configure it through the run driver's config seam\")",
+    "\t\t}",
+    "\t\treturn out",
+    "\t}",
+    "\tmissing := \"\"",
+    "\tn := 0",
+    "\tfor _, f := range required {",
+    "\t\tif _, present := cfg[f]; !present {",
+    "\t\t\tif n > 0 {",
+    "\t\t\t\tmissing += \", \"",
+    "\t\t\t}",
+    "\t\t\tmissing += f",
+    "\t\t\tn++",
+    "\t\t}",
+    "\t}",
+    "\tif n > 0 {",
+    "\t\tpanic(\"config extern `\" + name + \"` called before plug-time \" +",
+    "\t\t\t\"configuration was installed (missing required config: \" + "
+    "missing + \")\")",
+    "\t}",
+    "\tfor k, v := range cfg {",
+    "\t\tout[k] = v",
+    "\t}",
+    "\treturn out",
+    "}",
+    "",
+]
+
+
+def _go_extern_config_bind(ext: dict) -> str:
+    """The `_revl_config := ...` first-body line for a config extern, or None.
+    `_revl_config` is a `map[string]any`; the verbatim @go body reads a field as
+    `_revl_config["field"]` and asserts its type, exactly as the py body reads
+    the resolved dict."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    name = ext.get("name")
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = {f["name"]: f["default"] for f in schema
+                if f.get("default") is not None}
+    req_lit = "[]string{%s}" % ", ".join(_go_string(f) for f in required)
+    return (f"_revl_config := _revlExternConfig("
+            f"{_go_string(name)}, {req_lit}, {_go_literal(defaults)})")
+
+
 def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx) -> list[str]:
     out: list[str] = []
+    # item 378 Stage 5: emit the config seam once, before the externs, when any
+    # extern carries a config schema (byte-identical when none do).
+    if any(ext.get("config") for ext in externs):
+        out.extend(_GO_EXTERN_CONFIG_SCAFFOLD)
     for ext in externs:
         name = _v3_ident(ext.get("name"), "extern name")
         params = ", ".join(
@@ -4366,6 +4447,11 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx) -> list[str]:
             )
         body = bodies["go"].strip()
         out.append(f"func {name}({params}){sig_ret} {{")
+        # item 378 Stage 5: a config extern binds `_revl_config` as the first
+        # body line; None for a no-config extern (byte-identical body splice).
+        config_bind = _go_extern_config_bind(ext)
+        if config_bind:
+            out.append("\t" + config_bind)
         body_lines = _hoist_go_imports(body, ctx) if body else []
         if body_lines:
             for line in body_lines:
