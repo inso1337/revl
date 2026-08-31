@@ -10,6 +10,14 @@ file and the spliced file cannot be swapped between check and use), and a
 virtual (in-memory) compile resolves only through the supplied sources map with
 no disk fallback.
 
+The handle-to-path step behind that containment is native on macOS
+(`F_GETPATH`), Linux (`/proc/self/fd`) and Windows
+(`GetFinalPathNameByHandle`); on those three the guarantee holds against the
+realpath of the OPENED handle. On any OTHER platform there is no such primitive,
+so the check falls back to the candidate NAME's realpath, which reintroduces a
+check-then-use symlink race — the guarantee is stated for macOS/Linux/Windows,
+not claimed universally (item 412 R3).
+
 The one accepted residual, stated rather than claimed away: a HARDLINK inside
 the module tree to a file outside it realpaths to the inside name and passes.
 Creating that hardlink needs write access inside the tree being compiled, at
@@ -95,8 +103,12 @@ def _reject_bad_written_path(written: str, backend: str, decl_name: str,
 def _real_path_of_fd(fd: int, fallback: str) -> str:
     """The real path of the ACTUAL opened handle, so containment is validated
     against what will be read rather than a name that could be swapped after
-    the check (TOCTOU). macOS: `F_GETPATH`; Linux: `/proc/self/fd`. Falls back
-    to `realpath` of the candidate where neither is available."""
+    the check (TOCTOU). Handle-addressed on macOS (`F_GETPATH`), Linux
+    (`/proc/self/fd`) and Windows (`GetFinalPathNameByHandle`). On any OTHER
+    platform there is no handle-to-path primitive, so this falls back to
+    `realpath` of the candidate NAME, which reintroduces the check-then-use race
+    the module docstring's guarantee names as macOS/Linux/Windows-only (item 412
+    R3)."""
     try:
         if sys.platform == "darwin":
             import fcntl
@@ -107,7 +119,37 @@ def _real_path_of_fd(fd: int, fallback: str) -> str:
             return os.readlink(f"/proc/self/fd/{fd}")
     except OSError:
         pass
+    if sys.platform == "win32":
+        win = _win_final_path_of_fd(fd)
+        if win is not None:
+            return win
     return os.path.realpath(fallback)
+
+
+def _win_final_path_of_fd(fd: int) -> str | None:
+    """The final path of a Windows file handle via `GetFinalPathNameByHandleW`,
+    with the `\\\\?\\` (and `\\\\?\\UNC\\`) extended-length prefixes stripped so
+    the result compares against a plain `realpath`. `None` on any failure, so the
+    caller falls back to the name-based path (never crashes the compile)."""
+    try:
+        import ctypes
+        import msvcrt
+        handle = msvcrt.get_osfhandle(fd)
+        get_final = ctypes.windll.kernel32.GetFinalPathNameByHandleW
+        length = get_final(handle, None, 0, 0)
+        if not length:
+            return None
+        buf = ctypes.create_unicode_buffer(length)
+        if not get_final(handle, buf, length, 0):
+            return None
+        path = buf.value
+        if path.startswith("\\\\?\\UNC\\"):
+            return "\\\\" + path[len("\\\\?\\UNC\\"):]
+        if path.startswith("\\\\?\\"):
+            return path[len("\\\\?\\"):]
+        return path
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def _read_all(fd: int) -> bytes:
@@ -142,6 +184,15 @@ def read_body_file_disk(module_dir: str, written: str, backend: str,
             f"not found (resolved to {candidate})",
             hint="a body file is resolved relative to the declaring .rvl file's "
                  "directory (item 396)")
+    except ValueError as exc:
+        # item 412 R4: an embedded NUL byte in the path makes `os.open` raise
+        # ValueError, not OSError — catch it as a clean RevlError instead of an
+        # uncaught crash escaping the jail's open path.
+        raise RevlError(
+            filename, line,
+            f"@{backend} host-body file {written!r} for extern `{decl_name}` "
+            f"has an invalid path (resolved to {candidate!r}): {exc}",
+            hint="a body file path may not contain NUL bytes (item 396 jail)")
     except OSError as exc:
         raise RevlError(
             filename, line,

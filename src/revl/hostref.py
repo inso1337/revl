@@ -445,12 +445,16 @@ def plug_refs(ir: dict, root_dirs: list[str]) -> None:
        failing (the fail-CLOSED item 410 backstop). A missing USER-ref MODULE is
        still left to the thunk's first-call ImportError, matching the design.
     3. EVICT from `sys.modules` every ref-derived dotted name (and project-tree
-       ancestor packages) so a re-emit/replug in one process runs the NEW code
-       rather than a stale gen-N module python cached process-wide.
+       ancestor packages), AND — item 412 R1 — the WHOLE in-root closure under
+       the user compile roots (a ref'd module's transitive deps, importable only
+       through the appended root), so a re-emit/replug in one process runs the
+       NEW code (and the NEW deps) rather than a stale gen-N module python cached
+       process-wide.
     """
     refs = ir_refs(ir)
     if not refs:
         return
+    user_real_roots = [os.path.realpath(r) for r in root_dirs]
     # item 410: a stdlib-origin (`"root": "stdlib"`) py ref imports its helper
     # as a dotted name off the install tree (`backends/python/x.py` ->
     # `backends.python.x`), so the install root is APPENDED to the union search
@@ -517,6 +521,53 @@ def plug_refs(ir: dict, root_dirs: list[str]) -> None:
                      "reinstall/repair the revl install so the pinned helper "
                      "resolves from the install root (item 396 option B deploy "
                      "contract)")
+        elif ref.get("root") != "stdlib":
+            # item 412 R2: a USER ref fails CLOSED the same way a stdlib ref does
+            # (the item-410 backstop) when its pinned file is DEPLOYED in a user
+            # root but the dotted name does NOT resolve to that in-root file at
+            # plug. The landed code skipped the hash check + eviction whenever
+            # `resolve_ref_spec_origin` returned None (a partial same-top-level
+            # shadow that makes the disk walk descend into a foreign package and
+            # find no leaf, or a helper provided by a mechanism the static walk
+            # cannot see) and deferred to the thunk's first-call import — so a
+            # module that becomes resolvable at that dotted name between plug and
+            # first call would run UNHASHED, a fail-OPEN where the stdlib case
+            # fails closed. Keying the refusal on the pinned file being PRESENT
+            # in a user root keeps the legitimate "ref target simply not
+            # deployed" case a first-call ImportError as before (pinned is None),
+            # and still accepts a byte-identical copy resolved from elsewhere on
+            # sys.path (the content-addressed hash pin is the authority) only when
+            # the in-root file is absent.
+            resolves_in_root = origin_ok and any(
+                _contained(os.path.realpath(origin), r)
+                for r in user_real_roots)
+            pinned = _pinned_user_file(ref["path"], root_dirs)
+            if pinned is not None and not resolves_in_root:
+                first = ref["dotted"].split(".", 1)[0]
+                intercept = _first_component_origin(ref["dotted"], search)
+                where = (
+                    f"the top-level package `{first}` resolves on sys.path to "
+                    f"{intercept}, not to the deployed in-root file"
+                    if intercept is not None else
+                    f"the module `{ref['dotted']}` does not resolve to any file "
+                    f"on sys.path (it may be shadowed by a partial same-named "
+                    f"package, or provided by zipimport, a .pth namespace "
+                    f"portion, or a custom meta_path finder the plug-time disk "
+                    f"walk cannot verify)")
+                raise RevlError(
+                    "<plug>", 0,
+                    f"@py host-module ref for extern `{ref['extern']}` has its "
+                    f"pinned file DEPLOYED at {pinned} but the dotted name "
+                    f"`{ref['dotted']}` does not resolve to it at plug: {where}. "
+                    f"Refused rather than deferred to a first-call import that "
+                    f"could run a FOREIGN module UNHASHED",
+                    hint="a user ref whose pinned file is present in the compile "
+                         "root but whose dotted name resolves elsewhere (or "
+                         "nowhere) is REFUSED, never imported — matching the "
+                         "stdlib fail-CLOSED backstop. Remove the shadowing "
+                         "package from sys.path so the deployed in-root file "
+                         "resolves, or recompile against the deployed layout "
+                         "(item 396 option B / item 412 R2 deploy contract)")
         if origin_ok:
             # Drop any stale cached bytecode for the ref'd source. Python's
             # source-mtime pyc invalidation has 1-SECOND granularity, so a
@@ -546,6 +597,54 @@ def plug_refs(ir: dict, root_dirs: list[str]) -> None:
                          "or restore the reviewed one (item 396 option B deploy "
                          "contract)")
         _evict_ref(ref["dotted"], real_roots)
+    # item 412 R1: after every ref's own dotted chain is evicted, sweep the WHOLE
+    # in-root closure under the USER compile roots so a ref'd module's TRANSITIVE
+    # deps are re-imported fresh on the next call too, not served stale from
+    # sys.modules on an in-process replug (the item-380 silent-stale class one
+    # level deeper). The stdlib install root is deliberately NOT swept here — it
+    # holds the first-party revl/backends runtime that must not be evicted
+    # mid-plug — so a stdlib helper's transitive dep OUTSIDE its own dotted chain
+    # is covered only by the per-ref chain eviction above; a stated residual.
+    _evict_in_root_closure(user_real_roots)
+
+
+def _pinned_user_file(rel_path: str, user_roots: list[str]) -> str | None:
+    """The first `<root>/<rel_path>` that exists as a regular file across the
+    user compile roots — the DEPLOYED pinned file for a user ref. `None` when the
+    ref target is absent from every user root (legitimately not deployed, so a
+    missing user ref still surfaces the thunk's first-call ImportError)."""
+    native = rel_path.replace("/", os.sep)
+    for root in user_roots:
+        cand = os.path.join(root, native)
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _evict_in_root_closure(sweep_roots: list[str]) -> None:
+    """Drop from `sys.modules` EVERY already-loaded module whose file sits inside
+    one of `sweep_roots` — not just a ref's dotted chain (item 412 R1). A ref'd
+    module's transitive deps (`from host import helpers`, `import sibling`) are
+    made importable only by the appended root and would otherwise be served STALE
+    on an in-process replug even though the ref itself re-imports fresh. Trusted
+    runtime modules resolve OUTSIDE every user root and are untouched. Their stale
+    `.pyc` is dropped too (the same 1-second mtime-granularity concern)."""
+    if not sweep_roots:
+        return
+    for name in list(sys.modules):
+        mod = sys.modules.get(name)
+        if mod is None:
+            continue
+        mf = _module_file(mod)
+        if mf is None:
+            continue
+        try:
+            real = os.path.realpath(mf)
+        except OSError:
+            continue
+        if any(_contained(real, r) for r in sweep_roots):
+            del sys.modules[name]
+            _drop_pyc(real)
 
 
 def _drop_pyc(source_path: str) -> None:
