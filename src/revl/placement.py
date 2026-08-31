@@ -326,6 +326,19 @@ def expand_tiers(placement: dict, component_names) -> tuple[dict, str | None]:
         control = f"tier_{_canonical_backend(str(default_tier))}"
         if control in processes:
             processes[control]["probe"] = list(probe)
+        else:
+            # F5: every component is tiered off the default, so no default-tier
+            # control-plane process was synthesized to carry the probe. Dropping
+            # it silently would boot, probe NOTHING, and exit 0 — a seam
+            # verification that is a no-op green. Refuse instead of vanishing.
+            return placement, (
+                f"a top-level `probe` is declared, but no process runs on the "
+                f"default tier {default_tier!r}: every component is placed on "
+                f"another tier, so there is no default-tier control plane to "
+                f"attach the probe to (a cross-seam probe originates from the "
+                f"orchestrating control plane). Keep at least one component on "
+                f"the default tier, or move to an explicit `[processes]` "
+                f"topology and attach `probe` to the process you mean to run it.")
     expanded = {k: v for k, v in placement.items()
                 if k not in ("tiers", "default_tier", "probe")}
     expanded["processes"] = processes
@@ -668,22 +681,44 @@ def _preflight(backends_used: set[str], files, placement_path: str, once: bool) 
 # --------------------------------------------------------------------------
 
 
-def _names_in(node, acc: set) -> set:
-    """Every `name`/`id` string reachable in an IR subtree — enough to tell
-    whether a component's body reaches a given extern (an extern call is a
-    `{"kind": "fn", "name": "<extern>"}` node; a bare reference an
-    `{"kind": "name", "id": ...}`). Over-inclusive by design: it never drops an
-    extern a kept component still reaches."""
+def _names_in(node, acc: set, bound: frozenset = frozenset()) -> set:
+    """Every extern/fn/reference name reachable in an IR subtree — enough to
+    tell whether a component's body reaches a given extern (an extern or
+    top-level-fn call is a `{"kind": "fn", "name": "<extern>"}` node; a bare
+    reference an `{"kind": "name", "id": ...}` or `{"kind": "var", "name":
+    ...}`).
+
+    Kind-aware over parameter binders (item 363 hardening F6): a method or
+    lambda PARAMETER shadows any same-named extern within its body, so a bare
+    reference whose name is a bound parameter does NOT count as reaching that
+    extern. Otherwise a component whose method merely has a parameter spelled
+    like a `@py`-only extern would be dragged into a native slice and refused
+    blaming the innocent component. This is sound because the lowerer has
+    already resolved scope: a `{"kind": "fn", ...}` extern call never names a
+    shadowed local (a call to a param lowers to a `call` over a `name`/`var`),
+    so extern/fn calls are always counted; only bare `name`/`var` references are
+    filtered by the parameter set. Non-parameter binders (let/for/match) are
+    left over-inclusive — the safe direction, never dropping a reached extern."""
     if isinstance(node, dict):
-        for field in ("name", "id"):
-            value = node.get(field)
-            if isinstance(value, str):
-                acc.add(value)
+        kind = node.get("kind")
+        # a method/lambda introduces its parameters as binders for its body
+        params = node.get("params")
+        inner = (bound | {p for p in params if isinstance(p, str)}
+                 if isinstance(params, list) else bound)
+        if kind in ("name", "var"):
+            ref = node.get("id") if kind == "name" else node.get("name")
+            if isinstance(ref, str) and ref not in bound:
+                acc.add(ref)
+        else:
+            for field in ("name", "id"):
+                value = node.get(field)
+                if isinstance(value, str) and value not in bound:
+                    acc.add(value)
         for value in node.values():
-            _names_in(value, acc)
+            _names_in(value, acc, inner)
     elif isinstance(node, list):
         for value in node:
-            _names_in(value, acc)
+            _names_in(value, acc, bound)
     return acc
 
 
@@ -801,17 +836,59 @@ def _emit_gate_module(backend: str):
     return _EMIT_GATE_MODULES[backend]
 
 
+def _py_only_externs(ir: dict) -> set[str]:
+    """Externs with no `@ts` body — the ones `ts_safe_ir` deletes (and every
+    component reaching one with them)."""
+    return {e.get("name") for e in ir.get("externs") or []
+            if "ts" not in (e.get("bodies") or {}) and e.get("name")}
+
+
 def _dryrun_emit(backend: str, sliced: dict) -> None:
-    """Run `backend`'s emitter over `sliced` and let its tier-limit `EmitError`
-    propagate. The emitters ARE the capability oracle (docs/conformance.md):
-    each tier limit lives as a named refusal at emit time, so dry-running the
-    emit keeps the gate exactly as strong as the real refusal set with no
-    second list to drift (the design's recommended shape)."""
+    """Run `backend`'s emitter over `sliced` via the SAME entry point the real
+    build uses for that tier, and let its tier-limit `EmitError` propagate. The
+    emitters ARE the capability oracle (docs/conformance.md): each tier limit
+    lives as a named refusal at emit time, so dry-running the emit keeps the
+    gate exactly as strong as the real refusal set with no second list to drift
+    (the design's recommended shape).
+
+    Two per-tier alignments the initial cut got wrong:
+
+    * **go** — the build runs `emit_placement` (item 363's `_emit_v3_placement`
+      + interop bridge), but the gate ran `emit`, which for an ir_version-3 doc
+      with any top-level fn/type/extern routes to `_emit_v3_go` and DROPS the
+      components. Every tier limit in the component/bridge codegen path escaped
+      the gate and surfaced as a raw "go emit failed" RuntimeError AFTER the
+      gate said yes — the exact failure stage-3 exists to eliminate (F2). rust,
+      node and java already agree with their builds via `emit`.
+    * **node** — the build (and this dry-run) narrows through `ts_safe_ir`,
+      which DELETES any component reaching a py-only extern rather than refusing
+      it, so a node-placed dirty component would be silently omitted from the
+      artifact while the spec still lists it (a boot crash, F3). Diff the placed
+      component set against `ts_safe_ir`'s output and REFUSE at plan time,
+      naming the component + the py-only extern it reaches."""
     module = _emit_gate_module(backend)
     if backend == "node":
-        module.emit(ts_safe_ir(sliced))
+        placed_comps = {c.get("name") for c in sliced.get("components") or []}
+        safe = ts_safe_ir(sliced)
+        kept_comps = {c.get("name") for c in safe.get("components") or []}
+        dropped = placed_comps - kept_comps
+        if dropped:
+            py_only = _py_only_externs(sliced)
+            by_name = {c.get("name"): c for c in sliced.get("components") or []}
+            details = []
+            for cname in sorted(n for n in dropped if n is not None):
+                reached = sorted(_names_in(by_name.get(cname) or {}, set()) & py_only)
+                reach_str = ", ".join(reached) or "a py-only extern"
+                details.append(f"{cname} (reaches {reach_str})")
+            raise RuntimeError(
+                "a node-placed component reaches a `@py`-only extern (no `@ts` "
+                "body), which the ts tier cannot emit: " + "; ".join(details)
+                + " — a py-only provider must stay on the py tier and be reached "
+                "across the seam as a bridge proxy (place it on `py`, or give the "
+                "extern a `@ts` body)")
+        module.emit(safe)
     elif backend == "go":
-        module.emit(sliced, "emitted")
+        module.emit_placement(sliced, "emitted")
     else:  # py, rust, java
         module.emit(sliced)
 
@@ -892,8 +969,16 @@ def cross_tier_boundary_check(ir: dict, requires: dict, provides: dict,
                 continue  # same-tier seam: unchanged from today
             verdict = verdicts.get(service) or {}
             reasons = verdict.get("reasons") or []
-            resource_reasons = [r for r in reasons if "resource type" in r]
-            if resource_reasons:
+            # key the resource refusal on the STRUCTURED `resources` kind, not on
+            # the substring of a human reason — a wording change to the reason
+            # text cannot silently disarm the crossing refusal (F1). The closure
+            # in `_resource_taint` makes this fire for a handle NESTED in a
+            # user record, not only a bare handle in the signature.
+            resource_hits = verdict.get("resources") or []
+            if resource_hits:
+                resource_reasons = [
+                    f"{h['method']}: resource type {h['type']} crosses"
+                    for h in resource_hits]
                 return (
                     f"service `{service}` (key {key!r}) crosses the tier "
                     f"boundary {backends.get(consumer)} <- {backends.get(host)} "
@@ -1427,6 +1512,16 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             # consumers live in other placements and are not enumerable here.
             serve_keys = list(provides[pname])
         own = [c for c in load_order if placed.get(c) == pname]
+        # F4: a process gets only the config of the components IT hosts, and only
+        # the `@ts ref` hash-checks for the externs ITS slice reaches — never the
+        # whole [config] table (a `[config.ControlPlane] db_url = "...secret..."`
+        # must not be delivered to a tier that hosts no reader of it) nor every
+        # extern's refs (a node process must not hash-check refs for externs it
+        # does not host). A process hosting every component gets the full slice
+        # back, so a single-process placement is byte-identical.
+        own_config = {c: config[c] for c in own if c in config}
+        own_externs = {e.get("name")
+                       for e in placement_slice(ir, set(own)).get("externs") or []}
         spec = {
             "name": pname,
             "backend": backend,
@@ -1439,7 +1534,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             # already resolved as proxies before local activation, so they are
             # (correctly) absent here. docs/parallel-activation.md.
             "depends": local_prereqs(manifest_entries, subset=own),
-            "config": config,
+            "config": own_config,
             "provides": list(provides[pname]),
             "proxies": proxies,
             "probe": pconf.get("probe") or [],
@@ -1458,6 +1553,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                  "sha256": r["sha256"],
                  **({"root": r["root"]} if r.get("root") else {})}
                 for e in ir.get("externs") or []
+                if e.get("name") in own_externs
                 for r in [(e.get("refs") or {}).get("ts")] if r is not None
             ],
         }
@@ -1717,7 +1813,9 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             "backend": to_backend,
             "files": [str(f) for f in files],
             "components": [component],  # the swapped component, alone (v1 scope)
-            "config": config,
+            # F4: the successor hosts `component` alone, so it gets only that
+            # component's config — never the whole [config] table.
+            "config": {c: config[c] for c in [component] if c in config},
             "provides": list(provides[old]),
             "proxies": {k: dict(v) for k, v in (specs[old].get("proxies") or {}).items()},
             "probe": [],
