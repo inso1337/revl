@@ -13,6 +13,7 @@ from .admit_profile import enforce_document as _enforce_document
 from .admit_profile import enforce_source as _enforce_source
 from .errors import RevlError
 from .holes import refuse_admission
+from .hostfile import _contained
 from .hostfile import program_has_body_file as _program_has_body_file
 from .hostfile import resolve_body_files as _resolve_body_files
 from .hostref import program_has_ref as _program_has_ref
@@ -84,6 +85,12 @@ class _ModuleLoader:
         # its body files normally, so a pre-granted module may declare externs.
         self._profile = profile
         self._root_paths: set[str] = set()
+        # item 410: abspath -> the search-path ENTRY that resolved it, recorded
+        # by `resolve_use` when a `use` did NOT resolve relative to its importer
+        # (an install-origin module: a REVL_IMPORT_PATH entry or the stdlib
+        # default). A ref declared by such a module jails to that one entry's
+        # tree, never the composition's user tree. Absent -> user-origin.
+        self._install_root_of: dict[str, str] = {}
 
     def mark_roots(self, abs_paths) -> None:
         """Record the composition's root module abspaths BEFORE any load, so a
@@ -97,6 +104,33 @@ class _ModuleLoader:
         import root (the py driver's appended `sys.path` entry) is derived the
         same way, so a compiled ref specifier and the driver agree."""
         return sorted({os.path.dirname(p) for p in self._root_paths})
+
+    def _origin_install_root(self, abs_path: str) -> str | None:
+        """item 410: the INSTALL ROOT a module's refs jail to, or `None` for a
+        user-origin module (refs jail to `_root_dirs()`, unchanged 396(B)).
+
+        Install-origin two ways, mirroring the design's origin classification:
+
+        1. the module resolved through the item-319 search path (recorded by
+           `resolve_use`) — its install root is that resolving ENTRY, so a
+           REVL_IMPORT_PATH stand-in jails to its own entry, the stdlib default
+           to `stdlib_root().parent`;
+        2. its realpath is contained in `stdlib_root()` — the containment arm, so
+           a stdlib module reached RELATIVELY by a sibling (relative resolution
+           is primary and wins, never recorded in (1)) still classifies with its
+           importer. Its install root is `stdlib_root().parent`.
+
+        Origin DECIDES; containment of the ref TARGET never does. A user root
+        file that happens to sit inside the revl checkout is still user-origin
+        unless it lands in `stdlib_root()` itself.
+        """
+        recorded = self._install_root_of.get(abs_path)
+        if recorded is not None:
+            return recorded
+        if _contained(os.path.realpath(abs_path),
+                      os.path.realpath(str(stdlib_root()))):
+            return str(stdlib_root().parent)
+        return None
 
     def has_source(self, path: str) -> bool:
         return os.path.abspath(path) in self._sources
@@ -119,6 +153,11 @@ class _ModuleLoader:
         for base in self._search_path:
             candidate = os.path.join(base, use.path)
             if self._exists(candidate):
+                # item 410: this module resolved through the search path (a
+                # REVL_IMPORT_PATH entry or the stdlib default), so it is
+                # install-origin and any ref it declares jails to THIS entry's
+                # tree. Record the resolving entry keyed by the module's abspath.
+                self._install_root_of.setdefault(os.path.abspath(candidate), base)
                 return candidate
         hint = "`use` resolves paths relative to the importing file"
         if self._search_path:
@@ -171,8 +210,15 @@ class _ModuleLoader:
             # resolving outside every root tree is refused; an imported module
             # inside the tree resolves normally. The pinned rel-path + hash flow
             # through lower into the additive `refs` IR key.
+            # item 410: origin decides the ref jail's root set. An install-origin
+            # module (search-path-resolved, or contained in stdlib_root()) jails
+            # its refs to ONE install entry and stamps `root_kind = "stdlib"`; a
+            # user module jails to the composition's root trees, byte-identical
+            # to 396(B). A user ref never resolves against the install root and
+            # vice versa — the loader passes the single set the origin selects.
             _resolve_refs(program, os.path.dirname(abs_path),
-                          self._root_dirs(), self._sources, virtual is not None)
+                          self._root_dirs(), self._sources, virtual is not None,
+                          install_root=self._origin_install_root(abs_path))
             module = _LoadedModule(abs_path, os.path.dirname(abs_path), program)
             for fn in program.fn_decls:
                 if fn.public:

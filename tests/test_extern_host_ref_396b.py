@@ -539,7 +539,10 @@ def test_bundle_ref_program_clean_refusal(tmp_path):
     from revl.bundle import build_bundle
     _write(tmp_path / "host" / "engine.py", "def do_engine(x):\n    return x\n")
     m = _write(tmp_path / "m.rvl", _ref_rvl())
-    with pytest.raises(RevlError, match="references an external host module"):
+    # item 410: the refusal now distinguishes a USER ref (still refused, this
+    # case) from a stdlib ref (which bundles via re-resolve). A user ref program
+    # is still a clean refusal.
+    with pytest.raises(RevlError, match="references a USER external host module"):
         build_bundle([str(m)], str(tmp_path / "out"))
 
 

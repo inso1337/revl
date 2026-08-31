@@ -2578,9 +2578,19 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                 if body.backend in bodies or body.backend in refs:
                     raise RevlError(filename, body.line,
                                     f"duplicate @{body.backend} body for extern `{decl.name}`")
-                refs[body.backend] = {"symbol": body.symbol,
-                                      "path": body.rel_path,
-                                      "sha256": body.sha256}
+                refs[body.backend] = {
+                    "symbol": body.symbol,
+                    "path": body.rel_path,
+                    "sha256": body.sha256,
+                    # item 410: the root KIND, ADDITIVE. Present only for an
+                    # install-origin (stdlib / REVL_IMPORT_PATH) ref, so a
+                    # user-origin ref IR is byte-identical to 396(B) (the
+                    # 342/388 additivity discipline: absent, never `"user"`).
+                    # Selects the runner's install root vs the user root at
+                    # deploy.
+                    **({"root": body.root_kind}
+                       if getattr(body, "root_kind", None) else {}),
+                }
                 continue
             if body.backend in bodies or body.backend in refs:
                 raise RevlError(filename, body.line,
