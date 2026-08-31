@@ -75,6 +75,7 @@ Design decisions (documented in docs/bundle.md):
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -82,6 +83,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from ._paths import stdlib_root
 from .errors import RevlError
 
 # Reuse the item-297 reproduce vocabulary and projections verbatim, no new
@@ -321,23 +323,32 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
                  "`revl verify` could not reproduce it. Inline the body "
                  "(`= @backend { ... }`) to bundle for now; carrying body files "
                  "through the bundle is the item 396 stage 4 follow-up.")
-    # item 396 option B (interim clean refusal, same stage-4 gap): a host-module
-    # ref names a root-relative file that the flat basename copy would not carry,
-    # so a bundled ref program could not resolve or re-hash the module at verify.
-    # Refuse cleanly naming the gap rather than emit a bundle that cannot verify.
-    ref_externs = sorted(
-        e.get("name") for e in (ir.get("externs") or []) if e.get("refs"))
-    if ref_externs:
+    # item 396 option B / 410: a USER host-module ref names a root-relative file
+    # that the flat basename copy would not carry, so a bundled user-ref program
+    # could not resolve or re-hash the module at verify. Refuse it cleanly (396's
+    # stage-4 gap, still open). A STDLIB-kind ref is different: its helper is a
+    # versioned FIRST-PARTY install dependency the verifier resolves from ITS OWN
+    # install (re-resolve, carry nothing), exactly as verify already re-resolves
+    # the bundled `stdlib/fs.rvl` source itself — so a stdlib ref bundles, and the
+    # `stdlib refs` verify tier re-hashes it against the pin on the verifier.
+    user_ref_externs = sorted(
+        e.get("name") for e in (ir.get("externs") or [])
+        if any(r.get("root") != "stdlib"
+               for r in (e.get("refs") or {}).values()))
+    if user_ref_externs:
         raise RevlError(
             sources[0], 0,
-            "cannot bundle a composition whose extern references an external "
+            "cannot bundle a composition whose extern references a USER external "
             "host module (`= @backend ref sym from \"path\"`): "
-            f"{', '.join(ref_externs)}",
+            f"{', '.join(user_ref_externs)}",
             hint="`revl bundle` copies sources flat by basename, so a "
-                 "root-relative ref'd module would not travel with the bundle "
-                 "and `revl verify` could not reproduce it. Inline the body "
-                 "(`= @backend { ... }`) to bundle for now; carrying ref files "
-                 "through the bundle is the item 396 stage 4 follow-up.")
+                 "root-relative user ref'd module would not travel with the "
+                 "bundle and `revl verify` could not reproduce it. Inline the "
+                 "body (`= @backend { ... }`) to bundle for now; carrying user "
+                 "ref files through the bundle is the item 396 stage 4 follow-up. "
+                 "A STDLIB ref (a shipped module referencing a shipped helper) "
+                 "bundles fine — the verifier re-resolves it from its own install "
+                 "(item 410).")
 
     norm_ir = _canonical_ir(ir)
     ir_text = _ir_text(norm_ir)
@@ -461,6 +472,67 @@ def _toolchain_version() -> str:
 
 
 # --------------------------------------------------------------- verify
+
+def _stdlib_refs_of(ir: dict) -> list[dict]:
+    """Every stdlib-kind host-module ref in an IR, as
+    `[{"extern", "tier", "path", "sha256"}, ...]`. A user ref (no `"root"`) is
+    excluded — those never bundle (build-time refusal), so only stdlib refs reach
+    the verify tier below."""
+    out: list[dict] = []
+    for ext in ir.get("externs") or []:
+        for tier, ref in (ext.get("refs") or {}).items():
+            if ref.get("root") == "stdlib":
+                out.append({"extern": ext.get("name"), "tier": tier,
+                            "path": ref["path"], "sha256": ref["sha256"]})
+    return out
+
+
+def _check_stdlib_refs(bundle: Path) -> list[Check]:
+    """item 410 verify tier `stdlib refs`: re-resolve each stdlib-kind ref
+    against the VERIFYING machine's install root and re-hash against the recorded
+    pin (re-resolve, never travel — the helper is a versioned first-party install
+    dependency, so a second copy in the bundle would make skew representable). One
+    Check per ref: OK (bytes match), MISMATCH (differ — both hashes printed,
+    naming the file), or UNVERIFIED (the install lacks the helper on this
+    machine). Empty when the bundle carries no stdlib ref, so a ref-free bundle's
+    report is byte-identical.
+
+    Reads the RECORDED pin from the bundle's own `ir/ir.json` rather than the
+    recompiled IR: the recompile already re-resolves against the same install, so
+    comparing recompile-to-recompile would be a tautology. Comparing the recorded
+    pin against a fresh re-hash is what catches a bundle built on install A and
+    verified on a doctored or version-skewed install B."""
+    recorded_ir = _read_json(bundle / "ir" / "ir.json")
+    refs = _stdlib_refs_of(recorded_ir)
+    if not refs:
+        return []
+    install_root = Path(str(stdlib_root().parent))
+    checks: list[Check] = []
+    for ref in refs:
+        label = f"stdlib ref {ref['path']}#{ref['tier']}"
+        target = install_root / ref["path"]
+        try:
+            # raw file bytes, matching the compile-time pin in hostref.py
+            got = hashlib.sha256(target.read_bytes()).hexdigest()
+        except OSError:
+            checks.append(Check(
+                label, UNVERIFIED,
+                f"the install lacks the helper {ref['path']} for extern "
+                f"`{ref['extern']}` on this machine (nothing to re-hash)"))
+            continue
+        if got != ref["sha256"]:
+            checks.append(Check(
+                label, MISMATCH,
+                f"the shipped helper {ref['path']} for extern `{ref['extern']}` "
+                f"hashes differently than the bundle pinned (a version skew or a "
+                f"doctored install)", ref["sha256"], got))
+        else:
+            checks.append(Check(
+                label, OK,
+                f"{ref['path']} for extern `{ref['extern']}` re-resolves and "
+                f"matches the pin"))
+    return checks
+
 
 def _read_json(path: Path) -> dict:
     """Read a JSON document from a bundle, raising a bundle-shaped error rather
@@ -686,6 +758,14 @@ def verify_bundle(path: str, *, env=None) -> "VerifyReport":
 
     source_check, names = _check_source(bundle, manifest)
     report.checks.append(source_check)
+
+    # item 410: re-resolve each stdlib-kind ref against THIS machine's install
+    # and re-hash against the recorded pin, BEFORE the recompile — so a skewed or
+    # doctored shipped helper reads as "the helper changed", naming the file, and
+    # a helper the verifier's install LACKS is an honest UNVERIFIED (SKIP) line
+    # rather than a recompile crash. Empty (no line) for a bundle with no stdlib
+    # ref, keeping a ref-free report byte-identical.
+    report.checks.extend(_check_stdlib_refs(bundle))
 
     # recompile from the committed source, in the recorded order.
     source_paths = [str(bundle / "source" / n) for n in names if n]
