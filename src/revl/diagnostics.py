@@ -178,6 +178,14 @@ def classify(error: RevlError) -> dict:
     why = getattr(error, "why", None)
     if why is not None:
         record["why"] = why.to_json()
+    # item 274: the navigable-refusal map, copied verbatim beside the static
+    # `fix`. Additive — a rejection with no `navigate` serializes exactly as
+    # before, so `--json` consumers without navigate knowledge see a strict
+    # superset. The record is already redacted for the untrusted-author view at
+    # construction (navigate.py), so nothing here re-filters it.
+    navigate = getattr(error, "navigate", None)
+    if navigate is not None:
+        record["navigate"] = navigate
     return record
 
 
