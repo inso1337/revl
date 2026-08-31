@@ -26,6 +26,8 @@ This module is everything an emitted component imports.  It has two halves:
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import inspect
 import itertools
 import json
@@ -612,11 +614,144 @@ def trace_observers() -> int:
     return len(_observers) + (1 if _trace is not None else 0)
 
 
+# item 259 slice 2 (docs/design/259-checked-parallel-emissions.md §4.1, HIGH-1):
+# a contextvar-backed record-sink STACK. `_record` reads MODULE GLOBALS, so three
+# interleaving parallel branches could not each hold a distinct sink. The sink is
+# BUILT here: each parallel branch pushes a task-local buffer onto this stack for
+# the duration of its host call, so a mid-call `_record` lands in the branch
+# buffer instead of the real observers; the join pops and REPLAYS each buffer to
+# the real sink IN PLAN ORDER, so the observable trace is the sequential
+# concatenation even though the host calls overlapped (C1). Each branch is a
+# distinct asyncio Task with its own copied context, so the buffers never collide,
+# and the stack composes under nesting (a parallel group inside a parallel group).
+_revl_record_sinks: "contextvars.ContextVar[tuple]" = contextvars.ContextVar(
+    "_revl_record_sinks", default=())
+
+
 def _record(event: str) -> None:
+    sinks = _revl_record_sinks.get()
+    if sinks:
+        # innermost installed branch sink wins: buffer for a plan-order replay at
+        # the parallel group's join rather than emitting to the real sink now.
+        sinks[-1].append(event)
+        return
     if _trace is not None:
         _trace(event)
     for observer in list(_observers):
         observer(event)
+
+
+# ---------------------------------------------------------------------------
+# item 259 slice 2: checked parallel emissions - the py runtime fan-out
+# ---------------------------------------------------------------------------
+#
+# A parallel GROUP is a run of emissions the checker proved independent (disjoint
+# declared capabilities, or same-key `commutative`). The emitter renders a group
+# of size > 1 as `_revl_parallel([...])` followed by a PLAN-ORDER join. Three
+# obligations shape the helpers below (docs/design/259-checked-parallel-
+# emissions.md §3, §4.1):
+#
+#   * Concurrency. `_revl_parallel` fires every branch under the ONE cordis event
+#     loop via `asyncio.gather` - no threads (schedule.py decision 3), so
+#     "concurrent" means the branches' `await` points interleave cooperatively:
+#     three host round trips are in flight at once, ~max(latencies) not sum.
+#
+#   * Byte-identical audit (C1). Host extern bodies call `_record` mid-fire, so a
+#     naive gather would interleave those records nondeterministically. Each
+#     branch instead runs under a branch-local record sink (the contextvar stack
+#     above); its mid-fire records buffer, and the join replays them in PLAN
+#     ORDER. Records emitted OFF the awaiting task (Clock.fire / Job completion /
+#     spawn) would escape the buffer, which is why the emitter admits only
+#     emissions whose records are produced synchronously on-task (§3.2).
+#
+#   * Teardown-EFFECT equivalence, NOT byte-identical `accumulated` (§3.3, the
+#     CRITICAL). A branch that faults or is diverted changes the fired-and-
+#     registered SET versus a sequential early exit. `_revl_parallel` always
+#     drives the WHOLE group to quiescence (every branch captured, none left
+#     in-flight to race teardown); the emitted join then registers each
+#     SUCCESSFUL branch's compensation in plan order and `_revl_raise_first`
+#     re-raises the first fault. The emitter forms a group only from members with
+#     idempotent forward delivery and idempotent-or-absent compensation, so
+#     over-firing a member under a fault or an A1 divert and then compensating it
+#     leaves the same world state a skipped sequential tail would. Byte-identical
+#     `accumulated` is neither claimed nor needed for the fault/divert path.
+
+
+class _RevlBranchResult:
+    """One parallel branch's captured outcome, replayed at the join in plan order.
+
+    `records` is the branch-local audit buffer; `ok`/`value` carry a clean result
+    and `error` a fault. A divert (a deadline / sibling-fault / cancel that lands
+    at the branch's `await`) arrives as a ``CancelledError`` and rides the same
+    `error` slot, so the join treats a diverted branch exactly like a faulted one:
+    it does not register that member's compensation, and re-raises to unwind."""
+
+    __slots__ = ("ok", "value", "error", "records")
+
+    def __init__(self, ok: bool, value: Any, error: Optional[BaseException],
+                 records: list) -> None:
+        self.ok = ok
+        self.value = value
+        self.error = error
+        self.records = records
+
+
+async def _revl_branch(thunk: Callable[[], Any]) -> _RevlBranchResult:
+    """Fire one group member under a branch-local record sink and CAPTURE its
+    outcome - never raise. A fault or a divert (``CancelledError``) is caught and
+    surfaced at the join in plan order, so `gather` always drives every branch to
+    quiescence and no in-flight branch races the activation's teardown.
+
+    The sink is pushed inside this coroutine, which `gather` runs as its own Task
+    with a copied context, so the push is task-local and sibling branches never
+    see each other's buffer."""
+    buffer: list = []
+    token = _revl_record_sinks.set(_revl_record_sinks.get() + (buffer,))
+    try:
+        value = thunk()
+        if inspect.isawaitable(value):
+            value = await value
+        return _RevlBranchResult(True, value, None, buffer)
+    except asyncio.CancelledError as exc:  # a divert landing at this branch's await
+        return _RevlBranchResult(False, None, exc, buffer)
+    except Exception as exc:  # noqa: BLE001 - re-raised in plan order at the join
+        return _RevlBranchResult(False, None, exc, buffer)
+    finally:
+        _revl_record_sinks.reset(token)
+
+
+async def _revl_parallel(thunks) -> list:
+    """Fire a group's branches concurrently under the single cordis loop and
+    rejoin. Returns the branch outcomes in the SAME order as `thunks` (plan
+    order), regardless of completion order, so the emitted join is single-threaded
+    and in plan order.
+
+    Every branch captures its own outcome (`_revl_branch` never raises), so the
+    gather always completes: the whole group is driven to quiescence even when a
+    member faults or is diverted (§3.3, §5)."""
+    thunks = list(thunks)
+    if not thunks:
+        return []
+    return list(await asyncio.gather(*(_revl_branch(t) for t in thunks)))
+
+
+def _revl_flush(records) -> None:
+    """Replay one branch's buffered audit records to the sink, in order. Routing
+    back through `_record` nests correctly under an OUTER branch sink (a group
+    inside a group), because this branch's own sink is already popped by now."""
+    for event in records:
+        _record(event)
+
+
+def _revl_raise_first(outcomes) -> None:
+    """Re-raise the first faulted-or-diverted branch's error in PLAN order, after
+    every successful branch's compensation has been registered at the join. A
+    clean group is a no-op. Raising here (not inside `_revl_parallel`) is what
+    lets the join register the fired members' compensations FIRST, so the
+    subsequent L-Raise teardown unwinds a correctly-ordered stack (P/G7)."""
+    for outcome in outcomes:
+        if not outcome.ok:
+            raise outcome.error
 
 
 # ---------------------------------------------------------------------------

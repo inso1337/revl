@@ -702,9 +702,15 @@ def _is_map_cas(acquire: Any) -> bool:
 
 
 class _ComponentEmitter:
-    def __init__(self, component: dict, services: dict, externs: list | None = None) -> None:
+    def __init__(self, component: dict, services: dict, externs: list | None = None,
+                 plan_groups: list | None = None) -> None:
         self.ir = component
         self.services = services
+        # item 259 slice 2: every declared extern by name, so an `emit` step's
+        # forward-delivery idempotence (the fan-out eligibility gate) is readable
+        # off a host-extern emission the same way a req-target emission reads it
+        # off its service method spec.
+        self._extern_by_name = {e["name"]: e for e in (externs or [])}
         # item 243 (docs/design/243-witnessed-externs.md): witnessed externs by
         # name, so a call site can be recognised as a transactional effect and
         # register its DECLARED inverse (not a site-spelled one) into the
@@ -763,6 +769,115 @@ class _ComponentEmitter:
         for key in self.intercept:
             if key not in self.requires:
                 raise EmitError(f"{self.name}: intercept key {key!r} is not a requirement")
+        # item 259 slice 2: the checked fan-out plan for THIS component, reduced to
+        # the groups the runtime may actually fire concurrently in the activation
+        # body (`id(leader step) -> [member steps]`). Empty for every body with no
+        # provable parallelism, so its emission is byte-identical to before.
+        self._parallel_leaders = self._build_parallel_leaders(plan_groups)
+
+    def _build_parallel_leaders(self, plan_groups: list | None) -> dict:
+        """Map each fan-out group's LEADER step to its member steps, keeping only
+        groups the activation-body driver can safely fan out (item 259 slice 2,
+        the CONSERVATIVE path). A group qualifies only when:
+
+          * it has more than one member (a singleton is a plain sequential emit);
+          * every member is a top-level step of THIS activation body, appearing as
+            a PHYSICALLY CONTIGUOUS run (no intervening step) - a group split by a
+            pure filler step stays sequential, so the concurrent fires never
+            reorder around anything between them;
+          * every member passes `_group_eligible` (idempotent forward delivery,
+            compensation idempotent-or-absent, on-task audit records, awaited).
+
+        Any group that fails a clause degrades to sequential - the worst case is
+        no speedup, never a wrong grouping (§6)."""
+        body = self.ir.get("body") or []
+        pos = {id(step): i for i, step in enumerate(body)}
+        leaders: dict = {}
+        for group in plan_groups or []:
+            if len(group) < 2:
+                continue
+            positions = [pos.get(id(step)) for step in group]
+            if any(p is None for p in positions):
+                continue  # a member lives in a nested provide/timer body - skip
+            if positions != list(range(positions[0], positions[0] + len(positions))):
+                continue  # not physically contiguous (filler between members)
+            if not all(self._group_eligible(step) for step in group):
+                continue
+            leaders[id(group[0])] = list(group)
+        return leaders
+
+    def _emission_shape(self, expr: Any) -> Optional[str]:
+        """Classify an `emit` step's expression: "req" (a req-target emission),
+        "extern" (a direct host-extern emission), "spawn" (a spawn-handle
+        provision call), or None. The fan-out admits only "req"/"extern": a
+        spawn-handle emission records through the OFF-TASK spawn recorder
+        (`_revl_record_spawn`), so its audit escapes the branch sink (§3.2)."""
+        if not isinstance(expr, dict):
+            return None
+        kind = expr.get("kind")
+        target = expr.get("target")
+        if kind == "call" and isinstance(target, dict) and target.get("kind") == "req":
+            return "req"
+        if kind == "call":
+            callee = expr.get("callee")
+            if isinstance(callee, dict) and callee.get("kind") == "field":
+                recv = callee.get("target")
+                if isinstance(recv, dict) and recv.get("kind") == "instance-get":
+                    return "spawn"
+        if kind == "fn":
+            return "extern"
+        return None
+
+    def _emission_idempotent(self, expr: Any) -> bool:
+        """Whether an `emit` step's forward delivery is declared `idempotent`
+        (item 44/309). Read off the service method spec for a req-target emission,
+        or the extern IR for a host-extern emission."""
+        if not isinstance(expr, dict):
+            return False
+        kind = expr.get("kind")
+        target = expr.get("target")
+        if kind == "call" and isinstance(target, dict) and target.get("kind") == "req":
+            svc = self.services.get(self.requires.get(target.get("name"))) or {}
+            spec = (svc.get("methods") or {}).get(expr.get("method")) or {}
+            return bool(spec.get("idempotent"))
+        if kind == "fn":
+            return bool((self._extern_by_name.get(expr.get("name")) or {}).get("idempotent"))
+        return False
+
+    def _group_eligible(self, step: dict) -> bool:
+        """Whether one `emit` step may join a concurrent fan-out group (item 259
+        slice 2, the C2/E fail-safe). ALL of:
+
+          * it is an awaited (`async`) `emit` step - a real suspension, so the
+            branches' round trips are actually in flight at once and the body is
+            already the `async def` generator the fan-out needs;
+          * forward delivery is declared `idempotent` - the checkable proxy for
+            "safe to over-fire under a fault or an A1 divert" (the current IR
+            carries no separate compensation-idempotence flag, so the forward
+            `idempotent` declaration plus the absent-compensation common case is
+            the conservative admissible surface; §3.3, C2 residual);
+          * its audit records are produced synchronously on-task - a req-target or
+            direct host-extern emission, NOT a spawn-handle provision call whose
+            records route off-task (§3.2);
+          * it is not an approval crossing, a deferred emission, or a validated
+            emission - each carries stateful seam machinery the conservative slice
+            keeps sequential rather than reason about under concurrency."""
+        if step.get("step") != "emit":
+            return False
+        if not step.get("async"):
+            return False
+        expr = step.get("expr")
+        if self._emission_shape(expr) not in ("req", "extern"):
+            return False
+        if not self._emission_idempotent(expr):
+            return False
+        if step.get("approval") is not None:
+            return False
+        if self._deferred_extern(expr) is not None:
+            return False
+        if self._validated_call(expr) is not None:
+            return False
+        return True
 
     # -- expressions --------------------------------------------------------
 
@@ -1212,6 +1327,42 @@ class _ComponentEmitter:
         return "{" + ", ".join(
             f"{tag!r}: {_ident(tag, 'adt case')}" for tag in tags) + "}"
 
+    def _emit_parallel_group(self, out: "_Lines", indent: int, members: list,
+                             where: str) -> None:
+        """Render a proved-independent run of `emit` steps as a concurrent
+        fire-then-join (item 259 slice 2, design §4.1). The members' host round
+        trips are fired concurrently under one cordis loop; the join is
+        single-threaded and in PLAN ORDER - flush each branch's buffered audit
+        records, then register each SUCCESSFUL branch's compensation onto the
+        activation's LIFO stack, then re-raise the first fault.
+
+        The shape is byte-identical in EFFECT to the sequential
+        `await <fire>; yield compensation` of each member on a clean run: the
+        audit replays in plan order (byte-identical trace) and the compensations
+        register in plan order (a correct LIFO stack). It diverges only on a fault
+        or a divert, where it registers the members that actually fired (in plan
+        order) and re-raises - teardown-EFFECT equivalent, not byte-identical
+        `accumulated` (§3.3)."""
+        self.uses.update({"_revl_parallel", "_revl_flush", "_revl_raise_first"})
+        out.add(indent, "_revl_group = await _revl_parallel([")
+        for member in members:
+            # each fire is an un-awaited coroutine thunk; `_revl_branch` awaits it
+            # under a branch-local record sink so mid-fire records buffer (C1).
+            out.add(indent + 1, f"lambda: {self._emit_fire(member, where)},")
+        out.add(indent, "])")
+        for pos, member in enumerate(members):
+            out.add(indent, f"_revl_flush(_revl_group[{pos}].records)")
+            if member.get("compensate") is not None:
+                # register the compensation only for a branch that actually fired,
+                # in plan order - a faulted/diverted member registers nothing (its
+                # forward effect is compensated only if it landed). §3.3 invariant P.
+                out.add(indent, f"if _revl_group[{pos}].ok:")
+                out.add(indent + 1, "yield _revl_frame.compensation(lambda: "
+                                    f"{self._expr(member.get('compensate'), where)})")
+        # re-raise the first fault AFTER every fired member's compensation is on
+        # the stack, so the L-Raise teardown unwinds a correctly-ordered stack.
+        out.add(indent, "_revl_raise_first(_revl_group)")
+
     def _emit_fire(self, step: dict, where: str) -> str:
         """The Python expression that fires an `emit` step's host body. When the
         step carries a `with a` approval edge (item 246), the fire is wrapped in
@@ -1636,8 +1787,20 @@ class _ComponentEmitter:
         # drained after Phase 1 completes instead of being lost. `drain` yielded
         # LAST -> disposed FIRST, the commit signal every earlier entry reads.
         out.add(2, "yield _revl_frame.begin")
-        for step in self.ir.get("body") or []:
-            self._body_step(out, 2, step, where)
+        # item 259 slice 2: a group-aware walk - a run of `emit` steps the checker
+        # proved independent fires concurrently (`_emit_parallel_group`); every
+        # other step, and every un-grouped emit, renders exactly as before.
+        steps = self.ir.get("body") or []
+        i = 0
+        while i < len(steps):
+            step = steps[i]
+            group = self._parallel_leaders.get(id(step)) if isinstance(step, dict) else None
+            if group is not None:
+                self._emit_parallel_group(out, 2, group, where)
+                i += len(group)  # members are contiguous (checked in the leader map)
+            else:
+                self._body_step(out, 2, step, where)
+                i += 1
         out.add(2, "yield _revl_frame.drain")
         out.add(0)
         out.add(1, "_revl_frame.install(_body)")
@@ -3180,6 +3343,27 @@ def _inline_pure_fns(ir: dict) -> dict:
     return ir
 
 
+def _parallel_step_groups(ir: dict) -> dict:
+    """Per-component fan-out plan (item 259 slice 2): each component name maps to a
+    list of groups, each group a list of `emit` step dicts the checker proved
+    independent. Derived from the SAME `src/revl/parallel` partition the audit
+    surface renders, so the runtime fan-out can never diverge from the checked
+    plan.
+
+    Imported lazily and FAIL-SOFT: a backend-only context where the `revl`
+    frontend is not importable, or any plan-derivation failure, degrades to `{}` -
+    every group then emits sequentially, byte-identical to pre-259. The fan-out is
+    a speedup, never a correctness dependency, so it must never break codegen."""
+    try:
+        from revl.parallel import parallel_plan_steps  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - frontend absent: degrade to sequential
+        return {}
+    try:
+        return parallel_plan_steps(ir)
+    except Exception:  # noqa: BLE001 - a plan failure must never break codegen
+        return {}
+
+
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
@@ -3219,7 +3403,16 @@ def emit(ir: dict) -> str:
     }
     _PY_USES_AS_ASYNC = False
 
-    emitters = [_ComponentEmitter(component, services, externs) for component in components]
+    # item 259 slice 2: the checked fan-out plan, per component (empty in a
+    # backend-only context where the revl frontend is not importable, or when no
+    # body has a provable parallel group - either way the emission is sequential
+    # and byte-identical to before).
+    plan_groups = _parallel_step_groups(ir)
+    emitters = [
+        _ComponentEmitter(component, services, externs,
+                          plan_groups.get(component.get("name")))
+        for component in components
+    ]
     bodies = [emitter.emit() for emitter in emitters]
 
     names = [emitter.name for emitter in emitters]
