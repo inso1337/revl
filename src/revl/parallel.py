@@ -78,6 +78,11 @@ class _Emission:
     index: int
     caps: tuple[Cap, ...]
     commutative: bool
+    # The `emit` step dict this emission was read off, or None for the fail-safe
+    # singleton an unresolvable `emit` degrades to. Slice 2's emitter consumes it
+    # (`parallel_plan_steps`) to map a plan group back to the body steps it fans
+    # out; slice 1's index-only `parallel_plan` never reads it.
+    step: dict | None = None
 
     def tokens(self) -> set[str]:
         return {c.token for c in self.caps}
@@ -213,16 +218,23 @@ class _Partitioner:
         self.comp = comp
         self.fn_caps_map = fn_caps_map
         self.groups: list[list[int]] = []
+        # The same partition, but each group is the list of `emit` step DICTS its
+        # indices name (slice 2's emitter reads this to fan out the actual steps).
+        self.step_groups: list[list[dict]] = []
         self.current: list[_Emission] = []
         self.next_index = 0
 
     def _seal(self) -> None:
         if self.current:
             self.groups.append([e.index for e in self.current])
+            self.step_groups.append(
+                [e.step for e in self.current if e.step is not None])
             self.current = []
 
-    def _add_emission(self, cap_strs, commutative: bool) -> None:
-        emission = _Emission(self.next_index, _parse_caps(cap_strs), commutative)
+    def _add_emission(self, cap_strs, commutative: bool,
+                      step: dict | None = None) -> None:
+        emission = _Emission(self.next_index, _parse_caps(cap_strs), commutative,
+                             step)
         self.next_index += 1
         # Grow only while pairwise-compatible with the WHOLE running group.
         if self.current and all(_compatible(m, emission) for m in self.current):
@@ -241,9 +253,9 @@ class _Partitioner:
                 if res is None:
                     # an `emit` we cannot resolve: force a singleton, fail-safe.
                     self._seal()
-                    self._add_emission([_STAR], False)
+                    self._add_emission([_STAR], False, step)
                 else:
-                    self._add_emission(res[0], res[1])
+                    self._add_emission(res[0], res[1], step)
                 continue
             if kind == "provide":
                 # a registration: seal, then each provide-method body is its own
@@ -297,6 +309,36 @@ def parallel_plan(ir: dict) -> dict[str, list[list[int]]]:
         part._seal()
         if part.groups:
             plan[comp["name"]] = part.groups
+    return plan
+
+
+def parallel_plan_steps(ir: dict) -> dict[str, list[list[dict]]]:
+    """The same partition as :func:`parallel_plan`, but each group is the list of
+    `emit` STEP DICTS it names rather than their integer indices.
+
+    Slice 2's py emitter consumes this to map a plan group back to the body steps
+    it fans out (identity on the step dicts), so the runtime fan-out and the
+    checker's derivation cannot diverge - the emitter never re-derives the
+    partition, it reads this one. The two entry points share `_Partitioner`, so a
+    group here is byte-for-byte the same grouping `parallel_plan` reports.
+
+    Every group member is an `emit` step (the only shape `_Partitioner` turns into
+    an emission), so a consumer can assume `step["step"] == "emit"`. Groups whose
+    emissions came from a nested provide/timer body still appear; the emitter maps
+    only those whose members are steps of the body it is rendering and leaves the
+    rest sequential - safe, since a group it cannot place stays unfanned."""
+    fns = ir.get("functions") or []
+    if isinstance(fns, dict):
+        fns = list(fns.values())
+    fn_caps_map = _emitting_capabilities(fns, ir.get("externs") or [])
+
+    plan: dict[str, list[list[dict]]] = {}
+    for comp in ir.get("components") or []:
+        part = _Partitioner(ir, comp, fn_caps_map)
+        part.walk(comp.get("body") or [])
+        part._seal()
+        if part.step_groups:
+            plan[comp["name"]] = part.step_groups
     return plan
 
 
