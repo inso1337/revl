@@ -108,11 +108,17 @@ extern acquire fn open(url: Str) -> Pool
     undo idempotent close(result)
 ```
 
-- `idempotent` is a CONTEXTUAL keyword in the undo slot, the same discipline
-  that kept `witnessed` and `deferred` out of the reserved set (243 Slice 1
-  refinement 2, `parser.py:1379-1383`): recognized only between `undo` and
-  the inverse call, no lexer change, no self-hosted keyword-parity churn, and
-  no program using `idempotent` as an identifier breaks.
+- `idempotent` is ALREADY a reserved keyword: item 44 put it in the lexer's
+  KEYWORDS set (`lexer.py:35-37`, with the delivery comment) and the
+  service-method parser matches it as a `kw` token (`parser.py:1681`). No
+  program can use `idempotent` as an identifier today, so there is no
+  compatibility story to defend and no contextual keyword to introduce.
+  `undo idempotent restore(result)` has no ambiguity: an inverse fn named
+  `idempotent` is impossible (the word is reserved), so the parser change is
+  just accepting the existing kw token in the undo slot. `idempotent(key: p)`
+  in the extern modifier slot is likewise unambiguous: the confined reach
+  clause is consumed first, so a bracket after `idempotent` can only be the
+  key role.
 - It attaches to the INVERSE, not the forward effect, because that is what
   the claim is about. Placing it in the extern classification slot
   (`extern witnessed[fs] idempotent fn rm ...`) was considered and rejected:
@@ -167,9 +173,15 @@ extern emission[inventory] idempotent(key: reservation_id)
 - The keyed form also extends to service-method emissions
   (`emission idempotent(key: k) fn put(...)`) for symmetry with item 44;
   same checks.
-- A `compensate` expression whose emission target is declared idempotent
-  (either strength) is thereby retry-safe; the keyed form additionally makes
-  the recovery re-attempt dedup-safe (reconciliation below).
+- A remote-touching reversal is necessarily a COMPENSATION, never an
+  inverse: 243 rule 3 keeps inverses non-emission, and the keyed form is
+  emission-only, so you do not write a keyed inverse, you write a keyed
+  `compensate`. A `compensate` expression whose emission target is declared
+  idempotent is thereby retry-safe, with the register carried honestly: at
+  bare strength "retry-safe" is trust-registered (the author's item-44
+  claim, nothing more), while the keyed form makes the recovery re-attempt
+  dedup-safe by construction, conditional on the remote's dedup contract
+  (reconciliation below).
 
 ### 1c. Reconciliation with 294: the key is a 373-style parameter role, NOT a capability valuation
 
@@ -202,8 +214,17 @@ proof.
 |---|---|---|---|
 | host `undo` body (today: all of them) | NO. G8-opaque; revl cannot prove anything about the body | YES: fault-sweep double-undo (below) exercises the DESCRIPTOR against a world model, and a host-adapter run exercises the real body | YES: `undo idempotent`, carried on IR + WAL + audit |
 | external emission, bare `idempotent` | NO (remote behavior) | PARTIAL: item 37-style recording roundtrips can probe it, not prove it | YES: the item-44 register, unchanged |
-| external emission, `idempotent(key: p)` | shape only: `p` exists, scalar-serializable, threaded to the WAL descriptor (parse/check refusal on violation) | YES: the sweep asserts the SAME key value on both issues of a re-run | by construction GIVEN the remote's dedup contract (a named trust boundary, like 411's runtime enforcer) |
+| external emission, `idempotent(key: p)` | shape only: `p` exists, scalar-serializable, threaded to the WAL descriptor (parse/check refusal on violation) | YES: the sweep asserts the SAME key value on both issues of a re-run, and the collision twin asserts distinct logical operations carry distinct values | by construction, conditional on the remote honoring its dedup contract INCLUDING ITS RETENTION WINDOW (a named trust boundary, like 411's runtime enforcer; a recovery re-issued after the remote forgot the key re-applies) |
 | native inverse expressed in revl (item 244 `stdlib/fs.rvl` bodies, future) | RESTRICTED YES: a body in restore-to-recorded-value form (every write is `set(target, w.field)`, no reads of current state, no deltas, no appends) is last-writer-wins, hence idempotent by construction; the checker can verify THAT SHAPE syntactically | YES, same sweep | not needed where the shape check passes; `undo idempotent` still spellable to state intent |
+
+Scope of the sweep, stated plainly so the table cannot be over-read: the
+double-undo instruments catch referent-cardinality divergence and VALUE
+divergence, and nothing else. External-emission divergence (a refund that
+fires twice at a real remote) is invisible to the model world by
+construction; it is covered only by the keyed register and the mock-remote
+key tests below, never by the sweep. A green sweep says the descriptor's
+replay is value-stable against the model, not that the world's remotes
+dedup.
 
 Three honest sentences the docs must carry, mirroring 294's:
 
@@ -214,9 +235,18 @@ Three honest sentences the docs must carry, mirroring 294's:
 2. **The key is the mechanism, the remote is the enforcer.** With
    `idempotent(key: p)` revl guarantees the same key VALUE reaches every
    re-issue (checkable, tested); whether the remote dedups on it is the
-   remote's contract. `revl audit` prints `idempotent: declared` vs
-   `idempotent: keyed` vs `idempotent: shape-proven` so the three never
-   blur.
+   remote's contract, including its RETENTION WINDOW: a recovery run days
+   after the crash can re-issue a key the remote has already forgotten, and
+   the remote then re-applies. The register is "conditional on the remote
+   honoring its dedup contract, including its retention window", and
+   `revl audit` carries the window where the import evidence names one
+   (OpenAPI importers increasingly do). The audit prints
+   `idempotent: declared` vs `idempotent: keyed` vs
+   `idempotent: shape-proven` so the three never blur. The key's own
+   failure mode is UNDER-apply, not double-apply: two distinct logical
+   operations issued under one key value are dedup'd by the remote into
+   one application, and the leak is silent because every retry-safety
+   report reads clean (open question 3 and the collision twin below).
 3. **A test that passes is evidence, not a guarantee.** The double-undo
    sweep catches divergence (a non-idempotent inverse WILL fail it, exit
    tests below); passing it upgrades nothing to a proof. This is the same
@@ -232,21 +262,64 @@ chosen deliberately: it is exactly what a crash-retried recovery does, so
 the test exercises the real re-run path, not a synthetic one. Three
 additions:
 
-1. **Roundtrip double-undo round** (`fault.py`, `_drive_roundtrip`): after
+A precondition the current instruments do not meet, fixed first: they are
+value-BLIND, so the exact classes 309 exists for would pass. The roundtrip
+fingerprint (`fault.py::_outstanding`) folds the trace into referent SETS,
+carrying keys and never values, so a delta-shaped inverse (the design's own
+counter-increment headline) moves a value twice and the fingerprint never
+sees it. `DictWorld.apply_inverse` (`recovery.py:102`) pops referents and
+dict-overwrites a fixed key, both idempotent by construction, so the model
+world CANNOT represent non-idempotency: a double-refund passes against it.
+Left as-is, a falsified `undo idempotent` declaration sails through the
+sweep and `replay: free` rests on unearned evidence. So:
+
+1. **Value digests in the trace and fingerprint.** The trace vocabulary
+   extends from bare referent lines to value-carrying lines
+   (`<tag>.insert <key> = <hash>`, a short stable digest of the applied
+   value), and the fingerprint folds the digests, not just the key set. A
+   second application of a delta-shaped inverse moves the digest and the
+   fingerprint diverges; a restore-to-recorded-value inverse re-applies to
+   the same digest and it does not.
+2. **Roundtrip double-undo round** (`fault.py`, `_drive_roundtrip`): after
    the existing dispose-and-fingerprint round, re-issue the recorded
    reconstructible inverse ops against the world/ledger once more and
-   fingerprint again; the round passes iff `final2 == final`. The dossier
+   fingerprint again with the value-carrying form; the round passes iff
+   `final2 == final` over digests. The round runs against a world that
+   models VALUES, not just referents: an extension of `DictWorld` that
+   stores the per-key digest and applies delta ops as deltas, so a
+   non-idempotent shape can actually diverge in the model. The dossier
    (`_roundtrip_dossier`) gains a per-component `doubleUndo` facet, and the
    registry's `inverse-roundtrip.json` evidence (`registry.py:55-67`)
    carries it, so the gauntlet grade can require it.
-2. **Recovery-twice unit** (sweep level, item 125 family): run
-   `revl recover` against a mid-abort WAL, snapshot the `World`, run
-   `recover` again on the same WAL, assert the world is unchanged and no
-   new residue appears. This is `undo(undo(state)) = undo(state)` verbatim,
-   with `undo` = one full recovery pass.
-3. **Key-stability assertion**: for a keyed emission re-issued by recovery
+3. **Recovery-twice unit, with crash-mid-replay cuts** (sweep level, item
+   125 family): run `revl recover` against a mid-abort WAL, snapshot the
+   `World`, run `recover` again on the same WAL, assert the world is
+   unchanged and no new residue appears. Two complete passes are the easy
+   case; the real condition is a PARTIAL first pass. `fault.py` is a
+   fault-point engine, so the unit gains crash-after-k injection points:
+   for each k in 0..n, cut the first pass after k of n inverses, then run
+   a full second pass, and assert convergence to the once-through result.
+4. **Key-stability assertion**: for a keyed emission re-issued by recovery
    or retried by the runtime, assert both issues carried the identical key
-   value (read from the WAL descriptors).
+   value (read from the WAL descriptors). Its twin is the COLLISION
+   assertion: two distinct logical operations must carry distinct key
+   values (exit tests below name under-apply as the failure mode).
+
+The claim the crash-cut unit actually needs is SEQUENCE-level, not
+per-inverse: per-inverse `undo(undo(s)) = undo(s)` composes to convergence
+only when inverses over OVERLAPPING referents are order-stable under
+re-interleaving, and 243 Slice 2a point 5 already names the
+order-sensitive counterexample (`mv a b; mv b c`). The claim stated
+outright: **any crash-cut sequence of passes, each a prefix of the same
+LIFO order and the last one complete, converges to the once-through
+result.** For the restore-to-recorded-value shape this holds by a
+last-writer-wins argument: every inverse writes an absolute recorded value
+and reads nothing from the current state, every pass replays the same
+reverse-seq order from the same WAL, so whatever prefixes ran before, each
+referent's final value is the one written by the last inverse touching it
+in the completing pass, which is the once-through result. Shapes outside
+that form (a real `mv` chain) get no sequence-level claim from 309; they
+ride the fenced path.
 
 A declared-idempotent inverse that FAILS the sweep is a hard fail (the
 claim is falsified by evidence; same severity as a residue-bearing fault
@@ -271,15 +344,50 @@ policy, keyed off `undo_idempotent` in the descriptor:
   bookkeeping. This is the common case (every stdlib fs inverse) and it
   makes `revl recover` itself idempotent over the declared subset, which is
   the property a supervised/systemd-restarted recovery actually needs.
-- **Not declared: replay AT MOST ONCE, WAL-fenced.** Before applying,
-  recovery appends a `replay-attempted` record (fsync'd, consume-before-fire
-  discipline, the same ordering `_consume_grant` uses for grants); a later
-  recovery run that finds the attempt record does NOT re-apply. It reports
-  the inverse as `attempted-once, outcome unknown, will not re-run` in the
-  residue proof and defers to a human, with the referent named. Fenced is
-  honest: one attempt is safe (that is today's single-run behavior), a
+- **Not declared: at most one attempt, WAL-fenced, on EVERY apply path.**
+  Before applying, the applier appends a `replay-attempted` fence record
+  (fsync'd, consume-before-fire discipline, the same ordering
+  `_consume_grant` uses for grants); a later recovery run that finds the
+  fence does NOT re-apply. The fence mechanics are what carry the
+  guarantee: fence-fsync-before-apply means at-most-once-by-recovery, a
+  torn fence line implies the apply never ran (the append completes before
+  the attempt starts, so a torn record is discarded and the attempt may
+  proceed), and a forged fence is exactly the record class item 413's hash
+  chain exists for (a forgery could suppress a needed replay or force a
+  double one; routed there, reconciliation below).
+
+  "Every apply path" is load-bearing, and it is the part a recovery-only
+  fence gets WRONG: the in-process ABORT applies inverses too (Phase 1),
+  and without a durable per-inverse record there, the headline scenario
+  double-fires. Concretely: a witnessed effect with an undeclared
+  non-idempotent inverse; an in-process abort begins, Phase 1 applies the
+  inverse (the refund fires), the process dies before anything durable
+  marks it; `revl recover` finds the seq undischarged and applies it
+  AGAIN. Two applications, under the policy whose whole point is one. Two
+  fixes were weighed: (a) the abort path fsync-appends the same fence
+  record before each Phase-1 apply of an UNDECLARED inverse, or (b) a
+  single `teardown-started` record before Phase 1, after which recovery
+  treats every undeclared undischarged inverse as possibly-attempted and
+  DEFERS without attempting. **The design takes (a).** It is per-inverse
+  precise: recovery can still attempt the inverses Phase 1 provably never
+  reached, where (b) surrenders all of them to human-finish after any
+  abort-then-crash, and (b)'s single record buys only fewer fsyncs on a
+  path (abort with undeclared inverses under WAL recording) that is
+  already paying fsync per discharge. Declared inverses need no fence on
+  either path, which is a further payoff of declaring: the abort of a
+  fully-declared composition writes zero extra records.
+
+  The residue wording is register-honest about what the fence knows. After
+  a crash BETWEEN fence and apply, the truth is "fenced before attempt;
+  outcome unknown", not "attempted once": the fence proves the attempt was
+  about to start, never that it ran. The residue proof reports
+  `fenced-before-attempt, outcome unknown, will not re-run` and defers to
+  a human with the referent named. Fenced is honest: at most one unfenced
+  attempt ever happens across abort and any number of recovery runs, a
   second cannot be proven safe, so it is refused automatically and handed
-  over, in the existing `_residue_proof` voice.
+  over, in the existing `_residue_proof` voice. (The earlier draft's "one
+  attempt is safe, that is today's single-run behavior" was true only when
+  no abort ran; the abort fence is what makes it true unconditionally.)
 
 So the answer to the brief's question is yes, and precisely: **declaring
 `idempotent` is what lets recovery auto-replay an inverse it would
@@ -303,8 +411,11 @@ The window proof (`_window_proof`) says which rule fired per emission.
 A keyed compensation's re-attempt (`recovery.py:566-579`) stays
 best-effort and stays a RECORD (247's honesty: compensation is never
 inversion), but the residue record upgrades from "landing cannot be
-confirmed" to "re-issued under key K; a duplicate cannot double-apply",
-and the hint at `recovery.py:579` stops being aspirational. An abort-time
+confirmed" to "re-issued under key K; the remote's dedup contract prevents
+double-apply". The wording claims the CONTRACT, never the fact: revl
+verified the key was stable, not that the remote dedup'd, and the record
+carries the retention-window caveat where the audit knows one. The hint at
+`recovery.py:579` stops being aspirational. An abort-time
 Phase-2 retry after a mid-teardown crash follows the same rule.
 
 ## The check and the refusal (question 4)
@@ -330,12 +441,23 @@ completeness sweep over the boundary surface:
    not refusal: the fenced path is SAFE (that is its point), just less
    automatic, and a refusal would break every existing recorded corpus
    program overnight.
-3. **Policy-gated refusal.** An item-33-style policy rule
-   (`requires idempotent-teardown`) lets an operator refuse admission of a
-   composition whose recovery surface contains any `fenced`/`human-finish`
-   entry, for deployments where unattended recovery is a requirement. This
-   is where "flagged" becomes "refused", by the party who owns the
-   requirement.
+3. **Policy-gated refusal, with a STRENGTH argument.** An item-33-style
+   policy rule (`requires idempotent-teardown`) lets an operator refuse
+   admission of a composition whose recovery surface contains any
+   `fenced`/`human-finish` entry, for deployments where unattended
+   recovery is a requirement. The bare rule alone is too coarse: it
+   cannot distinguish `declared` (trust-me) from `keyed` or `shape-proven`
+   (by-construction or statically checked), and the unattended-recovery
+   operator's real sentence is "auto-replay only what is keyed or
+   shape-proven". So the rule takes a strength argument,
+   `requires idempotent-teardown(strength: keyed)`, refusing any inverse
+   or emission whose register is weaker than the named floor (order:
+   `declared < keyed`, `declared < shape-proven`; the two strong forms are
+   peers and either satisfies a strong floor). The bare form means
+   `strength: declared` (any register counts), today's behavior. The
+   audit already prints the three registers per entry, so the data the
+   rule keys on exists on day one. This is where "flagged" becomes
+   "refused", by the party who owns the requirement.
 4. **Hard refusals (parse/check), day one:** `idempotent(key: p)` where
    `p` is not a declared parameter or not scalar-serializable;
    `idempotent` on a non-emission extern classification slot; `undo
@@ -394,28 +516,34 @@ Each slice lands green alone; later slices need earlier ones.
 - **Slice 1: surface + IR + audit carry.** Parser: `idempotent` in the
   extern modifier slot (emission-only, combinable with
   `async`/`deferred`), the `idempotent(key: p)` role bracket (parse +
-  check against the parameter list, scalar type rule), `undo idempotent`
-  contextual keyword. Lower: `undo_idempotent` / `idempotent` /
+  check against the parameter list, scalar type rule), the existing
+  `idempotent` kw token accepted in the undo slot. Lower:
+  `undo_idempotent` / `idempotent` /
   `idempotency_key` onto the extern IR node and into the WAL
   discharge-descriptor and boundary-descriptor shapes. Audit:
   `revl audit --recovery` view + `--diff` weakening flag. Hard refusals
   (question 4, point 4). Byte-identity for programs that use none of it;
   service-method `idempotent` lowering unchanged.
-- **Slice 2: the sweep.** Roundtrip double-undo round + dossier facet +
-  registry evidence carry; the recovery-twice unit; key-stability
-  assertion; declared-but-falsified = fail. py reference tier first,
-  cross-tier via the 125 harness (loud-skip where the tier lacks the
-  recording channel, the existing discipline).
+- **Slice 2: the sweep.** Value-digest trace lines + digest-folding
+  fingerprint (the instruments are value-blind today and must not stay
+  so); the value-modeling world extension; roundtrip double-undo round +
+  dossier facet + registry evidence carry; the recovery-twice unit with
+  crash-after-k cut points; key-stability assertion + collision twin;
+  declared-but-falsified = fail. py reference tier first, cross-tier via
+  the 125 harness (loud-skip where the tier lacks the recording channel,
+  the existing discipline).
 - **Slice 3: recovery consumes the property.** Free-replay vs
   WAL-fenced-single-attempt in `_roll_back`; the `replay-attempted`
-  record (with 413 alignment); roll-forward auto-fire of keyed owed
-  emissions; keyed compensation re-attempt records; residue-proof and
-  window-proof language for every new state. The `--record` warning
-  (question 4, point 2).
+  record (with 413 alignment) on BOTH apply paths, including the abort
+  Phase-1 fence before each undeclared apply (option (a), section 3a);
+  roll-forward auto-fire of keyed owed emissions; keyed compensation
+  re-attempt records; residue-proof and window-proof language for every
+  new state. The `--record` warning (question 4, point 2).
 - **Slice 4: first-party adoption + policy.** `stdlib/fs.rvl` inverses
   declare `undo idempotent` (and the shape check for native
   restore-to-recorded-value bodies where 244's revl-expressed bodies
-  exist); the item-33 `requires idempotent-teardown` policy rule; docs
+  exist); the item-33 `requires idempotent-teardown` policy rule with
+  its strength argument; docs
   (`delivery-semantics.md`, `crash-recovery.md` §5/§6 updates).
 
 ## Exit tests
@@ -426,8 +554,9 @@ Surface and IR:
   `idempotent(key: p)` parse; `idempotent(key: nope)` (undeclared
   param), `idempotent(key: p)` with `p: Pool` (non-scalar), and
   `idempotent` on a `pure`/`acquire`/`witnessed` classification slot all
-  refuse with named messages; `idempotent` as an ordinary identifier
-  still parses everywhere else (contextual-keyword test).
+  refuse with named messages. (`idempotent` is already a reserved
+  keyword, item 44, so there is no identifier-compatibility test to run;
+  the new slots accept the existing kw token.)
 - Byte-identity: the full existing corpus (no new modifiers) admits and
   emits identically; goldens unchanged.
 
@@ -435,13 +564,23 @@ The property test (the item's own equation):
 - Undo-twice same state PASSES: a component with declared-idempotent
   inverses passes the double-undo roundtrip round
   (`final2 == final`), and the dossier's `doubleUndo` facet reads pass.
-- A NON-idempotent inverse run twice DIVERGES and is caught: a fixture
-  whose inverse is delta-shaped (counter increment) fails the
-  double-undo round when declared idempotent (hard fail: falsified
-  claim) and is reported `replay: fenced` when undeclared (informational).
+- A NON-idempotent inverse run twice DIVERGES and is caught, BY THE
+  VALUE FINGERPRINT: a fixture whose inverse is delta-shaped (counter
+  increment) runs against the value-modeling world; the second
+  application moves the counter's value digest, so `final2 != final`
+  over digests. When declared idempotent this is a hard fail (falsified
+  claim); when undeclared it is reported `replay: fenced`
+  (informational). The test's negative control is the reason the
+  extension exists: the same fixture against the referent-set
+  fingerprint PASSES, so the round must assert on digests. Scope stated
+  honestly: this catches referent-cardinality and value divergence in
+  the model; external-emission divergence is out of the sweep's reach
+  and is covered by the mock-remote key tests only.
 - Recovery-twice: `recover` run twice on the same mid-abort WAL yields
   an identical world and identical residue proof when all inverses are
-  declared idempotent.
+  declared idempotent; and for each crash-after-k cut point (first pass
+  cut after k of n inverses, second pass complete), the world converges
+  to the once-through result.
 
 The key:
 - An external effect with an idempotency key DEDUPS: a mock remote that
@@ -451,26 +590,46 @@ The key:
 - The same mock WITHOUT the key sees two applications on a forced
   re-issue, and the audit surface had said `recovery: human-finish` for
   exactly that extern (the honest-negative twin).
+- The COLLISION twin: two DISTINCT logical operations issued under one
+  key value (the `idempotency_key=order.id` mistake, one order holding
+  several reservations), and the mock remote sees ONE application; the
+  test asserts the second operation was silently dropped (one
+  reservation leaked) while every retry-safety report read clean. The
+  docs name UNDER-apply as the key's failure mode, and open question 3's
+  lint targets exactly this shape.
 
 Recovery policy:
 - Recovery AUTO-REPLAYS a declared-idempotent inverse on a second
   recovery run (no fence record written, replay happens, world stable).
 - Recovery DEFERS a non-idempotent one: first run writes
   `replay-attempted` before applying (crash between fence and apply
-  leaves a fence and no double-apply); second run does not re-apply,
-  reports `attempted-once ... will not re-run` with the referent, exits
+  leaves a fence and no double-apply; the report reads
+  `fenced-before-attempt, outcome unknown`, never "attempted once");
+  second run does not re-apply, reports
+  `fenced-before-attempt ... will not re-run` with the referent, exits
   1 on the honest residue.
+- The ABORT-THEN-CRASH twin (the headline scenario): an in-process abort
+  applies an undeclared inverse in Phase 1 (the fence record written and
+  fsync'd first), the process dies before discharge; `revl recover`
+  finds the seq undischarged AND fenced, does NOT re-apply, and reports
+  the fenced residue. Without the abort-path fence this test
+  double-applies; it is the test that makes option (a) load-bearing.
 - Roll-forward auto-fires an owed KEYED emission and reports it in the
   window proof; an unkeyed owed emission stays human-finish (existing
   `recovery.py:357` test extended, not replaced).
 - A committed transaction is still never rolled back (existing
   discharge-skip tests untouched).
-- Keyed compensation re-attempt residue record names the key and the
-  dedup-safety; unkeyed keeps today's wording.
+- Keyed compensation re-attempt residue record names the key and claims
+  the CONTRACT ("the remote's dedup contract prevents double-apply"),
+  never the fact of a dedup; unkeyed keeps today's wording.
 
 Policy and audit:
 - `requires idempotent-teardown` refuses a composition with a `fenced`
   inverse and admits it once the declaration (or key) is added.
+- The strength floor works: `requires idempotent-teardown(strength:
+  keyed)` refuses a composition whose only claim is bare `declared`
+  (trust-me) and admits it when the inverse is keyed or shape-proven;
+  the bare rule (no argument) admits all three registers.
 - `audit --diff` flags removing `idempotent` from an undo as a
   weakening.
 
@@ -502,7 +661,11 @@ Policy and audit:
    cost; the fenced path keeps undeclared inverses safe meanwhile.
 3. **Key uniqueness discipline.** The checker verifies the key parameter
    exists and threads; it cannot verify the AUTHOR passes a value that
-   is actually unique per logical operation (passing a constant would
-   dedup distinct operations into one). A lint (same literal in every
-   call site) is cheap; anything stronger is host semantics. Slice 2
-   may add the lint.
+   is actually unique per logical operation. The failure mode has a
+   name, silent UNDER-apply: a shared value (a constant, or one order id
+   covering several reservations) makes the remote dedup distinct
+   operations into one, one of them leaks, and every report reads clean
+   ("cannot double-apply" is true and beside the point). A lint (same
+   literal in every call site) is cheap; anything stronger is host
+   semantics. Slice 2 may add the lint, and the collision-twin exit test
+   pins the behavior either way.
