@@ -1414,7 +1414,9 @@ class WriteAheadLog:
     def record_discharge_descriptor(
             self, entry: str, *, receiver: str, method: str, args: list,
             origin: Optional[dict] = None, witness: Any = None,
-            idempotency: Optional[str] = None) -> dict:
+            idempotency: Optional[str] = None,
+            undo_idempotent: bool = False,
+            register: Optional[str] = None) -> dict:
         """Append the WAL discharge-descriptor for one witnessed (`transactional`)
         inverse or one `compensation` (docs/design/teardown-contract.md, "WAL
         descriptor"; owned by the witnessed-wal-recover slice on the py tier).
@@ -1447,8 +1449,40 @@ class WriteAheadLog:
             "origin": origin or {},
             "witness": witness,          # transactional only; durable data, not a handle
             "idempotency": idempotency,  # author-supplied key where present (item 309)
+            # item 309: the inverse's idempotency register, carried into the WAL
+            # so a FRESH-process `recover` reads it (the descriptor, not the
+            # source, is what recover has). `undo_idempotent` gates free vs
+            # fenced replay in `_roll_back`; `register` is the honesty tier the
+            # audit prints. Absent-by-default keeps every pre-309 descriptor
+            # byte-identical: only written when the author declared it.
+            **({"undo_idempotent": True} if undo_idempotent else {}),
+            **({"register": register} if register else {}),
         }
         self._seq += 1
+        self._write(record)
+        return record
+
+    def record_fence(self, seq: int) -> dict:
+        """Append the per-inverse `replay-fence` record for one UNDECLARED
+        (non-idempotent) transactional inverse, item 309 §3a.
+
+        Written and fsync'd BEFORE the inverse is applied, on EVERY apply path
+        (the in-process abort's Phase 1 and each `revl recover` roll-back), so a
+        later recovery run that finds the fence does NOT re-apply — at-most-once
+        holds across abort-then-crash and any number of recovery runs. The fence
+        proves an attempt was ABOUT TO START, never that it ran: a crash between
+        fence and apply leaves 'fenced-before-attempt, outcome unknown'. Consume-
+        before-fire, the same ordering `record_approval_consumed` uses for a
+        grant. A torn fence line (a real `kill -9` mid-append) is discarded by
+        the reader exactly as any torn record, so it implies the apply never ran.
+
+        A DECLARED-idempotent inverse needs NO fence (it replays freely) — a
+        payoff of declaring: the abort of a fully-declared composition writes
+        zero extra records. This record is a new WAL record kind and lands inside
+        item 413's integrity envelope (a forged fence could suppress a needed
+        replay or force a double one — the class 413's hash chain exists for);
+        413's gates are untouched here."""
+        record = {"record": "replay-fence", "seq": seq}
         self._write(record)
         return record
 

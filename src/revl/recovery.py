@@ -197,7 +197,7 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # proof; recover replays no inverse and rolls the missing discharge
         # forward. This dominates the discharge-set skip for a session-owned WAL.
         return _roll_forward_window(wal_path, wal, approved)
-    return _roll_back(wal, world=world or DictWorld())
+    return _roll_back(wal, world=world or DictWorld(), wal_path=wal_path)
 
 
 def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -> dict:
@@ -290,6 +290,26 @@ def _append_discharge(wal_path: str, seqs: list) -> None:
             pass
 
 
+def _append_replay_fence(wal_path: str, seq: int) -> None:
+    """Append the `replay-fence` record for one undeclared transactional inverse
+    BEFORE recover applies it (item 309 §3a), fsync'd, so a later recovery run
+    that finds it does NOT re-apply. Same fsync'd append discipline the WAL
+    writer and `_append_discharge` use; a fence FIRES nothing, so appending it is
+    safe. Consume-before-fire: the fence is durable before the single attempt
+    starts, and a crash between leaves 'fenced-before-attempt, outcome
+    unknown'."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    with open(wal_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"record": "replay-fence", "seq": seq},
+                                sort_keys=True) + "\n")
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
+
+
 def _roll_forward_window(wal_path: str, wal: dict, approved: dict) -> dict:
     """A crash inside the approved-to-discharged window (item 245, Decision 3):
     `commit-approved` is durable but `discharge`/`activation-complete` may not
@@ -356,6 +376,14 @@ def _roll_forward_window(wal_path: str, wal: dict, approved: dict) -> dict:
                 hint="the emission was approved but its flush is unconfirmed; v1 "
                      "recover never auto-fires an owed emission — finish the flush "
                      "by hand or re-run with the idempotency key (item 309)"))
+            # TODO(309-slice3): §3b — an owed deferred emission whose extern is
+            # `idempotent(key: p)` MAY be auto-fired here (the descriptor carries
+            # the key, so the fire is dedup-safe even if the pre-crash flush
+            # landed), gated by an item-33 policy knob; the `--recovery` audit
+            # already classifies a keyed owed emission as `replay: free`. Firing
+            # it requires re-invoking the emission host body, which this minimal
+            # fresh-process recover has no runtime for; deferred to the slice that
+            # gives recover an emission re-issue seam. Unkeyed stays human-finish.
 
     clean = not outstanding
     return {
@@ -439,7 +467,7 @@ def _crossing_of_descriptor(descriptor: dict) -> dict:
     }
 
 
-def _roll_back(wal: dict, *, world: World) -> dict:
+def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> dict:
     """Activation did not complete: reconstruct and run boundary inverses LIFO,
     then state a checked verdict with a residue proof.
 
@@ -522,6 +550,14 @@ def _roll_back(wal: dict, *, world: World) -> dict:
     transactional = [d for d in descriptors if d.get("entry") == "transactional"]
     compensations = [d for d in descriptors if d.get("entry") == "compensation"]
     transactional_rolled_back, discharged_skipped, restore_residue = [], [], []
+    # item 309 §3a: the durable per-inverse fences a prior apply path (the
+    # in-process abort's Phase 1, or an earlier recovery run) wrote before
+    # applying an UNDECLARED inverse. A seq named here has already spent its
+    # at-most-once attempt, so this run does NOT re-apply it — that is what makes
+    # at-most-once hold across abort-then-crash and any number of recovery runs.
+    fenced_seqs: set = {r.get("seq") for r in wal["records"]
+                        if r.get("record") == "replay-fence"}
+    fenced_deferred: list = []
     # Phase 1: transactional inverses, reverse-seq, skipping discharged seqs.
     for d in sorted(transactional, key=lambda x: x.get("seq", 0), reverse=True):
         call = d.get("call") or {}
@@ -535,11 +571,47 @@ def _roll_back(wal: dict, *, world: World) -> dict:
             discharged_skipped.append({"seq": seq, "referent": referent,
                                        "retained": True})
             continue
+        declared_idempotent = bool(d.get("undo_idempotent"))
+        if not declared_idempotent and seq in fenced_seqs:
+            # item 309 §3a: an UNDECLARED inverse whose single at-most-once
+            # attempt was already spent on another apply path (the headline
+            # abort-then-crash: Phase 1 fenced-and-applied, then the process died
+            # before discharge). The fence proves the attempt was ABOUT to start,
+            # never that it ran, so the honest residue is "outcome unknown", never
+            # "attempted once". A second attempt cannot be proven safe, so it is
+            # refused automatically and handed to a human with the referent named.
+            fenced_deferred.append({"seq": seq, "referent": referent})
+            outstanding.append(_record(
+                "fenced-residue",
+                crossing=_crossing_of_descriptor(d),
+                attempted={"call": call.get("method"),
+                           "args": list(call.get("args") or []), "phase": 1},
+                error={"type": "fenced-before-attempt",
+                       "message": "fenced-before-attempt, outcome unknown, will "
+                                  "not re-run — a prior apply path (abort Phase 1 "
+                                  "or an earlier recovery run) fenced this "
+                                  "undeclared inverse; a second attempt cannot be "
+                                  "proven safe"},
+                attempted_flag=False, outcome="unknown", referent=referent,
+                hint="declare `undo idempotent` (free replay) or add an "
+                     "idempotency key, or finish this inverse by hand — its "
+                     "at-most-once attempt is already spent (item 309)"))
+            continue
+        # A DECLARED-idempotent inverse replays FREELY on every recovery run (no
+        # fence, no bookkeeping) — `revl recover` is itself idempotent over the
+        # declared subset (§3a). An UNDECLARED one takes its single fenced
+        # attempt: the fence is fsync'd BEFORE the apply so a crash between them
+        # leaves a fence and no double-apply (§3a, consume-before-fire).
+        if not declared_idempotent and wal_path is not None:
+            _append_replay_fence(wal_path, seq)
+            fenced_seqs.add(seq)
         # ABORTED / undischarged: reconstruct and run the declared inverse.
         try:
             world.apply_inverse(call)
             transactional_rolled_back.append({"seq": seq, "referent": referent,
-                                              "op": call})
+                                              "op": call,
+                                              "replay": ("free" if declared_idempotent
+                                                         else "fenced")})
         except Exception as error:  # noqa: BLE001 — 243 rule 6: the inverse is fallible
             restore_residue.append({"seq": seq, "referent": referent})
             outstanding.append(_record(
@@ -565,18 +637,35 @@ def _roll_back(wal: dict, *, world: World) -> dict:
             continue
         world.apply_compensation(call)   # forced record-branch: never pops
         compensations_reissued.append({"seq": d.get("seq"), "referent": referent})
+        # item 309 §3c: a KEYED compensation's re-attempt stays best-effort and
+        # stays a RECORD (247's honesty: compensation is never inversion), but the
+        # residue message upgrades to claim the remote's dedup CONTRACT (never the
+        # fact of a dedup — revl verified only that the key is stable). An unkeyed
+        # compensation keeps today's wording exactly, so existing residue tests
+        # are untouched.
+        keyed = d.get("idempotency")
+        if keyed:
+            message = ("re-issued under a stable idempotency key; the remote's "
+                       "dedup contract prevents double-apply (the contract, "
+                       "conditional on its retention window — never the confirmed "
+                       "fact of a dedup)")
+            hint = ("the compensation was re-attempted best-effort under key "
+                    f"`{keyed}`; revl verified the key was stable, not that the "
+                    "remote dedup'd — the forward referent is still out")
+        else:
+            message = ("re-issued best-effort; the emission's landing cannot be "
+                       "confirmed in a fresh process")
+            hint = ("the compensation was re-attempted best-effort; its landing "
+                    "cannot be confirmed after a crash — the forward referent is "
+                    "still out. Verify it was offset, or carry an idempotency key")
         outstanding.append(_record(
             "compensation-residue",
             crossing=_crossing_of_descriptor(d),
             attempted={"call": call.get("method"),
                        "args": list(call.get("args") or []), "phase": 2},
-            error={"type": "unconfirmed",
-                   "message": "re-issued best-effort; the emission's landing "
-                              "cannot be confirmed in a fresh process"},
+            error={"type": "unconfirmed", "message": message},
             attempted_flag=True, outcome="unknown", referent=referent,
-            hint="the compensation was re-attempted best-effort; its landing "
-                 "cannot be confirmed after a crash — the forward referent is "
-                 "still out. Verify it was offset, or carry an idempotency key"))
+            hint=hint))
 
     # item 245, Decision 3: class-(b) deferred emissions with no `commit-approved`
     # are DROPPED — never fired, so zero crossings. Reported clean, never residue:
@@ -611,6 +700,9 @@ def _roll_back(wal: dict, *, world: World) -> dict:
         "transactionalRolledBack": transactional_rolled_back,
         "dischargedSkipped": discharged_skipped,
         "compensationsReissued": compensations_reissued,
+        # item 309 §3a: undeclared inverses whose single at-most-once attempt was
+        # already spent (fenced), refused this run and deferred to a human.
+        "fencedDeferred": fenced_deferred,
         "droppedDeferred": dropped_deferred,
         "abortCompleted": aborted is not None,
         "residue": {
@@ -705,6 +797,9 @@ def render(report: dict) -> str:
         for entry in report.get("compensationsReissued") or []:
             lines.append(f"  RESIDUE  compensation seq {entry['seq']:<3} re-attempted "
                          f"best-effort — still out: {entry['referent']}")
+        for entry in report.get("fencedDeferred") or []:
+            lines.append(f"  FENCED   seq {entry['seq']:<3} undeclared inverse — "
+                         f"fenced-before-attempt, will not re-run: {entry['referent']}")
     residue = report["residue"]
     lines += ["", f"residue proof [{'CLEAN' if residue['clean'] else 'RESIDUE'}]:",
               f"  {residue['proof']}", "", f"guarantee: {report['guarantee']}"]

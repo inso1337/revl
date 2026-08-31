@@ -580,12 +580,19 @@ class _Transactional:
     known when the effect runs — it depends on whether a LATER step aborts."""
 
     __slots__ = ("frame", "witness", "_undo", "discharged", "replayed", "seq",
-                 "_escrowed", "stamp")
+                 "_escrowed", "stamp", "undo_idempotent")
 
-    def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any) -> None:
+    def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any,
+                 undo_idempotent: bool = False) -> None:
         self.frame = frame
         self._undo = undo
         self.witness = witness
+        # item 309: whether the author declared `undo idempotent`. A declared
+        # inverse replays freely and needs NO fence; an undeclared one is fenced
+        # before its Phase-1 apply so recover cannot double-apply it after an
+        # abort-then-crash (option a, §3a). Absent (`False`) is every pre-309
+        # witnessed extern, so the abort path is byte-identical for them.
+        self.undo_idempotent = undo_idempotent
         self.discharged = False   # committed: inverse skipped, mutation persists
         self.replayed = False     # aborted: inverse ran, mutation reverted
         # item 247 second-pass (F5): process-monotonic registration index, so an
@@ -619,6 +626,16 @@ class _Transactional:
         witness, self.witness = self.witness, None
         if undo is None:  # pragma: no cover — single-flight guard
             return None
+        # item 309 §3a, option (a): fence an UNDECLARED inverse's own Phase-1
+        # apply. The fence is fsync-appended to the WAL BEFORE the inverse runs,
+        # so if the process dies here (abort-then-crash), `revl recover` finds
+        # the fence, does NOT re-apply, and reports the honest fenced residue —
+        # at-most-once holds across abort-then-crash. A DECLARED-idempotent
+        # inverse replays freely and writes no fence (a payoff of declaring).
+        if not self.undo_idempotent and self.seq is not None:
+            wal = self.frame._wal()
+            if wal is not None:
+                wal.record_fence(self.seq)
         return undo(witness)
 
 
@@ -1120,7 +1137,10 @@ class Frame:
             return None
         return getattr(timeline, "_wal", None)
 
-    def transactional(self, undo: Callable[[Any], Any], witness: Any) -> "_Transactional":
+    def transactional(self, undo: Callable[[Any], Any], witness: Any, *,
+                      undo_idempotent: bool = False,
+                      register: Optional[str] = None,
+                      idempotency: Optional[str] = None) -> "_Transactional":
         """Register a witnessed effect's declared inverse as a TRANSACTIONAL
         entry, carrying its `witness` (item 243). Returns the disposer the
         emitted body yields into the accumulator, so it sits in the same LIFO
@@ -1143,7 +1163,8 @@ class Frame:
         lets `revl recover` reconstruct and replay the inverse. `entry.seq`
         carries the assigned seq so `drain` can name it in the discharge
         record on a clean commit; it is `None` when no WAL is active."""
-        entry = _Transactional(self, undo, witness)
+        entry = _Transactional(self, undo, witness,
+                               undo_idempotent=undo_idempotent)
         self._transactional.append(entry)
         wal = self._wal()
         if wal is not None:
@@ -1154,6 +1175,11 @@ class Frame:
                 args=[witness],
                 origin={"phase": "activation", "key": self.name},
                 witness=witness,
+                # item 309: carry the register into the WAL so a fresh-process
+                # recover reads free-vs-fenced replay from the descriptor.
+                undo_idempotent=undo_idempotent,
+                register=register,
+                idempotency=idempotency,
             )
             entry.seq = record["seq"]
         return entry

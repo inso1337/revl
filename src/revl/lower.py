@@ -2210,6 +2210,43 @@ def _check_witnessed_inverse(decl, extern_class: dict, emitting_fns: set,
         _walk(decl.compensate)
 
 
+# item 309: the idempotency register partial order (design §2, §"question 4").
+# `declared` (a trust-me claim) is the floor; `keyed` (dedup-by-construction on a
+# named key) and `shape-proven` (a statically-checked restore-to-recorded-value
+# native body) are the two STRONG peers, either satisfying a strong floor. The
+# 290 `requires register <level>` and 309 `requires idempotent-teardown(strength)`
+# policies read this order.
+# `strong` is a policy FLOOR level only (never an actual IR register): it means
+# "any strong register", so it ranks with the two strong peers at 1.
+_REGISTER_RANK = {"declared": 0, "keyed": 1, "shape-proven": 1, "strong": 1}
+
+
+def _idempotent_register(decl) -> str:
+    """The honesty register for `decl`'s idempotency claim (design §2).
+
+    A keyed emission is dedup-safe BY CONSTRUCTION (`keyed`). A native inverse in
+    restore-to-recorded-value form would be `shape-proven`, but that check needs
+    244's revl-expressed bodies — TODO(309-slice4): detect the shape and upgrade
+    an `undo idempotent` native body to `shape-proven`. Every other claim (a bare
+    `idempotent` emission, an `undo idempotent` over a host body) is the author's
+    `declared` claim, machine-checked only for shape."""
+    if decl.idempotency_key is not None:
+        return "keyed"
+    return "declared"
+
+
+def _register_satisfies(actual: str | None, floor: str) -> bool:
+    """True when the register `actual` meets or exceeds the policy `floor` under
+    309's PARTIAL order. `None` (no idempotency claim) never satisfies a floor.
+    `keyed` and `shape-proven` are peers: either satisfies a strong floor, and
+    neither satisfies the other only if the floor names the specific peer — which
+    the strength grammar never does (it names `declared`/`keyed`/`shape-proven`
+    as a MINIMUM rank, so the two strong forms are interchangeable at rank 1)."""
+    if actual is None:
+        return False
+    return _REGISTER_RANK.get(actual, -1) >= _REGISTER_RANK.get(floor, 0)
+
+
 def _witnessed_extern_names(program: Program) -> set[str]:
     """Names of every `witnessed`-classified extern declared in *program*
     (docs/design/243-witnessed-externs.md). Shared by the effect-position
@@ -2472,6 +2509,52 @@ def _lower_externs(program: Program, filename: str, types: dict,
                          "body cannot swap for a literal, or the reach claim is "
                          "unreviewable (item 373)",
                 )
+        # item 309: the `idempotent` emission modifier and its `idempotent(key: p)`
+        # keyed form. Two rules, enforced here next to the sibling reach checks:
+        #   (1) `idempotent`/`idempotent(key:)` is EMISSION-ONLY. It is item-44's
+        #       delivery claim (the remote treats re-delivery as delivery), and
+        #       only an emission crosses to a remote. Placed on a witnessed/acquire
+        #       extern it would read as a keyed INVERSE, which 243 rule 3 forbids
+        #       (inverses are non-emission); reject the claim rather than drop it.
+        #   (2) the key TARGET must name a real PARAMETER and be scalar-
+        #       serializable (`Str`/`Int`), so a fresh process can read the same
+        #       key VALUE off the WAL descriptor on every re-issue (§1b, §1c).
+        if decl.idempotent and decl.classification != "emission":
+            raise RevlError(
+                filename, decl.line,
+                f"`{decl.classification}` extern `{decl.name}` cannot be declared "
+                f"`idempotent`",
+                hint="`idempotent` is a delivery claim about a boundary crossing, "
+                     "so it is emission-only; a witnessed/acquire reversal is a "
+                     "non-emission INVERSE (243 rule 3), and its at-most-once claim "
+                     "is spelled `undo idempotent <inverse>(result)` instead "
+                     "(docs/design/309-idempotent-inverse.md, §1b)",
+                code="G4", category="idempotent")
+        if decl.idempotency_key is not None:
+            param_by_name = {p.name: p for p in decl.params}
+            if decl.idempotency_key not in param_by_name:
+                params_list = ", ".join(sorted(param_by_name)) or "(none)"
+                raise RevlError(
+                    filename, decl.line,
+                    f"emission `{decl.name}` declares `idempotent(key: "
+                    f"{decl.idempotency_key})`, but `{decl.idempotency_key}` is not "
+                    f"one of its parameters ({params_list})",
+                    hint="the idempotency key names the PARAMETER whose per-call "
+                         "value the remote dedups on; it must resolve against the "
+                         "signature (item 309, §1b)",
+                    code="G4", category="idempotent")
+            key_type = param_by_name[decl.idempotency_key].type
+            if key_type not in ("Str", "Int"):
+                raise RevlError(
+                    filename, decl.line,
+                    f"emission `{decl.name}` idempotency key "
+                    f"`{decl.idempotency_key}` has type `{key_type}`, which is not "
+                    f"scalar-serializable",
+                    hint="an idempotency key rides the WAL descriptor as durable "
+                         "data every re-issue reads back, so it must be a "
+                         "serializable scalar (`Str` or `Int`), not a host handle "
+                         "or a compound type (item 309, §1b)",
+                    code="G4", category="idempotent")
         # witnessed-inverse externs (docs/design/243-witnessed-externs.md). A
         # witnessed mutation is a transaction, not a bracket: its declared `undo`
         # is auto-registered by the accumulator and replays on abort only. The
@@ -2787,6 +2870,21 @@ def _lower_externs(program: Program, filename: str, types: dict,
             # audit` prints it and `audit --diff` reads it to flag a weakening.
             **({"reach": {"kind": decl.reach[0], "target": decl.reach[1]}}
                if decl.reach is not None else {}),
+            # item 309: the idempotency register, ADDITIVE. Absent unless the
+            # author declared one of the three surfaces, so every existing
+            # extern's IR is byte-identical. `undo_idempotent` marks an
+            # at-most-once INVERSE (undo slot); `idempotent`/`idempotency_key`
+            # mark a re-deliverable emission (bare = trust-me, keyed = by
+            # construction). `register` is the per-declaration honesty tier the
+            # audit prints and the 290/309 policy floors read (partial order:
+            # declared < keyed, declared < shape-proven; keyed/shape-proven are
+            # peers) (docs/design/309-idempotent-inverse.md, §2, §"question 4").
+            **({"undo_idempotent": True} if decl.undo_idempotent else {}),
+            **({"idempotent": True} if decl.idempotent else {}),
+            **({"idempotency_key": decl.idempotency_key}
+               if decl.idempotency_key is not None else {}),
+            **({"register": _idempotent_register(decl)}
+               if (decl.idempotent or decl.undo_idempotent) else {}),
             # item 379: the typed config schema, in the SAME shape a component
             # carries it (lower.py:4956 `[{"name","type","default"}]`), so the
             # emitter and driver reuse the component config path verbatim. Absent
