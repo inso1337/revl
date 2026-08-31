@@ -3,8 +3,10 @@
 Design note for roadmap item 296 (`docs/v2.0-roadmap.md:3860`): when a
 consumer's required interface and a candidate's provided interface differ but
 are safely bridgeable, revl generates an adapter, but only under a strict,
-complete, named safety predicate. This is design-first; it changes no compiler
-code. It records what already exists and exactly where it stops, defines the
+complete, named safety predicate. This is design-first; the note itself
+changes no compiler code, and it specifies exactly one gate change for the
+implementation (alias token carry-over, section 2.1 S2). It records what
+already exists and exactly where it stops, defines the
 complete predicate (the crux), recommends where synthesis runs (proposed, not
 silent), specifies the artifact and its wiring, states the refusal contract,
 reconciles the design with 293 (evidence), 294 (parameterized capabilities),
@@ -14,8 +16,10 @@ tests an implementation agent can pick up.
 The one-sentence design: an adapter is ordinary revl code, synthesized from a
 closed catalogue of provably total transformations, declared at the consumer's
 required classification, wired through the existing require seam, and admitted
-by the same gate as hand-written code. Nothing in the pipeline learns what an
-adapter is; only the resolver and the `adapt` form do.
+by the same gate as hand-written code. The gate itself gains exactly one
+general wiring feature to make that true, alias token carry-over (section 2.1,
+S2), and hand-written wrappers use it identically. Nothing in the pipeline
+learns what an adapter is; only the resolver and the `adapt` form do.
 
 ## 1. What already exists, and the exact residue 296 covers
 
@@ -43,6 +47,16 @@ implicit, total, value-directed coercions: `T -> Opt[T]` injection (`:667`),
 with equal field sets pairwise (`:615`), function types with contravariant
 parameters (`:652`). So type widening and narrowing at unchanged arity already
 satisfy the consumer regime with no adapter at all.
+
+One caution up front: the bridge catalogue does not adopt `compatible`
+wholesale. `compatible` contains rules that are deliberately permissive and
+are not total coercions: `_is_wildcard` (`typecheck.py:590`) makes `Any`,
+`Never`, poison, and inference type parameters compatible with everything,
+the `Value` rule (`:611`) is compatible both ways, and the
+structural-meets-nominal rule (`:624`) returns True precisely because no type
+table is available at that call site to resolve the nominal. Section 2.2
+defines `compatible_total`, the restricted, table-carrying subrelation the
+bridges actually use.
 
 The residue, the exact set of differences that fail `_service_compatible`
 today but can carry a total, safe bridge, is:
@@ -93,31 +107,84 @@ outcome to a consumer outcome. It cannot panic, fault, or get stuck.
 **S2, effect class preserved.** The adapter method is declared with the
 consumer's required classification verbatim: plain stays plain,
 `emission` stays `emission`, `emission[caps]` keeps the same token list,
-the `async` flag and the `commutative` flag are copied. Conditions on the
-candidate:
+and the `async` and `commutative` flags are copied from `R`. Conditions on
+the candidate:
 
 * if `p` is an emission, `m` must be declared an emission (a plain
   requirement is never satisfied by an emitting candidate through a bridge;
   the adapter does not get to hide a boundary crossing);
-* `caps(p)` must be a subset of the consumer's declared `caps(m)`, compared
-  on declared tokens (with 294 valuations intact, section 6.2), and the
+* the candidate's capability reach must fit inside the consumer's declared
+  bound, compared as **boundaries under the joint wiring**, never as
+  literal token strings. Capability tokens are wiring keys
+  (`docs/capabilities.md`), local to each composition's namespace: a
+  candidate declared `emission[redis]` under a consumer declaring
+  `emission[cache]` may name the very same store, and a string comparison
+  would refuse that pair spuriously, or worse, admit two different
+  boundaries that happen to share a spelling. The check resolves each
+  side's tokens to the provisions they are bound to in the composed
+  manifest and requires the candidate's resolved boundary set to be a
+  subset of the consumer's (with 294 valuations intact, section 6.2). The
   unnameable `*` is never bridgeable;
-* `async(p) == async(m)` and `commutative(p) == commutative(m)`. Color and
-  ordering promises change how a call site is written;
-  `_service_compatible` fixes them (`admission.py:246`, `:251`) and the
-  adapter obeys the same law. A sync-to-async bridge would change the
-  consumer's call shape; an async-to-sync bridge is not writable.
+* color and ordering promises are one-way, admissible exactly in the
+  direction that *drops* a promise and refused in the direction that
+  fabricates one. `async(p)` implies `async(m)`: an async candidate cannot
+  hide behind a sync requirement, the consumer's call shape would change.
+  But a sync candidate under an async requirement is safe: the adapter is
+  declared `async` as required and its single candidate call is sync,
+  purer than declared, the same sound direction the G4 capability bound
+  already blesses. Symmetrically, `commutative(m)` implies
+  `commutative(p)`: a commutative requirement is never satisfied by a
+  candidate that made no reordering promise, but a consumer that never
+  assumes reorderability may bind a commutative candidate, whose promise
+  is simply dropped. `_service_compatible` currently fixes both flags as
+  equalities (`admission.py:246`, `:251`); the bridge predicate uses the
+  one-way form because the two relaxed directions are precisely the ones
+  that discard a promise instead of inventing one, and refusing them would
+  turn away safe candidates for no soundness gain.
 
-Enforcement is not new code. The synthesized provide body runs through the
-existing provider-body upper bound: a plain-declared method whose body
-reaches an emission is refused at `src/revl/lower.py:6959` (G4,
-emission-propagation), and an `emission[caps]` method whose body's capability
-set exceeds the declaration is refused at `lower.py:7005` (G4,
+Enforcement is *mostly* not new code, and the exception is load-bearing, so
+it is stated exactly rather than waved through. The synthesized provide
+body runs through the existing provider-body upper bound: a plain-declared
+method whose body reaches an emission is refused at `src/revl/lower.py:6959`
+(G4, emission-propagation), and an `emission[caps]` method whose body's
+capability set exceeds the declaration is refused at `lower.py:7005` (G4,
 emission-capability), both computed by `_method_emissions`
-(`src/revl/emission_analysis.py:346`). The predicate checks S2 up front only
-to refuse early with a resolution-time message; the gate would catch a
-violation regardless, which is the point: the adapter passes the same
-admission the same way hand-written code does.
+(`src/revl/emission_analysis.py:346`).
+
+But today that bound **refuses the adapter itself** for every
+capability-scoped requirement, including this design's own section 4
+example. `_method_emissions` records the *local require key name* as the
+capability a seam crossing reaches (`emission_analysis.py:398`,
+`caps.add(target.get("name"))`). The adapter binds the candidate under a
+fresh internal alias (section 4), say `backing`, so its body
+`emit backing.get(...)` computes `used = {backing}` against
+`decl.capabilities = (cache,)`, giving `extra = {backing}`, and the
+emission-capability bound refuses at `lower.py:7011`. Naming the alias
+`cache` instead collides with the adapter's own provided key `cache` and
+trips the G3 cycle check. Both doors are closed: under the shipped
+attribution rule, no admissible adapter for a capability-scoped
+requirement exists at all.
+
+The fix is a first-class **wiring feature, not an adapter special case**:
+alias token carry-over. An aliased require binding carries the capability
+tokens declared for the consumer-facing boundary it stands in for
+(valuations included), which under the joint wiring are the candidate's
+declared tokens resolved into the consumer's namespace, and
+`_method_emissions` attributes a crossing through an aliased require by
+those carried tokens, never by the alias's local key name. G4's subset
+check itself is unchanged; only the attribution of an aliased crossing
+changes, and it changes for **every** component, so a hand-written wrapper
+that renames a require gets exactly the same treatment. That is what keeps
+E5, the twin test, meaningful: the synthesized adapter and the
+byte-identical hand-written wrapper both lean on carry-over, and both pass
+or both fail together.
+
+So the honest form of the "same gate" claim: the gate gains one general
+attribution rule, specified in section 6.2, implemented in slice 2, tested
+by E5/E6/E8, and after that single change the adapter passes the same
+admission the same way hand-written code does. The predicate checks S2 up
+front only to refuse early with a resolution-time message; the extended
+gate would catch a violation regardless.
 
 **S3, no authority added.** The adapter component requires exactly one key
 (bound to the candidate's provision) and provides exactly the consumer's
@@ -140,17 +207,48 @@ ordinary component that holds one require and cannot create authority.
 * (b) a value the consumer never *named* may be projected away: extra fields
   in the candidate's return record that the consumer's required record type
   does not mention are unobservable to the consumer and safe to drop;
-* (c) distinct consumer-observable outcomes are never merged without opt-in.
+* (c) distinct consumer-observable outcomes are never merged without opt-in,
+  and the opt-in must be as fine-grained as the error type allows.
   `Result[V, E] -> Opt[V]` merges `Err(e)` with a legitimate `None`; that is
   the cache-outage-reads-as-a-miss bug, and it is exactly what the roadmap
-  item calls "error semantics silently weakened". It is admissible only when
-  `D` spells the arm (`Err(_) => None`), so the loss is written down, shown
-  in the diff, and attested.
+  item calls "error semantics silently weakened". When `E` is a **closed
+  variant type** (revl has these, `docs/syntax-2.0.md:84`), the opt-in must
+  map every variant **by name**: `NotFound => None` admits, and each
+  remaining variant is either mapped with its own honest arm or left
+  unmapped, which refuses. A blanket `Err(_) => None` over a variant `E`
+  is refused outright, because it is a fail-open trap. The revocation-cache
+  shape makes it concrete: the consumer requires
+  `revoked(t) -> Opt[Instant]` where `None` means proceed; the candidate
+  provides `-> Result[Instant, Error]` where `Error` includes
+  `Unavailable`. Under a blanket merge, a backend outage reads as "not
+  revoked": fail-open, silent, permanent, and attested as reviewed. Under
+  per-variant mapping the author must write an `Unavailable` arm, and
+  there is no honest `Opt` arm to write for it, which is the refusal doing
+  its job. Per-variant exhaustiveness also carries the right staleness
+  behavior for free: a new candidate error variant breaks exhaustiveness,
+  the derivation hash changes, re-derivation refuses, and the new error
+  surfaces for a human decision instead of silently joining the merge.
+  `Err(_) => None` remains available only when `E` is **opaque** (a `Str`,
+  a record, anything without a closed constructor set), and it is then
+  named for what it is: a **total waiver**. Every error the candidate can
+  ever produce, present and future, will read as absence. The refusal hint
+  says so in those words (section 5), and the plan records the two shapes
+  distinctly (`merge-variant` per arm vs `merge-total`), so a reviewer and
+  the 127 attestation can tell "merged NotFound" from "merged everything".
 
 The asymmetry worth stating once: data flowing *toward the candidate*
 (arguments) may be defaulted automatically when the default means absence;
 data flowing *toward the consumer* (returns) is never fabricated
 automatically, because the consumer will read it as truth.
+
+And one structural conflict is named rather than papered over: at the
+`Result -> Opt` position, S1 (the adapter is total) and S4 (outcomes are
+not merged) genuinely pull against each other. A total adapter returning
+`Opt[V]` has no honest destination for an error that must not be merged;
+there is no third value to return. The only sound options at that position
+are an explicit merge (per variant, or the total waiver on opaque `E`) or
+refusal, and the design's job is to make that choice loud, human, and
+recorded, never inferred.
 
 **S5, lifecycle neutrality.** The roadmap item requires that "lifecycle
 guarantees remain valid", and the adapter satisfies it by having no
@@ -174,9 +272,29 @@ admissible with no opt-in; `opt-in` means admissible only when `D` names it;
 `refused` means never synthesized (hand-write the wrapper instead).
 
 **B1: argument added with a default** (consumer sends k arguments, candidate
-wants k+n). Condition: the extra parameters form a positional suffix of the
-candidate's parameter list, and each extra type has a canonical inhabitant
-from the closed absence-shaped table:
+wants k+n). Two conditions, and pairing comes first:
+
+*Pairing.* Whenever arity differs, positional order alone is not evidence
+of correspondence. The consumer's k parameters pair with candidate
+parameters only where the **parameter names match**; an explicit mapping in
+`D` overrides name matching; the unpaired candidate parameters are the ones
+considered for defaulting. If more than one same-typed pairing would
+satisfy the plan, the method is refused (`ambiguous-pairing`) rather than
+resolved by position. The wrong bridge this rule exists to refuse: consumer
+`log(message: Str)`, candidate `log(category: Str, message: Opt[Str])`.
+Suffix-defaulting by position would pair consumer `message` with candidate
+`category` (a B3 identity `Str -> Str`) and default candidate `message` to
+`None`: every log line becomes a category with no message, fully
+automatically, with every step individually admissible. Name pairing sends
+`message` to `message` and then asks whether `category` is defaultable; it
+is not (`Str` has no canonical default), which is the correct refusal. At
+equal arity with all positions name-matched, positional and name pairing
+agree and nothing changes; record fields were already protected because
+structural records are name-keyed, and this rule extends the same
+protection to parameters.
+
+*Defaulting.* Each unpaired candidate parameter must have a canonical
+inhabitant from the closed absence-shaped table:
 
 * `Opt[T]` defaults to `None`;
 * `List[T]` defaults to `[]`;
@@ -193,7 +311,19 @@ With an explicit default expression in `D` (pure by S1: literals and
 constructors only), any type is admissible; the value is then visible in the
 adapter source and the diff. Totality: defaults are literal constructions.
 Effect: pure by construction. Contract: the consumer's k parameters pass
-through position-for-position, each under B3.
+through name-paired, each under B3.
+
+One honesty note carried from adversarial review: an absence-shaped default
+is a *convention*, not a checked property of the candidate. `delete(key)`
+bridged to a candidate `delete(key, scope: Opt[Scope])` where `None` means
+"all scopes" deletes strictly more than the consumer asked for, and every
+step of that bridge sits inside the auto table. No type-level fact
+distinguishes "None means not provided" from "None means everything". For
+that reason B1 auto-defaulting stays **proposed-only** for as long as this
+design stands: it is excluded from any future `--auto-adapt=safe` subset
+(section 3), and the proposal renders the defaulted call in full, so a
+reviewer sees `backing.delete(key, None)` and can ask what `None` means to
+this candidate before committing it.
 
 **B2: argument dropped** (the consumer's required method has parameters the
 candidate lacks). Trivially total and pure. Refused in auto under S4(a):
@@ -202,31 +332,75 @@ consumer believes it matters". Opt-in per parameter (`drop options` in `D`),
 which makes the discard auditable.
 
 **B3: parameter type bridge** (consumer passes `X` at a position where the
-candidate expects `Y`). Auto iff `compatible(Y, X)` holds through the
-implicit total coercions (identity, `Int -> Float`, `Int32 -> Int`,
-`T -> Opt[T]` injection, equal-field-set structural match, elementwise on
-same-head containers). Anything the language requires an explicit spelling
-for is refused: `Int -> Int32` can lose bits and is spelled `.to_int32()`
+candidate expects `Y`). Auto iff `compatible_total(Y, X)` holds, where
+`compatible_total` is a **named, restricted subrelation** of
+`typecheck.compatible`, defined once here and used everywhere in this
+predicate (B3, B4, B6):
+
+* identity on equal resolved types;
+* `Int -> Float`, `Int32 -> Int`, `Int32 -> Float`;
+* `T -> Opt[T]` injection;
+* structural records with equal field sets, elementwise `compatible_total`,
+  with nominals on **either side resolved to their field sets first**: the
+  predicate carries both declarations' type tables, so a nominal is
+  expanded before comparison, and a nominal that cannot be resolved
+  refuses rather than presumes;
+* same-head containers, elementwise `compatible_total`;
+* nothing else.
+
+The restriction exists because `compatible` is deliberately permissive in
+places that are not total coercions and must not become bridges (section
+1). `_is_wildcard` (`typecheck.py:590`) makes `Any`, `Never`, poison, and
+inference type parameters compatible with everything, and the `Value` rule
+(`:611`) is compatible both ways; a wildcard or `Value` at a bridged
+position would admit any candidate shape and prove nothing, so
+`compatible_total` refuses these positions outright
+(`non-total-conversion` naming the wildcard). And the
+structural-meets-nominal rule (`typecheck.py:624`) returns True precisely
+because that call site has no type table to resolve the nominal against;
+under it, a candidate nominal `UserRecord` would auto-bridge to a consumer
+structural `{name, age}` regardless of `UserRecord`'s actual fields. The
+predicate has no such excuse: resolution holds both manifests, so it
+carries both type tables into the relation and resolves, and refuses where
+it cannot.
+
+Anything the language requires an explicit spelling for is likewise
+refused: `Int -> Int32` can lose bits and is spelled `.to_int32()`
 (`docs/arithmetic.md`), `Float -> Int` likewise. The rule in one line: the
-adapter may use exactly the implicit coercion set of `compatible` and
-nothing more, so it never contains a conversion the checker would refuse to
-insert silently. (At unchanged arity these positions already pass
-`_service_compatible` with no adapter; B3 matters inside methods that also
-need B1/B2/B4.)
+adapter may use exactly the *total* subset of the checker's implicit
+coercions, resolved against real type tables, and nothing more. (At
+unchanged arity, positions passing the permissive `compatible` already
+pass `_service_compatible` with no adapter; B3's stricter relation matters
+inside methods that also need B1/B2/B4, and extra strictness there can
+only refuse a bridge, never a direct binding.)
 
 **B4: return type bridge** (candidate returns `Y`, consumer requires `X`):
 
-* auto iff `compatible(X, Y)` via the implicit set (this includes plain
-  narrowing and `V -> Opt[V]` injection);
-* `Result[V, E] -> Opt[V]`: constructor-complete
-  `match { Ok(v) => Some(v), Err(_) => None }`. Total, pure, type-correct,
-  but it merges outcomes: **opt-in** under S4(c), the arm written in `D`;
+* auto iff `compatible_total(X, Y)` (identity, the numeric widenings,
+  `V -> Opt[V]` injection, resolved structural equality; the same
+  restricted relation as B3, with wildcard and unresolved-nominal
+  positions refused);
+* `Result[V, E] -> Opt[V]`: constructor-complete `match`, graded by the
+  shape of `E` per S4(c). When `E` is a **closed variant type**, the
+  opt-in is **per-variant**: `D` maps every variant by name
+  (`NotFound => None`, each other variant with its own honest arm), every
+  arm total and pure, and a missing variant refuses
+  (`unmapped-error-variant` naming it), so a variant added to the
+  candidate later breaks the plan at re-derivation and surfaces for a
+  decision. When `E` is **opaque** (Str, a record, no closed constructor
+  set), `Err(_) => None` is admissible as an explicit **total waiver**,
+  opt-in under S4(c), with the waiver spelled out in the hint and the
+  plan recording `merge-total` (section 5);
 * `Opt[V] -> Result[V, E]`: requires fabricating an error for `None`. `E`
   has no canonical inhabitant, so this is **opt-in** with an explicit pure
   error expression (`None => Err({"code": "ENOENT", ...})`); refused
   otherwise;
-* `Result[V, E1] -> Result[V, E2]`: auto iff `compatible(E2, E1)` totally;
-  otherwise opt-in with an explicit `Err` mapping arm;
+* `Result[V, E1] -> Result[V, E2]`: auto iff `compatible_total(E2, E1)`.
+  The permissive `compatible` is never consulted here, for the same reason
+  as B3: a permissive True on the error types (a wildcard, an unresolved
+  nominal) would silently change the error shape the consumer matches on.
+  Otherwise opt-in with an explicit `Err` mapping, per-variant when `E1`
+  is a closed variant;
 * `Opt[V] -> V`: refused in auto (a `None` has nowhere honest to go);
   opt-in with an explicit value, same fabrication rule as B1's explicit
   form, and the same warning: this merges absence into data.
@@ -261,7 +435,8 @@ ADAPT(R, P, D) holds iff, for every method m of R:
 3. every transformation graded opt-in is named in D at that position;
 4. S1 holds (the plan uses only the closed body catalogue);
 5. S2 holds (classification copied from R; emission implication, token
-   subset, color and commutativity equality against P);
+   subset on boundaries under the joint wiring, one-way color and
+   commutativity against P);
 6. S3 holds (one require, no externs, pure defaults, candidate reach inside
    the consumer's declared bound);
 7. S4 holds (no un-opted discard, no un-opted fabrication toward the
@@ -279,7 +454,13 @@ refuses named.
 For completeness, the differences no `D` can opt into, because no total,
 effect-preserving bridge exists:
 
-* an `async` or `commutative` flip (call shape and reordering promises);
+* an `async` or `commutative` change in the promise-fabricating direction:
+  an async candidate behind a sync requirement (the consumer's call shape
+  would change), or a commutative requirement over a non-commutative
+  candidate (a reordering promise nobody made). The two opposite
+  directions, sync candidate under async requirement and commutative
+  candidate under a non-commutative requirement, drop a promise and are
+  admissible under S2;
 * an emitting candidate behind a plain requirement, or candidate capability
   tokens outside the consumer's declared scope (widening the consumer's
   declaration is an interface change, not an adapter);
@@ -316,20 +497,28 @@ a capability-list shrink. The registry loop already returns source to commit
 in two calls (`registry.py` module docstring), so the proposal costs no
 extra round trip in the agent workflow; the `adapt` block rides the same
 commit as the import. The trade-off stated honestly: auto mode would make
-some resolutions work with zero edits, and for the no-opt-in subset (B1
-absence-shaped suffixes, B6 return projection, B3/B4 implicit passthrough)
-the predicate is airtight on paper. But every 414 postmortem is a fold that
-was airtight on paper, and a wrong silent bridge ships a semantic bug with
-no reviewable artifact. If soak time earns it, an explicit
-`revl link --auto-adapt=safe` flag can later enable the no-opt-in subset,
-never the opt-in transformations and never by default.
+some resolutions work with zero edits, and the no-opt-in subset is typed
+end to end. But it is not semantically airtight, and the review's
+counterexamples say why: B1's absence-shaped default is a convention the
+type system cannot check (the `delete(key, scope: Opt[Scope])` widening,
+B1), and pairing under arity change needed a name condition to exclude a
+fully-auto wrong bridge (the `log` example, B1). A wrong silent bridge
+ships a semantic bug with no reviewable artifact, and every 414 postmortem
+is a fold that was airtight on paper. If soak time earns it, an explicit
+`revl link --auto-adapt=safe` flag can later enable only B6 return
+projection and B3/B4 `compatible_total` passthrough; B1 auto-defaulting is
+permanently excluded from that subset, and the opt-in transformations are
+never auto and never by default.
 
 Either way the synthesized component passes the **same admission gate as
 hand-written code**: G2 provision disjointness and G3 cycles over its wiring,
-G4 both provider-body bounds (`lower.py:6959`, `:7005`), A6 completeness for
-the service it provides, the item-66 attenuation fold, and the item-33
-policy gate. No gate learns what an adapter is; that is the design's main
-safety property, and it is testable (exit test E5).
+G4 both provider-body bounds (`lower.py:6959`, `:7005`) under the S2 alias
+token carry-over rule, A6 completeness for the service it provides, the
+item-66 attenuation fold, and the item-33 policy gate. The gate is extended
+exactly once, by carry-over, and that extension is a general wiring feature
+hand-written wrappers use identically (S2); beyond it, no gate learns what
+an adapter is. That is the design's main safety property, and it is
+testable (exit test E5).
 
 ## 4. The artifact
 
@@ -342,8 +531,10 @@ riding the existing seam:
 component CacheAdapter requires backing: VendorCache provides cache: Cache {
   provide cache {
     fn get(key: Str) -> Opt[Str] {
-      // B1: Options suffix defaulted to {}   (auto, absence-shaped)
-      // B4: Result[Str, Error] -> Opt[Str]   (opt-in: adapt names Err(_) => None)
+      // B1: options unpaired, defaulted to {}  (auto, absence-shaped)
+      // B4: Result[Str, Error] -> Opt[Str]     (opt-in: Error is an opaque
+      //     record here, so the total waiver Err(_) => None is admissible;
+      //     a closed variant Error would demand per-variant arms instead)
       return match backing.get(key, {}) {
         Ok(v)  => Some(v),
         Err(_) => None,
@@ -374,10 +565,12 @@ Properties:
   wrapper.
 * **Wiring.** The adapter provides the consumer's required key; the
   candidate's provision is bound under a fresh internal alias so G2 sees
-  exactly one provider of the consumer-facing key. This aliasing is an
-  honest hard part twice over: the resolver's manifest wiring must rename
-  the candidate's provided key, and the capability folds that compare
-  wiring keys must carry the candidate's declared tokens through the alias
+  exactly one provider of the consumer-facing key. This aliasing is where
+  S2's carry-over rule earns its keep: without it, `_method_emissions`
+  attributes the body's crossing to the alias key and G4 refuses the
+  adapter itself (S2 walks through the exact failure). The resolver's
+  manifest wiring must rename the candidate's provided key, and the alias
+  binding must carry the consumer-facing tokens, valuations included
   (section 6.2).
 * **Placement.** The adapter lands in the candidate's placement unit, so
   the consumer-to-adapter seam is the same seam the consumer-to-candidate
@@ -397,10 +590,17 @@ mirrors `_Drift` (`admission.py:102`):
 where `position` is a parameter name, `return`, or a record field path, and
 `clause` is one of a closed enum:
 
-`no-canonical-default`, `supplied-value-dropped`, `outcome-merge`,
-`fabricated-return`, `non-total-conversion`, `effect-missing-declaration`,
+`no-canonical-default`, `ambiguous-pairing`, `supplied-value-dropped`,
+`outcome-merge`, `unmapped-error-variant`, `fabricated-return`,
+`non-total-conversion`, `effect-missing-declaration`,
 `effect-exceeds-bound`, `color-mismatch`, `commutative-mismatch`,
 `method-missing`, `unnameable-reach`.
+
+On the admitting side, the plan records each opted-in outcome merge with
+its shape: `merge-variant` per named arm, or `merge-total` for the opaque-E
+waiver, so the 123 diff and the 127 attestation distinguish "merged
+NotFound" from "merged everything" without reading the arms back out of
+the source.
 
 Message style follows the shipped G4 refusals (message plus repair hint):
 
@@ -408,8 +608,18 @@ Message style follows the shipped G4 refusals (message plus repair hint):
 adapter refused: `Cache.get` return merges outcomes
   candidate returns `Result[Str, Error]`; the requirement is `Opt[Str]`.
   Folding `Err` into `None` makes a failure indistinguishable from a miss.
-  hint: opt in explicitly with `adapt cache { get: Err(_) => None }`, or
-  require `Result` and handle the error at the call site.
+  hint: `Error` is opaque, so the only opt-in is the total waiver
+  `adapt cache { get: Err(_) => None }`: every error this candidate can
+  ever produce, present and future, will read as absence. Opt in only if
+  absence is a safe reading of any failure whatsoever, or require
+  `Result` and handle the error at the call site.
+
+adapter refused: `Revocation.revoked` leaves `Unavailable` unmapped
+  candidate returns `Result[Instant, Error]` and `Error` is a closed
+  variant; the plan maps `NotFound => None` but names no arm for
+  `Unavailable`. A backend outage must not read as "not revoked".
+  hint: map every variant honestly, or require `Result` and decide at
+  the call site. `Err(_)` is not accepted for a closed variant type.
 
 adapter refused: `Cache.get` exceeds the declared reach (G4)
   the candidate implementation is `emission[net, cache]`, but the
@@ -440,6 +650,17 @@ candidate's own surface and behavior. Through an adapter:
   authority fit, a directly compatible candidate outranks an adapted one
   (the bridge is a cost, not a tie). The candidate row is annotated
   `via adapter` with the plan summary in its `why`.
+* **One evidence class is discounted by the plan itself.** A fault-sweep
+  conclusion of the shape "failures surface as `Err`, data is never
+  corrupted" is *inverted* by a plan that merges outcomes: behind a
+  `merge-total` waiver (or any merge arm folding an error into absence),
+  those dutifully surfaced errors are exactly what the consumer stops
+  seeing. So whenever the plan contains an outcome-merge opt-in, resolve
+  discounts the candidate's error-semantics evidence class in ranking and
+  flags the inversion in `why` ("fault sweep attests errors surface; this
+  plan merges them into `None`"). Inverse-roundtrip and gauntlet evidence
+  describe value behavior the bridge leaves untouched and rank at full
+  weight.
 * **Pair evidence accrues to the pair.** A gauntlet or fault sweep run
   through the adapted surface is recorded against the derivation hash
   (candidate sha plus adapter derivation), not against the bare candidate;
@@ -458,12 +679,19 @@ widens nor narrows a valuation; it has no spelling that could.
 
 The load-bearing seam is the one the 294 note already names
 (`docs/design/294-parameterized-capabilities.md`, "the elements the fold
-compares are WIRING KEYS, not declared tokens"): the adapter inserts one
-wiring hop (consumer key to internal alias), so the emit-caps fold must
-record the candidate's declared tokens through the alias binding, or the
-attenuation and G4 folds would compare the bare alias key and never see a
-valuation. Slice 2 makes that explicit: the alias require carries the
-candidate's declared tokens as its capability contribution.
+compares are WIRING KEYS, not declared tokens"), and S2 shows it is not
+merely load-bearing but currently *closed*: `_method_emissions` attributes
+an aliased crossing to the bare alias key, so the G4 folds never see a
+valuation and the emission-capability bound refuses the adapter outright.
+The carry-over rule of S2 is the fix, restated here in fold terms: the
+alias require binding carries the consumer-facing declared tokens,
+valuations included, as its capability contribution, and every fold that
+walks `_method_emissions` output (G4, the attenuation fold, `component_reach`,
+the G8 audit) reads the carried tokens through the alias. Slice 2
+implements exactly this, as a wiring feature any component's renamed
+require gets, and the S2 subset check then compares valuations under 294's
+extended partial order on the resolved boundaries, never on token
+spellings.
 
 ### 6.3 The 414 folds see through the adapter
 
@@ -482,44 +710,81 @@ in the consumer-side reach, the G8 audit chain shows both hops, and the
 taint origin fold flows provenance through. A fold that reports the adapter
 as the terminal boundary is a completeness bug, caught by these cells.
 
+### 6.4 Adapters over adapters
+
+A committed adapter is an ordinary component providing the consumer-facing
+key, so a later resolve can find *it* as a candidate and propose a second
+bridge in front of it. Two failure modes hide there. Composite lossiness:
+each hop's plan is individually attested, but the composed loss (a merge
+in hop one, a default in hop two) appears in no single artifact anyone
+reviewed. Ranking inversion: the committed adapter provides the exact
+required shape, so at equal authority fit it would outrank a fresh single
+bridge to the original candidate, and chains would grow by default,
+precisely backwards. Three rules close both:
+
+* `resolve` reads the synthesized-adapter marking (the derivation-hash
+  header of section 4 is machine-readable) and reports **chain depth** in
+  the candidate's `why`;
+* at equal authority fit, a chain ranks **below** a fresh single-bridge
+  plan against the underlying candidate: one reviewed plan beats two
+  stacked ones, and depth only ever ranks down;
+* `revl adapt --check` flattens a chain and re-displays the **composite**
+  plan end to end, every merge, default, and drop across all hops in one
+  listing, so what gets attested is the actual composed loss, not the
+  last hop's slice of it.
+
 ## 7. Staged plan and exit tests
 
 ### Slices
 
 1. **The predicate, pure.** `src/revl/adapt.py`: `bridge_plan(required,
    provided, opt_ins)` over two `ServiceDecl`s returning a per-method plan
-   or the refusal list; the catalogue and clause enum as data. CLI
-   `revl adapt --check` over a need and a candidate manifest. No synthesis,
-   no IR. Unit tests exercise every catalogue row and every refusal enum
-   member.
+   or the refusal list; the catalogue and clause enum as data; the
+   `compatible_total` relation carrying both type tables; the name-pairing
+   rule for arity change. CLI `revl adapt --check` over a need and a
+   candidate manifest. No synthesis, no IR. Unit tests exercise every
+   catalogue row and every refusal enum member.
 2. **Synthesis and the gate.** The `adapt` source form (parser), IR-level
-   synthesis from a plan (deterministic, derivation-hashed), the alias
-   wiring with token carry-over (6.2), admitted through the unmodified
+   synthesis from a plan (deterministic, derivation-hashed), and the one
+   deliberate gate change: alias token carry-over in `_method_emissions`
+   attribution plus the joint-wiring boundary comparison (S2, 6.2),
+   landed as a general wiring feature with its own tests over hand-written
+   renamed requires. Admission then runs through the otherwise-unchanged
    `check_and_lower`. The twin test (E5) lands here.
 3. **Registry, diff, federation.** `resolve` reports
    compatible-with-adapter below direct-compatible at equal authority, with
-   plan, generated `adapt` text, and near-miss refusals inline; `revl diff`
-   (item 123) shows the adapter as an added bridge component; the
-   attestation covers it as ordinary code; `federation.check` records a
-   satisfied-via-adapter verdict in the pin.
+   plan, generated `adapt` text, and near-miss refusals inline; chain
+   depth read from the derivation marking, chains ranked below fresh
+   single bridges, `adapt --check` flattening (6.4); the outcome-merge
+   evidence discount and `why` flag (6.1); `revl diff` (item 123) shows
+   the adapter as an added bridge component; the attestation covers it as
+   ordinary code, `merge-variant`/`merge-total` shapes included;
+   `federation.check` records a satisfied-via-adapter verdict in the pin.
 4. **Hardening.** The 414 matrix rows (6.3); a generative test over random
    declaration pairs asserting the dichotomy: every pair either yields an
    adapter that admits, or a refusal, never a synthesized artifact the gate
-   rejects (any third outcome is a predicate/gate disagreement and a bug);
-   293 pair-evidence plumbing.
+   rejects (any third outcome is a predicate/gate disagreement and a bug).
+   The generated pairs must include nominal-vs-structural surfaces,
+   wildcard (`Any`/`Never`/`Value`) positions, and closed-variant error
+   types, the exact surfaces where the permissive `compatible` and the
+   restricted `compatible_total` disagree; 293 pair-evidence plumbing.
 
 ### Exit tests
 
 * **E1, the item's own pair adapts.** Consumer requires
   `get(key: Str) -> Opt[Str]`; candidate provides
   `get(key: Str, options: Options) -> Result[Str, Error]` with `Options`
-  an empty-defaultable record. With `adapt` opting into `Err(_) => None`:
-  resolution reports compatible-with-adapter, synthesis admits end-to-end,
-  and `revl audit` shows the two-hop chain naming the candidate's real
-  boundary.
+  an empty-defaultable record and `Error` an opaque record type. With
+  `adapt` opting into the total waiver `Err(_) => None`: resolution
+  reports compatible-with-adapter, synthesis admits end-to-end under the
+  carry-over rule, and `revl audit` shows the two-hop chain naming the
+  candidate's real boundary. This test is red today without slice 2's
+  attribution change; that is the point of E1 running through a
+  capability-scoped `Cache`.
 * **E2, error discard without opt-in refused.** Same pair, no `Err` arm in
   `D`: refused with `outcome-merge` naming `get`, position `return`, and
-  the hint spelling the arm. Nothing is synthesized.
+  the hint spelling the total waiver in waiver language. Nothing is
+  synthesized.
 * **E3, authority refused.** (a) Candidate `get` is `emission[net]`,
   consumer requires plain `get`: refused `effect-missing-declaration`
   naming `net`. (b) Consumer requires `emission[db]`, candidate reaches
@@ -528,7 +793,12 @@ as the terminal boundary is a completeness bug, caught by these cells.
   same G4 bound (`lower.py:6959` / `:7005`).
 * **E4, non-total refused.** Candidate wants `Int32` where the consumer
   sends `Int`: refused `non-total-conversion`, hint pointing at
-  `.to_int32()` in a hand-written wrapper. `Float -> Int` likewise.
+  `.to_int32()` in a hand-written wrapper. `Float -> Int` likewise. Also
+  the `compatible_total` fences: a candidate nominal `UserRecord` against
+  a consumer structural `{name, age}` is admitted only when the carried
+  type table resolves `UserRecord` to exactly those fields, refused on
+  mismatch or when unresolvable; an `Any` or `Value` at a bridged
+  position is refused, never auto-passed.
 * **E5, the twin test (same gate as hand-written).** The synthesized
   adapter and a byte-identical hand-written component produce the same
   admission verdict, the same G8 surface, and the same audit chains, over
@@ -537,21 +807,57 @@ as the terminal boundary is a completeness bug, caught by these cells.
 * **E6, folds see through.** The 6.3 matrix cells: an adapted composition's
   emission is attributed to the candidate's boundary by the approval fold,
   `component_reach`, the G8 audit, and the taint fold.
-* **E7, defaults discipline.** An absence-shaped suffix (`Opt`, `List`,
-  empty record) auto-admits; an extra `Int` parameter is refused
+* **E7, defaults discipline.** Unpaired absence-shaped parameters (`Opt`,
+  `List`, empty record) auto-admit; an unpaired `Int` parameter is refused
   `no-canonical-default`; an explicit default in `D` admits it and shows
   the value in the emitted source.
 * **E8, 294 pass-through.** A candidate scoped
   `emission[fs.write(path="/tmp/job-42")]` bridges under a consumer
   requirement with the same or wider valuation and is refused under a
   tighter one; the attenuation fold sees the valuation through the alias.
+* **E9, pairing under arity change.** Consumer `log(message: Str)`,
+  candidate `log(category: Str, message: Opt[Str])`: refused, never the
+  positional bridge (consumer `message` must pair with candidate
+  `message`, and `category: Str` has no canonical default). An explicit
+  `D` mapping naming the pairing and a default admits, and the emitted
+  source shows both. A pair with two same-typed candidates for one
+  consumer parameter refuses `ambiguous-pairing`.
+* **E10, closed-variant error mapping.** The revocation pair: consumer
+  `revoked(t) -> Opt[Instant]`, candidate `-> Result[Instant, Error]`
+  with `Error = NotFound | Unavailable`. Blanket `Err(_) => None` is
+  refused (closed variant). A plan mapping only `NotFound => None` is
+  refused `unmapped-error-variant` naming `Unavailable`. Adding a new
+  variant to the candidate's `Error` breaks re-derivation of a previously
+  admitted plan. The same pair with an opaque `Error` admits under the
+  total waiver and the attestation records `merge-total`.
+* **E11, one-way promises.** A sync candidate under an async requirement
+  admits (adapter declared async, purer body); an async candidate under a
+  sync requirement refuses `color-mismatch`. A commutative candidate
+  under a non-commutative requirement admits; the reverse refuses
+  `commutative-mismatch`.
+* **E12, chains.** An adapter proposed in front of a committed adapter is
+  reported with chain depth 2 in `why` and ranks below a fresh
+  single-bridge plan against the underlying candidate at equal authority;
+  `revl adapt --check` on the chain displays the flattened composite plan
+  listing every hop's merges, defaults, and drops.
+* **E13, evidence discount.** A candidate whose fault-sweep evidence
+  attests errors-surface-as-`Err`, resolved through a plan containing an
+  outcome merge, has that evidence class discounted and the inversion
+  flagged in `why`; the same candidate through a merge-free plan ranks at
+  full weight.
 
 ## 8. Honest hard parts
 
-* **Key aliasing.** G2 key identity is composition-wide; the alias rename in
-  the resolver wiring and the token carry-over on the alias binding are the
-  two places a shortcut would silently break the capability folds. Both are
-  named in slices 2 and 3 and tested in E6/E8.
+* **Alias token carry-over is the one deliberate gate change.** S2 shows
+  the shipped attribution rule refuses every capability-scoped adapter
+  (both alias spellings lose, to G4 and to G3), so carry-over is not a
+  wiring nicety but the load-bearing enabling change, and the design says
+  so in S2 rather than claiming zero gate code and contradicting itself
+  here. It must land as a general wiring feature: a shortcut that
+  special-cased synthesized components would break the E5 twin and the
+  capability folds at once. The resolver's manifest rename and the carried
+  tokens on the alias binding are the two places to get exactly right;
+  both are named in slices 2 and 3 and tested in E5/E6/E8.
 * **Name-only matching in v1.** A candidate whose method is named `fetch`
   cannot satisfy `get` yet. Rename mapping in `D` is a clean extension, but
   it multiplies the audit surface and is deliberately out of scope.
