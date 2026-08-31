@@ -63,7 +63,7 @@ import threading
 import time
 from pathlib import Path
 
-from ._paths import backends_root
+from ._paths import backends_root, stdlib_root
 from .activation import local_prereqs
 from .compiler import compile_files
 from .distribute import distributability
@@ -1142,6 +1142,23 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             "provides": list(provides[pname]),
             "proxies": proxies,
             "probe": pconf.get("probe") or [],
+            # item 396 option B / 410: the two host-ref roots the node runner
+            # joins a `@ts ref` against, plus the per-ref hash-check list. 396(B)
+            # set NEITHER under placement (a pre-existing gap for user refs); 410
+            # fixes it for the stdlib kind (self-derived by the runner too) and in
+            # passing for the user kind. `refRoot` is the user root compile tree;
+            # `stdlibRefRoot` the install tree. Harmless for non-node backends,
+            # which ignore the keys.
+            "refRoot": (os.path.dirname(os.path.abspath(str(files[0])))
+                        if files else ""),
+            "stdlibRefRoot": str(stdlib_root().parent),
+            "refs": [
+                {"extern": e.get("name"), "path": r["path"],
+                 "sha256": r["sha256"],
+                 **({"root": r["root"]} if r.get("root") else {})}
+                for e in ir.get("externs") or []
+                for r in [(e.get("refs") or {}).get("ts")] if r is not None
+            ],
         }
         if serve_keys:
             # `methods` is the stub's allowlist: the operations the *service

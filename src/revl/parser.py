@@ -399,6 +399,13 @@ class HostRef:
     # set by the compiler's ref resolver (hostref.resolve_refs):
     rel_path: str | None = None   # resolved path RELATIVE TO THE ROOT tree
     sha256: str | None = None     # sha256 of the resolved file's raw bytes
+    # item 410: the ROOT KIND this ref resolved against. `"stdlib"` when the
+    # DECLARING module is install-origin (resolved through the item-319 search
+    # path or realpath-contained in `stdlib_root()`), so the ref jails to the
+    # install tree and the runner picks the install root at deploy. `None`
+    # (absent in the IR) for a user-origin ref — every existing ref IR stays
+    # byte-identical.
+    root_kind: str | None = None
 
 
 @dataclass
