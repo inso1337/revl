@@ -615,6 +615,26 @@ def derive_changelog(before: dict, after: dict, previous_version: str | None = N
 # --------------------------------------------------------------------------
 # rendering.
 
+# The stable release-note skeleton (Slice 3, item 49 attach point). The section
+# order and headings are a CONTRACT: release tooling splices under these anchors,
+# so both the Markdown and the plain renderers drive off this single list, and
+# every section is always emitted in this order - an empty one carries an
+# explicit placeholder rather than vanishing, so a tool never has to guess
+# whether a missing heading means "no changes" or "renderer changed".
+SECTIONS = (
+    ("breaking", "Breaking / authority widenings"),
+    ("added", "Added / relaxed (compatible)"),
+    ("internal", "Internal / wiring"),
+    ("unclassified", "Unclassified changes (review manually)"),
+)
+
+# The output formats `revl changelog --format` accepts. `markdown` is the stable
+# skeleton above; `json` is the section-4 document a registry or bot consumes;
+# `plain` is the same skeleton with no Markdown markup, for a log line or a
+# release tool that renders its own presentation.
+FORMATS = ("markdown", "json", "plain")
+
+
 def _render_headline(headline: dict) -> str:
     if headline.get("marker"):
         head = headline["marker"]
@@ -631,8 +651,12 @@ def _render_headline(headline: dict) -> str:
 def render_markdown(doc: dict, title: str | None = None) -> str:
     """Render the changelog document as a release note (Markdown, no timestamp).
 
-    A release date, if wanted, is passed via `title` by the operator and lives
-    in the header the renderer treats as opaque, never in a derived line.
+    A STABLE skeleton (Slice 3): every `SECTIONS` heading is emitted in the fixed
+    order, an empty section carrying an explicit `_None._` placeholder rather
+    than disappearing, so release tooling can rely on the `##` anchors being
+    present and ordered. A release date, if wanted, is passed via `title` by the
+    operator and lives in the header the renderer treats as opaque, never in a
+    derived line.
     """
     out: list[str] = []
     if title:
@@ -641,35 +665,67 @@ def render_markdown(doc: dict, title: str | None = None) -> str:
     out.append(f"**Release impact: {_render_headline(doc['headline'])}**")
     out.append("")
 
-    sections = [
-        ("breaking", "Breaking / authority widenings"),
-        ("added", "Added / relaxed (compatible)"),
-        ("internal", "Internal / wiring"),
-        ("unclassified", "Unclassified changes (review manually)"),
-    ]
-    any_body = False
-    for key, heading in sections:
+    for key, heading in SECTIONS:
         entries = doc.get(key) or []
-        if not entries:
-            continue
-        any_body = True
         out.append(f"## {heading}")
+        if not entries:
+            out.append("_None._")
+            out.append("")
+            continue
         for entry in entries:
             out.append(f"- {entry['text']}")
             if key == "unclassified" and entry.get("paths"):
                 out.append(f"  - moved: {', '.join(entry['paths'])}")
         out.append("")
 
-    if not any_body:
-        out.append("No structural, authority, or interface change detected.")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def render_plain(doc: dict, title: str | None = None) -> str:
+    """Render the changelog document as plain text - the same stable skeleton as
+    `render_markdown`, with no Markdown markup (no `#`, `**`, or `-`).
+
+    For a release tool that renders its own presentation, a commit-message body,
+    or a log line, where Markdown decoration would be noise. Deterministic and
+    timestamp-free, exactly like the Markdown form.
+    """
+    out: list[str] = []
+    if title:
+        out.append(title)
+        out.append("=" * len(title))
+        out.append("")
+    out.append(f"Release impact: {_render_headline(doc['headline'])}")
+    out.append("")
+
+    for key, heading in SECTIONS:
+        entries = doc.get(key) or []
+        out.append(f"{heading}:")
+        if not entries:
+            out.append("  (none)")
+            out.append("")
+            continue
+        for entry in entries:
+            out.append(f"  * {entry['text']}")
+            if key == "unclassified" and entry.get("paths"):
+                out.append(f"      moved: {', '.join(entry['paths'])}")
         out.append("")
 
     return "\n".join(out).rstrip() + "\n"
 
 
-def render(doc: dict, title: str | None = None, as_json: bool = False) -> str:
-    """The CLI entry: Markdown by default, the structured document with
-    `--json`."""
-    if as_json:
+def render(doc: dict, title: str | None = None, as_json: bool = False,
+           fmt: str | None = None) -> str:
+    """The CLI entry. `fmt` (one of `FORMATS`) selects the output; when it is
+    None the legacy `as_json` flag chooses between Markdown and JSON, so callers
+    predating `--format` keep working.
+    """
+    if fmt is None:
+        fmt = "json" if as_json else "markdown"
+    if fmt == "json":
         return json.dumps(doc, indent=2)
-    return render_markdown(doc, title=title)
+    if fmt == "plain":
+        return render_plain(doc, title=title)
+    if fmt == "markdown":
+        return render_markdown(doc, title=title)
+    raise ValueError(f"unknown changelog format: {fmt!r} (expected one of "
+                     f"{', '.join(FORMATS)})")
