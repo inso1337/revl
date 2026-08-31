@@ -126,6 +126,79 @@ def check_no_extern(root_programs: list[Program], profile: AdmissionProfile) -> 
             )
 
 
+def _iter_var_refs(node, out: set) -> None:
+    """Collect every bare-name reference (`ExprVar.name`) reachable from a parsed
+    AST fragment, by the same structural dataclass walk as `_iter_endorse`. A
+    named-imported extern is in a body's scope only as a bare callable (an
+    alias-qualified `mod.sh(...)` is rejected by lower — externs are not reachable
+    through a module alias), so a bare-name sweep of the root bodies is exactly
+    the reach surface. Structural, so it runs on the parsed source before any host
+    body could be lowered or run."""
+    from .parser import ExprVar  # noqa: PLC0415 — lazy, avoids import cycle
+    if isinstance(node, ExprVar):
+        out.add(node.name)
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _iter_var_refs(item, out)
+        return
+    fields = getattr(node, "__dict__", None)
+    if fields:
+        for value in fields.values():
+            _iter_var_refs(value, out)
+
+
+def check_no_host_extern_reach(root_programs: list[Program],
+                               imported_host_externs: dict,
+                               profile: AdmissionProfile) -> None:
+    """(a2) Refuse if an untrusted-authored ROOT reaches an IMPORTED extern that
+    carries a host body — the import-and-call bypass of `check_no_extern`.
+
+    `check_no_extern` refuses a root that DECLARES an extern, but nothing stopped
+    a root from `use "stdlib/shell.rvl" { sh }` and calling `sh(...)`: the extern
+    is DECLARED in a search-path module (trusted host code, granted deliberately)
+    yet REACHED directly from the untrusted turn. That runs arbitrary host code
+    under the profile whose whole purpose is to forbid it. The design's intent is
+    "compose granted SERVICES, never reach host code"; an imported host-body
+    extern is host code just the same (item 24: the gate does not sandbox host
+    code), so an untrusted author may not reach one directly.
+
+    `imported_host_externs` maps each host-body extern NAME the roots imported by
+    name to `(decl, module_path)` — built by the compiler, which owns the module
+    loader that resolves the imports. Refusal is conservative and sound: ANY
+    reference to such a name in a root component or fn body (a direct call, or
+    binding it to pass along) is a reach and is refused, full stop — there is no
+    extern allowlist, matching `check_no_extern`'s all-classifications stance. The
+    refusal fires at COMPILE (admission), before any host body runs, and names the
+    reached extern, the module it came from, and the profile rule.
+    """
+    if not profile.no_extern or not imported_host_externs:
+        return
+    for program in root_programs:
+        refs: set = set()
+        _iter_var_refs(program.components, refs)
+        _iter_var_refs(program.fn_decls, refs)
+        reached = refs & set(imported_host_externs)
+        if not reached:
+            continue
+        name = sorted(reached)[0]
+        decl, module_path = imported_host_externs[name]
+        backend = decl.bodies[0].backend if decl.bodies else "?"
+        raise RevlError(
+            program.filename, decl.line,
+            f"admission refused: the untrusted-author profile forbids reaching "
+            f"host code, but this source imports and reaches host-block extern "
+            f"`{name}` ({decl.classification} @{backend} body, from "
+            f"`{module_path}`) — an imported `extern` with a host body is verbatim "
+            f"host code the gate does not sandbox (G8, item 24)",
+            hint="`no_extern` forbids DECLARING host code; reaching an IMPORTED "
+                 "host extern is the same escape hatch by another door. An "
+                 "untrusted author may only COMPOSE pre-granted services, never "
+                 "reach a host extern directly — drop the import and reach a "
+                 "granted service instead (item 330)",
+            code="G8", category="admission",
+        )
+
+
 def _iter_endorse(node, out: list) -> None:
     """Collect every `ExprEndorse` node reachable from a parsed AST fragment, by
     a structural walk over dataclass fields and containers. Structural (like
