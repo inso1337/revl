@@ -1585,7 +1585,6 @@ def enforce(policy: Policy, audit: dict,
 def _rule_line(report: "RuleReport") -> str:
     facets = ", ".join(f"{c.facet} {c.threshold}" for c in report.clauses) \
         if report.clauses else ""
-    subj = _evidence_subject_phrase(report).replace("components ", "").strip()
     prefix = {"mcp": "mcp", "realm": f"realm {report.selector}",
               "capability": f"capability {report.selector}"}.get(
                   report.scope,
