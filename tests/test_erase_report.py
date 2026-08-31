@@ -104,6 +104,59 @@ def test_fully_revertible_realm_has_no_crossings(tenants_ir):
     assert cross["bareCount"] == 0 and cross["compensatedCount"] == 0
 
 
+# a realm member whose provide-method hands an emitting extern to a dispatcher
+# in VALUE position. The reach is unnameable (`*`): `approval.ClassMap`
+# classifies the call class (c), so the erase report must enumerate the same
+# crossing or its completeness claim is a false-safe (item 414).
+_WIDENING_SOURCE = """
+extern emission fn ship(x: Str) -> Str = @py { return x }
+fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
+service Gw { emission fn send(a: Str) -> Str }
+component Widener provides gw: Gw {
+  isolate gw in realm("alpha")
+  provide gw { fn send(a) = indirect(ship, a) }
+}
+"""
+
+
+def test_star_widening_crossing_is_enumerated(realms_ir):
+    # the erase report must list the SAME class-(c) `*` crossing the
+    # auto-approve ClassMap raises for a first-class emitting callable that
+    # escapes in value position (item 414: the report was a second class fold
+    # blind to the widening).
+    from revl.compiler import compile_source
+    from revl.mcp.approval import ClassMap
+
+    ir = compile_source(_WIDENING_SOURCE, "erase_widening.rvl")
+    # ClassMap sees the widening as a class-(c) crossing capability `*`.
+    reach = ClassMap(ir).classify_call("gw", "send")
+    assert reach["class"] == "c" and "*" in reach["capabilities"]
+
+    cross = erase_report.build_report(ir, "alpha", prove_residue=False)[
+        "boundaryCrossings"]
+    # the report enumerates it, not the false-safe empty surface.
+    assert cross["widenings"], "the `*` widening crossing must be enumerated"
+    widen = cross["widenings"][0]
+    assert widen["component"] == "Widener"
+    assert widen["capability"] == "*" and widen["actionClass"] == "c"
+    # a `*` widening is irreversible and bare, folded into the totals.
+    assert widen["compensated"] is False
+    assert cross["total"] == 1 and cross["bareCount"] == 1
+    assert "widen:Widener:*" in cross["bareTokens"]
+    # and it shows up in the human render as a bare crossing.
+    assert "widen `*`" in erase_report.render(
+        erase_report.build_report(ir, "alpha", prove_residue=False))
+
+
+def test_report_without_widening_omits_the_star_crossing(realms_ir):
+    # additive: a realm that widens nothing has an empty widenings bucket and
+    # its crossing totals are untouched by the item-414 fix.
+    cross = erase_report.build_report(realms_ir, "alpha", prove_residue=False)[
+        "boundaryCrossings"]
+    assert cross["widenings"] == []
+    assert not any("widen:" in t for t in cross["bareTokens"])
+
+
 # ---------------------------------------------------------- section 3: survivors
 
 def test_other_realms_proven_untouched_via_survivors(realms_ir):

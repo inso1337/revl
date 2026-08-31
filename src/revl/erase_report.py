@@ -150,13 +150,38 @@ def _crossings(index: Composition, members: list[str],
     emissions: list[dict] = []
     externs: list[dict] = []
     witnessed: list[dict] = []
+    widenings: list[dict] = []
     seen_emit: set = set()
     seen_host: set = set()
     seen_witnessed: set = set()
+    seen_widen: set = set()
     for name in members:
         for scope_id in index.scopes_of.get(name, []):
             scope = index.scopes[scope_id]
             facts = scope["facts"]
+            # the `*` first-class-value widening, off the SAME detection
+            # `approval.ClassMap` raises a class-(c) crossing for
+            # (`Composition.value_widens`, item 414). An emitting callable
+            # handed on as a value escapes this scope and may be dispatched by
+            # whoever receives it, reaching a boundary no `emission[...]` list
+            # can name (`*`). Without this the erase report was a second class
+            # fold blind to the widening, so an emission reached through a
+            # first-class dispatched callable was omitted while the report
+            # claimed every emission is listed (a false-safe). One `*` crossing
+            # per component, matching the audit surface's own `*` entry.
+            if index.value_widens(scope["nodes"]) and name not in seen_widen:
+                seen_widen.add(name)
+                widenings.append({
+                    "component": name, "scope": scope["kind"],
+                    "capability": "*", "actionClass": "c",
+                    # a `*` widening carries no compile-time compensate clause
+                    # and can never be proven reversible; bare by construction.
+                    "compensated": False,
+                    "token": f"widen:{name}:*",
+                    "note": "an emitting callable is handed on as a value; the "
+                            "boundary it may reach cannot be named (`*`), so it "
+                            "cannot be proven reversible",
+                })
             for fact in facts["emissions"]:
                 mark = (name, fact["key"], fact["method"])
                 if mark in seen_emit:
@@ -213,7 +238,12 @@ def _crossings(index: Composition, members: list[str],
     emissions.sort(key=lambda e: (e["component"], e["label"]))
     externs.sort(key=lambda e: (e["component"], e["name"]))
     witnessed.sort(key=lambda e: (e["component"], e["name"]))
-    all_cross = emissions + externs
+    widenings.sort(key=lambda e: (e["component"], e["scope"]))
+    # a `*` widening is an irreversible (class-(c)) crossing, so it is folded
+    # into the bare/compensated totals alongside emissions and host externs,
+    # unlike the class-(a) `witnessed` bucket, which stays separate. It is
+    # always bare (nothing can compensate an unnameable boundary).
+    all_cross = emissions + externs + widenings
     # item 247 gap 2: overlay the runtime residue to split the compensated
     # crossings into those that landed and those left unresolved. With no
     # residue this leaves every compensated crossing compensated and the
@@ -231,6 +261,13 @@ def _crossings(index: Composition, members: list[str],
         # the irreversible totals — a reader that wants the auto-approve action
         # class off the aggregation finds it here, tagged actionClass "a".
         "witnessed": witnessed,
+        # item 414: the `*` first-class-value widenings (class (c), capability
+        # `*`), enumerated so an emission reached through a first-class
+        # dispatched callable is no longer invisible to the completeness claim.
+        # Folded into the totals below (they are irreversible), and also listed
+        # here so a reader can find the widening crossings on their own. Empty
+        # (and the totals unchanged) for a realm that widens nothing.
+        "widenings": widenings,
         "total": len(all_cross),
         # `compensatedCount` counts crossings with an offset ATTACHED (the
         # static compile-time judgment), unchanged for back-compat. The runtime
@@ -457,7 +494,8 @@ def render(report: dict) -> str:
               f"({cross['compensatedCount']} compensated, {cross['bareCount']} bare")
     header += f", {unresolved_n} UNRESOLVED)" if unresolved_n else ")"
     out.append(header)
-    if not cross["emissions"] and not cross["externs"]:
+    if not cross["emissions"] and not cross["externs"] \
+            and not cross.get("widenings"):
         out.append("      none — this realm made no irreversible boundary "
                    "crossing (fully revertible, G8)")
     for c in cross["emissions"]:
@@ -465,6 +503,11 @@ def render(report: dict) -> str:
         out.append(f"      {tag:<14} {c['component']}  emit {c['label']}")
     for c in cross["externs"]:
         out.append(f"      {'[BARE]':<14} {c['component']}  host {c['name']}()")
+    # item 414: a `*` widening, an emitting callable escaping in value
+    # position, reaching a boundary that cannot be named.
+    for c in cross.get("widenings") or []:
+        out.append(f"      {'[BARE]':<14} {c['component']}  widen `*` "
+                   "(first-class emitting callable escapes)")
     # item 247 gap 2: the unresolved residue, named so an operator sees exactly
     # which owed offset is still out in the world.
     for c in cross.get("unresolved") or []:
