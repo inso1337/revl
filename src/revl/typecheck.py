@@ -2036,6 +2036,19 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
             t = infer_ir(e, tenv, types, services, filename, line)
             item = t if item is None else join(item, t)
         return f"List[{item}]" if item else "List[Never]"
+    if kind == "record":
+        # item 405: an anonymous record literal infers a STRUCTURAL record type
+        # from its fields (mirrors `infer_ast`'s `ExprRecord`, item 71). Without
+        # this, the lowered path left an anonymous binding untyped (None), so a
+        # later `a.missing` read on it was never field-checked inside a provide
+        # method — the residual of the 404 coverage class. Naming the structural
+        # type here is what lets the `field` case above refuse the bad read; at a
+        # declared boundary the structural type still meets the nominal record
+        # field-wise (`compatible`), so a valid record-literal return stays clean.
+        shape: dict[str, str | None] = {}
+        for name, value in node.get("fields") or []:
+            shape[name] = infer_ir(value, tenv, types, services, filename, line)
+        return format_structural(shape)
 
     if kind == "bin":
         lt = infer_ir(node.get("left"), tenv, types, services, filename, line)
@@ -2102,6 +2115,17 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
                       "it with stdlib/value.rvl (`value_is_object(v)`, "
                       f"`value_opt(v, \"{name}\")`, `value_field_or`)"),
                 code="T1", category="type-mismatch")
+        # item 405: a read through an anonymous / structural record binding is
+        # field-checked in a `fn`/`test` body (`infer_ast`, item 71); apply the
+        # same refusal here so a provide-method body (stratum 3) no longer
+        # accepts `a.missing` on a `{h: Str}` binding. Mirrors `infer_ast`.
+        struct = structural_fields(target)
+        if struct is not None:
+            if filename and name not in struct:
+                raise RevlError(filename, line,
+                                f"`{render_type(target)}` has no field `{name}` "
+                                f"(fields: {', '.join(sorted(struct)) or 'none'})")
+            return struct.get(name)
         spec = types.get(target or "")
         if spec is not None and spec.get("kind") == "record":
             fields = spec.get("fields", {})
@@ -2115,6 +2139,53 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
                                 f"(fields: {', '.join(sorted(fields)) or 'none'})")
             return fields.get(name)
         return None
+    if kind in ("optfield", "optcall"):
+        # item 405: the provide-method (stratum 3) twin of `infer_ast`'s
+        # `ExprOptField`/`ExprOptCall`. `a?.b` short-circuits on absence, so it
+        # REQUIRES an optional on the left and always yields an optional on the
+        # right; on a non-optional it is dead syntax the strict tiers cannot
+        # render (Rust/Java have no `?.` on a plain value). `infer_ir` had no
+        # node case, so `?.` on a non-`Opt` inferred to None and the refusal
+        # never fired inside a provide method — the item-392/404 coverage gap.
+        # Apply `infer_ast`'s refusals (same diagnostics) here.
+        target = infer_ir(node.get("target"), tenv, types, services, filename, line)
+        thead, targs = parse_type(target)
+        member = node.get("name") if kind == "optfield" else node.get("method")
+        if filename and target and not _is_wildcard(target) and thead != "Opt":
+            raise RevlError(
+                filename, line,
+                f"`?.` needs an optional on the left, got `{render_type(target)}`",
+                hint=f"`{render_type(target)}` is always present, so the short-circuit is "
+                     f"dead — write `.{member}` (syntax-2.0 §2)",
+                code="T1", category="type-mismatch",
+            )
+        if thead != "Opt":
+            return None
+        inner = targs[0] if targs else None
+        if kind == "optcall":
+            args = [infer_ir(a, tenv, types, services, filename, line)
+                    for a in node.get("args") or []]
+            result = builtin_check(node.get("method"), inner, args, filename, line)
+        else:
+            spec = types.get(inner or "")
+            ihead, _ = parse_type(inner)
+            if inner == "Opt" or ihead == "Opt":
+                result = None
+            elif member == "length" and ihead in _SIZED_HEADS:
+                result = "Int"
+            elif spec is not None and spec.get("kind") == "record":
+                fields = spec.get("fields", {})
+                if filename and member not in fields:
+                    raise RevlError(filename, line,
+                                    f"`{render_type(inner)}` has no field `{member}` "
+                                    f"(fields: {', '.join(sorted(fields)) or 'none'})")
+                result = fields.get(member)
+            else:
+                result = None
+        if result is None:
+            return None
+        # already-optional inner results are not double-wrapped
+        return result if parse_type(result)[0] == "Opt" else f"Opt[{result}]"
     if kind == "index":
         target = infer_ir(node.get("target"), tenv, types, services, filename, line)
         it = infer_ir(node.get("index"), tenv, types, services, filename, line)
