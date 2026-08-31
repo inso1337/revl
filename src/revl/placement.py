@@ -932,30 +932,93 @@ def tier_capability_gate(ir: dict, placed: dict, backends: dict) -> str | None:
     return None
 
 
+def resource_crossing_refusal(ir: dict, requires: dict, provides: dict,
+                              owner: dict, backends: dict) -> str | None:
+    """Refuse a resource-type value crossing ANY cross-process seam, TIER-
+    AGNOSTIC (Finding A). Returns a diagnostic naming the service, method and
+    resource, or None.
+
+    A resource type (an `extern acquire` return, or any record/variant that
+    carries one transitively — `_resource_taint`) cannot cross a PROCESS
+    boundary by copy: its lifetime is tied to a fiber in the providing process,
+    so a copy is a dead handle detached from its undo/teardown contract. That is
+    true whether the two processes run on the SAME backend (py<->py) or on
+    different tiers. The refusal therefore runs on every cross-process seam the
+    conductor wires, not only the cross-tier ones — the same seams the
+    proxy/serve construction loop in `run_placement` builds.
+
+    Only a CROSS-PROCESS crossing is refused. A resource shared WITHIN one
+    process is fine: a key a process both requires and provides is served
+    locally (`key in provides[consumer]`) and skipped here, so two components
+    co-located in one process pass a handle in memory, ungated. A key with no
+    local owner is a remote seam (item 151), a separate composition reached by
+    address; there is no local provider to gate here.
+
+    The refusal keys on the STRUCTURED `resources` kind from `distributability`,
+    not on the substring of a human reason string — a wording change to the
+    reason cannot silently disarm it (item 363 F1). The closure in
+    `_resource_taint` makes it fire for a handle NESTED in a user record or a
+    variant case payload, and the signature-level scan resolves a closed
+    generic argument (`ConnG[Socket]`), so a renamed/wrapped handle is caught
+    too.
+    """
+    verdicts = distributability(ir)
+    for consumer, keys in requires.items():
+        for key, service in keys.items():
+            if key in provides.get(consumer, {}):
+                continue  # served locally in-process, not a seam
+            host = owner.get(key)
+            if host is None:
+                continue  # a remote seam (item 151) has no local owner to gate
+            # host != consumer here (a locally-served key was skipped above), so
+            # this key genuinely crosses a process boundary; refuse a resource
+            # crossing it regardless of whether the tiers match.
+            resource_hits = (verdicts.get(service) or {}).get("resources") or []
+            if resource_hits:
+                resource_reasons = [
+                    f"{h['method']}: resource type {h['type']} crosses"
+                    for h in resource_hits]
+                same_tier = backends.get(host) == backends.get(consumer)
+                boundary = (
+                    f"same-tier process {host!r} -> {consumer!r} on "
+                    f"{backends.get(consumer)}" if same_tier else
+                    f"tier boundary {backends.get(consumer)} <- {backends.get(host)}")
+                return (
+                    f"service `{service}` (key {key!r}) crosses the {boundary} "
+                    f"but is address-space-bound: {', '.join(resource_reasons)}. "
+                    "A resource handle's lifetime is tied to a fiber in one "
+                    "process; it cannot cross a process seam by copy (same tier "
+                    "or across tiers), and a witnessed rollback across a seam is "
+                    "out of scope (parity with the `revl swap` gate, "
+                    "docs/interop-bridge.md §3-4).")
+    return None
+
+
 def cross_tier_boundary_check(ir: dict, requires: dict, provides: dict,
                               owner: dict, backends: dict,
                               services: dict) -> tuple[str | None, list[str]]:
-    """Plan-time checks over every CROSS-TIER seam the conductor creates
-    (roadmap item 363, stage 4). A cross-tier seam is a required key served by
-    a process on a DIFFERENT backend; a same-tier cross-process seam is
-    untouched (byte-identical to today).
+    """Plan-time checks over the cross-process seams the conductor creates
+    (roadmap item 363, stage 4; Finding A follow-up). Two halves with different
+    tier scope:
 
-    * **Refuse** a resource-type crossing. A service whose signature mentions a
-      resource type (an `extern acquire` return) cannot cross a process seam —
-      a handle's lifetime is tied to a fiber in one process; copying it is
-      meaningless and proxying it is out of scope. This is parity with the
-      `revl swap` gate (`placement.py` `swap_admission`), which the initial
-      conductor did not enforce; 363 closes that asymmetry for the seams it
-      creates. A cross-tier witnessed rollback is the same scope-out: what
-      crosses a seam is a call and a value, never a witness ledger.
-    * **Report** a sync (address-space-bound-for-async-reasons) crossing. A
-      sync `fn`/`emission` behind a cross-tier seam is permitted (today's
-      cross-process placements permit it and pay the blocking round-trip) but
-      NAMED — a hot worker behind a sync seam is a performance lie the author
-      should see before wondering where the native speedup went.
+    * **Refuse** a resource-type crossing, TIER-AGNOSTIC, via
+      `resource_crossing_refusal`. A handle cannot cross a process seam by copy
+      whether or not the two processes share a backend, so this half runs on
+      SAME-TIER seams too (Finding A: the same-tier short-circuit below used to
+      let a handle cross two py processes ungated). This is parity with the
+      `revl swap` gate (`placement.py` `swap_admission`).
+    * **Report** a sync (address-space-bound-for-async-reasons) crossing, CROSS-
+      TIER only. A sync `fn`/`emission` behind a cross-tier seam is permitted
+      (today's cross-process placements permit it and pay the blocking round-
+      trip) but NAMED — a hot worker behind a sync seam is a performance lie the
+      author should see before wondering where the native speedup went. A
+      same-tier sync seam is unchanged from today (no report line).
 
     Returns ``(diagnostic_or_None, report_lines)``.
     """
+    problem = resource_crossing_refusal(ir, requires, provides, owner, backends)
+    if problem is not None:
+        return problem, []
     verdicts = distributability(ir)
     lines: list[str] = []
     for consumer, keys in requires.items():
@@ -966,27 +1029,9 @@ def cross_tier_boundary_check(ir: dict, requires: dict, provides: dict,
             if host is None:
                 continue  # a remote seam (item 151) has no local owner
             if backends.get(host) == backends.get(consumer):
-                continue  # same-tier seam: unchanged from today
+                continue  # same-tier seam: no sync report (byte-identical today)
             verdict = verdicts.get(service) or {}
             reasons = verdict.get("reasons") or []
-            # key the resource refusal on the STRUCTURED `resources` kind, not on
-            # the substring of a human reason — a wording change to the reason
-            # text cannot silently disarm the crossing refusal (F1). The closure
-            # in `_resource_taint` makes this fire for a handle NESTED in a
-            # user record, not only a bare handle in the signature.
-            resource_hits = verdict.get("resources") or []
-            if resource_hits:
-                resource_reasons = [
-                    f"{h['method']}: resource type {h['type']} crosses"
-                    for h in resource_hits]
-                return (
-                    f"service `{service}` (key {key!r}) crosses the tier "
-                    f"boundary {backends.get(consumer)} <- {backends.get(host)} "
-                    f"but is address-space-bound: {', '.join(resource_reasons)}. "
-                    "A resource handle's lifetime is tied to a fiber in one "
-                    "process; it cannot cross a seam by copy, and a cross-tier "
-                    "witnessed rollback is out of scope (parity with the "
-                    "`revl swap` gate, docs/interop-bridge.md §4)."), lines
             if verdict.get("verdict") == "address-space-bound":
                 lines.append(
                     f"  seam {consumer}.{key} ({backends.get(consumer)} <- "
@@ -1666,11 +1711,13 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     if cap_problem:
         return abort(cap_problem)
 
-    # --- cross-tier boundary checks (item 363, stage 4): refuse a resource-type
-    # crossing (parity with the swap gate; a handle cannot cross a process
-    # seam and a cross-tier witnessed rollback is out of scope), and NAME every
-    # sync (address-space-bound) cross-tier seam (permitted, but a blocking
-    # round-trip the author should see). Same-tier seams are untouched.
+    # --- cross-process boundary checks (item 363, stage 4; Finding A): refuse a
+    # resource-type crossing on EVERY cross-process seam, tier-agnostic (parity
+    # with the swap gate; a handle cannot cross a process seam and a witnessed
+    # rollback across a seam is out of scope) — including same-tier py<->py
+    # seams, which the earlier cross-tier-only check let a handle cross ungated.
+    # The sync (address-space-bound) REPORT half stays cross-tier only: a
+    # same-tier value-typed seam is still byte-identical to today.
     boundary_problem, boundary_report = cross_tier_boundary_check(
         ir, requires, provides, owner, backends, services)
     if boundary_problem:
