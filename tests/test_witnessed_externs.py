@@ -133,6 +133,65 @@ def test_emission_inverse_refused():
     assert "which is an emission" in str(ei.value)
 
 
+def test_fn_wrapped_emission_inverse_refused():
+    # The teardown-path 330->329-transitive escape: the inverse calls a plain
+    # `fn` whose body itself reaches an emission. The old guard inspected extern
+    # NAMES only, so the fn resolved to `None` and passed, leaving an abort-time
+    # emission invisible to every fold and the approval gate. The guard now
+    # follows fn calls transitively and refuses it with the same G5 diagnostic,
+    # naming the reached emission and the fn path.
+    src = (
+        _TYPES
+        + "extern emission fn send(w: FsWitness) -> Unit = @ts { return }\n"
+        + "fn helper(w: FsWitness) -> Unit { return send(w) }\n"
+        + "extern witnessed[fs] fn mutate(path: Str)"
+          " -> Result[FsWitness, FsError]"
+          " undo helper(result) = @ts { return {} }\n"
+    )
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "t.rvl")
+    msg = str(ei.value)
+    assert "reaches an emission `send`" in msg
+    assert "helper -> send" in msg
+    assert "(G5)" in msg
+
+
+def test_two_hop_fn_chain_emission_inverse_refused():
+    # The reach is transitive across the whole call graph, not one hop: the
+    # inverse calls `outer`, which calls `inner`, which emits. The refusal names
+    # the full derivation so the author reads the shortest path to the boundary.
+    src = (
+        _TYPES
+        + "extern emission fn send(w: FsWitness) -> Unit = @ts { return }\n"
+        + "fn inner(w: FsWitness) -> Unit { return send(w) }\n"
+        + "fn outer(w: FsWitness) -> Unit { return inner(w) }\n"
+        + "extern witnessed[fs] fn mutate(path: Str)"
+          " -> Result[FsWitness, FsError]"
+          " undo outer(result) = @ts { return {} }\n"
+    )
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "t.rvl")
+    assert "outer -> inner -> send" in str(ei.value)
+
+
+def test_pure_fn_inverse_still_accepted():
+    # No over-refusal: a `fn` inverse that does pure/local work (here, calling a
+    # pure extern) reaches no emission, so it is in neither the extern-class nor
+    # the emitting-fn table and stays a legal host-local restore.
+    src = (
+        _TYPES
+        + "extern pure fn touch(w: FsWitness) -> Unit = @ts { return }\n"
+        + "fn restore_local(w: FsWitness) -> Unit { return touch(w) }\n"
+        + "extern witnessed[fs] fn mutate(path: Str)"
+          " -> Result[FsWitness, FsError]"
+          " undo restore_local(result) = @ts { return {} }\n"
+    )
+    ir = compile_source(src, "t.rvl")
+    mutate = next(e for e in ir["externs"] if e["name"] == "mutate")
+    assert mutate["class"] == "witnessed"
+    assert "undo" in mutate
+
+
 def test_witnessed_inverse_refused():
     src = (
         _TYPES + _RESTORE
