@@ -34,9 +34,36 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.Semantics.teardown_length` | G7 — length form | **proved** | `propext` | one replay per witnessed effect |
 | `RevL.G8.boundary_enumerates_emissions` | G8 — boundary enumerable (§6.1) | **proved** | `propext, Quot.sound` | completeness: every emission is on the audited surface |
 | `RevL.G8.boundary_only_declared` | G8 | **proved** | `propext, Quot.sound` | soundness: on a typed body the surface is exactly the emissions |
+| `RevL.CrossTier.cross_tier_agreement` | item 133 — cross-tier agreement | **proved** | `propext` | conformant runtimes agree on a well-annotated IR |
+| `RevL.CrossTier.six_tier_agreement` | item 133 | **proved** | `propext` | the six-runtime corollary over `Tier` |
+| `RevL.CrossTier.annotation_necessary` | item 133 | **proved** | none | annotation is necessary: python/ts disagree on a bare literal |
 
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
+
+## Item 133 — cross-tier agreement (`RevL.Theorems.CrossTier`)
+
+`RevL.CrossTier` models each of the six backends by its *observable
+profile* on the three DIVERGENCES axes — the numeric tag an unannotated
+literal defaults to, the string unit, and the map iteration order — and
+lowers a small value IR (`Atom`/`Value`, numeric literals carrying an
+optional operand annotation) through a profile with `eval`.
+
+The theorem states exactly the item-133 conditions and proves they
+suffice: `cross_tier_agreement` shows any two `Conformant` profiles (code-
+point string unit + canonical map order) lower a `WellAnnotated` IR (every
+numeric literal operand-annotated) to the *same* `Value`;
+`six_tier_agreement` is the corollary over the six-element `Tier`. The
+numeric default is deliberately left free per tier, and
+`annotation_necessary` exhibits python vs typescript disagreeing on a bare
+literal — so the annotation hypothesis is load-bearing, not vacuous. No
+`sorry`, no project axioms.
+
+Deliberately out of scope (documented, not smuggled as axioms): that the
+real emitters realise a conformant profile is the differential conformance
+matrix's empirical obligation, not a Lean theorem; and map values are
+modelled one level deep (nested maps are a mechanical extension of
+`entries_agree`).
 
 ## Differential oracle (wired)
 
