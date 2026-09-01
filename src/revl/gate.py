@@ -58,6 +58,7 @@ __all__ = [
     "GateError",
     "GateRefused",
     "AdmitResult",
+    "ProposeResult",
     "Handle",
     "recover",
 ]
@@ -345,6 +346,58 @@ class AdmitResult:
                 "message": self.message, "keys": list(self.keys)}
 
 
+class ProposeResult:
+    """The outcome of `Gate.propose` (roadmap item 334): admit an AGENT-authored
+    component under the untrusted-author profile AND hot-swap a running
+    composition to it, in one process. Three terminal shapes, all data (a refusal
+    is the repair signal, never a raised error the loop cannot catch):
+
+    * `admitted` False — the candidate was REFUSED before it ever became live:
+      either the forbidden-grant rule fired (`code` `FORBIDDEN_GRANT`) or the
+      untrusted-author compile refused it (`code`/`message` the reference
+      compiler's why-trace, verbatim). The running composition is UNTOUCHED.
+    * `admitted` True, `swapped` False, `reverted` True — the candidate admitted
+      but FAILED TO ACTIVATE (its activation raised/left a fiber FAILED, or a
+      requirement was unmet -> PENDING, or a declared provide never resolved).
+      The post-activation health gate rejected it and the swap REVERTED to gen N;
+      the process keeps serving gen N (`code` `SWAP_REVERTED`).
+    * `admitted` True, `swapped` True — the swap took: gen N+1 is live, `keys`
+      are what it provides, `state` is the resulting session state."""
+
+    __slots__ = ("admitted", "swapped", "reverted", "code", "message", "keys",
+                 "state")
+
+    def __init__(self, admitted: bool, *, swapped: bool = False,
+                 reverted: bool = False, code: str | None = None,
+                 message: str | None = None, keys: tuple[str, ...] = (),
+                 state: dict | None = None) -> None:
+        self.admitted = bool(admitted)
+        self.swapped = bool(swapped)
+        self.reverted = bool(reverted)
+        self.code = code
+        self.message = message
+        self.keys = tuple(keys)
+        self.state = state
+
+    def as_dict(self) -> dict:
+        return {"admitted": self.admitted, "swapped": self.swapped,
+                "reverted": self.reverted, "code": self.code,
+                "message": self.message, "keys": list(self.keys)}
+
+
+# The service names that reach the decider — the admit/swap/owner-state control
+# surface (item 334 FORBIDDEN-GRANT rule). Granting any of these to an untrusted
+# candidate would hand it the loop's own re-entrant-admit plumbing: the stdlib
+# `Admission` service (`stdlib/admit.rvl`, provided by component `AdmitGate`)
+# emits `host_admit`, whose `@py` body calls `revl.mcp.admit_bridge.admit`, so a
+# candidate granted it reaches the decider through a granted host body with NO
+# `extern` of its own — the non-extern path the untrusted profile alone does not
+# close. `propose` REJECTS a granted set naming any of these, before compiling,
+# which is how "re-entrant propose is deferred" is ENFORCED rather than merely
+# documented.
+_DECIDER_SERVICES = frozenset({"Admission", "AdmitGate"})
+
+
 # The process-global single live gate (v1). A second live `Gate` in one process
 # is refused loudly at construction, the honest spelling of today's
 # process-global admit-bridge/session-owner binds (`admit_bridge._SESSION`,
@@ -480,6 +533,141 @@ class Gate:
             return AdmitResult(False, code=verdict.code, message=verdict.message)
         return AdmitResult(True, keys=verdict.keys,
                            handle=Handle(self, verdict.handle))
+
+    def propose(self, source: str,
+                granted: list[str] | tuple[str, ...] = (),
+                *, providers: Mapping[str, str] | None = None) -> "ProposeResult":
+        """Admit an AGENT-authored component under the untrusted-author profile
+        AND hot-swap the running composition to it — the item-334 self-extending
+        crossing. The one verb neither `admit` (additive, refuses replacement)
+        nor `swap` (replaces, but runs the full compiler) occupies: replace a
+        running component with agent code that carries NO opaque host body.
+
+        Three parts, wired in order, each load-bearing:
+
+        0. FORBIDDEN-GRANT (enforced, before any compile): a `granted` set naming
+           a gate/session/admit-control service (`Admission`/`AdmitGate`, the
+           `host_admit`-reaching decider) is REJECTED. This ENFORCES "re-entrant
+           propose is deferred": a granted decider service is the non-extern path
+           to the decider that the untrusted profile alone does not block.
+
+        1. STANDALONE decision compile: `source` (the agent-authored candidate) is
+           compiled under `untrusted_author(granted)` on its OWN, NOT against the
+           running manifest and NOT via `Session.admit` (whose verdict has no
+           `ir` and which refuses replacement with G2). The profile forbids a new
+           `extern`/host-block and bounds reach to `granted`, so the admitted
+           candidate holds no host code and can name no Python object. A refusal
+           is the repair signal, returned as data, the live composition untouched.
+
+        2. HEALTH-GATED swap: the candidate must be a SELF-CONTAINED composition
+           (partial single-component replacement is not what swap does — it
+           replaces the whole composition). It brings its own granted providers:
+           `source` declares the service INTERFACES it needs and its own
+           consumer/tool component (pure revl), and the trusted `providers`
+           (a `{path: source}` map, operator-supplied host code that provides
+           those services) are composed as co-roots. That full composition is
+           handed to `Session.swap`, whose item-334 post-activation health gate
+           reverts to gen N if the successor fails to activate. `providers` may be
+           omitted for a fully self-contained pure-revl candidate.
+
+        The security boundary (G8, stated narrowly): revl guarantees the AGENT
+        introduced nothing opaque (the decision compile refused any `extern`,
+        any transitive host-extern reach, and any ungranted reach) and that the
+        swap is a revertible envelope. It does NOT sandbox the trusted
+        `providers`' host bodies; those are exactly as trusted as when the
+        operator granted them. New agent-introduced host code is out of scope for
+        autonomous self-extension (it needs the operator-gated trusted swap or
+        item-411 confinement)."""
+        if not self._loaded:
+            raise GateError("nothing is loaded; load a base composition first")
+        granted = list(granted)
+
+        # 0. FORBIDDEN-GRANT — before any compile, independent of the operator.
+        forbidden = sorted(set(granted) & _DECIDER_SERVICES)
+        if forbidden:
+            return ProposeResult(
+                False, code="FORBIDDEN_GRANT",
+                message=(
+                    f"propose refused: the granted set names a gate/session/"
+                    f"admit-control service ({', '.join(forbidden)}). Granting a "
+                    f"decider service would let the untrusted candidate reach "
+                    f"`host_admit`/swap/owner state through a granted host body "
+                    f"with no `extern` of its own — the non-extern path the "
+                    f"untrusted profile does not close. Re-entrant propose is "
+                    f"deferred and this rule enforces it (item 334); drop the "
+                    f"decider service from `granted`."))
+
+        from .admit_profile import AdmissionProfile  # noqa: PLC0415
+        from .compiler import compile_source  # noqa: PLC0415
+        from .errors import RevlError  # noqa: PLC0415
+
+        # 1. STANDALONE decision compile under the untrusted-author profile. This
+        #    is the DECISION: it refuses a new extern (G8, `check_no_extern`), a
+        #    transitive host-extern reach through the composed provider modules
+        #    (G8, `check_no_host_extern_reach`), an ungranted reach (R2,
+        #    `check_allowlist`), or a self-minted declassifier (G9), all as a
+        #    compile refusal returned as data. The trusted `providers` are handed
+        #    in as `modules=` so the candidate can compose the granted SERVICES
+        #    they declare, while any attempt to reach their host EXTERNS directly
+        #    (the import-and-call bypass) is refused across the whole transitive
+        #    closure. It is compiled STANDALONE (no `manifest=`): the candidate
+        #    reaches only what it is explicitly given, never the running base's
+        #    other ambient services.
+        profile = AdmissionProfile.untrusted_author(granted)
+        try:
+            compile_source(source, "<candidate>.rvl",
+                           modules=dict(providers) if providers else None,
+                           profile=profile)
+        except RevlError as error:
+            return ProposeResult(False, code=getattr(error, "code", None),
+                                 message=str(error))
+
+        # 2. Build the SELF-CONTAINED composition for the TRANSITION (the agent
+        #    source validated above, plus the trusted granted providers), then
+        #    hand it to the health-gated swap.
+        try:
+            ir = self._compile_candidate_composition(source, providers)
+        except RevlError as error:
+            return ProposeResult(False, code=getattr(error, "code", None),
+                                 message=str(error))
+
+        try:
+            state = self._invoke_with_approval(self._session.swap, ir)
+        except _session_error() as error:
+            # the post-activation health gate (or a migration reject) rolled the
+            # swap back: gen N is intact and still serving. Report it as data.
+            return ProposeResult(True, swapped=False, reverted=True,
+                                 code="SWAP_REVERTED", message=str(error))
+
+        keys = tuple(k for comp in (ir.get("components") or [])
+                     for k in (comp.get("provides") or {}))
+        return ProposeResult(True, swapped=True, keys=keys, state=state)
+
+    def _compile_candidate_composition(self, source: str,
+                                       providers: Mapping[str, str] | None
+                                       ) -> dict:
+        """Compile the candidate as a COMPLETE self-contained composition for the
+        swap transition: the agent `source` as the root, plus any trusted
+        `providers` as co-roots. Compiled WITHOUT the untrusted profile — the
+        agent source was already admitted under the profile in the decision
+        compile (step 1), and the providers are trusted operator-supplied host
+        code the candidate is allowed to compose. `swap` replaces the WHOLE
+        composition, so the returned document's `components` must span every
+        provider the candidate requires or the successor faults and reverts."""
+        from .compiler import compile_files, compile_source  # noqa: PLC0415
+        import os  # noqa: PLC0415
+        if not providers:
+            # a fully self-contained pure-revl candidate: the source IS the whole
+            # composition (it composes only providers it declares itself).
+            return compile_source(source, "candidate.rvl")
+        cand_abs = os.path.abspath("candidate.rvl")
+        virtual = {cand_abs: source}
+        paths = [cand_abs]
+        for path, text in providers.items():
+            abs_path = os.path.abspath(path)
+            virtual[abs_path] = text
+            paths.append(abs_path)
+        return compile_files(paths, sources=virtual)
 
     def call(self, key: str, method: str, args: list | None = None) -> dict:
         """Invoke a provided operation on the running composition, gated by the
