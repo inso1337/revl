@@ -1,0 +1,10 @@
+{
+  "kind": "revl.provenance",
+  "manifestSha256": "6323ed2e56e9e2f9c1a1bb46f78105efd5a1c5d2543159a3cc34efd86eb6bcf7",
+  "publisher": "revl-ci",
+  "schemaVersion": "1.0",
+  "sourceSha256": "672f33de5bb0b945af213addebbfceda14a9874f6e83e66dfbe43ea599ece8ef",
+  "toolchain": {
+    "interchange": "1.0"
+  }
+}

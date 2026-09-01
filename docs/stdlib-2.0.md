@@ -16,6 +16,7 @@ revl refuses.)
 | `slice(a, b)` | 2 | Str, List | half-open sub-range | `x[a:b]` | `x.slice(a, b)` |
 | `charAt(i)` | 1 | Str | 1-char string | `x[i]` | `x.charAt(i)` |
 | `charCodeAt(i)` | 1 | Str | code point at i | `ord(x[i])` | `x.charCodeAt(i)` |
+| `codepoint_at(i)` | 1 | Str | code point at i, returned directly (item 276) | `ord(x[i])` | `x.charCodeAt(i)` |
 | `indexOf(v)` | 1 | Str, List | first index, `-1` if absent | inline dispatch helper | `x.indexOf(v)` |
 | `concat(y)` | 1 | Str, List | joined copy | `x + y` | `x.concat(y)` |
 | `split(sep)` | 1 | Str | pieces between separators; `""` → 1-char strings; trailing empties kept | inline dispatch | `x.split(sep)` |
@@ -125,7 +126,17 @@ tiers would otherwise diverge for free.
 ### Coexistence with the host `Map.new()`
 
 The v1 host stub object (`let store = Map.new()`, methods
-`insert/remove/get/drop`) keeps its exact existing surface. The two
+`insert/insert_if_absent/remove/get/drop`) keeps its exact existing surface.
+`insert_if_absent(k, v) -> Bool` (item 397) is the atomic compare-and-set: it
+inserts and returns `true` only when the key was absent, otherwise it leaves
+the existing value untouched and returns `false`, and its result is the first
+host-verb result the frontend types (a `Bool`, so a claim can branch on it).
+It is spelled as a bound acquisition, `let fresh = effect
+store.insert_if_absent(k, v) undo store.remove(k)`, and the undo is
+result-guarded (a `false` CAS registers no inverse). Per tier the test and the
+insert are one atomic step: a lock spanning both on go/rust, ConcurrentHashMap
+`putIfAbsent` on java, run-to-completion of a synchronous op on py/ts. See
+docs/design/397-insert-if-absent.md. The two
 namespaces stay collision-free **by construction**: every new value-side
 name (`empty`, `set`, `lookup`, `has`) was chosen disjoint from the host
 verb set (`open/close/query/execute/new/get/insert/remove/drop/run`; `run`
@@ -339,6 +350,32 @@ backend — uses these builtins yet, so no other backend is exercised with them.
 A tier that later adopts them lowers to its own ASCII test (`char::is_ascii_*`
 on rust, a range compare elsewhere).
 
+### `Str.codepoint_at(i)`: codepoint-at-index scan (item 276)
+
+`codepoint_at(i)` returns the Unicode scalar value at code-point index `i` as an
+`Int`, **directly** — no intermediate 1-char `Str`. It is the codepoint-domain
+partner of `charAt` (which returns the 1-char string), and semantically it
+matches `charCodeAt(i)`; the point of the separate name is the **self-host
+lexer's hot path**, which previously spelled the code point at `j` as
+`code0(source.charAt(j))` — a `charAt` that allocates a 1-char `Str`, then a
+revl-fn call that indexes it a second time to reach `charCodeAt(0)`. Reading
+`source.codepoint_at(j)` drops the fn call and the second index. Like
+`charAt`/`charCodeAt`, the index is assumed **in bounds** (`0 <= i < length()`);
+the lexer only reads a position it has already guarded with `j < n`. For a
+position that may be past the end, `slice`-then-guard is still the total form
+(the lexer keeps its `code0` helper, which returns `-1` on an empty clamped
+slice, for exactly those probes).
+
+**Lowering per tier.** py `ord(x[i])`; ts/go/java via the same astral-aware
+`charCodeAt` helper (a lone JS surrogate would otherwise leak through
+`String.charCodeAt`); rust `x.chars().nth(i).unwrap() as u32 as i64`; wasm the
+UTF-8-decoding `$str_cp_char_code_at` helper. On the **py tier** the win is
+small — CPython caches 1-char Latin-1 strings, so the `charAt` "allocation" was
+already near-free and only the fn call is reclaimed — but on the **native tiers**
+`charAt`'s lowering allocates a heap `String` (`…to_string()` on rust) per byte,
+which `codepoint_at` avoids entirely. That is the residual-lexer perf lever the
+item-231a finding pointed at. See `docs/bench-selfhost.md` for the before→after.
+
 ### `Str.to_int()`: the parsing builtin (FR-9)
 
 `s.to_int()` parses `s` as an `Int` and answers `Opt[Int]`: `Some(n)` on the
@@ -368,6 +405,132 @@ a regex-guarded `BigInt` on ts, `str::parse::<i64>().ok()` on rust,
 accumulator on go and wasm — the wasm helper is the one that needs care,
 since `Int.MIN`'s magnitude is 2^63 and every larger magnitude must be
 `None`).
+
+## Crypto primitives — `stdlib/crypto.rvl` (item 272)
+
+Three independent components in the lighthouse workload hand-rolled the **same**
+crypto inside `@py`/`@ts` extern bodies within one wave — a constant-time
+compare (a token gate), an HMAC-SHA256 encrypt-then-MAC (a settings store), and
+two HMAC webhook-signature schemes (inbound verification). Three witnesses, all
+security-load-bearing, none sharing code. `stdlib/crypto.rvl` is that kit,
+**once** — a classified PRIMITIVE set (the item-244 pattern), deliberately not a
+framework. It ships the four irreducible operations those sites re-derived and
+stops there; a call site composes them (encrypt-then-MAC is `hmac_sha256` over
+the ciphertext plus a `ct_equal` on verify) exactly as before, now over one
+audited implementation instead of three.
+
+`use "stdlib/crypto.rvl" { sha256, hmac_sha256, ct_equal, random_token }` — the
+file lives in the repo as `stdlib/crypto.rvl`.
+
+| fn | signature | class | semantics |
+|---|---|---|---|
+| `sha256(data)` | `Str -> Str` | `pure` | lower-case hex SHA-256 of the UTF-8 bytes of `data` (64 chars) |
+| `hmac_sha256(key, data)` | `(Str, Str) -> Str` | `pure` | hex HMAC-SHA256 (RFC 2104) with `key` over `data`, both UTF-8 |
+| `ct_equal(a, b)` | `(Str, Str) -> Bool` | `pure` | constant-time equality — full-width, no early exit |
+| `random_token(n)` | `Int -> Str` | **`emission`** | `n` cryptographic random bytes as `2n` hex chars |
+
+**py + ts are the exit bar** (item 272). `sha256`/`hmac_sha256`/`ct_equal` ship
+a self-contained pure-JS SHA-256 on the ts tier (no host import, exactly as
+`stdlib/json.rvl` ships a pure-JS parser); `random_token` draws from
+`globalThis.crypto.getRandomValues` (a synchronous WHATWG global). Both tiers
+hash the identical UTF-8 encoding, so the hex digests agree across py and ts.
+The rust/go/java/wasm bodies are a documented follow-up.
+
+### Why `random_token` is `emission`, not `pure`
+
+The other three are `pure`: a hash, a MAC, and a compare are total functions of
+their inputs with no observable effect and no entropy. An **entropy draw is
+not** — two calls with the same argument return different values, the defining
+non-property of a pure function. Its classification is a design decision with
+the same rigor item 244 spent on its clonefile-preimage choice:
+
+- **Not `acquire`-with-a-trivial-undo.** `acquire` models a resource you hold
+  and must release; its `undo` replays on *clean unload and abort* alike. A
+  token draw holds nothing — no handle, no lease. The only `undo` one could
+  write is a no-op, and a no-op undo is a lie in the shape of a contract: it
+  tells the teardown accumulator the effect was cleanly reverted when nothing
+  was, and pays for a disposer on every draw.
+- **Not `witnessed`.** 244 earned `witnessed` for an fs write because a preimage
+  *snapshot* makes the inverse real. There is no preimage of an unpredictable
+  draw, and no inverse can un-observe a minted secret — so `witnessed` is
+  unearnable here.
+- **`emission` is the honest reading.** A draw reads external entropy (the host
+  CSPRNG), advancing non-recoverable state and producing a fresh secret: a
+  non-revertible boundary crossing. It is also the correct *policy* reading —
+  token minting is security-load-bearing and should be visible to the item-33
+  policy gate / audit (`caps(extern emission fn e) = { e }`), which a `pure` or
+  fake-`acquire` draw would hide.
+
+A `fn`, `test`, or provider that draws a token therefore carries the
+`random_token` capability outward, honestly.
+
+### Examples
+
+`sha256` — a content-addressing fingerprint (the `@py` body is inlined so the
+block is a complete, compilable program; real code writes the `use` above):
+
+```revl
+// stdlib/crypto.rvl ships this as `pub extern pure fn sha256`; the @py body is
+// inlined so this doc block is a complete, compilable program. In real code you
+// write `use "stdlib/crypto.rvl" { sha256 }` instead of the extern declaration.
+pub extern pure fn sha256(data: Str) -> Str = @py {
+    import hashlib
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+}
+
+// content-addressing: a stable fingerprint of a blob
+pub fn fingerprint(blob: Str) -> Str { return sha256(blob) }
+```
+
+`hmac_sha256` — the webhook-signature site, once:
+
+```revl
+pub extern pure fn hmac_sha256(key: Str, data: Str) -> Str = @py {
+    import hashlib, hmac
+    return hmac.new(key.encode("utf-8"), data.encode("utf-8"), hashlib.sha256).hexdigest()
+}
+
+// the webhook-signature site, once: sign a request body with the shared secret
+pub fn webhook_signature(secret: Str, body: Str) -> Str {
+  return hmac_sha256(secret, body)
+}
+```
+
+`ct_equal` — verify an inbound webhook without a timing side channel (never
+`==` on a secret-derived value):
+
+```revl
+pub extern pure fn ct_equal(a: Str, b: Str) -> Bool = @py {
+    import hmac
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+}
+pub extern pure fn hmac_sha256(key: Str, data: Str) -> Str = @py {
+    import hashlib, hmac
+    return hmac.new(key.encode("utf-8"), data.encode("utf-8"), hashlib.sha256).hexdigest()
+}
+
+// verify an inbound webhook without a timing side channel: recompute and
+// constant-time compare, never `==` on a secret-derived value
+pub fn webhook_ok(secret: Str, body: Str, sig: Str) -> Bool {
+  return ct_equal(hmac_sha256(secret, body), sig)
+}
+```
+
+`random_token` — mint a session id; the `emission` classification is visible in
+the declaration:
+
+```revl
+// `random_token` is `emission`, not `pure`: an entropy draw reads the host
+// CSPRNG and cannot be taken back, so a `fn` that mints a token carries the
+// `random_token` capability outward (visible to the policy gate / audit).
+pub extern emission fn random_token(n: Int) -> Str = @py {
+    import secrets
+    return secrets.token_hex(n)
+}
+
+// mint a 32-hex-char session id (16 random bytes)
+pub fn new_session_id() -> Str { return random_token(16) }
+```
 
 ## Versioning
 

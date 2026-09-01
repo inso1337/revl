@@ -1,0 +1,15 @@
+// REJECTED — Python's `elif` is not revl syntax (item 384). Conditionals chain
+// with `else if`. `elif` lexes as an identifier and used to report a cryptic
+// error deep in the following block.
+//
+// expected error:
+//   revl has no `elif`
+
+fn f(n: Int) -> Int {
+  if (n > 0) {
+    return 1
+  } elif (n < 0) {
+    return 2
+  }
+  return 0
+}

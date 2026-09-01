@@ -1,0 +1,11 @@
+service Greeter {
+  fn greet(name: Str) -> Str
+}
+
+component GreeterSvc provides greeter: Greeter {
+  let store = effect Map.new() undo store.drop()
+
+  provide greeter {
+    fn greet(name) = `Hello, ${name}!`
+  }
+}

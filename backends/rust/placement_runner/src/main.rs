@@ -154,9 +154,36 @@ fn main() {
             let cname = entry.as_str().unwrap_or("");
             match components::_revl_load(&root, cname, &spec["config"]) {
                 Some(fiber) => {
-                    fiber.wait().unwrap();
-                    log("load", cname, &format!("state={:?}", fiber.state()));
-                    fibers.push((cname.to_string(), fiber));
+                    // A component's activation can fail: an author's `fail` step
+                    // — or the fault sweep's injected L-Raise — makes `wait()`
+                    // return the recorded error instead of an Active fiber. That
+                    // is not a runner crash: cordis has already reverted this
+                    // fiber's own accumulated effects LIFO (its effect guard on
+                    // failure) and landed it FAILED. In `--once` mode we record
+                    // the FAILED fiber like any other so the LIFO teardown below
+                    // disposes it (clearing it from the registry) and still runs
+                    // the no-residue proof the fault sweep reads. Outside `--once`
+                    // there is no teardown-and-prove round-trip to salvage, so a
+                    // boot failure stays fatal: tear down what booted, exit nonzero.
+                    match fiber.wait() {
+                        Ok(_) => {
+                            log("load", cname, &format!("state={:?}", fiber.state()));
+                            fibers.push((cname.to_string(), fiber));
+                        }
+                        Err(error) if once => {
+                            log("load", cname,
+                                &format!("FAILED (L-Raise, effects unwound) — {error}"));
+                            fibers.push((cname.to_string(), fiber));
+                        }
+                        Err(error) => {
+                            eprintln!("[{name}] boot failed loading {cname}: {error}");
+                            for (label, fiber) in fibers.iter().rev() {
+                                let _ = fiber.dispose();
+                                log("swap", label, "dispose");
+                            }
+                            std::process::exit(1);
+                        }
+                    }
                 }
                 None => log("load", cname, "UNKNOWN component"),
             }

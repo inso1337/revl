@@ -55,6 +55,38 @@ TOOL_VERB = {
     "revl_snapshot": "snapshot",
     "revl_rollback": "undo",
     "revl_undo": "undo",  # item 65: deep history revert — same authority as rollback
+    # item 245: the session commit/abort verbs. `commit` gates who may cross the
+    # session boundary (flush the deferral queue, discharge the witnessed
+    # escrow); enumeration (`revl_commit`) and abort share that authority — an
+    # operator that cannot commit cannot decide the session's verdict.
+    "revl_commit": "commit",
+    "revl_commit_confirm": "commit",
+    "revl_abort": "commit",
+    # item 246: minting a class-(c) approval is its own scoped authority. `approve`
+    # gates who may say yes to an irreversible crossing, in the same profile
+    # grammar as `commit` — an operator without it cannot launder authority
+    # through the prompt (docs/design/246-auto-approve.md, Decision 4). Its
+    # `_targets` branch resolves the presented ticket hash — or an item-344
+    # standing grant's capability — to the crossing's component, so a subject-
+    # scoped `may approve on payments` grant is usable while other components are
+    # live.
+    "revl_approve": "approve",
+    # item 379: revoking a standing grant early is the mirror of granting it —
+    # withdrawing consent is the SAME authority as saying yes, so `revl_revoke`
+    # gates under the same `approve` verb. Its `_approve_targets` branch resolves
+    # the revoke's `capability` (or the grant's `requestId`) to the crossing
+    # component, so a subject-scoped `may approve on payments` grant governs who
+    # may take a grant BACK exactly as it governs who may mint one.
+    "revl_revoke": "approve",
+    # item 251: applying or revoking a distilled `AutoApproveRule` installs (or
+    # withdraws) a STANDING auto-approve - the same authority as granting the
+    # underlying yeses, so both gate under `approve`. `_approve_targets` resolves
+    # the offer/rule to the components its glob selects, so a subject-scoped
+    # `may approve on payments` grant governs distillation over payments exactly as
+    # it governs a mint. `revl_distillation_offers` is read-only (propose-only) and
+    # deliberately ungated (absent from this map).
+    "revl_apply_distillation": "approve",
+    "revl_revoke_distillation": "approve",
 }
 
 # friendly verb aliases the profile author may write (canonical on the right)
@@ -379,8 +411,100 @@ def _targets(verb: str, session, arguments: dict) \
         return _live_targets(candidate)
     if verb == "restore":
         return _snapshot_targets(arguments.get("snapshot"))
+    if verb == "approve":
+        return _approve_targets(session, arguments)
     # unload / edit / snapshot / undo operate on the whole running composition
     return _live_targets(ir)
+
+
+def _approve_targets(session, arguments: dict) \
+        -> list[tuple[str, frozenset[str]]] | None:
+    """A `revl_approve`'s target: the crossing component the approval names,
+    resolved WITHOUT running anything (the same resolve-without-running pattern
+    `_snapshot_targets` uses for `restore`). A ticket `hash` resolves against the
+    session's outstanding-ticket table; a proactive item-344 `capability` grant
+    resolves against the live class map. Either way the target scopes to the
+    crossing component and its realms, so a subject-scoped `may approve on
+    payments` grant is not defeated by other live components (Decision 2's
+    approve branch). Undecidable inputs — an unknown hash, or a capability that
+    resolves to more than one component — defer (None): the handler refuses them
+    by the outstanding-ticket table / the ambiguity guard before minting
+    anything, so gating never spuriously scopes an input that will not be
+    honoured."""
+    from ..policy import component_realms  # noqa: PLC0415 — read-only reuse
+    ticket_hash = arguments.get("hash")
+    tickets = getattr(session, "_tickets", None) or {}
+    ticket = tickets.get(ticket_hash) if ticket_hash else None
+    name = None
+    if ticket is not None:
+        name = ticket.get("component")
+    elif arguments.get("requestId") is not None:
+        # item 379: a revoke naming one grant by id — scope to that grant's
+        # component (the same subject-scoped gating a mint got), resolved off the
+        # session's grant store without running anything. An unknown id defers.
+        for g in getattr(session, "_grants", None) or []:
+            if g.get("requestId") == arguments["requestId"]:
+                name = g.get("component")
+                break
+    elif arguments.get("capability") is not None:
+        # item 344/379: a proactive capability grant or a capability-wide revoke —
+        # scope to the crossing component when the capability resolves to exactly
+        # one, else defer.
+        class_map = getattr(session, "_class_map", None)
+        if class_map is not None:
+            resolved = class_map.crossings_for_capability(arguments["capability"])
+            components = {t["component"] for t in resolved}
+            if len(components) == 1:
+                name = next(iter(components))
+    elif arguments.get("offerId") is not None \
+            or arguments.get("rule") is not None:
+        # item 251: apply/revoke a distilled rule - scope to the components the
+        # rule's glob selects, so the operator must hold `approve` over EVERY one
+        # (all-or-nothing, like a multi-component swap). An offer resolves through
+        # the session's fold; a bare rule string resolves through its glob. When no
+        # component matches (nothing live under the glob), defer.
+        return _distillation_targets(session, arguments)
+    if name is None:
+        return None  # unknown hash/id / ambiguous capability — handler refuses it
+    manifest = (session.ir or {}).get("manifest") or {}
+    realms = component_realms(manifest, name)
+    return [(name or WHOLE, frozenset({name or WHOLE}) | frozenset(realms))]
+
+
+def _distillation_targets(session, arguments: dict) \
+        -> list[tuple[str, frozenset[str]]] | None:
+    """The components an `apply_distillation` / `revoke_distillation` touches: the
+    live members of the rule's component glob (item 251, gated by `approve`). An
+    offer id resolves to its rule's glob; a bare `rule` string parses to its glob.
+    Returns one `(name, labels)` per selected component (all-or-nothing gating), or
+    None to defer when nothing resolves (the handler refuses it)."""
+    from ..policy import component_realms  # noqa: PLC0415
+    glob = None
+    offer_id = arguments.get("offerId")
+    if offer_id is not None and hasattr(session, "_offer_by_id"):
+        offer = session._offer_by_id(offer_id)
+        if offer is not None:
+            glob = offer.rule.component
+    if glob is None and arguments.get("rule") is not None:
+        try:
+            from ..policy import parse_policy  # noqa: PLC0415
+            rules = parse_policy(arguments["rule"]).auto_approve_rules
+            if rules:
+                glob = rules[0].component
+        except Exception:  # noqa: BLE001 - a non-DSL fragment defers
+            glob = None
+    if glob is None:
+        return None
+    members = sorted(session._glob_members(glob)) \
+        if hasattr(session, "_glob_members") else []
+    if not members:
+        return None
+    manifest = (session.ir or {}).get("manifest") or {}
+    out = []
+    for name in members:
+        realms = component_realms(manifest, name)
+        out.append((name, frozenset({name}) | frozenset(realms)))
+    return out
 
 
 def _refusal(operator: Operator, verb: str,

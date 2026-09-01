@@ -167,22 +167,29 @@ def _key_service(ir: dict) -> dict[str, str]:
     return out
 
 
-def _emit_components(ir: dict, gen_dir: Path) -> None:
+def _emit_components(ir: dict, gen_dir: Path, record: bool = False) -> None:
     spec = importlib.util.spec_from_file_location("revl_java_emit", _JAVA_DIR / "emit.py")
     emit_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(emit_module)
-    (gen_dir / "Components.java").write_text(emit_module.emit(ir), encoding="utf-8")
+    (gen_dir / "Components.java").write_text(
+        emit_module.emit(ir, "revl", record=record), encoding="utf-8")
 
 
-def _build(ir: dict, tmp: Path, jdk_bin: str) -> str:
+def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False) -> str:
     """Emit revl/Components.java and compile it + the cordis4j stubs +
     PlacementRunner (for its shared JSON parser) + RunOnce into a classes dir;
-    return that dir (the ``java -cp`` classpath)."""
+    return that dir (the ``java -cp`` classpath).
+
+    ``record`` (item 322 Slice 2) emits the durable WAL sink into Components so a
+    boot under ``REVL_WAL`` records its witnessed transactional descriptors and
+    (on a clean unload) the discharge + terminal marker — the same durable
+    write-ahead channel the crash-recovery proof exercises, now reachable through
+    ``revl run --backend java`` itself."""
     out = tmp / "java_out"
     out.mkdir()
     gen = tmp / "java_gen" / "revl"
     gen.mkdir(parents=True)
-    _emit_components(ir, gen)
+    _emit_components(ir, gen, record=record)
 
     javac = str(Path(jdk_bin) / "javac")
     stubs = [str(p) for p in (_JAVA_DIR / "stubs").rglob("*.java")]
@@ -234,10 +241,22 @@ def run_java(ir: dict, config: dict, files, once: bool = False,
 
     jdk_bin = _working_jdk_bin()
     assert jdk_bin is not None  # java_runtime_reason() already gated on this
+
+    # item 322 Slice 2: a durable WAL passthrough. When the caller set REVL_WAL,
+    # emit Components in record mode and hand the env down to the JVM child so the
+    # witnessed transactional descriptors and (on a clean unload) the discharge +
+    # activation-complete markers land in that host-visible log — the same
+    # tier-agnostic WAL `revl recover` reads. Unset -> byte-identical non-record
+    # emission and no recording surface at all (the crash-recovery proof's WAL
+    # passes through this same sink).
+    wal_path = os.environ.get("REVL_WAL")
+    record = bool(wal_path)
+    child_env = dict(os.environ) if record else None
+
     tmp = Path(tempfile.mkdtemp(prefix="revl_run_java_"))
     try:
         try:
-            classpath = _build(ir, tmp, jdk_bin)
+            classpath = _build(ir, tmp, jdk_bin, record=record)
         except (RevlError, RuntimeError, OSError) as exc:
             print(f"error: could not build the java composition:\n{exc}",
                   file=sys.stderr)
@@ -250,7 +269,7 @@ def run_java(ir: dict, config: dict, files, once: bool = False,
         proc = subprocess.Popen(
             [str(Path(jdk_bin) / "java"), "-cp", classpath, "RunOnce", str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True,
+            stderr=subprocess.STDOUT, text=True, env=child_env,
         )
         if proc.stdin is not None:
             proc.stdin.close()

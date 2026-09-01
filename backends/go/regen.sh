@@ -86,6 +86,51 @@ python3 "$here/emit.py" "$here/scenarios/emitted/records/records.ir.json" record
 python3 "$here/emit.py" "$here/scenarios/emitted/jsonwire/jsonwire.ir.json" jsonwire \
   > "$here/scenarios/emitted/jsonwire/gen_jsonwire_test.go"
 
+# --- witnessed-effects three-entry-kind teardown loop (items 243/247 Slice 2b,
+# docs/design/teardown-contract.md) ------------------------------------------
+# witnessed_teardown.ir.json is compiled from scenarios/witnessed_teardown.rvl
+# by the frozen frontend (`revl compile`). A component carrying a bracket, a
+# `witnessed` effect and an `emit ... compensate ...` in the SAME activation
+# proves mixed-entry LIFO and the two-phase abort against the real stc-go
+# runtime; the file is a `*_test.go` (the document carries a `lifecycle
+# test`) whose generated Test RUNS the commit path. exec_test.go (hand-written,
+# not regenerated) drives LoadCAbort directly for the abort path, and
+# panic_guard_test.go exercises the RevlFrame teardown accumulator directly
+# (the goroutine-abandon / panic-guard / concurrency rules).
+python3 "$here/emit.py" "$here/scenarios/emitted/witnessed_teardown/witnessed_teardown.ir.json" witnessedteardown \
+  > "$here/scenarios/emitted/witnessed_teardown/gen_witnessed_teardown_test.go"
+
+# --- per-tool-call witnessed effect in a provide METHOD (item 318, the H1 gate,
+# docs/design/243-witnessed-externs.md) --------------------------------------
+# provide_method_witnessed.ir.json is compiled from
+# scenarios/provide_method_witnessed.rvl by the frozen frontend (`revl
+# compile`). A component whose provide-METHOD does a witnessed fs mutation PER
+# TOOL CALL registers each per-call inverse into the component's activation
+# frame (`RevlFrame.registerMethodWitnessed`, parked for `commit()` to dispose
+# once the commit-vs-abort bit is settled) — the go mirror of the py reference
+# tier's `Frame.transactional_method`/`_deferred_transactional`. The emitted
+# file is a `*_test.go` (the document carries a `lifecycle test` smoke path);
+# exec_test.go (hand-written, not regenerated) drives the real per-tool-call H1
+# proof against files on disk — persist on clean unload, revert on abort — the
+# go mirror of tests/test_provide_method_witnessed.py.
+python3 "$here/emit.py" "$here/scenarios/emitted/provide_method_witnessed/provide_method_witnessed.ir.json" providemethodwitnessed \
+  > "$here/scenarios/emitted/provide_method_witnessed/gen_provide_method_witnessed_test.go"
+
+# --- method-body compensation in a provide METHOD (item-247 method-body
+# remainder, docs/design/teardown-contract.md) -------------------------------
+# method_compensate.ir.json is compiled from scenarios/method_compensate.rvl by
+# the frozen frontend (`revl compile`). A component whose provide-METHOD does an
+# `emit ... compensate ...` PER TOOL CALL registers each offset onto the
+# component's activation frame (`RevlFrame.registerMethodCompensation`, parked
+# for `commit()` to discharge on a clean commit and `runCompensationPhase` to
+# fire in Phase 2 on abort) — NOT a bare call that drops the compensate (the
+# silent-wrong placeholder this fixes) nor a `ctx.Effect` bracket (fires on a
+# clean unload). exec_test.go (hand-written) drives the discharge-on-commit and
+# fire-in-Phase-2-on-abort proof — the go mirror of
+# tests/test_provide_method_compensate.py.
+python3 "$here/emit.py" "$here/scenarios/emitted/method_compensate/method_compensate.ir.json" methodcompensate \
+  > "$here/scenarios/emitted/method_compensate/gen_method_compensate_test.go"
+
 # --- ir_version 3 pure/typed-core fixtures (ordinary Go, no stc runtime) ---
 # The v3_tests fixture carries `test` blocks that become real Go tests, so it
 # is emitted straight into a *_test.go file. The other two are libraries the
@@ -110,6 +155,9 @@ if command -v gofmt >/dev/null 2>&1; then
            "$here/scenarios/emitted/advance/gen_advance_test.go" \
            "$here/scenarios/emitted/records/gen_records_test.go" \
            "$here/scenarios/emitted/jsonwire/gen_jsonwire_test.go" \
+           "$here/scenarios/emitted/witnessed_teardown/gen_witnessed_teardown_test.go" \
+           "$here/scenarios/emitted/provide_method_witnessed/gen_provide_method_witnessed_test.go" \
+           "$here/scenarios/emitted/method_compensate/gen_method_compensate_test.go" \
            "$here/v3/tests/gen_test.go" \
            "$here/v3/types_functions/gen.go" \
            "$here/v3/stdlib/gen.go"

@@ -111,8 +111,16 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_ts_corpus"
+
+# item 243 Slice 2b (docs/design/teardown-contract.md): the reference emitter's
+# `emit ... compensate ...` lowering registers a Phase-2 compensation entry
+# through `Frame` (two-phase abort) instead of a bare `yield () => <compensate>`.
+# `selfhost/emit_ts.rvl` was ported to that lowering (item 323, py's item 317
+# analog), so the three saga fixtures below byte-match the reference like every
+# other fixture — no `xfail` remains.
 CORPUS = [
     "arith.rvl",       # bounded int/int32, division/modulo, comparisons, unary
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow
     "records.rvl",     # record literal, functional record update, list literal
@@ -121,6 +129,7 @@ CORPUS = [
     # slice 2 (item 204) — components/services, byte-exact:
     "services_methods.rvl",       # provide methods (params, ternary, builtin), context aug
     "services_body.rvl",          # let-effect (bound), if/fail guard, emit/compensate saga
+                                   # (compensation -> Frame two-phase teardown, item 323)
     "services_config.rvl",        # config interface (required + defaulted), applyConfigDefaults
     "services_method_block.rvl",  # block-form provide method: let/return, req-as-ctx in method
     "components_mixed.rvl",       # a pure fn alongside a provider (independent match counters)
@@ -128,6 +137,7 @@ CORPUS = [
     "services_composite.rvl",         # List/Opt/Map/Result/fn-type + declared-record `List[Msg]`
     "services_composite_provide.rvl", # composite provide-method params (Row[], Map) via `_ts_type`
     "component_exprs.rvl",            # host (`host.Job.run`), format (`` `…${}` ``), fn, adt
+                                       # (compensation -> Frame two-phase teardown, item 323)
     # slice 4 (item 219) — async coloring across the component tail, byte-exact:
     "services_async.rvl",       # async op `Promise<T>` sigs, `async` methods, the item-141
                                 # await-seed (direct `fetch` + nested ternary arm `pick`)
@@ -148,10 +158,13 @@ CORPUS = [
     # slice 7 (item 240) — the v1/v2 DISPATCH path (`emit()` -> `_emit_v1`), byte-exact:
     "v1_component_body.rvl",  # a component-only doc with no v3 feature lowers to ir_version 1
                               # (config, effect/undo, emit/compensate saga, provide method + ternary)
+                              # (compensation -> Frame two-phase teardown, item 323)
     "v2_isolate_only.rvl",    # isolate ONLY (no trivial v3 `fn`) -> ir_version 2 (closes item 234's flag)
     "v2_intercept_only.rvl",  # intercept ONLY (no trivial v3 `fn`) -> ir_version 2, dict-form inject
+    # item 383 / 391 (self-host port) — `.map`/`.filter`/`.reduce` desugar to the
+    # `list_*` free calls; the ts tier lowers the function-value params + arrows
+    "transforms.rvl",
 ]
-
 
 def _load_reference_emit():
     """The reference TS emitter, loaded by path so we compare against the exact

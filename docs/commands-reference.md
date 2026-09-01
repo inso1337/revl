@@ -521,7 +521,11 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 - `--backend {py, ts, rust, java, wasm, go, all}` - tier to run the blocks on
   (default: `py`); `all` runs every tier whose toolchain is present.
 - `--sweep` - fault sweep: inject failure at every step of every component and
-  check L-Raise / no-residue / LIFO / siblings at each (py tier;
+  check L-Raise / no-residue / LIFO / siblings at each (py tier). With
+  `--backend all`, sweep every runtime whose toolchain is present and assert
+  they agree — residue-free on every tier; a toolchain-absent or
+  not-yet-capable tier loud-skips, never a false green. Set `REVL_SWEEP_CAP=N`
+  to take a representative corpus on the heavy tiers (§10 of
   [fault-tests.md](fault-tests.md)).
 - `--mock-requires` - run every `lifecycle test` in mock world: each unmet
   `requires` is filled by an auto-generated mock provider, so a consumer boots

@@ -1,0 +1,43 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+service Api {
+  fn fetch(user: Str) -> Opt[Str]
+}
+
+component PgDatabase provides db: Database {
+  config { url: Str = "postgres://localhost", poolSize: Int = 4 }
+
+  let conn = effect Pool.open(config.url, config.poolSize) undo conn.close()
+
+  provide db {
+    fn query(sql) = conn.query(sql)
+    fn execute(sql) { emit conn.execute(sql) }
+  }
+}
+
+component UserCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value) undo store.remove(key)
+      emit db.execute(`INSERT INTO cache_log VALUES (${key})`)
+           compensate db.execute(`DELETE FROM cache_log WHERE k = ${key}`)
+    }
+  }
+}
+
+component ApiFront requires cache: Cache provides api: Api {
+  provide api {
+    fn fetch(user) = cache.get(user)
+  }
+}

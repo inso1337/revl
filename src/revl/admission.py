@@ -453,14 +453,16 @@ def _handoff_error(program: Program, comp: dict, key: str,
 
 
 def admit_under_policy(policy, audit: dict,
-                       mcp_components=None) -> None:
+                       mcp_components=None, *, profile=None) -> None:
     """Refuse admission when the composition breaches the boundary policy.
 
     `policy` is a `revl.policy.Policy`, `audit` the `revl audit` graph
     (`revl.audit_diff.audit_report`). Raises on the first violation (admission
     is all-or-nothing); returns silently on a clean policy. Kept a thin
     forwarder so the admission module names the third gate leg alongside the
-    other two, without importing the policy engine at module load."""
+    other two, without importing the policy engine at module load. `profile`
+    (item 274) is the untrusted-author admission profile, threaded so the
+    navigable-refusal map is redacted for an untrusted author."""
     from .policy import enforce  # noqa: PLC0415 — lazy, additive to §5
 
-    enforce(policy, audit, mcp_components=mcp_components)
+    enforce(policy, audit, mcp_components=mcp_components, profile=profile)

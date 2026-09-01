@@ -11,8 +11,14 @@ for hover text, the parser AST for symbols). Run it as `python -m revl.lsp`.
 
 from __future__ import annotations
 
-from .analysis import compute_definition, compute_diagnostics, compute_hover
+from .analysis import (
+    compute_code_actions,
+    compute_definition,
+    compute_diagnostics,
+    compute_hover,
+)
 from .document import Position
+from .fixgen import Fix, fix_code, generate_fix
 from .server import LspServer, serve
 
 __all__ = [
@@ -22,4 +28,8 @@ __all__ = [
     "compute_diagnostics",
     "compute_hover",
     "compute_definition",
+    "compute_code_actions",
+    "Fix",
+    "fix_code",
+    "generate_fix",
 ]

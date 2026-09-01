@@ -154,6 +154,13 @@ fn bin_instr(op: Str, opnd: Str) -> Str {
     return "i32.".concat(suf)
   }
   if (opnd == "Int32") {
+    // Int32 bitwise operators (item 366): each is one native i32 instruction;
+    // the shifts self-mask the count to mod 32. `>>` is `shr_s` (arithmetic).
+    if (op == "&") { return "i32.and" }
+    if (op == "|") { return "i32.or" }
+    if (op == "^") { return "i32.xor" }
+    if (op == "<<") { return "i32.shl" }
+    if (op == ">>") { return "i32.shr_s" }
     if (op == "+") { return `call $int32_add` }
     if (op == "-") { return `call $int32_sub` }
     if (op == "*") { return `call $int32_mul` }
@@ -185,12 +192,17 @@ fn infer_ty(node: Any, sty: Map[Str, Str]) -> Str {
     let op = node_op(node)
     if (is_comparison(op)) { return "Bool" }
     if (node_operands(node) == "Float") { return "Float" }
+    // Bitwise ops are Int32-only regardless of the (absent) operands annotation
+    // (item 366, docs/arithmetic.md).
+    if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") { return "Int32" }
     if (node_operands(node) == "Int32") { return "Int32" }
     return "Int"
   }
   if (k == "un") {
     let op = node_op(node)
     if (op == "!") { return "Bool" }
+    // Bitwise complement is Int32-only (item 366).
+    if (op == "~") { return "Int32" }
     if (op == "-") { if (node_operands(node) == "Int32") { return "Int32" } return "Int" }
     return ""
   }
@@ -218,7 +230,39 @@ type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str], 
 // id N, which names its `for_ptr_N`/`for_cnt_N`/`for_idx_N` scratch locals. It is
 // threaded in and out so the numbering continues across sibling and nested loops
 // exactly as the header's `_for_temps` collection does.
-type Sout = { lines: List[Str], scope: Scope, widths: Map[Str, Str], loop: Int }
+// `brk` is the running break-label counter (the reference's function-global
+// `_brk_labels`): a SEPARATE monotonic id, bumped once per loop that CARRIES a
+// break/continue, naming its `$revl_brk_N`/`$revl_top_N` (+ inner `$revl_cnt_N`
+// for a `for`). It is not the `for`-cursor id — a loop with no control flow
+// bumps `loop` (if a `for`) but not `brk`, so the two counters diverge under
+// nesting (item 379, docs/design/379-break-continue.md).
+type Sout = { lines: List[Str], scope: Scope, widths: Map[Str, Str], loop: Int, brk: Int }
+
+// The innermost enclosing loop's label set, threaded DOWN into a loop body so a
+// `break`/`continue` there resolves to it (the reference's `_loop_label_stack`
+// top). `kind` is "while"|"for"|"" — a `for`'s `continue` targets `cnt` (the
+// inner block, so the idx++ after it still runs); a `while`'s targets `top`.
+type LoopCtx = { kind: Str, brk: Str, top: Str, cnt: Str }
+
+fn no_loop() -> LoopCtx { return { kind: "", brk: "", top: "", cnt: "" } }
+
+// True when a `break`/`continue` (or, with `include_continue` false, only a
+// `break`) appears in `nodes` targeting the loop these are the body of — at any
+// statement depth, but NOT inside a nested `while`/`for`, which captures its own
+// control flow. Decides whether a loop needs named labels, and (with break-only)
+// whether a `while (true)` still diverges.
+fn loop_control_targets(nodes: List[Any], include_continue: Bool) -> Bool {
+  for (n of nodes) {
+    let k = value_str(value_field(n, "step"))
+    if (k == "break") { return true }
+    if (include_continue && k == "continue") { return true }
+    if (k == "if") {
+      if (loop_control_targets(value_list(value_field(n, "then")), include_continue)) { return true }
+      if (loop_control_targets(value_list(value_field(n, "else")), include_continue)) { return true }
+    }
+  }
+  return false
+}
 
 fn scope_bind(s: Scope, name: Str, slot: Str, ty: Str) -> Scope {
   return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs, rectypes: s.rectypes }
@@ -677,6 +721,13 @@ fn render_un(node: Any, s: Scope, depth: Int) -> E {
     return { wat: `${operand.wat}
       (i32.eqz)`, ty: "Bool" }
   }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): xor with -1. A bit op, so it never
+    // traps; the operand is Int32 (the checker guarantees it).
+    return { wat: `${operand.wat}
+      (i32.const -1)
+      (i32.xor)`, ty: "Int32" }
+  }
   // `-`: a checked subtract-from-zero at the operand's width (`0 - MIN` traps).
   if (operand.ty == "Int32") {
     return { wat: `(i32.const 0)
@@ -952,27 +1003,34 @@ fn render_expr(node: Any, s: Scope, expected: Str, depth: Int) -> E {
 }
 
 // -------------------------------------------------------------- statements
-fn emit_stmts(nodes: List[Any], s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int) -> Sout {
+fn emit_stmts(nodes: List[Any], s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
+              brkc: Int, lctx: LoopCtx) -> Sout {
   var lines = []
   var sc = s
   var w = widths
   var lc = loopc
+  var bk = brkc
   for (n of nodes) {
-    let r = emit_stmt(n, sc, w, rty, lc)
+    let r = emit_stmt(n, sc, w, rty, lc, bk, lctx)
     lines = lines.concat(r.lines)
     sc = r.scope
     w = r.widths
     lc = r.loop
+    bk = r.brk
   }
-  return { lines: lines, scope: sc, widths: w, loop: lc }
+  return { lines: lines, scope: sc, widths: w, loop: lc, brk: bk }
 }
 
 // `_emit_stmts` for one step -> its emitted lines, threaded scope, and the
 // accumulated local widths. A `let`/`assign` binds a value into l_<name> and
 // records that local's width; if/else/while lower their sub-blocks in COPIES of
 // the scope (a binding inside a block does not leak past it) while the widths
-// thread through (the reference's `_local_types` is function-global).
-fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int) -> Sout {
+// thread through (the reference's `_local_types` is function-global). `brkc` is
+// the running break-label counter and `lctx` the innermost enclosing loop's
+// labels — both threaded so a break/continue anywhere in a loop body resolves to
+// the right named block (item 379).
+fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
+             brkc: Int, lctx: LoopCtx) -> Sout {
   let step = value_str(value_field(node, "step"))
   if (step == "let" || step == "assign") {
     let name = value_str(value_field(node, "name"))
@@ -986,27 +1044,32 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int) -
     let nw = widths.set(`l_${name}`, wty(value_ty))
     var out = [value.wat, `(local.set $l_${name})`]
     let ns = scope_bind(s, name, `(local.get $l_${name})`, value_ty)
-    return { lines: out, scope: ns, widths: nw, loop: loopc }
+    return { lines: out, scope: ns, widths: nw, loop: loopc, brk: brkc }
   }
   if (step == "return") {
     let e = value_field(node, "expr")
-    if (value_is_null(e)) { return { lines: ["return"], scope: s, widths: widths, loop: loopc } }
+    if (value_is_null(e)) { return { lines: ["return"], scope: s, widths: widths, loop: loopc, brk: brkc } }
     let value = render_expr(e, s, rty, 0)
-    return { lines: [value.wat, "return"], scope: s, widths: widths, loop: loopc }
+    return { lines: [value.wat, "return"], scope: s, widths: widths, loop: loopc, brk: brkc }
   }
   if (step == "if") {
     let cond = render_expr(value_field(node, "cond"), s, "Bool", 0)
     let thenNodes = value_list(value_field(node, "then"))
     let elseNodes = value_list(value_field(node, "else"))
-    let thenR = emit_stmts(thenNodes, s, widths, rty, loopc)
+    // an `if` inside a loop body does not reset the loop context: a `break`
+    // written one `if` deep still targets the enclosing loop, which is exactly
+    // why the named labels are needed (anonymous `br 1` would hit the `if`).
+    let thenR = emit_stmts(thenNodes, s, widths, rty, loopc, brkc, lctx)
     var w2 = thenR.widths
     var lc = thenR.loop
+    var bk = thenR.brk
     var elseLines = []
     if (elseNodes.length() > 0) {
-      let elseR = emit_stmts(elseNodes, s, w2, rty, lc)
+      let elseR = emit_stmts(elseNodes, s, w2, rty, lc, bk, lctx)
       elseLines = elseR.lines
       w2 = elseR.widths
       lc = elseR.loop
+      bk = elseR.brk
     }
     var out = [cond.wat, "(if", "  (then"]
     for (l of thenR.lines) { out = out.push(`    ${l}`) }
@@ -1017,17 +1080,34 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int) -
       out = out.push("  )")
     }
     out = out.push(")")
-    return { lines: out, scope: s, widths: w2, loop: lc }
+    return { lines: out, scope: s, widths: w2, loop: lc, brk: bk }
   }
   if (step == "while") {
     let cond = render_expr(value_field(node, "cond"), s, "Bool", 0)
-    let bodyR = emit_stmts(value_list(value_field(node, "body")), s, widths, rty, loopc)
+    let body = value_list(value_field(node, "body"))
+    // A loop that CARRIES a break/continue gets named labels so a `br` resolves
+    // regardless of `if`-nesting depth; one with neither keeps the anonymous
+    // skeleton, so every existing golden stays byte-stable.
+    if (loop_control_targets(body, true)) {
+      let n = brkc + 1
+      let brkl = `$revl_brk_${num_str(n)}`
+      let topl = `$revl_top_${num_str(n)}`
+      let bctx: LoopCtx = { kind: "while", brk: brkl, top: topl, cnt: "" }
+      let bodyR = emit_stmts(body, s, widths, rty, loopc, n, bctx)
+      var out = [`(block ${brkl}`, `  (loop ${topl}`, `    ${cond.wat}`, "    (i32.eqz)", `    (br_if ${brkl})`]
+      for (l of bodyR.lines) { out = out.push(`    ${l}`) }
+      out = out.push(`    (br ${topl})`)
+      out = out.push("  )")
+      out = out.push(")")
+      return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop, brk: bodyR.brk }
+    }
+    let bodyR = emit_stmts(body, s, widths, rty, loopc, brkc, lctx)
     var out = ["(block", "  (loop", `    ${cond.wat}`, "    (i32.eqz)", "    (br_if 1)"]
     for (l of bodyR.lines) { out = out.push(`    ${l}`) }
     out = out.push("    (br 0)")
     out = out.push("  )")
     out = out.push(")")
-    return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop }
+    return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop, brk: bodyR.brk }
   }
   if (step == "for") {
     // `for (x of xs)` over a List `[u32 count][pad][slot…]`. This `for` claims the
@@ -1041,40 +1121,83 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int) -
     let it = render_expr(value_field(node, "iterable"), s, iter_ty, 0)
     let w1 = widths.set(`l_${bind}`, wty(elem))
     let bscope = scope_bind(s, bind, `(local.get $l_${bind})`, elem)
-    let bodyR = emit_stmts(value_list(value_field(node, "body")), bscope, w1, rty, n)
+    let body = value_list(value_field(node, "body"))
     let ptr = `for_ptr_${num_str(n)}`
     let cnt = `for_cnt_${num_str(n)}`
     let idx = `for_idx_${num_str(n)}`
     let element = slot_load(`(i32.add (local.get $${ptr}) (i32.add (i32.const 8) (i32.mul (local.get $${idx}) (i32.const 8))))`, elem)
-    var out = [
+    let prologue = [
       it.wat, `(local.set $${ptr})`,
       `(i32.load (local.get $${ptr}))`, `(local.set $${cnt})`,
-      "(i32.const 0)", `(local.set $${idx})`,
+      "(i32.const 0)", `(local.set $${idx})`
+    ]
+    // A `for` carrying break/continue gets named labels too; its `continue` must
+    // NOT jump to the loop head (that would skip the `idx += 1` after the body
+    // and spin forever), so the body is wrapped in an inner `$revl_cnt` block
+    // with the increment emitted after it. The break-label id (`bn`) is separate
+    // from the cursor id (`n`).
+    if (loop_control_targets(body, true)) {
+      let bn = brkc + 1
+      let brkl = `$revl_brk_${num_str(bn)}`
+      let topl = `$revl_top_${num_str(bn)}`
+      let cntl = `$revl_cnt_${num_str(bn)}`
+      let bctx: LoopCtx = { kind: "for", brk: brkl, top: topl, cnt: cntl }
+      let bodyR = emit_stmts(body, bscope, w1, rty, n, bn, bctx)
+      var out = prologue.concat([
+        `(block ${brkl}`,
+        `  (loop ${topl}`,
+        `    (i32.ge_s (local.get $${idx}) (local.get $${cnt}))`,
+        `    (br_if ${brkl})`,
+        `    ${element}`,
+        `    (local.set $l_${bind})`,
+        `    (block ${cntl}`
+      ])
+      for (l of bodyR.lines) { out = out.push(`      ${l}`) }
+      out = out.push("    )")
+      out = out.push(`    (local.set $${idx} (i32.add (local.get $${idx}) (i32.const 1)))`)
+      out = out.push(`    (br ${topl})`)
+      out = out.push("  )")
+      out = out.push(")")
+      return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop, brk: bodyR.brk }
+    }
+    let bodyR = emit_stmts(body, bscope, w1, rty, n, brkc, lctx)
+    var out = prologue.concat([
       "(block",
       "  (loop",
       `    (i32.ge_s (local.get $${idx}) (local.get $${cnt}))`,
       "    (br_if 1)",
       `    ${element}`,
       `    (local.set $l_${bind})`
-    ]
+    ])
     for (l of bodyR.lines) { out = out.push(`    ${l}`) }
     out = out.push(`    (local.set $${idx} (i32.add (local.get $${idx}) (i32.const 1)))`)
     out = out.push("    (br 0)")
     out = out.push("  )")
     out = out.push(")")
-    return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop }
+    return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop, brk: bodyR.brk }
   }
   if (step == "expr") {
     let value = render_expr(value_field(node, "expr"), s, "", 0)
     var out = [value.wat]
     if (value.ty != "" && value.ty != "Unit") { out = out.push("(drop)") }
-    return { lines: out, scope: s, widths: widths, loop: loopc }
+    return { lines: out, scope: s, widths: widths, loop: loopc, brk: brkc }
   }
   if (step == "assert") {
     let value = render_expr(value_field(node, "expr"), s, "Bool", 0)
-    return { lines: [value.wat, "(i32.eqz)", "(if (then unreachable))"], scope: s, widths: widths, loop: loopc }
+    return { lines: [value.wat, "(i32.eqz)", "(if (then unreachable))"], scope: s, widths: widths, loop: loopc, brk: brkc }
   }
-  return { lines: [`<<UNSUPPORTED-STEP:${step}>>`], scope: s, widths: widths, loop: loopc }
+  // item 379 / 391: bare loop control -> a `br` to the innermost loop's named
+  // block. `break` leaves via `$revl_brk`; `while`-`continue` re-tests at the
+  // head (`$revl_top`), while `for`-`continue` falls out of the inner
+  // `$revl_cnt` block so the trailing `idx += 1` still runs.
+  if (step == "break") {
+    return { lines: [`(br ${lctx.brk})`], scope: s, widths: widths, loop: loopc, brk: brkc }
+  }
+  if (step == "continue") {
+    let target = lctx.kind == "for" ? lctx.cnt : lctx.top
+    return { lines: [`(br ${target})`], scope: s, widths: widths, loop: loopc, brk: brkc }
+  }
+  return { lines: [`<<UNSUPPORTED-STEP:${step}>>`], scope: s, widths: widths, loop: loopc, brk: brkc }
 }
 
 // `_collect_locals` (subset): every `let`/`assign` name reachable through the
@@ -1139,6 +1262,17 @@ fn diverges(nodes: List[Any]) -> Bool {
     if (els.length() == 0) { return false }
     return diverges(value_list(value_field(last, "then"))) && diverges(els)
   }
+  // `while (true)` never exits, so it diverges — UNLESS a reachable `break` can
+  // leave it (a `continue` re-enters the loop, so it does not). Mirrors the
+  // frontend `_definitely_returns`, so a declared-return fn ending in a
+  // non-break `while (true)` gets the trailing `unreachable` its non-unit result
+  // needs (C4 / bug 398, docs/design/379-break-continue.md).
+  if (step == "while") {
+    let cond = value_field(last, "cond")
+    if (value_str(value_field(cond, "kind")) == "lit" && value_bool(value_field(cond, "value"))) {
+      return !loop_control_targets(value_list(value_field(last, "body")), false)
+    }
+  }
   return false
 }
 
@@ -1152,12 +1286,25 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any) -> Str {
   for (p of params) {
     let pname = value_str(value_field(p, "name"))
     let ptype = value_str(value_field(p, "type"))
-    if (ptype != "Unit") { sig = sig.push(`(param $p_${pname} ${wty(ptype)})`) }
+    // item 383 (self-host port): a declared function type `(P, ..) -> R` has no
+    // representation on the wasm tier — the emitted module is wasm MVP with no
+    // closures and no function references, so a function value cannot be a param
+    // or result (the reference's `_check_type`, which RAISES). A pure emitter fn
+    // cannot `fail`, so the refusal surfaces as a loud out-of-subset
+    // `<<DEFER-fn-type>>` marker. `.map`/`.filter`/`.reduce` reach here through
+    // their `list_map`/`list_filter`/`list_reduce` function-value parameters.
+    if (ptype != "Unit") {
+      let pw = ptype.startsWith("(") ? "<<DEFER-fn-type>>" : wty(ptype)
+      sig = sig.push(`(param $p_${pname} ${pw})`)
+    }
     slots = slots.set(pname, `(local.get $p_${pname})`)
     types = types.set(pname, ptype)
   }
   let return_ty = value_str(value_field(fnode, "returns"))
-  if (return_ty != "Unit" && return_ty != "") { sig = sig.push(`(result ${wty(return_ty)})`) }
+  if (return_ty != "Unit" && return_ty != "") {
+    let rw = return_ty.startsWith("(") ? "<<DEFER-fn-type>>" : wty(return_ty)
+    sig = sig.push(`(result ${rw})`)
+  }
 
   let body = value_list(value_field(fnode, "body"))
   var raw = []
@@ -1196,7 +1343,7 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any) -> Str {
   }
 
   var wempty: Map[Str, Str] = Map.empty()
-  let r = emit_stmts(body, scope, wempty, return_ty, 0)
+  let r = emit_stmts(body, scope, wempty, return_ty, 0, 0, no_loop())
   var bodyLines = r.lines
   var lastStep = ""
   if (body.length() > 0) { lastStep = value_str(value_field(body[body.length() - 1], "step")) }

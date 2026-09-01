@@ -11,9 +11,18 @@ attributes (never the lowering spine), so this module does not import from
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .parser import Program
 from .typecheck import parse_type, FN_HEAD
 from .why import TraceStep
+
+if TYPE_CHECKING:
+    # `Env` lives in `lower`, which re-exports this module's names, so importing
+    # it at runtime would be circular. Guarded to TYPE_CHECKING: the annotation
+    # resolves for type checkers and ruff without adding a runtime dependency on
+    # the lowering spine (see the module docstring).
+    from .lower import Env
 
 
 def _is_async_fn_type(type_name: str | None) -> bool:
@@ -66,9 +75,19 @@ def _calls_in(node, found: set, values: set | None = None,
 
 
 def _emitting_fns(fns: list, externs: list, witness: dict | None = None) -> set:
-    """Names whose call reaches an irreversible host effect: `emission`
-    externs, and functions that reach one transitively. An `acquire` extern
-    is *revertible* (it carries an inverse), so it is deliberately not one.
+    """Names whose call reaches a host boundary crossing: `emission` **and
+    `witnessed`** externs, and functions that reach one transitively.
+
+    An `acquire` extern is revertible by a bracket that the very structure of an
+    `effect` form registers, so it is deliberately not here. A `witnessed`
+    extern is different: its reversibility is realized only when the accumulator
+    actually registers the declared inverse (item 243). Reversibility therefore
+    ties to *registration*, not to the mere presence of a declared inverse — a
+    witnessed call that registers nothing is as irreversible as an emission and
+    must be visible to the item-33 policy gate, not exempted. So a witnessed
+    extern crosses a boundary in the same authority namespace as an emission,
+    carrying a reversibility flag on its IR node rather than forming a separate
+    lattice.
 
     `witness` (optional, filled in place) records *why* each derived name is
     in the set: `witness[caller] = callee`, the edge that put it there. The
@@ -92,6 +111,13 @@ def _emitting_capabilities(fns: list, externs: list,
     derivation come from one traversal, so they cannot disagree."""
     caps: dict[str, set] = {ext["name"]: {ext["name"]}
                             for ext in externs if ext.get("class") == "emission"}
+    # A witnessed extern crosses the same boundary as an emission (item 243): it
+    # seeds the fixed point too, so an unregistered witnessed reach is never
+    # mistaken for revertible. Its capability is the declared scope (`fs`), or
+    # its own name when unscoped — the same "the extern is the boundary" rule.
+    for ext in externs:
+        if ext.get("class") == "witnessed":
+            caps[ext["name"]] = set(ext.get("capabilities") or [ext["name"]])
     calls: dict[str, set] = {}
     passed: dict[str, set] = {}  # first-class callable references per fn body
     for fn in fns:
@@ -276,10 +302,15 @@ class _EmissionEvidence:
             if decl.classification == "emission"
         }
         # async externs (roadmap item 80): name -> decl, for the v1 coloring
-        # check to locate an async extern a body reaches (async-extern.md §3)
+        # check to locate an async extern a body reaches (async-extern.md §3).
+        # item 388: a poly extern (`fn|async`) is pre-seeded as the async form
+        # here too, so an awaited call site resolves during lowering and an A1
+        # diagnostic names it as an "extern" (the ordering wrinkle, design
+        # §"honest hard part" #3). Its sync clone is split off with the async
+        # membership cleared in the post-pass.
         self.async_externs = {
             decl.name: decl for decl in program.externs
-            if getattr(decl, "async_", False)
+            if getattr(decl, "async_", False) or getattr(decl, "colour_poly", False)
         }
 
     def locate(self, decl) -> tuple[str | None, int | None]:
@@ -356,6 +387,42 @@ def _method_emissions(body: list, env: "Env",
         capabilities = tuple(getattr(decl, "capabilities", ()) or ())
         return [TraceStep(label, "emission", file, line, detail, capabilities)]
 
+    def crossing_caps(local: str | None, method: str | None) -> set:
+        """The capability set a `req` seam crossing through `local.method`
+        contributes. Ordinarily the require KEY name (the composition-wide
+        wiring key naming this boundary). Under item 296 alias token carry-over,
+        an aliased require declared `carrying(...)` contributes the
+        consumer-facing tokens it stands in for instead, so an adapter's body
+        `emit backing.get(...)` computes the consumer's declared reach rather
+        than the internal alias key.
+
+        SAFETY (item 296, the load-bearing invariant): the carry must not let a
+        real emission escape the consumer's declared reach. So the carry is
+        honored only when it faithfully covers the candidate method's DECLARED
+        reach: if the candidate is a bare/unbounded emission, or reaches more
+        distinct boundaries than the carry names (at least one candidate
+        boundary would vanish through the alias), the crossing also contributes
+        `*` - the unnameable boundary no `emission[...]` list can name - so the
+        LOCAL G4 bound refuses the launder rather than passing it. This keeps
+        every fold seeing the candidate's real emission through the alias."""
+        carry_map = getattr(env, "require_carry", None) or {}
+        carried = carry_map.get(local) if local is not None else None
+        if not carried:
+            return {local}
+        service = env.services.get(env.requires.get(local) or "")
+        decl = service.methods.get(method) if service is not None else None
+        cand_caps = getattr(decl, "capabilities", None) if decl is not None else None
+        result = set(carried)
+        if decl is None or cand_caps is None:
+            # unknown, or a bare/unbounded candidate emission: a finite carry
+            # cannot bound it - refuse via the unnameable boundary.
+            result.add("*")
+        elif len(set(cand_caps)) > len(set(carried)):
+            # the carry names fewer boundaries than the candidate declares:
+            # at least one real boundary would be hidden through the alias.
+            result.add("*")
+        return result
+
     def walk(node):
         if isinstance(node, dict):
             if node.get("step") == "emit":
@@ -364,7 +431,7 @@ def _method_emissions(body: list, env: "Env",
                 if target.get("kind") == "req":
                     note(f"{target.get('name')}.{expr.get('method')}",
                          service_emission_step(target.get("name"), expr.get("method")))
-                    caps.add(target.get("name"))
+                    caps.update(crossing_caps(target.get("name"), expr.get("method")))
                 else:
                     note("a host emission")
                     # every host emission reaches a named `emission` extern
@@ -386,7 +453,7 @@ def _method_emissions(body: list, env: "Env",
                 if decl is not None and decl.emission:
                     note(f"{target.get('name')}.{node.get('method')}",
                          service_emission_step(target.get("name"), node.get("method")))
-                    caps.add(target.get("name"))
+                    caps.update(crossing_caps(target.get("name"), node.get("method")))
             calls: set = set()
             values: set = set()
             _calls_in(node, calls, values=values)

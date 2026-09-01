@@ -199,10 +199,23 @@ class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, ir_version: int = IR_VERSION,
                  types: dict | None = None, functions: list | None = None,
                  externs: list | None = None, is_template: bool = False,
-                 spawn_targets: dict | None = None) -> None:
+                 spawn_targets: dict | None = None, record: bool = False) -> None:
         self.ir = component
         self.services = services
         self.ir_version = ir_version
+        # item 322 Slice 2: durable-WAL record mode. OFF by default and gated at
+        # every emission site it touches, so a non-recording component (every
+        # existing golden) is byte-identical. When on, each witnessed
+        # TRANSACTIONAL registration frames its discharge-descriptor's runtime
+        # values out through the `coeffect:revl:wal.record` host import, which
+        # the driver drains into the durable host WAL.
+        self.record = record
+        # per-component 0-based WAL sequence for witnessed transactional
+        # registrations, in registration order (the seq recover keys off).
+        self._record_seq = 0
+        # set once the component actually emits a record framing call, so
+        # `_module` pulls the record import + a linear memory in only then.
+        self._needs_record_import = False
         self.name = _ident(component.get("name"), "component name")
         # A spawn target is a *template* (docs/design-v2-instances.md): a runtime
         # instance, never a static composition member. It alone may carry a
@@ -257,6 +270,32 @@ class _ComponentEmitter:
         # (key, op) -> (param wasm types, result wasm type or None) — the
         # coeffect import's ABI, one width per declared param/return.
         self.imports: dict[tuple[str, str], tuple[list[str | None], str | None]] = {}
+        # item 173: per-tier emitted-body routing. A routed require (item 162's
+        # `routes` IR: key -> {"realms": [...], "strategy": ...}) fans a key out
+        # across N NAMED worker realms. This tier is FIRST-PARTY — the runtime
+        # liveness primitive lives in cordis-wasm's substrate (`route:<key>`), so
+        # the emitted body routes on wasm exactly like py/ts/rust. A routed key
+        # is NOT a plain `coeffect:<key>` import (it has no single-realm
+        # provider); its calls go through generated selector + dispatch helpers
+        # that re-resolve the live per-realm handle on every call (reactive
+        # failover from the emitted body). Empty for every routes-less program,
+        # so such a program emits BYTE-IDENTICALLY to before this item.
+        self.routes: dict[str, dict] = component.get("routes") or {}
+        for key, route in self.routes.items():
+            if key not in self.requires:
+                raise EmitError(
+                    f"{self.name}: routed key {key!r} is not a requirement")
+            realms = route.get("realms") or []
+            if not realms:
+                raise EmitError(
+                    f"{self.name}: routed key {key!r} names no realms")
+        # routed (key, op) -> (param wasm types, result wasm type or None): the
+        # `route:<key>.<op>` dispatch ABI, kept out of `self.imports` so no plain
+        # coeffect import is emitted for a routed key.
+        self.route_imports: dict[tuple[str, str], tuple[list[str | None], str | None]] = {}
+        # routed key -> ordered ops its body calls (drives helper + import gen);
+        # only keys actually called emit any route machinery.
+        self.route_ops: dict[str, list[str]] = {}
         self.globals: list[tuple[str, str]] = []   # (name, wasm type)
         self.uses_job = False
         # job name -> interned i32 id (see _job_id)
@@ -264,6 +303,29 @@ class _ComponentEmitter:
         # the value engine: the *same* renderer the v3 `fn` tier uses
         self.v3 = _V3Emitter(types or {}, functions or [], externs or [], [])
         self.externs = {ext.get("name"): ext for ext in (externs or [])}
+        # item 243 Slice 2b (docs/design/teardown-contract.md): witnessed
+        # externs by name, so an acquisition step can be recognised as a
+        # TRANSACTIONAL effect and register the extern's own DECLARED undo
+        # (never a site-spelled one) into the accumulator. Absent/empty for
+        # every program with no witnessed extern, so their emission is
+        # unaffected by this table's existence.
+        self.witnessed = {
+            ext["name"]: ext for ext in (externs or [])
+            if ext.get("class") == "witnessed"
+        }
+        # item 324 (docs/design/243-witnessed-externs.md, the wasm half of item
+        # 318's provide-method witnessed position): the distinct `witnessed`
+        # externs this component's PROVIDE-METHOD bodies acquire per tool call,
+        # in first-seen order. A method-body witnessed effect fires per request,
+        # an unbounded number of times, so — unlike the activation body's
+        # fixed, compile-time-static accumulator — its inverses live in a
+        # RUNTIME accumulator (`$__mw_head`, a linked list in linear memory) and
+        # each entry carries an `undo_id` index into this list so the abort
+        # drain dispatches to the right declared inverse. Empty for every
+        # program with no method-body witnessed effect, so the whole runtime
+        # accumulator (global, `abort`/`mw_live` exports, drain code) is gated
+        # off and such a program emits BYTE-IDENTICALLY to before this slice.
+        self.method_witnessed_externs: list[dict] = []
         self.fn_by_name = {fn.get("name"): fn for fn in (functions or [])}
         self.needed_fns: list[str] = []   # top-level fns this component calls
         self.needed_externs: list[str] = []  # @wasm externs this component calls
@@ -309,7 +371,68 @@ class _ComponentEmitter:
         if self.intercept:
             payload = _wat_string(json.dumps(self.intercept, sort_keys=True))
             lines.append(f'  (@custom "revl:intercept" "{payload}")')
+        # item 173: the routed-require map the substrate reads at plug/spawn to
+        # resolve `route:<key>.<op>(index, …)` -> `realms[index] + "/" + key`
+        # strictly in that one realm. Only the ordered realm labels are load-
+        # bearing for the runtime (strategy is the emitted body's own concern),
+        # but the whole entry is carried so the section is self-describing.
+        # Emitted only when the component actually routes, so a routes-less
+        # program's custom sections are byte-identical to before.
+        if self.routes:
+            payload = _wat_string(json.dumps(self.routes, sort_keys=True))
+            lines.append(f'  (@custom "revl:routes" "{payload}")')
         return lines
+
+    def _teardown_section(self, abort_chain: list[dict[str, Any]],
+                          phase1_count: int) -> list[str]:
+        """The `revl:teardown` custom section (item 243 Slice 2b): a STATIC,
+        compile-time index of every activation-registered `transactional`/
+        `compensation` entry, by registration seq, KIND, and DISPATCH
+        position (its index in `abort_chain`, i.e. the `$__dstep` value
+        `deactivate_step` sees it at on an abort) — a first-party host driver
+        needs the dispatch position, not just the seq, to tell a Phase-1
+        `transactional` trap (`restore-residue`) from a Phase-1 `bracket`
+        trap (`bracket-fault`, contract-grade) apart at the SAME call site,
+        since brackets carry no seq of their own here (see below).
+
+        This is the honest ceiling of a "WAL descriptor" on this tier, stated
+        plainly rather than faked: the contract's full descriptor (docs/design/
+        teardown-contract.md "WAL descriptor") captures runtime ARGUMENT/
+        WITNESS VALUES at registration, durable enough for `revl recover` to
+        re-issue after a crash. Those values live in this component's own
+        linear memory at runtime; the wasm tier's teardown accumulator is
+        compiled state with "zero host bookkeeping" (backends/wasm/README.md),
+        not a host-tracked object graph, so there is no channel here that
+        durably persists a runtime value without a host choosing to add one.
+        What compile time DOES know — which entries exist, their seq, kind and
+        dispatch position — is exactly what a host wanting to build a real WAL
+        on this tier needs as its starting index; this section is that index,
+        not a claim of durability this tier does not carry. Absent for every
+        component with no transactional/compensation entry, so its emission is
+        unaffected by this section's existence.
+        """
+        descriptors = [
+            {"seq": entry["index"], "entry": entry["kind"], "dispatch": k}
+            for k, entry in enumerate(abort_chain)
+            if entry["kind"] in ("transactional", "compensation")
+        ]
+        if not descriptors:
+            return []
+        # phase1Count/phase2Count locate the `deactivate_step` dispatch split
+        # a first-party host driver needs to arm epoch/fuel around ONLY the
+        # Phase-2 (compensation) calls — the K-order is always [bracket +
+        # transactional, LIFO][compensation, LIFO]. `phase1Count` is passed
+        # in (the caller already knows it from building `abort_chain`);
+        # `phase2Count` is the remainder.
+        phase2_count = len(abort_chain) - phase1_count
+        doc = {
+            "record": "discharge-descriptor",
+            "entries": descriptors,
+            "phase1Count": phase1_count,
+            "phase2Count": phase2_count,
+        }
+        payload = _wat_string(json.dumps(doc, sort_keys=True))
+        return [f'  (@custom "revl:teardown" "{payload}")']
 
     # -- service boundary widths ---------------------------------------------
 
@@ -361,6 +484,125 @@ class _ComponentEmitter:
         result_wty = self._boundary_wty(return_type, f"{where}: {key}.{op} return")
         self.imports[(key, op)] = (param_wtys, result_wty)
         return param_types, return_type
+
+    def _route_op_spec(self, key: str, op: str, where: str) -> tuple[list[str | None], str | None]:
+        """Resolve a routed coeffect op (item 173), registering its `route:`
+        dispatch ABI instead of a plain `coeffect:` import.
+
+        A routed require carries no single-realm provider, so its op resolves
+        strictly per named realm through the substrate's `route:<key>` primitive.
+        Only SCALAR (Int/Bool) params/returns cross this tier's routed boundary:
+        a Str/List/record pointer is an offset into the CALLER's linear memory,
+        which the provider in another realm (another instance, another memory)
+        cannot read — the same physical boundary the scalar coeffect boundary
+        already draws, tightened here because the two sides never share memory.
+        """
+        service_name = self.requires.get(key)
+        service = self.services.get(service_name)
+        if service is None:
+            raise EmitError(f"{where}: req {key!r} is not declared in requires")
+        spec = (service.get("methods") or {}).get(op)
+        if spec is None:
+            raise EmitError(f"{where}: {key}.{op} is not a method of {service_name}")
+        param_types = [param.get("type") for param in spec.get("params") or []]
+        return_type = spec.get("returns")
+        for i, pty in enumerate(param_types):
+            if not _is_scalar_type(pty):
+                raise EmitError(
+                    f"{where}: routed op {key}.{op} param {i} is {pty!r} — only "
+                    f"scalar (Int/Bool) values cross a routed require on this "
+                    f"tier; a pointer would name the caller's memory, not the "
+                    f"cross-realm provider's (use a hosted backend)")
+        if return_type is not None and not _is_scalar_type(return_type):
+            raise EmitError(
+                f"{where}: routed op {key}.{op} returns {return_type!r} — only "
+                f"scalar (Int/Bool) values cross a routed require on this tier "
+                f"(use a hosted backend for a compound routed result)")
+        param_wtys = [_wasm_ty(pty) for pty in param_types]
+        result_wty = _wasm_ty(return_type) if return_type is not None else None
+        self.route_imports[(key, op)] = (param_wtys, result_wty)
+        if op not in self.route_ops.setdefault(key, []):
+            self.route_ops[key].append(op)
+        return param_types, return_type
+
+    def _route_helpers(self) -> list[str]:
+        """item 173: the emitted realization of a routed require on cordis-wasm,
+        mirroring src/revl/run.py::_Router and the rust `_emit_router_struct`.
+
+        Per routed key actually called: a `$route_select_<key>` that picks a
+        LIVE realm index by the recorded strategy (re-checking liveness through
+        the substrate's `route:<key>.live` on every call, so a withdrawn realm
+        drops out — reactive failover), and a `$route_<key>_<op>` dispatch
+        wrapper per op that forwards strictly to that one realm's provider via
+        `route:<key>.<op>(index, args…)`. The wrapper holds no handle; the
+        re-resolution IS the failover. Emits nothing for a routes-less program.
+        """
+        funcs: list[str] = []
+        for key in sorted(self.route_ops):
+            realms = self.routes[key].get("realms") or []
+            n = len(realms)
+            strategy = self.routes[key].get("strategy") or "round_robin"
+            live = f"$route_live_{key}"
+            if strategy == "least_loaded":
+                for i in range(n):
+                    self.globals.append((f"$route_served_{key}_{i}", "i32"))
+                sel = [
+                    f"  (func $route_select_{key} (result i32)"
+                    f" (local $best i32) (local $bc i32) (local $c i32)",
+                    "    (local.set $best (i32.const -1))",
+                ]
+                for i in range(n):
+                    served = f"$route_served_{key}_{i}"
+                    sel.append(
+                        f"    (if (call {live} (i32.const {i})) (then\n"
+                        f"      (local.set $c (global.get {served}))\n"
+                        f"      (if (i32.or (i32.eq (local.get $best) (i32.const -1))"
+                        f" (i32.lt_u (local.get $c) (local.get $bc)))\n"
+                        f"        (then (local.set $best (i32.const {i}))"
+                        f" (local.set $bc (local.get $c))))))")
+                sel.append("    (if (i32.eq (local.get $best) (i32.const -1)) (then (unreachable)))")
+                for i in range(n):
+                    served = f"$route_served_{key}_{i}"
+                    sel.append(
+                        f"    (if (i32.eq (local.get $best) (i32.const {i}))"
+                        f" (then (global.set {served}"
+                        f" (i32.add (global.get {served}) (i32.const 1)))))")
+                sel.append("    (local.get $best))")
+                funcs.append("\n".join(sel))
+            else:  # round_robin (the default when strategy is omitted)
+                cursor = f"$route_cursor_{key}"
+                self.globals.append((cursor, "i32"))
+                funcs.append("\n".join([
+                    f"  (func $route_select_{key} (result i32)"
+                    f" (local $off i32) (local $cand i32)",
+                    "    (local.set $off (i32.const 0))",
+                    "    (loop $scan",
+                    f"      (local.set $cand (i32.rem_u"
+                    f" (i32.add (global.get {cursor}) (local.get $off))"
+                    f" (i32.const {n})))",
+                    f"      (if (i32.eq (call {live} (local.get $cand)) (i32.const 1)) (then",
+                    f"        (global.set {cursor} (i32.rem_u"
+                    f" (i32.add (local.get $cand) (i32.const 1)) (i32.const {n})))",
+                    "        (return (local.get $cand))))",
+                    "      (local.set $off (i32.add (local.get $off) (i32.const 1)))",
+                    f"      (br_if $scan (i32.lt_u (local.get $off) (i32.const {n}))))",
+                    "    (unreachable))",
+                ]))
+            for op in self.route_ops[key]:
+                param_wtys, result_wty = self.route_imports[(key, op)]
+                decl = " ".join(f"(param $p{i} {w})" for i, w in enumerate(param_wtys))
+                head = f"  (func $route_{key}_{op}"
+                if decl:
+                    head += f" {decl}"
+                if result_wty:
+                    head += f" (result {result_wty})"
+                fwd_args = " ".join(f"(local.get $p{i})" for i in range(len(param_wtys)))
+                disp = f"$route_disp_{key}_{op}"
+                inner = (f"(call {disp} (call $route_select_{key}) {fwd_args})"
+                         if fwd_args else
+                         f"(call {disp} (call $route_select_{key}))")
+                funcs.append(f"{head}\n    {inner})")
+        return funcs
 
     # -- expressions ---------------------------------------------------------
 
@@ -446,7 +688,13 @@ class _ComponentEmitter:
                 )
             key = _ident(target.get("name"), f"{where}: req")
             op = _ident(node.get("method"), f"{where}: method")
-            param_types, return_type = self._op_spec(key, op, where)
+            # item 173: a routed require resolves per named realm through the
+            # generated selector + `route:<key>` dispatch, never a single
+            # `coeffect:<key>` handle.
+            routed = key in self.routes
+            param_types, return_type = (
+                self._route_op_spec(key, op, where) if routed
+                else self._op_spec(key, op, where))
             args = node.get("args") or []
             if len(args) != len(param_types):
                 raise EmitError(f"{where}: {key}.{op} takes {len(param_types)} argument(s)")
@@ -466,6 +714,16 @@ class _ComponentEmitter:
                         f"{ptype!r}; keep compound values inside the module"
                     )
                 parts.append(value.wat)
+            if routed:
+                # the selector picks a live realm index (round-robin cursor /
+                # least-loaded served count), then the dispatch import forwards
+                # `op` strictly to that one realm's provider. Selection is the
+                # FIRST operand so its cursor/served side effect runs before the
+                # args, matching the single-shot select rust does per call.
+                fn = f"$route_{key}_{op}"
+                call = (f"(call {fn} {' '.join(parts)})" if parts
+                        else f"(call {fn})")
+                return _E(call, return_type)
             call = f"(call $req_{key}_{op} {' '.join(parts)})" if parts else f"(call $req_{key}_{op})"
             return _E(call, return_type)
         if kind == "config":
@@ -721,6 +979,13 @@ class _ComponentEmitter:
         self.v3._match_counter = 0
         self.v3._cdiv_counter = 0
         self.v3._loop_counter = 0
+        # item 379: label ids for loops that carry a `break`/`continue`
+        # (docs/design/379-break-continue.md). A SEPARATE counter from
+        # `_loop_counter` so it never renumbers `for` scratch temps — a program
+        # with no loop control flow keeps byte-identical `$for_*` locals and the
+        # anonymous `br 0`/`br 1` skeleton.
+        self.v3._brk_labels = 0
+        self.v3._loop_label_stack = []
         self.v3._for_temps = []
         self.v3._local_types = {}
         self.extra_locals = set()
@@ -755,12 +1020,14 @@ class _ComponentEmitter:
         Save the activation function's rendering state across them."""
         return (self.extra_locals, self.func_uses_v3, self.v3._tmp,
                 self.v3._arrows, self.v3._arrow_counter, self.v3._match_counter,
-                self.v3._loop_counter, self.v3._for_temps, self.v3._local_types)
+                self.v3._loop_counter, self.v3._for_temps, self.v3._local_types,
+                self.v3._brk_labels, self.v3._loop_label_stack)
 
     def _restore_function_state(self, saved: tuple) -> None:
         (self.extra_locals, self.func_uses_v3, self.v3._tmp,
          self.v3._arrows, self.v3._arrow_counter, self.v3._match_counter,
-         self.v3._loop_counter, self.v3._for_temps, self.v3._local_types) = saved
+         self.v3._loop_counter, self.v3._for_temps, self.v3._local_types,
+         self.v3._brk_labels, self.v3._loop_label_stack) = saved
 
     def _to_v3(self, node: Any, scope: dict[str, str],
                types: dict[str, str | None], where: str) -> Any:
@@ -858,6 +1125,43 @@ class _ComponentEmitter:
         for inner in sorted(self._called_names(self.fn_by_name[name].get("body"), set())):
             self._need_fn(inner)
 
+    def _witnessed_extern(self, acquire: Any) -> dict | None:
+        """The witnessed extern descriptor a step's acquisition calls, or None
+        (item 243 Slice 2b). A witnessed effect is spelled as an effect-position
+        call to a `witnessed` extern; a component step call renders as an IR
+        `fn` node, so matching its name against the witnessed table is how the
+        emitter tells a transaction from an ordinary bracket — the exact test
+        the python reference tier uses (backends/python/emit.py), so both
+        tiers recognise the same programs. Absent/no-match for every other
+        acquisition, so non-witnessed effects emit byte-identically to before."""
+        if not self.witnessed or not isinstance(acquire, dict):
+            return None
+        if acquire.get("kind") != "fn":
+            return None
+        return self.witnessed.get(acquire.get("name"))
+
+    def _register_witnessed_calls(self, expr: Any) -> None:
+        """Plan every top-level `fn`/@wasm-extern this witnessed extern's
+        DECLARED `undo` reaches, exactly as `_to_v3`'s `kind == "fn"` branch
+        does for an ordinary body call — the undo lives on the extern
+        declaration, not in this component's own body, so `_plan`'s body walk
+        never finds it on its own; every witnessed acquisition site calls this
+        before anything renders."""
+        for name in sorted(self._called_names(expr, set())):
+            if name in self.fn_by_name:
+                self._need_fn(name)
+            elif name in self.externs:
+                ext = self.externs[name]
+                if _extern_wasm_body(ext) is None:
+                    available = ", ".join(sorted((ext.get("bodies") or {}))) or "none"
+                    raise EmitError(
+                        f"{self.name}: a witnessed extern's `undo` calls "
+                        f"`{name}`, which has no @wasm body — not portable to "
+                        f"this backend (available: {available})"
+                    )
+                if name not in self.needed_externs:
+                    self.needed_externs.append(name)
+
     def _plan(self) -> None:
         """Compute the call closure and pool the string literals it can reach.
 
@@ -869,7 +1173,53 @@ class _ComponentEmitter:
             self._need_fn(name)
         roots: list[Any] = [body]
         roots.extend(self.fn_by_name[name].get("body") for name in self.needed_fns)
-        self.v3._collect_string_literals(roots)
+        # item 243 Slice 2b: every witnessed extern this body actually
+        # acquires contributes its declared `undo`'s call closure and string
+        # literals too — the undo is not reachable from `body` itself (it
+        # lives on the extern's own declaration), so it is planned here,
+        # before `_collect_string_literals` runs.
+        # item 322 Slice 2: the record channel's receiver/method names — read
+        # off each witnessed transactional extern's own declaration, never
+        # spelled in the body — pooled so `_str_ptr` can name them when a
+        # framing call hands them to the host. Empty when record mode is off, so
+        # a non-recording component pools exactly what it pooled before.
+        record_strings: list[str] = []
+        for step in body:
+            if step.get("step") in ("let-effect", "effect"):
+                wit = self._witnessed_extern(step.get("acquire"))
+                if wit is not None and wit.get("undo") is not None:
+                    self._register_witnessed_calls(wit["undo"])
+                    roots.append(wit["undo"])
+                    if self.record:
+                        record_strings.append(_ident(wit.get("name"), "record receiver"))
+                        record_strings.append(self._wal_undo_name(wit))
+            elif step.get("step") == "provide":
+                # item 324: a witnessed effect inside a PROVIDE-METHOD body
+                # (the per-tool-call H1 position) contributes its declared
+                # undo's call closure and string literals too — the undo is not
+                # reachable from `body` walked above, and the drain renders it
+                # in `_module`, so it has to be planned here like the
+                # activation-body one.
+                for method in step.get("methods") or []:
+                    for mstep in method.get("body") or []:
+                        if mstep.get("step") != "effect":
+                            continue
+                        wit = self._witnessed_extern(mstep.get("acquire"))
+                        if wit is not None and wit.get("undo") is not None:
+                            self._register_witnessed_calls(wit["undo"])
+                            roots.append(wit["undo"])
+        self.v3._collect_string_literals(roots, extra=record_strings)
+
+    @staticmethod
+    def _wal_undo_name(ext: dict) -> str:
+        """The declared inverse's call name — the discharge-descriptor's
+        `method` (the go tier's `undo_name`, backends/go/emit.py). A witnessed
+        extern's `undo` is a top-level call whose callee names the re-issuable
+        inverse; recover replays exactly this named call."""
+        undo = ext.get("undo") or {}
+        callee = undo.get("callee") or {}
+        return _ident(callee.get("name") or callee.get("id") or "undo",
+                      "record method")
 
     # -- component -----------------------------------------------------------
 
@@ -879,13 +1229,49 @@ class _ComponentEmitter:
         self._open_function()
         scope: dict[str, str] = {}
         segments: list[str] = []          # activate_step bodies, in order
-        inverses: list[tuple[int, str]] = []  # (segment index completed, wat)
+        # item 243 Slice 2b (docs/design/teardown-contract.md): one LIFO
+        # entry per registered inverse/compensation, tagged with its kind —
+        # "bracket" (acquire, replays on commit AND abort), "transactional"
+        # (witnessed, abort-only replay + commit discharge, Ok-conditional —
+        # over ACTIVATION-REGISTERED entries only; the wasm accumulator is
+        # fixed at activation, so there is no method-time half to cover here)
+        # or "compensation" (abort-only, Phase 2, best-effort). `_module`
+        # reads this single list to build the two-phase `deactivate` — there
+        # is no second list, matching the contract's "one LIFO disposer
+        # stack" (243 Slice 2a decision 2, carried to this tier).
+        entries: list[dict[str, Any]] = []
         provide_funcs: list[str] = []
 
         for step in self.ir.get("body") or []:
             kind = step.get("step")
+            if kind in ("let-effect", "effect", "emit") and step.get("async"):
+                # item 131: the awaited effect-composition spellings (`effect
+                # await …`, `await emit …`) suspend a fiber. This tier awaits
+                # only the `Job.run` host op (see the `await` branch below);
+                # there is no async host seam for an acquisition or an emission
+                # here, so silently erasing the marker would drop the suspension
+                # semantics. Refuse honestly, matching the await-step refusal.
+                spelling = "await emit" if kind == "emit" else "effect await"
+                verb = "emit" if kind == "emit" else "effect"
+                raise EmitError(
+                    f"{where}: `{spelling}` suspends a fiber, but this tier "
+                    f"awaits only `Job.run(name)` (the runtime's async host op); "
+                    f"an awaited {verb} step lives on the hosted backends (py/ts)"
+                )
             if kind in ("let-effect", "effect"):
                 seg = []
+                wit = self._witnessed_extern(step.get("acquire"))
+                if wit is not None:
+                    index = len(segments) + 1
+                    bind = (_ident(step.get("bind"), f"{where}: bind")
+                            if kind == "let-effect" else None)
+                    wit_lines, entry_wat = self._witnessed_effect_step(
+                        index, step["acquire"], wit, scope, where, bind)
+                    seg.extend(wit_lines)
+                    entries.append({"index": index, "kind": "transactional",
+                                    "wat": entry_wat})
+                    segments.append("\n      ".join(seg))
+                    continue
                 if kind == "let-effect":
                     bind = _ident(step.get("bind"), f"{where}: bind")
                     glob = f"$g_{bind}"
@@ -903,13 +1289,15 @@ class _ComponentEmitter:
                 else:
                     seg.append(self._statement(step["acquire"], scope, where))
                 index = len(segments) + 1
-                inverses.append((index, self._statement(step["undo"], scope, where)))
+                entries.append({"index": index, "kind": "bracket",
+                                "wat": self._statement(step["undo"], scope, where)})
                 segments.append("\n      ".join(seg))
             elif kind == "emit":
                 seg = [self._statement(step["expr"], scope, where)]
                 index = len(segments) + 1
                 if step.get("compensate") is not None:
-                    inverses.append((index, self._statement(step["compensate"], scope, where)))
+                    entries.append({"index": index, "kind": "compensation",
+                                    "wat": self._statement(step["compensate"], scope, where)})
                 segments.append("\n      ".join(seg))
             elif kind == "await":
                 # A1 on the substrate: the segment launches an async host op;
@@ -954,7 +1342,255 @@ class _ComponentEmitter:
             self.activation_locals.append(self.v3._tmp)
             # deeper scratch pointers minted by nested allocations in a segment
             self.activation_locals.extend(sorted(self.v3._tmp_extra))
-        return self._module(segments, inverses, provide_funcs)
+        if self.method_witnessed_externs:
+            # item 324: `deactivate_step`'s abort drain holds the popped
+            # accumulator cell in this scratch pointer while it replays the
+            # inverse (i32, the default `_local_decl` width). Only present when
+            # the component actually has a method-body witnessed effect.
+            self.activation_locals.append("__mw_dcell")
+        # item 173: the routed-require selector + dispatch helpers, appended as
+        # ordinary internal funcs. Populates `self.globals` (route cursor /
+        # served counts), which `_module` renders below — so it must run before
+        # it. Empty (no funcs, no globals) for a routes-less program.
+        provide_funcs.extend(self._route_helpers())
+        return self._module(segments, entries, provide_funcs)
+
+    def _witnessed_effect_step(self, index: int, acquire: Any, ext: dict,
+                               scope: dict[str, str], where: str,
+                               bind: str | None) -> tuple[list[str], str]:
+        """Emit a witnessed effect (item 243 Slice 2b) for one activation step:
+        run the mutation, and on `Ok` register the extern's DECLARED inverse as
+        a TRANSACTIONAL entry carrying the `Ok` witness. On `Err` nothing
+        registers (Ok-conditional, 243 rule 3/Slice-1 note 1). Returns the
+        segment's own lines and the (already Ok-flag-guarded) inverse WAT
+        `_module` folds into Phase 1 of the two-phase `deactivate`.
+
+        Unlike a bracket, whose undo is site-spelled and always registers when
+        its step ran, a witnessed inverse is the EXTERN'S OWN declared `undo`
+        (never a site-spelled one — the accumulator owns it), and registration
+        depends on a value only known at runtime (which branch of the Result
+        the mutation returned). Two globals per entry carry what a bracket
+        needs no extra storage for: `$g_wit_val_<n>` holds the Ok payload (the
+        witness) across the activate_step/deactivate call boundary (a wasm
+        local does not survive between exported-function calls — only a
+        global does, the same reason an ordinary `let` binding uses one), and
+        `$g_wit_flag_<n>` records whether Ok was actually returned, since a
+        step that ran is not the same as a mutation that registered one.
+        """
+        result_value = self._lower(acquire, scope, {}, where)
+        if _wasm_ty(result_value.ty) != "i32":
+            raise EmitError(
+                f"{where}: a witnessed extern's Result is not a linear-memory "
+                f"value on this tier — {result_value.ty!r} was not expected"
+            )
+        witness_ty = ext.get("witness")
+        witness_wty = _wasm_ty(witness_ty)
+        ok_tag = self.v3._tag_of(result_value.ty, "Ok")
+
+        # a scratch local: it only needs to survive within THIS activate_step
+        # call (the tag check + payload extraction happen right here), unlike
+        # the witness/flag globals below, which must survive to `deactivate`,
+        # a later, separate exported-function call.
+        tmp = f"__revl_wit{index}"
+        self.extra_locals.add(tmp)
+
+        wit_val_glob = f"$g_wit_val_{index}"
+        wit_flag_glob = f"$g_wit_flag_{index}"
+        self.globals.append((wit_val_glob, witness_wty))
+        self.globals.append((wit_flag_glob, "i32"))
+
+        lines = [f"(local.set ${tmp} {result_value.wat})"]
+        # tagged-cell layout: `[u32 tag][pad][slot payload]` (docs/wasm-
+        # capabilities.md); the payload sits one `_SLOT` past the cell start.
+        payload_addr = f"(i32.add (local.get ${tmp}) (i32.const {_SLOT}))"
+        payload_load = self.v3._slot_load(payload_addr, witness_ty)
+        # item 322 Slice 2: at REGISTRATION (this Ok branch is exactly the
+        # moment the witnessed mutation committed its forward effect and parked
+        # its inverse), record mode frames the discharge-descriptor's runtime
+        # values out to the host. This is the wasm mirror of the go tier's
+        # `revlRecordTransactional` call site (backends/go/emit.py): there the
+        # emitted code opens REVL_WAL and fsyncs; here the sandbox has no file,
+        # so the module hands (seq, receiver, method, witness) to the
+        # `coeffect:revl:wal.record` host import and the driver drains+fsyncs it.
+        # The witness crosses as a Str pointer the host reads back through the
+        # canonical `[u32 len][bytes]` layout; a non-Str witness is refused in
+        # record mode rather than silently narrowed.
+        record_call = ""
+        if self.record:
+            if witness_ty != "Str":
+                raise EmitError(
+                    f"{where}: the wasm durable-WAL record channel (item 322 "
+                    f"Slice 2) marshals a Str witness, but this witnessed extern's "
+                    f"witness is {witness_ty!r} — declare a Str-witnessed inverse "
+                    f"or emit without --record")
+            seq = self._record_seq
+            self._record_seq += 1
+            self._needs_record_import = True
+            receiver_ptr = self.v3._str_ptr(_ident(ext.get("name"), "record receiver"))
+            method_ptr = self.v3._str_ptr(self._wal_undo_name(ext))
+            record_call = (
+                f"\n      (call $revl_wal_record (i32.const {seq}) "
+                f"{receiver_ptr} {method_ptr} (global.get {wit_val_glob}))")
+        lines.append(
+            f"(if (i32.eq (i32.load (local.get ${tmp})) (i32.const {ok_tag}))\n"
+            f"      (then\n"
+            f"      (global.set {wit_val_glob} {payload_load})\n"
+            f"      (global.set {wit_flag_glob} (i32.const 1))"
+            f"{record_call}))"
+        )
+        if bind is not None:
+            glob = f"$g_{bind}"
+            self.globals.append((glob, "i32"))
+            lines.append(f"(global.set {glob} (local.get ${tmp}))")
+            scope[bind] = f"(global.get {glob})"
+
+        # The declared `undo` is planned in `_plan` (call closure + string
+        # literals); it is a top-level pure expression (docs/design/243-
+        # witnessed-externs.md "Slice 1 as implemented" note 1), so its only
+        # free name is `result` — the Ok witness this entry captured, never
+        # the calling component's own scope. `ext["undo"]` is already in the
+        # v3/pure-fn dialect (`_lower_pure_expr` on the frontend), so it is
+        # rendered directly through the value engine, bypassing `_to_v3`.
+        undo_scope = _Scope({"result": f"(global.get {wit_val_glob})"},
+                            {"result": witness_ty})
+        undo_value = self.v3._expr(ext["undo"], undo_scope, where)
+        undo_wat = (undo_value.wat if _is_unit_type(undo_value.ty)
+                   else f"(drop {undo_value.wat})")
+        # discharge (commit) drops this reference by simply never reading it
+        # again — this tier's teardown accumulator is compiled state, not a
+        # host-tracked object graph, so there is nothing further to release;
+        # the witness global goes out of scope with the rest of the instance
+        # when the fiber is unplugged (witness GC, stated honestly: no
+        # separate free is needed or possible on this tier).
+        guarded_undo = (
+            f"(if (i32.eq (global.get {wit_flag_glob}) (i32.const 1))\n"
+            f"      (then\n"
+            f"      {undo_wat}))"
+        )
+        return lines, guarded_undo
+
+    def _method_undo_id(self, ext: dict) -> int:
+        """The dispatch index this component assigns the witnessed extern
+        `ext`, registering it (first-seen order) as a method-witnessed drain
+        participant (item 324). One id per distinct extern, so N tool calls to
+        the SAME method share one undo, and two different witnessed methods each
+        get their own — the abort drain reads the id off each runtime cell and
+        replays that extern's declared inverse."""
+        name = ext.get("name")
+        for i, seen in enumerate(self.method_witnessed_externs):
+            if seen.get("name") == name:
+                return i
+        self.method_witnessed_externs.append(ext)
+        return len(self.method_witnessed_externs) - 1
+
+    def _method_witnessed_step(self, mstep: dict, ext: dict,
+                               mscope: dict[str, str], mtypes: dict[str, str | None],
+                               mwhere: str) -> str:
+        """Emit ONE provide-method witnessed effect (item 324 — the wasm half of
+        item 318's H1 gate). Runs the per-call mutation and, on `Ok`, REGISTERS
+        the extern's declared inverse (carrying the runtime Ok witness) into the
+        component's RUNTIME teardown accumulator `$__mw_head`, so the inverse
+        outlives the method call and rides the component activation frame's
+        teardown — discharged (skipped) on a clean unload where the mutation is
+        the deliverable, replayed on abort. On `Err` nothing registers
+        (Ok-conditional, 243 rule 3), exactly like the activation-body path.
+
+        The disposal-ordering discipline (the soundness hazard item 318 found on
+        py, checked here for wasm): the entry is NEVER drained at method return
+        — a per-call disposal would observe `$__committed == 0` while the
+        session is still live and WRONGLY revert the deliverable. It is parked
+        in the linked list and drained ONLY by `deactivate`/`deactivate_step`,
+        gated on `$__committed`, where the commit-vs-abort bit is already
+        settled — the wasm analogue of py's park-for-drain. Consistent with the
+        teardown contract's `activation-registered-only` wasm preemption row:
+        `$__mw_head` is a component-instance global torn down with the instance,
+        drained by the component's own teardown, never by a per-call epoch."""
+        result_value = self._lower(mstep["acquire"], mscope, mtypes, mwhere)
+        if _wasm_ty(result_value.ty) != "i32":
+            raise EmitError(
+                f"{mwhere}: a witnessed extern's Result is not a linear-memory "
+                f"value on this tier — {result_value.ty!r} was not expected"
+            )
+        witness_ty = ext.get("witness")
+        ok_tag = self.v3._tag_of(result_value.ty, "Ok")
+        undo_id = self._method_undo_id(ext)
+        # the undo's own call closure + string literals were planned in `_plan`
+        # (which now walks provide-method bodies too); nothing to plan here.
+
+        # two method-scoped scratch pointers: the Result cell and the freshly
+        # allocated accumulator cell. Both i32 (default `_local_decl` width).
+        self.extra_locals.add("__revl_mw_res")
+        self.extra_locals.add("__revl_mw_cell")
+        self.func_uses_v3 = True  # this body reaches linear memory ($alloc)
+
+        payload_addr = f"(i32.add (local.get $__revl_mw_res) (i32.const {_SLOT}))"
+        payload_load = self.v3._slot_load(payload_addr, witness_ty)
+        witness_store = self.v3._slot_store("(local.get $__revl_mw_cell)",
+                                            payload_load, witness_ty)
+        # cell layout, three 8-byte slots (`$alloc(24)` keeps it 8-aligned):
+        #   +0  witness (the Ok payload, in the uniform 8-byte slot form)
+        #   +8  undo_id (i64) — which declared inverse the drain dispatches to
+        #   +16 next    (i32) — the previous head, so the list is newest-first
+        return (
+            f"(local.set $__revl_mw_res {result_value.wat})\n    "
+            f"(if (i32.eq (i32.load (local.get $__revl_mw_res)) (i32.const {ok_tag}))\n"
+            f"      (then\n"
+            f"      (local.set $__revl_mw_cell (call $alloc (i32.const 24)))\n"
+            f"      {witness_store}\n"
+            f"      (i64.store (i32.add (local.get $__revl_mw_cell) (i32.const 8))"
+            f" (i64.const {undo_id}))\n"
+            f"      (i32.store (i32.add (local.get $__revl_mw_cell) (i32.const 16))"
+            f" (global.get $__mw_head))\n"
+            f"      (global.set $__mw_head (local.get $__revl_mw_cell))\n"
+            f"      (global.set $__mw_count"
+            f" (i32.add (global.get $__mw_count) (i32.const 1)))))"
+        )
+
+    def _method_drain(self, where: str) -> list[str]:
+        """The abort-only Phase-1 drain of the runtime method-witnessed
+        accumulator (item 324), one cell per `deactivate_step` call — the same
+        one-entry-per-call idiom the static chain uses, so a host can bound each
+        replay individually. Pops the newest cell, replays the declared inverse
+        for the extern its `undo_id` names (against the exact Ok witness the cell
+        captured), decrements the live count, and reports more-work; only once
+        `$__mw_head` empties does control fall through to the static abort chain.
+        These cells are the NEWEST inverses (registered after activation, per
+        tool call), so draining them first is the component-level LIFO the
+        contract asks for — method inverses ahead of activation-body ones.
+
+        Never reached on a clean unload: the whole block is emitted inside the
+        `$__committed == 0` branch, so a commit discharges every method entry by
+        simply never walking the list (witness GC on this tier — the cells go
+        out of scope with the instance)."""
+        # Guard on the live COUNT, not on `$__mw_head != 0`: the bump heap can
+        # legitimately hand out address 0 as a cell (a literal-free module's
+        # heap starts at 0), so 0 is a valid list node, not a reliable empty
+        # sentinel. The count is the exact number of parked inverses, so it
+        # drives the "one more to drain" decision unambiguously.
+        out: list[str] = [
+            "      (if (global.get $__mw_count)",
+            "        (then",
+            "        (local.set $__mw_dcell (global.get $__mw_head))",
+            "        (global.set $__mw_head"
+            " (i32.load (i32.add (local.get $__mw_dcell) (i32.const 16))))",
+            "        (global.set $__mw_count"
+            " (i32.sub (global.get $__mw_count) (i32.const 1)))",
+        ]
+        for undo_id, ext in enumerate(self.method_witnessed_externs):
+            witness_ty = ext.get("witness")
+            witness_load = self.v3._slot_load("(local.get $__mw_dcell)", witness_ty)
+            undo_scope = _Scope({"result": witness_load}, {"result": witness_ty})
+            undo_value = self.v3._expr(ext["undo"], undo_scope, where)
+            undo_wat = (undo_value.wat if _is_unit_type(undo_value.ty)
+                        else f"(drop {undo_value.wat})")
+            out.append(
+                f"        (if (i64.eq (i64.load"
+                f" (i32.add (local.get $__mw_dcell) (i32.const 8)))"
+                f" (i64.const {undo_id}))\n"
+                f"          (then\n"
+                f"          {undo_wat}))")
+        out.append("        (return (i32.const 1))))")
+        return out
 
     def _provide(self, step: dict, scope: dict[str, str], where: str) -> list[str]:
         key = _ident(step.get("name"), f"{where}: provide key")
@@ -1059,6 +1695,17 @@ class _ComponentEmitter:
                     elif name not in mlocals:
                         raise EmitError(f"{mwhere}: `{name}` is not declared")
                     body_lines.append(f"(local.set ${name} {value.wat})")
+                elif mkind == "effect" and self._witnessed_extern(mstep.get("acquire")) is not None:
+                    # item 324: a WITNESSED effect in a provide-method body is
+                    # the per-tool-call H1 gate — valid, and registers its
+                    # inverse into the component's runtime teardown accumulator
+                    # (`_method_witnessed_step`). A plain (non-witnessed) effect,
+                    # a `let-effect` (spawn/acquire), and method-time compensation
+                    # all stay refused below: this tier admits only the witnessed
+                    # position item 318 opened, nothing more.
+                    ext = self._witnessed_extern(mstep["acquire"])
+                    body_lines.append(
+                        self._method_witnessed_step(mstep, ext, mscope, mtypes, mwhere))
                 elif mkind in ("effect", "let-effect"):
                     raise EmitError(
                         f"{mwhere}: method-time effects are not lowerable — the "
@@ -1090,7 +1737,7 @@ class _ComponentEmitter:
             raise EmitError(f"{where}: provision {key!r} is missing method {sorted(missing)[0]!r}")
         return funcs
 
-    def _module(self, segments: list[str], inverses: list[tuple[int, str]], provide_funcs: list[str]) -> str:
+    def _module(self, segments: list[str], entries: list[dict[str, Any]], provide_funcs: list[str]) -> str:
         # the activation function's local widths come from the engine's
         # per-function record, and `_emit_function` below resets it — so render
         # the declarations before the `fn`s are emitted, not after
@@ -1105,11 +1752,20 @@ class _ComponentEmitter:
                        for name in self.needed_externs]
         fn_defs = extern_defs + fn_defs
         rendered = "\n".join(provide_funcs + fn_defs + segments
-                             + [wat for _index, wat in inverses])
+                             + [entry["wat"] for entry in entries])
         # linear memory is pulled in only when something actually reaches for
         # it, so a scalar-only component emits no memory at all
         needs_memory = (self.boundary_uses_memory
-                        or (self.uses_v3 and any(token in rendered for token in _MEMORY_TOKENS)))
+                        or (self.uses_v3 and any(token in rendered for token in _MEMORY_TOKENS))
+                        # item 324: the runtime accumulator allocates a cell per
+                        # per-tool-call witnessed mutation, so it always needs
+                        # linear memory even if nothing else in the module does.
+                        or bool(self.method_witnessed_externs)
+                        # item 322 Slice 2: the record channel passes the
+                        # receiver/method names as pointers into the pooled data,
+                        # so the module needs a memory to export even if its own
+                        # body reaches for none. Gated on an actual framing call.
+                        or self._needs_record_import)
         # the checked-arithmetic and named-division helpers are *not* memory:
         # `x + 1` traps on overflow through `$int_add` in a component that
         # never touches linear memory, so they get their own gate. (Before
@@ -1117,10 +1773,61 @@ class _ComponentEmitter:
         # an `$int_div_floor` that was never defined.)
         needs_arith = any(token in rendered for token in _ARITH_TOKENS)
 
+        # the two `deactivate_step` dispatch chains (docs/design/teardown-
+        # contract.md): computed here, once, so both the `revl:teardown`
+        # custom section (which needs each entry's DISPATCH position, not
+        # just its registration seq) and the two-phase `deactivate_step` body
+        # further down read the exact same K-ordering.
+        #
+        # Committed: only `bracket` entries replay (LIFO) — release still
+        # happens on a clean unload. `transactional`/`compensation` entries
+        # DISCHARGE: they are simply absent from this chain, so a clean
+        # commit never even reaches for their inverse (witness GC — there is
+        # nothing further to free on this tier; the witness globals go out of
+        # scope with the rest of the instance when the fiber is unplugged).
+        #
+        # Aborted: Phase 1 is `bracket` + `transactional` entries LIFO, in
+        # their ORIGINAL INTERLEAVED registration order (never grouped by
+        # kind — the contract's "LIFO over the whole stack"); Phase 2 is
+        # `compensation` entries LIFO, strictly after every Phase-1 entry.
+        # `transactional`'s own wat is already guarded by its Ok-registration
+        # flag (`_witnessed_effect_step`), so an entry whose mutation actually
+        # returned `Err` is a correctly-skipped no-op here, not a residue.
+        commit_chain = [entry for entry in reversed(entries) if entry["kind"] == "bracket"]
+        phase1 = [entry for entry in reversed(entries) if entry["kind"] in ("bracket", "transactional")]
+        phase2 = [entry for entry in reversed(entries) if entry["kind"] == "compensation"]
+        abort_chain = phase1 + phase2
+        # Additive gate (item 243 Slice 2b): a program with no `witnessed`
+        # extern and no `emit ... compensate ...` step has nothing for the
+        # commit/abort split to distinguish — every entry is a `bracket`, and
+        # a bracket replays on commit AND abort alike, so `commit_chain` and
+        # `abort_chain`'s Phase-1 half are the same LIFO list either way. The
+        # new scaffold ($__committed/$__dstep globals, `committed()`,
+        # `deactivate_step()`) is therefore emitted ONLY when this component
+        # actually registers a `transactional`/`compensation` entry; every
+        # other component's `deactivate` renders EXACTLY as it did before
+        # this slice (the single flat LIFO pass), matching the additive
+        # discipline the go/rust Slice-2b landings already established
+        # (go's `_COMP_NEEDS_TEARDOWN`, rust's `_body_has_witnessed`/
+        # `_body_has_compensate`) — a program that never uses the feature
+        # never sees a byte of it in its emitted output.
+        needs_teardown_scaffold = any(
+            entry["kind"] in ("transactional", "compensation") for entry in entries)
+        # item 324: a component whose provide methods register per-tool-call
+        # witnessed inverses needs the RUNTIME accumulator (`$__mw_head`), which
+        # rides the same `$__committed` commit/abort discriminator as the static
+        # entries — so it needs the teardown scaffold even when the ACTIVATION
+        # body registered no transactional/compensation entry of its own. Gated
+        # strictly on this component actually having a method-body witnessed
+        # effect: a program without one emits byte-identically to before.
+        needs_method_drain = bool(self.method_witnessed_externs)
+        needs_teardown_scaffold = needs_teardown_scaffold or needs_method_drain
+
         lines = [f";; Generated by the revl cordis-wasm backend (ir_version {self.ir_version}) — do not edit.",
                  f";; component {self.name}",
                  "(module"]
         lines.extend(self._realm_sections())
+        lines.extend(self._teardown_section(abort_chain, len(phase1)))
         for (key, op), (param_wtys, result_wty) in sorted(self.imports.items()):
             # the coeffect ABI is one width per declared param/return: an `Int`
             # is an i64 *value*, a Str/List/record/variant/Opt/Result is an i32
@@ -1131,6 +1838,34 @@ class _ComponentEmitter:
             result = f" (result {result_wty})" if result_wty else ""
             sig = f" {params}" if params else ""
             lines.append(f'  (import "{self._import_module(key)}" "{op}" (func $req_{key}_{op}{sig}{result}))')
+        # item 173: the routed-require ABI. Per routed key called: a `live`
+        # probe (`route:<key>.live(index) -> i32`, 1 iff that one realm has an
+        # ACTIVE provider — the strict, no-parent-fallback liveness the emitted
+        # selector polls) and one strict dispatch per op (`route:<key>.<op>`,
+        # whose leading i32 param is the realm index the selector chose). A
+        # routed key is deliberately NOT a `coeffect:<key>` import — it has no
+        # single-realm provider — so it never enters the instantiation inject
+        # set and the Router activates without waiting on a bare provider.
+        for key in sorted(self.route_ops):
+            lines.append(f'  (import "route:{key}" "live" '
+                         f'(func $route_live_{key} (param i32) (result i32)))')
+            for op in self.route_ops[key]:
+                param_wtys, result_wty = self.route_imports[(key, op)]
+                params = " ".join(f"(param {w})" for w in param_wtys)
+                result = f" (result {result_wty})" if result_wty else ""
+                sig = f" {params}" if params else ""
+                lines.append(f'  (import "route:{key}" "{op}" '
+                             f'(func $route_disp_{key}_{op} (param i32){sig}{result}))')
+        if self._needs_record_import:
+            # item 322 Slice 2: the durable-WAL framing channel. `record` takes
+            # (seq, receiver_ptr, method_ptr, witness_ptr) — the runtime values
+            # of one witnessed transactional discharge-descriptor — and the host
+            # binds it (via `Runtime.host_provide("revl:wal", …)`) to a function
+            # that reads the three Str pointers back and drains a JSONL record to
+            # the durable host WAL. Emitted ONLY in record mode, so a normal
+            # module's import section is byte-identical.
+            lines.append('  (import "coeffect:revl:wal" "record" '
+                         '(func $revl_wal_record (param i32 i32 i32 i32)))')
         if self.uses_job:
             # the job id is an interned compile-time *tag*, not an Int value:
             # it stays i32, which is what the runtime's host op declares
@@ -1158,12 +1893,52 @@ class _ComponentEmitter:
             lines.append(
                 f'  (import "instance:{component}" "{key}.{op}" '
                 f'(func $inst_{component}_{key}_{op} (param i32){sig}{result}))')
+        # item 289, the wasm tier's `host imports subset-of declared caps` leg:
+        # every capability-bearing host import (`coeffect:<key>`, `route:<key>`)
+        # names a required key. This holds BY CONSTRUCTION -- `_coeffect_op_spec`
+        # and `_route_op_spec` refuse an unrequired key outright, so an import is
+        # only ever created while lowering a `req` on a resolved `requires` key
+        # -- and we re-assert it against the finished import set so a silent
+        # emitter regression becomes a named refusal rather than an ungranted
+        # host import. This leg is decidable only here: the wasm import set is
+        # statically knowable, where a @py/@ts host body is G8-opaque.
+        _assert_imports_within_requires(
+            self.name,
+            {key for (key, _op) in self.imports} | set(self.route_ops),
+            set(self.requires),
+        )
         if needs_memory:
             lines.append('  (memory (export "memory") 1)')
             for offset, data in self.v3.data_segments:
                 lines.append(f'  (data (i32.const {offset}) "{_wat_bytes(data)}")')
             lines.append(f"  (global $__hp (mut i32) (i32.const {self.v3.heap_start}))")
         lines.append("  (global $__step (mut i32) (i32.const 0))")
+        if needs_teardown_scaffold:
+            # item 243 Slice 2b (docs/design/teardown-contract.md): the
+            # abort-vs-commit discriminator. The py reference tier reads "did
+            # `drain` run" (backends/python/runtime.py, `Frame._committed`);
+            # this tier's analogue is "did the body run to every segment" —
+            # `activate_step` flips it the moment the LAST segment completes
+            # without trapping (below), which a mid-activation trap never
+            # reaches, so an abort leaves it 0 exactly like an unreached
+            # `drain` does on py.
+            lines.append("  (global $__committed (mut i32) (i32.const 0))")
+            # the `deactivate_step` dispatch cursor (mirrors `$__step`'s role
+            # for `activate_step`): one entry processed per call, so a
+            # first-party host driver can catch a trap per entry and bound a
+            # compensation's epoch/fuel individually (see `deactivate_step`
+            # below).
+            lines.append("  (global $__dstep (mut i32) (i32.const 0))")
+        if needs_method_drain:
+            # item 324: the per-tool-call witnessed accumulator. `$__mw_head` is
+            # the newest-first linked list of method-registered inverse cells (0
+            # == empty); `$__mw_count` is the live count, exported as `mw_live`
+            # so a host can ENUMERATE the outstanding crossings (the wasm tier's
+            # answer to the py WAL discharge descriptors). Both are
+            # component-instance state: they come up empty and are torn down
+            # with the instance, never shared across activations.
+            lines.append("  (global $__mw_head (mut i32) (i32.const 0))")
+            lines.append("  (global $__mw_count (mut i32) (i32.const 0))")
         for glob, glob_ty in self.globals:
             zero = "i64.const 0" if glob_ty == "i64" else "i32.const 0"
             lines.append(f"  (global {glob} (mut {glob_ty}) ({zero}))")
@@ -1177,21 +1952,151 @@ class _ComponentEmitter:
             lines.append("      (then")
             lines.append(f"      {seg}")
             lines.append(f"      (global.set $__step (i32.const {i + 1}))")
+            if more == 0 and needs_teardown_scaffold:
+                # the body ran to its last segment without trapping — a clean
+                # unload, an implicit commit until item 245's explicit commit
+                # UX lands (docs/design/teardown-contract.md "Commit path").
+                # A mid-activation trap never reaches this line, so an abort
+                # leaves `$__committed` at its default 0. Gated: nothing
+                # reads `$__committed` unless this component actually
+                # registers a transactional/compensation entry (see
+                # `needs_teardown_scaffold`, above).
+                lines.append("      (global.set $__committed (i32.const 1))")
             lines.append(f"      (return (i32.const {more}))))")
+        if total == 0 and needs_teardown_scaffold:
+            # an empty body has nothing to complete, so it is trivially a
+            # clean commit the first time `activate_step` is called.
+            lines.append("    (global.set $__committed (i32.const 1))")
         lines.append("    (i32.const 0))")
 
-        # deactivate: the accumulator — completed steps' inverses, LIFO
-        lines.append(f'  (func (export "deactivate"){activation_decls}')
-        if inverses:
-            for index, wat in reversed(inverses):
-                lines.append(f"    (if (i32.ge_s (global.get $__step) (i32.const {index}))")
-                lines.append("      (then")
-                lines.append(f"      {wat}))")
-        else:
-            lines.append("    nop")
-        lines.append("  )")
+        if not needs_teardown_scaffold:
+            # the legacy single-pass accumulator, byte-identical to every
+            # emission before this slice: no witnessed/compensation entry
+            # means every entry is a `bracket`, and a bracket replays on
+            # commit and abort alike, so there is nothing for a commit/abort
+            # split (or a `committed()` export, which nothing here would ever
+            # need to call) to distinguish.
+            lines.append(f'  (func (export "deactivate"){activation_decls}')
+            if entries:
+                for entry in reversed(entries):
+                    lines.append(f"    (if (i32.ge_s (global.get $__step) (i32.const {entry['index']}))")
+                    lines.append("      (then")
+                    lines.append(f"      {entry['wat']}))")
+            else:
+                lines.append("    nop")
+            lines.append("  )")
+            lines.extend(provide_funcs)
+            return self._tail(lines, needs_memory, needs_arith, rendered, fn_defs)
+
+        # committed: lets a first-party host driver read the commit/abort
+        # discriminator directly, rather than re-deriving it from `$__step`
+        # against the segment count it would otherwise have to track itself.
+        lines.append('  (func (export "committed") (result i32) (global.get $__committed))')
+
+        if needs_method_drain:
+            # item 324: the abort seam (py's `Frame.abort()`) and the
+            # enumeration surface (py's WAL discharge descriptors).
+            #
+            # `abort` flips a component that ALREADY activated cleanly back to
+            # not-committed, so its next `deactivate` reverts the per-tool-call
+            # mutations instead of committing them. Activation sets
+            # `$__committed = 1` on its last segment (a clean load), and every
+            # per-request mutation runs AFTER that; without this seam a later
+            # `deactivate` would always find `$__committed == 1` and discharge
+            # them. A session-level reject (item 245's explicit commit/abort UX
+            # is the eventual driver) calls `abort` first; the same flip also
+            # replays any activation-body transactional entries, so the whole
+            # activation reverts all-or-nothing. Idempotent.
+            lines.append('  (func (export "abort") (global.set $__committed (i32.const 0)))')
+            # `mw_live` is how a host enumerates the outstanding per-tool-call
+            # crossings — one per registered inverse still parked, the wasm
+            # analogue of reading the WAL discharge descriptors. It counts UP as
+            # calls register and back DOWN as the abort drain replays them, so
+            # after a clean abort it reads 0 (no rollback residue) and after a
+            # commit it holds the count of discharged deliverables.
+            lines.append('  (func (export "mw_live") (result i32) (global.get $__mw_count))')
+
+        # deactivate_step / deactivate: the two-phase accumulator (docs/
+        # design/teardown-contract.md). One LIFO stack, three entry kinds
+        # (bracket/transactional/compensation); `deactivate_step` processes
+        # exactly one entry per call — the same per-call idiom `activate_step`
+        # already uses — so a first-party host driver can: (a) catch a trap
+        # per entry and continue to the next (Phase-1 "continue-and-record",
+        # as far as core wasm's no-exceptions model allows: a trap still
+        # aborts whatever is LEFT of the CURRENT entry's own call, but not the
+        # entries before or after it, unlike the old single-pass `deactivate`
+        # where one trap silently dropped everything downstream); and (b) arm
+        # a wasmtime epoch deadline or fuel budget around exactly one
+        # compensation call at a time (the per-tier bound table: "wasm: guest
+        # code yes [preemption]" — a real capability once a host arms it,
+        # which is what this per-entry export makes possible; host IMPORTS in
+        # flight are still not preemptible, stated honestly, since an epoch/
+        # fuel check only fires in guest code). `commit_chain`/`abort_chain`
+        # are computed once, above, next to `_teardown_section`.
+
+        def _dispatch(items: list[dict[str, Any]]) -> list[str]:
+            out: list[str] = []
+            total_items = len(items)
+            for k, entry in enumerate(items):
+                more = 1 if k + 1 < total_items else 0
+                out.append(f"      (if (i32.eq (global.get $__dstep) (i32.const {k}))")
+                out.append("        (then")
+                # advance the cursor BEFORE running the entry: core wasm has
+                # no catch, so a trap inside `entry['wat']` aborts this call
+                # with `$__dstep` already past this slot. That is what makes
+                # a first-party host driver's per-call retry land on the NEXT
+                # entry rather than re-attempting the one that just failed —
+                # continue-and-record (docs/design/teardown-contract.md),
+                # achieved by the caller, one call per entry, never by this
+                # function looping past its own trap.
+                out.append(f"        (global.set $__dstep (i32.const {k + 1}))")
+                out.append(f"        (if (i32.ge_s (global.get $__step) (i32.const {entry['index']}))")
+                out.append("          (then")
+                out.append(f"          {entry['wat']}))")
+                out.append(f"        (return (i32.const {more}))))")
+            return out
+
+        lines.append(f'  (func $deactivate_step (export "deactivate_step") (result i32){activation_decls}')
+        lines.append("    (if (global.get $__committed)")
+        lines.append("      (then")
+        lines.extend(_dispatch(commit_chain))
+        lines.append("    ))")
+        lines.append("    (if (i32.eqz (global.get $__committed))")
+        lines.append("      (then")
+        if needs_method_drain:
+            # item 324: drain the RUNTIME method-witnessed accumulator first —
+            # these are the newest inverses (registered per tool call, after
+            # activation), so component-level LIFO replays them ahead of the
+            # static activation-body chain. One cell per call; only when the
+            # list empties does the static `abort_chain` dispatch run.
+            lines.extend(self._method_drain(self.name))
+        lines.extend(_dispatch(abort_chain))
+        lines.append("    ))")
+        lines.append("    (i32.const 0))")
+
+        # deactivate: the legacy single-call teardown hook (unchanged export
+        # name/signature, so an existing host — e.g. cordis-wasm's
+        # `Runtime.unplug` — keeps working with no changes of its own): drive
+        # `deactivate_step` to completion in one call. A trap from any entry
+        # still aborts the rest of THIS call (core wasm has no catch/continue
+        # across an internal `call`), exactly the substrate's pre-existing
+        # all-or-nothing limitation — restated here, not newly introduced by
+        # the phase split — so a host that wants genuine continue-and-record
+        # or per-compensation epoch/fuel bounding should drive
+        # `deactivate_step` itself instead of calling this export.
+        lines.append('  (func (export "deactivate")')
+        lines.append("    (loop $__teardown")
+        lines.append("      (if (call $deactivate_step) (then (br $__teardown)))))")
 
         lines.extend(provide_funcs)
+        return self._tail(lines, needs_memory, needs_arith, rendered, fn_defs)
+
+    def _tail(self, lines: list[str], needs_memory: bool, needs_arith: bool,
+             rendered: str, fn_defs: list[str]) -> str:
+        """The helper preamble + closing paren every module shares, regardless
+        of which `deactivate`/`deactivate_step` shape `_module` built above —
+        factored out so the gated (no witnessed/compensation entry) early
+        return and the normal path render this identically."""
         if needs_memory:
             lines.extend(self.v3._helper_funcs())
             # `$f64_to_str` is emitted only when a Float is actually rendered,
@@ -1278,9 +2183,17 @@ _TRAPPING_INT_OPS = {"+": "call $int_add", "-": "call $int_sub", "*": "call $int
 _TRAPPING_INT32_OPS = {"+": "call $int32_add", "-": "call $int32_sub",
                        "*": "call $int32_mul"}
 _RAW_INT_OPS = {"/": "i64.div_s", "%": "i64.rem_s"}
+#: Int32 bitwise operators (item 366). wasm is the reference substrate: every
+#: one is a single native i32 instruction, and both shifts mask the count to 5
+#: bits (mod 32) exactly as the spec requires, so no count-masking is emitted
+#: here. `>>` is `shr_s` — the arithmetic, sign-extending shift. `~` is unary
+#: and handled in `_un_expr` (xor with -1). They never trap (bit patterns).
+_BITWISE_INT32_OPS = {"&": "i32.and", "|": "i32.or", "^": "i32.xor",
+                      "<<": "i32.shl", ">>": "i32.shr_s"}
 _COMPARISON_OPS = frozenset(set(_CMP_SUFFIX) | set(_BOOL_OPS))
 _BINARY_OPS = frozenset(set(_CMP_SUFFIX) | set(_BOOL_OPS)
-                        | set(_TRAPPING_INT_OPS) | set(_RAW_INT_OPS))
+                        | set(_TRAPPING_INT_OPS) | set(_RAW_INT_OPS)
+                        | set(_BITWISE_INT32_OPS))
 
 
 def _bin_instr(op: str, operand_ty: str | None) -> str | None:
@@ -1298,6 +2211,10 @@ def _bin_instr(op: str, operand_ty: str | None) -> str | None:
             # Int32 comparisons are signed i32 (lt_s/…); Bool uses eq/ne only.
             return f"i32.{_CMP_SUFFIX[op]}"
         return None
+    if op in _BITWISE_INT32_OPS:
+        # Bitwise ops are Int32-only (docs/arithmetic.md); each is one native
+        # i32 instruction, shifts self-mask the count to mod 32.
+        return _BITWISE_INT32_OPS[op] if operand_ty == "Int32" else None
     if operand_ty == "Int32":
         # Only `+ - *` reach here for Int32 (docs/arithmetic.md): `/` yields
         # Float (refused on this tier) and `%` is Int-only.
@@ -1439,6 +2356,25 @@ def _wat_bytes(data: bytes) -> str:
         else:
             parts.append(f"\\{byte:02x}")
     return "".join(parts)
+
+
+def _assert_imports_within_requires(name: str, import_keys: set, require_keys: set) -> None:
+    """Item 289: `host imports subset-of declared caps` at the wasm tier.
+
+    Every capability-bearing host import a component emits names a key it
+    declares in `requires`. The emitter only ever adds one while lowering a
+    `req` on a resolved key, so the import set is a subset of the declared
+    capability surface BY CONSTRUCTION; this re-asserts the invariant against
+    the finished set. A failure is an emitter regression, not an author error,
+    so it names the leg that broke rather than pointing at the source.
+    """
+    extra = sorted(import_keys - require_keys)
+    if extra:
+        raise EmitError(
+            f"least-authority (289): component {name!r} would import host "
+            f"capability {extra[0]!r} it does not declare in `requires` -- the "
+            f"wasm import set must be a subset of the declared capabilities "
+            f"(host imports subset-of declared caps)")
 
 
 def test_export_names(tests: list) -> list[tuple[str, str]]:
@@ -1670,8 +2606,14 @@ class _V3Emitter:
         }
         return name
 
-    def _collect_string_literals(self, roots: list | None = None) -> None:
+    def _collect_string_literals(self, roots: list | None = None,
+                                 extra: list | None = None) -> None:
         """Pool every string constant reachable from `roots` into data.
+
+        `extra` seeds additional literals that no node in `roots` carries — the
+        item 322 record channel's receiver/method names, which are read off the
+        witnessed extern's declaration (not spelled anywhere in the body), so
+        `_str_ptr` can name their pooled offset when it frames a descriptor.
 
         `roots` defaults to this module's function bodies PLUS its `test`
         bodies — the tests are lowered later (as exported `revl_test_*`
@@ -1714,6 +2656,8 @@ class _V3Emitter:
                      + [t.get("body") or [] for t in self.tests])
         for root in roots:
             walk(root)
+        for value in extra or []:
+            seen.setdefault(value, None)
         offset = 0
         for value in seen:
             raw = value.encode("utf-8")
@@ -2647,6 +3591,8 @@ class _V3Emitter:
                 # result can be rendered (docs/strings.md); the value never
                 # enters the storage ABI.
                 return "Float"
+            if op in ("&", "|", "^", "<<", ">>"):
+                return "Int32"  # bitwise ops are Int32-only (docs/arithmetic.md)
             if node.get("operands") == "Int32":
                 return "Int32"  # Int32 arithmetic stays Int32 (docs/arithmetic.md)
             return "Int"
@@ -2654,6 +3600,8 @@ class _V3Emitter:
             op = node.get("op")
             if op == "!":
                 return "Bool"
+            if op == "~":
+                return "Int32"  # bitwise complement is Int32-only (docs/arithmetic.md)
             if op == "-":
                 return "Int32" if node.get("operands") == "Int32" else "Int"
             raise EmitError(f"unsupported unary operator {op!r}")
@@ -2796,6 +3744,11 @@ class _V3Emitter:
         if method == "charCodeAt":
             if target_ty not in ("Str", "Bytes"):
                 raise EmitError("charCodeAt is only lowerable on Str/Bytes values")
+            return "Int"
+        # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at).
+        if method == "codepoint_at":
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError("codepoint_at is only lowerable on Str/Bytes values")
             return "Int"
         if method == "to_str":
             if target_ty != "Int":
@@ -3103,6 +4056,10 @@ class _V3Emitter:
             raise EmitError(f"{where}: void operand in unary expression")
         if op == "!":
             return _E(f"{operand.wat}\n      (i32.eqz)", "Bool")
+        if op == "~":
+            # Int32 bitwise complement (item 366): xor with -1. A bit op, so it
+            # never traps; the operand is Int32 (the checker guarantees it).
+            return _E(f"{operand.wat}\n      (i32.const -1)\n      (i32.xor)", "Int32")
         if op == "-":
             # negation is a subtraction from zero, and `0 - MIN` overflows: it
             # goes through the checked helper like any other subtraction, at the
@@ -3283,6 +4240,16 @@ class _V3Emitter:
             # reads the raw byte (docs/strings.md).
             helper = "$str_cp_char_code_at" if target_ty == "Str" else "$str_char_code_at"
             return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Int")
+        # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+        # the Unicode scalar at code-point index i, via the same UTF-8-decoding
+        # helper as charCodeAt.
+        if method == "codepoint_at":
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError(f"{where}: codepoint_at is only lowerable on Str/Bytes")
+            target = self._expr(target_node, scope, where, target_ty)
+            arg = self._expr(args[0], scope, where, "Int")
+            helper = "$str_cp_char_code_at" if target_ty == "Str" else "$str_char_code_at"
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Int")
         if method in ("div_trunc", "div_floor", "div_euclid", "mod"):
             # Integer division and modulo (docs/arithmetic.md). i64.div_s
             # already truncates; the other three go through helpers so every
@@ -3359,6 +4326,18 @@ class _V3Emitter:
 
     def _field_expr(self, node: dict, scope: _Scope, where: str) -> _E:
         target_ty = self._infer_type(node.get("target"), scope)
+        # Component positions intentionally spell `.length` as a `field` node,
+        # not a `len` node (lower.py: `len` is produced only in fn bodies). A
+        # `Str`/`Bytes`/`List` `.length` reaching here as a field is the same
+        # property-form length as `_len_expr` handles, so route it through the
+        # identical code-point path — otherwise a multibyte `Str` literal errors
+        # (no record fields) or would fold to its UTF-8 byte count (item 104).
+        # Gated on a sized type so a record whose field is literally named
+        # `length` still reads its slot below.
+        if node.get("name") == "length" and (
+            target_ty in ("Str", "Bytes") or _is_list_type(target_ty)
+        ):
+            return self._len_expr(node, scope, where)
         fields = self._record_fields(target_ty)
         if fields is None:
             raise EmitError(f"{where}: field access on non-record type {target_ty!r}")
@@ -3737,6 +4716,35 @@ class _V3Emitter:
                                     f"for_idx_{self._loop_counter}"]
                 self._collect_locals(stmt.get("body") or [], acc)
 
+    # item 379 (docs/design/379-break-continue.md).
+    _LOOP_REGISTERING_STEPS = frozenset({
+        "effect", "let-effect", "emit", "timer", "approval", "spawn",
+    })
+
+    def _loop_control_targets(self, stmts: list, kinds: frozenset) -> bool:
+        """True when a step whose kind is in `kinds` (`break` and/or `continue`)
+        appears in `stmts` targeting the loop these are the body of — at any
+        statement depth, but not inside a nested `while`/`for`, which captures
+        its own control flow. Used both to decide whether a loop needs named
+        labels and (with `{"break"}`) to judge `while (true)` divergence."""
+        for stmt in stmts or []:
+            k = stmt.get("step")
+            if k in kinds:
+                return True
+            if k == "if":
+                if (self._loop_control_targets(stmt.get("then") or [], kinds)
+                        or self._loop_control_targets(stmt.get("else") or [], kinds)):
+                    return True
+        return False
+
+    def _guard_frame_neutral_loop(self, body, where: str) -> None:
+        for child in body or []:
+            if isinstance(child, dict) and child.get("step") in self._LOOP_REGISTERING_STEPS:
+                raise EmitError(
+                    f"{where}: frame-neutral loop invariant: a `{child['step']}` "
+                    "step inside a while/for body "
+                    "(docs/design/379-break-continue.md)")
+
     def _emit_stmts(self, stmts: list, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
         out: list[str] = []
         for stmt in stmts or []:
@@ -3807,20 +4815,55 @@ class _V3Emitter:
                 out.append("(i32.eqz)")
                 out.append("(if (then unreachable))")
             elif step == "while":
+                self._guard_frame_neutral_loop(stmt.get("body"), where)
                 cond = self._expr(stmt.get("cond"), scope, where, "Bool")
                 body_scope = _Scope(dict(scope.slots), dict(scope.types))
-                body_lines = self._emit_stmts(stmt.get("body") or [], body_scope, where, expected_return)
-                out.append("(block")
-                out.append("  (loop")
-                out.append("    " + cond.wat)
-                out.append("    (i32.eqz)")
-                out.append("    (br_if 1)")
-                out.extend("    " + line for line in body_lines)
-                out.append("    (br 0)")
-                out.append("  )")
-                out.append(")")
+                body = stmt.get("body") or []
+                # wasm has no native break/continue: a loop that carries either
+                # gets NAMED labels so a `br` resolves regardless of how many
+                # `if` labels it sits under (anonymous depth arithmetic would
+                # break under nesting). A loop with neither keeps the original
+                # anonymous skeleton, so every existing golden stays byte-stable.
+                if self._loop_control_targets(body, frozenset({"break", "continue"})):
+                    self._brk_labels += 1
+                    n = self._brk_labels
+                    brk, top = f"$revl_brk_{n}", f"$revl_top_{n}"
+                    self._loop_label_stack.append(("while", brk, top, None))
+                    body_lines = self._emit_stmts(body, body_scope, where, expected_return)
+                    self._loop_label_stack.pop()
+                    out.append(f"(block {brk}")
+                    out.append(f"  (loop {top}")
+                    out.append("    " + cond.wat)
+                    out.append("    (i32.eqz)")
+                    out.append(f"    (br_if {brk})")
+                    out.extend("    " + line for line in body_lines)
+                    out.append(f"    (br {top})")
+                    out.append("  )")
+                    out.append(")")
+                else:
+                    body_lines = self._emit_stmts(body, body_scope, where, expected_return)
+                    out.append("(block")
+                    out.append("  (loop")
+                    out.append("    " + cond.wat)
+                    out.append("    (i32.eqz)")
+                    out.append("    (br_if 1)")
+                    out.extend("    " + line for line in body_lines)
+                    out.append("    (br 0)")
+                    out.append("  )")
+                    out.append(")")
             elif step == "for":
                 out.extend(self._emit_for(stmt, scope, where, expected_return))
+            elif step == "break":
+                if not self._loop_label_stack:
+                    raise EmitError(f"{where}: `break` outside a loop")
+                out.append(f"(br {self._loop_label_stack[-1][1]})")
+            elif step == "continue":
+                if not self._loop_label_stack:
+                    raise EmitError(f"{where}: `continue` outside a loop")
+                kind, _brk, top, cnt = self._loop_label_stack[-1]
+                # `while` re-tests at the loop head; `for` must fall out of the
+                # inner `$revl_cnt` block so the increment after it still runs.
+                out.append(f"(br {cnt if kind == 'for' else top})")
             else:
                 raise EmitError(f"{where}: unsupported v3 statement step {step!r}")
         return out
@@ -3829,13 +4872,20 @@ class _V3Emitter:
         """Does this statement list return/trap on every path (never falling
         through to its end)? Only the *last* statement can carry the whole
         list, so it decides: a `return` diverges; an `if` diverges when it has
-        an `else` and both arms diverge. Everything else may fall through.
+        an `else` and both arms diverge; a `while (true)` diverges iff its body
+        has no reachable `break` that targets it. Everything else may fall
+        through.
 
         wasm's validator does no such flow analysis: an `if/else` with no result
         type is always a fallthrough point to it, even when both arms `return`.
-        A non-unit function whose body ends in a diverging `if/else` therefore
-        reaches its end with an unsatisfied result unless a trailing
+        A non-unit function whose body ends in a diverging control structure
+        therefore reaches its end with an unsatisfied result unless a trailing
         `unreachable` (stack-polymorphic) closes it — see `_emit_function`.
+
+        This mirrors the frontend `_definitely_returns` (src/revl/lower.py),
+        which the checker uses to accept a declared-return fn ending in
+        `while (true)`; if the two disagreed, that fn would type-check yet emit
+        wasm wasmtime rejects (bug 398 / C4, docs/design/379-break-continue.md).
         """
         if not stmts:
             return False
@@ -3847,6 +4897,13 @@ class _V3Emitter:
             else_branch = last.get("else")
             return bool(else_branch) and self._diverges(last.get("then") or []) \
                 and self._diverges(else_branch)
+        if step == "while":
+            cond = last.get("cond")
+            if isinstance(cond, dict) and cond.get("kind") == "lit" and cond.get("value") is True:
+                # `while (true)` never exits, so it diverges — UNLESS a reachable
+                # `break` can leave it (a `continue` cannot; it re-enters the
+                # loop). A break-bearing `while (true)` may fall through.
+                return not self._loop_control_targets(last.get("body") or [], frozenset({"break"}))
         return False
 
     def _emit_for(self, stmt: dict, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
@@ -3860,6 +4917,7 @@ class _V3Emitter:
         iter_ty = self._infer_type(stmt.get("iterable"), scope)
         if not _is_list_type(iter_ty):
             raise EmitError(f"{where}: `for … of` iterates a List, got {iter_ty!r}")
+        self._guard_frame_neutral_loop(stmt.get("body"), where)
         elem_ty = _list_elem(iter_ty)
         bind = _ident(stmt.get("bind"), f"{where}: loop bind")
         self._declare_local(f"l_{bind}", elem_ty, where)
@@ -3867,17 +4925,51 @@ class _V3Emitter:
         body_scope = _Scope(dict(scope.slots), dict(scope.types))
         body_scope.slots[stmt.get("bind")] = f"(local.get $l_{bind})"
         body_scope.types[stmt.get("bind")] = elem_ty
-        body_lines = self._emit_stmts(stmt.get("body") or [], body_scope, where, expected_return)
+        body = stmt.get("body") or []
         ptr, cnt, idx = f"$for_ptr_{n}", f"$for_cnt_{n}", f"$for_idx_{n}"
         element = self._slot_load(
             f"(i32.add (local.get {ptr}) "
             f"(i32.add (i32.const {_SLOT}) "
             f"(i32.mul (local.get {idx}) (i32.const {_SLOT}))))",
             elem_ty)
-        out = [
+        prologue = [
             it.wat, f"(local.set {ptr})",
             f"(i32.load (local.get {ptr}))", f"(local.set {cnt})",
             "(i32.const 0)", f"(local.set {idx})",
+        ]
+        if self._loop_control_targets(body, frozenset({"break", "continue"})):
+            # A loop carrying break/continue gets named labels. `continue` must
+            # NOT branch to the loop head (that would skip the `idx += 1` after
+            # the body and spin forever), so the body is wrapped in an inner
+            # `$revl_cnt` block with the increment emitted after it: `continue`
+            # is `(br $revl_cnt)`, which falls out of that block INTO the
+            # increment; `break` is `(br $revl_brk)`.
+            self._brk_labels += 1
+            ln = self._brk_labels
+            brk, top, cntl = f"$revl_brk_{ln}", f"$revl_top_{ln}", f"$revl_cnt_{ln}"
+            self._loop_label_stack.append(("for", brk, top, cntl))
+            body_lines = self._emit_stmts(body, body_scope, where, expected_return)
+            self._loop_label_stack.pop()
+            out = prologue + [
+                f"(block {brk}",
+                f"  (loop {top}",
+                f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))",
+                f"    (br_if {brk})",
+                f"    {element}",
+                f"    (local.set $l_{bind})",
+                f"    (block {cntl}",
+            ]
+            out.extend("      " + line for line in body_lines)
+            out.extend([
+                "    )",
+                f"    (local.set {idx} (i32.add (local.get {idx}) (i32.const 1)))",
+                f"    (br {top})",
+                "  )",
+                ")",
+            ])
+            return out
+        body_lines = self._emit_stmts(body, body_scope, where, expected_return)
+        out = prologue + [
             "(block",
             "  (loop",
             f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))",
@@ -3936,6 +5028,9 @@ class _V3Emitter:
 
         local_names: set[str] = set()
         self._loop_counter = 0
+        # item 379: fresh per function so label ids are deterministic per body.
+        self._brk_labels = 0
+        self._loop_label_stack: list[tuple] = []
         self._for_temps: list[str] = []
         self._arrows: dict = {}
         self._arrow_counter = 0
@@ -4084,7 +5179,7 @@ class _V3Emitter:
         return "\n".join(lines) + "\n"
 
 
-def _emit_v1(ir: dict) -> dict[str, str]:
+def _emit_v1(ir: dict, record: bool = False) -> dict[str, str]:
     """Lower a v1/v2 component document to WAT modules, one per component.
 
     v2 components carry ``isolate``/``intercept``; they are lowered to
@@ -4103,13 +5198,13 @@ def _emit_v1(ir: dict) -> dict[str, str]:
         emitter = _ComponentEmitter(
             component, services, ir_version=version,
             types=ir.get("types"), functions=ir.get("functions"),
-            externs=ir.get("externs"))
+            externs=ir.get("externs"), record=record)
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
     return out
 
-def _emit_v3(ir: dict) -> dict[str, str]:
+def _emit_v3(ir: dict, record: bool = False) -> dict[str, str]:
     """Lower an IR v3 document.
 
     Components (when present) use the v1 component lowering; types and pure
@@ -4147,7 +5242,7 @@ def _emit_v3(ir: dict) -> dict[str, str]:
                                     types=types, functions=functions,
                                     externs=externs,
                                     is_template=component.get("name") in templates,
-                                    spawn_targets=spawn_targets)
+                                    spawn_targets=spawn_targets, record=record)
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
@@ -4235,20 +5330,114 @@ def _refuse_lifecycle_tests(tests: list) -> None:
             )
 
 
-def emit(ir: dict) -> dict[str, str]:
-    """Lower one IR document to WAT modules (v1 components, v3 types/fns)."""
+def _refuse_deferred_emissions(ir: dict) -> None:
+    """Roadmap 245 Decision 2 tier gate: a CALL to a `deferred` emission needs a
+    session-owner runtime (the deferral queue and the commit verb) this tier does
+    not have yet, so refuse it at emit time — surfaced through EmitError, this
+    tier's existing "never silent degradation" refusal channel. The reachability
+    check and the single canonical wording live in `revl.session_commit`, shared
+    by all five ownerless tiers so six backends do not invent six messages; a
+    declared-but-never-called deferred extern emits cleanly (call-site keyed)."""
+    try:
+        from revl.errors import RevlError
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
+    except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.errors import RevlError
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
+    try:
+        refuse_deferred_on_ownerless_tier(ir, "wasm")
+        refuse_approval_on_ownerless_tier(ir, "wasm")
+    except RevlError as exc:
+        raise EmitError(exc.message) from None
+
+
+_REVL_SYNC_SUFFIX = "_revl_sync"
+
+
+def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
+    """item 388, stage 6: on a colour-erasing tier (go/rust/java/wasm — suspension
+    is not a function colour) a caller-decided-colour extern's two clones — `X`
+    (async) and `X_revl_sync` (sync) — emit the SAME blocking host function.
+    Collapse them to ONE: drop the sync clone and rewrite its call sites to `X`.
+
+    Detected structurally: a `_revl_sync` extern whose origin twin is present with
+    identical `bodies`. A poly extern instantiated in only one colour has no twin,
+    so it is emitted unchanged under whatever name survived. Non-destructive (the
+    shared IR is also emitted by py/ts, which keep both colours), and a no-op that
+    returns the IR untouched when no such pair exists (every existing golden is
+    byte-identical)."""
+    externs = ir.get("externs") or []
+    by_name = {e.get("name"): e for e in externs}
+    alias: dict = {}
+    kept: list = []
+    for e in externs:
+        name = e.get("name") or ""
+        if name.endswith(_REVL_SYNC_SUFFIX):
+            origin = name[: -len(_REVL_SYNC_SUFFIX)]
+            twin = by_name.get(origin)
+            if twin is not None and twin.get("bodies") == e.get("bodies"):
+                alias[name] = origin
+                continue
+        kept.append(e)
+    if not alias:
+        return ir
+
+    def _rewrite(node):
+        if isinstance(node, dict):
+            return {k: (alias[v] if k == "name" and isinstance(v, str)
+                        and v in alias else _rewrite(v))
+                    for k, v in node.items()}
+        if isinstance(node, list):
+            return [_rewrite(x) for x in node]
+        return node
+
+    ir = dict(ir)
+    ir["externs"] = kept
+    for key in ("components", "functions", "tests", "prop_tests"):
+        if key in ir:
+            ir[key] = _rewrite(ir[key])
+    return ir
+
+
+def emit(ir: dict, record: bool = False) -> dict[str, str]:
+    """Lower one IR document to WAT modules (v1 components, v3 types/fns).
+
+    ``record`` (item 322 Slice 2, the wasm durable-WAL channel) is OFF by
+    default and gated everywhere it touches emission, so every existing golden
+    emits BYTE-IDENTICALLY; only a module emitted with ``record=True`` carries
+    the WAL record import (`coeffect:revl:wal.record`) and, at each witnessed
+    TRANSACTIONAL registration, the framing call that hands the host the
+    discharge-descriptor's runtime values. The wasm sandbox has no direct
+    filesystem, so — unlike the go tier, whose emitted code opens ``REVL_WAL``
+    and fsyncs directly — the module FRAMES its records out through that host
+    import and the driver (:mod:`revl.run_wasm`) DRAINS them into the durable
+    host WAL. See ``backends/wasm/scenarios/crashproof``.
+    """
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
+    ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
     _refuse_holes(ir)
+    _refuse_deferred_emissions(ir)
 
     _refuse_fault_tests(ir)
 
     _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
     if version == 1 or version == 2:
-        return _emit_v1(ir)
+        return _emit_v1(ir, record=record)
     if version == 3:
-        return _emit_v3(ir)
+        return _emit_v3(ir, record=record)
     raise EmitError(f"unsupported ir_version {version!r} (expected 1, 2, or 3)")
 
 
@@ -4257,10 +5446,12 @@ if __name__ == "__main__":
     import pathlib
     import sys
 
-    ir_path, out_dir = sys.argv[1], pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else ".")
+    args = [a for a in sys.argv[1:] if a != "--record"]
+    record = "--record" in sys.argv[1:]
+    ir_path, out_dir = args[0], pathlib.Path(args[1] if len(args) > 1 else ".")
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(ir_path, encoding="utf-8") as handle:
-        modules = emit(json.load(handle))
+        modules = emit(json.load(handle), record=record)
     for name, wat in modules.items():
         (out_dir / f"{name}.wat").write_text(wat, encoding="utf-8")
         print(f"wrote {out_dir / (name + '.wat')}")

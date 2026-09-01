@@ -22,6 +22,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -29,7 +31,7 @@ from revl import compile_source  # noqa: E402
 from revl.__main__ import main  # noqa: E402
 from revl.audit_diff import audit_report  # noqa: E402
 from revl.policy import (  # noqa: E402
-    Policy, PolicyError, evaluate, load_policy, parse_policy, render_report,
+    Policy, PolicyError, evaluate, load_policy, parse_policy,
 )
 
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -290,3 +292,40 @@ def test_mcp_session_without_a_sandbox_is_unaffected():
     assert session.sandbox is None
     # _enforce_sandbox is a no-op; it must not raise on any ir
     session._enforce_sandbox(compile_source(AGENTS))
+
+
+# ---------------------------------------------------------------------------
+# item 246, Slice 2: `capability C requires approval [ttl D]`
+# ---------------------------------------------------------------------------
+
+def test_requires_approval_dsl_and_json_agree():
+    dsl = parse_policy(
+        "capability production.payment requires approval\n"
+        "capability prod.* requires approval ttl 10m\n")
+    js = parse_policy(json.dumps({"approvals": [
+        {"capability": "production.payment"},
+        {"capability": "prod.*", "ttl": "10m"}]}))
+    assert dsl.approval_rules == js.approval_rules
+    assert dsl.requires_approval()
+    # the tightest rule that covers a token is returned, with its ttl in ms
+    assert dsl.approval_rule_for("production.payment").ttl_ms is None
+    assert dsl.approval_rule_for("prod.payment").ttl_ms == 600_000
+    assert dsl.approval_rule_for("unrelated") is None
+
+
+def test_requires_approval_ttl_units_and_malformed():
+    assert parse_policy("capability c requires approval ttl 30s") \
+        .approval_rules[0].ttl_ms == 30_000
+    assert parse_policy("capability c requires approval ttl 500ms") \
+        .approval_rules[0].ttl_ms == 500
+    assert parse_policy("capability c requires approval ttl 45") \
+        .approval_rules[0].ttl_ms == 45_000       # a bare number is seconds
+    with pytest.raises(PolicyError):
+        parse_policy("capability c requires approval ttl notaduration")
+    with pytest.raises(PolicyError):
+        parse_policy("capability a, b requires approval")   # one glob only
+
+
+def test_requires_approval_leaves_a_plain_policy_empty():
+    # a policy with only allow/deny rules names no approval requirement
+    assert not parse_policy("component A* may reach llm").requires_approval()

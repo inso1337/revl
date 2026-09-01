@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
-  <title>revl: one checked front-end, six hardened runtimes</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 620" width="1200" height="620">
+  <title>revl: one checked front end, one IR, six hardened runtimes, an MCP admission gate</title>
   <defs>
     <linearGradient id="teal" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#2dd4bf"/>
@@ -9,84 +9,90 @@
       <stop offset="0" stop-color="#a78bfa"/>
       <stop offset="1" stop-color="#818cf8"/>
     </linearGradient>
-    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
       <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#8b949e"/>
     </marker>
-    <marker id="arr-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#2dd4bf"/>
+    <marker id="arr-v" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#a78bfa"/>
     </marker>
   </defs>
 
-  <rect width="1200" height="630" fill="#0d1117"/>
+  <rect width="1200" height="620" rx="18" fill="#0d1117"/>
 
-  <!-- wordmark -->
-  <text x="600" y="72" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="46" font-weight="700" fill="#e6edf3">revl</text>
-  <text x="600" y="104" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"
-        font-size="17" fill="#8b949e">revertible effects as a type system: one checked front-end, six hardened runtimes</text>
+  <!-- two doors, one checker -->
+  <g text-anchor="middle">
+    <rect x="150" y="34" width="380" height="66" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <text x="340" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#e6edf3">.rvl source</text>
+    <text x="340" y="86" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif" font-size="13" fill="#8b949e">components · services · tests, on disk</text>
 
-  <!-- source -->
-  <rect x="470" y="132" width="260" height="54" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-  <text x="600" y="166" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="21" fill="#e6edf3">.rvl source</text>
-
-  <!-- front-end pipeline -->
-  <rect x="180" y="226" width="840" height="76" rx="14" fill="#161b22" stroke="url(#teal)" stroke-width="2"/>
-  <text x="600" y="258" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="22" fill="#e6edf3">parse  →  check  →  link  →  IR</text>
-  <text x="600" y="286" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"
-        font-size="14" fill="#8b949e">G1–G8 enforced here: declared-only access · inverse for every mutation · no cycles · enumerable boundary</text>
-
-  <!-- arrows source -> frontend -->
-  <line x1="600" y1="186" x2="600" y2="222" stroke="#8b949e" stroke-width="2" marker-end="url(#arr)"/>
-
-  <!-- emitters -->
-  <rect x="440" y="342" width="320" height="48" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-  <text x="600" y="372" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="18" fill="#e6edf3">six emitters, one IR</text>
-  <line x1="600" y1="302" x2="600" y2="338" stroke="#8b949e" stroke-width="2" marker-end="url(#arr)"/>
-
-  <!-- fan-out lines -->
-  <path d="M 600 390 L 600 412" fill="none" stroke="#30363d" stroke-width="2"/>
-  <path d="M 135 412 L 1065 412" fill="none" stroke="#30363d" stroke-width="2"/>
-  <path d="M 135 412 L 135 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 321 412 L 321 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 507 412 L 507 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 693 412 L 693 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 879 412 L 879 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 1065 412 L 1065 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
-
-  <!-- tier boxes -->
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" text-anchor="middle">
-    <rect x="51" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#2dd4bf" stroke-width="1.8"/>
-    <text x="135" y="474" fill="#e6edf3">cordis-py</text>
-    <text x="135" y="500" font-size="12" fill="#8b949e">reference</text>
-
-    <rect x="237" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-    <text x="321" y="474" fill="#e6edf3">cordis (TS)</text>
-    <text x="321" y="500" font-size="12" fill="#8b949e">portability</text>
-
-    <rect x="423" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#a78bfa" stroke-width="1.8"/>
-    <text x="507" y="474" fill="#e6edf3">cordis-wasm</text>
-    <text x="507" y="500" font-size="12" fill="#8b949e">sandbox</text>
-
-    <rect x="609" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-    <text x="693" y="474" fill="#e6edf3">cordis-rs</text>
-    <text x="693" y="500" font-size="12" fill="#8b949e">native</text>
-
-    <rect x="795" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-    <text x="879" y="474" fill="#e6edf3">cordis4j</text>
-    <text x="879" y="500" font-size="12" fill="#8b949e">JVM</text>
-
-    <rect x="981" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-    <text x="1065" y="474" fill="#e6edf3">cordis-go</text>
-    <text x="1065" y="500" font-size="12" fill="#8b949e">stc-go</text>
-
+    <rect x="670" y="34" width="380" height="66" rx="12" fill="#161b22" stroke="url(#violet)" stroke-width="1.8"/>
+    <text x="860" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#e6edf3">agent draft</text>
+    <text x="860" y="86" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif" font-size="13" fill="#c4b5fd">revl_check · revl_admit, over MCP, no filesystem</text>
   </g>
 
-  <!-- agent boundary -->
-  <rect x="330" y="556" width="540" height="46" rx="10" fill="#0d1117" stroke="url(#violet)" stroke-width="1.8"/>
-  <text x="600" y="585" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="16" fill="#c4b5fd">revl mcp serve: the compiler as an agent admission gate</text>
-  <path d="M 600 526 L 600 552" fill="none" stroke="#a78bfa" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arr-teal)"/>
+  <line x1="340" y1="100" x2="480" y2="146" stroke="#8b949e" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="860" y1="100" x2="720" y2="146" stroke="#a78bfa" stroke-width="2" marker-end="url(#arr-v)"/>
+  <text x="600" y="132" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"
+        font-size="13" fill="#8b949e">the admission gate is the same checker</text>
+
+  <!-- the checked front end -->
+  <rect x="160" y="150" width="880" height="84" rx="14" fill="#161b22" stroke="url(#teal)" stroke-width="2"/>
+  <text x="600" y="186" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="23" fill="#e6edf3">parse  →  check  →  link</text>
+  <text x="600" y="215" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"
+        font-size="14" fill="#8b949e">G1–G8 enforced here: declared-only access · an inverse or an emit for every mutation · no cycles · enumerable boundary</text>
+
+  <!-- one IR -->
+  <line x1="600" y1="234" x2="600" y2="264" stroke="#8b949e" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="520" y="268" width="160" height="46" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="600" y="297" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="19" fill="#e6edf3">one IR</text>
+
+  <!-- fan-out -->
+  <path d="M 600 314 L 600 336" fill="none" stroke="#30363d" stroke-width="2"/>
+  <path d="M 140 336 L 1060 336" fill="none" stroke="#30363d" stroke-width="2"/>
+  <path d="M 140 336 L 140 358" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 324 336 L 324 358" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 508 336 L 508 358" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 692 336 L 692 358" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 876 336 L 876 358" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 1060 336 L 1060 358" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- six tiers -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" text-anchor="middle">
+    <rect x="55" y="362" width="170" height="82" rx="12" fill="#161b22" stroke="#2dd4bf" stroke-width="1.8"/>
+    <text x="140" y="396" fill="#e6edf3">cordis-py</text>
+    <text x="140" y="422" font-size="12" fill="#8b949e">reference</text>
+
+    <rect x="239" y="362" width="170" height="82" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <text x="324" y="396" fill="#e6edf3">cordis (TS)</text>
+    <text x="324" y="422" font-size="12" fill="#8b949e">portability</text>
+
+    <rect x="423" y="362" width="170" height="82" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <text x="508" y="396" fill="#e6edf3">cordis-rs</text>
+    <text x="508" y="422" font-size="12" fill="#8b949e">native</text>
+
+    <rect x="607" y="362" width="170" height="82" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <text x="692" y="396" fill="#e6edf3">cordis4j</text>
+    <text x="692" y="422" font-size="12" fill="#8b949e">JVM</text>
+
+    <rect x="791" y="362" width="170" height="82" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <text x="876" y="396" fill="#e6edf3">cordis-go</text>
+    <text x="876" y="422" font-size="12" fill="#8b949e">third-party runtime</text>
+
+    <rect x="975" y="362" width="170" height="82" rx="12" fill="#161b22" stroke="url(#violet)" stroke-width="1.8"/>
+    <text x="1060" y="396" fill="#e6edf3">cordis-wasm</text>
+    <text x="1060" y="422" font-size="12" fill="#8b949e">first-party sandbox</text>
+  </g>
+
+  <!-- live migration band -->
+  <line x1="150" y1="478" x2="1050" y2="478" stroke="#a78bfa" stroke-width="2"
+        stroke-dasharray="6 5" marker-start="url(#arr-v)" marker-end="url(#arr-v)"/>
+  <text x="600" y="508" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="14" fill="#c4b5fd">revl swap · a live component migrates between tiers, consumers keep calling</text>
+
+  <!-- validation strip -->
+  <rect x="55" y="532" width="1090" height="52" rx="10" fill="#10151d" stroke="#30363d" stroke-width="1.5"/>
+  <text x="600" y="564" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"
+        font-size="15" fill="#8b949e">every tier's emitted code is validated by that tier's real toolchain:&#160;&#160;tsc · cargo check · javac · wasmtime · go</text>
 </svg>

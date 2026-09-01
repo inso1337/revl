@@ -1,0 +1,16 @@
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+component NormCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key) = store.get(key.take(8))
+    fn put(key, value) {
+      effect store.insert(key.take(8), value)
+      undo   store.remove(key.take(8))
+    }
+  }
+}

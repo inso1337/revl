@@ -305,6 +305,8 @@ def test_emitted_python_body_reverts_cleanly():
             self.ctx = ctx
         def install(self, body):
             captured["body"] = body
+        def begin(self):
+            return None
         def drain(self):
             return None
 
@@ -795,6 +797,8 @@ def _install_async_timer_module(rt):
             self.ctx = ctx
         def install(self, body):
             captured["body"] = body
+        def begin(self):
+            return None
         def drain(self):
             return None
 

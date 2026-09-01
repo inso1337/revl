@@ -20,6 +20,7 @@
         "get: not async fn",
         "put: emission (sync)"
       ],
+      "resources": [],
       "verdict": "address-space-bound"
     },
     "Database": {
@@ -27,6 +28,7 @@
         "query: not async fn",
         "execute: emission (sync)"
       ],
+      "resources": [],
       "verdict": "address-space-bound"
     }
   },

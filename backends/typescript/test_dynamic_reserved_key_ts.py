@@ -19,7 +19,6 @@ tests/dynamic_reserved_key.test.ts in the vitest suite.
 
 import importlib.util
 import json
-import re
 import sys
 import types
 from pathlib import Path

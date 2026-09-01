@@ -1,0 +1,12 @@
+// REJECTED — `i--` is not revl syntax (item 384; syntax-2.0 §3.3). revl
+// expressions are pure — there is no decrement operator. The redirect names
+// the pure mutation form `i -= 1`.
+//
+// expected error:
+//   revl has no `--` decrement operator
+
+fn f() -> Int {
+  var i = 0
+  i--
+  return i
+}

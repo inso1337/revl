@@ -38,6 +38,7 @@ from . import quarantine as _quarantine
 from . import repair as _repair
 from . import ship as _ship
 from .persist import RestoreError
+from .approval import ApprovalRequired
 from .. import query as Q
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
@@ -416,6 +417,159 @@ def _tool_unload(_arguments: dict) -> dict:
         return _session_error(str(error))
 
 
+def _tool_commit(_arguments: dict) -> dict:
+    """Step 1 of the two-step session commit (item 245): enumerate the manifest.
+    The `summary` is the human's one-line prompt; the `hash` binds the gate
+    target. Nothing crosses yet — call revl_commit_confirm with the hash."""
+    try:
+        return {"ok": True, "manifest": SESSION.commit()}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_commit_confirm(arguments: dict) -> dict:
+    """Step 2 of the session commit: flush the deferral queue (FIFO), discharge
+    the witnessed escrow, mark it durable. A hash that no longer matches the
+    live gate target is refused with a fresh manifest (a result, not an error)."""
+    manifest_hash = arguments.get("hash")
+    if not manifest_hash:
+        return _session_error("provide `hash` — the manifest hash revl_commit "
+                              "returned, binding exactly what will fire")
+    try:
+        result = SESSION.commit_confirm(manifest_hash)
+    except SessionError as error:
+        return _session_error(str(error))
+    if result.get("refused"):
+        return {"ok": False, **result}
+    return {"ok": True, **result}
+
+
+def _approval_required(exc: ApprovalRequired) -> dict:
+    """Shape a class-(c) refusal into the ticket two-step response (item 246).
+    The call/load/swap did NOT fire: the ticket names what a yes would mean, and
+    `revl_approve(hash)` mints the standing approval that lets the identical
+    re-issue fire once."""
+    return {
+        "ok": False,
+        "approvalRequired": True,
+        "note": "a class-(c) crossing (an irreversible emission with no checked "
+                "inverse) needs a human yes — nothing fired. Relay the ticket, "
+                "then call revl_approve with its `hash`; the identical re-issue "
+                "then fires once and consumes the approval.",
+        "ticket": exc.ticket,
+    }
+
+
+def _tool_approve(arguments: dict) -> dict:
+    """Say YES to a class-(c) crossing (item 246 / roadmap item 344). Two shapes,
+    one verb:
+
+      * SINGLE-USE, EXACT-HASH (Slice 1): `hash` alone mints a single-use
+        approval bound to that one ticket; the identical re-issue fires once and
+        consumes it. An unknown hash is refused by the outstanding-ticket table.
+      * SESSION-SCOPED STANDING GRANT (item 344, fork b): a `capability` and/or a
+        `uses`/`ttlMs` bound mints a grant keyed by the capability's semantic
+        identity that per-call class-(c) crossings consume against — taking the
+        shell-escape shape (n repeat crossings) from n prompts to one mint. The
+        grant may be named from an outstanding ticket (`hash` + `uses`/`ttlMs`)
+        or proactively against a `capability`.
+
+    Gated by the `approve` verb (item 55), so an operator profile scopes who may
+    say yes."""
+    ticket_hash = arguments.get("hash")
+    capability = arguments.get("capability")
+    uses = arguments.get("uses")
+    ttl_ms = arguments.get("ttlMs")
+    # item 344: any of `capability`/`uses`/`ttlMs` selects the standing-grant
+    # path; a bare `hash` keeps the Slice-1 single-use behaviour byte-for-byte.
+    if capability is not None or uses is not None or ttl_ms is not None:
+        try:
+            return {"ok": True, **SESSION.mint_standing_grant(
+                ticket_hash=ticket_hash, capability=capability,
+                uses=uses, ttl_ms=ttl_ms)}
+        except SessionError as error:
+            return _session_error(str(error))
+    if not ticket_hash:
+        return _session_error("provide `hash` — the ticket hash from the "
+                              "approvalRequired response — or a `capability` "
+                              "(+ `uses`/`ttlMs`) to mint a standing grant")
+    try:
+        return {"ok": True, **SESSION.approve_ticket(ticket_hash)}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_revoke(arguments: dict) -> dict:
+    """Retire a session-scoped standing grant EARLY (roadmap item 379), the
+    symmetric partner of `revl_approve`'s item-344 standing-grant mint. Withdraw
+    consent BEFORE the grant's TTL/uses lapse, so the next class-(c) crossing it
+    covered prompts again:
+
+      * `capability` revokes EVERY live standing grant for that capability (the
+        same key `revl_approve` mints against — a token when scoped by item 343,
+        the extern name otherwise);
+      * `requestId` revokes one specific grant (the id the mint returned).
+
+    Revoking a capability/id with no live grant is a clean typed no-op
+    (`count: 0`), not an error — idempotent. Gated by the `approve` operator verb
+    (item 55): withdrawing consent is the same authority as granting it."""
+    capability = arguments.get("capability")
+    request_id = arguments.get("requestId")
+    try:
+        return {"ok": True, **SESSION.revoke_standing_grant(
+            capability=capability, request_id=request_id)}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_distillation_offers(_arguments: dict) -> dict:
+    """Fold this session's approval ledger to candidate `AutoApproveRule` offers
+    (roadmap item 251). Read-only and PROPOSE-ONLY - it applies no policy, so it
+    is ungated. Scoped to the caller's own attributed grants."""
+    try:
+        return {"ok": True, **SESSION.distillation_offers()}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_apply_distillation(arguments: dict) -> dict:
+    """Install a distilled offer as a live `AutoApproveRule` (roadmap item 251),
+    recording a `distillation-applied` WAL fact with the attribution. Gated by the
+    `approve` operator verb (item 55): installing a standing auto-approve is the
+    same authority as granting the underlying yeses."""
+    offer_id = arguments.get("offerId")
+    if not offer_id:
+        return _session_error("provide `offerId` - the id from "
+                              "`distillation_offers`")
+    try:
+        return {"ok": True, **SESSION.apply_distillation(offer_id)}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_revoke_distillation(arguments: dict) -> dict:
+    """Retire an applied distilled rule from the live policy (roadmap item 251),
+    recording a `distillation-revoked` WAL fact - the next matching crossing
+    prompts again (fail-closed). Gated by the `approve` operator verb (item 55)."""
+    rule = arguments.get("rule")
+    if not rule:
+        return _session_error("provide `rule` - the rule text (or its canonical "
+                              "DSL) to revoke")
+    try:
+        return {"ok": True, **SESSION.revoke_distillation(rule)}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_abort(_arguments: dict) -> dict:
+    """Abort the session (item 245): drop the deferral queue (never fired),
+    replay the witnessed inverses, prove a clean world."""
+    try:
+        return {"ok": True, **SESSION.abort()}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
 def _tool_state(_arguments: dict) -> dict:
     return {"ok": True, **SESSION.state(drain=True)}
 
@@ -427,7 +581,13 @@ def _tool_gauntlet(arguments: dict) -> dict:
     if arguments.get("source") is None and not arguments.get("files"):
         return _session_error("provide `source` or `files` — the gauntlet "
                               "grades a candidate component")
-    return _gauntlet.run(SESSION, arguments)
+    dossier = _gauntlet.run(SESSION, arguments)
+    # item 290, §4: retain an admissible session dossier so a `mcp requires
+    # evidence [gauntlet admissible]` admission can read this operator-run
+    # evidence (no attestation root needed — the operator produced it here).
+    if hasattr(SESSION, "record_gauntlet"):
+        SESSION.record_gauntlet(dossier)
+    return dossier
 
 
 def _tool_quarantine(arguments: dict) -> dict:
@@ -848,11 +1008,24 @@ def _tool_resolve(arguments: dict) -> dict:
         return {"ok": True, "query": "resolve", "candidates": [],
                 "assumptions": [f"no registry index at {registry_dir}; "
                                 "set `registry` or $REVL_REGISTRY"]}
+    verify_required = bool(arguments.get("verifyRequired"))
+    trusted_publishers = tuple(arguments.get("trustedPublishers") or ())
+    key = None
+    if verify_required:
+        # a verify-required resolve needs the signer secret to cryptographically
+        # check the attestations it gates on.
+        from ..attest import resolve_key  # noqa: PLC0415
+        try:
+            key = resolve_key(None)
+        except RevlError as error:
+            return report(error)
     try:
         registry = Registry.from_dir(registry_dir)
         return registry_resolve(registry, need,
                                 manifest=arguments.get("manifest"),
-                                limit=int(arguments.get("limit", 5)))
+                                limit=int(arguments.get("limit", 5)),
+                                verify_required=verify_required, key=key,
+                                trusted_publishers=trusted_publishers)
     except RevlError as error:
         return report(error)
 
@@ -1284,6 +1457,213 @@ TOOLS = [
         "handler": _tool_unload,
     },
     {
+        "name": "revl_commit",
+        "description": "Enumerate the session commit MANIFEST (step 1 of 2, item "
+                       "245). The session split its actions three ways: witnessed "
+                       "mutations ran and revert on abort; DEFERRED emissions were "
+                       "queued and have not crossed; immediate emissions already "
+                       "fired. This returns what a commit WILL cross — `summary` is "
+                       "the one-line prompt ('empty trash: 3 files; send: 1 email'), "
+                       "`deferred` the queue, `witnessed` the count about to "
+                       "discharge — plus a `hash` binding exactly that. Nothing "
+                       "crosses yet; call revl_commit_confirm(hash) to flush.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_commit,
+    },
+    {
+        "name": "revl_commit_confirm",
+        "description": "COMMIT the session (step 2 of 2, item 245): flush the "
+                       "deferral queue in FIFO order (each deferred emission's host "
+                       "body fires once), discharge the witnessed mutations, and "
+                       "mark it durable — record order commit-approved, flushed, "
+                       "discharge, activation-complete. `hash` must be the one "
+                       "revl_commit returned; if the queue or the live composition "
+                       "drifted since, the hash mismatches and the commit is "
+                       "REFUSED with a fresh manifest (ok:false), so what fires is "
+                       "exactly what was approved, never a superset.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"hash": {"type": "string",
+                                    "description": "the manifest hash from revl_commit"}},
+            "required": ["hash"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_commit_confirm,
+    },
+    {
+        "name": "revl_abort",
+        "description": "ABORT the session (item 245): DROP the deferral queue "
+                       "(nothing fired, nothing to offset — exact by construction), "
+                       "replay every witnessed mutation's inverse, and prove a "
+                       "clean world. Immediate emissions already out stay out. The "
+                       "counterpart to revl_commit_confirm; a session using only "
+                       "witnessed and deferred actions aborts residue-free.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_abort,
+    },
+    {
+        "name": "revl_approve",
+        "description": "Say YES to an outstanding class-(c) crossing (item 246, "
+                       "the auto-approve policy). When the approval policy is on, "
+                       "a revl_call (or a load/swap whose activation body emits) "
+                       "that reaches an IRREVERSIBLE emission with no checked "
+                       "inverse does not fire: it returns `approvalRequired` with "
+                       "a `ticket`. Relay that ticket to a human, then call this "
+                       "with the ticket's `hash` to mint a standing, single-use, "
+                       "hash-bound approval; the IDENTICAL re-issue then fires "
+                       "once and consumes it. A hash the server never issued is "
+                       "refused (the outstanding-ticket table); a swap or edit "
+                       "that changes the call's reach closure invalidates a "
+                       "standing approval (the candidate hash no longer matches). "
+                       "For a REPEAT-shaped session (n class-(c) calls to the same "
+                       "capability, e.g. a shell escape), pass `capability` and/or "
+                       "`uses`/`ttlMs` INSTEAD of a bare hash to mint a SESSION-"
+                       "SCOPED STANDING GRANT (item 344): one mint the n calls then "
+                       "auto-approve against, decrementing `uses` and checked "
+                       "against the TTL — n prompts become one. Name the grant from "
+                       "an outstanding ticket (`hash` + `uses`/`ttlMs`) or "
+                       "proactively (`capability` + `uses`/`ttlMs`). "
+                       "Gated by the `approve` operator verb (item 55): who may "
+                       "say yes is scoped in the same profile grammar as who may "
+                       "commit. Class (a) (witnessed-revertible) and (b) (deferred) "
+                       "crossings never reach here — they auto-approve.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "hash": {"type": "string",
+                         "description": "the ticket hash from the "
+                                        "approvalRequired response (single-use "
+                                        "approval, or the seed for a standing "
+                                        "grant when uses/ttlMs is also given)"},
+                "capability": {"type": "string",
+                               "description": "item 344: the capability to mint a "
+                                              "standing grant for (proactive, or "
+                                              "to disambiguate a multi-capability "
+                                              "ticket)"},
+                "uses": {"type": "integer", "minimum": 1,
+                         "description": "item 344: how many class-(c) crossings "
+                                        "the standing grant may auto-approve"},
+                "ttlMs": {"type": "integer", "minimum": 1,
+                          "description": "item 344: how long (ms) the standing "
+                                         "grant stays live; checked at the "
+                                         "crossing against the session clock"}},
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_approve,
+    },
+    {
+        "name": "revl_revoke",
+        "description": "Retire a SESSION-SCOPED STANDING GRANT early (item 379), "
+                       "the symmetric partner of revl_approve's item-344 standing "
+                       "grant. A grant minted by revl_approve (`capability` + "
+                       "`uses`/`ttlMs`) auto-approves repeat class-(c) crossings "
+                       "until its uses run out, its TTL lapses, or the session "
+                       "ends. This withdraws it BEFORE any of those, effective "
+                       "immediately and mid-session: the NEXT class-(c) crossing "
+                       "the grant would have covered prompts again (fail-closed). "
+                       "Target the SAME key revl_approve minted against — pass "
+                       "`capability` to revoke EVERY live grant for it (a token "
+                       "like `gateway.send` when the emission is item-343 scoped, "
+                       "the extern name otherwise), or `requestId` (the id the "
+                       "mint returned) to revoke one specific grant. Revoking a "
+                       "capability or id with no live grant is a clean no-op "
+                       "(`count: 0`), never an error — idempotent, so a double "
+                       "revoke or a stale id is harmless. Gated by the `approve` "
+                       "operator verb (item 55): withdrawing consent is the same "
+                       "authority as granting it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "capability": {"type": "string",
+                               "description": "revoke every live standing grant "
+                                              "for this capability (the same "
+                                              "token/name key revl_approve mints "
+                                              "against)"},
+                "requestId": {"type": "string",
+                              "description": "revoke one specific grant by the "
+                                             "id revl_approve's standing-grant "
+                                             "mint returned"}},
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_revoke,
+    },
+    {
+        "name": "revl_distillation_offers",
+        "description": "Fold this session's approval ledger to candidate distilled "
+                       "auto-approve rules (item 251). The ledger is the item-248 "
+                       "stream of human yeses to class-(c) crossings; distillation "
+                       "notices the same operator keeps saying yes to the same "
+                       "SHAPE of crossing (the resource-scoped capability, realm, "
+                       "and taint origins) and writes down the AutoApproveRule that "
+                       "would have said yes for them - a rule an operator could "
+                       "have typed, checked on the same runtime path. Read-only "
+                       "and PROPOSE-ONLY: it applies no policy and is ungated, but "
+                       "is scoped to the caller's own attributed grants. Each offer "
+                       "carries its rule text, blast radius (the past prompts it "
+                       "would have covered, the destinations seen, and the taint "
+                       "origins it can NEVER admit), the attributed operator, and "
+                       "the sessions it was distilled from. Apply one with "
+                       "revl_apply_distillation.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_distillation_offers,
+    },
+    {
+        "name": "revl_apply_distillation",
+        "description": "Install a distilled offer as a live AutoApproveRule (item "
+                       "251). Writes the rule into the bound policy and records a "
+                       "`distillation-applied` WAL fact with the attribution "
+                       "(distilledBy - the operator whose repeated yeses it "
+                       "encodes; reviewedBy - the operator who applied it; the "
+                       "ledger window it was distilled from; appliedAt). The rule "
+                       "is bound to the enumerated component set it was reviewed "
+                       "against: a component later ENTERING its glob that was not "
+                       "in that set suspends the rule and re-offers (fail-closed). "
+                       "A distilled `host=X` rule never auto-approves a send to "
+                       "another host (the resource scope is enforced by the same "
+                       "`covers` order a hand-written rule is), and an admission "
+                       "with unknown taint is floored to all origins (never waved "
+                       "through). Gated by the `approve` operator verb (item 55): "
+                       "installing a standing auto-approve is the same authority as "
+                       "granting the underlying yeses.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "offerId": {"type": "string",
+                            "description": "the offer id from "
+                                           "revl_distillation_offers"}},
+            "required": ["offerId"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_apply_distillation,
+    },
+    {
+        "name": "revl_revoke_distillation",
+        "description": "Retire an applied distilled AutoApproveRule from the live "
+                       "policy (item 251), the symmetric partner of "
+                       "revl_apply_distillation. Removes the rule (matched by its "
+                       "canonical DSL text), records a `distillation-revoked` WAL "
+                       "fact, and the NEXT matching crossing prompts again "
+                       "(fail-closed); consume-before-fire already covers any "
+                       "in-flight crossing, so there is no orphaned auto-approval "
+                       "mid-revoke. Revoking a rule with no live match is a clean "
+                       "no-op (`count: 0`). Gated by the `approve` operator verb "
+                       "(item 55): withdrawing a standing auto-approve is the same "
+                       "authority as installing it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "rule": {"type": "string",
+                         "description": "the rule text (or its canonical DSL) to "
+                                        "revoke"}},
+            "required": ["rule"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_revoke_distillation,
+    },
+    {
         "name": "revl_state",
         "description": "What is loaded right now: fiber states, provided keys, whether "
                        "a rollback is available, and the trace since the last call.",
@@ -1485,7 +1865,16 @@ TOOLS.append({
                    "'compatible somewhere' to 'admissible here': a key the "
                    "composition already provides is withheld (G2). Ranking is "
                    "least-authority-first (smallest capability set, then tighter "
-                   "interface fit, then stronger evidence, then smaller source).",
+                   "interface fit), and then by EVIDENCE QUALITY (item 293): among "
+                   "the interface-compatible candidates, one with a fuller fault "
+                   "sweep, a valid attestation, a trusted publisher, or an "
+                   "inverse-roundtrip pass ranks higher. Each candidate carries an "
+                   "`evidence` summary and the winner's `why` names the evidence it "
+                   "won on. Interface compatibility is a HARD filter; a missing "
+                   "evidence file is `unavailable` (ranked below present-and-valid), "
+                   "never read as valid. Set `verifyRequired` (with a signer key in "
+                   "$REVL_ATTEST_KEY/$REVL_ATTEST_KEY_FILE) to filter any candidate "
+                   "lacking a cryptographically valid attestation.",
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -1499,6 +1888,13 @@ TOOLS.append({
             "registry": {"type": "string",
                          "description": "registry directory (default $REVL_REGISTRY "
                                         "or the repo's registry/)"},
+            "verifyRequired": {"type": "boolean",
+                               "description": "filter candidates without a "
+                                              "cryptographically valid attestation "
+                                              "(needs a signer key in the env)"},
+            "trustedPublishers": {"type": "array", "items": {"type": "string"},
+                                  "description": "publisher ids whose provenance "
+                                                 "lifts a candidate in the ranking"},
         },
         "required": ["need"],
     },
@@ -1611,6 +2007,12 @@ def handle(message: dict) -> dict | None:
         else:
             try:
                 payload = handler(arguments)
+            except ApprovalRequired as exc:
+                # item 246: a class-(c) crossing the decision inside Session.call
+                # (or the activation gate in load/swap) refused. This is a result,
+                # not an error — shape the ticket two-step. Caught before the
+                # generic handler so it never reads as an internal fault.
+                payload = _approval_required(exc)
             except Exception as exc:  # a tool failure is a result, not a transport error
                 payload = {"ok": False, "diagnostics": [{
                     "severity": "error", "code": "REVL", "category": "internal",

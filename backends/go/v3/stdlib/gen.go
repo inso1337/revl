@@ -165,8 +165,8 @@ func revlListIndexOf[T comparable](xs []T, x T) int64 {
 }
 
 type Row struct {
-	id   int64
-	name string
+	Id   int64  `json:"id"`
+	Name string `json:"name"`
 }
 
 func strLen(s string) int64 {
@@ -214,7 +214,7 @@ func greetN(name string, n int64) string {
 }
 
 func optName(row RevlOpt[Row]) RevlOpt[string] {
-	return revlOptMap(row, func(_x Row) string { return _x.name })
+	return revlOptMap(row, func(_x Row) string { return _x.Name })
 }
 
 func optCode(s RevlOpt[string]) RevlOpt[int64] {
@@ -226,6 +226,7 @@ func unwrapOr(o RevlOpt[int64], d int64) int64 {
 		switch _m := o.(type) {
 		case RevlSome[int64]:
 			v := _m.Value
+			_ = v
 			return v
 		case RevlNone[int64]:
 			_ = _m
@@ -254,9 +255,11 @@ func resultFold(r RevlResult[int64, string]) int64 {
 		switch _m := r.(type) {
 		case RevlOk[int64, string]:
 			v := _m.Value
+			_ = v
 			return v
 		case RevlErr[int64, string]:
 			e := _m.Value
+			_ = e
 			return (-revlStrLen(e))
 		default:
 			_ = _m

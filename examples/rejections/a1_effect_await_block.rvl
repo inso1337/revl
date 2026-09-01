@@ -1,0 +1,19 @@
+// REJECTED — A1 (roadmap item 131): the block effect form does not take
+// `await` (design §2 fence). `effect { …setup…; acq }` keeps its stratum-1
+// interior; interleaving awaits with pure setup steps reopens the acquisition-
+// atomicity argument (design §4 clause 1). The refusal names the escape: hoist
+// the preparation into a module fn, which async-colors under item 90.
+//
+// expected error:
+//   `effect await { … }` — the block effect form does not take `await`
+
+extern emission async fn ho(u: Str) -> Str = @py { return u }
+fn open_conn(u: Str) -> Str { return ho(u) }
+extern pure fn hc(c: Str) -> Int = @py { return 0 }
+fn close_conn(c: Str) -> Int { return hc(c) }
+service Db { fn go() -> Str }
+component A provides db: Db {
+  config { u: Str }
+  let c = effect await { let x = config.u; open_conn(x) } undo close_conn(c)
+  provide db { fn go() { return c } }
+}

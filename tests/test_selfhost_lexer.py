@@ -130,10 +130,19 @@ def test_selfhosted_keyword_set_matches_reference():
     """
     from revl.lexer import KEYWORDS
 
+    # Keywords the reference frontend has gained but whose self-host port is a
+    # separately-tracked follow-up slice, so `selfhost/lexer.rvl` does not carry
+    # them yet. `break`/`continue` landed in the reference at item 379
+    # (docs/design/379-break-continue.md) and their self-host port is item 391,
+    # done here, so they are no longer pending. Drop an entry from here as its
+    # 391 port lands.
+    PENDING_SELFHOST_PORT = set()
+    expected = set(KEYWORDS) - PENDING_SELFHOST_PORT
+
     emitted = set(_exec_emitted("kw")["keywords"]())
-    assert emitted == set(KEYWORDS), {
-        "missing from selfhost": sorted(set(KEYWORDS) - emitted),
-        "extra in selfhost": sorted(emitted - set(KEYWORDS)),
+    assert emitted == expected, {
+        "missing from selfhost": sorted(expected - emitted),
+        "extra in selfhost": sorted(emitted - expected),
     }
 
 
@@ -177,3 +186,77 @@ def test_selfhosted_lexer_numbers_match_reference(lex_src, src):
     got = _canon_emitted(lex_src(src))
     assert "error" not in {k for k, _, _ in got}, got
     assert got == _canon_reference(reference_lex(src, "number_case.rvl"))
+
+
+# Non-decimal integer prefixes (item 381) and `_` digit-group separators
+# (item 381), plus single-quoted string literals (item 382) — three lexer-local
+# forms the reference lexer accepts that no corpus file exercises, so the
+# differential oracle stayed green while the self-host lexer lacked them (the
+# same blind-spot family as `hole`, `${a || b}`, and the float cases above).
+# The reference normalizes a non-decimal / underscored int to its parsed value
+# (`str(int(digits, base))`), so the token TEXT the two lexers must agree on is
+# the decimal spelling: `0xFF` -> `255`, `1_000` -> `1000`, not the raw slice.
+LITERAL_FORM_CASES = [
+    # hex / binary / octal integers, either case for the prefix and a-f digits
+    "0xFF", "0xff", "0XFF", "0x0", "0xdead_beef", "0b1010", "0B1010",
+    "0o755", "0O17", "0x1_00", "let mask = 0xFF_FF",
+    # decimal underscore separators
+    "1_000", "1_000_000", "0_0", "1_2_3", "let n = 10_000 + 1",
+    # underscores inside a float's parts (int part, fraction, exponent)
+    "1_000.5", "3.14_15", "1_0e1_0",
+    # single-quoted string literals (same token kind + escapes as `"..."`)
+    "'a'", "'hello'", "''", "'a b c'",
+    r"'it\'s'",       # \' escapes the closing quote
+    r"'back\\slash'",  # \\ is a literal backslash
+    r"'not\nnewline'",  # \n is a literal backslash + n (no escape processing)
+    "let s = 'x' + 'y'",
+]
+
+
+@pytest.mark.parametrize("src", LITERAL_FORM_CASES)
+def test_selfhosted_lexer_literal_forms_match_reference(lex_src, src):
+    got = _canon_emitted(lex_src(src))
+    assert "error" not in {k for k, _, _ in got}, got
+    assert got == _canon_reference(reference_lex(src, "literal_form_case.rvl"))
+
+
+# The Int32 bitwise operators (item 366): the two-char shifts `<<`/`>>` and the
+# single-char `&`/`^`/`~` — tokens the reference lexer produces but no corpus
+# file exercised, so the differential lexer oracle stayed green while the
+# self-host lexer lacked them (the same blind-spot family as `hole` above). `|`
+# already lexed (the variant separator), so it is covered by the corpus; the
+# combinations below pin that `<<`/`>>` win over `<`/`>`, that `&&`/`||` still
+# lex before a lone `&`/`|`, and that `~` lexes as its own prefix token.
+BITWISE_CASES = [
+    "a & b", "a | b", "a ^ b", "a << b", "a >> b", "~a",
+    "a & b | c ^ d", "a << b >> c", "a << b + c", "a | b & c",
+    "~a & ~b", "a && b & c", "a || b | c", "x & 0xFF", "1 << 8",
+    "flags & MASK | BIT", "a >> 2 << 1", "~ ~ a", "a<<b", "a>>b>=c",
+]
+
+
+@pytest.mark.parametrize("src", BITWISE_CASES)
+def test_selfhosted_lexer_bitwise_match_reference(lex_src, src):
+    got = _canon_emitted(lex_src(src))
+    assert "error" not in {k for k, _, _ in got}, got
+    assert got == _canon_reference(reference_lex(src, "bitwise_case.rvl"))
+
+
+# The loop-control keywords `break`/`continue` (item 379, self-host port item
+# 391): now that they are keywords on both sides, each must lex as a `kw` token
+# (not `ident`), including when adjacent to punctuation, so a `break;` or a
+# `continue }` in a loop body streams the same tokens on both lexers.
+LOOP_CONTROL_CASES = [
+    "break", "continue", "break;", "continue;",
+    "while (c) { break }", "for (x of xs) { continue }",
+    "if (c) { break } else { continue }",
+    "while (true) { if (x) { break }; i += 1 }",
+    "for (x of xs) { if (x < 0) { continue }; total += x }",
+]
+
+
+@pytest.mark.parametrize("src", LOOP_CONTROL_CASES)
+def test_selfhosted_lexer_loop_control_match_reference(lex_src, src):
+    got = _canon_emitted(lex_src(src))
+    assert "error" not in {k for k, _, _ in got}, got
+    assert got == _canon_reference(reference_lex(src, "loop_control_case.rvl"))

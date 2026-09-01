@@ -233,6 +233,14 @@ fn v3_bin_ops(op: Str) -> Str {
   if (op == "%") { return "%" }
   if (op == "&&") { return "&&" }
   if (op == "||") { return "||" }
+  // Int32 bitwise operators (item 366, docs/arithmetic.md). `& | ^` are native
+  // on i32 and never trap. The shifts are rendered specially (render_bin) to
+  // mask the count to 0..31, since rust panics on a shift amount >= 32.
+  if (op == "&") { return "&" }
+  if (op == "|") { return "|" }
+  if (op == "^") { return "^" }
+  if (op == "<<") { return "<<" }
+  if (op == ">>") { return ">>" }
   return ""
 }
 
@@ -421,6 +429,80 @@ fn rust_type_t(tv: Any, tnames: Map[Str, Str]) -> Str {
 // types in scope (the in-file tests and any function-only document).
 fn rust_type(tv: Any) -> Str { return rust_type_t(tv, Map.empty()) }
 
+// item 383 (self-host port): a declared function type `(P, ..) -> R` lowers to
+// `impl Fn(P, ..) -> R` in the `param`/`return` positions of a free `fn`/`extern`
+// (rustc monomorphises it, exactly as a hand-written Rust signature would). This
+// mirrors the reference's position-aware `_rust_type`/`_rust_fn_type`: only those
+// positions are monomorphisable, so ESCAPING function types (a struct field, an
+// `ADT`/`List`/`Opt`/`Map` element, a service-method signature) still have no
+// constructible lowering and stay the out-of-subset `<<DEFER-fn-type>>` marker
+// `rust_type_t` returns. `.map`/`.filter`/`.reduce` reach this through their
+// `list_map`/`list_filter`/`list_reduce` free-function parameters.
+//
+// `_split_fn_type`: the leading parenthesised group is the (comma-separated)
+// parameters; the type after the matching `->` is the return.
+fn split_fn_params(name: Str) -> List[Str] {
+  var depth = 0
+  var i = 0
+  while (i < name.length()) {
+    let ch = name.charAt(i)
+    if (ch == "[" || ch == "(") { depth = depth + 1 }
+    else {
+      if (ch == "]" || ch == ")") {
+        depth = depth - 1
+        if (depth == 0) {
+          let inner = strip_spaces(name.slice(1, i))
+          if (inner == "") { return [] }
+          return split_generic(inner)
+        }
+      }
+    }
+    i = i + 1
+  }
+  return []
+}
+fn split_fn_ret(name: Str) -> Str {
+  var depth = 0
+  var i = 0
+  while (i < name.length()) {
+    let ch = name.charAt(i)
+    if (ch == "[" || ch == "(") { depth = depth + 1 }
+    else {
+      if (ch == "]" || ch == ")") {
+        depth = depth - 1
+        if (depth == 0) {
+          let rest = strip_spaces(name.slice(i + 1, name.length()))
+          if (rest.startsWith("->")) { return strip_spaces(rest.slice(2, rest.length())) }
+          return ""
+        }
+      }
+    }
+    i = i + 1
+  }
+  return ""
+}
+// `_erase_async`: an `Async[T]` fn-type return has no async-fn machinery on the
+// rust tier, so it erases to its concrete `T` (item 92/94) — `(Str) -> Async[Str]`
+// lowers `impl Fn(String) -> String`, not `impl Fn(String) -> Value`.
+fn erase_async_ret(ret: Str) -> Str {
+  let r = strip_spaces(ret)
+  if (r.startsWith("Async[") && r.endsWith("]")) {
+    return strip_spaces(r.slice(6, r.length() - 1))
+  }
+  return ret
+}
+// `_rust_type` at a `param`/`return` position: a function type lowers to
+// `impl Fn(..)`; everything else takes the ordinary owned lowering.
+fn rust_type_pos(tv: Any, tnames: Map[Str, Str]) -> Str {
+  let name = value_str(tv)
+  if (is_fn_type(name)) {
+    var ps = []
+    for (p of split_fn_params(name)) { ps = ps.push(rust_type_t(p, tnames)) }
+    return `impl Fn(${ps.join(", ")}) -> ${rust_type_t(erase_async_ret(split_fn_ret(name)), tnames)}`
+  }
+  return rust_type_t(tv, tnames)
+}
+
 // `_rust_v3_lit`: a v3 literal. Strings are owned `String` (revl `Str`).
 fn rust_v3_lit(node: Any) -> Str {
   let v = value_field(node, "value")
@@ -579,6 +661,13 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
   if (op == "/" && (opnd == "Int" || opnd == "Int32")) {
     return `((${left}) as f64 / (${right}) as f64)`
   }
+  if (op == "<<" || op == ">>") {
+    // Int32 shift: mask the count to 0..31 (mod 32) so `<<`/`>>` stay panic-
+    // free (rust panics on a shift amount >= 32) and match wasm/JS. `<<` drops
+    // the high bits (i32 two's complement); `>>` on the signed i32 is
+    // arithmetic (docs/arithmetic.md, item 366).
+    return `(${left} ${opr} ((${right}) & 31))`
+  }
   return `(${left} ${opr} ${right})`
 }
 
@@ -586,6 +675,11 @@ fn render_un(node: Any, ctx: Ctx) -> Str {
   let op = node_op(node)
   let operand = render_expr(value_field(node, "operand"), ctx)
   if (op == "!") { return `(!${operand})` }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): rust spells bitwise NOT on an
+    // integer as `!` (the same token as logical not on bool). Never traps.
+    return `(!${operand})`
+  }
   if (op == "-") { return `(-${operand})` }
   return `<<UNSUPPORTED-UN:${op}>>`
 }
@@ -895,6 +989,9 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   if (step == "assert") {
     return { lines: [line(indent, `assert!(${render_expr(value_field(node, "expr"), ctx)});`)], ctx: ctx }
   }
+  // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
+  if (step == "break") { return { lines: [line(indent, "break;")], ctx: ctx } }
+  if (step == "continue") { return { lines: [line(indent, "continue;")], ctx: ctx } }
   return { lines: [line(indent, `<<UNSUPPORTED-STEP:${step}>>`)], ctx: ctx }
 }
 
@@ -911,9 +1008,9 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
     let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, rn: Map.empty() }
     var ps = []
     for (p of params) {
-      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_t(value_field(p, "type"), tables.tn)}`)
+      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_pos(value_field(p, "type"), tables.tn)}`)
     }
-    let returns = rust_type_t(value_field(fnode, "returns"), tables.tn)
+    let returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
     var vis = ""
     if (value_bool(value_field(fnode, "public"))) { vis = "pub " }
     out = out.push(`${vis}fn ${name}(${ps.join(", ")}) -> ${returns} {`)
@@ -1862,12 +1959,21 @@ fn emit_bridge(ir: Any) -> List[Str] {
   return out
 }
 
-// `_module_header(3)`: the banner, the lint allowances, and the crate uses.
-fn module_header() -> List[Str] {
+// `_module_header(version)`: the banner, the lint allowances, and the crate
+// uses. Mirrors the reference `_module_header`: a components-ONLY document lowers
+// to `ir_version 1`, whose banner names version 1 and carries the SHORT allow
+// line; `ir_version 2` (realms) and `ir_version 3` (types/functions) share the
+// wider allow set. Only the header depends on the version; the covered
+// service/comp body is byte-identical across versions (item 217 front-door).
+fn module_header(version: Int) -> List[Str] {
   var o = []
-  o = o.push("//! Generated by the revl cordis-rs backend (ir_version 3): do not edit.")
+  o = o.push(`//! Generated by the revl cordis-rs backend (ir_version ${version}): do not edit.`)
   o = o.push("//! Target: cordis-rs 0.3.x (docs.rs/cordis-rs).")
-  o = o.push("#![allow(dead_code, unused_variables, unused_mut, unused_imports, unused_parens, unreachable_patterns)]")
+  if (version == 1) {
+    o = o.push("#![allow(dead_code, unused_variables)]")
+  } else {
+    o = o.push("#![allow(dead_code, unused_variables, unused_mut, unused_imports, unused_parens, unreachable_patterns)]")
+  }
   o = o.push("")
   o = o.push("use std::sync::Arc;")
   o = o.push("use cordis::Value;")
@@ -1895,7 +2001,13 @@ pub fn emit_rust_src(ir: Any) -> Str {
     let r = value_field(fnode, "returns")
     if (!value_is_null(r)) { fr = fr.set(value_str(value_field(fnode, "name")), value_str(r)) }
   }
-  var out = module_header()
+  // item 217: the reference dispatches on `ir_version` (`_emit_v1`/`_emit_v2`/
+  // `_emit_v3`); across those paths only the module header differs for the
+  // covered service/comp surface, so the front-door is a versioned header over
+  // the shared body. A components-only document lowers to v1, a realm-only one
+  // to v2, everything else here to v3.
+  let ver = value_int(value_opt(ir, "ir_version") ?? 3)
+  var out = module_header(ver)
   if (value_keys(types).length() > 0) { out = out.concat(emit_v3_types(types, tables.tn)) }
   if (functions.length() > 0) { out = out.concat(emit_v3_functions(functions, fr, tables)) }
   // `_emit_components`, run unconditionally in `_emit_v3` (after types/functions,

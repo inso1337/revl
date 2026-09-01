@@ -91,7 +91,8 @@ def _read_text(path: str) -> str:
 
 
 def build_snapshot(ir: dict | None, origin: dict | None,
-                   config: dict | None, record: bool = False) -> dict | None:
+                   config: dict | None, record: bool = False,
+                   approval: dict | None = None) -> dict | None:
     """`{sources, manifest, meta}` from *explicit* admission inputs, not a live
     session — the shared core of :func:`snapshot` and of the generation-history
     entries (roadmap item 65, docs/generation-history.md).
@@ -100,24 +101,59 @@ def build_snapshot(ir: dict | None, origin: dict | None,
     composition from: a snapshot is the *inputs* to re-admit, so a generation
     admitted without its sources (a hand-built IR) has nothing to snapshot, and
     an undo to it will be refused rather than rehydrated past the gate.
+
+    `approval` is the operator-flag approval posture that governed the original
+    admission (the `--approval-policy` mode and the bound policy-file reference).
+    Stamped into meta so a restore into a policy-less session can REFUSE rather
+    than boot the recovered generation ungated (see :func:`restore`). A composition
+    admitted with no operator-flag posture stamps nothing, so the meta stays
+    byte-identical off-policy.
     """
     if not origin:
         return None
     manifest = (ir or {}).get("manifest") or {}
+    meta = {
+        "snapshotVersion": SNAPSHOT_VERSION,
+        "irVersion": (ir or {}).get("ir_version"),
+        "components": [entry.get("name")
+                      for entry in manifest.get("components") or []],
+        "loadOrder": manifest.get("loadOrder") or [],
+        "record": bool(record),
+        "config": dict(config or {}),
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    if approval:
+        meta["approval"] = dict(approval)
     return {
         "sources": _materialize(origin),
         "manifest": manifest,
-        "meta": {
-            "snapshotVersion": SNAPSHOT_VERSION,
-            "irVersion": (ir or {}).get("ir_version"),
-            "components": [entry.get("name")
-                          for entry in manifest.get("components") or []],
-            "loadOrder": manifest.get("loadOrder") or [],
-            "record": bool(record),
-            "config": dict(config or {}),
-            "createdAt": datetime.now(timezone.utc).isoformat(),
-        },
+        "meta": meta,
     }
+
+
+def _approval_posture(session) -> dict | None:
+    """The operator-flag approval posture in force on `session`, or None.
+
+    Two orthogonal operator-flag admissions gate a live composition: the
+    `--approval-policy` MODE (item 246) and the `--policy` boundary-policy FILE
+    whose `requires approval` rules enable the same gate (Decision 3). Neither is
+    derivable from the IR — unlike the language-surface `with a` edges, which
+    `_ir_has_approval_edges` recovers from the sources — so a restore that does
+    not carry them forward boots policy-less. This captures both by reference so
+    the operator can re-establish the identical posture on recovery."""
+    posture: dict = {}
+    mode = getattr(session, "approval_policy", None)
+    if mode is not None:
+        posture["policy"] = mode
+    sandbox = getattr(session, "sandbox", None)
+    if sandbox is not None:
+        # a boundary policy enables the gate only when it names an
+        # approval-required capability (Decision 3); record its file reference
+        # so restore can demand it back.
+        if getattr(sandbox, "requires_approval", None) is not None \
+                and sandbox.requires_approval():
+            posture["policyFile"] = getattr(sandbox, "source", None)
+    return posture or None
 
 
 def snapshot(session) -> dict:
@@ -138,7 +174,8 @@ def snapshot(session) -> dict:
             "not a dump of runtime objects)")
 
     snap = build_snapshot(session.ir, session.origin, session.config,
-                          session.recorder is not None)
+                          session.recorder is not None,
+                          approval=_approval_posture(session))
     # component leases (item 61): reflect the active workspace claims into the
     # persisted meta, so a snapshot records who was iterating on what. Leases
     # are wall-clock TTL claims, so only the still-live ones are carried and
@@ -205,15 +242,51 @@ def _origin_from(sources: dict) -> dict:
     return origin
 
 
+def _refuse_policy_downgrade(session, meta: dict) -> None:
+    """Refuse to re-admit a snapshot taken under an operator-flag approval
+    posture into a session that has none.
+
+    The activation gate (`_enforce_activation_gate`) and the class map are off
+    when `approval_policy`/`sandbox` are unset, so a generation whose activation
+    body reaches a class-(c) emission — one that PROMPTED a human on first boot —
+    would replay that crossing SILENTLY on restore, the original single-use
+    approval long since consumed. Unlike the language-surface `with a` path,
+    which re-derives its frame check from the IR and so fails closed on its own,
+    the operator-flag posture is nowhere in the sources: it must be carried in
+    meta and demanded back here. Same refuse-don't-degrade shape as the
+    record-required rule in `Session.load` (item 246, Decision 2)."""
+    posture = meta.get("approval") or {}
+    if not posture:
+        return
+    mode = posture.get("policy")
+    if mode is not None and getattr(session, "approval_policy", None) is None:
+        raise RestoreError(
+            "restore refused: this snapshot was admitted under approval policy "
+            f"'{mode}', but the recovering session has none. Booting it policy-less "
+            "would replay a class-(c) activation crossing UNPROMPTED, past an "
+            "approval already spent. Re-establish the posture: pass "
+            f"`--approval-policy {mode}` to `revl recover` (item 246, "
+            "refuse-don't-degrade)")
+    policy_file = posture.get("policyFile")
+    if policy_file is not None and getattr(session, "sandbox", None) is None:
+        raise RestoreError(
+            "restore refused: this snapshot was admitted under a boundary policy "
+            f"that names approval-required capabilities ({policy_file}), but the "
+            "recovering session has no policy bound. Re-establish it: pass "
+            f"`--policy {policy_file}` to `revl recover` (item 246, "
+            "refuse-don't-degrade)")
+
+
 def restore(session, snap: dict) -> dict:
     """Re-admit a snapshot into `session`, replaying admission.
 
-    Refuses if a composition is already loaded. Compiles the snapshotted
-    sources through the gate (a rejected component -> `RestoreError` carrying
-    the diagnostic, and nothing is loaded), then boots them through
-    `Session.load` — the same holes gate and runtime path a live load takes.
-    Cross-checks that the re-admitted component set matches what the snapshot
-    claimed.
+    Refuses if a composition is already loaded. Refuses a snapshot taken under an
+    operator-flag approval posture into a policy-less session (a silent re-fire of
+    a once-approved class-(c) crossing). Compiles the snapshotted sources through
+    the gate (a rejected component -> `RestoreError` carrying the diagnostic, and
+    nothing is loaded), then boots them through `Session.load` — the same holes
+    gate and runtime path a live load takes. Cross-checks that the re-admitted
+    component set matches what the snapshot claimed.
     """
     from .session import SessionError  # noqa: PLC0415
 
@@ -226,6 +299,11 @@ def restore(session, snap: dict) -> dict:
     meta = snap.get("meta") or {}
     config = meta.get("config") or {}
     record = bool(meta.get("record"))
+
+    # refuse-don't-degrade: a policy-recorded snapshot into a policy-less session
+    # would boot the recovered generation ungated. Demand the posture back before
+    # any recompile or runtime touch, so the refusal is loud and side-effect-free.
+    _refuse_policy_downgrade(session, meta)
 
     try:
         ir = _recompile(sources)

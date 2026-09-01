@@ -78,10 +78,120 @@ extern witnessed[fs] fn rm(path: Str) -> Result[FsWitness, FsError]
   accumulator entry kind in the IR with Ok-conditional auto-registration. Additive:
   no existing program uses `witnessed`, so the backends are untouched and stay green.
   Tested at the parse/check/IR level.
+### Slice 1 as implemented (refinements)
+
+Three decisions were refined against the actual code while landing Slice 1;
+recorded here so Slice 2 builds on the real contract.
+
+1. **`undo` reuses the acquire slot; `result` binds the `Ok` witness.** The
+   surface above writes `undo restore(w: FsWitness)`, but the extern `undo` slot
+   is an ordinary pure-expression call (`_check_extern_undo`), and acquire
+   already binds the return as the implicit `result`. So the spelling is
+   `undo restore(result)`, and for a `witnessed` extern `result` is typed as the
+   **`Ok` payload** `W` (not the whole `Result[W,E]`), exactly the value the
+   auto-registered inverse receives on abort. No new typed-binder grammar.
+2. **`witnessed` is a CONTEXTUAL keyword.** It is recognised only in the extern
+   classification slot, not added to the lexer `KEYWORDS`. This keeps the
+   self-hosted lexer's keyword set in parity (its differential oracle asserts
+   set equality) with no `selfhost/*` change, and never breaks a program that
+   used `witnessed` as an ordinary identifier.
+3. **The `transactional` entry kind is an IR descriptor on the extern node.**
+   Slice 1 is "frontend + IR correctness core"; the per-call-site accumulator
+   wiring is the Slice-2 runtime seam. So the second entry kind lands as a
+   descriptor the runtime loop reads: a `witnessed` extern's IR node carries
+   `class: "witnessed"`, `entry_kind: "transactional"`, `revertible: true`,
+   `ok_conditional: true`, `witness: <W>`, `capabilities: [...]`, and the lowered
+   `undo`. An `acquire` node carries `undo` but **no** `entry_kind` (its effect
+   step is the existing bracket), which is the checked distinction. Rule 1's
+   "refused outside effect position" is enforced as a refusal of any witnessed
+   call in a `fn`/`test` body (no accumulator there); the positive effect-position
+   call site is enabled with the runtime seam in Slice 2.
+
 - **Slice 2: six-tier runtime seam.** Each backend's emit + runtime teardown loop
   consumes the declared inverse, auto-registers it, and implements the
   `transactional` entry kind (abort-only replay + commit discharge + witness GC),
   plus WAL descriptor emission. Async-extern-scale (items 80/115). Rust part waits
   for item 278.
+### Slice 2a as implemented (py reference-tier runtime seam)
+
+The py teardown seam is landed in `backends/python/{emit,runtime}.py`; the other
+tiers (Slice 2b) follow this contract.
+
+1. **The abort-vs-commit discriminator is "did `drain` run".** The emitted body
+   is one cordis effect whose yielded disposers cordis unwinds LIFO. A clean
+   activation runs to its final `yield _revl_frame.drain`, so on unload `drain`
+   is disposed FIRST and every earlier disposer runs after it; a mid-activation
+   failure raises before that `yield`, so cordis's setup-failure unwind replays
+   the already-collected disposers and `drain` never runs. `Frame.drain` flips
+   `Frame._committed = True` synchronously at entry, so a transactional disposer
+   reads `_committed == True` on a clean commit and `False` on an abort. This
+   needs no new cordis signal and no lowerer change.
+
+2. **The transactional entry is a distinct disposer, not a distinct list.**
+   `Frame.transactional(undo, witness)` returns a `_Transactional` disposer that
+   joins the same LIFO disposer stack as every bracket inverse (so mixed-entry
+   LIFO is preserved for free — for effects fired from the ACTIVATION body;
+   point 5 states the rule for effects fired mid-session, from a provide method)
+   and, at disposal time, replays `undo(witness)`
+   iff `not frame._committed` (abort) and otherwise discharges — dropping both
+   the inverse and the witness references (witness GC). A bracket (`acquire`)
+   still `yield lambda: <undo>`s and replays unconditionally: the two entry
+   kinds are now observably distinct at runtime (clean unload reverts the
+   bracket, persists the witnessed mutation).
+
+3. **Registration is Ok-conditional and uses the DECLARED inverse.** The emitted
+   call site runs the mutation, and on the `Ok` branch (`isinstance(x, Ok)`)
+   yields `_revl_frame.transactional((lambda result: <declared undo>), x.value)`
+   — the extern's own `undo` with the `Ok` payload bound as `result`; on `Err`
+   it registers nothing. There is no site-spelled undo; the accumulator owns it.
+   emit keys this off the acquisition calling a `witnessed` extern (the externs
+   table), so no new IR step field is required and every non-witnessed program
+   emits byte-identically.
+
+4. **Deferred: the effect-position call-site SURFACE.** Slice 2a is the backend
+   consuming the IR; it did NOT touch `src/revl/lower.py`. A witnessed call in
+   effect position without a site undo (`effect rm(p)`) is still refused by the
+   lowerer — enabling that surface (auto-attaching the declared undo, stamping
+   the step) is a lower.py slice that belongs with 245's commit UX, kept out of
+   Slice 2a to avoid colliding with item 312's live lower/main work. The runtime
+   seam is proven against the IR the future lowerer will emit (a standard
+   `effect`/`let-effect` step whose acquisition calls a witnessed extern), which
+   is exactly the shape emit already handles.
+
+5. **Mid-session (post-activation) witnessed effects replay LIFO across the
+   whole frame — item 318 seam, item 369 fix.** Points 1–2 reason about the
+   ACTIVATION body, whose disposers the host runtime unwinds LIFO. But the real
+   agent case is a witnessed effect fired from a PROVIDE METHOD, per tool call,
+   AFTER the component activated. Such an effect has no body generator to
+   `yield` its disposer into, and adopting it as a sibling effect is unsound
+   (the host disposes an adopted effect BEFORE the body's `drain`, so a clean
+   unload would see `_committed` still `False` and wrongly revert the
+   deliverable). So `Frame.transactional_method` PARKS the entry in
+   `_deferred_transactional` and `Frame.drain` disposes it once the
+   commit-vs-abort bit is settled — commit discharges it, abort replays its
+   inverse.
+
+   The contract: **a mid-session witnessed inverse replays in reverse
+   INVOCATION order (LIFO) across the whole frame — identical to an
+   activation-body inverse, and consistent with G7.** `_deferred_transactional`
+   is appended newest-last as each provide method fires, so `drain` must dispose
+   it newest-FIRST (`reversed`). On a commit the order is immaterial (every
+   entry no-op discharges); on an ABORT it is load-bearing: two inverses whose
+   paths OVERLAP must undo newest-first, or — because every stdlib/fs.rvl
+   inverse is idempotent-and-total ("a second replay is a no-op") — the oldest
+   inverse runs first, finds nothing, silently no-ops, and the newer inverse
+   then undoes into the hole. A FIFO drain therefore leaves residue or DESTROYS
+   pre-session data while abort still reports `noResidue: true`, silently
+   voiding the item 246 auto-approve of a class-(a) crossing. Three-line
+   reproducers (`mv a b ; mv b c`; `rm a ; touch a`; `write "V2" ; write "V3"`,
+   each then `abort`) are in `tests/test_witnessed_abort_lifo.py`.
+
+   This holds on every tier that carries the deferred-park mechanism (py
+   `runtime.py`, ts `runtime.ts`, go `emit.py`'s `RevlFrame.commit`): each
+   drains the parked list newest-first. Tiers that flip `committed` eagerly at
+   activation-end (rust, java) register the method inverse directly on the host
+   runtime's native LIFO dispose stack and need no parked list; the wasm tier
+   parks in a newest-first linked list and pops the head first. All four are
+   LIFO by construction.
 - **Slice 3: item 244 `stdlib/fs.rvl`.** The per-tier witness bodies (APFS
   clonefile / copy fallback / rename-to-garbage). First visible H1 proof.

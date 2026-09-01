@@ -111,6 +111,50 @@ should stay a frontend/loader concern, not an emitter hack.
   `ctx.provide(name, impl)` covers them; revertible `set` is finer-grained
   than the contract needs.
 
+### 1.5 Per-tool-call witnessed effects — the H1 gate (item 318 → 324)
+
+A witnessed `[fs]` mutation that fires from a **provide-method body** (per tool
+call, after activation) is the real agent H1 gate: the mutation IS the
+deliverable, so it must PERSIST on a clean session/component unload and REVERT,
+residue-free, on an abort. The activation-body form (`Frame.transactional`,
+Slice 2b) yields its disposer into the body generator's own cordis LIFO stack;
+a method body has no such generator.
+
+**The soundness hazard (verified on this cordis-style tier).** The obvious move
+— adopt the method's witnessed entry as a sibling `ctx.effect`, so its disposer
+joins the fiber's teardown — is UNSOUND here, exactly as item 318 found on py.
+cordis disposes an adopted sibling effect BEFORE the body effect's final
+`yield frame.drain` runs, so on a CLEAN unload that disposer observes
+`committed` still false and WRONGLY REPLAYS (reverts) the deliverable. The fix
+mirrors py: `Frame.transactionalMethod` does NOT return a cordis disposer. It
+PARKS the entry in the frame (`deferredList`) and `Frame.drain` disposes it
+itself, AFTER `committed`/`aborting` is settled — so it reads the correct
+commit-vs-abort bit by construction. `tests/method_witnessed.test.ts` pins the
+hazard directly (a clean unload never reverts) plus the full H1 loop.
+
+**The abort seam.** A component that activated cleanly always reaches its final
+`yield frame.drain`, so any later clean unload runs `drain` and would implicitly
+COMMIT every per-call mutation. `Frame.abort()` (the seam item 245's commit/
+abort UX will drive) sets `aborting` before that unload; `drain` then leaves
+`committed` false, so every transactional entry — activation-body and
+method-deferred alike — replays and the mutations revert. A test reaches the
+live frame through `frameForCtx(fiber.ctx)` (a WeakMap keyed by the apply ctx,
+the TS analog of py's `_FRAME_BY_CTX`).
+
+**Byte-identity.** The whole apparatus is gated on `_needs_frame`, now extended
+to descend into provide-method bodies but to trigger ONLY on a WITNESSED method
+effect — an ordinary method-body bracket / `emit … compensate` stays the
+pre-existing bare `ctx.effect(...)`. Every non-witnessed and non-method-witnessed
+program emits byte-identically (verified: goldens + every committed generated
+module diff clean against a fresh emit).
+
+**Shared-doc note (not edited here):** `docs/design/243-witnessed-externs.md`
+and `docs/design/teardown-contract.md` already describe the method-body
+witnessed position and the park-for-drain rule generically (item 318, py
+reference); this TS tier now realises that rule with no new shared-doc surface.
+`selfhost/emit_ts.rvl` is not yet ported to this lowering (item 323 owns the
+port; see §2 below).
+
 ## 2. What the IR contract could not express cleanly (reporting, not fixing)
 
 1. **No types on service methods** — `params` are bare names, so emitted

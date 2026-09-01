@@ -610,3 +610,45 @@ reaches the IR**. The `record` / `record_update` IR nodes carry no type, an
 inferred `let` type is not emitted, and the emitted `types` table stays nominal
 — so the v1/v2/v3 goldens are byte-identical and no emitter changed. See
 docs/records.md ("Structural vs nominal at declared boundaries").
+
+## TCK A5 respec: two-phase teardown (amendment, 2026-08-26)
+
+`a5_compensate_lifo` (tck/spec.py) asserts the v0 placeholder behavior: a
+compensation joins the single teardown accumulator and reverts interleaved
+LIFO with the activation inverses, on every teardown. The DELETE fires before
+the earlier bracket unlock, success and abort alike. The unified teardown
+contract (docs/design/teardown-contract.md, from 243/247) changes this on two
+axes at once, ordering AND firing condition, so A5 is respecced as two
+clauses:
+
+- **a5a, discharge on clean unload.** A clean successful unload DISCHARGES
+  the compensation: it never runs, and the forward emission it would have
+  offset (the insert) survives as the deliverable. Observable: no
+  `migration_log` DELETE in the trace, the row is present, sibling provider
+  unaffected.
+- **a5b, two-phase abort.** An abort runs Phase-1 proof replay (every
+  `bracket` and `transactional` inverse, LIFO, to completion) and only THEN
+  Phase-2 compensations (LIFO within the class, best-effort, bounded).
+  Observable: every proof inverse in the trace precedes the first
+  compensation; the compensation DELETE now fires AFTER the earlier bracket
+  unlock, the exact inversion of the old a5 ordering assertion.
+
+Sequencing, because `pytest tests/` does not run the per-backend goldens
+(a green root suite proves nothing about this respec): the a5a/a5b spec
+change lands together with the py tier's runtime flip and an explicit sweep
+of `backends/*/golden`, the TCK adapters, and the executed per-tier scenario
+suites where old-a5 behavior actually lives and runs: the go scenarios under
+`go test` (backends/go/scenarios), the typescript suite under `npm test`
+(backends/typescript), and the java scenario runner
+(backends/java/scenarios). The adapter directory holds exactly one adapter,
+`tck/adapters/py_adapter.py`; the other tiers exercise the spec through the
+scenario harnesses just named, so "sweep the adapters" means that one file
+plus those harnesses. a5b also needs a NEW adapter fixture: the current a5
+case only disposes a cleanly activated component, so there is no
+abort-after-the-compensated-emit path against which a5b's ordering
+observable could be asserted. Each remaining tier flips against the new
+clauses, carried as a pinned `Divergence` in tck/spec.py until it does. No
+backend is ever built or asserted against the old single-interleaved-LIFO
+a5 once the spec change is in. The pre-flip corpus sweep for programs
+relying on clean-unload compensation firing (247 open question 2) gates the
+first flip.

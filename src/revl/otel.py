@@ -293,10 +293,6 @@ def otel_available() -> bool:
         return False
 
 
-# a stable, dependency-free trace id for a single export, so all spans of one
-# run share one trace even across the synthetic root
-_TRACE_ID = 0x7265766C0000_0000_0000_0000_00000001  # "revl" prefixed
-
 
 def _topo_order(spans: list[SpanModel]) -> list[SpanModel]:
     """Parents before children. The trace is a tree (each span has one
@@ -355,7 +351,6 @@ def export_to_otel(events: list[dict], *, span_exporter=None,
         SpanContext,
         Status,
         StatusCode,
-        TraceFlags,
         set_span_in_context,
     )
 
@@ -376,13 +371,6 @@ def export_to_otel(events: list[dict], *, span_exporter=None,
 
     spans = build_spans(events, run_name=run_name)
     contexts: dict[str, SpanContext] = {}
-    span_id_counter = 0
-
-    def next_span_id() -> int:
-        nonlocal span_id_counter
-        span_id_counter += 1
-        return span_id_counter
-
     exported = 0
     for model in _topo_order(spans):
         # OTel Links reference already-materialised spans; parents precede
@@ -406,14 +394,7 @@ def export_to_otel(events: list[dict], *, span_exporter=None,
             model.name, context=parent_context, links=links,
             attributes=attributes)
 
-        span_ctx = SpanContext(
-            trace_id=_TRACE_ID,
-            span_id=next_span_id(),
-            is_remote=False,
-            trace_flags=TraceFlags(TraceFlags.SAMPLED),
-        )
-        # record the *logical* span context so children/links resolve to it,
-        # independent of the SDK's own id allocation
+        # record this span's context so its children and links resolve to it
         contexts[model.span_id] = span.get_span_context()
 
         for sev in model.events:

@@ -14,6 +14,7 @@
         "query: not async fn",
         "execute: emission (sync)"
       ],
+      "resources": [],
       "verdict": "address-space-bound"
     }
   },
