@@ -89,6 +89,25 @@ _IDEMPOTENT_EMISSION_METHODS = ("put", "delete")
 #: every method an OpenAPI 3.x path item may carry.
 _METHODS = (*_SAFE_METHODS, "put", "post", "delete", "patch")
 
+#: item 254 (compensate-grade network effects, Slice 1). A COMPENSATE-grade
+#: reversal is item 247's best-effort follow-up to a one-way emission, NOT a
+#: proof-surface witness: it emits through the compensate slot at teardown,
+#: lands on the AUDIT surface, and never contributes to a `noResidue`/witness
+#: proof (docs/design/254-witnessed-network.md, "Revision" §). The annotations
+#: mirror the `x-revl-emission` override family; the engineer `--compensate`/
+#: `--preimage`/`--undo` flags are their out-of-band equivalents.
+#:
+#: Slice 1 honours the promotion ONLY on `PUT` (the verb gate): `PUT` is
+#: idempotent by RFC 9110 §9.2.2, so the annotation can only NARROW within an
+#: already-idempotent verb, never invent idempotence on a `POST`/`PATCH`. The
+#: `DELETE`-recreate form is Slice 2. Absent the annotation, a `PUT` imports
+#: exactly as item 44 makes it (`emission idempotent fn`), byte-identically.
+_COMPENSATE_METHODS = ("put",)
+_COMPENSATE_KEY = "x-revl-compensate"
+_PREIMAGE_KEY = "x-revl-preimage"
+_UNDO_KEY = "x-revl-undo"
+_IF_MATCH_KEY = "x-revl-if-match"
+
 #: path-item fields that are not operations.
 _PATH_ITEM_FIELDS = {"summary", "description", "servers", "parameters"}
 
@@ -554,11 +573,25 @@ class _Operation:
     emission: bool
     reason: str                     # why it is (or is not) an emission
     idempotent: bool = False        # RFC 9110 §9.2.2, spec's claim (item 44)
+    # item 254 (compensate-grade network effect, Slice 1). `compensate` records
+    # that this PUT was promoted to carry an item-247 COMPENSATE slot on its
+    # emission extern; `preimage`/`undo` name the operations the reversal reads
+    # and re-issues; `if_match` records whether the author claims a version/ETag
+    # token for the reversal (HIGH 1). None/False leaves the operation exactly
+    # as item 44 emits it.
+    compensate: bool = False
+    preimage: str | None = None     # the safe GET op that reads the preimage
+    undo: str | None = None         # the op that writes the preimage back (the PUT)
+    if_match: bool = False          # author claims a version/ETag concurrency token
 
 
 class _Generator:
     def __init__(self, doc: dict, filename: str, source: str, backend: str,
-                 service: str | None, pure: set[str], emission: set[str]) -> None:
+                 service: str | None, pure: set[str], emission: set[str],
+                 compensate: set[str] | None = None,
+                 preimage: dict[str, str] | None = None,
+                 undo: dict[str, str] | None = None,
+                 if_match: set[str] | None = None) -> None:
         self.doc = doc
         self.filename = filename
         self.backend = backend
@@ -566,6 +599,18 @@ class _Generator:
         self.types = _TypeSpace(doc, self.report)
         self.pure_requested = pure
         self.emission_requested = emission
+        # item 254: the engineer `--compensate`/`--preimage`/`--undo`/`--if-match`
+        # out-of-band equivalents of the `x-revl-*` annotations. `compensate` and
+        # `if_match` are op-handle sets (like `--pure`); `preimage`/`undo` are
+        # `OP -> TARGET_OP` maps (the reversal route the flag names out of band).
+        self.compensate_requested = compensate or set()
+        self.preimage_requested = preimage or {}
+        self.undo_requested = undo or {}
+        self.if_match_requested = if_match or set()
+        # item 254: set once any operation is promoted compensate-grade, so the
+        # header gains its claim-vs-proof paragraph ONLY then — a document with
+        # no `x-revl-compensate` annotation emits byte-identically to before.
+        self._has_compensation = False
         self.used: set[str] = set()
         self.notes: list[str] = []
         self.service = self._service_name(service)
@@ -704,9 +749,116 @@ class _Generator:
         # emission — a verb the author weakened to plain `fn` has no delivery.
         idempotent = emission and method in _IDEMPOTENT_EMISSION_METHODS
 
+        compensate, preimage, undo, if_match = self.compensation(
+            method, path, pointer, operation, name, operation_id, emission)
+
         return _Operation(method=method, path=path, name=name, pointer=pointer,
                           summary=summary, params=params, returns=returns,
-                          emission=emission, reason=reason, idempotent=idempotent)
+                          emission=emission, reason=reason, idempotent=idempotent,
+                          compensate=compensate, preimage=preimage, undo=undo,
+                          if_match=if_match)
+
+    # -- item 254: the compensate-grade promotion -------------------------
+    def compensation(self, method: str, path: str, pointer: str, operation: dict,
+                     name: str, operation_id: object,
+                     emission: bool) -> tuple[bool, str | None, str | None, bool]:
+        """`(compensate, preimage, undo, if_match)` — the item-254 Slice 1
+        promotion of a `PUT` to a COMPENSATE-grade network effect.
+
+        The promotion attaches an item-247 `compensate` slot (a best-effort,
+        audit-surface reversal) to the operation's `emission` extern. It is NOT
+        a proof-surface witness: it never claims `noResidue`, and the endpoint
+        stays an `emission`. Two guards keep optimism out, exactly as the
+        `emission` override family does:
+
+          * the VERB GATE (item 254 verb gate / attack 3): the promotion is
+            honoured ONLY on `PUT`. `PUT` is idempotent by RFC 9110 §9.2.2, so
+            the annotation NARROWS within an already-idempotent verb; it cannot
+            invent idempotence on a `POST`/`PATCH`, which is a HARD ERROR. The
+            `DELETE`-recreate form is Slice 2, refused here rather than
+            half-emitted;
+          * the operation must import as an `emission` — a verb weakened to a
+            plain `fn` (`--pure`) crosses no boundary, so there is nothing to
+            compensate.
+        """
+        handles = {name, f"{method.upper()} {path}"}
+        if isinstance(operation_id, str) and operation_id.strip():
+            handles.add(operation_id)
+
+        ext_compensate = operation.get(_COMPENSATE_KEY)
+        forced = handles & self.compensate_requested
+        requested = bool(forced) or ext_compensate is True
+        if forced:
+            self.used |= forced
+        if not requested:
+            return False, None, None, False
+
+        # the verb gate — a HARD ERROR off `PUT`, never a silent drop
+        if method not in _COMPENSATE_METHODS:
+            if method in ("post", "patch"):
+                raise self.report.bad(
+                    pointer,
+                    f"`{method.upper()} {path}` is asked to carry a compensate "
+                    f"reversal, but `{method.upper()}` is not idempotent by RFC "
+                    f"9110 §9.2.2",
+                    hint="the compensate promotion is honoured only on `PUT`, a "
+                         "verb the RFC defines idempotent; it can NARROW within "
+                         "an already-idempotent verb but cannot invent "
+                         "idempotence on a POST/PATCH. Drop the annotation, or "
+                         "model the offset as a plain emission")
+            if method == "delete":
+                raise self.report.bad(
+                    pointer,
+                    f"`DELETE {path}` compensate-grade removal (recreate-on-abort) "
+                    "is Slice 2, not Slice 1",
+                    hint="Slice 1 ships only the `PUT`-with-`GET`-preimage form; a "
+                         "`DELETE` reversal recreates via a documented create op "
+                         "and rides the same audit surface in a later slice "
+                         "(docs/design/254-witnessed-network.md §7)")
+            raise self.report.bad(
+                pointer,
+                f"`{method.upper()} {path}` cannot carry a compensate reversal — "
+                f"`{method.upper()}` is safe by RFC 9110 §9.2.1 (read-only)",
+                hint="a compensation offsets a WRITE; a safe operation crosses no "
+                     "boundary to offset. Drop the annotation")
+
+        if not emission:
+            raise self.report.bad(
+                pointer,
+                f"`{name}` is asked to carry a compensate reversal, but it was "
+                "weakened to a plain `fn` (`--pure`/`x-revl-emission: false`)",
+                hint="a compensation offsets a one-way boundary crossing; an "
+                     "operation that crosses nothing has nothing to compensate. "
+                     "Drop one of the two conflicting claims")
+
+        # the reversal route: `preimage` (the safe GET read) and `undo` (the op
+        # that writes the captured preimage back — the PUT itself, by default).
+        preimage = self.preimage_requested.get(name)
+        if preimage is None:
+            ext_preimage = operation.get(_PREIMAGE_KEY)
+            preimage = ext_preimage if isinstance(ext_preimage, str) else None
+        if not preimage:
+            raise self.report.bad(
+                pointer,
+                f"`{name}` is compensate-grade but names no preimage source",
+                hint=f"declare `{_PREIMAGE_KEY}: <getOp>` (or `--preimage "
+                     f"{name}=<getOp>`) — the safe `GET` whose response the "
+                     "reversal `PUT`s back to restore server state (item 254 §1.2)")
+
+        undo = self.undo_requested.get(name)
+        if undo is None:
+            ext_undo = operation.get(_UNDO_KEY)
+            undo = ext_undo if isinstance(ext_undo, str) else None
+        if not undo:
+            # for a PUT the undo IS the PUT itself (item 254 §1.2)
+            undo = name
+
+        if_match = (bool(handles & self.if_match_requested)
+                    or operation.get(_IF_MATCH_KEY) is True)
+        if handles & self.if_match_requested:
+            self.used |= handles & self.if_match_requested
+
+        return True, _snake(preimage), _snake(undo), if_match
 
     def op_name(self, method: str, path: str, operation_id: object,
                 pointer: str) -> str:
@@ -973,15 +1125,68 @@ class _Generator:
         marker = _BACKEND_COMMENT[self.backend]
         return f"{marker} {text.replace('{', '(').replace('}', ')')}"
 
+    def _net_cap(self, server: str) -> str:
+        """The `net.<host>` capability token for a compensate-grade crossing
+        (item 254 §4). The scope is a NETWORK cap, never host-confined: this is
+        load-bearing for the item-250 fork rewind, which enumerates-not-runs any
+        reversal whose scope crosses the network (a speculative remote `PUT` per
+        explored branch is exactly the residue item 245 prevents). The token is
+        the server host, realm-style dotted (`net.api_example_com`); with no
+        `servers` block it falls back to `net.<service_key>` so the crossing is
+        still a named net cap, never a bare emission."""
+        host = ""
+        if server:
+            rest = server.split("://", 1)[-1]
+            host = rest.split("/", 1)[0].split(":", 1)[0].split("@")[-1]
+        host = _snake(host) if host else self.key
+        return f"net.{host}"
+
+    def _validate_compensations(self, operations: list) -> None:
+        """Cross-op checks for the item-254 compensate route (§1.2): the
+        `preimage` names a real, SAFE operation (an emission read is not a safe
+        read), and the `undo` names a real operation. Runs after `collect` so
+        the whole operation table is visible."""
+        by_name = {op.name: op for op in operations}
+        for op in operations:
+            if not op.compensate:
+                continue
+            pre = by_name.get(op.preimage)
+            if pre is None:
+                raise self.report.bad(
+                    op.pointer,
+                    f"`{op.name}` names preimage `{op.preimage}`, which is not an "
+                    "operation in this document",
+                    hint="the preimage is the safe `GET` the reversal reads; spell "
+                         "it as the generated revl name or `operationId`")
+            if pre.emission:
+                raise self.report.bad(
+                    op.pointer,
+                    f"`{op.name}`'s preimage `{op.preimage}` is an `emission`, not "
+                    "a safe read",
+                    hint="a preimage must be a SAFE operation (a `GET`): an "
+                         "emission read cannot serve as the pre-state the reversal "
+                         "restores (item 254 §1.2)")
+            if op.undo not in by_name:
+                raise self.report.bad(
+                    op.pointer,
+                    f"`{op.name}` names undo `{op.undo}`, which is not an operation "
+                    "in this document",
+                    hint="the undo writes the captured preimage back; for a `PUT` "
+                         "it is the operation itself")
+
     def emit(self) -> str:
         self.check_version()
         operations = self.collect()
+        self._validate_compensations(operations)
 
-        unused = sorted((self.pure_requested | self.emission_requested) - self.used)
+        unused = sorted((self.pure_requested | self.emission_requested
+                         | self.compensate_requested | self.if_match_requested)
+                        - self.used)
         if unused:
             raise self.report.bad(
                 _pointer("paths"),
-                f"--pure/--emission named {', '.join(repr(n) for n in unused)}, "
+                f"--pure/--emission/--compensate named "
+                f"{', '.join(repr(n) for n in unused)}, "
                 "which is not an operation in this document",
                 hint="spell it as the generated revl name (`get_pets_by_id`), "
                      "the `operationId`, or `\"GET /pets/{id}\"`; a typo here "
@@ -991,6 +1196,7 @@ class _Generator:
         servers = self.doc.get("servers")
         if isinstance(servers, list) and servers and isinstance(servers[0], dict):
             server = str(servers[0].get("url") or "")
+        net_cap = self._net_cap(server)
 
         ops: list[str] = []
         externs: list[str] = []
@@ -1010,6 +1216,32 @@ class _Generator:
                     f"  // `idempotent` by RFC 9110 §9.2.2: `{operation.method.upper()}` is "
                     "idempotent by specification — the author's claim about their "
                     "server, letting the runtime auto-retry a transient failure")
+            if operation.compensate:
+                self._has_compensation = True
+                # item 254: the per-operation claim-vs-proof block for a
+                # compensate-grade reversal. It states the classification
+                # ceiling (compensate, NOT witnessed / NOT a proof surface), the
+                # §3 observability caveat verbatim, and the HIGH 1 concurrency
+                # posture (If-Match required, or best-effort-may-clobber).
+                clobber = ("with `If-Match`/`ETag` (the author claims a version "
+                           "token), so a reversal that would clobber an "
+                           "intervening write FAILS LOUDLY"
+                           if operation.if_match else
+                           "best-effort-may-clobber: this endpoint exposes no "
+                           "version/ETag token, so a reversal cannot detect a "
+                           "racing writer and may clobber an intervening write")
+                ops.append(
+                    f"  // COMPENSATE-grade (item 247): a best-effort reversal is "
+                    f"attached to the emission — it PUTs the `{operation.preimage}` "
+                    f"preimage back via `{operation.undo}` on abort. It lands on "
+                    "the AUDIT surface, NOT a proof surface: it makes NO "
+                    "`noResidue`/witness claim and restores SERVER STATE only.")
+                ops.append(
+                    "  // a rewound `PUT` does not unsend what a webhook "
+                    "subscriber already saw. The reversal is itself an outbound "
+                    f"crossing on the `{net_cap}` cap, enumerated at teardown.")
+                ops.append(f"  // reversal issued {clobber}.")
+
             modifiers = ""
             if operation.emission:
                 modifiers = "emission idempotent " if operation.idempotent else "emission "
@@ -1017,12 +1249,41 @@ class _Generator:
 
             extern = f"http_{self.key}_{operation.name}"
             target = f"{server}{operation.path}" if server else operation.path
-            externs.append(
-                f"extern {'emission' if operation.emission else 'pure'} fn "
-                f"{extern}({signature}){returns}\n"
-                f"  = @{self.backend} {{ "
-                f"{self._host_comment(f'{operation.method.upper()} {target} — send the request and decode the JSON response here')}"
-                f" }}")
+            if operation.compensate:
+                # item 254 Slice 1: the forward emission carries a NETWORK cap
+                # scope and an item-247 `compensate` slot. The reversal extern is
+                # NULLARY — the extern-level `compensate` slot binds no variables
+                # (not `result`, not the forward parameters; lower.py
+                # `_check_extern_undo`), so the captured preimage (resolved URL +
+                # bytes + reversal method/headers) rides the compensation closure
+                # at runtime, not the call. This LOWERS cleanly precisely because
+                # it is a `compensate` on an `emission`, never a witnessed
+                # `undo` — the rule-3 `_check_witnessed_inverse` (lower.py:2153)
+                # is not on this path.
+                reversal = f"{extern}_compensate"
+                if_match_note = ("issue the reversal PUT WITH `If-Match`/`ETag`"
+                                 if operation.if_match else
+                                 "no version token: best-effort, may clobber a "
+                                 "concurrent write")
+                externs.append(
+                    f"extern emission[{net_cap}] fn "
+                    f"{extern}({signature}){returns}\n"
+                    f"  compensate {reversal}()\n"
+                    f"  = @{self.backend} {{ "
+                    f"{self._host_comment(f'{operation.method.upper()} {target} — GET the {operation.preimage} preimage, send the request, decode the JSON, and stash the preimage for the compensation')}"
+                    f" }}")
+                externs.append(
+                    f"extern emission[{net_cap}] fn {reversal}() -> Unit\n"
+                    f"  = @{self.backend} {{ "
+                    f"{self._host_comment(f'best-effort reversal: PUT the stashed preimage back via {operation.undo} to {target} ({if_match_note}). Lands on the audit surface; never claims noResidue')}"
+                    f" }}")
+            else:
+                externs.append(
+                    f"extern {'emission' if operation.emission else 'pure'} fn "
+                    f"{extern}({signature}){returns}\n"
+                    f"  = @{self.backend} {{ "
+                    f"{self._host_comment(f'{operation.method.upper()} {target} — send the request and decode the JSON response here')}"
+                    f" }}")
             args = ", ".join(pname for pname, _ in operation.params)
             methods.append(f"    fn {operation.name}({args}) = {extern}({args})")
 
@@ -1084,6 +1345,27 @@ class _Generator:
             "// and every `number` becomes `Float`, so `format` distinctions (`int32`",
             "// vs `int64`, `float` vs `double`) do not survive the trip.",
         ]
+        if self._has_compensation:
+            lines += [
+                "//",
+                "// item 254 (compensate-grade network effects). An operation marked",
+                "// `x-revl-compensate` (a `PUT`, honoured on that verb only) carries an",
+                "// item-247 COMPENSATE slot on its `emission[net.<host>]` extern: a",
+                "// best-effort reversal that PUTs the captured GET preimage back on",
+                "// abort. This is a THIRD, narrower claim on top of safe/idempotent, and",
+                "// it is the CEILING — compensate-grade, NOT witnessed. The reversal",
+                "// lands on the AUDIT surface (intention), never a PROOF surface",
+                "// (guarantee): it makes NO `noResidue`/witness claim, restores SERVER",
+                "// STATE only, and is best-effort — it may 5xx or time out.",
+                "//",
+                "// A rewound `PUT` does not unsend what a webhook subscriber, a replica,",
+                "// a cache, or a human already saw. The reversal is itself an outbound",
+                "// crossing on the `net.<host>` cap and is enumerated at teardown as its",
+                "// own event — never a silent un-crossing. Where the endpoint exposes a",
+                "// version/ETag token, mark `x-revl-if-match: true` so the reversal PUTs",
+                "// with `If-Match` and fails loudly on a racing writer; without one the",
+                "// reversal is best-effort-may-clobber, and the header says which.",
+            ]
         for note in self.notes + self.types.notes + self.types.names.renames:
             lines.append(f"// note: {note}")
         return "\n".join(lines)
@@ -1091,14 +1373,38 @@ class _Generator:
 
 # ----------------------------------------------------------------- public API
 
+def _pair_map(items: object, flag: str) -> dict[str, str]:
+    """Parse a list of engineer `OP=TARGET` strings into an `{OP: TARGET}` map
+    (item 254 `--preimage`/`--undo`). A dict passes through unchanged."""
+    if isinstance(items, dict):
+        return dict(items)
+    out: dict[str, str] = {}
+    for item in items or ():
+        key, sep, value = str(item).partition("=")
+        if not sep or not key.strip() or not value.strip():
+            raise RevlError(
+                "<args>", 0,
+                f"`{flag} {item}` is not an `OP=TARGET` pair",
+                hint=f"write `{flag} setConfig=getConfig` — the operation and the "
+                     "reversal route operation it names")
+        out[_snake(key.strip())] = value.strip()
+    return out
+
+
 def import_openapi(document: object, *, filename: str = "<openapi>",
                    source: str = "", backend: str = "ts",
                    service: str | None = None, pure: object = (),
-                   emission: object = ()) -> str:
+                   emission: object = (), compensate: object = (),
+                   preimage: object = (), undo: object = (),
+                   if_match: object = ()) -> str:
     """Project an already-parsed OpenAPI 3.x `document` to revl source.
 
     Raises `RevlError` — naming the construct, its JSON pointer and the way
     forward — for anything this importer refuses to translate.
+
+    `compensate`/`preimage`/`undo`/`if_match` are the item-254 engineer
+    equivalents of the `x-revl-compensate`/`x-revl-preimage`/`x-revl-undo`/
+    `x-revl-if-match` annotations (Slice 1, `PUT` only).
     """
     if backend not in _BACKEND_COMMENT:
         raise RevlError(filename, 0, f"unknown host backend {backend!r}",
@@ -1112,7 +1418,11 @@ def import_openapi(document: object, *, filename: str = "<openapi>",
                         hint="the top level of an OpenAPI document is a mapping "
                              "with `openapi`, `info` and `paths`")
     return _Generator(document, filename, source, backend, service,
-                      set(pure or ()), set(emission or ())).emit()
+                      set(pure or ()), set(emission or ()),
+                      compensate=set(compensate or ()),
+                      preimage=_pair_map(preimage, "--preimage"),
+                      undo=_pair_map(undo, "--undo"),
+                      if_match=set(if_match or ())).emit()
 
 
 def load_document(text: str, *, filename: str = "<openapi>") -> object:
@@ -1153,9 +1463,13 @@ def load_document(text: str, *, filename: str = "<openapi>") -> object:
 
 def import_openapi_file(path: str, *, backend: str = "ts",
                         service: str | None = None, pure: object = (),
-                        emission: object = ()) -> str:
+                        emission: object = (), compensate: object = (),
+                        preimage: object = (), undo: object = (),
+                        if_match: object = ()) -> str:
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
     document = load_document(text, filename=path)
     return import_openapi(document, filename=path, source=text, backend=backend,
-                          service=service, pure=pure, emission=emission)
+                          service=service, pure=pure, emission=emission,
+                          compensate=compensate, preimage=preimage, undo=undo,
+                          if_match=if_match)
