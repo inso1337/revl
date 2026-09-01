@@ -37,6 +37,15 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("code", help="a diagnostic code, e.g. G4 (case-insensitive)")
     exp.add_argument("--json", action="store_true", help="machine-readable output")
 
+    grammar = sub.add_parser(
+        "grammar",
+        help="the revl surface syntax, small enough to keep in a prompt")
+    grammar.add_argument(
+        "--prompt", action="store_true",
+        help="print the dense, complete, prompt-pinnable grammar (roadmap item "
+             "346; also shipped as docs/syntax-2.0.prompt.txt) instead of the "
+             "short human-readable summary")
+
     # item 296: propose a safe adapter between a consumer's required service and
     # a candidate's provided service (proposed, not silent).
     adapt = sub.add_parser(

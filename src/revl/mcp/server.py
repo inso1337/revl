@@ -27,7 +27,8 @@ import json
 import sys
 
 from ..compiler import compile_files, compile_source
-from ..diagnostics import FIXES, GUARANTEES, report
+from ..diagnostics import FIXES, GUARANTEES, explain, report
+from .. import grammar_summary as _grammar_summary
 from . import fillspec
 from . import edit as _edit
 from . import leases as _leases
@@ -987,39 +988,11 @@ def _tool_tools(arguments: dict) -> dict:
     }
 
 
-_GRAMMAR = """\
-revl 2.0 — surface summary (full spec: docs/syntax-2.0.md)
-
-service S { fn f(a: Str) -> Int          // checked operation
-            emission fn g(a: Str) -> Int // crosses the boundary
-            emission[db] fn p(a: Str)    // ... only through `db`
-            async fn h() -> Str }
-
-component C requires k: S provides j: T {
-  config { field: Int = 3 }
-  isolate k in realm("tenant")        // optional realm placement (prelude)
-  let r = effect acquire() undo r.release()
-  await Job.run("work")               // iteration boundary (divert point)
-  emit k.g("x") compensate k.g("undo")
-  fail "reason"                       // deliberate L-Raise
-  provide j { fn m(a) = pure_fn(a) }
-}
-
-type Row = { id: Int, name: Str }      // record
-type Outcome = Ok(Row) | NotFound      // ADT; match is exhaustive
-pub fn f(xs: List[Row]) -> Int {       // pure stratum (TS-subset exprs)
-  var n = 0
-  for (x of xs) { if (x.id > 0) n += 1 }
-  return n
-}
-extern pure fn sha(d: Bytes) -> Str = @ts { ... } = @py { ... }
-test "name" { assert f([]) == 0 }
-
-Rules that reject code: mutation needs `undo` or `emit` (G4); reads must be
-declared (G1); no cycles or duplicate providers (G2/G3); teardown cannot
-register effects (G5); expressions are pure (G6); `null` has no type —
-absence is Opt[T]; declared types are checked at every boundary.
-"""
+# the prose summary lives in grammar_summary.py, alongside the dense
+# prompt-pinnable grammar (roadmap item 346) — shared so `revl grammar
+# --prompt` (a plain CLI command) never has to import this module's session
+# machinery just to print a string.
+_GRAMMAR = _grammar_summary.PROSE_GRAMMAR
 
 
 def _resolve_registry_dir(arguments: dict) -> str:
@@ -1079,6 +1052,91 @@ def _tool_grammar(_arguments: dict) -> dict:
     # a second round trip
     return {"ok": True, "grammar": _GRAMMAR, "guarantees": GUARANTEES,
             "fixes": FIXES}
+
+
+# -- the authoring toolbox as MCP tools (roadmap item 345) -------------------
+#
+# `revl scaffold` / `revl fmt` / `revl explain` were CLI/compiler-only: an
+# agent harness had to shell out or reinvent the scaffold-first flow. These
+# three handlers are thin wrappers over the same functions the CLI calls
+# (`scaffold.py`, `formatter.py`, `diagnostics.explain`) — no new logic, just
+# the MCP projection, matching every other tool in this module.
+
+def _tool_scaffold(arguments: dict) -> dict:
+    """revl_scaffold: a typed, holed component skeleton from a spec
+    (docs/scaffold.md) — the MCP twin of `revl scaffold --json`. Returns the
+    skeleton AND every open hole's fillSpec in one call, so an agent scaffolds
+    -> fills -> admits without a second round-trip."""
+    from ..scaffold import ScaffoldError, build_spec, scaffold_document
+
+    service = arguments.get("service")
+    if not service:
+        return _session_error("`service` is required")
+    try:
+        spec = build_spec(
+            service=service,
+            provides=arguments.get("provides"),
+            component=arguments.get("component"),
+            requires=arguments.get("requires") or [],
+            capabilities=arguments.get("capabilities") or [],
+            methods=arguments.get("methods") or [],
+            emits=arguments.get("emits") or [],
+            config=arguments.get("config") or [],
+            effect=arguments.get("effect", True),
+            resource_type=arguments.get("resource"),
+        )
+    except ScaffoldError as error:
+        return _session_error(str(error))
+    filename = arguments.get("filename") or f"{spec.component}.rvl"
+    return scaffold_document(spec, filename)
+
+
+def _tool_fmt(arguments: dict) -> dict:
+    """revl_fmt: canonical formatting (or `migrate: true` for the 1.x `$`
+    interpolation rewrite) over inline source — the MCP twin of `revl fmt`,
+    taking text in and text out instead of touching the filesystem. Gated by
+    the same IR-equivalence proof the CLI runs: a rewrite that would change
+    what the compiler sees is refused, never silently written."""
+    from ..fmt import migrate_source
+    from ..formatter import FormatError, ir_equivalent, format_source
+
+    source = arguments.get("source")
+    if source is None:
+        return _session_error("`source` is required")
+    filename = arguments.get("filename") or "<source>"
+    migrate = bool(arguments.get("migrate"))
+    warnings: list[str] = []
+
+    if migrate:
+        try:
+            rewritten, warnings = migrate_source(source, filename)
+        except RevlError as error:
+            return _session_error(f"cannot migrate: {error}")
+    else:
+        try:
+            rewritten = format_source(source, filename)
+        except FormatError as error:
+            return _session_error(f"cannot format: {error}")
+
+    gate = ir_equivalent(source, rewritten, filename, token_preserving=not migrate)
+    if not gate.admitted:
+        return {"ok": False, "admitted": False, "reason": gate.reason,
+                "note": "refused — the rewrite would change what the compiler sees"}
+    result = {"ok": True, "admitted": True, "formatted": rewritten,
+              "changed": rewritten != source, "proof": gate.proof}
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+def _tool_explain(arguments: dict) -> dict:
+    """revl_explain: what a diagnostic code means and how to fix it — the MCP
+    twin of `revl explain`, the other half of a structured `revl_check`
+    rejection (which already carries the code)."""
+    code = arguments.get("code")
+    if not code:
+        return _session_error("`code` is required")
+    return explain(code)
 
 
 _SOURCE_INPUT = {
@@ -1937,6 +1995,114 @@ TOOLS = [
         "handler": _tool_grammar,
     },
 ]
+
+# the authoring toolbox (roadmap item 345, docs/scaffold.md + docs/holes.md):
+# scaffold -> fill -> admit was reachable from the CLI but not from MCP, so a
+# harness reinvented generate-whole -> refuse -> regenerate instead. Appended
+# additively, like revl_resolve below, so the core verb literal stays owned.
+TOOLS.extend([
+    {
+        "name": "revl_scaffold",
+        "description": "Generate a typed, holed component skeleton from a spec "
+                       "(docs/scaffold.md) and return it WITH every open hole's "
+                       "fillSpec in one call — expected type, capability bound, "
+                       "in-scope bindings, reachable services (the same shape "
+                       "revl_check adds to `holes`). The scaffold-first flow: "
+                       "revl_scaffold -> fill each hole -> revl_check/revl_admit, "
+                       "instead of generating a whole component and repairing "
+                       "structural errors after the fact.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "service": {"type": "string",
+                            "description": "the service the component provides"},
+                "provides": {"type": "string",
+                             "description": "the provision key (default: the "
+                                            "service, lowercased)"},
+                "component": {"type": "string",
+                              "description": "the component name (default: "
+                                             "<Service>Provider)"},
+                "requires": {"type": "array", "items": {"type": "string"},
+                             "description": "injected dependencies, each "
+                                            "`KEY[:Service]` (a bare KEY defaults "
+                                            "its service to KEY capitalized)"},
+                "capabilities": {"type": "array", "items": {"type": "string"},
+                                 "description": "boundaries the component may "
+                                                "emit through; only a capability "
+                                                "whose boundary is `requires`d "
+                                                "becomes an emission bound"},
+                "methods": {"type": "array", "items": {"type": "string"},
+                            "description": "pure service methods, each "
+                                           "`'name(p: T) -> R'`"},
+                "emits": {"type": "array", "items": {"type": "string"},
+                          "description": "emission service methods, each "
+                                         "`'name(p: T) -> R'`, bound to the "
+                                         "wired capabilities"},
+                "config": {"type": "array", "items": {"type": "string"},
+                           "description": "component config fields, each "
+                                          "`name:Type`"},
+                "resource": {"type": "string",
+                             "description": "the effect-acquired resource's "
+                                            "type (default: <Service>Resource)"},
+                "effect": {"type": "boolean",
+                           "description": "include the acquire/undo effect "
+                                          "block (default true)"},
+                "filename": {"type": "string",
+                             "description": "filename used when compiling the "
+                                            "skeleton for its holes (default: "
+                                            "<component>.rvl)"},
+            },
+            "required": ["service"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_scaffold,
+    },
+    {
+        "name": "revl_fmt",
+        "description": "Canonically format (or, with `migrate: true`, rewrite 1.x "
+                       "`$` interpolation to 2.0 backtick templates) inline source "
+                       "— the MCP twin of `revl fmt`, text in and text out, nothing "
+                       "touches disk. The rewrite is proven against the same "
+                       "IR-equivalence gate the CLI runs: `admitted: false` means "
+                       "the rewrite would change what the compiler sees, and "
+                       "`formatted` is NOT returned.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "inline .rvl source"},
+                "filename": {"type": "string",
+                             "description": "filename for diagnostics (default "
+                                            "<source>)"},
+                "migrate": {"type": "boolean",
+                            "description": "rewrite 1.x `$` interpolation to "
+                                           "backtick templates instead of "
+                                           "canonical formatting"},
+            },
+            "required": ["source"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_fmt,
+    },
+    {
+        "name": "revl_explain",
+        "description": "What a diagnostic code means and how to fix it — the "
+                       "MCP twin of `revl explain`. The other half of a "
+                       "structured `revl_check`/`revl_admit` rejection, which "
+                       "already carries the code; an unknown code answers with "
+                       "the roster of known ones instead of nothing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string",
+                         "description": "a diagnostic code, e.g. G4 "
+                                        "(case-insensitive)"},
+            },
+            "required": ["code"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_explain,
+    },
+])
 
 # the component registry read path (docs/registry.md, roadmap item 49) —
 # appended additively so the tool literal above stays owned by the core verbs
