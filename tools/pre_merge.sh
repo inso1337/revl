@@ -255,6 +255,16 @@ else
     skip "ruff check" "no ruff and no uvx"
 fi
 
+# 6. The formal backbone (formal/STATUS.md): lake build, then the axioms
+#    gate (no theorem may depend on sorryAx — an unfinished proof — or any
+#    project-defined axiom), then the harness census. Needs elan/lake;
+#    absent, loud-skip — CI's `formal` job is the real gate for those.
+if ! want gate formal; then
+    note "formal     (lake build + axioms gate)"
+else
+    step "formal     (lake build + axioms gate)" sh formal/scripts/run_gate.sh
+fi
+
 # Clean up the emit shim.
 [ -n "$EMIT_PATH" ] && rm -rf "$EMIT_PATH"
 
