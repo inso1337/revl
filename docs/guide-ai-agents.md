@@ -320,6 +320,11 @@ different transport.
 
 ### The modern agent loop, scaffold → fill → resolve → admit
 
+For the CLI-side counterpart of this loop (`revl scaffold` generating the
+holed skeleton itself, plus `revl fmt` and `revl explain`), see
+[authoring-for-agents.md](authoring-for-agents.md); step 1 below writes the
+skeleton by hand, `revl scaffold` is the same shape from a spec instead.
+
 The verbs above compose into one workflow, and it is the discoverable path from
 a vague need to an admitted component. Nothing touches the filesystem until the
 last step:
