@@ -41,30 +41,55 @@ whitelists exactly those three.)
 ## Differential oracle (wired)
 
 `harness/diff_corpus.py` + `harness/Oracle.lean`: parse every corpus
-`.rvl` with revl's real parser, export one TSV row per component
-(path, name, requires, provides), compute the reference G2/G3 verdict in
-Python set logic, run the Lean oracle (`RevL.Manifest` model, coded
-independently) over the same TSV, and diff. Current status over the
-corpus: **289 files → 179 components → 127 manifest-bearing files
-compared, 127 agree, 0 mismatches** (28 parse-error skips, loud).
+`.rvl` with revl's real parser, export one TSV row per *fact* — component
+manifests (M), require-binding resolutions (R), declared emission methods
+(E), per-statement classifications (T), and call facts with marker
+context (U) — then run the Lean oracle (`RevL.Manifest` + a G4-shaped
+body judgment, coded independently) over the same TSV and diff against a
+plain-Python reference of the same semantics. A mismatch is definitional
+drift between the model and the spec/extraction, and it fails
+`make formal`.
+
+Verdicts:
+
+- **V rows (per file, G2/G3)**: provision disjointness + requirement
+  closure over the whole composition (a component's requirements need not
+  be its own provisions).
+- **G rows (per component, G4-shaped)**: marker presence must equal the
+  interface's declaration — a plain call to a declared emission method,
+  or an `emit`'d call to a non-emission method, is refused.
+
+Current status over the corpus: **289 files → 179 components → 531
+statements → 127 manifest-bearing files → 306 verdicts compared
+(127 files + 179 components), 306 agree, 0 mismatches** (28 parse-error
+skips, loud).
 A mismatch is definitional drift between the model and the
 spec/extraction — this is the gate that keeps parallel edits to the
 formal model honest.
 
+Checker alignment (informational, not a gate): each parsed file is also
+compiled with the real checker and its refusal code is compared against
+the formal verdicts. Current buckets: 50 agree-accept, 2 agree-G2, 1
+agree-G4, 36 formal-strict (formal clean, checker refuses for reasons
+outside the modeled fragment), 5 missed-G4 (checker G4-refuses where the
+shaped model sees no violation), 12 formal-found-other, 21 out-of-
+fragment. The five missed-G4 files are known model-coverage gaps
+(`examples/rejections/g4_capability_not_declared`,
+`g4_emission_not_declared`, `g4_spawn_widens_capability`,
+`g4_spawn_widens_parameter`, `g4_unmarked_handle_emission`) — they need
+capability scope and spawn/wrapper reachability the shaped model does
+not yet express.
+
 ## TODO (in dependency order)
 
-1. **Statement-level oracle verdicts**: extend the export with per-
-   statement classification (pure / effect / emit / raw + call heads) so
-   the G4/G6-shaped judgments decide over the corpus too. This upgrades
-   the diff from component headers to bodies.
-2. **Checker-verdict alignment**: currently the reference is the spec
-   re-stated in Python; the next step is diffing the formal model against
-   the checker's own link/refusal codes on compositions (`revl compile`
-   exit statuses), excluding files that fail for reasons outside the
-   modeled fragment (excluded loudly, with the reason).
-3. **Capability ceilings/budgets** (2.0 features): parameterized
+1. **Close the modeled G4 gaps**: extend the export's call facts with the
+   `g4_*_rejection` shapes (spawn-widened capability/parameter, handle
+   emissions, undeclared-sink refusals) so the shaped G4 stops missing
+   the five `missed-G4` files. Needs a reachability model for
+   arrow/spawn bodies in the export, not a checker change.
+2. **Capability ceilings/budgets** (2.0 features): parameterized
    capabilities over the `Ctx` model.
-4. **L3, deliberately deferred**: `Trusted[T]`/`Secret[T]`
+3. **L3, deliberately deferred**: `Trusted[T]`/`Secret[T]`
    non-interference and WAL commit/abort discharge. Both extend L0 (taint
    is a checker feature, not part of the current core; commit/abort is a
    runtime state-machine refinement). Not near-term work.
