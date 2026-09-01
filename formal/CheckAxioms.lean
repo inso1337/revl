@@ -18,6 +18,14 @@ import RevL
 -- G1: undeclared access cannot be written (component level).
 #print axioms RevL.G1.declared_only_access
 
+-- G2: provision disjointness + requirement closure from the link judgment.
+#print axioms RevL.G2.linkOK_provision_disjoint
+#print axioms RevL.G2.linkOK_requires_closed
+
+-- G3: layering certificate excludes dependency cycles.
+#print axioms RevL.G3.depPath_rank_lt
+#print axioms RevL.G3.no_dependency_cycles
+
 -- G4: every admitted mutation carries an inverse or an emit marker.
 #print axioms RevL.G4.inverse_or_emit
 
@@ -31,3 +39,7 @@ import RevL
 #print axioms RevL.G7.teardown_replays_all
 #print axioms RevL.G7.teardown_only_witnessed
 #print axioms RevL.G7.teardown_eq_reversed_inverses
+
+-- G8: the boundary surface is enumerable (completeness + soundness).
+#print axioms RevL.G8.boundary_enumerates_emissions
+#print axioms RevL.G8.boundary_only_declared

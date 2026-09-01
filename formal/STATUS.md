@@ -21,30 +21,50 @@ Rules of the layering (enforced by imports, not by hope):
 
 | Theorem | Guarantee (DESIGN.md §4) | Status | Axioms | Notes |
 |---|---|---|---|---|
-| `RevL.G1.declared_only_access` | G1 — declared-only access (Def. 25) | **proved** | none | component level; composes `TypedIn` over a body |
+| `RevL.G2.linkOK_provision_disjoint` | G2 — provision disjointness (Def. 43) | **proved** | `propext, Quot.sound` | from the incremental `LinkOK` judgment |
+| `RevL.G2.linkOK_requires_closed` | G2/G1 — requirement closure | **proved** | `propext` | every requirement provided in-composition |
+| `RevL.G3.depPath_rank_lt` | G3 — cycles rejected (§6.5) | **proved** | none | ranks strictly decrease along dep paths |
+| `RevL.G3.no_dependency_cycles` | G3 | **proved** | none | a layering certificate excludes cycles |
 | `RevL.G4.inverse_or_emit` | G4 — inverse-or-emit (Def. 8) | **proved** | none | content is the shape of `Typed` |
 | `RevL.G5.teardown_registers_nothing` | G5 — teardown registers nothing | **proved** | none | undo bodies are a separate constructor set |
-| `RevL.G6.confinement` | G6 — confinement (Def. 48) | **proved** | none | content is the shape of `TypedIn`/`ReachIn` |
-| `RevL.G7.teardown_replays_all` | G7 — LIFO-completeness (Thm. 16) | **proved** | none | every witnessed inverse is replayed |
-| `RevL.G7.teardown_only_witnessed` | G7 | **proved** | none | nothing unwitnessed is replayed |
-| `RevL.G7.teardown_eq_reversed_inverses` | G7 | **proved** | none | the LIFO equation; positions via `List.getElem_reverse` |
+| `RevL.G6.confinement` | G6 — confinement (Def. 48) | **proved** | `propext, Quot.sound` | content is the shape of `TypedIn`/`ReachIn` |
+| `RevL.G7.teardown_replays_all` | G7 — LIFO-completeness (Thm. 16) | **proved** | `propext, Quot.sound` | every witnessed inverse is replayed |
+| `RevL.G7.teardown_only_witnessed` | G7 | **proved** | `propext, Quot.sound` | nothing unwitnessed is replayed |
+| `RevL.G7.teardown_eq_reversed_inverses` | G7 | **proved** | `propext` | the LIFO equation; positions via `List.getElem_reverse` |
 | `RevL.Semantics.teardown_length` | G7 — length form | **proved** | `propext` | one replay per witnessed effect |
+| `RevL.G8.boundary_enumerates_emissions` | G8 — boundary enumerable (§6.1) | **proved** | `propext, Quot.sound` | completeness: every emission is on the audited surface |
+| `RevL.G8.boundary_only_declared` | G8 | **proved** | `propext, Quot.sound` | soundness: on a typed body the surface is exactly the emissions |
+
+(`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
+whitelists exactly those three.)
+
+## Differential oracle (wired)
+
+`harness/diff_corpus.py` + `harness/Oracle.lean`: parse every corpus
+`.rvl` with revl's real parser, export one TSV row per component
+(path, name, requires, provides), compute the reference G2/G3 verdict in
+Python set logic, run the Lean oracle (`RevL.Manifest` model, coded
+independently) over the same TSV, and diff. Current status over the
+corpus: **289 files → 179 components → 127 manifest-bearing files
+compared, 127 agree, 0 mismatches** (28 parse-error skips, loud).
+A mismatch is definitional drift between the model and the
+spec/extraction — this is the gate that keeps parallel edits to the
+formal model honest.
 
 ## TODO (in dependency order)
 
-1. **G2/G3**: graph properties over the linker manifest (provision
-   disjointness, acyclicity) — small, but wait for the manifest model in
-   L0 (a `Component`-graph + topological link judgment).
-2. **G8**: boundary surface enumerability — needs the extern/emission
-   declaration model in L0.
+1. **Statement-level oracle verdicts**: extend the export with per-
+   statement classification (pure / effect / emit / raw + call heads) so
+   the G4/G6-shaped judgments decide over the corpus too. This upgrades
+   the diff from component headers to bodies.
+2. **Checker-verdict alignment**: currently the reference is the spec
+   re-stated in Python; the next step is diffing the formal model against
+   the checker's own link/refusal codes on compositions (`revl compile`
+   exit statuses), excluding files that fail for reasons outside the
+   modeled fragment (excluded loudly, with the reason).
 3. **Capability ceilings/budgets** (2.0 features): parameterized
    capabilities over the `Ctx` model.
-4. **Differential oracle** (`harness/diff_corpus.py`): a Lean
-   decision procedure is the blocker; alternative is exporting verdicts
-   from Lean to JSON and diffing in Python. Architect call. This is the
-   highest-leverage parallel-safe item: it is what keeps many worker
-   sessions mutating L0 honest (drift surfaces as a corpus mismatch).
-5. **L3, deliberately deferred**: `Trusted[T]`/`Secret[T]`
+4. **L3, deliberately deferred**: `Trusted[T]`/`Secret[T]`
    non-interference and WAL commit/abort discharge. Both extend L0 (taint
    is a checker feature, not part of the current core; commit/abort is a
    runtime state-machine refinement). Not near-term work.

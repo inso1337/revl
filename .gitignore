@@ -30,3 +30,4 @@ uv.lock
 # reconstruct it; see formal/STATUS.md and .github/workflows/ci.yml)
 formal/.lake/
 formal/.axioms.out
+formal/harness/out/
