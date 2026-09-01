@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check demo pre-merge pre-merge-affected
+.PHONY: matrix matrix-check demo pre-merge pre-merge-affected formal
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -37,3 +37,14 @@ matrix-check:
 demo:
 	@[ -x backends/python/.venv/bin/python ] || sh backends/python/setup.sh
 	REVL_DEMO_REQUIRE=1 backends/python/.venv/bin/python demo/live_systems/run_demo.py
+
+# formal/ — the machine-checked backbone (formal/STATUS.md). run_gate.sh:
+# lake build, then the axioms gate (no theorem may depend on sorryAx — an
+# unfinished proof — or any project-defined axiom; the machine-checked
+# form of "a claim gets a command or it gets softened"), then the harness
+# census. A missing elan/lake skips LOUDLY (never a false green), matching
+# the pre-merge discipline. The logic lives in a script, not recipe lines:
+# each recipe line is its own shell, so an in-Makefile skip-guard cannot
+# stop the target.
+formal:
+	sh formal/scripts/run_gate.sh

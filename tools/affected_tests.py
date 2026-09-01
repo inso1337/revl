@@ -30,7 +30,7 @@ MACHINE OUTPUT (one key per line, for tools/pre_merge.sh to consume):
     REASON <one-line reason>
     PYTEST <space-separated pytest node-ids/paths, or empty>
     BACKENDS <space-separated tiers with a dedicated pre-merge step>
-    GATES <space-separated of: conformance site-wheel ruff>
+    GATES <space-separated of: conformance site-wheel ruff formal>
 Lines beginning with '# ' are the human summary and are ignored by the parser.
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ BACKEND_TIERS = ("python", "go", "rust", "wasm", "java", "typescript")
 # is still covered by the folded goldens in tests/test_goldens.py + the frontend
 # ts-referencing tests, which is exactly what the FULL gate does for ts too.
 BACKEND_STEP_TIERS = ("python", "go", "rust", "wasm", "java")
-GATES_ALL = ("conformance", "site-wheel", "ruff")
+GATES_ALL = ("conformance", "site-wheel", "ruff", "formal")
 
 # The documented hard core (the top-level import closure of compile_source): a
 # change to any of these is unambiguously a full-gate trigger. `compile_reachable`
@@ -337,6 +337,16 @@ def select(changed, root) -> dict:
             continue
         if f.startswith("tools/"):
             return _full(f"non-python tools change {f} -> full")
+
+        # --- formal/** (the Lean backbone) ---------------------------------- #
+        # A formal/ change affects nothing else — the formal gate is the only
+        # thing it can break (plus lint, which is always run). Deliberately
+        # narrower than the fail-safe default so proof-engineering iterations
+        # stay fast on the inner loop.
+        if f.startswith("formal/"):
+            gates.add("formal")
+            reasons.append(f"{f} (formal gate)")
+            continue
 
         # --- tests/test_*.py (modified — add/delete handled by caller) ------ #
         if f.startswith("tests/") and Path(f).name.startswith("test_") and f.endswith(".py"):
