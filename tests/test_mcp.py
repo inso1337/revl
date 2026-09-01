@@ -223,6 +223,8 @@ def test_initialize_and_tools_list():
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
                           # the session commit protocol (docs/design/245-session-commit.md)
                           "revl_commit", "revl_commit_confirm", "revl_abort",
+                          # session branching (docs/design/250-session-branching.md)
+                          "revl_fork", "revl_fork_confirm",
                           # the auto-approve policy (docs/design/246-auto-approve.md)
                           "revl_approve",
                           # early revocation of a standing grant (roadmap item 379)
