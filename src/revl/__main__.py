@@ -30,7 +30,7 @@ from .cli.interop import (
     _run_contract, _run_export, _run_fmt, _run_import, _run_mcp, _run_serve)
 from .cli.observe import (
     _run_attest, _run_changelog, _run_dash, _run_diff, _run_explain,
-    _run_history_query, _run_metrics, _run_profile, _run_why)
+    _run_history_query, _run_metrics, _run_profile, _run_trace, _run_why)
 
 
 # G8 audit: the pseudo-boundary recorded when a component reaches host code
@@ -828,6 +828,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_why(args)
     if args.command == "metrics":
         return _run_metrics(args)
+    if args.command == "trace":
+        return _run_trace(args)
     if args.command == "profile":
         return _run_profile(args)
     if args.command == "attest":

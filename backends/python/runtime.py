@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
+import hmac
 import inspect
 import itertools
 import json
@@ -274,14 +276,24 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
     any other host error is NOT retried here (a completion is not idempotent, §5.1)
     and propagates immediately."""
     attempt = 0
+    started = time.monotonic()
     while True:
         value = make_call()
         try:
-            return validate_response(value, schema, where, constructors)
+            validated = validate_response(value, schema, where, constructors)
         except ResponseValidationError:  # noqa: PERF203 — retry is the point
             if attempt >= budget:
+                _revl_record_model_call(started, attempt + 1, budget + 1, value)
                 raise
             attempt += 1
+            continue
+        # item 121: a validated model completion. Record the revl-measured
+        # bracket, the attempt count against the static N+1 ceiling, and the
+        # host-reported usage from the return, into a fiber-local slot the driver
+        # reads when it records this crossing's `emit` event (§2.1). Off-path for
+        # a non-model retry loop only in that nothing reads the slot there.
+        _revl_record_model_call(started, attempt + 1, budget + 1, value)
+        return validated
 
 
 async def validate_retry_async(make_call, budget: int, schema, where: str = "",
@@ -294,16 +306,202 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
     to ``budget + 1`` attempts, only a :class:`ResponseValidationError` is
     retried, and exhaustion surfaces the terminal typed fault."""
     attempt = 0
+    started = time.monotonic()
     while True:
         result = make_call()
         if inspect.isawaitable(result):
             result = await result
         try:
-            return validate_response(result, schema, where, constructors)
+            validated = validate_response(result, schema, where, constructors)
         except ResponseValidationError:  # noqa: PERF203 — retry is the point
             if attempt >= budget:
+                _revl_record_model_call(started, attempt + 1, budget + 1, result)
                 raise
             attempt += 1
+            continue
+        _revl_record_model_call(started, attempt + 1, budget + 1, result)
+        return validated
+
+
+# ---------------------------------------------------------------------------
+# item 121: `revl trace` — the model hop as a first-class span
+# (docs/design/121-revl-trace.md). The completion fires at exactly one runtime
+# seam, `validate_retry` above, the only scope that sees the attempt count, the
+# wall-clock bracket, the static N+1 ceiling, and the host usage metadata in one
+# place (§2.1). These helpers assemble the `llm` payload the driver attaches to
+# the crossing's `emit` event, mint the fiber-local value-flow token that gates
+# `producedSeq`, and compute the salted, suppressible prompt digest.
+# ---------------------------------------------------------------------------
+
+# The origin markers item 256/249 attribute to a value. Spelled here as bare
+# literals — matching `revl.taint.SECRET_ORIGIN`/`CONFIDENTIAL_ORIGIN` — so the
+# emitted-code runtime stays free of a compiler-package import while the digest
+# gate keeps the SAME meaning as the taint checker (§4 attack 1).
+_REVL_SECRET_ORIGIN = "secret"
+_REVL_CONFIDENTIAL_ORIGIN = "confidential"
+
+# Per-run secret nonce keying the salted prompt digest (§4 attack 4b). Minted
+# lazily once per process run and NEVER written to the trace or any span; salting
+# defeats the cross-run confirmation oracle while preserving within-run "same
+# prompt twice" equality (identical args under one run hash identically).
+_revl_digest_nonce: "Optional[bytes]" = None
+
+
+def revl_digest_nonce() -> bytes:
+    """The per-run HMAC key for the prompt digest, minted on first use. Never
+    serialised into the trace or a span (§4 attack 4b)."""
+    global _revl_digest_nonce
+    if _revl_digest_nonce is None:
+        _revl_digest_nonce = os.urandom(32)
+    return _revl_digest_nonce
+
+
+def revl_reset_run_trace_state() -> None:
+    """Reset the per-run trace state (mint a fresh digest nonce, clear the
+    fiber-local model-hop registers). Called at run start; also the test seam."""
+    global _revl_digest_nonce
+    _revl_digest_nonce = None
+    _revl_last_model_call.set(None)
+    _revl_last_validated_completion.set(None)
+
+
+# The fiber-local observation of the most recent model completion in THIS fiber:
+# (latencySeconds, attempts, attemptCeiling, rawReturn). Written by
+# `validate_retry` at the seam, read by the driver when it records the crossing.
+_revl_last_model_call: "contextvars.ContextVar[Optional[tuple]]" = \
+    contextvars.ContextVar("_revl_last_model_call", default=None)
+
+# The fiber-local value-flow token gating `producedSeq` (§2.2, the NEW CRITICAL).
+# (activationId, completionSeq): the last VALIDATED model completion crossing in
+# THIS fiber. A downstream emit in the same fiber back-references it, and the
+# activationId gate rejects a token inherited by a DIFFERENT activation (a child
+# Task copies the parent context), so two live activations of one component never
+# cross-attribute — the edge honest-degrades to absent rather than being guessed.
+_revl_last_validated_completion: "contextvars.ContextVar[Optional[tuple]]" = \
+    contextvars.ContextVar("_revl_last_validated_completion", default=None)
+
+
+def _revl_record_model_call(started: float, attempts: int, attempt_ceiling: int,
+                            raw_return) -> None:
+    """Stash this fiber's model-completion observation for the driver to read
+    when it records the crossing's `emit` event. `latencySeconds` is the
+    revl-measured BRACKET (§2.2): honest about what revl timed, silent about what
+    the host `@py` body did inside it."""
+    latency = max(0.0, time.monotonic() - started)
+    _revl_last_model_call.set((latency, attempts, attempt_ceiling, raw_return))
+
+
+def revl_take_model_call() -> "Optional[tuple]":
+    """Consume and return this fiber's last model-call observation (or None).
+    Consuming clears it so a later NON-model emit in the same fiber does not
+    inherit a stale bracket."""
+    obs = _revl_last_model_call.get()
+    _revl_last_model_call.set(None)
+    return obs
+
+
+def revl_note_validated_completion(activation_id: "Optional[str]", seq: int) -> None:
+    """Mint the fiber-local value-flow token: the seq of the model completion
+    this fiber just validated, tagged with the activation that produced it. The
+    downstream emit crossing back-references it (`revl_produced_seq`)."""
+    _revl_last_validated_completion.set((activation_id, seq))
+
+
+def revl_produced_seq(activation_id: "Optional[str]") -> "Optional[list]":
+    """The `producedSeq` value-flow edge for an emission recorded under
+    `activation_id`, or None (honest-degrade, §2.2).
+
+    Present ONLY when this fiber holds a validated-completion token AND its
+    activation id matches this emission's — so a token inherited by a different
+    concurrent activation of the same component does NOT match and the edge is
+    OMITTED, never adjacency-guessed. A missing token (a non-validated
+    `Str`-returning completion, or no completion in this fiber) also omits."""
+    token = _revl_last_validated_completion.get()
+    if token is None:
+        return None
+    tok_activation, tok_seq = token
+    if tok_activation != activation_id:
+        return None
+    return [tok_seq]
+
+
+def _revl_canonical_args_bytes(args) -> bytes:
+    """A stable byte encoding of the revl-typed emission arguments (§2.3): the
+    program-passed values the taint checker can see, NEVER the host-materialised
+    request string (§4 attack 1, the CRITICAL)."""
+    return json.dumps(args, separators=(",", ":"), sort_keys=True,
+                      default=str, ensure_ascii=False).encode("utf-8")
+
+
+def _revl_bytes_bucket(length: int) -> str:
+    """A COARSE size bucket instead of an exact byte length, so the digest
+    cannot serve as a length-narrowed confirmation oracle (§4 attack 4b)."""
+    for hi, label in ((64, "0-64"), (256, "64-256"), (1024, "256-1k"),
+                      (4096, "1k-4k"), (16384, "4k-16k"), (65536, "16k-64k")):
+        if length < hi:
+            return label
+    return "64k+"
+
+
+def revl_prompt_digest(args, arg_origins, taint_engaged: bool) -> "Optional[dict]":
+    """The salted, suppressible prompt digest over the revl-typed args (§2.3, §4).
+
+    `arg_origins` is the set of taint origins the checker attributes to the args
+    (item 249/256), or None when the analysis is unavailable/disengaged.
+
+    FAIL-CLOSED (§4 attack 1): a digest is emitted ONLY when taint analysis is
+    engaged AND proves the args carry NEITHER a `secret` NOR a `confidential`
+    origin. A secret/confidential arg SUPPRESSES the digest (returns None — the
+    caller still records the hop, just without a digest); it NEVER refuses, so a
+    `Secret[T]`-receiving model op stays a legal, compilable program (HIGH 2).
+    Disengaged/unavailable analysis suppresses too (treated as unproven)."""
+    if not taint_engaged or arg_origins is None:
+        return None
+    origins = set(arg_origins)
+    if _REVL_SECRET_ORIGIN in origins or _REVL_CONFIDENTIAL_ORIGIN in origins:
+        return None
+    payload = _revl_canonical_args_bytes(args)
+    mac = hmac.new(revl_digest_nonce(), payload, hashlib.sha256).hexdigest()
+    return {"salted": "hmac-sha256:" + mac,
+            "bytesBucket": _revl_bytes_bucket(len(payload)),
+            "provenance": "revl-side-args"}
+
+
+def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
+                   attempts, attempt_ceiling, verified_by,
+                   produced_seq=None, prompt_digest=None,
+                   model_id_cap: int = 256) -> dict:
+    """Assemble the `llm` payload for a model completion crossing (§2.2), with
+    every field's provenance fixed and not host-negotiable.
+
+    `model`/`tokens`/`cost` are HOST-REPORTED and unverifiable (§4 attack 2);
+    `latency` is a REVL-MEASURED BRACKET; `attempts`/`attemptCeiling` are
+    REVL-CONTROLLED (the one cross-checkable number, §3.2). `model` is a
+    length-capped opaque string, never parsed or trusted (§4 attack 4a).
+    `produced_seq`/`prompt_digest` are attached only when present (both
+    honest-degrade to absent)."""
+    payload: dict = {
+        "model": (str(model)[:model_id_cap] if model is not None else None),
+        "modelProvenance": "host-reported",
+        "tokensIn": tokens_in,
+        "tokensOut": tokens_out,
+        "usageProvenance": "host-reported",
+        "latencySeconds": latency_seconds,
+        "latencyProvenance": "revl-measured-bracket",
+        "attempts": attempts,
+        "attemptCeiling": attempt_ceiling,
+        "attemptsProvenance": "revl-controlled",
+        "verifiedBy": list(verified_by) if verified_by is not None else [],
+    }
+    if cost is not None:
+        payload["cost"] = {"amount": cost.get("amount"),
+                           "currency": cost.get("currency"),
+                           "provenance": "host-reported"}
+    if produced_seq:
+        payload["producedSeq"] = list(produced_seq)
+    if prompt_digest is not None:
+        payload["promptDigest"] = prompt_digest
+    return payload
 
 
 # ---------------------------------------------------------------------------
