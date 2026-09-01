@@ -43,3 +43,9 @@ import RevL
 -- G8: the boundary surface is enumerable (completeness + soundness).
 #print axioms RevL.G8.boundary_enumerates_emissions
 #print axioms RevL.G8.boundary_only_declared
+
+-- Item 133: cross-tier agreement — conformant runtimes agree on a
+-- well-annotated IR; six-tier corollary; necessity of the annotation.
+#print axioms RevL.CrossTier.cross_tier_agreement
+#print axioms RevL.CrossTier.six_tier_agreement
+#print axioms RevL.CrossTier.annotation_necessary
