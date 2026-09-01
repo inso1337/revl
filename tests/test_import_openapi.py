@@ -311,7 +311,8 @@ def test_an_override_that_matches_nothing_is_an_error():
     """Silently leaving it classified by its verb would be safe in one
     direction and dishonest in both: the engineer believes they changed it."""
     message = _refusal(_one("get"), emission=["get_thnig"])
-    assert "--pure/--emission named 'get_thnig', which is not an operation" in message
+    assert ("--pure/--emission/--compensate named 'get_thnig', which is not an "
+            "operation" in message)
     assert "a typo here would silently leave the operation classified by its verb" in message
 
 
