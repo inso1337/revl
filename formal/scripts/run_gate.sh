@@ -34,5 +34,8 @@ python3 scripts/axioms_gate.py \
   RevL.G7.teardown_only_witnessed \
   RevL.G7.teardown_eq_reversed_inverses \
   RevL.G8.boundary_enumerates_emissions \
-  RevL.G8.boundary_only_declared < .axioms.out
+  RevL.G8.boundary_only_declared \
+  RevL.CrossTier.cross_tier_agreement \
+  RevL.CrossTier.six_tier_agreement \
+  RevL.CrossTier.annotation_necessary < .axioms.out
 python3 harness/diff_corpus.py

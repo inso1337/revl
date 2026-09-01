@@ -14,3 +14,4 @@ import RevL.Theorems.G5_TeardownPure
 import RevL.Theorems.G6_Confinement
 import RevL.Theorems.G7_LifoComplete
 import RevL.Theorems.G8_Boundary
+import RevL.Theorems.CrossTier
