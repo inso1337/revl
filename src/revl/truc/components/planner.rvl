@@ -24,7 +24,12 @@ type LockRow   = { name: Str, sourceHash: Str }
 type LockFile  = { trucs: List[LockRow] }
 type Entry     = { name: Str, source: Str, manifest: Str }
 type IndexRow  = { name: Str, sourceHash: Str }
-type Verdict   = { ok: Bool, diagnostic: Str }
+// `manifest` is the gate's composition manifest, carried on a successful
+// verdict. It is modelled here (item 380) so it can be read as a typed record
+// field — `v.manifest` — rather than reached out of a re-parsed `Any` (a field
+// read off `Any` is now refused by the frontend; the manifest is a nested JSON
+// value, hence `Any`).
+type Verdict   = { ok: Bool, diagnostic: Str, manifest: Any }
 type Drift     = { ok: Bool, message: Str }
 
 // The wiring of the gate's own composition manifest (admit_all's `manifest`),
@@ -192,8 +197,7 @@ fn plan_assemble_report(dj: Str, vj: Str, gj: Str) -> Str {
   }
   let g: Gathered = json_parse(gj)
   let n = g.vendored.length()
-  let vAny = json_parse(vj)
-  let manifestStr = json_stringify(vAny.manifest)
+  let manifestStr = json_stringify(v.manifest)
   let msg = `truc: assembled ${n.to_str()} petit(s) bout(s) — every one admitted through the gate; wrote build/assembly.json`
   return report(0, msg, manifestStr, "")
 }
@@ -241,8 +245,8 @@ fn list_has(xs: List[Str], x: Str) -> Bool {
 // needs). This reads the gate's wiring output, not a truc-invented graph: the
 // same source of truth, only reshaped past revl's reserved-word fields.
 fn plan_unmet(vj: Str) -> Str {
-  let vAny = json_parse(vj)
-  let mstr = json_stringify(vAny.manifest)
+  let v: Verdict = json_parse(vj)
+  let mstr = json_stringify(v.manifest)
   let w: Wiring = json_parse(host_wiring(mstr))
   var ok = true
   var message = ""

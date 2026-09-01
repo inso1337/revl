@@ -407,3 +407,83 @@ async interleaving (failing at every step *under every legal interleaving* of
 concurrent activations); together they would turn this step sweep into a
 *schedule* sweep, the natural next frontier once the sequential exhaustive
 verdict is banked.
+
+---
+
+## 10. The cross-tier sweep — the same faults on *every* runtime
+
+`revl test --sweep` proves A8/R4 exhaustively on the py reference tier.
+`revl test --backend all --sweep` upgrades the claim to a **portability** one:
+
+> the same injected fault at the same step leaves no residue on *every*
+> runtime whose toolchain is present, and the runtimes **agree**.
+
+"No residue on ANY tier, and they all agree" is the strongest A8 statement the
+compiler can make.
+
+```
+revl test --backend all --sweep app.rvl
+```
+
+### 10.1 One fault, two oracles
+
+The fault is the same IR splice every tier already lowers — a `fail` step after
+step N (`fault._inject`, section 2). What differs is how residue is *observed*:
+
+* **py** — `fault.run_sweep`: a real activation, the runtime interrogated for
+  inverse order and residue (the richest oracle; the reference, section 9).
+* **ts / rust / java / wasm / go** — the `--once` composition runner
+  (`revl run --backend <tier> --once`): boot the composition with the fault
+  armed, tear down LIFO, and read the runtime's own no-residue proof
+  (`[run] NO-RESIDUE`). This is the same boot → LIFO teardown → no-residue
+  round-trip the cross-tier suite already runs, now with the fault armed.
+
+Faulting a *provider* would strand its dependents on the `--once` runner (they
+wait on a provision that never arrives). So the compiled-tier sweep prunes the
+target's transitive dependents before the boot — the same hold-out the py
+reference applies (section 9.2), so the two sweep the same fault points.
+
+### 10.2 Agreement, and what a skip means
+
+```
+cross-tier fault sweep — the same faults on every runtime (roadmap item 125)
+
+  py    EXECUTED — 4 fault point(s), all residue-free
+  ts    skipped  — toolchain absent — the cordis-ts runtime is not installed …
+  rust  skipped  — the --once runner does not yet drive a faulting activation …
+  java  skipped  — the --once runner does not yet drive a faulting activation …
+  wasm  skipped  — the --once runner does not yet drive a faulting activation …
+  go    EXECUTED — 4 fault point(s), all residue-free
+
+AGREEMENT — 2 tiers (py, go) swept 4 fault point(s) and agree: residue-free on
+every tier.
+```
+
+**AGREEMENT** is checked over the tiers that *executed*: every fault point is
+residue-free on every executing tier. A point residue-free on one runtime and
+residue-bearing on another is a **disagreement** — a portability failure,
+reported as such (exit 1).
+
+A tier is **loud-skipped**, never a false green, when either:
+
+* its **toolchain is absent** (no `go`/`cargo`/JDK/`wasmtime`/vitest), exactly
+  as the rest of the cross-tier suite skips; or
+* its `--once` runner cannot yet drive a *faulting* activation to a residue
+  proof — a named **capability gap** (e.g. the rust runner unwraps a faulting
+  `Ready` and panics; the java emitter rejects a mid-body `fail` as an
+  unreachable statement). A gap is reported with how many points proved clean
+  before it, and is never rounded up to a pass — nor mistaken for a leak
+  (`RESIDUE-LEFT` is the only leak signal).
+
+An all-skip run (no toolchains, no runtime) is a loud skip that exits 0 — a
+laptop without runtimes is not a red build — but it is never printed as a pass.
+
+### 10.3 Scope — a representative corpus on the heavy tiers
+
+Each compiled tier pays an emit+build per fault point, so a heavy tier can take
+a **representative** corpus — the first, middle, and last top-level step of each
+component — via `REVL_SWEEP_CAP=N`. That still exercises every component's
+bring-up, mid-life, and (compensating) teardown. A full-toolchain **CI** run
+leaves the cap unset and sweeps *every* step of *every* component on *every*
+tier whose runtime is present; on a machine with all six runtimes that is the
+complete portability verdict.

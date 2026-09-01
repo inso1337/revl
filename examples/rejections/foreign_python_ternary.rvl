@@ -1,0 +1,11 @@
+// REJECTED — Python's `a if c else b` conditional expression is not revl
+// syntax (item 384). revl's ternary is `c ? a : b`, condition first. The
+// trailing `if` used to report the cryptic `expected (, found ...`.
+//
+// expected error:
+//   revl has no Python-style `a if c else b` conditional expression
+
+fn f(c: Bool) -> Int {
+  let x = 1 if c else 2
+  return x
+}

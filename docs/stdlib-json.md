@@ -49,11 +49,11 @@ each emitter refuses an extern that has no body for its tier):
 
 | tier | parse | stringify | status |
 |---|---|---|---|
-| py | `json.loads(s)` | `json.dumps(v)` | **executed by tests** (stdlib) |
+| py | `json.loads(s)` | `json.dumps(v, separators=(",",":"), ensure_ascii=False)` | **executed by tests** (stdlib); compact + raw UTF-8 for the canonical form (item 385) |
 | ts | number-preserving recursive descent | `JSON.stringify(v, replacer)` | emitted by tests; parse decodes a JSON integer literal to a JS `bigint` and a float to a `number` (item 311), stringify wraps `JSON.stringify` in a bigint replacer (item 281) — see the `Int` note below |
 | rs | `Value::new(serde_json::from_str(&s))` | `serde_json::to_string(v.downcast())` | **runs** (item 140): `Any` erases to `cordis::Value` (a cloneable `Arc<dyn Any>`); the body boxes a parsed `serde_json::Value` into it and recovers it to re-encode (`serde_json` is already pinned in the emitted crate). A structured document survives `stringify∘parse`; `cargo test` runs the round-trip (backends/rust/scenarios/jsonwire.rvl → golden jsonwire.rs). Reading a parsed value into a typed binding for field access is still the erased-`Value` boundary. |
 | java | — | — | the tier refuses with `extern `json_parse` has no @java body — not portable to this backend`; a provider's Jackson/Gson plugs in here when one is on the `javac` classpath |
-| go | `json.Unmarshal([]byte(s), &v)` | `json.Marshal(v)` | **runs** (item 140): `Any` erases to Go's `any`; the @go body reaches `encoding/json` through a `//revl:import encoding/json` directive the emitter hoists into the module's import block. `go test` runs the round-trip (backends/go/scenarios/emitted/jsonwire/). |
+| go | `json.Unmarshal([]byte(s), &v)` | `json.NewEncoder` with `SetEscapeHTML(false)` | **runs** (item 140): `Any` erases to Go's `any`; the @go body reaches `encoding/json` through `//revl:import` directives the emitter hoists into the module's import block. Encodes compact with `<`/`>`/`&` raw for the canonical form (item 385). `go test` runs the round-trip (backends/go/scenarios/emitted/jsonwire/). Record caveat: unexported struct fields marshal to `{}` — see the canonical-form section. |
 | wasm | — | — | the substrate value model (Int/Bool/Str/List) cannot hold Float/Map/records, so a JSON value has no representation there |
 
 The refusal message is the built-in honesty gate, the same shape the
@@ -114,10 +114,46 @@ fr3_json_int.test.ts` (runtime, under vitest) cross-checked against the py tier
 in `tests/test_json_stdlib.py::test_ts_int_serialization_matches_py_tier`,
 covering a small, a negative, and a beyond-2^53 `Int`.
 
-One residual, out-of-scope note: the py tier's `json.dumps` inserts
-insignificant whitespace after `:`/`,` by default while `JSON.stringify` is
-compact; the two are byte-equal after that whitespace is normalized, and
-identical under `json_parse`.
+That residual whitespace drift was itself a cross-tier bug, now fixed — see
+the canonical-form contract below.
+
+## Canonical form: byte-identical across tiers (item 385)
+
+`json_stringify` is a `pure` fn, so revl's cross-tier determinism guarantee
+(docs/syntax-2.0.md §3.4: "no backend can diverge") requires it to return the
+**same bytes on every tier** for the same value. It did not: the py tier's
+default `json.dumps(v)` inserts insignificant whitespace (`{"k": "v", "n": 1}`)
+where ts/go emit the compact `{"k":"v","n":1}`. Each tier was self-consistent,
+so both tiers' own tests passed; the drift only bit **cross-tier** — hashing a
+record, byte-comparing a ledger, a cassette asserting an identical transcript,
+a signature over emitted JSON (the harness does all four). A `pure` function
+that returns different bytes per tier is exactly the guarantee violation.
+
+The stated **canonical form**, now enforced by
+`tests/test_json_cross_tier_bytes.py` (the same corpus stringified on py **and**
+ts **and** go, asserted against one shared expected string — not per-tier
+self-consistency):
+
+- **Compact** — no space after `:` or `,`. ts `JSON.stringify` default; go; py
+  `json.dumps(v, separators=(",", ":"))`.
+- **Non-ASCII stays raw UTF-8** — py `ensure_ascii=False`; ts; go. `<`, `>`,
+  `&` also stay raw: go's default `json.Marshal` HTML-escapes them, so the @go
+  body encodes through a `json.NewEncoder` with `SetEscapeHTML(false)`.
+- **Key order** is record-declaration / insertion order (py dict, ts object).
+- **Booleans/null** spelled `true`/`false`/`null`; **ints** exact, incl. beyond
+  2^53 (py int, ts bigint replacer, go int64 — see the two Int/bigint notes).
+- **Floats**: values that share a decimal form across Python and JS (`1.5`,
+  `-0.25`) are byte-identical. A **whole-number float** (`1.0` vs `1`), `-0.0`,
+  or an extreme-exponent float can still format differently between the two
+  runtimes — canonicalize integral quantities as `Int`, not `Float`.
+
+**go record caveat** (a separate, deeper defect, not fixable in json.rvl's @go
+body): a revl record lowers to a Go struct whose fields are **unexported**
+(lowercase) with no `json:` tags, so `encoding/json` cannot see them and a
+record stringifies to `{}` on go. go is canonical for scalars, strings and
+lists; the record `{}` behavior is pinned by
+`test_go_record_is_the_known_separate_defect` until the go emitter is taught to
+export + tag record fields (its own roadmap item).
 
 ## Large integers on the ts tier: bigint on *parse* too (item 311)
 

@@ -107,6 +107,17 @@ class ReplayError(RuntimeError):
     """The timeline cannot do what was asked."""
 
 
+class WALIntegrityError(RuntimeError):
+    """A WAL failed an integrity gate on read (item 413).
+
+    The py backend's own copy of the reader gate, kept behaviourally identical
+    to :class:`revl.wal.WALIntegrityError`. Raised for an unsupported header
+    ``walVersion`` or for MID-FILE corruption (an unparseable line with valid
+    records after it); a torn TRAILING line stays tolerated. Fails closed rather
+    than silently dropping a committed record on the cleanup path.
+    """
+
+
 class IrreversibleStep(ReplayError):
     """Stepping back would cross an emission that has no compensation.
 
@@ -314,6 +325,17 @@ class Timeline:
                              note="A1 iteration boundary — nothing accumulated")
             self._wal_append(step)
             return step, None
+
+        if inspect.ismethod(value) and getattr(value, "__name__", "") == "begin":
+            # `yield frame.begin` (item 247 second-pass): the Phase-2 post-unwind
+            # hook, yielded as the body's FIRST step so it disposes LAST. It is
+            # pure runtime scaffolding at the very bottom of the unwind stack with
+            # no author meaning and no author inverse, so it is INVISIBLE to the
+            # timeline and the WAL — recording it would prepend a spurious leading
+            # step to every recorded body. The disposer is passed through
+            # untouched so the runtime still installs it; step-back never needs
+            # to see it (it drains Phase 2, which has no forward author step).
+            return None, value
 
         if inspect.ismethod(value) and getattr(value, "__name__", "") == "drain":
             # `yield frame.drain`: the Frame's adopted-effect hinge.  Left
@@ -767,6 +789,74 @@ class _ServiceProxy:
         return f"<recording {self._key}: {self._service}>"
 
 
+class _SpawnRecorder:
+    """A recording wrapper around a runtime ``SpawnHandle``.
+
+    Everything delegates to the real handle (``dispose``, the hot-swap
+    ``capture_state``/``restore_state`` surface, ``component``); ONLY ``get(key)``
+    is intercepted. When the provision at ``key`` publishes ``emission`` methods,
+    ``get`` returns a :class:`_ServiceProxy` bound to the SPAWNER's timeline, so a
+    ``emit s.inner.method()`` crossing records a WAL step exactly as a required
+    service does. Without this, a provision reached off a spawn handle came back
+    unwrapped and its emissions were invisible to the crash-recovery no-residue
+    proof and the erase-report overlay.
+
+    The registry (``_remember_instance``) still holds the REAL handle, and this
+    wrapper forwards ``dispose``/state to it, so teardown identity and live
+    instance enumeration are unchanged.
+    """
+
+    __slots__ = ("_handle", "_timeline", "_ir", "_services")
+
+    def __init__(self, handle, timeline: Timeline, ir: dict, services: dict) -> None:
+        object.__setattr__(self, "_handle", handle)
+        object.__setattr__(self, "_timeline", timeline)
+        object.__setattr__(self, "_ir", ir or {})
+        object.__setattr__(self, "_services", services or {})
+
+    def get(self, key: str):
+        value = self._handle.get(key)
+        if value is None:
+            return value
+        service = self._service_for(key)
+        if service is None:
+            return value
+        methods = ((self._services.get(service) or {}).get("methods") or {})
+        emissions = {m for m, spec in methods.items() if (spec or {}).get("emission")}
+        if not emissions:
+            return value
+        return _ServiceProxy(value, self._timeline, key, service, emissions)
+
+    def _service_for(self, key: str) -> Optional[str]:
+        component = getattr(self._handle, "component", None)
+        for comp in (self._ir.get("components") or []):
+            if comp.get("name") == component:
+                return (comp.get("provides") or {}).get(key)
+        return None
+
+    def __getattr__(self, name: str):
+        # everything that is not `get` is the real handle's own surface
+        # (dispose, capture_state, restore_state, component, ...).
+        return getattr(object.__getattribute__(self, "_handle"), name)
+
+    def __repr__(self) -> str:  # pragma: no cover — debugging aid
+        return f"<recording spawn {getattr(self._handle, 'component', '?')}>"
+
+
+# The recorder observes an emission only where the crossing is routed through a
+# handle it wraps: a required service (`_ServiceProxy` off the recording context)
+# or a spawn-handle provision (`_SpawnRecorder.get` above). A *direct* free host
+# extern emission (`emit announce(x)`, a kind-3/4 crossing) compiles to a bare
+# module-level call — `announce(x)` — that never touches the recording context,
+# and the extern body is G8-opaque, so there is no seam to record it at this
+# layer. That crossing is caught statically by the approval fold and the
+# activation-crossing gate, not by this runtime WAL recorder.
+# TODO(414): if such a free-extern emission ever needs a runtime WAL record, the
+# seam is the emitter (route the extern call through `_revl_ctx`) or a recorded
+# extern shim, not `_RecordingContext` — the recorder cannot see the call as it
+# stands.
+
+
 class _RecordingContext:
     """Delegates everything to the real cordis context, recording the
     accumulator events on the way through.
@@ -777,13 +867,32 @@ class _RecordingContext:
     """
 
     def __init__(self, ctx, timeline: Timeline, requires: dict,
-                 services: dict) -> None:
+                 services: dict, ir: Optional[dict] = None) -> None:
         object.__setattr__(self, "_revl_ctx", ctx)
         object.__setattr__(self, "_revl_timeline", timeline)
         object.__setattr__(self, "_revl_requires", dict(requires or {}))
         object.__setattr__(self, "_revl_services", services or {})
+        object.__setattr__(self, "_revl_ir", ir or {})
 
     # -- recorded surface --------------------------------------------------
+
+    def _revl_record_spawn(self, handle):
+        """Wrap a spawn handle so an emission reached through it
+        (``emit s.inner.method()``) records on THIS component's timeline, exactly
+        as a required-service emission does.
+
+        The runtime's :func:`runtime.spawn` calls this when a recording context is
+        threaded through the spawn (the hook is absent on the real cordis
+        ``Context``, so an un-instrumented activation is untouched). This is the
+        runtime counterpart to the static spawn-fold: the spawner is the one doing
+        the crossing, so the crossing is recorded against the spawner, the same
+        seam the static approval fold was taught to see.
+        """
+        return _SpawnRecorder(
+            handle,
+            object.__getattribute__(self, "_revl_timeline"),
+            object.__getattribute__(self, "_revl_ir"),
+            object.__getattribute__(self, "_revl_services"))
 
     def effect(self, fn, *args, **kwargs):
         label = args[0] if args else kwargs.get("label")
@@ -920,7 +1029,8 @@ class Recorder:
             # resolution here to keep the recorded body faithful.
             if config_schema is not None:
                 config = config_schema.resolve(config)
-            return apply(_RecordingContext(ctx, timeline, requires, services), config)
+            return apply(_RecordingContext(ctx, timeline, requires, services,
+                                           recorder._ir), config)
 
         recording_apply.__name__ = getattr(apply, "__name__", "apply")
         recording_apply.__doc__ = getattr(apply, "__doc__", None)
@@ -1017,6 +1127,10 @@ class Recorder:
 # a dead lambda can be re-run.
 
 WAL_VERSION = 1
+
+#: The versions this reader understands. Kept in step with :mod:`revl.wal`'s
+#: ``SUPPORTED_WAL_VERSIONS`` (item 413); the agreement test pins the readers.
+SUPPORTED_WAL_VERSIONS = frozenset({WAL_VERSION})
 
 #: The single sentence recovery is allowed to claim.  Deliberately narrow, in
 #: the same spirit as :data:`GUARANTEE`.
@@ -1300,7 +1414,9 @@ class WriteAheadLog:
     def record_discharge_descriptor(
             self, entry: str, *, receiver: str, method: str, args: list,
             origin: Optional[dict] = None, witness: Any = None,
-            idempotency: Optional[str] = None) -> dict:
+            idempotency: Optional[str] = None,
+            undo_idempotent: bool = False,
+            register: Optional[str] = None) -> dict:
         """Append the WAL discharge-descriptor for one witnessed (`transactional`)
         inverse or one `compensation` (docs/design/teardown-contract.md, "WAL
         descriptor"; owned by the witnessed-wal-recover slice on the py tier).
@@ -1333,8 +1449,40 @@ class WriteAheadLog:
             "origin": origin or {},
             "witness": witness,          # transactional only; durable data, not a handle
             "idempotency": idempotency,  # author-supplied key where present (item 309)
+            # item 309: the inverse's idempotency register, carried into the WAL
+            # so a FRESH-process `recover` reads it (the descriptor, not the
+            # source, is what recover has). `undo_idempotent` gates free vs
+            # fenced replay in `_roll_back`; `register` is the honesty tier the
+            # audit prints. Absent-by-default keeps every pre-309 descriptor
+            # byte-identical: only written when the author declared it.
+            **({"undo_idempotent": True} if undo_idempotent else {}),
+            **({"register": register} if register else {}),
         }
         self._seq += 1
+        self._write(record)
+        return record
+
+    def record_fence(self, seq: int) -> dict:
+        """Append the per-inverse `replay-fence` record for one UNDECLARED
+        (non-idempotent) transactional inverse, item 309 §3a.
+
+        Written and fsync'd BEFORE the inverse is applied, on EVERY apply path
+        (the in-process abort's Phase 1 and each `revl recover` roll-back), so a
+        later recovery run that finds the fence does NOT re-apply — at-most-once
+        holds across abort-then-crash and any number of recovery runs. The fence
+        proves an attempt was ABOUT TO START, never that it ran: a crash between
+        fence and apply leaves 'fenced-before-attempt, outcome unknown'. Consume-
+        before-fire, the same ordering `record_approval_consumed` uses for a
+        grant. A torn fence line (a real `kill -9` mid-append) is discarded by
+        the reader exactly as any torn record, so it implies the apply never ran.
+
+        A DECLARED-idempotent inverse needs NO fence (it replays freely) — a
+        payoff of declaring: the abort of a fully-declared composition writes
+        zero extra records. This record is a new WAL record kind and lands inside
+        item 413's integrity envelope (a forged fence could suppress a needed
+        replay or force a double one — the class 413's hash chain exists for);
+        413's gates are untouched here."""
+        record = {"record": "replay-fence", "seq": seq}
         self._write(record)
         return record
 
@@ -1359,6 +1507,89 @@ class WriteAheadLog:
             "idempotency": idempotency,
         }
         self._seq += 1
+        self._write(record)
+        return record
+
+    def record_approval_granted(self, entry: dict) -> dict:
+        """Append the ``approval-granted`` record for a human yes to a class-(c)
+        crossing (item 246, docs/design/246-auto-approve.md, Decision 3). Names
+        the ticket hash, the reach-closure candidate hash, the component, and the
+        fields the human saw, so the audit can answer "which human decision
+        authorized this crossing". Consumes no seq — like ``commit-approved`` it
+        names facts, it is not an effect.
+
+        Item 251 Slice 2 (additive, no seq change) extends the recorded ``entry``
+        with the distiller's shape-key fields when the grant site supplies them:
+        the crossing's ``realm``, its ``taintOrigins`` (the post-endorsement
+        runtime taint at the sink), its bound ``resourceScopes`` and resource-bound
+        ``classCCapabilities`` (the registered-resource projection - the
+        ``host=``/``path=``/``table=`` values that actually crossed, NOT the whole
+        ``argsDigest`` hash), and the attributed ``operator``. All are optional
+        keys spliced from ``entry``, so a grant site that supplies none records
+        byte-identically to before."""
+        record = {"record": "approval-granted", **entry}
+        self._write(record)
+        return record
+
+    def record_distillation_applied(self, entry: dict) -> dict:
+        """Append the ``distillation-applied`` record when an operator applies a
+        distilled `AutoApproveRule` into the live policy (roadmap item 251, Slice
+        2). Names the ``rule`` text, the operator who applied it (``reviewedBy``),
+        the operator whose repeated yeses it encodes (``distilledBy``), the ledger
+        window / grant ids it was distilled from (``distilledFrom``), the
+        blast-radius snapshot, and ``appliedAt`` - so the item-27 causal trace can
+        answer "what auto-approved this crossing and on whose authority" through
+        the rule to the operator and to the original yeses (design §4). Consumes no
+        seq: like ``approval-granted`` it names a consent fact, not an effect."""
+        record = {"record": "distillation-applied", **entry}
+        self._write(record)
+        return record
+
+    def record_distillation_revoked(self, entry: dict) -> dict:
+        """Append the ``distillation-revoked`` record when an operator retires a
+        distilled `AutoApproveRule` from the live policy (roadmap item 251, Slice
+        2), the symmetric partner of ``distillation-applied``. Names the ``rule``
+        text and the operator who revoked it (``revokedBy``), so the next matching
+        crossing prompts again (fail-closed) and the audit tells an operator's cut
+        from a natural lapse. Consumes no seq."""
+        record = {"record": "distillation-revoked", **entry}
+        self._write(record)
+        return record
+
+    def record_approval_consumed(self, request_id: str) -> dict:
+        """Append the single-use SPEND, durably, BEFORE the extern body runs
+        (item 246, Decision 3: consume-before-fire). A crash between this record
+        and the emission leaves consumed-but-unfired — an owed action that needs a
+        FRESH approval, which is fail-closed: the world saw at most one fire on
+        this yes. The later emission record names the same ``requestId``; the
+        audit joins the spend and the emission on it."""
+        record = {"record": "approval-consumed", "requestId": request_id}
+        self._write(record)
+        return record
+
+    def record_approval_revoked(self, request_id: str) -> dict:
+        """Append the ``approval-revoked`` record when an operator retires a
+        session-scoped standing grant EARLY (roadmap item 379), before its TTL or
+        uses lapse. Names the grant's ``requestId`` so the audit reads the grant's
+        whole life — granted, the crossings it auto-approved (each an
+        ``approval-consumed`` on the same id), and this revoke — and can tell a
+        grant that lapsed on its own from one an operator cut short. Consumes no
+        seq: like ``approval-granted`` it names a consent fact, it is not an
+        effect."""
+        record = {"record": "approval-revoked", "requestId": request_id}
+        self._write(record)
+        return record
+
+    def record_approval_emission(self, request_id: str, capability: str,
+                                 component: str) -> dict:
+        """Append the ``approval-emission`` record AFTER a typed-approval crossing
+        fires (item 246, Decision 3), naming the same ``requestId`` the spend
+        did. The audit joins the ``approval-consumed`` spend and this emission on
+        ``requestId``: a spend with no matching emission is a visible owed action
+        (crossing unverified), never a silent gap. Consumes no seq — it names a
+        fact about a fire that already happened."""
+        record = {"record": "approval-emission", "requestId": request_id,
+                  "capability": capability, "component": component}
         self._write(record)
         return record
 
@@ -1444,28 +1675,51 @@ class WriteAheadLog:
         present.  A trailing half-written line (a genuine ``kill -9`` can leave
         one) is tolerated and reported as ``torn`` rather than crashing the
         recovery that exists to handle exactly that.
+
+        Two integrity gates run first (item 413), fail-closed via
+        :class:`WALIntegrityError`: a header ``walVersion`` outside
+        :data:`SUPPORTED_WAL_VERSIONS` is refused, and an unparseable line is
+        tolerated only when it is the last line in the file (mid-file corruption
+        is refused rather than silently dropping a committed record). Kept
+        behaviourally identical to :func:`revl.wal.read_wal`, which the
+        agreement test pins.
         """
         header: dict = {}
         records: list = []
         complete = False
         torn = False
         with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
+            lines = [line.strip() for line in handle]
+        last_content = max((i for i, line in enumerate(lines) if line),
+                           default=-1)
+        for index, line in enumerate(lines):
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                if index == last_content:
+                    torn = True   # a partial FINAL record: the crash itself
                     continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    torn = True   # a partial final record — the crash itself
-                    continue
-                kind = entry.get("record")
-                if kind == "header":
-                    header = entry
-                elif kind == "activation-complete":
-                    complete = True
-                    records.append(entry)
-                else:
-                    records.append(entry)
+                raise WALIntegrityError(
+                    f"WAL {path} is corrupt at line {index + 1}: an unparseable "
+                    f"record with {last_content - index} line(s) after it. This "
+                    "is mid-file corruption, not a crash-torn trailing line."
+                ) from None
+            kind = entry.get("record")
+            if kind == "header":
+                header = entry
+                version = header.get("walVersion")
+                if version not in SUPPORTED_WAL_VERSIONS:
+                    raise WALIntegrityError(
+                        f"WAL {path} declares walVersion {version!r}, which this "
+                        "reader does not support (supported: "
+                        f"{sorted(SUPPORTED_WAL_VERSIONS)})."
+                    )
+            elif kind == "activation-complete":
+                complete = True
+                records.append(entry)
+            else:
+                records.append(entry)
         return {"header": header, "records": records,
                 "complete": complete, "torn": torn}

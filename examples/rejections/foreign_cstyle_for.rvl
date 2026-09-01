@@ -1,0 +1,15 @@
+// REJECTED — the C-style `for (init; cond; step)` header is not revl syntax
+// (item 384, pairs with 379). revl's only loop header is the TS for-of
+// `for (x of xs)`; a counter uses a `var` and `while`. The `let` keyword in
+// the header used to report the cryptic `expected ident, found 'let'`.
+//
+// expected error:
+//   revl has no C-style `for (init; cond; step)` loop
+
+fn f() -> Int {
+  var s = 0
+  for (let i = 0; i < 10; i += 1) {
+    s += i
+  }
+  return s
+}

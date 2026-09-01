@@ -109,6 +109,22 @@ func (m *Map[V]) Insert(k string, v V) {
 	m.m[k] = v
 	m.mu.Unlock()
 }
+
+// InsertIfAbsent is the atomic compare-and-set (item 397). The per-op mutex is
+// held across BOTH the membership test AND the insert, so the whole CAS is one
+// critical section: no concurrent caller can witness the probe and the write as
+// separable steps. Returns whether it inserted; a false (key already present)
+// leaves the existing value untouched. Under N concurrent callers on one map,
+// exactly one receives true.
+func (m *Map[V]) InsertIfAbsent(k string, v V) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.m[k]; ok {
+		return false
+	}
+	m.m[k] = v
+	return true
+}
 func (m *Map[V]) Remove(k string) {
 	m.mu.Lock()
 	delete(m.m, k)
@@ -254,6 +270,32 @@ func (f *RevlFrame) registerMethodWitnessed(run func() error) {
 	f.mu.Unlock()
 }
 
+// registerMethodCompensation parks one provide-method `emit ... compensate ...`
+// offset (the item-247 method-body remainder): the compensation analog of
+// registerMethodWitnessed, and the method-body analog of the activation-body
+// `emit ... compensate ...` (item 247). A method body runs AFTER activation, so
+// the offset must outlive the method call and is owed ONLY on an abort, never on
+// a clean commit (the emission it offsets was the deliverable). It is NOT a
+// stc-go disposer (see commit() for the disposal-ordering hazard); commit()
+// disposes the parked closure once the commit-vs-abort bit is settled. On a
+// COMMIT the closure discharges (never runs). On an ABORT it hands the offset to
+// `enqueue`, so runCompensationPhase (registered first, hence run LAST on the
+// unwind) fires it in Phase 2 — after every bracket/transactional/method-
+// witnessed inverse in this activation has completed, guarded and residue-
+// collected. `key`/`method` are the offsetting call's descriptor for the WAL and
+// residue, captured here at registration (the "no data hazard" rule).
+func (f *RevlFrame) registerMethodCompensation(key, method string, run func() error) {
+	f.mu.Lock()
+	f.deferred = append(f.deferred, func() error {
+		if f.committed {
+			return nil // discharge — the emission was the deliverable
+		}
+		f.enqueue(key, method, run) // abort: defer to Phase 2
+		return nil
+	})
+	f.mu.Unlock()
+}
+
 // commit flips the discriminator a clean unload reads (item 243 decision 1,
 // the go mirror of `Frame._committed`/`Frame.drain`): every transactional
 // entry and every compensation observes `committed == true` from here on,
@@ -272,12 +314,23 @@ func (f *RevlFrame) commit() {
 	// stc-go disposers, so this is their sole disposal — no double-free with the
 	// fiber's own unwind. commit() is the LAST-registered inverse, hence stc-go
 	// runs it FIRST on unwind, so this is ordered before any body inverse runs.
+	//
+	// item 369: replay in reverse INVOCATION order (LIFO), NOT registration
+	// order. `deferred` is appended newest-last as each provide-method fires
+	// (registerMethodWitnessed), so it must be drained newest-FIRST — exactly
+	// like the activation-body path, where stc-go unwinds its disposer stack
+	// LIFO. On a COMMIT order is immaterial (every entry no-op discharges); on
+	// an ABORT two inverses whose paths OVERLAP must undo newest-first or a FIFO
+	// replay leaves residue or DESTROYS pre-session data (every stdlib/fs.rvl
+	// inverse is idempotent-and-total, so the oldest inverse runs first, no-ops,
+	// and the newer one undoes into the hole — G7, 243 §2). Mirrors the py/ts
+	// runtimes.
 	f.mu.Lock()
 	deferred := f.deferred
 	f.deferred = nil
 	f.mu.Unlock()
-	for _, d := range deferred {
-		_ = d()
+	for i := len(deferred) - 1; i >= 0; i-- {
+		_ = deferred[i]()
 	}
 }
 
@@ -449,6 +502,11 @@ type FsError struct {
 	Code string `json:"code"`
 }
 
+type Move struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
 func unstash(w Stash) {
 	if _, err := os.Stat(w.Bak); err == nil {
 		_ = os.Rename(w.Bak, w.Path)
@@ -464,9 +522,24 @@ func stash_path(p string) RevlResult[Stash, FsError] {
 	return RevlOk[Stash, FsError]{Value: Stash{Path: p, Bak: bak}}
 }
 
+func unmove(w Move) {
+	if _, err := os.Stat(w.To); err == nil {
+		_ = os.Rename(w.To, w.From)
+	}
+	return
+}
+
+func move_e(a string, b string) RevlResult[Move, FsError] {
+	if err := os.Rename(a, b); err != nil {
+		return RevlErr[Move, FsError]{Value: FsError{Code: err.Error()}}
+	}
+	return RevlOk[Move, FsError]{Value: Move{From: a, To: b}}
+}
+
 // service Ops
 type Ops interface {
 	Touch(p string)
+	Mv(a string, b string)
 }
 
 var _keyOps = stc.NewKey[Ops]("ops")
@@ -520,6 +593,35 @@ func (revlSelf *Agent_ops) Touch(p string) {
 				}
 			}()
 			unstash(result)
+			return nil
+		})
+	}
+}
+
+func (revlSelf *Agent_ops) Mv(a string, b string) {
+	var _revlWit2 RevlResult[Move, FsError]
+	_revlWit2 = move_e(a, b)
+	if _revlOk2, _revlIsOk2 := _revlWit2.(RevlOk[Move, FsError]); _revlIsOk2 {
+		result := _revlOk2.Value
+		_ = result
+		revlSelf.revlFrame.registerMethodWitnessed(func() (_revlErr error) {
+			if revlSelf.revlFrame.committed {
+				// item 318 a5a: discharge — the mutation is the deliverable
+				// and persists; witness GC'd (out of scope).
+				return nil
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					revlSelf.revlFrame.recordResidue(RevlTeardownRecord{
+						Kind: "restore-residue", CrossingKey: "move_e", CrossingMethod: "unmove",
+						AttemptedCall: "unmove", AttemptedPhase: 1,
+						ErrorType: "panic", ErrorMessage: fmt.Sprint(r),
+						Outcome: "failed", Referent: "move_e",
+						Hint: "the witnessed inverse " + "unmove" + " panicked during abort replay; verify and finish by hand",
+					})
+				}
+			}()
+			unmove(result)
 			return nil
 		})
 	}

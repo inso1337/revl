@@ -2798,7 +2798,7 @@ def test_method_witnessed_does_not_perturb_non_witnessed_methods():
     always-replaying bracket, unchanged by item 324 — the witnessed dispatch is
     gated on the extern class."""
     src = emit.emit(compile_source(
-        "extern acquire fn acq() -> Int undo rel() = @rs { 0 }\n"
+        "extern acquire fn acq() -> Acq undo rel() = @rs { 0 }\n"
         "extern pure fn rel() -> Unit = @rs { }\n"
         "service S { fn go() }\n"
         "component C provides s: S {\n"

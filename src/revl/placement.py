@@ -63,7 +63,7 @@ import threading
 import time
 from pathlib import Path
 
-from ._paths import backends_root
+from ._paths import backends_root, stdlib_root
 from .activation import local_prereqs
 from .compiler import compile_files
 from .distribute import distributability
@@ -231,11 +231,484 @@ def _parse_probe(expr: str) -> dict:
 
 
 # --------------------------------------------------------------------------
+# per-component tier placement (roadmap item 363): the `[tiers]` surface
+# --------------------------------------------------------------------------
+#
+# A composition declares which backend tier each component emits to, in the
+# placement manifest, with no `.rvl` source change (docs/interop-bridge.md
+# "the broker is manifest data"; item 119 "read off the placement toml"):
+#
+#     default_tier = "py"
+#     [tiers]
+#     HotWorker = "rust"
+#     [config.HotWorker]
+#     threads = 4
+#
+# The conductor expands `[tiers]` into the equivalent synthesized `[processes]`
+# topology — one process per distinct declared tier — and proceeds through the
+# EXISTING conductor unchanged (placed map, seams, proxies, stub allowlists,
+# preflight, capability/realm checks, per-tier builds). A cross-tier component
+# communicates over the existing cross-process seam (generated proxy/stub over
+# UDS/mTLS, canonical value-copy encoding, G8 allowlist, seam deadline,
+# peer-death-as-withdrawal); two components on different tiers are in different
+# processes by construction, so there is no in-process cross-tier FFI to build.
+
+
+def expand_tiers(placement: dict, component_names) -> tuple[dict, str | None]:
+    """Expand a `[tiers]` / `default_tier` manifest into the equivalent
+    synthesized `[processes]` topology (one `tier_<backend>` process per
+    distinct declared tier, grouping every component by its tier; a component
+    absent from `[tiers]` takes `default_tier`, itself defaulting to ``py``).
+
+    Returns ``(expanded_placement, None)`` on success or
+    ``(placement, diagnostic)`` on a refusal. A manifest with neither
+    ``[tiers]`` nor ``default_tier`` is returned **unchanged** — the classic
+    hand-written `[processes]` form is byte-identical downstream, so the whole
+    feature is a no-op then (the item's additivity guarantee).
+    """
+    tiers = placement.get("tiers")
+    default_tier = placement.get("default_tier")
+    # item 411: the `[tiers]`-form `[sandbox]` sugar table assigns a component
+    # to its own isolation boundary. It shares the top-level `sandbox` key with
+    # the `[sandbox.needs]` table (form-independent, consumed by the gate later),
+    # so split the two: every non-`needs` key is a component -> sandbox-table
+    # assignment. A manifest with no tier/sandbox sugar is returned unchanged.
+    sandbox_tbl = placement.get("sandbox") or {}
+    if not isinstance(sandbox_tbl, dict):
+        return placement, ('`[sandbox]` must be a table (component sandbox '
+                           'assignments and/or a `needs` sub-table)')
+    sandbox_needs = sandbox_tbl.get("needs")
+    sandbox_assign = {k: v for k, v in sandbox_tbl.items() if k != "needs"}
+    if tiers is None and default_tier is None and not sandbox_assign:
+        return placement, None  # classic [processes] form, untouched
+    if placement.get("processes"):
+        both = "[tiers]" if (tiers is not None or default_tier is not None) else "[sandbox]"
+        if sandbox_assign and both != "[sandbox]":
+            both = "[tiers]/[sandbox]"
+        return placement, (
+            f"a placement declares both a per-component {both} sugar table and an "
+            "explicit `[processes]` topology — they are two spellings of the "
+            "same placement and mutually exclusive in one file; keep the sugar "
+            "table for one-process-per-tier/sandbox, or `[processes]` for a "
+            "hand-written topology (addresses, TLS identities, probes, "
+            "per-process deadlines, and per-process `[processes.<p>.sandbox]`)")
+    if tiers is not None and not isinstance(tiers, dict):
+        return placement, '`[tiers]` must be a table of `Component = "backend"`'
+    tiers = tiers or {}
+    default_tier = default_tier or "py"
+    known_names = set(component_names)
+    unknown = sorted(c for c in tiers if c not in known_names)
+    if unknown:
+        return placement, (
+            f"[tiers] names unknown component(s): {', '.join(unknown)} "
+            f"(known: {', '.join(sorted(known_names))})")
+    unknown_sb = sorted(c for c in sandbox_assign if c not in known_names)
+    if unknown_sb:
+        return placement, (
+            f"[sandbox] names unknown component(s): {', '.join(unknown_sb)} "
+            f"(known: {', '.join(sorted(known_names))})")
+    # validate every declared tier before synthesizing: wasm is refused with a
+    # redirect (no wasm placement runner on the substrate), an unknown name is
+    # named. The default_tier is validated once (it applies to every component
+    # absent from [tiers]).
+    for cname, backend in [("<default_tier>", default_tier),
+                           *tiers.items()]:
+        raw = str(backend)
+        canon = _canonical_backend(raw)
+        if raw == "wasm" or canon == "wasm":
+            who = ("default_tier" if cname == "<default_tier>"
+                   else f"component {cname!r}")
+            return placement, (
+                f"{who} is placed on the `wasm` tier, which is not a placement "
+                "tier: no wasm placement runner, bridge client, or stub exists "
+                "on the substrate (a wasm placement runner is a separately "
+                "designed follow-on). Place native components on `rust` or `go`.")
+        if canon not in KNOWN_BACKENDS:
+            who = ("default_tier" if cname == "<default_tier>"
+                   else f"component {cname!r}")
+            return placement, (
+                f"{who} is placed on unknown tier {raw!r} "
+                f"(known: {', '.join(KNOWN_BACKENDS)})")
+    # group NON-sandboxed components by their declared (or default) tier,
+    # deterministically; a `[sandbox]`-listed component is split OUT into its
+    # own synthesized process below (item 411). The tier a sandboxed component
+    # runs on is still its `[tiers]` entry (or the default); isolation is a
+    # fourth placement dimension composed WITH the tier, not a replacement.
+    by_tier: dict[str, list[str]] = {}
+    for cname in component_names:
+        if cname in sandbox_assign:
+            continue
+        backend = _canonical_backend(str(tiers.get(cname, default_tier)))
+        by_tier.setdefault(backend, []).append(cname)
+    processes: dict[str, dict] = {}
+    for backend in sorted(by_tier):
+        processes[f"tier_{backend}"] = {
+            "backend": backend, "components": list(by_tier[backend])}
+    # each sandboxed component gets its own `sandbox_<component>` process
+    # carrying the sandbox table verbatim (validated + normalized in
+    # run_placement, uniformly with the `[processes.<p>.sandbox]` form).
+    for cname in component_names:
+        if cname not in sandbox_assign:
+            continue
+        backend = _canonical_backend(str(tiers.get(cname, default_tier)))
+        processes[f"sandbox_{cname}"] = {
+            "backend": backend, "components": [cname],
+            "sandbox": sandbox_assign[cname]}
+    # a top-level `probe` list drives the default-tier (control-plane) process:
+    # the [tiers] form has no named process for the author to attach probes to,
+    # and a cross-seam probe originates from the orchestrating control plane.
+    probe = placement.get("probe")
+    if probe:
+        control = f"tier_{_canonical_backend(str(default_tier))}"
+        if control in processes:
+            processes[control]["probe"] = list(probe)
+        else:
+            # F5: every component is tiered off the default, so no default-tier
+            # control-plane process was synthesized to carry the probe. Dropping
+            # it silently would boot, probe NOTHING, and exit 0 — a seam
+            # verification that is a no-op green. Refuse instead of vanishing.
+            return placement, (
+                f"a top-level `probe` is declared, but no process runs on the "
+                f"default tier {default_tier!r}: every component is placed on "
+                f"another tier, so there is no default-tier control plane to "
+                f"attach the probe to (a cross-seam probe originates from the "
+                f"orchestrating control plane). Keep at least one component on "
+                f"the default tier, or move to an explicit `[processes]` "
+                f"topology and attach `probe` to the process you mean to run it.")
+    expanded = {k: v for k, v in placement.items()
+                if k not in ("tiers", "default_tier", "probe", "sandbox")}
+    expanded["processes"] = processes
+    # keep the `[sandbox.needs]` table for the plan-time gate (it is
+    # form-independent: an extern's needs do not depend on where it runs). The
+    # sandbox ASSIGNMENTS have been consumed into the synthesized processes.
+    if sandbox_needs is not None:
+        expanded["sandbox"] = {"needs": sandbox_needs}
+    return expanded, None
+
+
+# --------------------------------------------------------------------------
+# capability-enforced sandbox placement (roadmap item 411, Slice 1)
+# --------------------------------------------------------------------------
+#
+# Isolation is a FOURTH per-process placement dimension over the 363 seam: a
+# process may declare an isolation boundary (`wasm-cell` | `container` |
+# `microvm`) and an OS capability envelope (`fs`, `net`) it confines the
+# process to. Slice 1 is the STATIC surface: parse the manifest tables, refuse
+# at plan time (the advisory needs gate + the fail-closed unmappable-need
+# refusal + the cell opaque-residue refusal), narrow each sandboxed process's
+# spec to its own config so a sibling's secret never enters the boundary, and
+# print the envelope + effective reach in the boot summary and `revl audit`.
+#
+# Slice 1 does NOT launch a real jail: a sandboxed process still boots on the
+# ordinary runner (the isolation is declared + gated but not yet ENFORCED). The
+# runtime driver (launch/canary/transport/approval seam, the container/microVM/
+# wasm-cell rungs) is Slice 2. Every refusal and every printed line below is
+# real; only the enforcing boundary is deferred. A placement with no sandbox
+# surface is byte-identical throughout (the 342/363/396 additivity discipline).
+
+_ISOLATION_RUNGS = ("wasm-cell", "container", "microvm")
+# The envelope vocabulary is fs and net, and ONLY fs and net (the design's
+# surface section): the derived flags confine what the process reaches on the
+# network and the filesystem; env, exec, ipc and device authority have no
+# fs/net analogue and are NOT confined by item 411. A `[sandbox.needs]` entry
+# naming a resource outside this vocabulary is a plan-time refusal, never a
+# silently unenforced grant.
+_ENVELOPE_RESOURCES = ("fs", "net")
+
+
+def _normalize_sandbox_table(sb) -> tuple[dict | None, str | None]:
+    """Validate one `sandbox` table (either `[processes.<p>.sandbox]` or a
+    `[tiers]`-form `[sandbox]` assignment) and return `(normalized, None)` or
+    `(None, diagnostic)`. Both envelope keys default to DENY: no `fs` key means
+    no mount is granted, no `net` key means `net = "none"`."""
+    if not isinstance(sb, dict):
+        return None, "a sandbox table must be a mapping (isolation, image, fs, net)"
+    iso = sb.get("isolation")
+    if iso not in _ISOLATION_RUNGS:
+        return None, (f"`isolation` must be one of "
+                      f"{', '.join(repr(r) for r in _ISOLATION_RUNGS)} "
+                      f"(got {iso!r})")
+    net = sb.get("net", "none")
+    if net not in ("none", "all"):
+        return None, (f'`net` must be "none" or "all" (got {net!r}); a host '
+                      "allowlist is a named follow-on, not a Slice-1 spelling")
+    fs = sb.get("fs", [])
+    if not isinstance(fs, list):
+        return None, "`fs` must be a list of `path` or `path:mode` mount strings"
+    fs = [str(m) for m in fs]
+    image = sb.get("image")
+    if iso in ("container", "microvm") and not image:
+        return None, (f"the {iso!r} rung needs an `image` (pin by digest; the "
+                      "image is trusted input at the level of the placement file)")
+    # cell: the `fs`/`net` keys bind nothing a wasm instance could use (its
+    # confinement is a generated import set, not an OS grant), so a NON-DEFAULT
+    # value under a cell is refused as unmappable rather than accepted as
+    # decoration (the isolation-ladder honesty paragraph).
+    if iso == "wasm-cell" and (net != "none" or fs):
+        return None, ("the `wasm-cell` rung takes no fs/net OS envelope; its "
+                      "confinement is a generated import set (no_extern plus the "
+                      "seam-only imports), so `fs`/`net` bind nothing here; "
+                      "remove them, or use the `container` rung for an OS envelope")
+    return {"isolation": iso, "image": image, "fs": fs, "net": net}, None
+
+
+def _parse_need(resource: str) -> tuple[str, str | None, str | None]:
+    """Parse one `[sandbox.needs]` resource string. Returns `(kind, path, mode)`:
+    `("net", None, None)`, `("fs", path, mode)` (mode defaults to "ro"), or
+    `("?", resource, None)` for anything outside the fs/net vocabulary (`env`,
+    `exec`, `ipc`, devices); the fail-closed unmappable case."""
+    parts = resource.split(":")
+    if parts[0] == "net" and len(parts) == 1:
+        return "net", None, None
+    if parts[0] == "fs" and len(parts) >= 2:
+        path = parts[1]
+        mode = parts[2] if len(parts) >= 3 and parts[2] else "ro"
+        return "fs", path, mode
+    return "?", resource, None
+
+
+def _parse_mount(mount: str) -> tuple[str, str]:
+    """`/scratch:rw` -> ("/scratch", "rw"); `/data` -> ("/data", "ro")."""
+    parts = mount.split(":")
+    path = parts[0]
+    mode = parts[1] if len(parts) >= 2 and parts[1] else "ro"
+    return path, mode
+
+
+def _fs_covers(mounts: list[str], path: str, mode: str) -> bool:
+    """Does the envelope's mount list grant `path` at `mode`? A mount covers a
+    path it equals or is a prefix of; `rw` is needed for a `rw` need, `ro`
+    suffices for a `ro` need."""
+    for mount in mounts:
+        mpath, mmode = _parse_mount(mount)
+        prefix = mpath.rstrip("/")
+        covers_path = path == mpath or path.startswith(prefix + "/")
+        covers_mode = mmode == "rw" or mode != "rw"
+        if covers_path and covers_mode:
+            return True
+    return False
+
+
+def _need_covered(kind: str, path: str | None, mode: str | None, env: dict) -> bool:
+    """Is a parsed need covered by the normalized envelope `env`?"""
+    if kind == "net":
+        return env.get("net") == "all"
+    if kind == "fs":
+        return _fs_covers(env.get("fs") or [], path or "", mode or "ro")
+    return False  # unmappable; handled as a refusal by the caller
+
+
+def _component_reach(ir: dict) -> dict[str, set]:
+    """`{component: {reached extern name, ...}}`, `*` included for the opaque
+    residue (a first-class-dispatched reach no name bounds). This is the same
+    authoritative G8/G4 boundary walk `revl audit` uses; reused here so the
+    sandbox gate partitions the exact reach the audit prints, with no second
+    walk to drift (the `_boundary` surface, `__main__._boundary`)."""
+    from .__main__ import _boundary  # noqa: PLC0415; lazy, avoids an import cycle
+    surface = _boundary(ir)
+    return {name: {e["name"] for e in (stats.get("externs") or [])}
+            for name, stats in surface.items()}
+
+
+def _envelope_str(env: dict) -> str:
+    """`net=none fs=none` / `net=all fs=/scratch:rw`; the one-line envelope."""
+    fs = env.get("fs") or []
+    return f"net={env.get('net', 'none')} fs={','.join(fs) if fs else 'none'}"
+
+
+def _reach_descriptor(pname: str, sandboxes: dict, backends: dict) -> str:
+    """How a provider process's reach reads on a seam-served line: its envelope
+    if it is sandboxed, else `full host reach` (an unsandboxed process runs with
+    the conductor's ambient authority)."""
+    backend = backends.get(pname, "py")
+    if pname in sandboxes:
+        env = sandboxes[pname]
+        return f"{pname}[{backend}, {env['isolation']}: {_envelope_str(env)}]"
+    return f"{pname}[{backend}, unsandboxed: full host reach]"
+
+
+def process_tag(pname: str, processes: dict, backends: dict, sandboxes: dict) -> str:
+    """The boot-summary tag for one process. A non-sandboxed process is
+    byte-identical to the pre-411 tag (`p[backend]=[comps]`); a sandboxed one
+    carries its rung + envelope (`p[py, container: net=none fs=none]=[comps]`)."""
+    backend = backends.get(pname) or _canonical_backend(
+        (processes.get(pname) or {}).get("backend", "py"))
+    comps = ",".join((processes.get(pname) or {}).get("components") or [])
+    if pname in sandboxes:
+        env = sandboxes[pname]
+        return f"{pname}[{backend}, {env['isolation']}: {_envelope_str(env)}]=[{comps}]"
+    return f"{pname}[{backend}]=[{comps}]"
+
+
+def sandbox_capability_gate(ir: dict, processes: dict, sandboxes: dict,
+                            needs: dict, requires: dict, provides: dict,
+                            owner: dict) -> str | None:
+    """The item-411 Slice-1 plan-time gate. Returns a diagnostic for the first
+    refusal, or None. Runs before anything spawns, next to the 119/363 gates.
+
+    Two refusals, plus a cell carve-out (the design's "Capability enforcement
+    and the plan-time gate"):
+
+    * **fail-closed unmappable need**: a `[sandbox.needs]` entry (consulted for
+      a reached host-rooted capability) naming a resource outside the fs/net
+      envelope vocabulary (`env`, `exec`, ...) is refused naming the entry and
+      the unmappable need. This is the one hard gate in Slice 1: the envelope
+      cannot enforce it, so it is never silently ignored.
+    * **advisory declared-need vs grant**: a reached host-rooted capability
+      whose DECLARED needs are not covered by the envelope is refused naming the
+      component, capability, need and missing grant. This borrows item 119's
+      refusal shape and claims 119's authority for NEITHER: the needs side is an
+      unverified authorial claim (G8 keeps the bodies opaque), so admission here
+      is advisory and the ENVELOPE, not this gate, is the security boundary. A
+      missing/understated entry defaults to "needs nothing" and is admitted.
+    * **cell opaque residue**: `*` (a first-class-dispatched reach) under a
+      `wasm-cell` is refused: the cell's confinement is a generated import set,
+      and an opaque reach has no representable import. On the container/microVM
+      rungs `*` is a REPORT (the envelope binds it regardless), not a refusal.
+    """
+    if not sandboxes:
+        return None
+    reach = _component_reach(ir)
+    for pname in processes:
+        if pname not in sandboxes:
+            continue
+        env = sandboxes[pname]
+        rung = env["isolation"]
+        for cname in processes[pname].get("components") or []:
+            host_rooted = reach.get(cname, set())
+            for cap in sorted(c for c in host_rooted if c != "*"):
+                declared = needs.get(cap)
+                if declared is None:
+                    continue  # advisory default: "needs nothing", admitted
+                for resource in declared:
+                    kind, path, mode = _parse_need(str(resource))
+                    if kind == "?":
+                        return (
+                            f"[sandbox.needs] entry {cap!r} names {str(resource)!r}, "
+                            f"which the sandbox envelope cannot enforce: the envelope "
+                            f"vocabulary is fs and net only (env, exec, ipc and device "
+                            f"authority are not confined by item 411). Remove the "
+                            f"entry, or express the need as an fs/net resource "
+                            f"(`net`, `fs:/path:rw`).")
+                    if not _need_covered(kind, path, mode, env):
+                        grant = (f'net = "{env["net"]}"' if kind == "net"
+                                 else (f"fs = [{', '.join(repr(m) for m in env['fs'])}]"
+                                       if env["fs"] else "fs = [] (no covering mount)"))
+                        want = "net" if kind == "net" else str(resource)
+                        grant_hint = 'net = "all"' if kind == "net" else "fs = [...]"
+                        return (
+                            f"component {cname!r} cannot run in sandbox {pname!r}: "
+                            f"capability {cap!r} needs {want}, but the sandbox grants "
+                            f"{grant}; grant it ([processes.{pname}.sandbox] "
+                            f"{grant_hint}), "
+                            f"serve it across the seam instead, or move the component "
+                            f"out of the sandbox")
+            if "*" in host_rooted and rung == "wasm-cell":
+                return (
+                    f"component {cname!r} reaches `*` (an opaque, first-class-"
+                    f"dispatched host surface) but is placed in the `wasm-cell` "
+                    f"sandbox {pname!r}: a cell's confinement is a generated import "
+                    f"set and an opaque reach has no representable import. Use the "
+                    f"`container` rung, whose runtime envelope binds an opaque body "
+                    f"regardless.")
+    return None
+
+
+def render_sandbox_summary(processes: dict, sandboxes: dict, reach: dict,
+                           needs: dict, requires: dict, provides: dict,
+                           owner: dict, backends: dict) -> list[str]:
+    """The per-sandboxed-process boot-summary / audit lines: the envelope-scope
+    note, the opaque-reach report, the seam-served keys with each provider's
+    reach, the claimed-vouched externs, and the net=none egress note. Empty for
+    a placement with no sandbox (additivity)."""
+    lines: list[str] = []
+    for pname in processes:
+        if pname not in sandboxes:
+            continue
+        env = sandboxes[pname]
+        comps = processes[pname].get("components") or []
+        host_rooted: set = set()
+        for cname in comps:
+            host_rooted |= reach.get(cname, set())
+        lines.append(f"  sandbox {pname}: envelope confines fs+net only; "
+                     f"env/exec/ipc unenforced")
+        if "*" in host_rooted:
+            lines.append("    reach * (opaque host surface), bounded only by the envelope")
+        # seam-served keys: required by this process, owned by ANOTHER process
+        seam_keys = sorted(k for k in requires.get(pname, {})
+                           if k not in provides.get(pname, {})
+                           and owner.get(k) not in (None, pname))
+        if seam_keys:
+            pad = " " * len("    seam-served: ")
+            for i, key in enumerate(seam_keys):
+                head = "    seam-served: " if i == 0 else pad
+                lines.append(f"{head}{key} -> "
+                             f"{_reach_descriptor(owner[key], sandboxes, backends)}")
+        vouched = sorted(c for c in host_rooted if c != "*" and c in needs)
+        if vouched:
+            lines.append("    vouched self-contained (claimed, unverified): "
+                         + ", ".join(vouched))
+        lines.append(f"    note: net={env['net']} bounds this process's own egress, "
+                     f"not the reach of its seam-served providers")
+    return lines
+
+
+def sandbox_audit_view(ir: dict, placement: dict) -> tuple[list[str], str | None]:
+    """`revl audit --placement`: the sandbox envelope + per-key reach + claimed-
+    vouched list for a placement, computed off the same reach walk the gate and
+    boot summary use. Returns `(lines, None)` or `([], diagnostic)`. Empty lines
+    (no diagnostic) when the placement declares no sandbox."""
+    expanded, err = expand_tiers(
+        placement, [c["name"] for c in ir.get("components") or []])
+    if err:
+        return [], err
+    processes = expanded.get("processes") or {}
+    needs = (expanded.get("sandbox") or {}).get("needs") or {}
+    sandboxes: dict[str, dict] = {}
+    for pname, pconf in processes.items():
+        sb = pconf.get("sandbox")
+        if sb is None:
+            continue
+        normalized, sb_err = _normalize_sandbox_table(sb)
+        if sb_err:
+            return [], f"process {pname!r} [sandbox]: {sb_err}"
+        sandboxes[pname] = normalized
+    if not sandboxes:
+        return [], None
+    components = {c["name"]: c for c in ir.get("components") or []}
+
+    def _merged(cnames, which):
+        out: dict[str, str] = {}
+        for cname in cnames:
+            out.update((components.get(cname) or {}).get(which) or {})
+        return out
+
+    requires = {p: _merged(pc.get("components") or [], "requires")
+                for p, pc in processes.items()}
+    provides = {p: _merged(pc.get("components") or [], "provides")
+                for p, pc in processes.items()}
+    owner = {key: p for p, keys in provides.items() for key in keys}
+    backends = {p: _canonical_backend(pc.get("backend", "py"))
+                for p, pc in processes.items()}
+    reach = _component_reach(ir)
+    lines = ["sandbox placement (item 411): envelope confines fs+net only "
+             "(env/exec/ipc/devices unenforced); the envelope, not the needs "
+             "table, is the security boundary"]
+    for pname in processes:
+        if pname in sandboxes:
+            lines.append("  " + process_tag(pname, processes, backends, sandboxes))
+    lines.extend(render_sandbox_summary(
+        processes, sandboxes, reach, needs, requires, provides, owner, backends))
+    return lines, None
+
+
+# --------------------------------------------------------------------------
 # live swap: admission gate (roadmap §23, `revl swap <component> --to <backend>`)
 # --------------------------------------------------------------------------
 
 
-def swap_admission(files, running_ir: dict, component: str, backend: str):
+def swap_admission(files, running_ir: dict, component: str, backend: str,
+                   from_backend: str | None = None):
     """Admit a candidate provider for `component`, re-hosted on `backend`,
     against the *running* manifest. Returns ``(candidate_ir, None)`` when the
     swap is admissible, or ``(None, diagnostic)`` when it is refused — in which
@@ -251,12 +724,21 @@ def swap_admission(files, running_ir: dict, component: str, backend: str):
       operation a consumer still calls is refused here with a guarantee-naming
       diagnostic (G2/G3, `differs from the running manifest in a way that
       breaks <consumer>`).
-    * **the seam is crossable** — a tier swap moves the component into its own
-      process, so every service it *provides and another component consumes*
-      must be transport-safe (async, value-typed; docs/interop-bridge.md §4).
-      An address-space-bound service (a sync `fn`, an `emission`, or a resource
-      return) cannot be re-pointed across a process boundary, so the swap is
-      refused before anything is booted.
+    * **the seam is crossable, in both directions.** A tier swap moves the
+      component into its own process, so every seam between it and the rest of
+      the composition becomes cross-process, INBOUND and OUTBOUND alike. A
+      resource-type return cannot cross a process seam by copy in either
+      direction, so a resource crossing on the services the component provides
+      (consumed by a component staying behind) OR on the services it requires
+      (from a component staying behind) is refused, through the same tier-
+      agnostic predicate the plan-time gate uses (`resource_crossing_refusal`).
+      The outbound side additionally refuses a re-pointed sync `fn`/`emission`:
+      an existing consumer's live call site is re-pointed across the new seam and
+      only a transport-safe (async, value-typed) service survives that re-point.
+      All of this is decided before anything is booted, and `do_swap` re-runs the
+      real plan-time gate (`cross_tier_boundary_check` + `tier_capability_gate`)
+      over the post-swap topology, so the swap-vs-plan parity is actual and
+      symmetric rather than prose.
 
     A pure tier swap (same source, new backend) satisfies the first trivially;
     the check still runs, because passing it *is* the cross-tier guarantee.
@@ -273,6 +755,44 @@ def swap_admission(files, running_ir: dict, component: str, backend: str):
         return None, (f"{component!r} is not a component of the running "
                       f"composition (nothing to swap)")
 
+    # Model the post-swap topology as two processes: the moving component alone
+    # (it goes to its own process on `backend`, v1 scope) and everything staying
+    # behind. Every seam between the two halves becomes cross-process, in BOTH
+    # directions: the services the component PROVIDES that another consumes
+    # (outbound) and the services it REQUIRES from a component staying behind
+    # (inbound). A resource handle cannot cross a process seam by copy either
+    # way, so refuse a resource crossing on EITHER side through the SAME shared
+    # predicate the plan-time gate uses (`resource_crossing_refusal`), keeping
+    # the swap-vs-plan parity actual and symmetric rather than a private loop
+    # that only walked the provides side.
+    cand_comps = candidate.get("components") or []
+    cand_moving = next((c for c in cand_comps
+                        if c.get("name") == component), running_comp)
+    move_provides = cand_moving.get("provides") or {}
+    move_requires = cand_moving.get("requires") or {}
+    rest_provides: dict[str, str] = {}
+    rest_requires: dict[str, str] = {}
+    for other in cand_comps:
+        if other.get("name") == component:
+            continue
+        rest_provides.update(other.get("provides") or {})
+        rest_requires.update(other.get("requires") or {})
+    model_provides = {"__moving__": dict(move_provides), "__rest__": rest_provides}
+    model_requires = {"__moving__": dict(move_requires), "__rest__": rest_requires}
+    model_owner = {k: "__moving__" for k in move_provides}
+    model_owner.update({k: "__rest__" for k in rest_provides})
+    model_backends = {"__moving__": backend, "__rest__": from_backend or "py"}
+    resource_problem = resource_crossing_refusal(
+        candidate, model_requires, model_provides, model_owner, model_backends)
+    if resource_problem is not None:
+        return None, resource_problem
+
+    # The provides side (outbound) additionally refuses a re-pointed SYNC/emission
+    # service: an existing consumer's live call site is re-pointed across the new
+    # seam, and only a transport-safe (async, value-typed) service survives that
+    # re-point. The inbound side is a FRESH successor wiring (no live re-point),
+    # so a sync inbound seam is permitted here exactly as the plan-time gate
+    # permits (and reports) a cross-tier sync seam.
     provided = running_comp.get("provides") or {}
     consumed_services = set()
     for other in running_ir.get("components") or []:
@@ -566,22 +1086,44 @@ def _preflight(backends_used: set[str], files, placement_path: str, once: bool) 
 # --------------------------------------------------------------------------
 
 
-def _names_in(node, acc: set) -> set:
-    """Every `name`/`id` string reachable in an IR subtree — enough to tell
-    whether a component's body reaches a given extern (an extern call is a
-    `{"kind": "fn", "name": "<extern>"}` node; a bare reference an
-    `{"kind": "name", "id": ...}`). Over-inclusive by design: it never drops an
-    extern a kept component still reaches."""
+def _names_in(node, acc: set, bound: frozenset = frozenset()) -> set:
+    """Every extern/fn/reference name reachable in an IR subtree — enough to
+    tell whether a component's body reaches a given extern (an extern or
+    top-level-fn call is a `{"kind": "fn", "name": "<extern>"}` node; a bare
+    reference an `{"kind": "name", "id": ...}` or `{"kind": "var", "name":
+    ...}`).
+
+    Kind-aware over parameter binders (item 363 hardening F6): a method or
+    lambda PARAMETER shadows any same-named extern within its body, so a bare
+    reference whose name is a bound parameter does NOT count as reaching that
+    extern. Otherwise a component whose method merely has a parameter spelled
+    like a `@py`-only extern would be dragged into a native slice and refused
+    blaming the innocent component. This is sound because the lowerer has
+    already resolved scope: a `{"kind": "fn", ...}` extern call never names a
+    shadowed local (a call to a param lowers to a `call` over a `name`/`var`),
+    so extern/fn calls are always counted; only bare `name`/`var` references are
+    filtered by the parameter set. Non-parameter binders (let/for/match) are
+    left over-inclusive — the safe direction, never dropping a reached extern."""
     if isinstance(node, dict):
-        for field in ("name", "id"):
-            value = node.get(field)
-            if isinstance(value, str):
-                acc.add(value)
+        kind = node.get("kind")
+        # a method/lambda introduces its parameters as binders for its body
+        params = node.get("params")
+        inner = (bound | {p for p in params if isinstance(p, str)}
+                 if isinstance(params, list) else bound)
+        if kind in ("name", "var"):
+            ref = node.get("id") if kind == "name" else node.get("name")
+            if isinstance(ref, str) and ref not in bound:
+                acc.add(ref)
+        else:
+            for field in ("name", "id"):
+                value = node.get(field)
+                if isinstance(value, str) and value not in bound:
+                    acc.add(value)
         for value in node.values():
-            _names_in(value, acc)
+            _names_in(value, acc, inner)
     elif isinstance(node, list):
         for value in node:
-            _names_in(value, acc)
+            _names_in(value, acc, bound)
     return acc
 
 
@@ -623,6 +1165,330 @@ def ts_safe_ir(ir: dict) -> dict:
     out["functions"] = [f for f in ir.get("functions") or []
                         if not reaches_py_only(f)]
     return out
+
+
+def placement_slice(ir: dict, kept) -> dict:
+    """The slice of a linked composition a process hosts (roadmap item 363,
+    the general form of `ts_safe_ir`). Keep the `kept` components, every
+    service and type declaration, and every top-level fn and extern REACHED
+    from a kept component (transitively through kept fns); drop the rest.
+
+    Two load-bearing properties, each an exit test:
+
+    * **Additive.** A process that hosts every component gets the full IR back
+      byte-identical (the guard below), so a single-process placement — and
+      every all-same-tier placement — builds exactly today's artifact.
+    * **Unblocking.** A `@py`-only extern reached only by py-placed components
+      never reaches the rust/go emitter, so a composition whose control plane
+      touches a `@py` extern can still place its hot worker on rust. This is
+      `ts_safe_ir`'s job done once, uniformly, by placement declaration instead
+      of per-tier body inference; `ts_safe_ir` stays as a second ts-specific
+      filter applied after this slice.
+
+    Reachability reuses the deliberately over-inclusive `_names_in` name walk
+    (it never drops an extern a kept component still reaches). A shared pure fn
+    reached from both sides of a seam is kept in BOTH slices — correct (pure
+    code has no home process), and exactly where the item-385 cross-tier
+    byte-equality discipline bites.
+    """
+    all_names = {c.get("name") for c in ir.get("components") or []}
+    kept = {k for k in kept if k in all_names}
+    if kept >= all_names:
+        return ir  # hosts everything -> the whole document, byte-identical
+    components = [c for c in ir.get("components") or [] if c.get("name") in kept]
+    functions = ir.get("functions") or []
+    externs = ir.get("externs") or []
+    reachable: set = set()
+    for comp in components:
+        _names_in(comp, reachable)
+    # fixpoint: a kept fn may reach further fns/externs (a shared helper chain)
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            if fn.get("name") in reachable:
+                before = len(reachable)
+                _names_in(fn, reachable)
+                changed = changed or len(reachable) != before
+    out = dict(ir)
+    out["components"] = components
+    out["functions"] = [f for f in functions if f.get("name") in reachable]
+    out["externs"] = [e for e in externs if e.get("name") in reachable]
+    return out
+
+
+# per-backend emitter modules, imported lazily for the plan-time capability
+# dry-run. Every emitter is pure-python codegen (stdlib only), so the gate
+# needs no tier toolchain — a fn-typed component placed on java is refused at
+# plan time with the emitter's own tier-limit message, never a javac stderr.
+_EMIT_GATE_MODULES: dict[str, object] = {}
+_EMIT_GATE_PATHS = {
+    "py": _BACKENDS_DIR / "python" / "emit.py",
+    "node": _TS_DIR / "emit.py",
+    "rust": _BACKENDS_DIR / "rust" / "emit.py",
+    "go": _GO_DIR / "emit.py",
+    "java": _JAVA_DIR / "emit.py",
+}
+
+
+def _emit_gate_module(backend: str):
+    if backend not in _EMIT_GATE_MODULES:
+        path = _EMIT_GATE_PATHS[backend]
+        spec = importlib.util.spec_from_file_location(f"revl_{backend}_emit_gate", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _EMIT_GATE_MODULES[backend] = module
+    return _EMIT_GATE_MODULES[backend]
+
+
+def _py_only_externs(ir: dict) -> set[str]:
+    """Externs with no `@ts` body — the ones `ts_safe_ir` deletes (and every
+    component reaching one with them)."""
+    return {e.get("name") for e in ir.get("externs") or []
+            if "ts" not in (e.get("bodies") or {}) and e.get("name")}
+
+
+def _dryrun_emit(backend: str, sliced: dict) -> None:
+    """Run `backend`'s emitter over `sliced` via the SAME entry point the real
+    build uses for that tier, and let its tier-limit `EmitError` propagate. The
+    emitters ARE the capability oracle (docs/conformance.md): each tier limit
+    lives as a named refusal at emit time, so dry-running the emit keeps the
+    gate exactly as strong as the real refusal set with no second list to drift
+    (the design's recommended shape).
+
+    Two per-tier alignments the initial cut got wrong:
+
+    * **go** — the build runs `emit_placement` (item 363's `_emit_v3_placement`
+      + interop bridge), but the gate ran `emit`, which for an ir_version-3 doc
+      with any top-level fn/type/extern routes to `_emit_v3_go` and DROPS the
+      components. Every tier limit in the component/bridge codegen path escaped
+      the gate and surfaced as a raw "go emit failed" RuntimeError AFTER the
+      gate said yes — the exact failure stage-3 exists to eliminate (F2). rust,
+      node and java already agree with their builds via `emit`.
+    * **node** — the build (and this dry-run) narrows through `ts_safe_ir`,
+      which DELETES any component reaching a py-only extern rather than refusing
+      it, so a node-placed dirty component would be silently omitted from the
+      artifact while the spec still lists it (a boot crash, F3). Diff the placed
+      component set against `ts_safe_ir`'s output and REFUSE at plan time,
+      naming the component + the py-only extern it reaches."""
+    module = _emit_gate_module(backend)
+    if backend == "node":
+        placed_comps = {c.get("name") for c in sliced.get("components") or []}
+        safe = ts_safe_ir(sliced)
+        kept_comps = {c.get("name") for c in safe.get("components") or []}
+        dropped = placed_comps - kept_comps
+        if dropped:
+            py_only = _py_only_externs(sliced)
+            by_name = {c.get("name"): c for c in sliced.get("components") or []}
+            details = []
+            for cname in sorted(n for n in dropped if n is not None):
+                reached = sorted(_names_in(by_name.get(cname) or {}, set()) & py_only)
+                reach_str = ", ".join(reached) or "a py-only extern"
+                details.append(f"{cname} (reaches {reach_str})")
+            raise RuntimeError(
+                "a node-placed component reaches a `@py`-only extern (no `@ts` "
+                "body), which the ts tier cannot emit: " + "; ".join(details)
+                + " — a py-only provider must stay on the py tier and be reached "
+                "across the seam as a bridge proxy (place it on `py`, or give the "
+                "extern a `@ts` body)")
+        module.emit(safe)
+    elif backend == "go":
+        module.emit_placement(sliced, "emitted")
+    else:  # py, rust, java
+        module.emit(sliced)
+
+
+def tier_capability_gate(ir: dict, placed: dict, backends: dict) -> str | None:
+    """Refuse, at plan time, a component placed on a tier that cannot emit it,
+    naming the component, the tier, and the tier's own reason — never a raw
+    toolchain error (roadmap item 363, stage 3).
+
+    Mechanism: dry-run each tier's placement slice through its emitter before
+    anything spawns. On a refusal, attribution re-emits single-component
+    sub-slices to name the culprit (bounded work, only on the failure path).
+    `py` is skipped — it is the reference tier and refuses no construct that
+    compiled — so a placement using only `py` processes runs no gate and is
+    byte-identical.
+    """
+    # components hosted on each compiled tier, in load order for a stable slice
+    by_backend: dict[str, list[str]] = {}
+    order = [c.get("name") for c in ir.get("components") or []]
+    for cname in order:
+        backend = backends.get(placed.get(cname))
+        if backend and backend != "py":
+            by_backend.setdefault(backend, []).append(cname)
+    for backend, comps in by_backend.items():
+        try:
+            _dryrun_emit(backend, placement_slice(ir, set(comps)))
+        except Exception as whole:  # noqa: BLE001 — any refusal is a plan diagnostic
+            culprit, reason = None, str(whole).strip()
+            for cname in comps:
+                try:
+                    _dryrun_emit(backend, placement_slice(ir, {cname}))
+                except Exception as single:  # noqa: BLE001
+                    culprit, reason = cname, str(single).strip()
+                    break
+            named = f"component {culprit!r}" if culprit else "a component"
+            return (
+                f"{named} cannot be placed on the `{backend}` tier: {reason}\n"
+                f"       (place it on a tier that supports the construct, or "
+                f"keep it on the default tier; the `{backend}` emitter is the "
+                f"capability oracle — docs/conformance.md)")
+    return None
+
+
+def resource_crossing_refusal(ir: dict, requires: dict, provides: dict,
+                              owner: dict, backends: dict) -> str | None:
+    """Refuse a resource-type value crossing ANY cross-process seam, TIER-
+    AGNOSTIC (Finding A). Returns a diagnostic naming the service, method and
+    resource, or None.
+
+    A resource type (an `extern acquire` return, or any record/variant that
+    carries one transitively — `_resource_taint`) cannot cross a PROCESS
+    boundary by copy: its lifetime is tied to a fiber in the providing process,
+    so a copy is a dead handle detached from its undo/teardown contract. That is
+    true whether the two processes run on the SAME backend (py<->py) or on
+    different tiers. The refusal therefore runs on every cross-process seam the
+    conductor wires, not only the cross-tier ones — the same seams the
+    proxy/serve construction loop in `run_placement` builds.
+
+    Only a CROSS-PROCESS crossing is refused. A resource shared WITHIN one
+    process is fine: a key a process both requires and provides is served
+    locally (`key in provides[consumer]`) and skipped here, so two components
+    co-located in one process pass a handle in memory, ungated. A key with no
+    local owner is a remote seam (item 151), a separate composition reached by
+    address; there is no local provider to gate here.
+
+    The refusal keys on the STRUCTURED `resources` kind from `distributability`,
+    not on the substring of a human reason string — a wording change to the
+    reason cannot silently disarm it (item 363 F1). The closure in
+    `_resource_taint` makes it fire for a handle NESTED in a user record or a
+    variant case payload, and the signature-level scan resolves a closed
+    generic argument (`ConnG[Socket]`), so a renamed/wrapped handle is caught
+    too.
+    """
+    verdicts = distributability(ir)
+    for consumer, keys in requires.items():
+        for key, service in keys.items():
+            if key in provides.get(consumer, {}):
+                continue  # served locally in-process, not a seam
+            host = owner.get(key)
+            if host is None:
+                continue  # a remote seam (item 151) has no local owner to gate
+            # host != consumer here (a locally-served key was skipped above), so
+            # this key genuinely crosses a process boundary; refuse a resource
+            # crossing it regardless of whether the tiers match.
+            resource_hits = (verdicts.get(service) or {}).get("resources") or []
+            if resource_hits:
+                resource_reasons = [
+                    f"{h['method']}: resource type {h['type']} crosses"
+                    for h in resource_hits]
+                same_tier = backends.get(host) == backends.get(consumer)
+                boundary = (
+                    f"same-tier process {host!r} -> {consumer!r} on "
+                    f"{backends.get(consumer)}" if same_tier else
+                    f"tier boundary {backends.get(consumer)} <- {backends.get(host)}")
+                return (
+                    f"service `{service}` (key {key!r}) crosses the {boundary} "
+                    f"but is address-space-bound: {', '.join(resource_reasons)}. "
+                    "An OWNED resource handle's bracket lives in the providing "
+                    "process (item 308); it cannot cross a process seam by copy "
+                    "(same tier or across tiers) — a copy is a dead handle "
+                    "detached from its undo/teardown contract — and a witnessed "
+                    "rollback across a seam is out of scope (parity with the "
+                    "`revl swap` gate, docs/interop-bridge.md §3-4).")
+    return None
+
+
+def cache_crossing_refusal(ir: dict, requires: dict, provides: dict,
+                           owner: dict) -> str | None:
+    """Refuse a `cache`-declaring seam method split across a PROCESS boundary
+    (roadmap item 310, §invalidated_by scope). Returns a diagnostic naming the
+    service, method and split, or None.
+
+    "Ordered by the same WAL" presumes ONE WAL: the item-310 entry store is
+    per-session and single-process. A composition placed across processes has
+    each child firing its own extern crossings locally, where no shared WAL
+    orders an `invalidated_by` crossing against an entry held in another process
+    — a per-process private cache with cross-process invalidation traffic is
+    exactly the stale-read bug the freshness clause exists to prevent. Until the
+    federation surface lands, a distributed placement refuses `cache` on any
+    method the placement splits from its invalidating crossings, at admission,
+    next to the resource-crossing refusal. The same composition placed in ONE
+    process admits (this check only fires on a cross-process seam)."""
+    services = ir.get("services") or {}
+    for consumer, keys in requires.items():
+        for key, service in keys.items():
+            if key in provides.get(consumer, {}):
+                continue  # served locally in-process, not a seam
+            host = owner.get(key)
+            if host is None:
+                continue  # a remote seam (item 151) has no local owner to gate
+            methods = (services.get(service) or {}).get("methods") or {}
+            cached = sorted(m for m, spec in methods.items()
+                            if (spec or {}).get("cache"))
+            if cached:
+                return (
+                    f"service `{service}` (key {key!r}) declares `cache` on "
+                    f"{', '.join(cached)} but is split across a process seam "
+                    f"({host!r} -> {consumer!r}). The item-310 entry store is "
+                    "single-process and WAL-ordered; a per-process private cache "
+                    "with cross-process invalidation traffic is the stale-read "
+                    "bug `invalidated_by` exists to prevent. Cross-composition "
+                    "invalidation is the federation surface (unshipped) — place "
+                    "the cache-declaring method in one process, or drop `cache` "
+                    "(item 310, §invalidated_by scope).")
+    return None
+
+
+def cross_tier_boundary_check(ir: dict, requires: dict, provides: dict,
+                              owner: dict, backends: dict,
+                              services: dict) -> tuple[str | None, list[str]]:
+    """Plan-time checks over the cross-process seams the conductor creates
+    (roadmap item 363, stage 4; Finding A follow-up). Two halves with different
+    tier scope:
+
+    * **Refuse** a resource-type crossing, TIER-AGNOSTIC, via
+      `resource_crossing_refusal`. A handle cannot cross a process seam by copy
+      whether or not the two processes share a backend, so this half runs on
+      SAME-TIER seams too (Finding A: the same-tier short-circuit below used to
+      let a handle cross two py processes ungated). This is parity with the
+      `revl swap` gate (`placement.py` `swap_admission`).
+    * **Report** a sync (address-space-bound-for-async-reasons) crossing, CROSS-
+      TIER only. A sync `fn`/`emission` behind a cross-tier seam is permitted
+      (today's cross-process placements permit it and pay the blocking round-
+      trip) but NAMED — a hot worker behind a sync seam is a performance lie the
+      author should see before wondering where the native speedup went. A
+      same-tier sync seam is unchanged from today (no report line).
+
+    Returns ``(diagnostic_or_None, report_lines)``.
+    """
+    problem = resource_crossing_refusal(ir, requires, provides, owner, backends)
+    if problem is not None:
+        return problem, []
+    problem = cache_crossing_refusal(ir, requires, provides, owner)
+    if problem is not None:
+        return problem, []
+    verdicts = distributability(ir)
+    lines: list[str] = []
+    for consumer, keys in requires.items():
+        for key, service in keys.items():
+            if key in provides.get(consumer, {}):
+                continue  # served locally, not a seam
+            host = owner.get(key)
+            if host is None:
+                continue  # a remote seam (item 151) has no local owner
+            if backends.get(host) == backends.get(consumer):
+                continue  # same-tier seam: no sync report (byte-identical today)
+            verdict = verdicts.get(service) or {}
+            reasons = verdict.get("reasons") or []
+            if verdict.get("verdict") == "address-space-bound":
+                lines.append(
+                    f"  seam {consumer}.{key} ({backends.get(consumer)} <- "
+                    f"{backends.get(host)}): service `{service}` is "
+                    f"address-space-bound ({', '.join(reasons)}) — permitted, "
+                    "but each call is a blocking cross-tier round-trip")
+    return None, lines
 
 
 def _emit_ts_module(ir: dict, tmp: Path) -> str:
@@ -801,6 +1667,15 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         return 1
 
     placement = _load_placement(placement_path)
+    # item 363: a `[tiers]` / `default_tier` manifest declares a backend tier
+    # per component and is expanded here into the equivalent synthesized
+    # `[processes]` topology (one process per distinct tier). A classic
+    # `[processes]` manifest is returned unchanged, so everything below runs
+    # identically and is byte-identical for existing placements.
+    placement, tier_err = expand_tiers(placement, [c["name"] for c in ir.get("components") or []])
+    if tier_err:
+        print(f"error: {tier_err}", file=sys.stderr)
+        return 1
     processes = placement.get("processes") or {}
     config = placement.get("config") or {}
     # composition-wide seam-deadline default; a process may override it, and a
@@ -848,6 +1723,14 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     requires = {p: merged(pc.get("components") or [], "requires") for p, pc in processes.items()}
     owner = {key: p for p, keys in provides.items() for key in keys}
     methods = {name: list((svc.get("methods") or {}).keys()) for name, svc in (ir.get("services") or {}).items()}
+    # `async fn` operations must forward across a seam as awaitables, so a
+    # chained async provide (`async fn hit(k) = cache.get(k)`) that emits
+    # `await cache.get(k)` resolves the cross-seam value instead of awaiting a
+    # bare str (item 331). Read the async subset off the service declaration.
+    async_methods = {
+        name: [m for m, spec in (svc.get("methods") or {}).items() if spec.get("async")]
+        for name, svc in (ir.get("services") or {}).items()
+    }
     key_service: dict[str, str] = {}
     for comp in components.values():
         key_service.update(comp.get("provides") or {})
@@ -883,6 +1766,25 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     cap_realm_problem = capability_realm_diagnostic(processes, ir, required_caps)
     if cap_realm_problem:
         return abort(cap_realm_problem)
+
+    # --- sandbox placement (item 411, Slice 1): a process may declare an
+    # isolation boundary + fs/net envelope, either as `[processes.<p>.sandbox]`
+    # (validated here) or via the `[tiers]`-form `[sandbox]` sugar (already
+    # split into `sandbox_<component>` processes by expand_tiers, carrying the
+    # raw table; normalized here uniformly). The `[sandbox.needs]` table is
+    # form-independent. Purely additive: a placement with no sandbox surface
+    # builds `sandboxes = {}` and every 411 step below is a no-op.
+    sandboxes: dict[str, dict] = {}
+    for pname, pconf in processes.items():
+        sb_raw = pconf.get("sandbox")
+        if sb_raw is None:
+            continue
+        normalized, sb_err = _normalize_sandbox_table(sb_raw)
+        if sb_err:
+            return abort(f"process {pname!r} [sandbox]: {sb_err}")
+        sandboxes[pname] = normalized
+    sandbox_needs = (placement.get("sandbox") or {}).get("needs") or {}
+
     if placement.get("report_colocation"):
         for advice in colocation_advice(processes, placed, ir):
             print(f"  co-location: {advice}", flush=True)
@@ -1066,6 +1968,12 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     backends: dict[str, str] = {}
     for pname, pconf in processes.items():
         backend = _canonical_backend(pconf.get("backend", "py"))
+        if backend == "wasm" or pconf.get("backend") == "wasm":
+            return abort(f"process {pname!r} is on the `wasm` tier, which is not a "
+                         "placement tier: no wasm placement runner, bridge client, "
+                         "or stub exists on the substrate (a wasm placement runner "
+                         "is a separately designed follow-on). Place native "
+                         "components on `rust` or `go`.")
         if backend not in KNOWN_BACKENDS:
             return abort(f"process {pname!r} has unsupported backend {pconf.get('backend')!r} "
                          f"({', '.join(KNOWN_BACKENDS)})")
@@ -1083,6 +1991,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             if host is None and key not in remote_specs:
                 return abort(f"key {key!r} required by {pname!r} is provided by no process")
             entry = {"methods": methods.get(service, []), "service": service,
+                     "async_methods": async_methods.get(service, []),
                      "deadline": p_deadline}
             if key in remote_specs:
                 # a remote seam (item 151): the provider is a *separate*
@@ -1117,6 +2026,16 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             # consumers live in other placements and are not enumerable here.
             serve_keys = list(provides[pname])
         own = [c for c in load_order if placed.get(c) == pname]
+        # F4: a process gets only the config of the components IT hosts, and only
+        # the `@ts ref` hash-checks for the externs ITS slice reaches — never the
+        # whole [config] table (a `[config.ControlPlane] db_url = "...secret..."`
+        # must not be delivered to a tier that hosts no reader of it) nor every
+        # extern's refs (a node process must not hash-check refs for externs it
+        # does not host). A process hosting every component gets the full slice
+        # back, so a single-process placement is byte-identical.
+        own_config = {c: config[c] for c in own if c in config}
+        own_externs = {e.get("name")
+                       for e in placement_slice(ir, set(own)).get("externs") or []}
         spec = {
             "name": pname,
             "backend": backend,
@@ -1129,10 +2048,28 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             # already resolved as proxies before local activation, so they are
             # (correctly) absent here. docs/parallel-activation.md.
             "depends": local_prereqs(manifest_entries, subset=own),
-            "config": config,
+            "config": own_config,
             "provides": list(provides[pname]),
             "proxies": proxies,
             "probe": pconf.get("probe") or [],
+            # item 396 option B / 410: the two host-ref roots the node runner
+            # joins a `@ts ref` against, plus the per-ref hash-check list. 396(B)
+            # set NEITHER under placement (a pre-existing gap for user refs); 410
+            # fixes it for the stdlib kind (self-derived by the runner too) and in
+            # passing for the user kind. `refRoot` is the user root compile tree;
+            # `stdlibRefRoot` the install tree. Harmless for non-node backends,
+            # which ignore the keys.
+            "refRoot": (os.path.dirname(os.path.abspath(str(files[0])))
+                        if files else ""),
+            "stdlibRefRoot": str(stdlib_root().parent),
+            "refs": [
+                {"extern": e.get("name"), "path": r["path"],
+                 "sha256": r["sha256"],
+                 **({"root": r["root"]} if r.get("root") else {})}
+                for e in ir.get("externs") or []
+                if e.get("name") in own_externs
+                for r in [(e.get("refs") or {}).get("ts")] if r is not None
+            ],
         }
         if serve_keys:
             # `methods` is the stub's allowlist: the operations the *service
@@ -1165,25 +2102,37 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     cleanup: list[str] = []
     built: dict[str, object] = {}
 
-    def ensure_backend(backend: str) -> None:
-        if backend in built:
+    def _backend_slice(backend: str, extra=()) -> dict:
+        """The IR a tier's emitter sees: the placement slice of every component
+        hosted on that backend (item 363). `extra` names a component being
+        swapped onto the tier live, so its successor build contains it. A tier
+        that hosts every component gets the full IR back byte-identical, so an
+        existing (single-tier or all-same-tier) placement builds today's
+        artifact unchanged."""
+        comps = {c for c, p in placed.items() if backends.get(p) == backend}
+        comps |= set(extra)
+        return placement_slice(ir, comps)
+
+    def ensure_backend(backend: str, extra=(), rebuild: bool = False) -> None:
+        if backend in built and not rebuild:
             return
+        sliced = _backend_slice(backend, extra)
         if backend == "node":
-            module = _emit_ts_module(ir, tmp)
+            module = _emit_ts_module(sliced, tmp)
             cleanup.append(module)
             built["node"] = module
         elif backend == "rust":
-            built["rust"] = _build_rust(ir, tmp)
+            built["rust"] = _build_rust(sliced, tmp)
         elif backend == "go":
-            built["go"] = _build_go(ir, tmp)
+            built["go"] = _build_go(sliced, tmp)
         elif backend == "java":
             java21_bin = _find_jdk21()
             cordis_classes = _find_cordis4j_classes()
             if java21_bin and cordis_classes:
-                built["java"] = ("real", _build_java_real(ir, tmp, java21_bin, cordis_classes),
+                built["java"] = ("real", _build_java_real(sliced, tmp, java21_bin, cordis_classes),
                                  java21_bin, cordis_classes)
             else:
-                built["java"] = ("stub", _build_java(ir, tmp), None, None)
+                built["java"] = ("stub", _build_java(sliced, tmp), None, None)
         else:  # py needs no build step
             built["py"] = True
 
@@ -1222,6 +2171,38 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             return ["java", "-cp", out, "PlacementRunner", str(spec_file)], None, "term"
         return [sys.executable, "-m", "revl._process_runner", str(spec_file)], env, "term"
 
+    # --- tier-capability gate (item 363, stage 3): a component placed on a
+    # tier that cannot emit it is refused HERE, at plan time, with a diagnostic
+    # naming the component + tier + the tier's own reason — never a raw
+    # toolchain error after a partial spawn. The emitters are the oracle
+    # (dry-run per slice); wasm was already refused at expansion.
+    cap_problem = tier_capability_gate(ir, placed, backends)
+    if cap_problem:
+        return abort(cap_problem)
+
+    # --- cross-process boundary checks (item 363, stage 4; Finding A): refuse a
+    # resource-type crossing on EVERY cross-process seam, tier-agnostic (parity
+    # with the swap gate; a handle cannot cross a process seam and a witnessed
+    # rollback across a seam is out of scope) — including same-tier py<->py
+    # seams, which the earlier cross-tier-only check let a handle cross ungated.
+    # The sync (address-space-bound) REPORT half stays cross-tier only: a
+    # same-tier value-typed seam is still byte-identical to today.
+    boundary_problem, boundary_report = cross_tier_boundary_check(
+        ir, requires, provides, owner, backends, services)
+    if boundary_problem:
+        return abort(boundary_problem)
+    for advice in boundary_report:
+        print(advice, flush=True)
+
+    # --- sandbox placement gate (item 411, Slice 1): the fail-closed
+    # unmappable-need refusal + the advisory declared-need-vs-envelope refusal +
+    # the cell opaque-residue refusal, all before anything spawns. A no-op when
+    # the placement declares no sandbox (`sandboxes == {}`).
+    sandbox_problem = sandbox_capability_gate(
+        ir, processes, sandboxes, sandbox_needs, requires, provides, owner)
+    if sandbox_problem:
+        return abort(sandbox_problem)
+
     try:
         for backend in backends.values():
             ensure_backend(backend)
@@ -1231,8 +2212,25 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     for pname, spec in specs.items():
         adapt_spec(spec, backends[pname])
 
-    summary = "  ".join(f"{p}[{backends[p]}]=[{','.join(processes[p].get('components') or [])}]" for p in processes)
+    summary = "  ".join(process_tag(p, processes, backends, sandboxes) for p in processes)
     print(f"placement: {summary}", flush=True)
+    if sandboxes:
+        # item 411 Slice 1: the envelope + effective reach per sandboxed
+        # process (the per-key seam-served provider reach, the opaque residue,
+        # the claimed-vouched externs, and the net=none egress note), so
+        # `net=none` is never readable as a total-egress claim. The isolation
+        # is DECLARED and gated here but not yet ENFORCED; the runtime driver
+        # (container/microVM/wasm-cell launch, boot canary, per-rung transport,
+        # the conductor-served approval channel) is Slice 2.
+        # TODO(411 Slice 2): wrap the runner in the isolation boundary, print
+        # the derived confinement flags, and add the approval channel row.
+        print("  sandbox placement (item 411, Slice 1): isolation DECLARED + "
+              "gated, not yet enforced (runtime driver is Slice 2)", flush=True)
+        reach = _component_reach(ir)
+        for line in render_sandbox_summary(
+                processes, sandboxes, reach, sandbox_needs,
+                requires, provides, owner, backends):
+            print(line, flush=True)
     if "java" in built:
         note = ("real cordis4j (reactive)" if built["java"][0] == "real"
                 else "stub (non-reactive; set REVL_CORDIS4J_CLASSES + a JDK 21 for reactive withdrawal)")
@@ -1319,6 +2317,19 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                   f"({', '.join(KNOWN_BACKENDS)})", flush=True)
             return
         old = placed[component]
+        # item 411: moving a component across an ISOLATION boundary changes the
+        # security posture of a running system; an operator decision this item
+        # declines to automate in v1. A swap naming a sandboxed component (or
+        # targeting its process) is refused with the named gap; lifting it is a
+        # follow-on with its own admission story.
+        if old in sandboxes:
+            env = sandboxes[old]
+            print(f"swap refused (item 411): {component!r} runs in sandbox {old!r} "
+                  f"({env['isolation']}: {_envelope_str(env)}); moving a component "
+                  f"across an isolation boundary changes the running system's "
+                  f"security posture and is not automated in v1 (a sandbox swap is "
+                  f"a follow-on). Running composition untouched.", flush=True)
+            return
         housemates = [c for c, p in placed.items() if p == old]
         if housemates != [component]:
             others = ", ".join(c for c in housemates if c != component)
@@ -1328,14 +2339,46 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             return
 
         # --- admission gate: refuse without touching the running composition
-        candidate, error = swap_admission(files, ir, component, to_backend)
+        candidate, error = swap_admission(files, ir, component, to_backend,
+                                          from_backend=backends.get(old))
         if error is not None:
             for i, text in enumerate(error.splitlines()):
                 print(f"  {'swap refused:' if i == 0 else '             '} {text}", flush=True)
             print("  running composition untouched — the candidate never booted.", flush=True)
             return
+
+        # --- re-gate the POST-SWAP topology exactly like the initial plan
+        # (parity, not prose). The swap re-tiers `component` from `old`'s backend
+        # onto `to_backend`; the same seam that admission modelled component-wise
+        # is here re-checked over the real process placement, so the swapped
+        # component's new tier is gated identically to a from-scratch plan:
+        #   * tier_capability_gate: the target tier can actually emit it;
+        #   * cross_tier_boundary_check: no resource crosses a seam the re-tier
+        #     opens (either direction), matching the plan-time refusal.
+        # Modelled on a copy of the placement maps (the component is alone in its
+        # process in v1, so only its process's backend changes), so a refusal
+        # here leaves the running composition untouched, nothing booted.
+        post_backends = dict(backends)
+        post_backends[old] = to_backend
+        cap_after = tier_capability_gate(ir, placed, post_backends)
+        if cap_after:
+            print(f"  swap refused: {cap_after}", flush=True)
+            print("  running composition untouched; the candidate never booted.", flush=True)
+            return
+        boundary_after, _ = cross_tier_boundary_check(
+            ir, requires, provides, owner, post_backends, services)
+        if boundary_after:
+            print(f"  swap refused: {boundary_after}", flush=True)
+            print("  running composition untouched; the candidate never booted.", flush=True)
+            return
+
         try:
-            ensure_backend(to_backend)
+            # the successor hosts `component` alone on the target tier, so its
+            # build must contain it even in a mixed-tier placement where the
+            # tier's initial slice did not (item 363: builds are per component
+            # set, not the shared whole-IR cache). rebuild=True re-emits the
+            # tier binary including the swapped component.
+            ensure_backend(to_backend, extra=(component,), rebuild=True)
         except (RevlError, RuntimeError, OSError) as exc:
             print(f"swap refused: could not build the {to_backend} tier:\n{exc}", flush=True)
             print("  running composition untouched.", flush=True)
@@ -1352,7 +2395,9 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             "backend": to_backend,
             "files": [str(f) for f in files],
             "components": [component],  # the swapped component, alone (v1 scope)
-            "config": config,
+            # F4: the successor hosts `component` alone, so it gets only that
+            # component's config — never the whole [config] table.
+            "config": {c: config[c] for c in [component] if c in config},
             "provides": list(provides[old]),
             "proxies": {k: dict(v) for k, v in (specs[old].get("proxies") or {}).items()},
             "probe": [],

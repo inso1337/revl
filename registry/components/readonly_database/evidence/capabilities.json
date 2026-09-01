@@ -1,0 +1,12 @@
+{
+  "boundary": {
+    "ReadOnlyDatabase": {
+      "awaits": 0,
+      "capabilities": {},
+      "compensated": 0,
+      "emissions": [],
+      "externs": []
+    }
+  },
+  "kind": "revl.capabilities"
+}

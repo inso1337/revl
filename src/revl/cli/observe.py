@@ -190,6 +190,18 @@ def _run_profile(args) -> int:
         print(f"error: cannot profile: {error}", file=sys.stderr)
         return 1
 
+    # --patch (item 307): reuse the same declared-vs-observed profile, but emit
+    # the proposed least-authority repair patch rather than the profile itself.
+    # It is a SUGGESTION, never a gate, so it always exits 0 (even with --strict:
+    # the patch is what you apply to *clear* a strict failure, not the check).
+    if getattr(args, "patch", False):
+        patch = _profile.compute_repair_patch(computed)
+        if args.json:
+            print(json.dumps(patch, indent=2))
+        else:
+            print(_profile.render_patch(patch))
+        return 0
+
     if args.json:
         print(json.dumps(computed, indent=2))
     else:
@@ -331,4 +343,31 @@ def _run_diff(args) -> int:
         print(json.dumps(delta, indent=2))
     else:
         print(render_diff(delta, args.before, args.after))
+    return 0
+
+
+def _run_changelog(args) -> int:
+    """`revl changelog --from OLD --to NEW` — the derived release note (item
+    261). Two-input loader (each side an IR/interchange doc or a source), like
+    `diff`, so it is routed before the single shared compile step. Always a
+    render: exit 0, no acknowledgement model (the audit gate is the wall)."""
+    from ..changelog import derive_changelog, render  # noqa: PLC0415
+    from ..composition_diff import load_composition  # noqa: PLC0415
+
+    try:
+        before = load_composition(args.from_)
+        after = load_composition(args.to)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    doc = derive_changelog(
+        before, after,
+        previous_version=getattr(args, "current_version", None),
+        no_semver=getattr(args, "no_semver", False),
+        from_label=args.from_, to_label=args.to)
+    # `--json` is the legacy alias; when it is set it forces JSON regardless of
+    # `--format`, otherwise `--format` (default `markdown`) chooses the form.
+    fmt = "json" if getattr(args, "json", False) else getattr(args, "format",
+                                                              "markdown")
+    print(render(doc, title=getattr(args, "title", None), fmt=fmt))
     return 0

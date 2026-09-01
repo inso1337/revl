@@ -1,0 +1,577 @@
+"""`revl changelog` - the derived release note (roadmap item 261, Slice 1).
+
+The changelog is a MEASUREMENT, not a promise: every rendered line is a
+projection of a fact one of the shipped differs already produces
+(`composition_diff.diff`, `version.derive`, `audit_diff.diff_reach`), and a line
+with no backing fact cannot be constructed. Slice 1 is honest-but-incomplete:
+the audit surfaces no differ yet reads (`recovery_surface`,
+`capability_registers`, `cardinality`, the per-component `boundary[*]`
+capability scope map, `externs[*].backends`) are surfaced by the path-granular
+completeness guard as unclassified honesty lines, never silently dropped, and a
+non-empty unclassified bucket forces the headline non-clean.
+
+These tests pin the definition of done. The guard regression suite is mandatory:
+it is the mechanism that makes Slice 1 safe to ship before Slice 2 exists.
+"""
+
+import inspect
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from revl import compile_source  # noqa: E402
+from revl import audit_diff, composition_diff, version  # noqa: E402
+from revl.audit_diff import audit_report, diff_reach  # noqa: E402
+from revl.changelog import (  # noqa: E402
+    CONSUMED_PATHS, FORMATS, SECTIONS, ChangelogLine, _build_changelog,
+    _completeness_guard, derive_changelog, render, render_markdown,
+    render_plain)
+
+
+# an empty structural delta, for the pure-core headline tests that inject only
+# audit reports (the shape `composition_diff.diff` returns for no change).
+EMPTY_DELTA = {
+    "components": {"added": [], "removed": [], "changed": []},
+    "providers": {"added": [], "removed": [], "changed": []},
+    "requires": {"added": [], "removed": [], "broken": []},
+    "crossings": {"added": [], "removed": []},
+}
+
+
+# a stable two-component base (mirrors test_composition_diff's BASE).
+BASE = """
+service Database { emission fn execute(sql: Str) -> Int }
+service Cache { emission[db] fn put(key: Str, value: Str) }
+
+component PgCache requires db: Database provides cache: Cache {
+  provide cache { fn put(key, value) { emit db.execute(`INSERT ${key}`) } }
+}
+component Front requires cache: Cache { }
+"""
+
+
+def _changelog(before_src: str, after_src: str, **kw) -> dict:
+    return derive_changelog(compile_source(before_src),
+                            compile_source(after_src), **kw)
+
+
+# ----------------------------------------------------- the guard regression suite
+
+def test_capability_scope_widening_on_a_stable_crossing_classifies_breaking():
+    """Slice 2 (was the Slice-1 CRITICAL honesty line): an emission that widens
+    its declared capability scope (`send.mail -> send.*`) while its crossing
+    token stays `emit:C:notify` is now CLASSIFIED breaking by
+    `diff_capability_scopes` (scope is not in the token, so `diff_crossings` is
+    still blind to it). The leaf `boundary[*].capabilities` is now in
+    CONSUMED_PATHS, so the guard NO LONGER double-reports it as unclassified."""
+    before = {"boundary": {"C": {"emissions": ["notify"],
+                                 "capabilities": {"notify": ["send.mail"]}}}}
+    after = {"boundary": {"C": {"emissions": ["notify"],
+                                "capabilities": {"notify": ["send.*"]}}}}
+
+    # the leaf is consumed now: the guard no longer surfaces it.
+    assert _completeness_guard(before, after) == []
+
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert len(doc["breaking"]) == 1
+    assert doc["breaking"][0]["fact"] == "scope.widened:C:notify"
+    assert doc["breaking"][0]["lede"] is True
+    # classified, so the bucket is empty and the headline is a CLEAN major.
+    assert doc["unclassified"] == []
+    assert doc["headline"]["clean"] is True
+    assert doc["headline"]["bump"] == "major"
+    assert "marker" not in doc["headline"]
+
+
+def test_capability_scope_narrowing_classifies_added():
+    """The safe direction: an emission that NARROWS its scope (`send.* ->
+    send.mail`) is added/relaxed, never breaking."""
+    before = {"boundary": {"C": {"emissions": ["notify"],
+                                 "capabilities": {"notify": ["send.*"]}}}}
+    after = {"boundary": {"C": {"emissions": ["notify"],
+                                "capabilities": {"notify": ["send.mail"]}}}}
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert doc["breaking"] == []
+    assert doc["added"][0]["fact"] == "scope.tightened:C:notify"
+
+
+def test_new_backend_host_body_classifies_breaking():
+    """Slice 2 (was the Slice-1 second-CRITICAL honesty line): an extern that
+    GAINS a backend host body (`backends: ["rust"] -> ["py","rust"]`, new
+    reachable host code) is now CLASSIFIED breaking by `diff_backends`
+    (`diff_reach` reads only `reach`, so it is still blind to a new body). The
+    leaf `externs[*].backends` is now in CONSUMED_PATHS."""
+    before = {"externs": [{"name": "x", "reach": {"kind": "net"},
+                           "backends": ["rust"]}]}
+    after = {"externs": [{"name": "x", "reach": {"kind": "net"},
+                          "backends": ["py", "rust"]}]}
+    assert _completeness_guard(before, after) == []
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert len(doc["breaking"]) == 1
+    assert doc["breaking"][0]["fact"] == "backend.added:x:py"
+    assert doc["breaking"][0]["lede"] is True
+    assert doc["unclassified"] == []
+    assert doc["headline"]["bump"] == "major"
+
+
+def test_weakened_register_floor_classifies_breaking():
+    """Slice 2: a weakened idempotency register floor (`keyed -> declared`) is
+    classified breaking by `diff_registers`; the `capability_registers` leaf is
+    consumed, so the guard no longer honesty-lines it."""
+    before = {"capability_registers": {"send.mail": "keyed"}}
+    after = {"capability_registers": {"send.mail": "declared"}}
+    assert _completeness_guard(before, after) == []
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert doc["breaking"][0]["fact"] == "register.weakened:send.mail"
+    assert doc["breaking"][0]["lede"] is True
+    assert doc["unclassified"] == []
+    assert doc["headline"]["bump"] == "major"
+
+
+def test_raised_cardinality_ceiling_classifies_breaking():
+    """Slice 2: a raised emission ceiling (`<= 3` -> `unbounded`) is classified
+    breaking by `diff_cardinality`; the `cardinality` leaf is consumed."""
+    before = {"cardinality": {"C": {"per_capability": {
+        "send.mail": {"bound": 3, "kind": "bounded"}}}}}
+    after = {"cardinality": {"C": {"per_capability": {
+        "send.mail": {"bound": None, "kind": "unbounded"}}}}}
+    assert _completeness_guard(before, after) == []
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert doc["breaking"][0]["fact"] == "cardinality.widened:C:send.mail"
+    assert doc["breaking"][0]["lede"] is True
+    assert doc["unclassified"] == []
+    assert doc["headline"]["bump"] == "major"
+
+
+def test_guard_reach_change_alone_is_consumed_not_honesty_lined():
+    """A pure `reach` change is read by `diff_reach`, so it is NOT a guard
+    honesty line (it flows through the classified authority axis instead). This
+    pins that `externs[*].reach` really is in CONSUMED_PATHS."""
+    before = {"externs": [{"name": "x", "reach": {"kind": "net", "target": "a"},
+                           "backends": ["rust"]}]}
+    after = {"externs": [{"name": "x", "reach": {"kind": "net", "target": "b"},
+                          "backends": ["rust"]}]}
+    assert _completeness_guard(before, after) == []
+
+
+def test_guard_removed_optional_surface_trips_over_before_union():
+    """MEDIUM finding 3: `parallel_plan` is conditionally present. Removing the
+    last parallel group leaves it in `before` and absent from `after`; a guard
+    iterating `after` alone would never see it. The guard must drive over
+    `before | after`."""
+    before = {"parallel_plan": {"C": [{"group": [0, 1]}]}}
+    after = {}
+    lines = _completeness_guard(before, after)
+    assert len(lines) == 1
+    assert lines[0].fact == "audit-path:parallel_plan"
+    assert lines[0].changed is True
+
+
+def test_guard_same_length_reshuffle_reports_changed_not_a_count():
+    """LOW finding 4, on a STILL-UNCLASSIFIED surface: Slice 2 now CONSUMES
+    `recovery_surface`, so the reshuffle-not-hidden invariant rides
+    `parallel_plan`, which no differ reads. A same-length reorder inside an
+    unhashable `list[dict]` surface must report `changed: true` with the moved
+    leaf paths, never a bare count a reshuffle could hide."""
+    before = {"parallel_plan": {"C": [{"group": [0, 1]}, {"group": [2, 3]}]}}
+    after = {"parallel_plan": {"C": [{"group": [2, 3]}, {"group": [0, 1]}]}}
+    lines = _completeness_guard(before, after)
+    assert len(lines) == 1
+    assert lines[0].fact == "audit-path:parallel_plan"
+    assert lines[0].changed is True
+    assert lines[0].paths  # the moved leaf paths, not a bare count
+
+
+def test_dropped_recovery_inverse_classifies_breaking_and_floors_headline():
+    """Slice 2 (was the original Slice-1 CRITICAL honesty line): a
+    witnessed/acquire extern's `undo` is deleted, turning a reversible effect
+    irreversible. It shows up ONLY in `recovery_surface` (no crossing, no
+    interface change). `diff_recovery` now CLASSIFIES it breaking with
+    `lede=True`, and it FLOORS the headline to a CLEAN major - never the silent
+    clean PATCH Slice 1 could only mark non-clean."""
+    before = {"recovery_surface": [
+        {"name": "acquire", "kind": "inverse", "register": "keyed"}]}
+    after = {"recovery_surface": []}
+
+    # consumed now: the guard no longer surfaces it.
+    assert _completeness_guard(before, after) == []
+
+    doc = _build_changelog(EMPTY_DELTA,
+                           {"bump": "patch", "changes": [], "nextVersion": None},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert len(doc["breaking"]) == 1
+    assert doc["breaking"][0]["fact"] == "recovery.dropped:acquire:inverse"
+    assert doc["breaking"][0]["lede"] is True
+    assert doc["unclassified"] == []
+    # the dropped inverse FLOORS the headline to major even though version /
+    # crossings / reach all read PATCH.
+    assert doc["headline"]["clean"] is True
+    assert doc["headline"]["bump"] == "major"
+    assert "marker" not in doc["headline"]
+
+
+def test_a_genuinely_unclassified_surface_still_honesty_lines_and_floors():
+    """The guard survives Slice 2: a surface NO differ reads (`distributability`)
+    still honesty-lines and still forces the headline non-clean, so Slice 2
+    shrinks the residual set without ever letting a real change go silent."""
+    before = {"distributability": {"S": "splittable"}}
+    after = {"distributability": {"S": "co-located"}}
+    lines = _completeness_guard(before, after)
+    assert len(lines) == 1
+    assert lines[0].fact == "audit-path:distributability"
+    assert lines[0].category == "unclassified"
+    assert lines[0].changed is True
+
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert len(doc["unclassified"]) == 1
+    assert doc["headline"]["clean"] is False
+    assert "PATCH?" in doc["headline"]["marker"]
+
+
+# ---------------------------------------------------------- the headline invariant
+
+def test_headline_clean_only_when_unclassified_empty():
+    """When nothing honesty-lines and the only change is a consumed emission
+    add, the headline may claim a definite level (clean=true, no marker)."""
+    before = {"boundary": {"C": {"emissions": ["a"]}}}
+    after = {"boundary": {"C": {"emissions": ["a", "b"]}}}
+    delta = dict(EMPTY_DELTA)
+    delta = json.loads(json.dumps(EMPTY_DELTA))
+    delta["crossings"] = {"added": ["emit:C:b"], "removed": []}
+    version_result = {"bump": "major", "changes": [
+        {"service": "S", "method": "b", "kind": "added", "bump": "major",
+         "reason": "b added"}], "nextVersion": None}
+    doc = _build_changelog(delta, version_result, before, after, "v1", "v2",
+                           None, degraded=False)
+    assert doc["unclassified"] == []
+    assert doc["headline"]["clean"] is True
+    assert doc["headline"]["bump"] == "major"
+    assert "marker" not in doc["headline"]
+
+
+def test_headline_never_understates_a_breaking_body_line():
+    """A body breaking line (an added crossing) floors the headline at major even
+    when the interface diff reads PATCH - never headline PATCH over a widening."""
+    before = {"boundary": {"C": {"emissions": ["a"]}}}
+    after = {"boundary": {"C": {"emissions": ["a", "b"]}}}
+    delta = json.loads(json.dumps(EMPTY_DELTA))
+    delta["crossings"] = {"added": ["emit:C:b"], "removed": []}
+    doc = _build_changelog(delta, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert doc["breaking"][0]["fact"] == "crossing.added:emit:C:b"
+    assert doc["headline"]["bump"] == "major"
+    assert doc["headline"]["clean"] is True
+
+
+# ------------------------------------------------------------- CONSUMED_PATHS test
+
+def test_every_consumed_path_corresponds_to_a_real_differ_read():
+    """The allowlist cannot rot: every `CONSUMED_PATHS` leaf pattern must name a
+    differ whose source demonstrably READS that leaf. If a future edit adds a
+    path here without a backing read, this fails."""
+    modules = {"audit_diff": audit_diff, "composition_diff": composition_diff}
+    for pattern, (mod_name, func_name) in CONSUMED_PATHS.items():
+        module = modules[mod_name]
+        func = getattr(module, func_name)
+        src = inspect.getsource(func)
+        # the last concrete (non-wildcard) segment names the leaf the differ reads
+        leaf = [seg for seg in pattern if seg != "*"][-1]
+        assert leaf in src, (
+            f"CONSUMED_PATHS pattern {pattern} claims {mod_name}.{func_name} "
+            f"reads {leaf!r}, but its source does not reference it")
+
+
+# ------------------------------------------------------------------ bijection test
+
+def _resolvable_facts(before_ir: dict, after_ir: dict) -> set[str]:
+    """Independently reconstruct the set of fact tokens the inputs can back,
+    from the raw differ outputs (NOT from the renderer's line-building), so this
+    is a real check that every rendered line traces to an upstream fact."""
+    delta = composition_diff.diff(before_ir, after_ir)
+    ba, aa = audit_report(before_ir), audit_report(after_ir)
+    reach = diff_reach(ba, aa)
+    facts: set[str] = set()
+    for token in delta["crossings"]["added"]:
+        facts.add(f"crossing.added:{token}")
+    for token in delta["crossings"]["removed"]:
+        facts.add(f"crossing.removed:{token}")
+    for token in reach["reach_weakened"]:
+        facts.add(f"reach.weakened:{token.split(':', 1)[-1]}")
+    for token in reach["reach_tightened"]:
+        facts.add(f"reach.tightened:{token.split(':', 1)[-1]}")
+    # Slice 2 audit-surface differs, reconstructed independently.
+    scopes = audit_diff.diff_capability_scopes(ba, aa)
+    for token in scopes["scope_widened"]:
+        _, comp, label = token.split(":", 2)
+        facts.add(f"scope.widened:{comp}:{label}")
+    for token in scopes["scope_tightened"]:
+        _, comp, label = token.split(":", 2)
+        facts.add(f"scope.tightened:{comp}:{label}")
+    backends = audit_diff.diff_backends(ba, aa)
+    for token in backends["backends_added"]:
+        _, name, backend = token.split(":", 2)
+        facts.add(f"backend.added:{name}:{backend}")
+    for token in backends["backends_removed"]:
+        _, name, backend = token.split(":", 2)
+        facts.add(f"backend.removed:{name}:{backend}")
+    recovery = audit_diff.diff_recovery(ba, aa)
+    for token in recovery["recovery_dropped"]:
+        _, name, kind = token.split(":", 2)
+        facts.add(f"recovery.dropped:{name}:{kind}")
+    for token in recovery["recovery_weakened"]:
+        _, name, kind = token.split(":", 2)
+        facts.add(f"recovery.weakened:{name}:{kind}")
+    for token in recovery["recovery_added"]:
+        _, name, kind = token.split(":", 2)
+        facts.add(f"recovery.added:{name}:{kind}")
+    registers = audit_diff.diff_registers(ba, aa)
+    for token in registers["registers_weakened"]:
+        facts.add(f"register.weakened:{token.split(':', 1)[-1]}")
+    for token in registers["registers_strengthened"]:
+        facts.add(f"register.strengthened:{token.split(':', 1)[-1]}")
+    cardinality = audit_diff.diff_cardinality(ba, aa)
+    for token in cardinality["cardinality_widened"]:
+        _, comp, cap = token.split(":", 2)
+        facts.add(f"cardinality.widened:{comp}:{cap}")
+    for token in cardinality["cardinality_tightened"]:
+        _, comp, cap = token.split(":", 2)
+        facts.add(f"cardinality.tightened:{comp}:{cap}")
+    for name in delta["components"]["added"]:
+        facts.add(f"component.added:{name}")
+    for name in delta["components"]["removed"]:
+        facts.add(f"component.removed:{name}")
+    for prov in delta["providers"]["changed"]:
+        facts.add(f"provider.changed:{prov['key']}")
+        facts.add(f"provider.swapped:{prov['key']}")
+    for prov in delta["providers"]["added"]:
+        facts.add(f"provider.added:{prov['key']}")
+    for prov in delta["providers"]["removed"]:
+        facts.add(f"provider.removed:{prov['key']}")
+    for edge in delta["requires"]["added"]:
+        facts.add(f"require.added:{edge['component']}:{edge['key']}")
+    for edge in delta["requires"]["removed"]:
+        facts.add(f"require.removed:{edge['component']}:{edge['key']}")
+    for edge in delta["requires"]["broken"]:
+        facts.add(f"require.broken:{edge['component']}:{edge['key']}")
+    try:
+        vr = version.derive(before_ir, after_ir, None)
+        for change in vr["changes"]:
+            where = (f"{change['service']}.{change['method']}"
+                     if change["method"] else change["service"])
+            facts.add(f"semver:{where}:{change['kind']}")
+    except ValueError:
+        pass
+    for line in _completeness_guard(ba, aa):
+        facts.add(line.fact)
+    return facts
+
+
+def test_every_rendered_line_has_a_backing_fact():
+    """The bijection: every line in the document carries a `fact`, and every
+    such `fact` resolves to a member of the union of the differ outputs."""
+    before = compile_source(BASE)
+    after = compile_source(BASE.replace(
+        "component Front requires cache: Cache { }",
+        'component Front requires cache: Cache { emit cache.put("h", "1") }')
+        + '\ncomponent Metrics requires cache: Cache { }')
+    doc = derive_changelog(before, after)
+    allowed = _resolvable_facts(before, after)
+
+    seen = 0
+    for category in ("breaking", "added", "internal", "unclassified"):
+        for entry in doc[category]:
+            assert entry["fact"], "a rendered line carried no fact"
+            assert entry["fact"] in allowed, (
+                f"line fact {entry['fact']!r} does not resolve to an input fact")
+            seen += 1
+    assert seen > 0
+
+
+def test_changelogline_refuses_an_empty_fact():
+    """The structural guarantee behind 'no invented prose': a line cannot be
+    built without a non-empty backing fact."""
+    try:
+        ChangelogLine(fact="", category="added", text="This release improves reliability")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a ChangelogLine with no fact must be refused")
+
+
+# --------------------------------------------------------------------- determinism
+
+def test_determinism_byte_identical_and_serialization_invariant():
+    """A pure function of the two IRs: rendered twice is byte-identical, and the
+    result is invariant under re-serializing either input (JSON key order must
+    not matter)."""
+    before = compile_source(BASE)
+    after = compile_source(BASE.replace(
+        "component Front requires cache: Cache { }",
+        'component Front requires cache: Cache { emit cache.put("h", "1") }'))
+
+    first = render_markdown(derive_changelog(before, after))
+    second = render_markdown(derive_changelog(before, after))
+    assert first == second
+
+    reser_before = json.loads(json.dumps(before))
+    reser_after = json.loads(json.dumps(after))
+    third = render_markdown(derive_changelog(reser_before, reser_after))
+    assert first == third
+
+
+# --------------------------------------------------------------- structural axes
+
+def test_a_same_service_provider_swap_renders_internal_never_dropped():
+    """CRITICAL-adjacent Attack A: a live provider swap (same service interface)
+    is interface-compatible, so semver stays PATCH - but it must ALWAYS render
+    (never folded into 'no change'), under Internal/wiring."""
+    before = """
+    service Database { emission fn execute(sql: Str) }
+    component Pg provides db: Database {
+      provide db { fn execute(sql) { } }
+    }
+    """
+    after = """
+    service Database { emission fn execute(sql: Str) }
+    component Mysql provides db: Database {
+      provide db { fn execute(sql) { } }
+    }
+    """
+    doc = _changelog(before, after)
+    swaps = [ln for ln in doc["internal"] if ln["fact"].startswith("provider.swapped")]
+    assert swaps, "a same-service provider swap must render under internal"
+
+
+def test_a_removed_component_is_breaking():
+    after = """
+    service Cache { emission[db] fn put(key: Str, value: Str) }
+    service Database { emission fn execute(sql: Str) -> Int }
+    component PgCache requires db: Database provides cache: Cache {
+      provide cache { fn put(key, value) { emit db.execute(`INSERT ${key}`) } }
+    }
+    """  # Front removed
+    doc = _changelog(BASE, after)
+    facts = [ln["fact"] for ln in doc["breaking"]]
+    assert "component.removed:Front" in facts
+    assert doc["headline"]["bump"] == "major"
+
+
+# ------------------------------------------------------------------ degraded input
+
+def test_no_semver_withholds_the_headline_and_states_it():
+    """`--no-semver` (and, transitively, a bare audit doc that lacks the
+    interface table) emits the full structural changelog and WITHHOLDS the
+    semver headline, stating its absence rather than faking a level."""
+    before = compile_source(BASE)
+    after = compile_source(BASE + """
+    component Metrics requires cache: Cache { }
+    """)
+    doc = derive_changelog(before, after, no_semver=True)
+    assert doc["headline"]["semver"] is False
+    assert doc["headline"]["bump"] == "undetermined"
+    assert "interface table" in doc["headline"]["note"]
+    # the structural axis survives the degrade
+    assert any(ln["fact"] == "component.added:Metrics" for ln in doc["added"])
+
+
+# ------------------------------------------------------ Slice 3: formats + skeleton
+
+def test_markdown_is_a_stable_skeleton_even_with_no_changes():
+    """The Markdown form is a CONTRACT release tooling splices into: every
+    `SECTIONS` heading is present, in the fixed order, even when the composition
+    did not change at all - an empty section carries `_None._`, it never
+    vanishes."""
+    doc = _changelog(BASE, BASE)  # identical inputs: nothing changed
+    md = render_markdown(doc)
+    last = -1
+    for _key, heading in SECTIONS:
+        anchor = f"## {heading}"
+        idx = md.find(anchor)
+        assert idx != -1, f"stable skeleton dropped the {heading!r} heading"
+        assert idx > last, "skeleton headings must keep the SECTIONS order"
+        last = idx
+    # an empty section is present-but-placeholdered, not absent
+    assert "_None._" in md
+
+
+def test_markdown_skeleton_carries_real_entries_and_moved_paths():
+    before = compile_source(BASE)
+    after = compile_source(BASE + """
+    component Metrics requires cache: Cache { }
+    """)
+    doc = derive_changelog(before, after)
+    md = render_markdown(doc)
+    assert "## Added / relaxed (compatible)" in md
+    assert "- component Metrics added" in md
+    # every section heading still present (the skeleton is stable regardless
+    # of which buckets are populated)
+    for _key, heading in SECTIONS:
+        assert f"## {heading}" in md
+
+
+def test_plain_has_no_markdown_markup_but_same_skeleton():
+    """`plain` is the same stable skeleton with the Markdown decoration stripped
+    - for a log line or a release tool that renders its own presentation."""
+    before = compile_source(BASE)
+    after = compile_source(BASE + """
+    component Metrics requires cache: Cache { }
+    """)
+    doc = derive_changelog(before, after)
+    plain = render_plain(doc)
+    assert "Release impact:" in plain
+    assert not plain.startswith("**")
+    for line in plain.splitlines():
+        assert not line.startswith("#"), "plain output must carry no Markdown headings"
+        assert not line.lstrip().startswith("- "), "plain output must carry no Markdown bullets"
+        assert "**" not in line, "plain output must carry no Markdown bold"
+    # the same section headings appear, in order, as plain labels
+    for _key, heading in SECTIONS:
+        assert f"{heading}:" in plain
+    assert "component Metrics added" in plain
+
+
+def test_render_dispatches_on_format():
+    doc = _changelog(BASE, BASE)
+    assert render(doc, fmt="markdown") == render_markdown(doc)
+    assert render(doc, fmt="plain") == render_plain(doc)
+    assert json.loads(render(doc, fmt="json")) == doc
+    # legacy as_json path still works when no fmt is given
+    assert render(doc, as_json=True) == render(doc, fmt="json")
+    assert render(doc) == render(doc, fmt="markdown")
+
+
+def test_render_rejects_an_unknown_format():
+    doc = _changelog(BASE, BASE)
+    try:
+        render(doc, fmt="rst")
+    except ValueError as error:
+        assert "rst" in str(error)
+    else:
+        raise AssertionError("render must reject an unknown format")
+
+
+def test_formats_constant_matches_the_dispatch():
+    assert FORMATS == ("markdown", "json", "plain")
+
+
+def test_plain_and_markdown_are_deterministic():
+    before = compile_source(BASE)
+    after = compile_source(BASE + """
+    component Metrics requires cache: Cache { }
+    """)
+    reser_before = json.loads(json.dumps(before, sort_keys=True))
+    reser_after = json.loads(json.dumps(after, sort_keys=True))
+    for renderer in (render_plain, render_markdown):
+        first = renderer(derive_changelog(before, after))
+        second = renderer(derive_changelog(before, after))
+        third = renderer(derive_changelog(reser_before, reser_after))
+        assert first == second == third

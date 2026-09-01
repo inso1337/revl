@@ -561,6 +561,22 @@ export class MapHandle {
     this.data.set(key, value)
   }
 
+  insert_if_absent(key: any, value: any): boolean {
+    // item 397: the atomic compare-and-set. Node runs one event loop, so this
+    // synchronous method (no await) is atomic by run-to-completion: no task can
+    // interleave between the membership test and the insert. Returns whether it
+    // inserted; a `false` (key already present) leaves the existing value
+    // untouched.
+    this.assertLive('insert_if_absent')
+    if (this.data.has(key)) {
+      record(`${this.label}.insert_if_absent(${key}) -> false`)
+      return false
+    }
+    this.data.set(key, value)
+    record(`${this.label}.insert_if_absent(${key}) -> true`)
+    return true
+  }
+
   remove(key: any): void {
     this.assertLive('remove')
     record(`${this.label}.remove(${key})`)
@@ -839,6 +855,16 @@ export class Frame {
    * parked here rather than yielded into cordis' LIFO stack, and disposed by
    * `drain` once the commit-vs-abort bit is settled. */
   private deferredList: _DeferredTransactional[] = []
+  /** item 247 (method-body compensate remainder): PROVIDE-METHOD-registered COMPENSATION entries (`emit ...
+   * compensate ...` in a method body), the compensation analog of
+   * `deferredList`. A method body has no generator to yield the compensation
+   * disposer into, and adopting it as a sibling `ctx.effect` is unsound (cordis
+   * disposes it BEFORE the body `drain`, so it fires the offset on a CLEAN
+   * unload — destroying the deliverable, the item-247 bug left on the method-
+   * body site). So it is parked here and disposed by `drain`: DISCHARGED on a
+   * commit; ENQUEUED onto `pending` on an abort, so `begin`'s post-unwind
+   * `runPhase2` fires it after every Phase-1 inverse. */
+  private deferredCompensations: _PendingCompensation[] = []
   /** item 318: the reject signal for a component that already activated
    * cleanly. `committed` (flipped by `drain`) answers "did the ACTIVATION body
    * complete"; but a per-tool-call mutation runs AFTER activation, so on any
@@ -1045,6 +1071,42 @@ export class Frame {
     }
   }
 
+  /** Register a PROVIDE-METHOD `emit ... compensate ...` step's offset as a
+   * COMPENSATION on THIS component's activation frame (item 247 (method-body compensate remainder)) — the
+   * compensation analog of `transactionalMethod` (item 318), and the method-body
+   * analog of `compensation` (item 247). A per-tool-call emission fires from a
+   * provide-method; its offset must outlive the method call and is owed ONLY on
+   * an abort, never on a clean commit (the emission was the deliverable).
+   *
+   * Unlike `compensation` (whose disposer the activation body's generator yields
+   * into cordis' LIFO stack), a method body has no generator to yield into.
+   * Adopting the disposer as a sibling `ctx.effect` is UNSOUND — cordis disposes
+   * it BEFORE the body's `drain`, firing the offset on a clean unload (the
+   * placeholder-lowering bug this closes). So the entry is PARKED in
+   * `deferredCompensations` and disposed by `drain`: DISCHARGED on a commit
+   * (never runs — its seq still joins the discharge record); ENQUEUED onto
+   * `pending` on an abort, where `begin`'s post-unwind `runPhase2` fires it in
+   * Phase 2 after every proof inverse. `args` are captured at registration (the
+   * "no data hazard" reason for the phase split), exactly as `compensation`. */
+  compensationMethod(
+    crossing: Crossing,
+    method: string,
+    args: unknown[],
+    run: () => unknown,
+  ): void {
+    const seq = this.nextSeq()
+    this.descriptorList.push({
+      record: 'discharge-descriptor',
+      seq,
+      entry: 'compensation',
+      call: { receiver: this.name, method, args },
+      origin: crossing,
+      witness: null,
+      idempotency: null,
+    })
+    this.deferredCompensations.push({ seq, crossing, methodName: method, args, run })
+  }
+
   // -- prologue / epilogue sentinels ----------------------------------------
 
   /** Yielded FIRST -> disposed LAST. No-op on commit (nothing left to do —
@@ -1095,7 +1157,18 @@ export class Frame {
     // Phase-1 restore failure is caught and recorded (`restore-residue`),
     // never thrown into the disposer chain — same continue-and-record rule as
     // the activation-body transactional inverse.
-    const deferred = this.deferredList
+    //
+    // item 369: replay in reverse INVOCATION order (LIFO), NOT registration
+    // order. `deferredList` is pushed newest-last as each provide-method fires
+    // (`transactionalMethod`), so it must be drained newest-FIRST — exactly
+    // like the activation-body path, where cordis unwinds its disposer stack
+    // LIFO. On a COMMIT order is immaterial (every entry no-op discharges);
+    // on an ABORT two inverses whose
+    // paths OVERLAP must undo newest-first or a FIFO replay leaves residue or
+    // DESTROYS pre-session data — every stdlib/fs.rvl inverse is idempotent-
+    // and-total, so the oldest inverse runs first, no-ops, and the newer one
+    // undoes into the hole (G7, 243 §2). Mirrors backends/python/runtime.py.
+    const deferred = [...this.deferredList].reverse()
     this.deferredList = []
     for (const entry of deferred) {
       if (this.committed) {
@@ -1121,6 +1194,22 @@ export class Frame {
         )
       }
     }
+    // item 247 (method-body compensate remainder): dispose the method-registered COMPENSATION entries now that the
+    // commit-vs-abort bit is settled — the compensation analog of the deferred
+    // transactional loop above, and the method-body analog of the activation-
+    // body `compensation` (item 247). On a COMMIT each DISCHARGES (never runs —
+    // the emission was the deliverable; its seq already joined the discharge
+    // record above). On an ABORT each is ENQUEUED onto `pending`, never fired
+    // inline here, so `begin`'s post-unwind `runPhase2` fires it in Phase 2
+    // strictly AFTER every Phase-1 inverse (the deferred transactional above AND
+    // the activation-body disposers cordis unwinds between `drain` and `begin`).
+    // Enqueued newest-first so Phase 2 runs the newest compensation first (LIFO),
+    // matching the activation-body path.
+    if (!this.committed) {
+      const deferredComp = [...this.deferredCompensations].reverse()
+      for (const entry of deferredComp) this.pending.push(entry)
+    }
+    this.deferredCompensations = []
   }
 
   private runPhase2(): void {

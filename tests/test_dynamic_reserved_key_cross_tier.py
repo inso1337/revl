@@ -1,38 +1,34 @@
-"""Roadmap item 299 — audit rust/go/java/wasm for the item-279 dynamic-value
-reserved-word field-access divergence.
+"""Roadmap items 279 / 299 / 380 — the dynamic reserved-word field-access class,
+now CLOSED at the frontend by item 380.
 
-Item 279 fixed the TS tier, where a reserved-word key on a `json_parse` / `Any`
-(dynamic) value was renamed on ACCESS (`tc.function` -> `tc.function_`) but the
-runtime JSON object still held the raw key, so the read was `undefined` while the
-py tier read the raw key and worked — the same admitted program diverging
-between tiers, SILENTLY (a wrong value, not a crash). The fix was scoped to the
-TS emitter; this file is the follow-up audit of the other statically-typed
-tiers.
+History. Item 279 found the TS tier reading a reserved-word key on a `json_parse`
+/ `Any` (dynamic) value as `undefined`: the key was renamed on ACCESS
+(`tc.function` -> `tc.function_`) but the runtime JSON object still held the raw
+key, so the same admitted program diverged between tiers SILENTLY (py read the
+raw key and worked; ts read `undefined`). Item 299 audited rust/go/java/wasm and
+found none reproduced the *silent* class — a dynamic field access on those tiers
+emits a static field selection the target compiler rejects loudly (or, for wasm,
+`json_parse` is refused at emit).
 
-FINDING — none of rust / go / java / wasm reproduce the 279 *silent* class.
-The reason is structural, not a rename that this file has to undo:
+Item 380 supersedes that whole finding at the ROOT. `tc.range.name` is a NON-`Opt`
+field read off a value whose static type is `Any` — exactly the 279/299
+divergence class — and item 380(2) makes the FRONTEND REFUSE it: a field read
+off `Any`/`Value` is a compile error on every tier, before any emit, because an
+erased value has no known fields and neither a py raw-key read nor a ts
+`undefined` is a defensible total answer. So the class can no longer be WRITTEN,
+uniformly, which is a stronger resolution than "py works, the others fail
+loudly": there is nothing left to diverge.
 
-  * `Any` erases to a type with no arbitrary members — Go `any`, Java `Object`,
-    Rust `cordis::Value` — and none of these tiers carries a dynamic key reader
-    (the py tier's `_revl_field(v, name)` / the TS tier's `obj["key"]`). A
-    field access on a dynamic value therefore emits a STATIC field selection
-    (`tc.<name>`), which the target compiler REJECTS (`type any has no field`,
-    `cannot find symbol`, `no field on type Value`). wasm has no dynamic value
-    at all and REFUSES `json_parse` at emit.
-  * So the reserved-word sanitizer does fire on the access (Go/Java/Rust mangle
-    a target-reserved key to `<name>_`), but it is MOOT: the access never
-    reaches a runtime key/value bag whose raw key could be "missed". The
-    divergence, where it is reachable, is a LOUD build error / emit refusal —
-    never a silent wrong value. The 279 silent read was unique to JS, where
-    `obj.function` / `obj["function"]` is a live dynamic lookup on any object.
+The replacement is the total shape surface (stdlib/value.rvl): `value_field(tc,
+"range")` reads a reserved key by STRING, so the identifier-mangle divergence
+that started this whole saga cannot arise — there is no identifier to mangle. It
+is total (absent / non-record -> null Value) and byte-identical on py + ts.
 
-Because nothing reproduces the silent class, item 299 needs no lower/typecheck
-annotation and no emitter change — the shared "attach the receiver's static type
-so a dynamic access uses the raw key" fix would be a no-op that only churns
-byte-identity. This test LOCKS the finding: it proves py reads the raw key, that
-the mangle-firing tiers emit a static selection (so no silent read is possible),
-and — where a `go` toolchain is present — that the go tier fails LOUDLY rather
-than passing with a wrong value.
+This file now LOCKS:
+  * the dynamic reserved-word read off `Any` is REFUSED at the frontend, with a
+    message that names `Any` and points at the record-cast / value.rvl surfaces;
+  * `value_field(tc, "range")` is the mangle-free, cross-tier replacement, read
+    identically on py + ts.
 
     pytest tests/test_dynamic_reserved_key_cross_tier.py -q
 """
@@ -40,8 +36,12 @@ than passing with a wrong value.
 from __future__ import annotations
 
 import importlib.util
+import json
 import shutil
+import subprocess
 import sys
+import tempfile
+import types
 from pathlib import Path
 
 import pytest
@@ -49,12 +49,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import compile_source  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
 
-# A two-line distillation of the item-279 lighthouse finding: read a reserved-word
-# key off a dynamic (`json_parse` / `Any`) value. `{w}` is a word that is BOTH a
-# valid revl identifier AND a reserved word in the tier under test, so the tier's
-# sanitizer actually fires on the access.
+# The two-line 279 lighthouse: read a reserved-word key off a dynamic
+# (`json_parse` / `Any`) value. `{w}` is BOTH a valid revl identifier AND a
+# reserved word in some tier, so historically the sanitizer fired on the access.
+# Item 380 now refuses the read at the frontend before any of that matters.
 _SRC = """
 pub extern pure fn jp(s: Str) -> Any
   = @py {{ import json; return json.loads(s) }}
@@ -67,94 +68,121 @@ pub fn read_key(s: Str) -> Str {{
   let tc: Any = jp(s)
   return tc.{w}.name
 }}
-
-test "dyn_reserved_key" {{
-  assert read_key("{{\\"{w}\\": {{\\"name\\": \\"get_weather\\"}}}}") == "get_weather"
-}}
 """
 
 
-def _ir(word: str) -> dict:
+def _compile(word: str) -> dict:
     return compile_source(_SRC.format(w=word))
 
 
-def _emit(backend: str, ir: dict):
-    spec = importlib.util.spec_from_file_location(
-        f"emit_{backend}_dyn299", ROOT / "backends" / backend / "emit.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    out = module.emit(ir)
-    if isinstance(out, dict):  # wasm returns {path: text}
-        return "\n".join(out.values())
-    return out
+# ------------------------------------------------- item 380: refused at the frontend
+
+@pytest.mark.parametrize("word", ["range", "class", "move", "function"])
+def test_dynamic_reserved_key_read_is_refused_at_the_frontend(word):
+    """A field read off an `Any` value is refused for ANY key — reserved word or
+    not — before a single tier emits. This is what closes the 279/299 class: the
+    divergence cannot be written, so it cannot diverge."""
+    with pytest.raises(RevlError) as ei:
+        _compile(word)
+    msg = str(ei.value)
+    assert "Any" in msg
+    # the refusal points the author at the designed surfaces
+    assert "value_field" in msg or "record" in msg
 
 
-# --------------------------------------------------------------- py reference
-#
-# The py tier is the ground truth: it reads the raw dynamic key and works.
+# ------------------------------------------------ the migration: value_field, cross-tier
 
-def test_py_reads_the_raw_reserved_key_unmangled():
-    """py lowers a dynamic field access to `_revl_field(v, name)` — a dict/attr
-    read by the RAW key string, never the append-`_` mangle. This is the
-    reference every other tier is measured against."""
-    out = _emit("python", _ir("range"))
-    assert "_revl_field(_revl_field(tc, 'range'), 'name')" in out
-    # the reserved-word mangle must NOT touch a dynamic-value read
-    assert "'range_'" not in out
+_STDLIB = ("json.rvl", "str.rvl", "value.rvl")
 
+# The 279 program, rewritten on the total shape surface. The reserved key is a
+# STRING argument to `value_field`, so there is no identifier to mangle and no
+# tier can rename it — the root cause of the whole saga is structurally gone.
+_MIGRATED = r'''
+use "stdlib/json.rvl"  { json_parse }
+use "stdlib/value.rvl" { value_field, value_str }
 
-# ------------------------------------------ statically-typed tiers: no silent read
-#
-# Each of these mangles a target-reserved key on the ACCESS, but the access is a
-# STATIC field selection on a type with no such member, so the outcome is a build
-# error — never the 279 silent wrong value. We pin the emitted static selection
-# and the ABSENCE of any raw-key dynamic reader, which is what makes a silent read
-# structurally impossible.
-
-@pytest.mark.parametrize("backend,word,expected", [
-    ("go", "range", "tc.range_.name"),      # `range` is a Go keyword
-    ("java", "class", "tc.class_.name"),    # `class` is a Java keyword
-    ("rust", "move", "tc.move_.name"),      # `move` is a Rust keyword
-])
-def test_dynamic_access_emits_a_static_selection_not_a_raw_key_read(backend, word, expected):
-    """The sanitizer fires (the key is mangled `<word>_`), but the access is a
-    static field selection — there is no `_revl_field`-style raw-key bag read on
-    these tiers, so no runtime key can be silently missed. The selection targets
-    `Any` (Go `any` / Java `Object` / Rust `cordis::Value`), which has no such
-    member, so the compiler rejects it LOUDLY (proven end-to-end for go below)."""
-    out = _emit(backend, _ir(word))
-    assert expected in out
-    # no dynamic key/value reader exists on this tier — the thing that would be
-    # needed for a 279-style silent read
-    assert "_revl_field" not in out
-    # and the access is NOT a quoted-key bag lookup (the TS `obj["key"]` shape)
-    assert f'["{word}"]' not in out
+pub fn read_key(s: Str) -> Str {
+  let tc = json_parse(s)
+  return value_str(value_field(value_field(tc, "range"), "name"))
+}
+'''
 
 
-def test_wasm_refuses_the_dynamic_value_at_emit():
-    """wasm carries no dynamic `Any` value at all: it refuses `json_parse` at
-    emit, so the 279 class cannot arise — a loud refusal, not a silent read."""
-    with pytest.raises(Exception) as exc:
-        _emit("wasm", _ir("range"))
-    assert "jp" in str(exc.value) or "lowerable" in str(exc.value)
+def _compile_with_stdlib(src: str) -> dict:
+    d = Path(tempfile.mkdtemp())
+    (d / "stdlib").mkdir()
+    for name in _STDLIB:
+        (d / "stdlib" / name).write_text(
+            (ROOT / "stdlib" / name).read_text(encoding="utf-8"), encoding="utf-8")
+    (d / "consumer.rvl").write_text(src, encoding="utf-8")
+    return compile_files([str(d / "consumer.rvl")])
 
 
-# ------------------------------------------------- end-to-end loud-failure proof
-#
-# The strongest form of the finding: run the go tier for real and assert it does
-# NOT silently pass with a wrong value — it fails to build. Gated on a `go`
-# toolchain (skips with a reason where absent), so it never spuriously reds.
+def _emit(backend: str, ir: dict) -> str:
+    path = str(ROOT / "backends" / backend)
+    sys.path.insert(0, path)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            f"emit_{backend}_dyn380", ROOT / "backends" / backend / "emit.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        out = module.emit(ir)
+        return "\n".join(out.values()) if isinstance(out, dict) else str(out)
+    finally:
+        sys.path.remove(path)
 
-@pytest.mark.skipif(shutil.which("go") is None, reason="needs a go toolchain")
-def test_go_tier_fails_loudly_never_a_silent_wrong_value():
-    """The 279 invariant on go: a reserved-word key on a dynamic value is a LOUD
-    build error, never a silent pass. `go` compiles `tc.range_` against `any`
-    (`type any has no field ...`), so the tier reports `fail`, not `pass`."""
-    from revl.test import RUNNERS  # noqa: E402
-    outcome, message = RUNNERS["go"](_ir("range"))
-    # the invariant: a loud failure, never a silent pass with a wrong value. The
-    # go runner surfaces the compiler's `tc.range_ undefined (type any has no
-    # field ...)` to stdout and returns a `fail` verdict.
-    assert outcome == "fail", (
-        "go must fail loudly on a dynamic reserved-word read — it has no "
-        f"dynamic key reader; got {outcome!r}: {message!r}")
+
+def _exec_py(ir: dict) -> dict:
+    code = _emit("python", ir)
+    stub = types.ModuleType("runtime")
+    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    had, previous = "runtime" in sys.modules, sys.modules.get("runtime")
+    sys.modules["runtime"] = stub
+    try:
+        ns: dict = {}
+        exec(compile(code, "emitted.py", "exec"), ns)  # noqa: S102 — our own emitter
+        return ns
+    finally:
+        if had:
+            sys.modules["runtime"] = previous
+        else:
+            del sys.modules["runtime"]
+
+
+def _run_ts(ir: dict, tail: str):
+    code = _emit("typescript", ir)
+    d = Path(tempfile.mkdtemp())
+    (d / "runtime.ts").write_text("export const host: any = {};\n", encoding="utf-8")
+    pkg = d / "pkg"
+    pkg.mkdir()
+    (pkg / "mod.ts").write_text(code + "\n" + tail + "\n", encoding="utf-8")
+    proc = subprocess.run(  # noqa: S603
+        ["node", str(pkg / "mod.ts")], capture_output=True, text=True)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+_BODY = '{"range": {"name": "get_weather"}}'
+
+
+def test_py_value_field_reads_the_reserved_key_by_string():
+    """`value_field(tc, "range")` reads the raw reserved key with no mangle —
+    the key is a string, not an identifier."""
+    ns = _exec_py(_compile_with_stdlib(_MIGRATED))
+    assert ns["read_key"](_BODY) == "get_weather"
+    # absent / non-object tolerated (total), never a raise
+    assert ns["read_key"]("{}") == ""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_ts_value_field_matches_py():
+    """The same source on ts (value.rvl is two-tier) reads the reserved key
+    identically — no `tc.range_` rename, so no divergence."""
+    ir = _compile_with_stdlib(_MIGRATED)
+    ns = _exec_py(ir)
+    for body in (_BODY, "{}"):
+        py_out = ns["read_key"](body)
+        ts_out = _run_ts(
+            ir, f"console.log(JSON.stringify(read_key({json.dumps(body)})));")
+        assert py_out == ts_out
+    assert ns["read_key"](_BODY) == "get_weather"

@@ -472,6 +472,49 @@ def test_named_integer_arithmetic_agrees_slow(tier: str):
     assert status == "pass", f"{tier}: {message}"
 
 
+# Int32 bitwise operators (item 366, docs/arithmetic.md). Every tier lowers
+# them to native bit operations, and the whole point of the wave is that they
+# produce the SAME value on all six: `& | ^ ~` on the bit patterns, a `<<` that
+# wraps into 32-bit two's complement, an arithmetic (sign-extending) `>>`, and a
+# shift count taken mod 32. The rotl32 kernel is the payoff — the 32-bit
+# left-rotate SHA-256/HMAC needs, expressed in pure revl and running identically
+# everywhere. Each assertion pins a value python and wasm were checked against.
+BITWISE = """
+fn rotl32(x: Int32, n: Int32) -> Int32 { return (x << n) | (x >> (32.to_int32() - n)) }
+
+test "AND masks bits"        { assert (240.to_int32() & 15.to_int32()) == 0.to_int32() }
+test "OR sets bits"          { assert (240.to_int32() | 15.to_int32()) == 255.to_int32() }
+test "XOR toggles bits"      { assert (255.to_int32() ^ 15.to_int32()) == 240.to_int32() }
+test "NOT complements"       { assert ~(5.to_int32()) == (0 - 6).to_int32() }
+test "shl by 4"              { assert (1.to_int32() << 4.to_int32()) == 16.to_int32() }
+test "shl into the sign bit" { assert (1.to_int32() << 31.to_int32()) == (0 - 2147483648).to_int32() }
+test "shift count is mod 32" { assert (1.to_int32() << 32.to_int32()) == 1.to_int32() }
+test "shr is arithmetic"     { assert ((0 - 8).to_int32() >> 1.to_int32()) == (0 - 4).to_int32() }
+test "shr sign-extends MIN"  { assert ((0 - 2147483648).to_int32() >> 28.to_int32()) == (0 - 8).to_int32() }
+test "shift binds below +"   { assert (1.to_int32() + 1.to_int32() << 2.to_int32()) == 8.to_int32() }
+test "rotl32 payoff"         { assert rotl32(305419896.to_int32(), 8.to_int32()) == 878082066.to_int32() }
+test "rotl32 by zero is id"  { assert rotl32(305419896.to_int32(), 0.to_int32()) == 305419896.to_int32() }
+"""
+
+
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_bitwise_operators_agree(tier: str):
+    status, message = _run(tier, BITWISE)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", SLOW_TIERS)
+def test_bitwise_operators_agree_slow(tier: str):
+    status, message = _run(tier, BITWISE)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
 def test_true_division_yields_float_everywhere():
     """`Int / Int` is Float, so declaring the result `Int` is a type error.
     This is the fix for what used to be a soundness break: the checker said

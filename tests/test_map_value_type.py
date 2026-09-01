@@ -52,7 +52,8 @@ def test_value_and_host_method_namespaces_are_disjoint():
     for methods in _HOST_FAMILIES.values():
         host_verbs |= set(methods)
     assert host_verbs == {"open", "close", "query", "execute", "new",
-                          "drop", "insert", "remove", "get", "run"}
+                          "drop", "insert", "insert_if_absent", "remove",
+                          "get", "run"}
     # `remove` is the ONE sanctioned overlap (docs/stdlib-2.0.md §Map): the
     # persistent Map value operation shares a spelling with the v1 host stub
     # verb. Safe because dispatch is by receiver kind — a constructor-tracked
@@ -68,7 +69,11 @@ def test_map_surface_is_exactly_the_spec():
     assert _BUILTIN_SIG["has"] == ("Map", ["Str"], "Bool")
     # The iteration/remove step (docs/stdlib-2.0.md §Map).
     assert _BUILTIN_SIG["size"] == ("Map", [], "Int")
-    assert _BUILTIN_SIG["keys"] == ("Map", [], "List[Str]")
+    # `keys` is a multi-receiver builtin (roadmap item 189): the Map key set
+    # AND the Value record-key enumeration (`value_keys` dot-form). The Map row
+    # is unchanged — it is selected by the receiver head, like `to_int`.
+    assert _BUILTIN_SIG["keys"]["Map"] == ("Map", [], "List[Str]")
+    assert _BUILTIN_SIG["keys"]["Value"] == ("Value", [], "List[Str]")
     assert _BUILTIN_SIG["remove"] == ("Map", ["Str"], "@self")
 
 

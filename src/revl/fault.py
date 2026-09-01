@@ -796,6 +796,363 @@ def sweep_dossier(ir: dict, only: str | None = None) -> dict:
     return run_sweep(ir, out=lambda _line: None, only=only)[1]
 
 
+# ---------------------------------------------------------------------------
+# the cross-tier sweep — the same faults, on every runtime (roadmap item 125)
+# ---------------------------------------------------------------------------
+#
+# `revl test --sweep` proves A8/R4 exhaustively on the py reference tier.  The
+# cross-tier sweep (`revl test --backend all --sweep`) upgrades the claim to a
+# *portability* one: the same fault injected at the same step must leave no
+# residue on *every* runtime, and the runtimes must *agree*.  "No residue on
+# ANY tier, and they all agree" is the strongest A8 statement the compiler can
+# make.
+#
+# The residue oracle differs by tier, but the fault is the same IR splice
+# (`_inject`, a `fail` step after step N) every tier already lowers:
+#
+# * py       — `run_sweep`: a real activation, the runtime interrogated for
+#              inverse order / residue (the richest oracle; the reference).
+# * ts/rust/  the `--once` composition runner (`revl run --backend <t> --once`):
+#   java/     boot the composition with the fault armed, tear down LIFO, and
+#   wasm/go   read the runtime's own no-residue proof (`[run] NO-RESIDUE`).
+#
+# A tier whose toolchain is absent is a *loud skip with a reason* (never a
+# false green), exactly as the rest of the cross-tier suite skips.  A tier
+# whose `--once` runner cannot yet drive a *faulting* activation to a residue
+# proof — it panics, or the emitter rejects a mid-body `fail` as unreachable —
+# is a loud skip too, carrying that diagnostic: a capability gap is named,
+# never silently passed and never mistaken for a leak.
+#
+# AGREEMENT is the cross-tier claim: every tier that executed swept the same
+# fault points (they are enumerated from the shared IR, so the set is
+# tier-independent by construction) and reached the same residue-free verdict
+# at each.  A point residue-free on one runtime and residue-bearing on another
+# is a portability failure, reported as such.
+#
+# SCOPE: the compiled tiers pay an emit+build per fault point, so a heavy tier
+# takes a *representative* corpus (first / middle / last top-level step of each
+# component) when `cap` is set — enough to exercise every component's bring-up,
+# unwind, and any compensating teardown, while staying runnable on a laptop.
+# A full-toolchain CI run passes `cap=None` and sweeps every step of every
+# component on every tier whose runtime is present.
+
+_SWEEP_ALL_TIERS = ("py", "ts", "rust", "java", "wasm", "go")
+
+
+def _corpus_units(ir: dict, cap: int | None = None) -> list:
+    """The tier-independent fault corpus: every top-level step of every
+    component (`sweep_units`), flattened.  With *cap* set, each component is
+    reduced to a representative subset — its first, middle, and last step — so
+    a heavy compiled tier stays runnable while still exercising every
+    component's bring-up, mid-life, and teardown."""
+    corpus: list = []
+    for component in ir.get("components") or []:
+        units = sweep_units(ir, component.get("name"))
+        if cap is not None and len(units) > cap:
+            picks = sorted({0, len(units) // 2, len(units) - 1})[:cap]
+            units = [units[i] for i in picks]
+        corpus.extend(units)
+    return corpus
+
+
+def _once_runner(tier: str):
+    """The `--once` composition runner + its toolchain-availability probe for
+    a compiled/hosted *tier*.  Imported lazily — none of these need cordis-py,
+    and importing a tier's runner must not drag in its toolchain."""
+    if tier == "go":
+        from .run_go import go_runtime_reason, run_go  # noqa: PLC0415
+        return run_go, go_runtime_reason
+    if tier == "rust":
+        from .run_rust import run_rust, rust_runtime_reason  # noqa: PLC0415
+        return run_rust, rust_runtime_reason
+    if tier == "java":
+        from .run_java import java_runtime_reason, run_java  # noqa: PLC0415
+        return run_java, java_runtime_reason
+    if tier == "wasm":
+        from .run_wasm import run_wasm, wasm_runtime_reason  # noqa: PLC0415
+        return run_wasm, wasm_runtime_reason
+    if tier == "ts":
+        from .run_ts import run_ts, ts_runtime_reason  # noqa: PLC0415
+        return run_ts, ts_runtime_reason
+    raise KeyError(tier)  # pragma: no cover — callers pass a known tier
+
+
+def _once_verdict(runner, faulted_ir: dict, config: dict, files) -> tuple:
+    """Run one faulted composition on a tier's `--once` runner, capture its
+    output, and classify the result.  Returns ``(kind, detail)`` where *kind*
+    is one of ``clean`` (proved no residue), ``residue`` (a real leak — the
+    runner printed ``RESIDUE-LEFT``), ``toolchain`` (the runtime is absent),
+    or ``gap`` (the runner could not drive a faulting activation to a residue
+    proof — a named capability gap, never a pass and never counted as a leak).
+    """
+    import contextlib  # noqa: PLC0415
+    import io  # noqa: PLC0415
+
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            code = runner(faulted_ir, config, files, once=True, interactive=False)
+    except Exception as error:  # noqa: BLE001 — a runner crash is a capability gap, not a leak
+        return ("gap", f"the --once runner raised "
+                       f"{type(error).__name__}: {error}")
+    output = buffer.getvalue()
+    if "RESIDUE-LEFT" in output:
+        return ("residue", "the runner's teardown proof reported RESIDUE-LEFT")
+    if code == 3:
+        return ("toolchain", _first_error_line(output) or "runtime not available")
+    if code == 0 and "NO-RESIDUE" in output:
+        return ("clean", "")
+    return ("gap", _first_error_line(output)
+            or f"the --once runner exited {code} without a residue proof")
+
+
+def _first_error_line(output: str) -> str:
+    """The first ``error:``/failure line of a runner's output, for a gap or
+    toolchain-skip reason (trimmed so the dossier stays one line per tier)."""
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("error:") or "failed:" in stripped:
+            return stripped[:200]
+    for line in output.splitlines():  # fall back to the last non-empty line
+        if line.strip():
+            return line.strip()[:200]
+    return ""
+
+
+def _prune_dependents(ir: dict, target: str) -> dict:
+    """A copy of *ir* with *target*'s transitive dependents removed from the
+    composition.
+
+    The py sweep holds a target's dependents *out of the bring-up* while it
+    faults the target (:func:`_provider_dependents`): a dependent whose
+    provider is the deliberately-failed target could never activate, so it
+    would sit forever waiting on a provision that never arrives.  The compiled
+    tiers' `--once` runner boots the *whole* composition, so it would strand
+    (and, on go, deadlock) that dependent.  Pruning the dependents before the
+    boot gives the compiled tiers the same held-out bring-up the py reference
+    uses — so the two sweep the same fault points and can be compared."""
+    dependents = _provider_dependents(ir).get(target, set())
+    if not dependents:
+        return ir
+    pruned = copy.deepcopy(ir)
+    pruned["components"] = [c for c in pruned.get("components") or []
+                            if c.get("name") not in dependents]
+    manifest = pruned.get("manifest")
+    if isinstance(manifest, dict):
+        if isinstance(manifest.get("components"), list):
+            manifest["components"] = [c for c in manifest["components"]
+                                      if c.get("name") not in dependents]
+        if isinstance(manifest.get("loadOrder"), list):
+            manifest["loadOrder"] = [n for n in manifest["loadOrder"]
+                                     if n not in dependents]
+    return pruned
+
+
+def _compiled_tier_sweep(tier: str, ir: dict, config: dict, files,
+                         cap: int | None) -> dict:
+    """Sweep a compiled/hosted *tier*: inject the fault at each corpus point,
+    boot the composition through the `--once` runner, and read its no-residue
+    proof.  Returns a per-tier record ``{tier, status, points, reason}``.
+
+    ``status`` is ``executed`` (every corpus point proved residue-free),
+    ``failed`` (a point left residue — a real portability leak), or ``skipped``
+    (the runtime is absent, or the runner cannot yet drive a faulting
+    activation — a named capability gap).  A gap stops the tier and is reported
+    with how many points had proved clean before it, so a partial capability is
+    never rounded up to a pass."""
+    runner, reason_of = _once_runner(tier)
+    absent = reason_of()
+    if absent is not None:
+        return {"tier": tier, "status": "skipped", "points": [],
+                "reason": f"toolchain absent — {absent}"}
+
+    corpus = _corpus_units(ir, cap)
+    points: list = []
+    for unit in corpus:
+        faulted = _prune_dependents(_inject(ir, unit), unit["component"])
+        kind, detail = _once_verdict(runner, faulted, config, files)
+        if kind == "clean":
+            points.append({"where": unit["where"], "component": unit["component"],
+                           "status": "clean"})
+        elif kind == "residue":
+            points.append({"where": unit["where"], "component": unit["component"],
+                           "status": "residue", "detail": detail})
+            return {"tier": tier, "status": "failed", "points": points,
+                    "reason": f"residue at {unit['where']}: {detail}"}
+        elif kind == "toolchain":  # pragma: no cover — pre-checked above
+            return {"tier": tier, "status": "skipped", "points": points,
+                    "reason": f"toolchain absent — {detail}"}
+        else:  # gap — a capability the tier's runner does not have yet
+            return {"tier": tier, "status": "skipped", "points": points,
+                    "reason": (f"the --once runner does not yet drive a "
+                               f"faulting activation on this tier "
+                               f"({len(points)} point(s) proved clean first) — "
+                               f"{detail}")}
+    return {"tier": tier, "status": "executed", "points": points, "reason": ""}
+
+
+def _py_tier_sweep(ir: dict) -> dict:
+    """Sweep the py reference tier via :func:`run_sweep` (a real activation,
+    the runtime interrogated).  Returns the same per-tier record shape as the
+    compiled tiers, so agreement compares like with like.  A missing cordis-py
+    runtime is a loud skip, never a pass."""
+    try:
+        failed, dossier = run_sweep(ir, out=lambda _line: None)
+    except ModuleNotFoundError as error:
+        return {"tier": "py", "status": "skipped", "points": [],
+                "reason": (f"the cordis-py runtime is not installed "
+                           f"({error.name!r} missing — sh backends/python/setup.sh)")}
+    points = [{"where": step["where"], "component": section["component"],
+               "status": "residue" if step["status"] == "fail" else "clean",
+               **({"detail": "; ".join(step["problems"])} if step["problems"] else {})}
+              for section in dossier["components"] for step in section["steps"]]
+    unreachable = dossier.get("unreachable") or []
+    if failed:
+        leak = next((p for p in points if p["status"] == "residue"), None)
+        return {"tier": "py", "status": "failed", "points": points,
+                "unreachable": unreachable,
+                "reason": (f"residue at {leak['where']}: {leak.get('detail', '')}"
+                           if leak else f"{failed} step(s) left residue")}
+    return {"tier": "py", "status": "executed", "points": points,
+            "unreachable": unreachable, "reason": ""}
+
+
+def cross_tier_sweep(ir: dict, config: dict | None = None, files=None,
+                     tiers=_SWEEP_ALL_TIERS, cap: int | None = None,
+                     out=None) -> tuple[int, dict]:
+    """`revl test --backend all --sweep`: the fault sweep on every tier.
+
+    Inject the fault at every step (or a representative corpus, with *cap*) on
+    every runtime whose toolchain is present, assert each is residue-free at
+    every fault point, and assert the tiers AGREE.  A tier whose toolchain is
+    absent — or whose `--once` runner cannot yet drive a faulting activation —
+    is loud-skipped with a reason, never a false green.
+
+    Returns ``(failures, dossier)``.  ``failures`` is nonzero when a tier left
+    residue or two tiers disagreed on a fault point; a run where only skips
+    occurred is a loud skip, not a failure and not a pass.
+    """
+    printer = (lambda line: print(line)) if out is None else out
+    config = config or {}
+    files = files or []
+
+    records: list = []
+    for tier in tiers:
+        if tier == "py":
+            records.append(_py_tier_sweep(ir))
+        else:
+            records.append(_compiled_tier_sweep(tier, ir, config, files, cap))
+
+    dossier = _cross_tier_dossier(ir, records, cap)
+    _format_cross_tier(dossier, printer)
+    failures = (dossier["counts"]["tiersLeakingResidue"]
+                + dossier["counts"]["disagreements"])
+    return failures, dossier
+
+
+def _cross_tier_dossier(ir: dict, records: list, cap: int | None) -> dict:
+    """Aggregate the per-tier records into a cross-tier verdict.
+
+    AGREEMENT is checked over the *executing* tiers: for every fault point any
+    tier reached, every executing tier that swept it must have reached the same
+    residue-free verdict.  A point clean on one tier and residue on another is
+    a disagreement (a portability failure).  Pure over the records, so the
+    aggregation is tested without any runtime."""
+    executed = [r for r in records if r["status"] == "executed"]
+    leaking = [r for r in records if r["status"] == "failed"]
+    skipped = [r for r in records if r["status"] == "skipped"]
+
+    # verdict per (where) point across executing tiers
+    by_point: dict = {}
+    for record in executed:
+        for point in record["points"]:
+            by_point.setdefault(point["where"], {})[record["tier"]] = point["status"]
+    disagreements = []
+    cross_checked = 0  # points ≥2 executing tiers both swept — the real overlap
+    for where, verdicts in sorted(by_point.items()):
+        if len(verdicts) >= 2:
+            cross_checked += 1
+        statuses = set(verdicts.values())
+        if len(statuses) > 1:
+            disagreements.append({"where": where, "verdicts": dict(verdicts)})
+
+    agree = bool(executed) and not disagreements and not leaking
+    status = "failed" if (leaking or disagreements) else (
+        "passed" if executed else "skipped")
+    return {
+        "kind": "cross-tier-sweep",
+        "status": status,
+        "roadmapItem": 125,
+        "title": "cross-tier fault sweep — the same faults on every runtime",
+        "agree": agree,
+        "cap": cap,
+        "note": ("the same injected fault at the same step, on every runtime "
+                 "whose toolchain is present; each asserted residue-free and "
+                 "the tiers asserted to agree. absent toolchains and "
+                 "not-yet-capable runners are named, never passed "
+                 "(docs/fault-tests.md §10)."),
+        "tiers": records,
+        "agreement": {
+            "executed": [r["tier"] for r in executed],
+            "skipped": [{"tier": r["tier"], "reason": r["reason"]} for r in skipped],
+            "leaking": [{"tier": r["tier"], "reason": r["reason"]} for r in leaking],
+            "disagreements": disagreements,
+            "points": len(by_point),
+            "crossChecked": cross_checked,
+        },
+        "counts": {
+            "tiers": len(records),
+            "executed": len(executed),
+            "skipped": len(skipped),
+            "tiersLeakingResidue": len(leaking),
+            "disagreements": len(disagreements),
+        },
+    }
+
+
+def _format_cross_tier(dossier: dict, printer) -> None:
+    """Human-readable rendering: one line per tier, then the agreement verdict."""
+    printer("cross-tier fault sweep — the same faults on every runtime "
+            "(roadmap item 125)")
+    if dossier["cap"] is not None:
+        printer(f"  (representative corpus: first/middle/last step per "
+                f"component, cap {dossier['cap']}; a full CI run sweeps every "
+                f"step)")
+    printer("")
+    for record in dossier["tiers"]:
+        tier = record["tier"]
+        if record["status"] == "executed":
+            clean = sum(1 for p in record["points"] if p["status"] == "clean")
+            printer(f"  {tier:5} EXECUTED — {clean} fault point(s), all "
+                    f"residue-free")
+        elif record["status"] == "failed":
+            printer(f"  {tier:5} RESIDUE  — {record['reason']}")
+        else:
+            printer(f"  {tier:5} skipped  — {record['reason']}")
+    printer("")
+    agreement = dossier["agreement"]
+    if dossier["counts"]["disagreements"]:
+        printer("DISAGREEMENT — the tiers do not agree on residue-freedom:")
+        for item in agreement["disagreements"]:
+            verdicts = ", ".join(f"{t}={s}" for t, s in item["verdicts"].items())
+            printer(f"  {item['where']}: {verdicts}")
+    executed = agreement["executed"]
+    if len(executed) >= 2:
+        printer(f"AGREEMENT — {len(executed)} tiers ({', '.join(executed)}) "
+                f"agree on {agreement['crossChecked']} shared fault point(s): "
+                f"residue-free on every tier.")
+    elif len(executed) == 1:
+        printer(f"one tier executed ({executed[0]}): residue-free at every "
+                f"fault point; no cross-tier agreement to check (the others "
+                f"loud-skipped — see above).")
+    else:
+        printer("no tier could execute the sweep — every tier loud-skipped "
+                "(toolchain absent or runner not yet capable); not a pass.")
+    if agreement["skipped"]:
+        printer("  skipped tiers: "
+                + ", ".join(s["tier"] for s in agreement["skipped"]))
+
+
 # ===========================================================================
 # `verified effect` — inverse round-trip testing (roadmap item 26)
 # ===========================================================================
@@ -868,6 +1225,8 @@ def _outstanding(events: list) -> dict:
         "<tag>.new" / "<tag>.drop"                 a Map came into / left being
         "<tag>.open <url>" / "<tag>.close <url>"    a Pool opened / closed
         "<tag>.insert <key>" / "<tag>.remove <key>" a Map key set / cleared
+        "<tag>.insert_if_absent <key> -> true|false" a CAS: true set the key,
+                                                    false changed nothing (397)
         "<tag>.acquire conn=<k> …" / ".release …"   a Pool connection checked out
 
     Anything the ledger does not carry (an aliased reference, an emission that
@@ -893,7 +1252,21 @@ def _outstanding(events: list) -> dict:
             conns.pop(tag, None)
         elif verb == "insert":
             if tag in keys:
-                keys[tag].add(rest)
+                # item 309: a value-carrying insert line is `<key> = <hash>`.
+                # `_outstanding` stays the value-BLIND negative control — it folds
+                # the KEY and ignores the digest — but it must strip the ` = <hash>`
+                # suffix so insert/remove still pair (a bare pre-309 `insert k`
+                # line has no suffix and is unchanged).
+                keys[tag].add(rest.split(" = ", 1)[0].strip())
+        elif verb == "insert_if_absent":
+            # item 397: the record is "<key> -> true|false". A `true` CAS set
+            # the key (fold it in exactly as `insert`); a `false` CAS changed
+            # nothing (the key was already outstanding for its own claimant),
+            # so it counts as no residue here — or the fingerprint would
+            # over-count a key this call never owned.
+            key_part, _, outcome = rest.rpartition(" -> ")
+            if outcome == "true" and tag in keys:
+                keys[tag].add(key_part)
         elif verb == "remove":
             if tag in keys:
                 keys[tag].discard(rest)
@@ -942,6 +1315,175 @@ def _fingerprint_delta(baseline: dict, final: dict) -> list:
             diffs.append(f"`{tag}` released baseline connection {conn} "
                          "(the inverse released more than it acquired)")
     return diffs
+
+
+# ---------------------------------------------------------------------------
+# item 309: the value-aware double-undo round
+# ---------------------------------------------------------------------------
+#
+# The precondition the design (docs/design/309-idempotent-inverse.md, §"The
+# test") fixes FIRST: `_outstanding` above is value-BLIND. It folds the trace
+# into referent SETS, carrying keys and never values, so a delta-shaped inverse
+# (the design's counter-increment headline, a refund) moves a value twice and
+# the set fingerprint never sees it. Left as-is a falsified `undo idempotent`
+# declaration sails through and `replay: free` rests on unearned evidence.
+#
+# So this section adds a VALUE-CARRYING fold and a value-modeling world, WITHOUT
+# touching `_outstanding` — the value-blind fold is retained deliberately as the
+# negative control the design names ("the same fixture against the referent-set
+# fingerprint PASSES, so the round must assert on digests"). Scope, stated
+# plainly (design §"Scope of the sweep"): the double-undo instruments catch
+# referent-cardinality divergence and VALUE divergence, and NOTHING ELSE.
+# External-emission divergence (a refund that fires twice at a real remote) is
+# invisible to the model world by construction; it is covered only by the keyed
+# register and the mock-remote key tests, never by this sweep. A green round
+# says the descriptor's replay is value-stable against the model, not that the
+# world's remotes dedup.
+
+import hashlib  # noqa: E402 — kept local to the value-aware section
+
+# verbs whose recovered inverse APPLIES A DELTA to the referent's value rather
+# than writing an absolute one: re-running one moves the value again, so it is
+# non-idempotent by construction (the exact class 309 exists to catch). A verb
+# not in this set is treated as restore-to-recorded-value (last-writer-wins,
+# idempotent). Matched as a substring of the lowered method, like DictWorld's
+# `_REMOVE`, so `credit_account`/`applyRefund` are caught too.
+_DELTA_VERBS = ("increment", "decrement", "refund", "credit", "debit",
+                "deposit", "withdraw", "append", "push", "adjust", "accrue",
+                "add", "subtract")
+
+
+def _value_digest(value) -> str:
+    """A short, STABLE digest of an applied value (design §"The test", point 1).
+
+    Stable across processes — uses hashlib, never Python's per-process-salted
+    `hash()`, because the digest is compared across a recovery re-run in a fresh
+    process. Canonicalizes through `repr` of a JSON-ish normal form so two
+    equal values digest equally regardless of dict key order."""
+    try:
+        import json  # noqa: PLC0415
+        canon = json.dumps(value, sort_keys=True, default=repr)
+    except (TypeError, ValueError):  # pragma: no cover — exotic value
+        canon = repr(value)
+    return hashlib.blake2s(canon.encode("utf-8"), digest_size=6).hexdigest()
+
+
+def _outstanding_valued(events: list) -> dict:
+    """The value-AWARE companion to `_outstanding`: the same acquire/insert/
+    remove fold, but it ALSO folds the per-key value digest carried by a
+    value-carrying insert line (`<tag>.insert <key> = <hash>`), item 309.
+
+    Backward-compatible: a bare `<tag>.insert <key>` line (every pre-309 trace,
+    and the fabricated-ledger unit fixtures) folds exactly as before with no
+    digest recorded for that key, so `_outstanding_valued` degrades to a
+    superset of `_outstanding`. The digest map is what a delta-shaped inverse
+    moves on a second application and a restore-shaped one does not."""
+    base = _outstanding(events)
+    digests: dict = {}
+    for event in events:
+        head = event.split(" ", 1)[0]
+        tag, _, verb = head.rpartition(".")
+        if not tag or verb not in ("insert", "insert_if_absent"):
+            continue
+        rest = event[len(head):].strip()
+        if " = " not in rest:
+            continue  # a bare (value-blind) insert line — no digest to fold
+        key_part, _, digest = rest.partition(" = ")
+        key_part = key_part.strip()
+        # a CAS `<key> -> true|false = <hash>`: only a `true` set a value
+        if " -> " in key_part:
+            key_only, _, outcome = key_part.rpartition(" -> ")
+            if outcome != "true":
+                continue
+            key_part = key_only
+        digests.setdefault(tag, {})[key_part] = digest.strip()
+    # a `remove` clears any digest for that key (mirrors the key-set fold)
+    for event in events:
+        head = event.split(" ", 1)[0]
+        tag, _, verb = head.rpartition(".")
+        if verb == "remove" and tag in digests:
+            digests[tag].pop(event[len(head):].strip(), None)
+    base["digests"] = {tag: d for tag, d in digests.items() if d}
+    return base
+
+
+class _ValueWorld:
+    """A value-modeling world the double-undo round re-applies inverse ops to
+    (design §"The test", point 2): an extension of the recovery `DictWorld`
+    idea that stores a per-referent VALUE and applies a delta op as a DELTA, so
+    a non-idempotent inverse can actually diverge in the model instead of being
+    flattened by a dict overwrite.
+
+    An inverse op is the reconstructible WAL shape recovery already keys off —
+    `{"receiver","method","args"}` — extended with the applied `value`. The
+    verb decides the shape: a `_DELTA_VERBS` method accumulates (re-applying
+    moves the value), any other method is restore-to-recorded-value (re-applying
+    is a no-op). Pure and runtime-free, so the round is unit-testable against
+    fabricated op lists exactly as `_outstanding` is against fabricated
+    ledgers."""
+
+    def __init__(self) -> None:
+        self.values: dict = {}
+
+    @staticmethod
+    def _key(op: dict) -> str:
+        args = op.get("args") or []
+        return f"{op.get('receiver')}:{args[0] if args else ''}"
+
+    @staticmethod
+    def _is_delta(op: dict) -> bool:
+        method = (op.get("method") or "").lower()
+        return any(verb in method for verb in _DELTA_VERBS)
+
+    def apply(self, op: dict) -> None:
+        ref = self._key(op)
+        value = op.get("value")
+        if self._is_delta(op):
+            # a delta accumulates onto whatever stands — the non-idempotent
+            # shape. Numeric deltas sum; a non-numeric delta (an append) grows a
+            # tuple, so a second application still moves the digest.
+            prior = self.values.get(ref)
+            if isinstance(value, (int, float)) and isinstance(prior, (int, float)):
+                self.values[ref] = prior + value
+            elif isinstance(value, (int, float)) and prior is None:
+                self.values[ref] = value
+            else:
+                self.values[ref] = (prior, value) if prior is not None else (value,)
+        else:
+            # restore-to-recorded-value: last writer wins, so re-applying the
+            # same absolute value is a no-op (idempotent by construction).
+            self.values[ref] = value
+
+    def fingerprint(self) -> dict:
+        return {ref: _value_digest(v) for ref, v in sorted(self.values.items())}
+
+
+def _double_undo_round(inverse_ops: list) -> tuple:
+    """The property in operational terms (design §"The test"): re-applying an
+    inverse's WAL descriptor to the post-rollback world changes nothing.
+
+    Apply the recorded reconstructible inverse ops once against a value-modeling
+    world (`final`), then re-issue the SAME ops once more (`final2`), and return
+    `(ok, detail, final, final2)` with `ok = (final2 == final)` over value
+    digests. A restore-to-recorded-value inverse re-applies to the same digest
+    and passes; a delta-shaped inverse moves the digest on the second
+    application and is CAUGHT — which the value-blind `_outstanding` fold cannot
+    see (the negative control the extension exists for)."""
+    world = _ValueWorld()
+    for op in inverse_ops:
+        world.apply(op)
+    final = world.fingerprint()
+    for op in inverse_ops:
+        world.apply(op)
+    final2 = world.fingerprint()
+    if final2 == final:
+        return (True, None, final, final2)
+    moved = sorted(ref for ref in set(final) | set(final2)
+                   if final.get(ref) != final2.get(ref))
+    detail = ("a second application of the recorded inverse moved the value "
+              f"digest of referent(s) {', '.join(moved)} — the inverse is "
+              "delta-shaped (non-idempotent), so `undo(undo(s)) != undo(s)`")
+    return (False, detail, final, final2)
 
 
 def _verified_effect_labels(body: list) -> list:
@@ -1117,6 +1659,27 @@ def _roundtrip_dossier(results: list, rounds: int) -> dict:
             "rounds": rounds,
         },
         "components": components,
+        # item 309: the value-aware double-undo facet the gauntlet grade can
+        # require. The value-modeling round (`_double_undo_round` over a
+        # `_ValueWorld`) re-applies a recorded inverse's descriptor a SECOND time
+        # and asserts the value digest is stable — catching a delta/refund-shaped
+        # inverse the value-blind referent-set fingerprint above cannot see. Its
+        # scope is referent-cardinality + value divergence in the model ONLY,
+        # never external-emission divergence (docs/design/309-idempotent-inverse.md,
+        # §"Scope of the sweep"). The descriptor-level double-undo runs in the
+        # recovery-twice unit over witnessed-extern WAL descriptors;
+        # TODO(309-slice2): re-issue the live verified-effect inverses a second
+        # time here so this facet carries a per-component pass/fail from the
+        # runtime path too (needs the runtime to emit value-carrying trace lines).
+        "doubleUndo": {
+            "available": True,
+            "scope": "referent-cardinality + value divergence in the model; "
+                     "external-emission divergence out of reach",
+            "note": "value-aware re-application round — a delta-shaped inverse "
+                    "moves the value digest on the second undo and is caught; a "
+                    "restore-to-recorded-value inverse re-applies to the same "
+                    "digest and passes (item 309).",
+        },
     }
 
 

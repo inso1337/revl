@@ -76,7 +76,13 @@ _IMPORT_ALIAS = {
     "plug": "_revl_plug",
     "set_trace": "_revl_set_trace",
     "retry_idempotent": "_revl_retry_idempotent",
+    "validate_response": "_revl_validate",
+    "validate_retry": "_revl_validate_retry",
+    "validate_retry_async": "_revl_validate_retry_async",
     "Clock": "_revl_Clock",
+    "SessionOwner": "_revl_SessionOwner",
+    "set_session_owner": "_revl_set_session_owner",
+    "clear_session_owner": "_revl_clear_session_owner",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
 
@@ -236,6 +242,24 @@ def _py_async_arrow(body: Any, params: str, render, requires=None,
     return f"_revl_as_async(lambda {params}: {rendered_body})"
 
 
+def _transactional_register_kwargs(ext: dict) -> str:
+    """item 309: the extra `.transactional(...)` kwargs carrying an extern's
+    idempotency register, or `""` when none is declared.
+
+    Emitted ONLY when the author declared `undo idempotent` / `idempotent(key:)`,
+    so a pre-309 witnessed extern's emitted code is byte-identical (additivity).
+    The kwargs let the runtime fence-vs-free the abort Phase-1 apply and thread
+    the register into the WAL descriptor a fresh-process recover reads."""
+    parts: list = []
+    if ext.get("undo_idempotent"):
+        parts.append("undo_idempotent=True")
+    if ext.get("register"):
+        parts.append(f"register={ext['register']!r}")
+    if ext.get("idempotency_key"):
+        parts.append(f"idempotency={ext['idempotency_key']!r}")
+    return (", " + ", ".join(parts)) if parts else ""
+
+
 def _mangle(name: str) -> str:
     """Rename a syntactically-valid identifier that collides with a *Python*
     reserved word, so a valid revl identifier that happens to be a Python
@@ -259,7 +283,20 @@ def _mangle(name: str) -> str:
 def _ident(name: Any, what: str) -> str:
     if not isinstance(name, str) or not name.isidentifier():
         raise EmitError(f"{what} {name!r} is not a usable Python identifier")
-    if name in _RESERVED or name.startswith("_"):
+    # The emitter's scaffolding lives in the `_revl*` namespace (`_revl_ctx`,
+    # `_revl_config`, the `__revl_destructure_*` temps, the `_IMPORT_ALIAS`
+    # `_revl_<name>` aliases): a user identifier that enters it would collide.
+    # That is the ONLY leading-underscore namespace the emitter claims. A plain
+    # leading-underscore name (`_v`, `_x`) is an ordinary Python identifier and
+    # the well-worn "bound but unused" idiom (e.g. a match arm that ignores its
+    # payload, `Some(_v) => ...`); it is a valid Python local, does NOT collide,
+    # and already emits verbatim on the module-`fn` path and on the other tiers
+    # (a go regression, examples/regressions/fuzz_go_ead437e4.rvl, pins it).
+    # Reserving ALL of `_*` refused it LATE here with a raw `EmitError`
+    # traceback for a program the checker and every other tier accept (roadmap
+    # item 408). Narrow the guard to the namespace actually reserved so the
+    # component/method binding path emits it verbatim like the rest.
+    if name in _RESERVED or (name.startswith("_") and name.lstrip("_").startswith("revl")):
         raise EmitError(f"{what} {name!r} collides with emitter scaffolding")
     return _mangle(name)
 
@@ -335,6 +372,20 @@ def _uses_bounded_int32(node) -> bool:
     return False
 
 
+def _uses_i32_shl(node) -> bool:
+    """Does this IR do an Int32 `<<`? Left shift is the one bitwise op whose
+    result can leave the 32-bit range (a bit op, not a trap), so python
+    re-wraps it through `_revl_i32_wrap`; `&`/`|`/`^`/`>>`/`~` all stay in
+    range for in-range operands and need no helper (docs/arithmetic.md)."""
+    if isinstance(node, dict):
+        if node.get("kind") == "bin" and node.get("op") == "<<":
+            return True
+        return any(_uses_i32_shl(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_i32_shl(v) for v in node)
+    return False
+
+
 def _uses_true_division(node) -> bool:
     """Does anything in this IR divide with `/`? The IEEE helper is emitted
     only where it is used, so modules that never divide stay unchanged."""
@@ -344,6 +395,19 @@ def _uses_true_division(node) -> bool:
         return any(_uses_true_division(v) for v in node.values())
     if isinstance(node, (list, tuple)):
         return any(_uses_true_division(v) for v in node)
+    return False
+
+
+def _uses_opt_field(node) -> bool:
+    """Does any field read carry the item-380 `opt` flag (an `Opt[T]`-declared
+    field, read TOTAL)? The `_revl_opt_field` helper is emitted only then, so a
+    module with no optional-field read stays byte-identical."""
+    if isinstance(node, dict):
+        if node.get("kind") == "field" and node.get("opt"):
+            return True
+        return any(_uses_opt_field(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_opt_field(v) for v in node)
     return False
 
 
@@ -500,6 +564,12 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
         return f"{target}[{args[0]}]"
     if method == "charCodeAt":
         return f"ord({target}[{args[0]}])"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at index i, returned directly. `ord(s[i])` allocates
+    # only the transient 1-char slice `ord` consumes — no persistent 1-char Str
+    # the self-host lexer would otherwise index a second time via `code0`.
+    if method == "codepoint_at":
+        return f"ord({target}[{args[0]}])"
     if method == "concat":
         return f"({target} + {args[0]})"
     if method == "indexOf":
@@ -617,10 +687,30 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     raise EmitError(f"unknown builtin method {method!r}")
 
 
+# item 397: a compare-and-set host verb (`insert_if_absent`) whose site-spelled
+# `undo` must be RESULT-GUARDED — registered only when the CAS actually
+# inserted. A `false` CAS (key already present) inserted nothing, so its
+# inverse is the identity; replaying `remove(k)` at teardown would delete the
+# WINNING claimant's entry, the exact corruption single-use exists to prevent.
+_MAP_CAS_VERBS = frozenset({"insert_if_absent"})
+
+
+def _is_map_cas(acquire: Any) -> bool:
+    """Whether an acquisition node is a result-guarded map CAS (item 397)."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 class _ComponentEmitter:
-    def __init__(self, component: dict, services: dict, externs: list | None = None) -> None:
+    def __init__(self, component: dict, services: dict, externs: list | None = None,
+                 plan_groups: list | None = None) -> None:
         self.ir = component
         self.services = services
+        # item 259 slice 2: every declared extern by name, so an `emit` step's
+        # forward-delivery idempotence (the fan-out eligibility gate) is readable
+        # off a host-extern emission the same way a req-target emission reads it
+        # off its service method spec.
+        self._extern_by_name = {e["name"]: e for e in (externs or [])}
         # item 243 (docs/design/243-witnessed-externs.md): witnessed externs by
         # name, so a call site can be recognised as a transactional effect and
         # register its DECLARED inverse (not a site-spelled one) into the
@@ -679,6 +769,158 @@ class _ComponentEmitter:
         for key in self.intercept:
             if key not in self.requires:
                 raise EmitError(f"{self.name}: intercept key {key!r} is not a requirement")
+        # item 259 slice 2: the checked fan-out plan for THIS component, reduced to
+        # the groups the runtime may actually fire concurrently in the activation
+        # body (`id(leader step) -> [member steps]`). Empty for every body with no
+        # provable parallelism, so its emission is byte-identical to before.
+        self._parallel_leaders = self._build_parallel_leaders(plan_groups)
+
+    def _build_parallel_leaders(self, plan_groups: list | None) -> dict:
+        """Map each fan-out group's LEADER step to its member steps, keeping only
+        groups the activation-body driver can safely fan out (item 259 slice 2,
+        the CONSERVATIVE path). A group qualifies only when:
+
+          * it has more than one member (a singleton is a plain sequential emit);
+          * every member is a top-level step of THIS activation body, appearing as
+            a PHYSICALLY CONTIGUOUS run (no intervening step) - a group split by a
+            pure filler step stays sequential, so the concurrent fires never
+            reorder around anything between them;
+          * every member passes `_group_eligible` (idempotent forward delivery,
+            compensation idempotent-or-absent, on-task audit records, awaited).
+
+        Any group that fails a clause degrades to sequential - the worst case is
+        no speedup, never a wrong grouping (§6)."""
+        body = self.ir.get("body") or []
+        pos = {id(step): i for i, step in enumerate(body)}
+        leaders: dict = {}
+        for group in plan_groups or []:
+            if len(group) < 2:
+                continue
+            positions = [pos.get(id(step)) for step in group]
+            if any(p is None for p in positions):
+                continue  # a member lives in a nested provide/timer body - skip
+            if positions != list(range(positions[0], positions[0] + len(positions))):
+                continue  # not physically contiguous (filler between members)
+            if not all(self._group_eligible(step) for step in group):
+                continue
+            leaders[id(group[0])] = list(group)
+        return leaders
+
+    def _emission_shape(self, expr: Any) -> Optional[str]:
+        """Classify an `emit` step's expression: "req" (a req-target emission),
+        "extern" (a direct host-extern emission), "spawn" (a spawn-handle
+        provision call), or None. The fan-out admits only "req"/"extern": a
+        spawn-handle emission records through the OFF-TASK spawn recorder
+        (`_revl_record_spawn`), so its audit escapes the branch sink (§3.2)."""
+        if not isinstance(expr, dict):
+            return None
+        kind = expr.get("kind")
+        target = expr.get("target")
+        if kind == "call" and isinstance(target, dict) and target.get("kind") == "req":
+            return "req"
+        if kind == "call":
+            callee = expr.get("callee")
+            if isinstance(callee, dict) and callee.get("kind") == "field":
+                recv = callee.get("target")
+                if isinstance(recv, dict) and recv.get("kind") == "instance-get":
+                    return "spawn"
+        if kind == "fn":
+            return "extern"
+        return None
+
+    def _emission_idempotent(self, expr: Any) -> bool:
+        """Whether an `emit` step's forward delivery is declared `idempotent`
+        (item 44/309). Read off the service method spec for a req-target emission,
+        or the extern IR for a host-extern emission."""
+        if not isinstance(expr, dict):
+            return False
+        kind = expr.get("kind")
+        target = expr.get("target")
+        if kind == "call" and isinstance(target, dict) and target.get("kind") == "req":
+            svc = self.services.get(self.requires.get(target.get("name"))) or {}
+            spec = (svc.get("methods") or {}).get(expr.get("method")) or {}
+            return bool(spec.get("idempotent"))
+        if kind == "fn":
+            return bool((self._extern_by_name.get(expr.get("name")) or {}).get("idempotent"))
+        return False
+
+    def _call_declares_idempotent(self, expr: Any) -> bool:
+        """Whether a call expression's target operation is DECLARED idempotent -
+        forward `idempotent` (item 44/309) or inverse `undo_idempotent` (item 309,
+        the flag recovery.py reads). Used to decide whether a member's
+        COMPENSATION is safe to re-run or skip: a compensation whose operation is
+        idempotent leaves the world in the same state whether it runs once, twice,
+        or (under a divert) not at all."""
+        if not isinstance(expr, dict):
+            return False
+        kind = expr.get("kind")
+        target = expr.get("target")
+        if kind == "call" and isinstance(target, dict) and target.get("kind") == "req":
+            svc = self.services.get(self.requires.get(target.get("name"))) or {}
+            spec = (svc.get("methods") or {}).get(expr.get("method")) or {}
+            return bool(spec.get("idempotent") or spec.get("undo_idempotent"))
+        if kind == "fn":
+            ext = self._extern_by_name.get(expr.get("name")) or {}
+            return bool(ext.get("idempotent") or ext.get("undo_idempotent"))
+        return False
+
+    def _compensation_idempotent_or_absent(self, step: dict) -> bool:
+        """The CRITICAL conservative restriction (item 259, S3.3/S5/S8, the
+        adversarial-review fix): a multi-emission group may form ONLY from
+        emissions whose COMPENSATION is itself idempotent-or-absent - NOT merely
+        whose forward delivery is idempotent.
+
+        `absent`: the `emit` step declares no `compensate` clause (the common case,
+        trivially safe). `idempotent`: the compensation operation is declared
+        idempotent (`_call_declares_idempotent`). A member with a PRESENT,
+        non-idempotent compensation stays sequential (a singleton), because a
+        fault or an A1 divert that fires it and then runs (or, at the divert
+        boundary, skips) its compensation would not leave the same world state a
+        skipped sequential tail would - the exact soundness gap this restriction
+        closes by construction (§3.3 invariant E)."""
+        compensate = step.get("compensate")
+        if compensate is None:
+            return True  # absent - trivially safe
+        return self._call_declares_idempotent(compensate)
+
+    def _group_eligible(self, step: dict) -> bool:
+        """Whether one `emit` step may join a concurrent fan-out group (item 259
+        slice 2, the C2/E fail-safe). ALL of:
+
+          * it is an awaited (`async`) `emit` step - a real suspension, so the
+            branches' round trips are actually in flight at once and the body is
+            already the `async def` generator the fan-out needs;
+          * forward delivery is declared `idempotent` (item 44/309) - safe to
+            over-fire under a fault or an A1 divert;
+          * its COMPENSATION is idempotent-or-absent (the CRITICAL restriction,
+            `_compensation_idempotent_or_absent`) - NOT merely idempotent forward
+            delivery. A member carrying a present, non-idempotent compensation
+            stays sequential, so a divert can never leave a fired member with a
+            real, un-runnable compensation (§3.3/§5/§8);
+          * its audit records are produced synchronously on-task - a req-target or
+            direct host-extern emission, NOT a spawn-handle provision call whose
+            records route off-task (§3.2);
+          * it is not an approval crossing, a deferred emission, or a validated
+            emission - each carries stateful seam machinery the conservative slice
+            keeps sequential rather than reason about under concurrency."""
+        if step.get("step") != "emit":
+            return False
+        if not step.get("async"):
+            return False
+        expr = step.get("expr")
+        if self._emission_shape(expr) not in ("req", "extern"):
+            return False
+        if not self._emission_idempotent(expr):
+            return False
+        if not self._compensation_idempotent_or_absent(step):
+            return False
+        if step.get("approval") is not None:
+            return False
+        if self._deferred_extern(expr) is not None:
+            return False
+        if self._validated_call(expr) is not None:
+            return False
+        return True
 
     # -- expressions --------------------------------------------------------
 
@@ -734,10 +976,40 @@ class _ComponentEmitter:
             # ternary arm (`p == "go" ? emit m.complete(p) : "idle"`), so no
             # coroutine leaks unawaited. `_py_yields_coroutine` is the same
             # predicate the arrow renderer uses, so the two stay in lockstep.
-            if self._in_async and not self._in_arrow \
-                    and _py_yields_coroutine(expr, self.requires):
-                return f"(await {rendered})"
-            return rendered
+            awaited = (self._in_async and not self._in_arrow
+                       and _py_yields_coroutine(expr, self.requires))
+            settled = f"(await {rendered})" if awaited else rendered
+            # item 257: the validate-on-response seam. A `validated` emission's
+            # SETTLED response is checked revl-side against the schema derived
+            # from its return type (regardless of the provider), and the revl ADT
+            # is constructed from the validated tag/value. A malformed response is
+            # a typed fault (retry is Slice 2). Byte-identical for any non-
+            # `validated` call: `_validated_call` returns None.
+            validated = self._validated_call(expr)
+            if validated is not None:
+                schema, ctors, retry = validated
+                if retry:
+                    # item 257 (Slice 2, §5.2): the read-with-a-cost retry loop.
+                    # On a `ResponseValidationError` the loop re-fires ONLY the
+                    # model completion call (`rendered`, a fresh coroutine per
+                    # attempt in the async case), up to `retry` times, then
+                    # surfaces the typed fault. The validate seam sits at the
+                    # forward crossing BEFORE the value binds, so no downstream
+                    # `emit`/witnessed effect exists to double (§5.3). Passing the
+                    # call as a thunk (not the already-`settled` value) is what
+                    # lets the loop re-issue the completion and nothing else.
+                    if awaited:
+                        self.uses.add("validate_retry_async")
+                        return (f"(await _revl_validate_retry_async("
+                                f"lambda: {rendered}, {retry}, {schema!r}, "
+                                f"{where!r}, {ctors}))")
+                    self.uses.add("validate_retry")
+                    return (f"_revl_validate_retry(lambda: {rendered}, {retry}, "
+                            f"{schema!r}, {where!r}, {ctors})")
+                self.uses.add("validate_response")
+                return (f"_revl_validate({settled}, {schema!r}, {where!r}, "
+                        f"{ctors})")
+            return settled
         if kind == "host":
             fn = expr.get("fn") or ""
             root, _, rest = fn.partition(".")
@@ -775,6 +1047,24 @@ class _ComponentEmitter:
                                    self._expr(arm.get("body"), where))}
                                 for arm in arms],
                                awaited=awaited)
+        if kind == "do":
+            # a statement-block match arm lowered inline (item 361): each `let`
+            # becomes a walrus bind carried by a `(<binds>, <tail>)[-1]` tuple,
+            # so an `await` in a value or the tail lands in the enclosing
+            # `async def` frame — the match holding this arm renders its awaited
+            # (walrus) form when the arm reaches a coroutine, never a sync
+            # lambda (item 263).
+            binds = []
+            for st in expr.get("stmts") or []:
+                if st.get("step") != "let":
+                    raise EmitError(
+                        f"{where}: unsupported step in a block arm: {st.get('step')!r}")
+                nm = _ident(st.get("name"), f"{where}: block-arm binding")
+                binds.append(f"({nm} := {self._expr(st.get('value'), where)})")
+            tail = self._expr(expr.get("tail"), where)
+            if binds:
+                return f"({', '.join(binds)}, {tail})[-1]"
+            return f"({tail})"
         if kind == "adt":
             case = _ident(expr.get("case"), f"{where}: adt case")
             args = ", ".join(self._expr(a, where) for a in expr.get("args") or [])
@@ -792,9 +1082,19 @@ class _ComponentEmitter:
             name = expr.get("name")
             if not isinstance(name, str) or not name.isidentifier():
                 raise EmitError(f"{where}: bad field name {name!r}")
+            if expr.get("sized_length"):
+                # item 104 (cross-tier): property-form `.length` on a sized value
+                # in a component position — the code-point (Str) / element (List)
+                # count, NOT a record `getattr` (which raises on a str). python's
+                # `len` counts code points, matching `.length()` and the fn-body
+                # `len` node. The frontend marks this only on a sized target, so
+                # a record field literally named `length` still reads its slot.
+                return f"len({self._expr(expr.get('target'), where)})"
             # record literals are dicts; ADT payloads are objects — the
-            # preamble helper reads either shape
-            return f"_revl_field({self._expr(expr.get('target'), where)}, {name!r})"
+            # preamble helper reads either shape. An `Opt[T]`-declared field
+            # reads TOTAL (item 380): absent -> None, the Opt's empty case.
+            helper = "_revl_opt_field" if expr.get("opt") else "_revl_field"
+            return f"{helper}({self._expr(expr.get('target'), where)}, {name!r})"
         if kind == "index":
             return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
         if kind == "bin":
@@ -884,6 +1184,23 @@ class _ComponentEmitter:
                 for k, v in (expr.get("config") or {}).items()) + "}"
             realms = tuple(expr.get("realms") or ())
             return f"{_runtime_ref('spawn')}(_revl_ctx, {target}, {cfg}, {realms!r})"
+        if kind == "lease-acquire":
+            # capability lease (item 294 Slice 2): the acquire binds a lease
+            # HANDLE to the standing grant the session already minted from the
+            # approved ticket (session._enforce_lease_gate raised it before boot).
+            # `_revl_frame.acquire_lease` resolves the live lease grant for this
+            # component + capability cone and returns the handle; the disposer's
+            # `lease-revoke` retires it on the LIFO teardown.
+            cap = expr.get("capability")
+            ttl = expr.get("ttlMs")
+            uses = expr.get("uses")
+            return (f"_revl_frame.acquire_lease({cap!r}, "
+                    f"{ttl!r}, {uses!r})")
+        if kind == "lease-revoke":
+            handle = expr.get("handle")
+            if not isinstance(handle, str) or not handle.isidentifier():
+                raise EmitError(f"{where}: bad lease handle {handle!r}")
+            return f"{handle}.revoke()"
         if kind == "instance-get":
             # instance-parametric components (docs/design-v2-instances.md):
             # `s.<key>` reads a provision off a spawn handle. The handle
@@ -940,8 +1257,19 @@ class _ComponentEmitter:
                                      bind=_ident(step.get("bind"), f"{where}: bind"))
             else:
                 bind = _ident(step.get("bind"), f"{where}: bind")
-                out.add(indent, f"{bind} = {self._expr(step.get('acquire'), where)}")
-                out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
+                # item 131: an async-flagged acquisition awaits its landed
+                # result, THEN registers the inverse — the inverse yield is the
+                # next action in the same generator step, so registration is
+                # boundary-atomic with the acquisition (design §4 clause 1).
+                aw = "await " if step.get("async") else ""
+                out.add(indent, f"{bind} = {aw}{self._expr(step.get('acquire'), where)}")
+                undo = self._expr(step.get('undo'), where)
+                if _is_map_cas(step.get("acquire")):
+                    # result-guarded undo (item 397): identity inverse on a
+                    # `false` CAS, so teardown never removes the winner's entry.
+                    out.add(indent, f"yield lambda: ({undo} if {bind} else None)")
+                else:
+                    out.add(indent, f"yield lambda: {undo}")
         elif kind == "effect":
             if step.get("setup"):
                 for setup in step["setup"]:
@@ -950,7 +1278,10 @@ class _ComponentEmitter:
             if wit is not None:
                 self._witnessed_step(out, indent, step, wit, where, bind=None)
             else:
-                out.add(indent, self._expr(step.get("acquire"), where))
+                # item 131: an unbound async acquisition awaits before the
+                # inverse yield, same boundary-atomic shape as the bound form.
+                aw = "await " if step.get("async") else ""
+                out.add(indent, f"{aw}{self._expr(step.get('acquire'), where)}")
                 out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
         elif kind == "fail":
             out.add(indent, f"raise RuntimeError({self._expr(step.get('message'), where)})")
@@ -968,7 +1299,12 @@ class _ComponentEmitter:
                 self._deferred_step(out, indent, step, deferred, where)
                 out.add(0)
                 return
-            out.add(indent, self._expr(step.get("expr"), where))
+            # item 131: `await emit …` awaits the boundary crossing so the
+            # emission actually fires (a bare async emit builds a coroutine that
+            # never runs). The compensation registers AFTER, exactly as the sync
+            # spelling registers after the fire (design §4 clause 1).
+            aw = "await " if step.get("async") else ""
+            out.add(indent, f"{aw}{self._emit_fire(step, where)}")
             if step.get("compensate") is not None:
                 # item 247 (docs/design/teardown-contract.md): a compensation
                 # is a first-class COMPENSATION entry on the frame's shared
@@ -982,6 +1318,8 @@ class _ComponentEmitter:
                 # compensation, not inversion (§6.1).
                 out.add(indent, "yield _revl_frame.compensation(lambda: "
                                  f"{self._expr(step.get('compensate'), where)})")
+        elif kind == "approval":
+            self._approval_step(out, indent, step, where)
         elif kind == "await":
             # A1: the await lands (inertia, paper §4.3.3), then the yield
             # closes the iteration — a divert during the await therefore
@@ -997,6 +1335,104 @@ class _ComponentEmitter:
         else:
             raise EmitError(f"{where}: unknown step {kind!r}")
         out.add(0)
+
+    def _validated_call(self, expr: dict):
+        """Item 257: if this `call` node is an `emit` on a `validated` service
+        emission (through a req key), return `(schema, ctors, retry)` for the
+        validate seam; else None. `schema` is the derived boundary schema carried
+        on the method IR; `ctors` is a Python dict-literal mapping each case tag to
+        its emitted ADT case class (or `None` when the validated return is not a
+        tagged variant, e.g. a record or primitive, and the validated value is used
+        as-is); `retry` is the Slice-2 validation-retry budget (§5.2), `0` when no
+        `retry` clause was declared (one attempt, the Slice-1 seam)."""
+        target = expr.get("target")
+        if not (isinstance(target, dict) and target.get("kind") == "req"):
+            return None
+        svc_name = self.requires.get(target.get("name"))
+        spec = (((self.services.get(svc_name) or {}).get("methods") or {})
+                .get(expr.get("method")) or {})
+        if not spec.get("validated"):
+            return None
+        return (spec.get("response_schema"),
+                self._ctor_map(spec.get("response_schema")),
+                spec.get("retry") or 0)
+
+    def _ctor_map(self, schema) -> str:
+        """The tag -> ADT-case-class dict literal for a discriminated-union
+        response schema, or `"None"` when the schema is not a tagged union."""
+        tags = []
+        for arm in (schema or {}).get("oneOf") or []:
+            tag = ((arm.get("properties") or {}).get("tag") or {}).get("const")
+            if isinstance(tag, str):
+                tags.append(tag)
+        if not tags:
+            return "None"
+        return "{" + ", ".join(
+            f"{tag!r}: {_ident(tag, 'adt case')}" for tag in tags) + "}"
+
+    def _emit_parallel_group(self, out: "_Lines", indent: int, members: list,
+                             where: str) -> None:
+        """Render a proved-independent run of `emit` steps as a concurrent
+        fire-then-join (item 259 slice 2, design §4.1). The members' host round
+        trips are fired concurrently under one cordis loop; the join is
+        single-threaded and in PLAN ORDER - flush each branch's buffered audit
+        records, then register each SUCCESSFUL branch's compensation onto the
+        activation's LIFO stack, then re-raise the first fault.
+
+        The shape is byte-identical in EFFECT to the sequential
+        `await <fire>; yield compensation` of each member on a clean run: the
+        audit replays in plan order (byte-identical trace) and the compensations
+        register in plan order (a correct LIFO stack). It diverges only on a fault
+        or a divert, where it registers the members that actually fired (in plan
+        order) and re-raises - teardown-EFFECT equivalent, not byte-identical
+        `accumulated` (§3.3)."""
+        self.uses.update({"_revl_parallel", "_revl_flush", "_revl_raise_first"})
+        out.add(indent, "_revl_group = await _revl_parallel([")
+        for member in members:
+            # each fire is an un-awaited coroutine thunk; `_revl_branch` awaits it
+            # under a branch-local record sink so mid-fire records buffer (C1).
+            out.add(indent + 1, f"lambda: {self._emit_fire(member, where)},")
+        out.add(indent, "])")
+        for pos, member in enumerate(members):
+            out.add(indent, f"_revl_flush(_revl_group[{pos}].records)")
+            if member.get("compensate") is not None:
+                # register the compensation only for a branch that actually fired,
+                # in plan order - a faulted/diverted member registers nothing (its
+                # forward effect is compensated only if it landed). §3.3 invariant P.
+                out.add(indent, f"if _revl_group[{pos}].ok:")
+                out.add(indent + 1, "yield _revl_frame.compensation(lambda: "
+                                    f"{self._expr(member.get('compensate'), where)})")
+        # re-raise the first fault AFTER every fired member's compensation is on
+        # the stack, so the L-Raise teardown unwinds a correctly-ordered stack.
+        out.add(indent, "_revl_raise_first(_revl_group)")
+
+    def _emit_fire(self, step: dict, where: str) -> str:
+        """The Python expression that fires an `emit` step's host body. When the
+        step carries a `with a` approval edge (item 246), the fire is wrapped in
+        `_revl_frame.approval_crossing(a, "C", lambda: <fire>)`: the frame checks
+        and consumes the token durably before the body runs (Decision 3). No edge
+        emits byte-identically to before."""
+        fire = self._expr(step.get("expr"), where)
+        approval = step.get("approval")
+        if approval is None:
+            return fire
+        handle = self._expr(approval.get("expr"), where)
+        cap = approval.get("capability")
+        return (f"_revl_frame.approval_crossing({handle}, {cap!r}, "
+                f"lambda: {fire})")
+
+    def _approval_step(self, out: "_Lines", indent: int, step: dict,
+                       where: str) -> None:
+        """`let a = await approval[C] { fields }` (item 246): resolve the standing
+        `Approval[C]` for this component from the owner ledger and bind the handle
+        `with` threads to the crossing."""
+        cap = step.get("capability")
+        fields = ", ".join(
+            f"{name!r}: {self._expr(value, where)}"
+            for name, value in step.get("fields") or [])
+        out.add(indent,
+                f"{step['bind']} = _revl_frame.request_approval({cap!r}, "
+                f"{{{fields}}})")
 
     def _deferred_extern(self, expr: Any) -> Optional[dict]:
         """The deferred emission extern an `emit` step's expression calls, or
@@ -1070,8 +1506,14 @@ class _ComponentEmitter:
         undo = self._expr(ext["undo"], where)  # e.g. `restore(result)`
         out.add(indent, f"{tmp} = {self._expr(step.get('acquire'), where)}")
         out.add(indent, f"if isinstance({tmp}, Ok):")
+        # item 309: pass the idempotency register to the transactional entry ONLY
+        # when the author declared it, so a witnessed extern with no register
+        # emits byte-identical code (the additivity discipline). The register
+        # gates free-vs-fenced abort-Phase-1 fencing and free-vs-fenced recover.
+        extra = _transactional_register_kwargs(ext)
         out.add(indent + 1,
-                f"yield _revl_frame.transactional((lambda result: {undo}), {tmp}.value)")
+                f"yield _revl_frame.transactional((lambda result: {undo}), "
+                f"{tmp}.value{extra})")
         if bind is not None:
             out.add(indent, f"{bind} = {tmp}")
 
@@ -1098,6 +1540,11 @@ class _ComponentEmitter:
         undo = self._expr(ext["undo"], where)  # e.g. `restore(result)`
         out.add(indent, f"{tmp} = {self._expr(step.get('acquire'), where)}")
         out.add(indent, f"if isinstance({tmp}, Ok):")
+        # TODO(309-slice3): thread the idempotency register (item 309) into the
+        # provide-method transactional entry too, mirroring `_witnessed_step`, so
+        # a method-seam witnessed inverse (item 318) fences its abort Phase-1 apply
+        # and recovers free-vs-fenced. The activation-body path is wired; this
+        # narrower per-tool-call seam is deferred.
         out.add(indent + 1,
                 f"_revl_frame.transactional_method((lambda result: {undo}), {tmp}.value)")
         if bind is not None:
@@ -1281,23 +1728,42 @@ class _ComponentEmitter:
                 bind = _ident(step.get("bind"), f"{where}: bind")
                 acquire = self._expr(step.get("acquire"), where)
                 undo = self._expr(step.get("undo"), where)
+                if _is_map_cas(step.get("acquire")):
+                    # result-guarded undo (item 397): the accumulator entry
+                    # receives the bound Bool; on a `false` CAS the inverse is
+                    # the identity, so teardown leaves the winner's entry alone.
+                    undo_fn = f"lambda {bind}: ({undo} if {bind} else None)"
+                else:
+                    undo_fn = f"lambda {bind}: {undo}"
                 out.add(
                     indent,
                     f"{bind} = _revl_frame.acquire({self._label(label)!r}, "
-                    f"lambda: {acquire}, lambda {bind}: {undo})",
+                    f"lambda: {acquire}, {undo_fn})",
                 )
         elif kind == "emit":
             deferred = self._deferred_extern(step.get("expr"))
             if deferred is not None:
                 self._deferred_step(out, indent, step, deferred, where)
             elif step.get("compensate") is not None:
-                fn = f"_emit_{self._counter}"
-                out.add(indent, f"def {fn}():")
-                out.add(indent + 1, self._expr(step.get("expr"), where))
-                out.add(indent + 1, f"yield lambda: {self._expr(step.get('compensate'), where)}")
-                out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
+                # item 247 (method-body compensate remainder) (docs/design/teardown-contract.md): a method-body
+                # `emit ... compensate ...` is a first-class COMPENSATION on the
+                # component's activation frame, exactly as the activation-body
+                # site is (item 247) — NOT a bare `yield lambda: <offset>` adopted
+                # as a sibling effect. A bare adopted disposer is a BRACKET: cordis
+                # disposes it before the body drain, so it fires the offset on a
+                # CLEAN commit (destroying the deliverable), interleaves with the
+                # proof inverses, and is unguarded. Routing through
+                # `Frame.compensation_method` (the compensation analog of item
+                # 318's `transactional_method`) makes it abort-only: discharged on
+                # a clean commit, drained in Phase 2 after every proof inverse,
+                # guarded and residue-collected. Fire the emission first, then
+                # register — the sync spelling of the activation body's
+                # `<fire>; yield _revl_frame.compensation(...)`.
+                out.add(indent, self._emit_fire(step, where))
+                out.add(indent, "_revl_frame.compensation_method(lambda: "
+                                f"{self._expr(step.get('compensate'), where)})")
             else:
-                out.add(indent, self._expr(step.get("expr"), where))
+                out.add(indent, self._emit_fire(step, where))
         elif kind == "return":
             if step.get("expr") is None:
                 out.add(indent, "return")
@@ -1331,8 +1797,17 @@ class _ComponentEmitter:
 
         # A1: a body containing an `await` step compiles to an async
         # generator; the runtime treats each yield as an iteration boundary
-        # and the await as an in-flight iteration (paper §4.3.2-3)
-        is_async = any(step.get("step") == "await" for step in self.ir.get("body") or [])
+        # and the await as an in-flight iteration (paper §4.3.2-3). item 131:
+        # an async-flagged `effect`/`let-effect`/`emit` step (an awaited
+        # acquisition or emission) is likewise a suspension in the body and
+        # forces the `async def` generator. Timer steps are excluded: a timer's
+        # `async` flag (item 170) colors its OWN runtime-awaited firing, not the
+        # activation body generator, so it must not flip the body to async here.
+        is_async = any(
+            step.get("step") == "await"
+            or (step.get("step") in ("effect", "let-effect", "emit")
+                and step.get("async"))
+            for step in self.ir.get("body") or [])
 
         out.add(0, f"def _{self.snake}_apply(_revl_ctx, _revl_config):")
         out.add(1, f"_revl_frame = {_runtime_ref('Frame')}(_revl_ctx, {self.name!r})")
@@ -1347,8 +1822,28 @@ class _ComponentEmitter:
                        f"_revl_ctx, {key!r}, {realms!r}, {strategy!r})")
         out.add(0)
         out.add(1, f"{'async def' if is_async else 'def'} _body():")
-        for step in self.ir.get("body") or []:
-            self._body_step(out, 2, step, where)
+        # item 247 second-pass (F1): two sentinel yields bracket the ordinary
+        # steps (mirrors the ts/go tiers). `begin` yielded FIRST -> disposed
+        # LAST (cordis LIFO): the Phase-2 post-unwind hook, at the bottom of the
+        # unwind stack, so a POST-activation abort's activation-body offsets —
+        # which enqueue only when cordis disposes them, BELOW `drain` — are
+        # drained after Phase 1 completes instead of being lost. `drain` yielded
+        # LAST -> disposed FIRST, the commit signal every earlier entry reads.
+        out.add(2, "yield _revl_frame.begin")
+        # item 259 slice 2: a group-aware walk - a run of `emit` steps the checker
+        # proved independent fires concurrently (`_emit_parallel_group`); every
+        # other step, and every un-grouped emit, renders exactly as before.
+        steps = self.ir.get("body") or []
+        i = 0
+        while i < len(steps):
+            step = steps[i]
+            group = self._parallel_leaders.get(id(step)) if isinstance(step, dict) else None
+            if group is not None:
+                self._emit_parallel_group(out, 2, group, where)
+                i += len(group)  # members are contiguous (checked in the leader map)
+            else:
+                self._body_step(out, 2, step, where)
+                i += 1
         out.add(2, "yield _revl_frame.drain")
         out.add(0)
         out.add(1, "_revl_frame.install(_body)")
@@ -1723,6 +2218,25 @@ def _expr(node: dict) -> str:
             lhs, rhs = _expr(node["left"]), _expr(node["right"])
             return (f"(lambda _a, _b: abs(_a) % abs(_b) if _a >= 0 "
                     f"else -(abs(_a) % abs(_b)))({lhs}, {rhs})")
+        if node["op"] in ("&", "|", "^"):
+            # Int32 bitwise AND/OR/XOR (item 366). These are bit patterns, not
+            # arithmetic, so they never trap. python's ints are signed and, for
+            # two operands already in i32 range, `&`/`|`/`^` produce a result
+            # that is also in i32 range — the sign bit propagates consistently
+            # in python's two's-complement view — so no re-wrap is needed.
+            return (f"({_expr(node['left'])} {node['op']} "
+                    f"{_expr(node['right'])})")
+        if node["op"] == ">>":
+            # Arithmetic (sign-extending) right shift; the count is taken mod
+            # 32 (`& 31`), matching wasm/JS. python `>>` is arithmetic and the
+            # magnitude only shrinks, so the result stays in i32 range.
+            return (f"({_expr(node['left'])} >> "
+                    f"({_expr(node['right'])} & 31))")
+        if node["op"] == "<<":
+            # Left shift wraps into 32-bit two's complement (a bit op, no
+            # trap): the count is taken mod 32 and the result is re-wrapped.
+            return (f"_revl_i32_wrap({_expr(node['left'])} << "
+                    f"({_expr(node['right'])} & 31))")
         op = _PY_BIN_OPS.get(node["op"])
         if op is None:
             raise EmitError(f"unsupported binary operator {node['op']!r}")
@@ -1730,6 +2244,10 @@ def _expr(node: dict) -> str:
     if kind == "un":
         if node["op"] == "!":
             return f"(not {_expr(node['operand'])})"
+        if node["op"] == "~":
+            # Int32 bitwise complement (item 366): `~x == -x - 1`, which stays
+            # in i32 range for any in-range `x`, so no re-wrap is needed.
+            return f"(~{_expr(node['operand'])})"
         if node["op"] == "-":
             if node.get("operands") == "Int":
                 # Negation is `0 - x`, and `0 - Int.MIN` overflows: it goes
@@ -1761,9 +2279,16 @@ def _expr(node: dict) -> str:
             return f"(await {call})"
         return call
     if kind == "field":
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value —
+            # the code-point/element count, not a record `getattr`. python's
+            # `len` counts code points.
+            return f"len({_expr(node['target'])})"
         # record literals are dicts; ADT payloads are objects — the preamble
-        # helper reads either shape
-        return f"_revl_field({_expr(node['target'])}, {node['name']!r})"
+        # helper reads either shape. An `Opt[T]`-declared field reads TOTAL
+        # (item 380): absent -> None, the Opt's empty case.
+        helper = "_revl_opt_field" if node.get("opt") else "_revl_field"
+        return f"{helper}({_expr(node['target'])}, {node['name']!r})"
     if kind == "index":
         return f"{_expr(node['target'])}[{_expr(node['index'])}]"
     if kind == "if":
@@ -1868,6 +2393,23 @@ def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
         raise EmitError(f"unsupported let_pattern kind {node['pattern']!r}")
 
 
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant
+# is enforced whole-IR in the frontend (`_validate_no_loop_scoped_registration`);
+# this is the cheap per-emitter belt-and-suspenders — a teardown-registering step
+# must never be a loop body's child on any tier.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
     step = node["step"]
     if step in ("let", "assign"):
@@ -1888,6 +2430,7 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
             for s in node["else"]:
                 _fn_stmt(s, out, indent + 1)
     elif step == "while":
+        _guard_frame_neutral_loop(node["body"])
         out.add(indent, f"while {_expr(node['cond'])}:")
         if not node["body"]:
             out.add(indent + 1, "pass")
@@ -1895,12 +2438,17 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
             for s in node["body"]:
                 _fn_stmt(s, out, indent + 1)
     elif step == "for":
+        _guard_frame_neutral_loop(node["body"])
         out.add(indent, f"for {_mangle(node['bind'])} in {_expr(node['iterable'])}:")
         if not node["body"]:
             out.add(indent + 1, "pass")
         else:
             for s in node["body"]:
                 _fn_stmt(s, out, indent + 1)
+    elif step == "break":
+        out.add(indent, "break")
+    elif step == "continue":
+        out.add(indent, "continue")
     elif step == "expr":
         out.add(indent, _expr(node["expr"]))
     elif step == "assert":
@@ -1969,16 +2517,146 @@ def _emit_functions(functions: list) -> "_Lines":
     return out
 
 
+def _ref_dotted(rel_path: str) -> str:
+    """`src/host/engine.py` -> `src.host.engine`, the py import specifier derived
+    from the IR ref's root-relative path. Self-contained (the backend has no
+    `revl` import); mirrors `revl.hostref.dotted_module`."""
+    stem = rel_path[:-3] if rel_path.endswith(".py") else rel_path
+    return stem.replace("/", ".")
+
+
+def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines":
+    """item 396 option B: the lazy import thunk for a `@py ref` extern.
+
+    Sync and async share one shape (host execution at first call, symbol cached
+    in `_REVL_REFS`, the resolved symbol carrying the declared colour). The
+    colour claim is unverifiable at compile (G8), so it is asserted HOST-NATIVELY
+    at first call — the earliest gate this design owns:
+
+    - A declared-SYNC ref whose symbol is a plain `async def` catches on
+      `inspect.iscoroutinefunction`, and a value-level `inspect.isawaitable`
+      guard on the result closes the wrapper/callable-instance shapes the
+      function-object check cannot see (a plain `def` returning a coroutine).
+      This makes a ref STRICTER than an inline body for an extern that
+      intentionally returns an awaitable handle — a stated, deliberate trade.
+      Neither check is a proof: `iscoroutinefunction` sees only the plain
+      `async def` shape (design re-review #3).
+    - A declared-ASYNC ref is NOT hard-refused when the symbol is not an
+      `iscoroutinefunction` (that would falsely refuse an lru_cache-wrapped
+      async fn or a callable instance whose `__call__` is async). `await _f(...)`
+      is loud-wrong at worst if the symbol returns a non-awaitable — never
+      silent — so the async direction stays awaited-by-name.
+    """
+    dotted = _ref_dotted(ref["path"])
+    symbol = _ident(ref["symbol"], "ref symbol")
+    where = f"{dotted}.{symbol}"
+    out = _Lines()
+    is_async = bool(ext.get("async"))
+    out.add(0, f"{'async def' if is_async else 'def'} {name}({params}):")
+    out.add(1, f"_f = _REVL_REFS.get({name!r})")
+    out.add(1, "if _f is None:")
+    out.add(2, f"from {dotted} import {symbol} as _f")
+    if not is_async:
+        out.add(2, "if _inspect.iscoroutinefunction(_f):")
+        out.add(3, "raise TypeError(")
+        out.add(4, f"\"revl extern `{name}` is declared sync but "
+                   f"{where} is a coroutine \"")
+        out.add(4, "\"function; declare the extern `async` or ref a sync symbol\")")
+    out.add(2, f"_REVL_REFS[{name!r}] = _f")
+    call_args = params
+    if is_async:
+        out.add(1, f"return await _f({call_args})")
+    else:
+        out.add(1, f"_r = _f({call_args})")
+        out.add(1, "if _inspect.isawaitable(_r):")
+        out.add(2, "raise TypeError(")
+        out.add(3, f"\"revl extern `{name}` is declared sync but "
+                   f"{where} returned \"")
+        out.add(3, "\"an awaitable; declare the extern `async` or ref a sync "
+                   "symbol\")")
+        out.add(1, "return _r")
+    out.add(0)
+    return out
+
+
 def _emit_externs(externs: list) -> "_Lines":
     out = _Lines()
+    # item 256 Slice 1: the composition secrets map, keyed by secret name, and a
+    # FAIL-LOUD lookup. The driver (src/revl/run.py) resolves each bound secret's
+    # value once at plug and installs it here; a body reads the key as its FIRST
+    # local (`openai_key = _revl_secret("openai_key")`, injected below). Emitted
+    # ONLY when some emission extern carries a bound secret, so a secret-free
+    # program is byte-identical. The value is NEVER logged, defaulted, or echoed:
+    # the helper names the secret but never its value, and there is no defaults
+    # path (unlike config) - a bound key with no installed value is a hard error
+    # at the extern call, never a silent None (§3).
+    if any(ext.get("secrets") for ext in externs):
+        out.add(0, "_REVL_SECRETS = {}")
+        out.add(0)
+        out.add(0, "def _revl_secret(_name):")
+        out.add(1, "if _name not in _REVL_SECRETS:")
+        out.add(2, "raise RuntimeError(")
+        out.add(3, "\"capability-bound secret `\" + _name + \"` was not \"")
+        out.add(3, "\"installed before its extern body ran; the run driver \"")
+        out.add(3, "\"must resolve it at plug (item 256). No default exists \"")
+        out.add(3, "\"for a secret.\")")
+        out.add(1, "return _REVL_SECRETS[_name]")
+        out.add(0)
+    # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md: the
+    # composition config map for document-global config externs, keyed by extern
+    # name. The driver (src/revl/run.py) resolves each config extern's schema
+    # once at plug time and installs the resolved dict here, exactly as it
+    # supplies a component's config at plug. Emitted ONLY when some extern
+    # carries a `config` schema, so a program with no config extern is
+    # byte-identical.
+    if any(ext.get("config") for ext in externs):
+        out.add(0, "_REVL_EXTERN_CONFIG = {}")
+        out.add(0)
+        # item 395 (Fable review): FAIL-LOUD config lookup. The old
+        # `_REVL_EXTERN_CONFIG.get(name) or {}` fallback handed a config extern an
+        # empty dict whenever plug-time configuration was never installed — a
+        # module imported OUTSIDE the run.py driver silently got `{}`, so a body
+        # reading `_revl_config["provider"]` failed LATE with a bare KeyError that
+        # never named the extern or the real cause. This helper RAISES at the
+        # extern call, naming the extern, when a REQUIRED (non-defaulted) field is
+        # absent. A defaults-only extern (empty `required`) still resolves to its
+        # defaults when unconfigured, so it keeps working driver-free.
+        out.add(0, "def _revl_extern_config(_name, _required, _defaults):")
+        out.add(1, "_cfg = _REVL_EXTERN_CONFIG.get(_name)")
+        out.add(1, "if _cfg is None:")
+        out.add(2, "if _required:")
+        out.add(3, "raise RuntimeError(")
+        out.add(4, "\"config extern `\" + _name + \"` called before plug-time \"")
+        out.add(4, "\"configuration was installed (required config: \" +")
+        out.add(4, "\", \".join(_required) + \"); configure it through the run \"")
+        out.add(4, "\"driver's config seam\")")
+        out.add(2, "return dict(_defaults)")
+        out.add(1, "_missing = [_f for _f in _required if _f not in _cfg]")
+        out.add(1, "if _missing:")
+        out.add(2, "raise RuntimeError(")
+        out.add(3, "\"config extern `\" + _name + \"` called before plug-time \"")
+        out.add(3, "\"configuration was installed (missing required config: \" +")
+        out.add(3, "\", \".join(_missing) + \")\")")
+        out.add(1, "return {**_defaults, **_cfg}")
+        out.add(0)
     for ext in externs:
         name = _ident(ext["name"], "extern name")
         params = ", ".join(_ident(p["name"], "extern parameter name") for p in ext["params"])
         bodies = ext.get("bodies") or {}
+        refs = ext.get("refs") or {}
+        # item 396 option B: a `@py ref sym from "module.py"` extern emits a LAZY
+        # import THUNK — never a body — that imports the host symbol at the
+        # extern's FIRST CALL, inside the extern frame, and caches it. A module-
+        # top import would run the referenced module at artifact LOAD, outside
+        # every classification/approval/witness gate; the thunk keeps host
+        # execution where an inline body's execution is (design §"Emit, py").
+        if "py" in refs and "py" not in bodies:
+            out.extend(_emit_py_ref_thunk(name, params, ext, refs["py"]))
+            continue
         if "py" not in bodies:
             raise EmitError(
                 f"extern `{name}` has no @py body — not portable to this backend "
-                f"(available: {', '.join(sorted(bodies)) or 'none'})"
+                f"(available: {', '.join(sorted(set(bodies) | set(refs))) or 'none'})"
             )
         # item 115 (async-extern.md §8): an async extern emits an `async def`
         # so its verbatim @py body may `await` a host operation; every admitted
@@ -1986,11 +2664,41 @@ def _emit_externs(externs: list) -> "_Lines":
         # A non-async extern stays a blocking `def`, unchanged.
         kw = "async def" if ext.get("async") else "def"
         out.add(0, f"{kw} {name}({params}):")
+        # item 256 Slice 1: a bound secret is injected as the FIRST body local of
+        # every emission extern whose declared capability it is bound to, and
+        # NOWHERE else (a component/service method body has no `_revl_secret` call
+        # emitted into it, so the name resolves nowhere outside a bound body - the
+        # "nowhere else" property, enforced by construction here in the extern
+        # emitter loop, §3). The verbatim @py body then reads the key as a
+        # host-scope local and hands it straight to its provider call. Emitted only
+        # for a bound extern, so a non-bound extern's `def`/body is byte-identical.
+        for _sname in ext.get("secrets") or []:
+            out.add(1, f"{_ident(_sname, 'secret name')} = _revl_secret({_sname!r})")
+        # item 379: a config extern binds `_revl_config` in its body scope as the
+        # first local, mirroring how a component method binds it (emit.py:1425,
+        # read at emit.py:734). The verbatim @py body then reads typed config
+        # (`_revl_config["provider"]`) instead of `os.environ`. The dict is the
+        # composition value the driver resolved once at plug.
+        #
+        # item 395 (Fable review): resolve through the FAIL-LOUD helper, passing
+        # the REQUIRED (non-defaulted) field names and the resolved defaults from
+        # the schema. When plug-time configuration was never installed and a
+        # required field is absent, the helper RAISES at the extern call naming
+        # the extern — no more silent `{}`. A defaults-only extern still resolves
+        # to its defaults driver-free. Emitted only for a config extern, so a
+        # no-config extern's `def`/body is byte-identical.
+        cfg_schema = ext.get("config")
+        if cfg_schema:
+            required = [f["name"] for f in cfg_schema if f.get("default") is None]
+            defaults = {f["name"]: f["default"] for f in cfg_schema
+                        if f.get("default") is not None}
+            out.add(1, f"_revl_config = _revl_extern_config("
+                       f"{name!r}, {required!r}, {defaults!r})")
         body = textwrap.dedent(bodies["py"].strip("\n"))
         if body:
             for line in body.splitlines() or [""]:
                 out.add(1, line)
-        else:
+        elif not ext.get("config") and not ext.get("secrets"):
             out.add(1, "pass")
         out.add(0)
     return out
@@ -2167,6 +2875,7 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
     out.add(1, "# need a runtime.")
     out.add(1, "from cordis import Context")
     out.add(0)
+    uses_abort = _lifecycle_uses_abort(test)
     out.add(1, "async def _run():")
     out.add(2, "root = Context()")
     if _lifecycle_uses_clock(test):
@@ -2176,6 +2885,14 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
         out.add(2, "_revl_Clock.reset()")
     out.add(2, "events = []")
     out.add(2, "_revl_fibers = {}")
+    if uses_abort:
+        # item 377: register a 245 session-commit owner BEFORE any component
+        # loads, so every activation frame joins its live-frame registry and an
+        # `abort` step can mark them aborting (the exact seam `Session.abort`
+        # drives, docs/design/245-session-commit.md). Cleared in `finally`, so a
+        # later lifecycle test in the same file gets the pre-245 world back.
+        out.add(2, "_revl_owner = _revl_SessionOwner()")
+        out.add(2, "_revl_set_session_owner(_revl_owner)")
     out.add(2, "_revl_set_trace(events.append)")
     out.add(2, "try:")
     out.add(3, "baseline = _revl_residue(root)")
@@ -2186,6 +2903,8 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
         _lifecycle_step(out, 3, step, where)
     out.add(2, "finally:")
     out.add(3, "_revl_set_trace(None)")
+    if uses_abort:
+        out.add(3, "_revl_clear_session_owner()")
     out.add(3, "for fiber in reversed(list(_revl_fibers.values())):")
     out.add(4, "try:")
     out.add(5, "await fiber.dispose()")
@@ -2223,6 +2942,27 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         # statement observes it (docs/time-coeffect.md §advance).
         out.add(indent, f"_revl_Clock.advance({int(step['ms'])})")
         out.add(indent, "await _revl_settle()")
+    elif kind == "abort":
+        # item 377 (F-H1.7): drive the enclosing session frame's 245 abort,
+        # mirroring `revl.mcp.session.Session.abort` exactly — mark every live
+        # frame aborting (so its teardown reverts rather than commits), replay
+        # the witnessed inverses by disposing LIFO, then finalize. The witnessed
+        # mutations revert and the deferral queue is dropped, so the workspace is
+        # left byte-identical to before (docs/design/245-session-commit.md).
+        out.add(indent, "_revl_owner.begin_abort()   # mark frames abort, drop queue")
+        out.add(indent, "for _fiber in reversed(list(_revl_fibers.values())):")
+        out.add(indent + 1, "try:")
+        out.add(indent + 2, "await _fiber.dispose()   # replay inverses")
+        out.add(indent + 1, "except Exception:")
+        out.add(indent + 2, "pass")
+        out.add(indent, "_revl_fibers.clear()")
+        out.add(indent, "_revl_owner.finalize_abort()")
+        # the aborted session is over; a fresh owner means any component loaded
+        # after the abort is a clean new session (Session.abort resets), never
+        # inheriting the aborted verdict.
+        out.add(indent, "_revl_owner = _revl_SessionOwner()")
+        out.add(indent, "_revl_set_session_owner(_revl_owner)")
+        out.add(indent, "await _revl_settle()")
     elif kind == "assert_no_residue":
         out.add(indent, f"_revl_no_residue(root, baseline, events, {where!r})")
     elif kind == "assert":
@@ -2230,6 +2970,13 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         out.add(indent, f"assert {rendered}, {where + ': assertion failed'!r}")
     else:  # pragma: no cover — the lowerer emits nothing else
         raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
+
+
+def _lifecycle_uses_abort(test: dict) -> bool:
+    """True iff a lifecycle test drives a session abort (an `abort` step, item
+    377). Only such a test registers the 245 session-commit owner and imports
+    its symbols — an abort-free lifecycle test stays byte-identical to before."""
+    return any(step.get("step") == "abort" for step in test.get("body") or [])
 
 
 def _lifecycle_uses_clock(test: dict) -> bool:
@@ -2292,6 +3039,13 @@ def _uses_builtin_result(ir: dict) -> bool:
     # so the Result classes must be present even if no surface `match`/`adt`
     # names them. Any witnessed extern is enough to require them.
     if any(ext.get("class") == "witnessed" for ext in ir.get("externs") or []):
+        return True
+    # item 362: a pure/total extern that RETURNS a Result builds `Ok(..)`/
+    # `Err(..)` in its host body (e.g. `json_try_parse`), so the classes must
+    # be present even when no surface `match`/`adt` names them — the same
+    # reasoning as the witnessed case, extended to any Result-returning extern.
+    if any(str(ext.get("returns", "")).startswith("Result")
+           for ext in ir.get("externs") or []):
         return True
     return walk(ir.get("components")) or walk(ir.get("functions")) or walk(ir.get("tests"))
 
@@ -2632,6 +3386,27 @@ def _inline_pure_fns(ir: dict) -> dict:
     return ir
 
 
+def _parallel_step_groups(ir: dict) -> dict:
+    """Per-component fan-out plan (item 259 slice 2): each component name maps to a
+    list of groups, each group a list of `emit` step dicts the checker proved
+    independent. Derived from the SAME `src/revl/parallel` partition the audit
+    surface renders, so the runtime fan-out can never diverge from the checked
+    plan.
+
+    Imported lazily and FAIL-SOFT: a backend-only context where the `revl`
+    frontend is not importable, or any plan-derivation failure, degrades to `{}` -
+    every group then emits sequentially, byte-identical to pre-259. The fan-out is
+    a speedup, never a correctness dependency, so it must never break codegen."""
+    try:
+        from revl.parallel import parallel_plan_steps  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - frontend absent: degrade to sequential
+        return {}
+    try:
+        return parallel_plan_steps(ir)
+    except Exception:  # noqa: BLE001 - a plan failure must never break codegen
+        return {}
+
+
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
@@ -2671,7 +3446,16 @@ def emit(ir: dict) -> str:
     }
     _PY_USES_AS_ASYNC = False
 
-    emitters = [_ComponentEmitter(component, services, externs) for component in components]
+    # item 259 slice 2: the checked fan-out plan, per component (empty in a
+    # backend-only context where the revl frontend is not importable, or when no
+    # body has a provable parallel group - either way the emission is sequential
+    # and byte-identical to before).
+    plan_groups = _parallel_step_groups(ir)
+    emitters = [
+        _ComponentEmitter(component, services, externs,
+                          plan_groups.get(component.get("name")))
+        for component in components
+    ]
     bodies = [emitter.emit() for emitter in emitters]
 
     names = [emitter.name for emitter in emitters]
@@ -2698,6 +3482,11 @@ def emit(ir: dict) -> str:
         # clock coeffect, so `Clock` is imported (for `advance`/`reset`) only
         # then — a timer-free document's output is unchanged.
         | ({"Clock"} if any(_lifecycle_uses_clock(t) for t in lifecycle) else set())
+        # item 377: only a lifecycle test with an `abort` step drives the 245
+        # session-commit owner (`begin_abort`/`finalize_abort`), so the owner
+        # symbols are imported only then — an abort-free document is unchanged.
+        | ({"SessionOwner", "set_session_owner", "clear_session_owner"}
+           if any(_lifecycle_uses_abort(t) for t in lifecycle) else set())
         # item 167: a routed require resolves its worker realms by label, so the
         # emitted router needs the runtime's realm-label registry.
         | ({"realm_label"} if any(c.get("routes") for c in components) else set())
@@ -2727,6 +3516,15 @@ def emit(ir: dict) -> str:
             for name in uses
         )
         out.add(0, f"from runtime import {imported}")
+        out.add(0)
+    # item 396 option B: a `@py ref` extern emits a lazy import thunk that caches
+    # the resolved host symbol in this module-level dict and asserts its colour
+    # via `inspect`. `import inspect` is stdlib (no USER code runs at load — the
+    # host module is imported only inside the thunk, at first call). Emitted only
+    # when some extern carries a ref, so a ref-free module is byte-identical.
+    if any(ext.get("refs") for ext in externs):
+        out.add(0, "import inspect as _inspect")
+        out.add(0, "_REVL_REFS = {}")
         out.add(0)
     if lifecycle or uses_async_timer:
         # the lifecycle driver runs under `asyncio.run`, and (item 170) an
@@ -2767,6 +3565,13 @@ def emit(ir: dict) -> str:
         out.add(0, "        raise OverflowError('revl: Int32 overflow')")
         out.add(0, "    return v")
         out.add(0)
+    if _uses_i32_shl(ir):
+        out.add(0, "def _revl_i32_wrap(v):")
+        out.add(0, '    """Wrap an Int32 `<<` result into 32-bit two\'s '
+                   'complement (docs/arithmetic.md)."""')
+        out.add(0, "    v &= 0xFFFFFFFF")
+        out.add(0, "    return v - 0x100000000 if v & 0x80000000 else v")
+        out.add(0)
     if _uses_true_division(ir):
         # `/` is IEEE true division (docs/arithmetic.md): a zero divisor gives
         # +/-inf, and 0/0 gives NaN. Python is the only tier that raises
@@ -2796,6 +3601,15 @@ def emit(ir: dict) -> str:
     out.add(0, '    """Record literals are dicts, ADT payloads are objects."""')
     out.add(0, "    return v[name] if isinstance(v, dict) else getattr(v, name)")
     out.add(0)
+    if _uses_opt_field(ir):
+        # item 380: an `Opt[T]`-declared field reads TOTAL — an absent key (or a
+        # non-record receiver) is the Opt's empty case (`None`), never a raise.
+        # This is what makes `e.kind ?? default` mean the same on every tier
+        # (py's `_revl_field` raises `KeyError` here; ts is total by JS accident).
+        out.add(0, "def _revl_opt_field(v, name):")
+        out.add(0, '    """An `Opt[T]`-declared field: absent -> None, never a raise."""')
+        out.add(0, "    return v.get(name) if isinstance(v, dict) else getattr(v, name, None)")
+        out.add(0)
     # built-in Result is a tagged ADT (so `match` can discriminate Ok/Err),
     # unless a user type shadows the name. Opt stays host-None, so it needs
     # no class. Emitted only when the IR actually uses Result — an unused

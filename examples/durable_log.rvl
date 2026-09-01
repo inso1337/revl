@@ -6,25 +6,29 @@
 // that fd; `log_close` releases it. The fd is state that outlives the call
 // that produced it, so releasing it correctly is the whole point.
 //
-// Two undos are in play, and only one of them is real:
+// The descriptor is a nominal opaque handle type, `LogHandle` (item 308 R0):
+// an `acquire` return carries the identity ownership tracks, so it may not be
+// a bare primitive. `LogHandle` erases to the OS file descriptor at runtime,
+// so the host bodies still work with the raw fd.
 //
-//   * the extern's `undo log_close(1)` — G4 requires an `acquire` extern to
-//     carry an undo, but an acquire's teardown sees only the implicit
-//     `result` binding, and the literal `1` written here can never be the
-//     descriptor the runtime actually handed back. This slot is DOCUMENTATION:
-//     it names the inverse operation, not a working release.
+// Two undos are in play, both naming the same inverse over the same handle:
+//
+//   * the extern's `undo log_close(result)` — G4 requires an `acquire` extern
+//     to carry an undo. An acquire's teardown sees only the implicit `result`
+//     binding (the handle the acquire returned), and this slot names the
+//     inverse operation over it.
 //
 //   * the component's `let fd = effect log_open(...) undo log_close(fd)` — the
 //     REAL revertible acquisition. `fd` is the descriptor the acquire returned,
 //     in scope, so this undo closes the handle that was actually opened. This
 //     is what the lifecycle machinery runs on teardown, and what `no_residue`
-//     checks reverted.
+//     checks reverted. It is the acquiring binding's OWN undo, so O1's own-undo
+//     exemption (item 308) admits its call to the declared inverse.
 //
 // The discipline: thread the acquired handle through the component effect and
-// close it there. The extern undo documents intent; the component effect does
-// the work.
+// close it there.
 
-extern pure fn log_close(fd: Int)
+extern pure fn log_close(fd: LogHandle)
 = @py {
       import os
       try:
@@ -34,13 +38,13 @@ extern pure fn log_close(fd: Int)
       return None
     }
 
-extern pure fn log_write(fd: Int, line: Str) -> Int
+extern pure fn log_write(fd: LogHandle, line: Str) -> Int
 = @py {
       import os
       return os.write(fd, (line + "\n").encode("utf-8"))
     }
 
-extern acquire fn log_open(path: Str) -> Int undo log_close(1)
+extern acquire fn log_open(path: Str) -> LogHandle undo log_close(result)
 = @py {
       import os
       return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
@@ -54,7 +58,7 @@ component FileAuditLog provides audit: AuditLog {
   config { path: Str }
 
   // The acquired fd is threaded into the undo — this closes the handle that
-  // was really opened, unlike the extern's documentary `log_close(1)`.
+  // was really opened (the acquiring binding's own undo, O1-exempt).
   let fd = effect log_open(config.path) undo log_close(fd)
 
   provide audit {

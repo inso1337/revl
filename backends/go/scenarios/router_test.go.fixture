@@ -1,0 +1,90 @@
+package emitted
+
+import (
+	stdctx "context"
+	"testing"
+
+	stc "github.com/0xdenny218/stc-go"
+)
+
+func drive(t *testing.T) (*stc.Context, map[string]*stc.Fiber) {
+	t.Helper()
+	root := stc.New()
+	g := stdctx.Background()
+	fibers := map[string]*stc.Fiber{
+		"W1":     LoadW1(root),
+		"W2":     LoadW2(root),
+		"W3":     LoadW3(root),
+		"Router": LoadRouter(root),
+	}
+	for _, f := range fibers {
+		if err := f.Ready(g); err != nil {
+			t.Fatalf("ready %s: %v", f.Name(), err)
+		}
+	}
+	return root, fibers
+}
+
+func routerCall(t *testing.T, root *stc.Context, req string) string {
+	t.Helper()
+	w, err := stc.Service[Worker](root, _keyWorker)
+	if err != nil {
+		t.Fatalf("resolve router: %v", err)
+	}
+	return w.Call(req)
+}
+
+func TestGoRouterRoundRobin(t *testing.T) {
+	root, _ := drive(t)
+	defer root.Close()
+	got := []string{
+		routerCall(t, root, "a"), routerCall(t, root, "b"), routerCall(t, root, "c"),
+		routerCall(t, root, "d"), routerCall(t, root, "e"), routerCall(t, root, "f"),
+	}
+	want := []string{"w1:a", "w2:b", "w3:c", "w1:d", "w2:e", "w3:f"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("call %d = %q, want %q (all: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestGoRouterFailover(t *testing.T) {
+	root, fibers := drive(t)
+	defer root.Close()
+	g := stdctx.Background()
+	fibers["W2"].Dispose()
+	if err := fibers["W2"].Gone(g); err != nil {
+		t.Fatalf("gone W2: %v", err)
+	}
+	// six calls now skip the withdrawn w2 — only survivors serve, no fallback
+	// to the router's own root provision (that would be an infinite self-route).
+	for i := 0; i < 6; i++ {
+		r := routerCall(t, root, "x")
+		if r == "w2:x" {
+			t.Fatalf("call %d resolved to withdrawn w2: %q", i, r)
+		}
+		if r != "w1:x" && r != "w3:x" {
+			t.Fatalf("call %d unexpected: %q", i, r)
+		}
+	}
+}
+
+func TestGoRouterG2SingleProvider(t *testing.T) {
+	root, _ := drive(t)
+	defer root.Close()
+	// downstream resolves exactly one provider of the bare key (the Router).
+	w, err := stc.Service[Worker](root, _keyWorker)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	// The Router provides the bare key through its own provide impl, which
+	// forwards to the embedded router struct — so downstream sees exactly ONE
+	// provider (G2), and calling it still routes across the worker realms.
+	if _, ok := w.(*Router_worker); !ok {
+		t.Fatalf("bare key resolves to %T, want *Router_worker (the sole provider)", w)
+	}
+	if got := w.Call("g2"); got != "w1:g2" {
+		t.Fatalf("single provider routed to %q, want w1:g2", got)
+	}
+}

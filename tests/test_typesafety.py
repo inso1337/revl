@@ -700,7 +700,8 @@ fn f() {
   m.putt("k", "v")
 }""")
     assert "`Map` has no method `putt`" in err
-    assert "drop, get, insert, new, remove" in err  # the real surface, named
+    # the real surface, named (item 397 added the CAS verb insert_if_absent)
+    assert "drop, get, insert, insert_if_absent, new, remove" in err
 
 
 def test_host_method_wrong_arity_is_refused():
@@ -719,6 +720,117 @@ fn f() {
   m.get(7)
 }""")
     assert "expects `Str`, got `Int`" in err
+
+
+# ---- item 401: unknown host verb in a component / provide-method body ------
+# The fn-body path above (`test_typoed_host_method_...`) has refused an unknown
+# verb since the constructor-tracking landed, but a component activation body
+# and a provide-method body lower through `_lower_component_pure_expr` /
+# `_lower_expr`, which passed a host-local method call through VERBATIM with no
+# family check. `store.frobnicate(k)` therefore compiled and reached emit, the
+# item-84 compiles-then-crashes shape. All three surface positions must now be
+# refused with the same named HOST-METHOD diagnostic, checked against the
+# acquisition's family surface.
+
+_CACHE_SVC = "service Cache { fn get(key: Str) -> Str fn put(key: Str, value: Str) }\n"
+
+
+def test_401_unknown_verb_in_provide_method_pure_body_is_refused():
+    err = _err(_CACHE_SVC + """
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn get(key) = store.frobnicate(key)
+  }
+}""")
+    assert "`Map` has no method `frobnicate`" in err
+    # the FULL host-Map surface is named: the stub verbs plus the item-84/86/88
+    # iteration verbs (`size`/`keys`), which are legal on a host local
+    assert "drop, get, insert, insert_if_absent, keys, new, remove, size" in err
+
+
+def test_401_unknown_verb_in_provide_method_effect_statement_is_refused():
+    err = _err(_CACHE_SVC + """
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      effect store.frobnicate(key, value)
+      undo   store.remove(key)
+    }
+  }
+}""")
+    assert "`Map` has no method `frobnicate`" in err
+
+
+def test_401_unknown_verb_in_component_activation_body_is_refused():
+    err = _err(_CACHE_SVC + """
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  effect store.frobnicate("k")
+  undo   store.remove("k")
+  provide cache {
+    fn get(key) = store.get(key)
+  }
+}""")
+    assert "`Map` has no method `frobnicate`" in err
+
+
+def test_401_wrong_arity_host_verb_in_component_body_is_refused():
+    err = _err(_CACHE_SVC + """
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn get(key) = store.get()
+  }
+}""")
+    assert "takes 1 argument, got 0" in err
+
+
+def test_401_every_known_map_verb_still_compiles_in_a_component_body():
+    # new/drop (acquisition/undo), insert/remove (effect + undo), get (read):
+    # the full documented host-Map surface across activation and method bodies.
+    # None of these may regress into a HOST-METHOD refusal.
+    ir = compile_source(_CACHE_SVC + """
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  effect store.insert("boot", "1")
+  undo   store.remove("boot")
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}""")
+    assert any(c.get("name") == "C" for c in ir.get("components", []))
+
+
+def test_401_host_map_iteration_verbs_still_compile_in_a_component_body():
+    # `size`/`keys` (items 84/86/88) are host verbs on a host Map local even
+    # though they share a spelling with the value-Map builtins — they must NOT
+    # regress into a HOST-METHOD refusal by the item-401 admission.
+    ir = compile_source("""
+component C {
+  let store = effect Map.new() undo store.drop()
+  let warm = effect { let n = store.size()  Pool.open("u", n) } undo warm.close()
+  let ks = effect { let all = store.keys()  Pool.open("v", store.size()) } undo ks.close()
+}""")
+    assert any(c.get("name") == "C" for c in ir.get("components", []))
+
+
+def test_401_value_map_only_method_on_host_local_is_refused():
+    # `lookup` is a VALUE-Map builtin no host runtime backs; aimed at a host
+    # local it used to lower to a call that crashes at the host runtime (the
+    # item-84 shape). It is refused with the host surface, not admitted.
+    err = _err("""
+component C {
+  let store = effect Map.new() undo store.drop()
+  effect store.lookup("k")
+  undo   store.remove("k")
+}""")
+    assert "`Map` has no method `lookup`" in err
 
 
 def test_the_documented_surface_still_compiles_and_results_stay_opaque():

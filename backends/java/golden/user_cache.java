@@ -25,7 +25,13 @@ public final class Components {
     // The value type is generic — each site's `Map.create()` pins `V`
     // (FR-4: `Map[Str, List[Msg]]` and friends, not just String).
     public static final class Map<V> {
-        private final java.util.HashMap<String, V> values = new java.util.HashMap<>();
+        // item 397: a ConcurrentHashMap, not a bare HashMap. The tier's
+        // placement runner serves each bridge connection on its own thread,
+        // so the former unsynchronized HashMap was not memory-safe under
+        // concurrent put; migrating the backing class makes insert/remove/get
+        // thread-safe AND gives insert_if_absent an atomic putIfAbsent.
+        private final java.util.concurrent.ConcurrentHashMap<String, V> values =
+            new java.util.concurrent.ConcurrentHashMap<>();
         private Map() {}
         // revl `Map.new()` — renamed: `new` is a Java reserved word.
         public static <V> Map<V> create() {
@@ -36,6 +42,15 @@ public final class Components {
         }
         public void insert(String key, V value) {
             values.put(key, value);
+        }
+        // The atomic compare-and-set (item 397): ConcurrentHashMap.putIfAbsent
+        // is a single atomic operation over the test AND the insert. It returns
+        // the previous value (null when absent), so a null return means this
+        // call inserted. Under N concurrent callers, exactly one sees null.
+        // (ConcurrentHashMap forbids null values; revl host inserts never pass
+        // null, and `get` already wraps absence in Optional.)
+        public boolean insert_if_absent(String key, V value) {
+            return values.putIfAbsent(key, value) == null;
         }
         public void remove(String key) {
             values.remove(key);

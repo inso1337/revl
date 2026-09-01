@@ -3,8 +3,8 @@
 package types_functions
 
 type Row struct {
-	id   int64
-	name string
+	Id   int64  `json:"id"`
+	Name string `json:"name"`
 }
 
 // Outcome is a sealed sum type (revl ADT); isOutcome() seals it.
@@ -46,7 +46,7 @@ func first(xs []int64) int64 {
 }
 
 func makeRow(id int64, name string) Row {
-	return Row{id: id, name: name}
+	return Row{Id: id, Name: name}
 }
 
 func describe(outcome Outcome) string {
@@ -55,7 +55,7 @@ func describe(outcome Outcome) string {
 		case OutcomeOk:
 			row := _m.Value
 			_ = row
-			return row.name
+			return row.Name
 		case OutcomeNotFound:
 			_ = _m
 			return "not found"
@@ -76,7 +76,7 @@ func label(outcome Outcome) string {
 		case OutcomeOk:
 			row := _m.Value
 			_ = row
-			return row.name
+			return row.Name
 		default:
 			_ = _m
 			return "other"

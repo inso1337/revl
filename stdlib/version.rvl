@@ -1,0 +1,39 @@
+// The revl stdlib VERSION STAMP (roadmap item 389).
+//
+// ------------------------------------------------------------------- why
+// A consumer that VENDORS the stdlib holds byte-COPIES of `stdlib/*.rvl` in its
+// own tree (the revl-harness copies `stdlib/{json,value,str}.rvl`). Those copies
+// go stale silently: when item 104 added `value_is_object` to `stdlib/value.rvl`
+// upstream, the compiler began recommending `value_is_object` as a fix — but the
+// harness's byte-copy predated that symbol, so the recommended API did not exist
+// in the consumer's tree, and nothing noticed. There was no way for the consumer
+// to ask "is my copy of the stdlib the one this compiler expects?".
+//
+// This module IS that marker. It is a single, pure-revl, zero-argument fn that
+// returns the stdlib's version as a `Str`. Because it is pure revl (no `@py`
+// bodies) it lowers on every tier, so a consumer can call it on any backend and
+// print/compare the result. The version travels WITH the file: a vendored copy
+// carries the version it was copied AT, and the compiler ships (and knows) the
+// version it EXPECTS — the two disagree exactly when the copy has drifted.
+//
+// ------------------------------------------------------------- how to read it
+// A consumer holding a vendored copy compares two numbers:
+//   * what my copy IS      — call `stdlib_version()` from the vendored copy;
+//   * what the compiler WANTS — the compiler's `EXPECTED_STDLIB_VERSION`
+//     (src/revl/stdlib_version.py), surfaced by `revl doctor`, which warns when
+//     the resolved stdlib's stamp differs from the version the compiler expects.
+// See docs/stdlib-version.md for the consumer-side recipe and the drift check.
+//
+// ------------------------------------------------------------ BUMP DISCIPLINE
+// Bump the integer below by one whenever a PUBLIC stdlib symbol is ADDED,
+// REMOVED, or CHANGED in signature/behaviour — i.e. any change a consumer's
+// vendored copy could fall behind. Item 104's `value_is_object` is the canonical
+// example: adding it is exactly the kind of change that must bump this stamp, so
+// a downstream copy predating it reads back an older number and is flagged as
+// drifted. A change that touches only comments or a private (non-`pub`) helper
+// need not bump. The stamp is a monotonic counter, NOT semver: it only has to
+// increase, so "newer than expected" and "older than expected" are both
+// distinguishable from "in sync".
+pub fn stdlib_version() -> Str {
+  return "1"
+}

@@ -95,6 +95,7 @@ from revl import compile_files  # noqa: E402
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_wasm_corpus"
 CORPUS = [
     "arith.rvl",    # checked int/int32 +-*, % (rem_s), i64/i32 cmp, &&/||, !, unary -
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",  # if/else, while, let/var/assign, bare-expr drop, assert, divergence
     "strlit.rvl",   # the Str-literal memory ABI: data-segment pooling, _wat_bytes,
                     # first-encounter dedup, 4-byte stride, 8-aligned heap_start, _str_ptr
@@ -118,6 +119,10 @@ CORPUS = [
                     # to_int/to_int32 widths, the four int divisions, to_str /
                     # Str.to_int, push/concat/slice/charAt/charCodeAt/startsWith/
                     # endsWith over Str and List
+    "loopctrl.rvl", # item 379 / 391: break/continue via named labels
+                    # ($revl_brk_N/$revl_top_N, inner $revl_cnt_N so `for`'s
+                    # continue still runs idx++), nested-if/nested-loop targeting,
+                    # and the break-aware while(true) terminates-check (C4)
 ]
 
 
@@ -208,3 +213,19 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+def test_fn_type_param_refused(emitted, reference):
+    """item 383 / 391 (self-host port): a `.map`/`.filter`/`.reduce` transform
+    lowers (in the frontend) to a `list_*` free function with a function-value
+    parameter, and a declared function type is not representable on this tier.
+    The reference RAISES EmitError; a pure self-host emitter fn cannot `fail`, so
+    it refuses within the subset with a loud `<<DEFER-fn-type>>` marker instead of
+    silently emitting a mis-typed signature. Both refuse the same construct, so
+    tests/fixtures/emit_*_corpus/transforms.rvl stays OUT of the byte-identity
+    CORPUS above (the reference would raise there) and is checked only here."""
+    ir = compile_files([str(CORPUS_DIR / "transforms.rvl")])
+    with pytest.raises(reference.EmitError, match="function type"):
+        reference.emit(ir)
+    got = emitted["emit_src"](ir)
+    assert "<<DEFER-fn-type>>" in got

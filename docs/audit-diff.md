@@ -33,9 +33,23 @@ a stable token:
 
     emit:<component>:<service.method>   an emission the component performs
     host:<component>:<extern-name>      host code the component reaches
+    secret:<capability>:<name>          a secret bound to a capability (item 256)
 
 The same reach yields the same token across generations, so the whole diff is
 a set difference over these tokens.
+
+The `secret:` token is a composition-level crossing, not a per-component one: it
+comes from the audit's top-level `secrets` table (roadmap item 256, the
+capability-bound-secrets note §5), which carries a secret's **name and
+capability only**, never its value, and no length, hash, or timing. Its drift
+semantics follow the same rule as every other crossing:
+
+- **Binding a new secret** adds a `secret:<cap>:<name>` token, a widening the
+  gate flags (a new key is a new authority fact on the boundary surface).
+- **Rebinding a secret to a wider capability** changes the token (the capability
+  is part of it), so the new binding appears as an addition (widening) while the
+  old one appears as a removal (narrowing).
+- **Removing a secret binding** drops the token, a narrowing, always safe.
 
 ## The exit-code contract
 

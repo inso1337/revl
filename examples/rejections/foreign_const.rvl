@@ -1,0 +1,10 @@
+// REJECTED — revl has no `const` (item 384). Immutable single-assignment is
+// `let`; mutable is `var`. `const` lexes as an undeclared identifier.
+//
+// expected error:
+//   revl has no `const`
+
+fn f() -> Int {
+  const x = 1
+  return x
+}

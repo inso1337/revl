@@ -130,7 +130,9 @@ tiers (Slice 2b) follow this contract.
 2. **The transactional entry is a distinct disposer, not a distinct list.**
    `Frame.transactional(undo, witness)` returns a `_Transactional` disposer that
    joins the same LIFO disposer stack as every bracket inverse (so mixed-entry
-   LIFO is preserved for free) and, at disposal time, replays `undo(witness)`
+   LIFO is preserved for free — for effects fired from the ACTIVATION body;
+   point 5 states the rule for effects fired mid-session, from a provide method)
+   and, at disposal time, replays `undo(witness)`
    iff `not frame._committed` (abort) and otherwise discharges — dropping both
    the inverse and the witness references (witness GC). A bracket (`acquire`)
    still `yield lambda: <undo>`s and replays unconditionally: the two entry
@@ -155,5 +157,41 @@ tiers (Slice 2b) follow this contract.
    seam is proven against the IR the future lowerer will emit (a standard
    `effect`/`let-effect` step whose acquisition calls a witnessed extern), which
    is exactly the shape emit already handles.
+
+5. **Mid-session (post-activation) witnessed effects replay LIFO across the
+   whole frame — item 318 seam, item 369 fix.** Points 1–2 reason about the
+   ACTIVATION body, whose disposers the host runtime unwinds LIFO. But the real
+   agent case is a witnessed effect fired from a PROVIDE METHOD, per tool call,
+   AFTER the component activated. Such an effect has no body generator to
+   `yield` its disposer into, and adopting it as a sibling effect is unsound
+   (the host disposes an adopted effect BEFORE the body's `drain`, so a clean
+   unload would see `_committed` still `False` and wrongly revert the
+   deliverable). So `Frame.transactional_method` PARKS the entry in
+   `_deferred_transactional` and `Frame.drain` disposes it once the
+   commit-vs-abort bit is settled — commit discharges it, abort replays its
+   inverse.
+
+   The contract: **a mid-session witnessed inverse replays in reverse
+   INVOCATION order (LIFO) across the whole frame — identical to an
+   activation-body inverse, and consistent with G7.** `_deferred_transactional`
+   is appended newest-last as each provide method fires, so `drain` must dispose
+   it newest-FIRST (`reversed`). On a commit the order is immaterial (every
+   entry no-op discharges); on an ABORT it is load-bearing: two inverses whose
+   paths OVERLAP must undo newest-first, or — because every stdlib/fs.rvl
+   inverse is idempotent-and-total ("a second replay is a no-op") — the oldest
+   inverse runs first, finds nothing, silently no-ops, and the newer inverse
+   then undoes into the hole. A FIFO drain therefore leaves residue or DESTROYS
+   pre-session data while abort still reports `noResidue: true`, silently
+   voiding the item 246 auto-approve of a class-(a) crossing. Three-line
+   reproducers (`mv a b ; mv b c`; `rm a ; touch a`; `write "V2" ; write "V3"`,
+   each then `abort`) are in `tests/test_witnessed_abort_lifo.py`.
+
+   This holds on every tier that carries the deferred-park mechanism (py
+   `runtime.py`, ts `runtime.ts`, go `emit.py`'s `RevlFrame.commit`): each
+   drains the parked list newest-first. Tiers that flip `committed` eagerly at
+   activation-end (rust, java) register the method inverse directly on the host
+   runtime's native LIFO dispose stack and need no parked list; the wasm tier
+   parks in a newest-first linked list and pops the head first. All four are
+   LIFO by construction.
 - **Slice 3: item 244 `stdlib/fs.rvl`.** The per-tier witness bodies (APFS
   clonefile / copy fallback / rename-to-garbage). First visible H1 proof.

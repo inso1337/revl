@@ -46,16 +46,18 @@ def test_durable_log_compiles():
     assert {"log_open", "log_write", "log_close"} <= names
 
 
-def test_extern_undo_is_documentary_a_literal_placeholder():
-    """The extern's `undo log_close(1)` names the inverse but cannot pass the
-    real fd — an acquire's teardown sees only the implicit `result`, and the
-    literal `1` proves the slot is documentation, not a working release."""
+def test_extern_undo_names_the_inverse_over_the_result_handle():
+    """The extern's `undo log_close(result)` names the inverse over the implicit
+    `result` binding — the nominal `LogHandle` the acquire returned. Item 308 R0
+    requires the acquire return to be a nominal opaque handle (not a bare `Int`),
+    so the descriptor threads through the undo by its handle, not a literal."""
     ir = compile_files([str(EXAMPLE)])
     log_open = next(e for e in ir["externs"] if e["name"] == "log_open")
     assert log_open["class"] == "acquire"
+    assert log_open["returns"] == "LogHandle"
     undo = log_open["undo"]
     assert undo["callee"]["name"] == "log_close"
-    assert undo["args"] == [{"kind": "lit", "value": 1}]
+    assert undo["args"] == [{"kind": "var", "name": "result"}]
 
 
 def test_component_effect_threads_the_real_fd_through_its_undo():

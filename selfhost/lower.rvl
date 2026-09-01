@@ -4001,7 +4001,36 @@ fn lir_builtin(f: FieldN, args: List[Expr], env: List[Bind]) -> Str {
   return s.concat("}")
 }
 
+// item 383 (self-host port): the receiver-first list transforms `xs.map(f)` /
+// `xs.filter(p)` / `xs.reduce(init, f)` are PURE SUGAR for the generic free
+// functions `list_map` / `list_filter` / `list_reduce`. The reference desugars
+// them BEFORE typing and lowering (parser.py `desugar_list_transform`, wired at
+// the method-call site in typecheck.py and lower.py); the receiver becomes the
+// leading argument, preserving the written argument order. A syntactic redirect
+// to a real generic `fn`, NOT a builtin-method row — no per-backend branch — so
+// the existing generic-call + arrow-argument path does all the work. Skipped for
+// a host-family receiver (that stays on the host stub surface), exactly as the
+// reference guards on `not _host_receiver`.
+fn list_transform_free(name: Str) -> Str {
+  if (name == "map") { return "list_map" }
+  if (name == "filter") { return "list_filter" }
+  if (name == "reduce") { return "list_reduce" }
+  return ""
+}
+
 fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
+  let transform = match callee {
+    Field(f) => is_host_root_recv(f.target) ? "" : list_transform_free(f.name),
+    _ => "",
+  }
+  if (transform != "") {
+    // `recv.map(...)` -> `list_map(recv, ...)`: thread the receiver in as the
+    // leading argument and lower the resulting plain free-function call.
+    let recv = match callee { Field(f) => f.target, _ => callee, }
+    return "{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":"
+      .concat(jstr(transform)).concat("},\"args\":[").concat(lir_expr(recv, env))
+      .concat(args.length() > 0 ? "," : "").concat(lir_args(args, env)).concat("]}")
+  }
   let builtin = match callee {
     Field(f) => (is_host_root_recv(f.target) || !is_builtin_method(f.name))
       ? "" : lir_builtin(f, args, env),
@@ -4164,8 +4193,15 @@ fn lir_rhs(ts: List[Token], j: Int, env: List[Bind]) -> RhsR {
     if (close != 0 - 1) {
       let pipe = top_pipe(ts, j + 1, close - 1)
       if (pipe != 0 - 1) {
-        let base = expr_at(ts, j + 1)
-        if (!is_bad(base.e) && base.i == pipe) {
+        // Parse the base over the tokens BEFORE the separator `|` only. Since
+        // item 366 made `|` the bitwise-OR operator, parsing from `j + 1` over
+        // the full token stream would swallow the `|` (and the update fields)
+        // as a bitwise-OR expression; bounding the slice to `[j+1, pipe)` keeps
+        // the update separator out of the base, mirroring the reference's
+        // `_suppress_bor` (which suppresses exactly this leading top-level `|`).
+        let sub = ts.slice(j + 1, pipe)
+        let base = expr_at(sub, 0)
+        if (!is_bad(base.e) && base.i == sub.length()) {
           let ups = lir_updates(ts, pipe + 1, close - 1, env)
           if (ups.ok) {
             let js = "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(base.e, env))
@@ -4219,6 +4255,16 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     if (is_bad(r.e) || r.i <= i + 1) { return mk_one("", env, muts, hi) }
     return mk_one("{\"step\":\"assert\",\"expr\":".concat(lir_expr(r.e, env)).concat("}"),
                   env, muts, r.i)
+  }
+  // item 379 / 391: bare loop control. Additive step kinds, no payload but a
+  // `line` for diagnostics (the reference `_lower_pure_stmt` carries `line` on
+  // break/continue, unlike the sibling while/for/if steps). The parser refused a
+  // `break` outside a loop, so lowering only records it; teardown is untouched
+  // (frame-neutral, docs/design/379-break-continue.md Decision 1).
+  if (t.kind == "kw" && (t.text == "break" || t.text == "continue")) {
+    let js = "{\"step\":".concat(jstr(t.text)).concat(",\"line\":")
+      .concat(t.line.to_str()).concat("}")
+    return mk_one(js, env, muts, i + 1)
   }
   if (t.kind == "kw" && t.text == "if") {
     let c = expr_at(ts, i + 1)

@@ -69,6 +69,27 @@ export function emitFixtures(): void {
   // like `emitRouterModule` above.
   const emitMethodWitnessed = emitFixture
   emitMethodWitnessed('method_witnessed.ir.json', 'method_witnessed.ts')
+  // item 247 (method-body compensate remainder): the method-body-compensation soundness fix — a per-tool-call
+  // `emit ... compensate ...` registered onto the activation frame
+  // (`Frame.compensationMethod`), discharged on a clean unload and fired in
+  // Phase 2 on `frame.abort()` (method_compensate.test.ts). Carries no `test`
+  // blocks, so the alias keeps the pair off `generated_coverage.test.ts`'s
+  // scan, like the method-witnessed fixture above.
+  const emitMethodCompensate = emitFixture
+  emitMethodCompensate('method_compensate.ir.json', 'method_compensate.ts')
+  // item 369: the H1 flagship on ts — the witnessed stdlib/fs.rvl catalog
+  // (real externs) driven through cordis, persisting on commit and reverting
+  // residue-free on abort (ts_witnessed_fs.test.ts). Carries no `test` blocks,
+  // so the alias keeps the pair off `generated_coverage.test.ts`'s scan, like
+  // the router/method-witnessed fixtures above.
+  const emitTsWitnessedFs = emitFixture
+  emitTsWitnessedFs('ts_witnessed_fs.ir.json', 'ts_witnessed_fs.ts')
+  // item 131: explicit async/await EFFECT composition — the LIFO teardown
+  // ACROSS an in-flight `effect await` acquisition (async_effect_composition.
+  // test.ts). Carries no `test` blocks, so the alias keeps the pair off
+  // `generated_coverage.test.ts`'s scan, like the fixtures above.
+  const emitAsyncEffectComposition = emitFixture
+  emitAsyncEffectComposition('async_effect_composition.ir.json', 'async_effect_composition.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone

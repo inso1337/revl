@@ -47,7 +47,7 @@ func TestV3ChooseAndFirst(t *testing.T) {
 
 func TestV3RecordAndMatch(t *testing.T) {
 	r := makeRow(7, "ada")
-	if r.id != 7 || r.name != "ada" {
+	if r.Id != 7 || r.Name != "ada" {
 		t.Fatalf("makeRow = %+v", r)
 	}
 	// match over the sealed Outcome variant (type switch)

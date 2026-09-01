@@ -223,6 +223,10 @@ def test_initialize_and_tools_list():
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
                           # the session commit protocol (docs/design/245-session-commit.md)
                           "revl_commit", "revl_commit_confirm", "revl_abort",
+                          # the auto-approve policy (docs/design/246-auto-approve.md)
+                          "revl_approve",
+                          # early revocation of a standing grant (roadmap item 379)
+                          "revl_revoke",
                           # generation history + operator undo (docs/generation-history.md)
                           "revl_undo",
                           # component leases: the multi-agent workspace (item 61)
@@ -252,7 +256,10 @@ def test_initialize_and_tools_list():
                           # the component registry read path (docs/registry.md)
                           "revl_resolve",
                           # verified canary (docs/verified-canary.md, item 59)
-                          "revl_canary"}
+                          "revl_canary",
+                          # approval distillation operator surface (item 251)
+                          "revl_distillation_offers", "revl_apply_distillation",
+                          "revl_revoke_distillation"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True

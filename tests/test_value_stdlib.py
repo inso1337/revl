@@ -163,10 +163,11 @@ def test_module_imports_and_externs_reach_the_ir(consumer_ir):
     assert names["value_list"]["returns"] == "List[Value]"
     assert names["value_opt"]["returns"] == "Opt[Value]"
     assert names["value_keys"]["returns"] == "List[Str]"
-    # py-tier is the shipped slice; the other five tiers are the documented
-    # follow-up (docs/stdlib-value.md), so only @py bodies exist today.
+    # py and ts are both shipped now (item 368 made the module two-tier so the
+    # total field read is identical on both wire tiers); rs/go/java/wasm stay the
+    # documented follow-up (docs/stdlib-value.md).
     for e in consumer_ir["externs"]:
-        assert set(e["bodies"]) == {"py"}, e["name"]
+        assert set(e["bodies"]) == {"py", "ts"}, e["name"]
     assert consumer_ir["ir_version"] == 3
 
 

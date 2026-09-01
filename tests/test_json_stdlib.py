@@ -69,13 +69,16 @@ def consumer_ir(tmp_path_factory):
 
 def test_module_imports_and_externs_reach_the_ir(consumer_ir):
     names = {e["name"]: e for e in consumer_ir["externs"]}
-    assert set(names) == {"json_parse", "json_stringify"}
+    assert set(names) == {"json_parse", "json_stringify", "json_try_parse"}
     assert names["json_parse"]["returns"] == "Any"
     assert names["json_stringify"]["returns"] == "Str"
+    # item 362: the total parse returns the Result channel instead of raising
+    assert names["json_try_parse"]["returns"] == "Result[Any, Str]"
     # the module ships @py, @ts, @rs and @go bodies (item 140); java and wasm
     # remain documented refusals (docs/stdlib-json.md)
     assert set(names["json_parse"]["bodies"]) == {"py", "ts", "rs", "go"}
     assert set(names["json_stringify"]["bodies"]) == {"py", "ts", "rs", "go"}
+    assert set(names["json_try_parse"]["bodies"]) == {"py", "ts", "rs", "go"}
     assert consumer_ir["ir_version"] == 3
 
 
@@ -83,6 +86,7 @@ def test_module_file_is_the_documented_surface():
     text = STDLIB.read_text(encoding="utf-8")
     assert "pub extern pure fn json_parse" in text
     assert "pub extern pure fn json_stringify" in text
+    assert "pub extern pure fn json_try_parse" in text
 
 
 # ---------------------------------------------------------------- py tier
@@ -118,9 +122,13 @@ def test_py_tier_recovers_tool_call_fields(consumer_ir):
 
 def test_py_tier_roundtrips_every_value_type(consumer_ir):
     ns = _exec_python(consumer_ir)
-    # Str / Int / Bool / Float / List / null (the Opt None case) / nested
-    for doc in ('"hi"', "42", "-7", "true", "false", "2.5", "[1, 2, 3]",
-                "null", '{"a": [1, 2.5, true, null, "x"]}'):
+    # Str / Int / Bool / Float / List / null (the Opt None case) / nested.
+    # The docs are written in the CANONICAL form (item 385): compact, no space
+    # after `:` or `,`. json_stringify now emits that form on every tier (py
+    # used to insert `", "`/`": "` — the cross-tier byte drift this item fixed),
+    # so a canonical document round-trips to itself byte-for-byte here.
+    for doc in ('"hi"', "42", "-7", "true", "false", "2.5", "[1,2,3]",
+                "null", '{"a":[1,2.5,true,null,"x"]}'):
         assert ns["roundtrip"](doc) == doc, f"roundtrip failed for {doc}"
 
 
@@ -273,9 +281,14 @@ def test_go_tier_emits_json_bodies_and_hoists_encoding_json(consumer_ir):
     assert "func json_parse(s string) any" in out
     assert "func json_stringify(v any) string" in out
     assert "json.Unmarshal([]byte(s), &v)" in out
-    assert "json.Marshal(v)" in out
-    # the directive is hoisted, not left dangling in the body
+    # item 385 canonical form: json_stringify encodes with SetEscapeHTML(false)
+    # (so `<`, `>`, `&` stay raw, matching py/ts) instead of the default
+    # json.Marshal, which HTML-escapes them.
+    assert "json.NewEncoder" in out
+    assert "enc.SetEscapeHTML(false)" in out
+    # both directives are hoisted, not left dangling in the body
     assert '"encoding/json"' in out
+    assert '"bytes"' in out
     assert "//revl:import" not in out
 
 

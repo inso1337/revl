@@ -26,7 +26,10 @@ This module is everything an emitted component imports.  It has two halves:
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import inspect
+import itertools
 import json
 import os
 import re
@@ -34,9 +37,18 @@ import time
 import weakref
 from typing import Any, Callable, Optional
 
+# item 247 second-pass (F5): a process-monotonic registration index stamped on
+# every transactional/compensation entry at construction, so the escrow can be
+# replayed LIFO (reverse registration) even when no WAL is attached and every
+# `seq` is None. Reverse-`seq` alone collapses to a stable-sort no-op there,
+# leaving a data-losing FIFO replay of overlapping idempotent-total inverses
+# (the item-369 hazard). See `SessionOwner.finalize_abort`.
+_ENTRY_STAMP = itertools.count()
+
 __all__ = [
     "Clock", "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
-    "JobHandle", "Map", "Pool", "PoolError", "SessionCommitError", "SessionOwner",
+    "JobHandle", "LeaseHandle", "LeaseRefused", "Map", "Pool", "PoolError",
+    "SessionCommitError", "SessionOwner",
     "SpawnHandle", "StateIncompatible",
     "TimerHandle", "TransientError", "add_trace", "arm_fault_probe", "clear_session_owner",
     "disarm_fault_probe",
@@ -97,6 +109,201 @@ async def retry_idempotent(call, *, idempotent: bool = False,
     # budget exhausted (or a single non-idempotent attempt): re-raise the
     # transient failure so the caller still sees a failed delivery
     raise last
+
+
+class ResponseValidationError(RuntimeError):
+    """Item 257: a `validated` emission's response failed to validate against
+    the schema derived from its return type.
+
+    This is a TYPED fault at the boundary, not a stringly parse error a body
+    forgets to handle. The malformed response is DISCARDED before the body ever
+    sees it (validation runs at the forward crossing, before the value binds and
+    before the body resumes), so nothing downstream consumed it and no `emit`
+    step fired on it. That is what makes a completion safe-to-retry ("a read with
+    a cost", §5.1), but the retry BUDGET and loop are Slice 2; Slice 1 raises
+    this typed fault without re-issuing. `retryable` records the classification
+    so the audit surface and the Slice-2 loop can read it.
+    """
+
+    retryable = True
+
+    def __init__(self, message: str, *, where: str = "", schema=None, value=None):
+        super().__init__(message)
+        self.where = where
+        self.schema = schema
+        self.value = value
+
+
+def _json_type_ok(value, json_type: str) -> bool:
+    if json_type == "object":
+        return isinstance(value, dict)
+    if json_type == "array":
+        return isinstance(value, list)
+    if json_type == "string":
+        return isinstance(value, str)
+    if json_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if json_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if json_type == "boolean":
+        return isinstance(value, bool)
+    if json_type == "null":
+        return value is None
+    return True
+
+
+def _json_schema_error(value, schema, path: str = "$"):
+    """Validate ``value`` against the derived JSON-Schema subset the revl mapping
+    emits (item 257, §3). Returns an error string for the FIRST violation, or
+    ``None`` when the value conforms. Covers exactly the constructs
+    `json_schema_for` produces: primitive `type`, `const`, `enum`, `nullable`,
+    `properties`/`required`/`additionalProperties` (bool or schema), `items`, and
+    a discriminated `oneOf` (exactly one arm matches). No `$ref` (Slice 1 refuses
+    cyclic types), so the walk is finite by construction."""
+    if not isinstance(schema, dict):
+        return None
+
+    if "const" in schema:
+        if value != schema["const"]:
+            return f"{path}: expected const {schema['const']!r}, got {value!r}"
+        return None
+
+    if "enum" in schema:
+        if value not in schema["enum"]:
+            return f"{path}: {value!r} is not one of {schema['enum']!r}"
+        return None
+
+    if "oneOf" in schema:
+        matches = [arm for arm in schema["oneOf"]
+                   if _json_schema_error(value, arm, path) is None]
+        if len(matches) == 1:
+            return None
+        if not matches:
+            return (f"{path}: value matches no arm of the union "
+                    f"(a well-formed value names exactly one constructor)")
+        return f"{path}: value is ambiguous, matching {len(matches)} union arms"
+
+    if schema.get("nullable") and value is None:
+        return None
+
+    json_type = schema.get("type")
+    if json_type is not None and not _json_type_ok(value, json_type):
+        return f"{path}: expected type {json_type!r}, got {type(value).__name__}"
+
+    if json_type == "object" or isinstance(value, dict):
+        if not isinstance(value, dict):
+            return None
+        props = schema.get("properties") or {}
+        for name in schema.get("required") or []:
+            if name not in value:
+                return f"{path}: missing required property {name!r}"
+        extra = schema.get("additionalProperties", True)
+        for key, item in value.items():
+            if key in props:
+                err = _json_schema_error(item, props[key], f"{path}.{key}")
+                if err is not None:
+                    return err
+            elif extra is False:
+                return f"{path}: unexpected property {key!r}"
+            elif isinstance(extra, dict):
+                err = _json_schema_error(item, extra, f"{path}.{key}")
+                if err is not None:
+                    return err
+
+    if json_type == "array" and isinstance(value, list):
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for i, item in enumerate(value):
+                err = _json_schema_error(item, items, f"{path}[{i}]")
+                if err is not None:
+                    return err
+
+    return None
+
+
+_VALIDATE_MISSING = object()
+
+
+def validate_response(value, schema, where: str = "", constructors=None):
+    """Item 257 (§4): the validate-on-response seam. Check ``value`` against the
+    derived ``schema`` REGARDLESS of what the provider did, and on success
+    construct the revl ADT value from the validated tag/value so the tagged wire
+    shape never leaks into the matched-over value (§3.2). On failure raise the
+    typed :class:`ResponseValidationError` (the malformed value is discarded
+    before the body sees it).
+
+    ``constructors`` maps each case tag to its emitted ADT case class. Absent
+    (a non-ADT validated return, e.g. a record or a primitive), the validated
+    value is returned as-is."""
+    err = _json_schema_error(value, schema, "$")
+    if err is not None:
+        raise ResponseValidationError(
+            f"{where}: response failed validation: {err}"
+            if where else f"response failed validation: {err}",
+            where=where, schema=schema, value=value)
+    if constructors and isinstance(value, dict) and "tag" in value:
+        tag = value["tag"]
+        ctor = constructors.get(tag)
+        if ctor is None:
+            raise ResponseValidationError(
+                f"{where}: validated response tag {tag!r} names no constructor"
+                if where else f"validated response tag {tag!r} names no constructor",
+                where=where, schema=schema, value=value)
+        payload = value.get("value", _VALIDATE_MISSING)
+        return ctor() if payload is _VALIDATE_MISSING else ctor(payload)
+    return value
+
+
+def validate_retry(make_call, budget: int, schema, where: str = "",
+                   constructors=None):
+    """Item 257 (Slice 2, §5.2): the read-with-a-cost validation-retry loop.
+
+    Fire ``make_call`` — the model completion call, and ONLY it — and validate its
+    response with :func:`validate_response`. On a
+    :class:`ResponseValidationError` (the malformed value is discarded before the
+    body ever sees it, §5.3) re-issue the completion up to ``budget`` times, then
+    surface the fault. Total attempts are ``budget + 1`` (the first plus ``budget``
+    retries), a hard ceiling: exhaustion is the SAME terminal typed fault the body
+    observes under `retry 0`, never an unbounded loop (§8, attack 4).
+
+    The seam sits at the forward crossing, so a retry re-crosses the one-way model
+    boundary again and re-incurs ONLY that crossing (another token charge); no
+    downstream `emit` fired on the malformed value and no teardown entry was
+    registered from it, so a re-issue doubles nothing the system executes (§5.3).
+    This is keyed on ONE fault kind — the validation fault; a `TransientError` or
+    any other host error is NOT retried here (a completion is not idempotent, §5.1)
+    and propagates immediately."""
+    attempt = 0
+    while True:
+        value = make_call()
+        try:
+            return validate_response(value, schema, where, constructors)
+        except ResponseValidationError:  # noqa: PERF203 — retry is the point
+            if attempt >= budget:
+                raise
+            attempt += 1
+
+
+async def validate_retry_async(make_call, budget: int, schema, where: str = "",
+                               constructors=None):
+    """Item 257 (Slice 2, §5.2): the async colour of :func:`validate_retry`.
+
+    ``make_call`` returns a FRESH coroutine per attempt (the emitter passes the
+    un-awaited completion call as the thunk), so awaiting it re-issues the one-way
+    crossing each retry. Identical bound and fault semantics to the sync form: up
+    to ``budget + 1`` attempts, only a :class:`ResponseValidationError` is
+    retried, and exhaustion surfaces the terminal typed fault."""
+    attempt = 0
+    while True:
+        result = make_call()
+        if inspect.isawaitable(result):
+            result = await result
+        try:
+            return validate_response(result, schema, where, constructors)
+        except ResponseValidationError:  # noqa: PERF203 — retry is the point
+            if attempt >= budget:
+                raise
+            attempt += 1
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +545,16 @@ def spawn(ctx, component: dict, config, realms):
     fiber = scoped.plugin(component, dict(config or {}))
     handle = SpawnHandle(fiber, component.get("name"))
     _remember_instance(handle)  # so a hot-swap can enumerate live instances
+    # If a recording context is threaded through the spawn, give it the chance to
+    # wrap the handle so an emission reached off it (`emit s.inner.method()`) is
+    # recorded in the WAL, the same as a required-service emission (replay.py's
+    # `_SpawnRecorder`). The hook lives only on the recorder's context wrapper;
+    # the real cordis `Context` returns None for a `_`-prefixed unknown name, so a
+    # normal (un-recorded) activation is untouched. The registry above still holds
+    # the REAL handle, so teardown and live-instance enumeration are unchanged.
+    record = getattr(ctx, "_revl_record_spawn", None)
+    if callable(record):
+        return record(handle)
     return handle
 
 
@@ -397,11 +614,144 @@ def trace_observers() -> int:
     return len(_observers) + (1 if _trace is not None else 0)
 
 
+# item 259 slice 2 (docs/design/259-checked-parallel-emissions.md §4.1, HIGH-1):
+# a contextvar-backed record-sink STACK. `_record` reads MODULE GLOBALS, so three
+# interleaving parallel branches could not each hold a distinct sink. The sink is
+# BUILT here: each parallel branch pushes a task-local buffer onto this stack for
+# the duration of its host call, so a mid-call `_record` lands in the branch
+# buffer instead of the real observers; the join pops and REPLAYS each buffer to
+# the real sink IN PLAN ORDER, so the observable trace is the sequential
+# concatenation even though the host calls overlapped (C1). Each branch is a
+# distinct asyncio Task with its own copied context, so the buffers never collide,
+# and the stack composes under nesting (a parallel group inside a parallel group).
+_revl_record_sinks: "contextvars.ContextVar[tuple]" = contextvars.ContextVar(
+    "_revl_record_sinks", default=())
+
+
 def _record(event: str) -> None:
+    sinks = _revl_record_sinks.get()
+    if sinks:
+        # innermost installed branch sink wins: buffer for a plan-order replay at
+        # the parallel group's join rather than emitting to the real sink now.
+        sinks[-1].append(event)
+        return
     if _trace is not None:
         _trace(event)
     for observer in list(_observers):
         observer(event)
+
+
+# ---------------------------------------------------------------------------
+# item 259 slice 2: checked parallel emissions - the py runtime fan-out
+# ---------------------------------------------------------------------------
+#
+# A parallel GROUP is a run of emissions the checker proved independent (disjoint
+# declared capabilities, or same-key `commutative`). The emitter renders a group
+# of size > 1 as `_revl_parallel([...])` followed by a PLAN-ORDER join. Three
+# obligations shape the helpers below (docs/design/259-checked-parallel-
+# emissions.md §3, §4.1):
+#
+#   * Concurrency. `_revl_parallel` fires every branch under the ONE cordis event
+#     loop via `asyncio.gather` - no threads (schedule.py decision 3), so
+#     "concurrent" means the branches' `await` points interleave cooperatively:
+#     three host round trips are in flight at once, ~max(latencies) not sum.
+#
+#   * Byte-identical audit (C1). Host extern bodies call `_record` mid-fire, so a
+#     naive gather would interleave those records nondeterministically. Each
+#     branch instead runs under a branch-local record sink (the contextvar stack
+#     above); its mid-fire records buffer, and the join replays them in PLAN
+#     ORDER. Records emitted OFF the awaiting task (Clock.fire / Job completion /
+#     spawn) would escape the buffer, which is why the emitter admits only
+#     emissions whose records are produced synchronously on-task (§3.2).
+#
+#   * Teardown-EFFECT equivalence, NOT byte-identical `accumulated` (§3.3, the
+#     CRITICAL). A branch that faults or is diverted changes the fired-and-
+#     registered SET versus a sequential early exit. `_revl_parallel` always
+#     drives the WHOLE group to quiescence (every branch captured, none left
+#     in-flight to race teardown); the emitted join then registers each
+#     SUCCESSFUL branch's compensation in plan order and `_revl_raise_first`
+#     re-raises the first fault. The emitter forms a group only from members with
+#     idempotent forward delivery and idempotent-or-absent compensation, so
+#     over-firing a member under a fault or an A1 divert and then compensating it
+#     leaves the same world state a skipped sequential tail would. Byte-identical
+#     `accumulated` is neither claimed nor needed for the fault/divert path.
+
+
+class _RevlBranchResult:
+    """One parallel branch's captured outcome, replayed at the join in plan order.
+
+    `records` is the branch-local audit buffer; `ok`/`value` carry a clean result
+    and `error` a fault. A divert (a deadline / sibling-fault / cancel that lands
+    at the branch's `await`) arrives as a ``CancelledError`` and rides the same
+    `error` slot, so the join treats a diverted branch exactly like a faulted one:
+    it does not register that member's compensation, and re-raises to unwind."""
+
+    __slots__ = ("ok", "value", "error", "records")
+
+    def __init__(self, ok: bool, value: Any, error: Optional[BaseException],
+                 records: list) -> None:
+        self.ok = ok
+        self.value = value
+        self.error = error
+        self.records = records
+
+
+async def _revl_branch(thunk: Callable[[], Any]) -> _RevlBranchResult:
+    """Fire one group member under a branch-local record sink and CAPTURE its
+    outcome - never raise. A fault or a divert (``CancelledError``) is caught and
+    surfaced at the join in plan order, so `gather` always drives every branch to
+    quiescence and no in-flight branch races the activation's teardown.
+
+    The sink is pushed inside this coroutine, which `gather` runs as its own Task
+    with a copied context, so the push is task-local and sibling branches never
+    see each other's buffer."""
+    buffer: list = []
+    token = _revl_record_sinks.set(_revl_record_sinks.get() + (buffer,))
+    try:
+        value = thunk()
+        if inspect.isawaitable(value):
+            value = await value
+        return _RevlBranchResult(True, value, None, buffer)
+    except asyncio.CancelledError as exc:  # a divert landing at this branch's await
+        return _RevlBranchResult(False, None, exc, buffer)
+    except Exception as exc:  # noqa: BLE001 - re-raised in plan order at the join
+        return _RevlBranchResult(False, None, exc, buffer)
+    finally:
+        _revl_record_sinks.reset(token)
+
+
+async def _revl_parallel(thunks) -> list:
+    """Fire a group's branches concurrently under the single cordis loop and
+    rejoin. Returns the branch outcomes in the SAME order as `thunks` (plan
+    order), regardless of completion order, so the emitted join is single-threaded
+    and in plan order.
+
+    Every branch captures its own outcome (`_revl_branch` never raises), so the
+    gather always completes: the whole group is driven to quiescence even when a
+    member faults or is diverted (§3.3, §5)."""
+    thunks = list(thunks)
+    if not thunks:
+        return []
+    return list(await asyncio.gather(*(_revl_branch(t) for t in thunks)))
+
+
+def _revl_flush(records) -> None:
+    """Replay one branch's buffered audit records to the sink, in order. Routing
+    back through `_record` nests correctly under an OUTER branch sink (a group
+    inside a group), because this branch's own sink is already popped by now."""
+    for event in records:
+        _record(event)
+
+
+def _revl_raise_first(outcomes) -> None:
+    """Re-raise the first faulted-or-diverted branch's error in PLAN order, after
+    every successful branch's compensation has been registered at the join. A
+    clean group is a no-op. Raising here (not inside `_revl_parallel`) is what
+    lets the join register the fired members' compensations FIRST, so the
+    subsequent L-Raise teardown unwinds a correctly-ordered stack (P/G7)."""
+    for outcome in outcomes:
+        if not outcome.ok:
+            raise outcome.error
 
 
 # ---------------------------------------------------------------------------
@@ -560,14 +910,24 @@ class _Transactional:
     known when the effect runs — it depends on whether a LATER step aborts."""
 
     __slots__ = ("frame", "witness", "_undo", "discharged", "replayed", "seq",
-                 "_escrowed")
+                 "_escrowed", "stamp", "undo_idempotent")
 
-    def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any) -> None:
+    def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any,
+                 undo_idempotent: bool = False) -> None:
         self.frame = frame
         self._undo = undo
         self.witness = witness
+        # item 309: whether the author declared `undo idempotent`. A declared
+        # inverse replays freely and needs NO fence; an undeclared one is fenced
+        # before its Phase-1 apply so recover cannot double-apply it after an
+        # abort-then-crash (option a, §3a). Absent (`False`) is every pre-309
+        # witnessed extern, so the abort path is byte-identical for them.
+        self.undo_idempotent = undo_idempotent
         self.discharged = False   # committed: inverse skipped, mutation persists
         self.replayed = False     # aborted: inverse ran, mutation reverted
+        # item 247 second-pass (F5): process-monotonic registration index, so an
+        # escrow with no WAL (every seq is None) still replays LIFO.
+        self.stamp = next(_ENTRY_STAMP)
         # the WAL discharge-descriptor's `seq` this entry was registered under
         # (bridge slice: connects Slice 2a to the WAL/recover foundation), or
         # `None` when no WriteAheadLog is attached (a plain run) — see
@@ -596,6 +956,16 @@ class _Transactional:
         witness, self.witness = self.witness, None
         if undo is None:  # pragma: no cover — single-flight guard
             return None
+        # item 309 §3a, option (a): fence an UNDECLARED inverse's own Phase-1
+        # apply. The fence is fsync-appended to the WAL BEFORE the inverse runs,
+        # so if the process dies here (abort-then-crash), `revl recover` finds
+        # the fence, does NOT re-apply, and reports the honest fenced residue —
+        # at-most-once holds across abort-then-crash. A DECLARED-idempotent
+        # inverse replays freely and writes no fence (a payoff of declaring).
+        if not self.undo_idempotent and self.seq is not None:
+            wal = self.frame._wal()
+            if wal is not None:
+                wal.record_fence(self.seq)
         return undo(witness)
 
 
@@ -630,6 +1000,31 @@ def _read_bound_seconds(env_name: str, default_ms: int) -> Optional[float]:
     return ms / 1000.0
 
 
+def _residue_record(entry: "_Compensation", *, outcome: str,
+                    attempted_flag: bool, attempted: Optional[dict],
+                    error: dict) -> dict:
+    """One `compensation-residue` fact (item 247 gap 2, design Decision 2).
+
+    A best-effort offset that raised (`failed`) or never got to run under the
+    Phase-2 budget (`not-attempted`) is residue: a crossing whose compensation
+    was OWED but did not land. Every such record carries `state: "unresolved"`
+    — the third audit state joining `bare`/`compensated` — and NAMES the
+    crossing it was offsetting (`component`, `method`, WAL `seq`), so the audit
+    surface (`revl.query`/`revl.erase_report`) and the 246 session-boundary
+    report can enumerate it rather than let an in-memory list silently grow."""
+    return {
+        "kind": "compensation-residue",
+        "state": "unresolved",
+        "component": entry.component,
+        "method": entry.method,
+        "seq": entry.seq,
+        "attemptedFlag": attempted_flag,
+        "attempted": attempted,
+        "outcome": outcome,
+        "error": error,
+    }
+
+
 class _Compensation:
     """The disposer for one compensation entry (item 247, docs/design/
     teardown-contract.md 'the three entry kinds, one stack'). Registered at
@@ -661,21 +1056,32 @@ class _Compensation:
     every disposer in one synchronous stack-position pass."""
 
     __slots__ = ("frame", "fn", "discharged", "ran", "failed", "error", "seq",
-                 "_escrowed")
+                 "_escrowed", "component", "method", "stamp")
 
-    def __init__(self, frame: "Frame", fn: Callable[[], Any]) -> None:
+    def __init__(self, frame: "Frame", fn: Callable[[], Any],
+                 method: Optional[str] = None) -> None:
         self.frame = frame
         self.fn = fn
         self.discharged = False   # committed: never runs, deliverable persists
         self.ran = False          # Phase 2: actually invoked (any outcome)
         self.failed = False       # Phase 2: invoked and raised (continue-and-record)
         self.error: Optional[BaseException] = None
+        # item 247 gap 2: the offset emission's identity, so a residue record
+        # NAMES the crossing it was offsetting on the audit surface (design
+        # Decision 2: "the record names the original emission it was offsetting").
+        # `component` is the activation the compensation belongs to; `method` is
+        # the offsetting call the emitter wrote (from `_named_call_method`).
+        self.component: Optional[str] = frame.name
+        self.method: Optional[str] = method
         # the WAL discharge-descriptor's `seq` this entry was registered
         # under (mirrors `_Transactional.seq`), or `None` when no
         # WriteAheadLog is attached.
         self.seq: Optional[int] = None
         # item 245: escrowed under a session owner with a pending verdict.
         self._escrowed = False
+        # item 247 second-pass (F5): process-monotonic registration index, so an
+        # escrow with no WAL (every seq is None) still replays LIFO.
+        self.stamp = next(_ENTRY_STAMP)
 
     def __call__(self) -> Any:
         if _hold_for_session(self):
@@ -854,6 +1260,22 @@ class Frame:
         # `_Compensation.__call__`) and drained by `_drain_phase2` after
         # `install`'s `ctx.effect(...)` call re-raises the body's failure.
         self._compensations: list = []
+        # item 247 (method-body compensate remainder) (docs/design/teardown-contract.md): the compensation entries
+        # a PROVIDE-METHOD registered (`emit ... compensate ...` in a method
+        # body), the compensation analog of `_deferred_transactional` above. Like
+        # a method-registered transactional inverse, a method-body compensation
+        # has NO body generator to yield its `_Compensation` disposer into, and
+        # adopting it as a sibling `ctx.effect` is UNSOUND: cordis disposes an
+        # adopted effect BEFORE the body's `drain`, so the bare disposer would
+        # run on a CLEAN unload — firing the offset after a successful commit and
+        # destroying the deliverable the emission was (the item 247 bug this
+        # closes, left in place for the method-body site). So the entry is parked
+        # here and disposed by `drain` once `_committed`/`_aborting` is settled:
+        # DISCHARGED on commit, ENQUEUED for Phase 2 on abort (drained after every
+        # proof inverse, exactly as the activation-body compensation is). Each
+        # entry also joins `_compensations` above so the WAL discharge record and
+        # residue introspection cover it uniformly.
+        self._deferred_compensations: list = []
         self._pending_compensations: list = []
         # Phase-2 residue (teardown-contract.md's `compensation-residue`):
         # one record per compensation that raised or was skipped past the
@@ -960,28 +1382,20 @@ class Frame:
         deadline = None if budget is None else time.monotonic() + budget
         for entry in pending:
             if deadline is not None and time.monotonic() >= deadline:
-                self.compensation_residue.append({
-                    "kind": "compensation-residue",
-                    "seq": entry.seq,
-                    "attemptedFlag": False,
-                    "attempted": None,
-                    "outcome": "not-attempted",
-                    "error": {"type": "deadline-expired",
-                              "message": "phase-2 budget exhausted before "
-                                         "this compensation started"},
-                })
+                self.compensation_residue.append(_residue_record(
+                    entry, outcome="not-attempted", attempted_flag=False,
+                    attempted=None,
+                    error={"type": "deadline-expired",
+                           "message": "phase-2 budget exhausted before "
+                                      "this compensation started"}))
                 continue
             entry._run_phase2()
             if entry.failed:
-                self.compensation_residue.append({
-                    "kind": "compensation-residue",
-                    "seq": entry.seq,
-                    "attemptedFlag": True,
-                    "attempted": {"phase": 2},
-                    "outcome": "failed",
-                    "error": {"type": type(entry.error).__name__,
-                              "message": str(entry.error)},
-                })
+                self.compensation_residue.append(_residue_record(
+                    entry, outcome="failed", attempted_flag=True,
+                    attempted={"phase": 2},
+                    error={"type": type(entry.error).__name__,
+                           "message": str(entry.error)}))
 
     def _tracked(self, body: Callable) -> Callable:
         """Wrap `body` so `self` is the top activation frame while its code
@@ -1053,7 +1467,10 @@ class Frame:
             return None
         return getattr(timeline, "_wal", None)
 
-    def transactional(self, undo: Callable[[Any], Any], witness: Any) -> "_Transactional":
+    def transactional(self, undo: Callable[[Any], Any], witness: Any, *,
+                      undo_idempotent: bool = False,
+                      register: Optional[str] = None,
+                      idempotency: Optional[str] = None) -> "_Transactional":
         """Register a witnessed effect's declared inverse as a TRANSACTIONAL
         entry, carrying its `witness` (item 243). Returns the disposer the
         emitted body yields into the accumulator, so it sits in the same LIFO
@@ -1076,7 +1493,8 @@ class Frame:
         lets `revl recover` reconstruct and replay the inverse. `entry.seq`
         carries the assigned seq so `drain` can name it in the discharge
         record on a clean commit; it is `None` when no WAL is active."""
-        entry = _Transactional(self, undo, witness)
+        entry = _Transactional(self, undo, witness,
+                               undo_idempotent=undo_idempotent)
         self._transactional.append(entry)
         wal = self._wal()
         if wal is not None:
@@ -1087,6 +1505,11 @@ class Frame:
                 args=[witness],
                 origin={"phase": "activation", "key": self.name},
                 witness=witness,
+                # item 309: carry the register into the WAL so a fresh-process
+                # recover reads free-vs-fenced replay from the descriptor.
+                undo_idempotent=undo_idempotent,
+                register=register,
+                idempotency=idempotency,
             )
             entry.seq = record["seq"]
         return entry
@@ -1177,7 +1600,7 @@ class Frame:
         `entry.seq` carries the assigned seq so `drain` can name it in the
         discharge record on a clean commit; it is `None` when no WAL is
         active."""
-        entry = _Compensation(self, fn)
+        entry = _Compensation(self, fn, method=_named_call_method(fn))
         self._compensations.append(entry)
         wal = self._wal()
         if wal is not None:
@@ -1187,6 +1610,70 @@ class Frame:
                 method=_named_call_method(fn),
                 args=[],
                 origin={"phase": "activation", "key": self.name},
+                witness=None,
+            )
+            entry.seq = record["seq"]
+        return entry
+
+    def compensation_method(self, fn: Callable[[], Any]) -> "_Compensation":
+        """Register a PROVIDE-METHOD `emit ... compensate ...` step's offsetting
+        call as a COMPENSATION entry on THIS component's activation frame (the
+        item-247 method-body compensate remainder, docs/design/teardown-contract.md).
+        This is the compensation analog
+        of `transactional_method` (item 318): a per-tool-call emission fires from
+        a provide-method, and its offset must outlive the method call — the method
+        returns, but the offset is owed only if the component/session ABORTS, and
+        must never fire on a clean commit (the emission was the deliverable).
+
+        Unlike `compensation` (yielded by the activation body's generator into
+        cordis's LIFO disposer stack), a method body has no generator to yield
+        into. Adopting the `_Compensation` as a sibling `ctx.effect` is UNSOUND —
+        cordis disposes an adopted effect BEFORE the body's `drain`, so the
+        disposer would run on a CLEAN unload and fire the offset after a
+        successful commit (the exact placeholder-lowering bug this closes). So
+        the entry is parked in `_deferred_compensations` and disposed by `drain`
+        (commit → discharge; abort → enqueue for Phase 2), where the commit-vs-
+        abort bit is already settled. The entry still joins `_compensations` so
+        the WAL discharge record and residue introspection cover it exactly like
+        an activation-body one.
+
+        Registration is unconditional here, matching the activation-body
+        `compensation` and the existing `emit ... compensate ...` surface: the
+        call site yields this right after the emission, unconditionally. Bridge
+        slice: the WAL discharge-descriptor is written at registration, durably
+        ahead of the fate decision, `entry="compensation"`, `origin.phase="call"`
+        (a per-tool-call crossing, as opposed to the activation-body's
+        `"activation"`), so `revl recover` reconstructs and re-issues it through
+        recovery's `apply_compensation` path (teardown-contract.md's "WAL
+        descriptor").
+
+        Recorder seam: under `--record`, the offset must still surface as a
+        `compensation` step in the step-back timeline. The pre-fix placeholder
+        lowering got that for free — it `yield`ed the bare offset lambda into a
+        recorded effect generator, where `Timeline.record_yield` classified it by
+        SOURCE ADJACENCY to the just-recorded emission. Routing through the frame
+        bypasses that generator, so this records the step explicitly (same
+        classifier) and adopts the ONCE-wrapped disposer `record_yield` returns as
+        the entry's `fn` — so a step-back run and the live Phase-2 drain share one
+        guard and never double-fire the offset. A plain run carries no timeline
+        (its `ctx` has no `_revl_timeline`), so this is a no-op there, byte-inert.
+        The discharge-descriptor's `method` is read from the ORIGINAL `fn` before
+        wrapping, so the WAL names the real offsetting call, not the wrapper."""
+        method_name = _named_call_method(fn)
+        timeline = getattr(self.ctx, "_revl_timeline", None)
+        if timeline is not None:
+            _step, fn = timeline.record_yield(fn, f"{self.name}/compensate")
+        entry = _Compensation(self, fn, method=method_name)
+        self._compensations.append(entry)
+        self._deferred_compensations.append(entry)
+        wal = self._wal()
+        if wal is not None:
+            record = wal.record_discharge_descriptor(
+                "compensation",
+                receiver=self.name,
+                method=method_name,
+                args=[],
+                origin={"phase": "call", "key": self.name},
                 witness=None,
             )
             entry.seq = record["seq"]
@@ -1213,6 +1700,124 @@ class Frame:
                 "queue and the commit verb), which this composition has none — "
                 "load it under a driver that registers one (item 245)")
         self._owner.enqueue(receiver, method, list(args), fire)
+
+    def request_approval(self, capability: str, fields: dict) -> dict:
+        """`let a = await approval[C] { fields }` at runtime (item 246). Resolve a
+        standing `Approval[C]` for THIS component from the owner ledger and return
+        a handle threaded to the crossing by `with`. Fails closed when the policy
+        is enforced and no valid approval covers it (silence never approves). When
+        the policy is off, or no owner is registered, returns a passthrough handle
+        so a `with a` crossing fires normally (byte-identity)."""
+        owner = self._owner
+        if owner is None or not owner.approval_enforced:
+            return {"capability": capability, "requestId": None,
+                    "passthrough": True}
+        entry = owner.find_approval(capability, self.name)
+        if entry is None:
+            raise ApprovalCrossingRefused(
+                capability,
+                f"no granted, unexpired, unconsumed Approval[{capability}] for "
+                f"component `{self.name}` in this generation and session — a "
+                f"human must grant it via revl_approve (item 246, "
+                f"unreachable-without)")
+        return {"capability": capability, "requestId": entry.get("requestId"),
+                "passthrough": False}
+
+    def acquire_lease(self, capability: str, ttl_ms: Any, uses: Any) -> Any:
+        """`let l = effect lease <cap> …` at runtime (item 294 Slice 2). The
+        standing grant was already minted from the operator's approved ticket by
+        the load-time lease gate; this resolves the live lease grant for THIS
+        component and capability cone and returns the handle whose `.revoke()`
+        retires it on teardown. Fails closed when no session owner backs the lease
+        (an ungated raw run) — the load gate refuses that upstream, and this is the
+        defensive twin so no self-mint ever happens with no ticket behind it."""
+        owner = self._owner
+        acquire = getattr(owner, "lease_acquire", None) if owner is not None \
+            else None
+        if acquire is None:
+            raise LeaseRefused(
+                capability,
+                "no session grant ledger backs this lease — an unenforceable "
+                "lease is not a lease (item 294, honest sentence 2). A lease "
+                "must be acquired under an approval policy that raised and "
+                "approved its ticket")
+        request_id = acquire(self.name, capability, ttl_ms, uses)
+        if request_id is None:
+            raise LeaseRefused(
+                capability,
+                "no live standing grant was minted for this lease — the "
+                "operator ticket for the lease was not approved (fail-closed: "
+                "a lease never self-mints)")
+        return LeaseHandle(capability, request_id, owner.lease_revoke)
+
+    def approval_crossing(self, handle: Any, capability: str,
+                          fire: Callable[[], Any]) -> Any:
+        """`emit <call> with a` at runtime (item 246, Decision 3). The frame
+        checks the token BEFORE the host body runs and consumes it DURABLY first
+        (consume-before-fire): the `approval-consumed` WAL record is flushed, then
+        the body fires, then the `approval-emission` record names the same
+        `requestId`. A crash between spend and fire leaves consumed-but-unfired —
+        an owed action needing a FRESH approval, fail-closed. When the policy is
+        off (passthrough handle / no owner), the body fires unchanged."""
+        owner = self._owner
+        if owner is None or not owner.approval_enforced \
+                or (isinstance(handle, dict) and handle.get("passthrough")):
+            return fire()
+        # re-resolve at the crossing: the token must still be valid HERE (expiry
+        # is checked at the crossing, not at mint — invariant 3), by requestId
+        # when the handle names one, else by capability+component.
+        rid = handle.get("requestId") if isinstance(handle, dict) else None
+        entry = None
+        if rid is not None:
+            entry = next((e for e in owner.approval_ledger
+                          if e.get("requestId") == rid and not e.get("consumed")),
+                         None)
+            if entry is not None and owner.find_approval(
+                    capability, self.name) is None:
+                entry = None  # named token is stale/expired/wrong-generation
+        if entry is None:
+            entry = owner.find_approval(capability, self.name)
+        if entry is None:
+            raise ApprovalCrossingRefused(
+                capability,
+                f"the Approval[{capability}] threaded here is absent, consumed, "
+                f"expired, or bound to another component/generation/session "
+                f"(item 246, invariants 1/3/4/5)")
+        owner.consume_approval(entry)          # durable spend BEFORE the fire
+        result = fire()                         # the host body crosses now
+        wal = self._wal()
+        if wal is not None:
+            wal.record_approval_emission(entry.get("requestId"), capability,
+                                         self.name)
+        return result
+
+    def begin(self) -> None:
+        """Yielded FIRST by the emitted body -> disposed LAST (cordis LIFO), so
+        it sits at the BOTTOM of this activation's unwind stack.
+
+        item 247 second-pass (F1, data loss): this is the Phase-2 POST-UNWIND
+        hook for an activation whose body ran to completion and is aborted
+        LATER — a session-level reject (`Frame.abort()` + unload, or
+        `Session.abort()`), not a mid-body raise. In that case `drain` (yielded
+        last, disposed FIRST) runs at the TOP of the stack, and the activation-
+        body `_Compensation` disposers — yielded BEFORE `drain`, so disposed
+        AFTER it — enqueue themselves onto `_pending_compensations` only once
+        cordis reaches them, strictly BELOW `drain`. Draining Phase 2 in
+        `drain`'s tail therefore runs before those compensations exist and
+        silently loses the offset. `begin`, at the bottom of the stack, is the
+        one disposer guaranteed to run AFTER every earlier entry has been
+        disposed — Phase 1 complete, `_pending_compensations` fully populated —
+        so it is the correct place to drain Phase 2 (mirrors the go
+        `runCompensationPhase` / ts `begin` post-unwind hook).
+
+        A no-op on a clean commit (`_committed` — nothing was enqueued, the
+        offsets discharged), and idempotent with `install`'s except hook: both
+        call `_drain_phase2`, which single-flights `_pending_compensations` by
+        swapping it to `[]`, so whichever runs first drains and the other finds
+        nothing."""
+        if self._committed:
+            return
+        self._drain_phase2()
 
     def drain(self) -> Any:
         """Dispose every adopted effect, newest first (yielded last by the
@@ -1267,6 +1872,14 @@ class Frame:
                 self._owner.escrow(entry)
                 entry._escrowed = True
             self._deferred_transactional = []
+            # item 247 (method-body compensate remainder): the method-registered compensations escrow the same way;
+            # `finalize_abort` runs their Phase-2 offset (after the escrowed
+            # transactional inverses), and a session commit discharges them by
+            # omission — byte-for-byte the `_deferred_transactional` discipline.
+            for entry in self._deferred_compensations:
+                self._owner.escrow(entry)
+                entry._escrowed = True
+            self._deferred_compensations = []
             return self._dispose_adopted()
 
         if not self._aborting:
@@ -1289,9 +1902,46 @@ class Frame:
         # (mutation persists, witness GC'd); on an abort each replays (reverts).
         # They are not cordis disposers, so this is their sole disposal — no
         # double-free with the fiber's own unwind.
+        #
+        # item 369: replay in reverse INVOCATION order (LIFO), NOT registration
+        # order. `_deferred_transactional` is appended newest-last as each
+        # provide-method fires (`transactional_method`), so it must be drained
+        # newest-FIRST — exactly like the activation-body path, where cordis
+        # unwinds its disposer stack LIFO, and like `_dispose_adopted` below
+        # (`reversed(adopted)`). On a COMMIT order is immaterial (every entry
+        # no-op discharges), but on an ABORT two inverses whose paths OVERLAP
+        # must undo newest-first or the guarantee 243/246 sell is violated:
+        # every stdlib/fs.rvl inverse is idempotent-and-total, so a FIFO replay
+        # runs the oldest inverse first, finds nothing, silently no-ops, and the
+        # newer inverse then undoes into the hole — residue or DESTROYED
+        # pre-session data with `noResidue: true` still reported (G7, 243 §2).
         deferred, self._deferred_transactional = self._deferred_transactional, []
-        for entry in deferred:
+        for entry in reversed(deferred):
             entry()
+        # item 247 (method-body compensate remainder): dispose the method-registered COMPENSATION entries, now that
+        # the commit-vs-abort bit is settled — the compensation analog of the
+        # `_deferred_transactional` disposal above, and the method-body analog of
+        # the activation-body `emit ... compensate ...` (item 247). On a COMMIT
+        # each `__call__` DISCHARGES (the offset never runs — the emission was the
+        # deliverable, best-effort cleanup on success would be wrong); on an ABORT
+        # each ENQUEUES onto `_pending_compensations` (never fired inline during
+        # Phase 1, so a raising offset can never interrupt a proof inverse).
+        # Newest-first, so Phase 2 runs the newest compensation first, matching
+        # the activation-body path (cordis unwinds its disposer stack LIFO).
+        deferred_comp, self._deferred_compensations = self._deferred_compensations, []
+        for entry in reversed(deferred_comp):
+            entry()
+        # item 247 second-pass (F1): Phase 2 is NOT drained here. This `drain`
+        # is disposed FIRST (yielded last), at the TOP of the unwind stack; the
+        # activation-body `_Compensation` disposers are yielded BEFORE it, so
+        # they are disposed AFTER it and enqueue onto `_pending_compensations`
+        # only once cordis reaches them — draining here would run before they
+        # exist and lose the offset (the F1 data-loss hole). The method-body
+        # deferred compensations enqueued just above are in the same queue.
+        # `begin` — yielded FIRST, disposed LAST, at the BOTTOM of the stack —
+        # is the post-unwind hook that drains the whole queue as Phase 2,
+        # strictly after every Phase-1 inverse in this activation, including the
+        # async adopted disposal cordis awaits from the coroutine returned here.
         return self._dispose_adopted()
 
     def _dispose_adopted(self) -> Any:
@@ -1317,6 +1967,70 @@ class SessionCommitError(RuntimeError):
     """A session commit could not proceed as asked — most often a stale manifest
     hash (the queue or the live composition changed since enumeration), which is
     refused rather than flushing a superset of what the human approved."""
+
+
+class ApprovalCrossingRefused(RuntimeError):
+    """A typed-approval crossing (`emit … with a`) that no valid `Approval[C]`
+    covers (item 246, invariant 1 runtime half). Raised at the crossing BEFORE
+    the host body runs, so a hand-built IR or a backend bug cannot cross a
+    sensitive boundary silently. Carries the capability and the binding that
+    failed for the why-trace."""
+
+    def __init__(self, capability: str, reason: str) -> None:
+        super().__init__(
+            f"approval crossing refused for capability `{capability}`: {reason}")
+        self.capability = capability
+        self.reason = reason
+
+
+class LeaseRefused(RuntimeError):
+    """A capability lease (`effect lease …`, item 294 Slice 2) that cannot be
+    acquired at runtime because no session driver / grant ledger backs it. The
+    load-time gate (`Session._enforce_lease_gate`) already refuses an ungated
+    lease before boot; this is the defensive twin, so a hand-built IR or a raw
+    backend run cannot silently self-mint a grant with no operator ticket behind
+    it (the self-mint consent bypass the design closes)."""
+
+    def __init__(self, capability: str, reason: str) -> None:
+        super().__init__(
+            f"lease refused for capability `{capability}`: {reason}")
+        self.capability = capability
+        self.reason = reason
+
+
+class LeaseHandle:
+    """The value bound by `let l = effect lease …`. It names the standing grant
+    the session minted from the approved ticket (by `requestId`) and carries the
+    single scoped revoke exemption: `l.revoke()` retires THAT grant (its own,
+    always-safe: revoking your own authority only narrows), riding the LIFO
+    teardown. It names no other grant."""
+
+    __slots__ = ("capability", "request_id", "_revoke_cb")
+
+    def __init__(self, capability: str, request_id: str,
+                 revoke_cb: "Callable[[str], Any]") -> None:
+        self.capability = capability
+        self.request_id = request_id
+        self._revoke_cb = revoke_cb
+
+    def revoke(self) -> Any:
+        return self._revoke_cb(self.request_id)
+
+
+def _default_now_ms() -> int:
+    import time  # noqa: PLC0415 — stdlib
+    return int(time.time() * 1000)
+
+
+def _approval_scope_covers(scope: Optional[str], token: str) -> bool:
+    """Whether an `Approval[scope]` covers a crossing of capability `token`
+    (Decision 3, `C within C'`'s scope). Exact match or a glob scope."""
+    if scope is None:
+        return False
+    if scope == token:
+        return True
+    from fnmatch import fnmatchcase  # noqa: PLC0415 — stdlib, only on a crossing
+    return fnmatchcase(token, scope)
 
 
 def _hash_manifest(target: dict) -> str:
@@ -1391,10 +2105,107 @@ class SessionOwner:
         self._wal_getter = wal_getter
         self._verdict: Optional[str] = None    # None (pending) | "commit" | "abort"
         self.prompts = {"commit": 0, "perCall": 0, "residue": 0}
+        # item 246 (docs/design/246-auto-approve.md, Decision 6): boundary calls
+        # counted by posture at decision time. `silent` = class (a),
+        # auto-approved on a checked inverse; `atCommit` = class (b), auto-approved
+        # and enumerated at commit; `prompted` = class (c), a ticket surfaced to a
+        # human. Class none is not a boundary call and stays out of all three
+        # (and out of the percent-auto-approved denominator). The auto-approve
+        # policy (Session) increments these; they are 0 for a session with no
+        # policy configured, so the manifest is byte-identical there.
+        self.approvals = {"silent": 0, "atCommit": 0, "prompted": 0}
         self.flush_residue: list = []
+        # item 247 gap 2: the compensation residue from ESCROWED entries — the
+        # entries of a mid-session-withdrawn frame whose Phase-2 offset runs in
+        # `finalize_abort`, after the frame has already left `_registry`. A live
+        # frame's residue stays on `frame.compensation_residue` and is merged with
+        # this by `collect_compensation_residue` at the session boundary; without
+        # this, an escrowed offset's failure was run but never recorded (dropped).
+        self.compensation_residue: list = []
+        # item 246, Decision 3: the typed-approval ledger, owned here beside the
+        # deferral queue and the escrow. Each granted `Approval[C]` is one entry
+        # bound to its capability, component, reach-closure candidate hash,
+        # session, ttl and single-use `consumed` bit. The language-level frame
+        # check (`Frame.approval_crossing`) and the operator-layer ticket path
+        # (`Session.approve_ticket`) share THIS ledger — one consent mechanism,
+        # two entry points. Empty and inert unless the approval policy is enabled.
+        self.approval_ledger: list = []
+        # whether the language-level frame check enforces: True only when the
+        # session enabled the approval policy. Off = a `with a` crossing fires
+        # normally (byte-identity — the edge only exists in new programs).
+        self.approval_enforced: bool = False
+        # the live generation's reach-closure candidate hash per component,
+        # pushed by the session at load/swap. The frame check binds a token to it
+        # (invariant 4, candidate-invalidates): a swap changes the hash and every
+        # standing token whose closure moved fails the crossing.
+        self.approval_candidates: dict = {}
+        # the session identity a token is bound to (invariant 5, non-replayable):
+        # a token minted in one session is refused in a later one, even over the
+        # same workspace and WAL. None until the session sets it.
+        self.session_id: Optional[str] = None
+        # an injectable clock (ms since epoch) so expiry (invariant 3) is testable
+        # without sleeping; defaults to the wall clock.
+        self.now_ms: Callable[[], int] = _default_now_ms
+        # item 294 Slice 2: the session's lease acquire/revoke bridge. A lease
+        # `effect lease …` acquisition resolves the already-minted standing grant
+        # through `lease_acquire`, and its disposer's own-requestId revoke rides
+        # `lease_revoke`. Both are set by the session at owner install; None (and
+        # inert) for a session with no lease-bearing program, so byte-identity
+        # holds for every existing composition.
+        self.lease_acquire: Optional[Callable[..., Any]] = None
+        self.lease_revoke: Optional[Callable[[str], Any]] = None
 
     def _wal(self) -> Optional[Any]:
         return self._wal_getter() if self._wal_getter is not None else None
+
+    # -- item 246: the typed-approval ledger -------------------------------
+
+    def grant_approval(self, entry: dict) -> None:
+        """Record a granted `Approval[C]` (item 246). Called by the session's
+        `approve_ticket`/`await approval` grant; the frame check reads it back at
+        the crossing. Idempotent on `requestId`."""
+        rid = entry.get("requestId")
+        if any(e.get("requestId") == rid for e in self.approval_ledger):
+            return
+        self.approval_ledger.append(dict(entry))
+
+    def find_approval(self, capability: str, component: str,
+                      candidate_hash: Optional[str] = None) -> Optional[dict]:
+        """The first VALID standing approval covering this crossing (all five
+        bindings, invariants 2-5): unconsumed, unexpired, same capability scope,
+        same component, same reach-closure candidate hash against the live
+        generation, same session. None when nothing covers it — the crossing then
+        fails closed (invariant 1, runtime half)."""
+        want_hash = (candidate_hash if candidate_hash is not None
+                     else self.approval_candidates.get(component))
+        now = self.now_ms()
+        for entry in self.approval_ledger:
+            if entry.get("consumed"):
+                continue
+            if entry.get("component") != component:
+                continue                                   # invariant 5: deputy
+            if not _approval_scope_covers(entry.get("capability"), capability):
+                continue                                   # wrong capability
+            exp = entry.get("expiresAt")
+            if exp is not None and now > exp:
+                continue                                   # invariant 3: expired
+            if want_hash is not None and entry.get("candidateHash") != want_hash:
+                continue                                   # invariant 4: swapped
+            if self.session_id is not None \
+                    and entry.get("session") not in (None, self.session_id):
+                continue                                   # invariant 5: session
+            return entry
+        return None
+
+    def consume_approval(self, entry: dict) -> None:
+        """Spend the token durably BEFORE the crossing fires (Decision 3,
+        consume-before-fire). The `approval-consumed` WAL record is written and
+        flushed here; a crash between it and the fire leaves consumed-but-unfired
+        — fail-closed, a fresh approval is demanded on recover."""
+        entry["consumed"] = True
+        wal = self._wal()
+        if wal is not None:
+            wal.record_approval_consumed(entry.get("requestId"))
 
     # -- registry / escrow -------------------------------------------------
 
@@ -1449,8 +2260,14 @@ class SessionOwner:
         return sorted({e.seq for e in self._live_entries() if e.seq is not None})
 
     def _witnessed_count(self) -> int:
+        # `_live_entries` mixes `_Transactional` (has `.replayed`) and
+        # `_Compensation` (item 247: has no `.replayed` — a compensation offsets,
+        # it never replays an inverse). Read `replayed` defensively so a live
+        # compensation entry counts toward the commit gate target (it discharges
+        # at commit, joining the discharge record) instead of crashing the
+        # manifest — the two-step commit of a session holding a compensation.
         return sum(1 for e in self._live_entries()
-                   if not e.discharged and not e.replayed)
+                   if not e.discharged and not getattr(e, "replayed", False))
 
     def _target(self) -> dict:
         """The gate target, hash-bound: (queue, live witnessed count, registry
@@ -1480,8 +2297,22 @@ class SessionOwner:
             "witnessed": {"count": target["witnessed"]},
             "residue": {"clean": True, "outstanding": []},
             "prompts": dict(self.prompts),
+            # item 246: the posture tally and the headline percent, so the commit
+            # manifest carries the auto-approve metrics beside the prompt counts.
+            "approvals": dict(self.approvals),
+            "percentAutoApproved": self.percent_auto_approved(),
             "hash": _hash_manifest(target),
         }
+
+    def percent_auto_approved(self) -> Optional[float]:
+        """`(silent + atCommit) / (silent + atCommit + prompted)` over calls that
+        reached at least one crossing (item 246, Decision 6). None when no
+        boundary call has been decided, so the ratio never divides by zero."""
+        a = self.approvals
+        denom = a["silent"] + a["atCommit"] + a["prompted"]
+        if denom == 0:
+            return None
+        return round(100.0 * (a["silent"] + a["atCommit"]) / denom, 2)
 
     # -- commit (two-step, hash-bound) -------------------------------------
 
@@ -1565,8 +2396,17 @@ class SessionOwner:
         replayed: list = []
         # escrow replays reverse-seq, in its own two phases (transactional
         # inverses, then owed compensations) — the contract's phase rules.
+        # item 247 second-pass (F5): the sort key carries the process-monotonic
+        # `stamp` as a tiebreaker AFTER `seq`, so LIFO holds even in a NON-
+        # recorded session where every `seq` is None: without it the key
+        # collapsed to a constant 0, the stable sort kept insertion order
+        # (oldest-first), and a FIFO replay of overlapping idempotent-total
+        # inverses destroyed pre-session data while reporting `noResidue: true`
+        # (the item-369 hazard). With a WAL, `seq` still dominates (it is
+        # monotonic with registration too), so the recorded ordering is
+        # unchanged.
         escrow = sorted(self._escrow,
-                        key=lambda e: (e.seq if e.seq is not None else 0),
+                        key=lambda e: (e.seq if e.seq is not None else 0, e.stamp),
                         reverse=True)
         transactional = [e for e in escrow if isinstance(e, _Transactional)]
         compensations = [e for e in escrow if isinstance(e, _Compensation)]
@@ -1576,6 +2416,15 @@ class SessionOwner:
                 replayed.append(entry.seq)
         for entry in compensations:
             entry._run_phase2()
+            # item 247 gap 2: an escrowed offset that raised is residue too —
+            # record it (previously run-and-dropped), same shape and severity as
+            # the live-frame Phase-2 residue, so the session boundary sees it.
+            if entry.failed:
+                self.compensation_residue.append(_residue_record(
+                    entry, outcome="failed", attempted_flag=True,
+                    attempted={"phase": 2},
+                    error={"type": type(entry.error).__name__,
+                           "message": str(entry.error)}))
         self._escrow = []
         # collect the seqs the live frames replayed too (their inverses ran
         # during the driver's unload)
@@ -1588,6 +2437,33 @@ class SessionOwner:
         if wal is not None:
             wal.record_aborted(replayed)
         return {"replayed": replayed}
+
+    # -- compensation residue (item 247 gap 2) -----------------------------
+
+    def collect_compensation_residue(self) -> list:
+        """Every `unresolved` compensation-residue fact this session produced —
+        the merge of each live registry frame's `compensation_residue` and the
+        escrow residue this owner captured in `finalize_abort` (item 247 gap 2,
+        design Decision 2). This is the owner-held enumeration the 246 session
+        boundary reads: a session that ends with an offset it could not land
+        surfaces it here, never a silently growing in-memory list.
+
+        Deduplicated by identity, so a frame that appears in both the registry
+        and (transiently) elsewhere is not double-counted."""
+        records: list = []
+        seen: set = set()
+        for frame in self._registry:
+            for rec in getattr(frame, "compensation_residue", ()):  # noqa: B009
+                key = id(rec)
+                if key not in seen:
+                    seen.add(key)
+                    records.append(rec)
+        for rec in self.compensation_residue:
+            key = id(rec)
+            if key not in seen:
+                seen.add(key)
+                records.append(rec)
+        return records
 
 
 # ---------------------------------------------------------------------------
@@ -2242,6 +3118,24 @@ class Map(_Closable):
         self._check_open("insert")
         self.data[key] = value
         _record(f"{self._tag}.insert {key}")
+
+    def insert_if_absent(self, key: Any, value: Any) -> bool:
+        # item 397: the atomic compare-and-set. On this tier the whole method
+        # is one synchronous, suspension-free step (no await), so it is atomic
+        # by construction under the reference runtime's run-to-completion model
+        # (backends/python/runtime.py `.. _pool-job-semantics:`): no task can
+        # interleave between the membership test and the insert. Returns whether
+        # it inserted; a `false` (key already present) leaves the existing value
+        # untouched. The trace records the outcome so the residue prover can
+        # fold it into the outstanding-key fingerprint (a `true` counts the key
+        # as set, a `false` counts nothing).
+        self._check_open("insert_if_absent")
+        if key in self.data:
+            _record(f"{self._tag}.insert_if_absent {key} -> false")
+            return False
+        self.data[key] = value
+        _record(f"{self._tag}.insert_if_absent {key} -> true")
+        return True
 
     def remove(self, key: Any) -> None:
         self._check_open("remove")

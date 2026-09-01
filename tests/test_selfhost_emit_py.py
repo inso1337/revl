@@ -105,6 +105,7 @@ CORPUS = [
     # function-only documents (slice 1); still byte-exact after the value_*
     # navigation rewrite (slice 2, item 185) — the refactor's own proof
     "arith.rvl",       # bounded int/int32, division/modulo, comparisons, unary
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow
     "records.rvl",     # record literal, functional record update, list literal
@@ -124,6 +125,10 @@ CORPUS = [
     "externs.rvl",              # `_emit_externs`: verbatim `@py` body via stdlib/str.rvl::dedent (item 193) + splitlines
     "services_config.rvl",      # component `config`/`ConfigSchema`: schema block, ConfigSchema-first import, `Config` key, `config.<field>` read
     "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
+    # item 383 / 391 (self-host port) — the `.map`/`.filter`/`.reduce` transforms
+    # desugar (frontend) to `list_map`/`list_filter`/`list_reduce` free calls; the
+    # py tier lowers the function-value params, arrow args, and `f(x)` calls.
+    "transforms.rvl",
 ]
 
 

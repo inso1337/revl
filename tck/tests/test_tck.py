@@ -142,6 +142,7 @@ def test_py_reference_run_is_ok_and_a8_async_now_conforms():
     # landed the async body FAILED like the sync path (its pin is retired).
     for cid in ("r1_lifo_recovery", "r2_reactive_resolution", "r3_withdrawal_ordering",
                 "r4_no_residue", "r5_derived_withdrawal", "a1_divert_at_boundary",
-                "a5_compensate_lifo", "a8_sync_failure_contained",
+                "a5a_compensate_discharged", "a5b_two_phase_abort",
+                "a8_sync_failure_contained",
                 "a8_async_body_failure", "g7_lifo_complete_teardown"):
         assert _result(report, cid).outcome is Outcome.PASS, cid

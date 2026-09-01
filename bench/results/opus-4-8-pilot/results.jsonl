@@ -1,0 +1,18 @@
+{"spec": "01-kv-provider", "variant": "v1", "model": "opus-4-8", "attempt": 1, "ok": true, "error": null, "duration_s": null, "cost": null, "output_tokens": null}
+{"spec": "01-kv-provider", "variant": "v1", "model": "opus-4-8", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": null}
+{"spec": "01-kv-provider", "variant": "v2", "model": "opus-4-8", "attempt": 1, "ok": true, "error": null, "duration_s": null, "cost": null, "output_tokens": null}
+{"spec": "01-kv-provider", "variant": "v2", "model": "opus-4-8", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": null}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "opus-4-8", "attempt": 1, "ok": true, "error": null, "duration_s": null, "cost": null, "output_tokens": null}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "opus-4-8", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": null}
+{"spec": "02-pg-pool", "variant": "v1", "model": "opus-4-8", "attempt": 1, "ok": true, "error": null, "duration_s": null, "cost": null, "output_tokens": null}
+{"spec": "02-pg-pool", "variant": "v1", "model": "opus-4-8", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": null}
+{"spec": "02-pg-pool", "variant": "v2", "model": "opus-4-8", "attempt": 1, "ok": true, "error": null, "duration_s": null, "cost": null, "output_tokens": null}
+{"spec": "02-pg-pool", "variant": "v2", "model": "opus-4-8", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": null}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "opus-4-8", "attempt": 1, "ok": true, "error": null, "duration_s": null, "cost": null, "output_tokens": null}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "opus-4-8", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": null}
+{"spec": "03-user-cache", "variant": "v1", "model": "opus-4-8", "attempt": 1, "ok": true, "error": null, "duration_s": null, "cost": null, "output_tokens": null}
+{"spec": "03-user-cache", "variant": "v1", "model": "opus-4-8", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": null}
+{"spec": "03-user-cache", "variant": "v2", "model": "opus-4-8", "attempt": 1, "ok": true, "error": null, "duration_s": null, "cost": null, "output_tokens": null}
+{"spec": "03-user-cache", "variant": "v2", "model": "opus-4-8", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": null}
+{"spec": "03-user-cache", "variant": "v2host", "model": "opus-4-8", "attempt": 1, "ok": true, "error": null, "duration_s": null, "cost": null, "output_tokens": null}
+{"spec": "03-user-cache", "variant": "v2host", "model": "opus-4-8", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": null}

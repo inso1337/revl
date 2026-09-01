@@ -1,0 +1,10 @@
+// REJECTED — Python's `def` is not a revl declaration keyword (item 384). A
+// function is declared with `fn`. `def` lexes as an identifier and used to
+// report the cryptic `expected a top-level declaration, found 'def'`.
+//
+// expected error:
+//   revl has no `def`
+
+def foo() -> Int {
+  return 1
+}
