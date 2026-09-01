@@ -49,12 +49,18 @@ def main() -> int:
                 f"{name}: non-standard axioms {bad} "
                 f"(whitelist: {sorted(WHITELIST)})"
             )
-    for expected in sys.argv[1:]:
-        if expected not in seen:
-            failures.append(
-                f"{expected}: no '#print axioms' line — drift between "
-                "CheckAxioms.lean and the registered theorem list"
-            )
+    expected = set(sys.argv[1:])
+    for name in sorted(expected - seen):
+        failures.append(
+            f"{name}: no '#print axioms' line — drift between "
+            "CheckAxioms.lean and the registered theorem list"
+        )
+    for name in sorted(seen - expected):
+        failures.append(
+            f"{name}: '#print axioms' present but not registered in the "
+            "gate's theorem list — add it to run_gate.sh or remove the "
+            "print from CheckAxioms.lean"
+        )
     if failures:
         print("axioms gate: FAIL")
         for f in failures:
