@@ -297,3 +297,19 @@ jobs:
       - run: backends/python/.venv/bin/python demo/live_systems/run_demo.py
         env:
           REVL_DEMO_REQUIRE: "1"
+
+  # formal/ — the Lean backbone (formal/STATUS.md). lean-action pins the
+  # toolchain via formal/lean-toolchain and runs `lake build`; the second
+  # step is the axioms gate: every theorem must be axiom-free (`#print
+  # axioms` may not report sorryAx or any other dependency), the
+  # machine-checked form of the repo rule "a claim gets a command or it
+  # gets softened". STATUS.md tracks proved/stuck/TODO per guarantee.
+  formal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: formal
+      - name: axioms gate (no sorry, no project axioms) + harness census
+        run: sh formal/scripts/run_gate.sh
