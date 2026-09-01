@@ -33,6 +33,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "backends" / "python"))
 
 from revl import otel as ot  # noqa: E402
+from revl import run  # noqa: E402
 from revl import trace as tr  # noqa: E402
 from revl import why_runtime as wr  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
@@ -439,3 +440,136 @@ def test_cli_trace_exits_zero_and_emits_json(tmp_path):
         capture_output=True, text=True, env=env)
     assert res2.returncode == 0, res2.stderr
     assert "model hop(s)" in res2.stdout
+
+
+# ---------------------------------------------------------------------------
+# 7. the driver call-site glue (run.py): a LIVE model crossing carries the llm
+#    payload; a NON-model crossing is byte-identical to the pre-glue shape.
+#    This is item 121's final integration hop — the mechanism (runtime.py) is
+#    exercised through the driver's real `_record_emit` / `_model_crossing_payload`.
+# ---------------------------------------------------------------------------
+
+
+def _bare_driver(generation: int = 3):
+    """A `_Driver` holding only the trace-recording state the emit glue touches,
+    wired to the REAL runtime module — no cordis load needed (the glue reads the
+    fiber-local model-call register, which is pure-python contextvars)."""
+    driver = run._Driver.__new__(run._Driver)
+    driver.runtime = rt
+    driver._events = []
+    driver._seq = 0
+    driver.generation = generation
+    return driver
+
+
+def test_live_model_crossing_records_the_llm_payload_end_to_end():
+    """Drive an ACTUAL model crossing through the item-257 `validate_retry` seam
+    (a fake host model callback), then record the crossing through the driver's
+    real emit glue. The `emit` record must carry the `llm` payload: the
+    revl-owned attempt/latency numbers, the host-reported usage passed through,
+    a salted digest with a coarse bucket, and the fiber-token-gated produced
+    edge — with NO prompt/response TEXT anywhere."""
+    # the fake host model: fails validation twice (a bare string is not an
+    # object), then returns a well-formed completion carrying host usage.
+    calls = {"n": 0}
+
+    def host_model():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return "not-a-dict"          # fails the object schema -> a retry
+        return {"tag": "ok", "model": "openai:gpt-4o-2024-08-06",
+                "tokensIn": 1204, "tokensOut": 88,
+                "cost": {"amount": 0.0121, "currency": "USD"}}
+
+    validated = rt.validate_retry(host_model, budget=2,
+                                  schema={"type": "object"}, where="Agent")
+    assert validated["tag"] == "ok"
+
+    driver = _bare_driver()
+    activation_id = f"AgentLoop#g{driver.generation}"
+    # the single-activation validated flow: the seam mints the value-flow token
+    # tied to the completion this fiber just validated (seq 7 below).
+    rt.revl_note_validated_completion(activation_id, 7)
+
+    llm = driver._model_crossing_payload(
+        activation_id=activation_id,
+        args=["system prompt", "user question"],   # revl-typed args, proven clean
+        arg_origins={"model", "input"}, taint_engaged=True)
+    driver._record_emit("AgentLoop", "model", "Model.complete",
+                        wr.cause_trigger("decision point"),
+                        llm=llm, activation_id=activation_id)
+
+    ev = driver._events[-1]
+    assert ev["event"] == wr.EMIT and ev["seq"] == 0  # first record on this driver
+    assert ev["activationId"] == activation_id
+    got = ev["llm"]
+    # revl-owned numbers: 3 attempts against the static N+1 = 3 ceiling
+    assert got["attempts"] == 3 and got["attemptCeiling"] == 3
+    assert got["attemptsProvenance"] == "revl-controlled"
+    assert got["latencySeconds"] >= 0.0
+    assert got["latencyProvenance"] == "revl-measured-bracket"
+    # host-reported usage passed through, tagged unverifiable
+    assert got["model"] == "openai:gpt-4o-2024-08-06"
+    assert got["tokensIn"] == 1204 and got["tokensOut"] == 88
+    assert got["modelProvenance"] == "host-reported"
+    assert got["usageProvenance"] == "host-reported"
+    assert got["cost"]["amount"] == 0.0121
+    assert got["cost"]["provenance"] == "host-reported"
+    # the salted digest: hash + coarse bucket present, NEVER the raw text
+    assert got["promptDigest"]["salted"].startswith("hmac-sha256:")
+    assert got["promptDigest"]["bytesBucket"] == "0-64"
+    # the fiber-token-gated produced edge (the activation id matched)
+    assert got["producedSeq"] == [7]
+    # no prompt/response TEXT anywhere in the serialized record
+    blob = json.dumps(ev)
+    assert "system prompt" not in blob and "user question" not in blob
+    assert "prompt" not in got and "response" not in got  # only promptDigest
+
+    # the reader projects the hop, and the OTel span carries the produced link
+    doc = tr.compute_trace(list(driver._events))
+    hop = doc["modelHops"][0]
+    assert hop["attempts"] == {"count": 3, "ceiling": 3,
+                               "provenance": "revl-controlled"}
+    assert hop["promptDigest"]["salted"].startswith("hmac-sha256:")
+    span = next(s for s in ot.build_spans(list(driver._events))
+                if s.kind == wr.EMIT)
+    assert any(l.attributes.get("revl.link.relation") == "model-produced"
+               for l in span.links)
+    # the register is consumed: a later non-model crossing inherits nothing
+    assert driver._model_crossing_payload(activation_id=activation_id,
+                                          args=["later"]) is None
+
+
+def test_produced_seq_omitted_live_when_activation_id_differs():
+    """A model crossing whose activation id does NOT match the fiber's token
+    still records the hop, but OMITS `producedSeq` (honest-degrade, never an
+    adjacency guess) — the crossing carries the llm payload without the edge."""
+    rt.validate_retry(lambda: {"tag": "ok"}, budget=0,
+                      schema={"type": "object"}, where="Agent")
+    rt.revl_note_validated_completion("AgentLoop#g3#a1", 7)   # a1's token
+    driver = _bare_driver()
+    llm = driver._model_crossing_payload(activation_id="AgentLoop#g3#a2")  # a2
+    assert llm is not None
+    assert "producedSeq" not in llm       # omitted: activation ids differ
+    assert llm["attempts"] == 1 and llm["attemptCeiling"] == 1
+
+
+def test_non_model_crossing_record_is_byte_identical_to_pre_glue():
+    """A NON-model crossing: no `validate_retry` ran in this fiber, so the
+    register is empty and `_model_crossing_payload` returns None. The recorded
+    event must be byte-identical (modulo the monotonic `ts`) to what the
+    pre-glue `_record_emit` produced — no `llm`, no `activationId`."""
+    driver = _bare_driver()
+    llm = driver._model_crossing_payload(activation_id="Reporter#g3",
+                                         args=["a path"])
+    assert llm is None
+    cause = wr.cause_trigger("a filesystem write crossed")
+    driver._record_emit("Reporter", "fs", "Report.write", cause,
+                        llm=llm, activation_id=None)
+    ev = driver._events[-1]
+    assert "llm" not in ev and "activationId" not in ev
+    assert set(ev) == {"v", "seq", "gen", "event", "component", "cause",
+                       "capability", "key", "ts"}
+    # byte-identical to the pre-121 emit shape (drop the monotonic ts on both)
+    expect = wr.make_emit_event(0, 3, "Reporter", "fs", "Report.write", cause)
+    assert {k: v for k, v in ev.items() if k != "ts"} == expect

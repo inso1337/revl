@@ -49,6 +49,29 @@ from . import why_runtime
 KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm", "go")
 
 
+def _host_usage(raw) -> tuple:
+    """Item 121: the HOST-REPORTED model/tokens/cost, best-effort read off a
+    model completion's return value (§2.1, "whatever usage metadata the host
+    ``make_call`` return carries back from the provider").
+
+    Recognized ONLY when the return is a mapping carrying the conventional keys
+    (top-level, or a nested ``usage`` object for the token counts); anything
+    else honest-degrades to ``None`` for every field — the hop is still recorded
+    (with `latency`/`attempts`, the revl-owned numbers), the host fields simply
+    absent. These values are unverifiable (§4 attack 2); `revl_model_hop` tags
+    them `host-reported`, so a passthrough here promotes nothing to ground
+    truth. Returns ``(model, tokens_in, tokens_out, cost)``."""
+    if not isinstance(raw, dict):
+        return None, None, None, None
+    usage = raw.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    tokens_in = raw.get("tokensIn", usage.get("tokensIn"))
+    tokens_out = raw.get("tokensOut", usage.get("tokensOut"))
+    cost = raw.get("cost")
+    cost = cost if isinstance(cost, dict) else None
+    return raw.get("model"), tokens_in, tokens_out, cost
+
+
 class ActivationError(RuntimeError):
     """A component's activation did not complete — "loaded" would be a lie
     (roadmap item 372).
@@ -562,13 +585,61 @@ class _Driver:
         self._seq += 1
 
     def _record_emit(self, component: str, capability: str, key: str,
-                     cause: dict) -> None:
+                     cause: dict, *, llm: dict | None = None,
+                     activation_id: str | None = None) -> None:
         """Record one ``emit`` event (v2): an emission crossed an irreversible
-        boundary at runtime (the ``emissionsCrossed`` site in a step-back)."""
+        boundary at runtime (the ``emissionsCrossed`` site in a step-back).
+
+        `llm`/`activation_id` (item 121, both additive and omit-by-default) are
+        supplied ONLY for a model-completion crossing, from
+        :meth:`_model_crossing_payload`. A non-model crossing passes neither, so
+        its record is byte-identical to a pre-121 v2 emit — the same additive
+        discipline `make_emit_event` already documents."""
         self._events.append(why_runtime.make_emit_event(
             self._seq, self.generation, component, capability, key, cause,
-            ts=time.monotonic()))
+            ts=time.monotonic(), llm=llm, activation_id=activation_id))
         self._seq += 1
+
+    def _model_crossing_payload(self, *, activation_id: str | None = None,
+                                args=None, arg_origins=None,
+                                taint_engaged: bool = False,
+                                verified_by=None) -> dict | None:
+        """Item 121: assemble the `llm` payload for a model-completion crossing,
+        or ``None`` when this crossing is not one.
+
+        The completion fires at exactly one runtime seam — ``validate_retry``
+        (`backends/python/runtime.py`) — which stashes a fiber-local observation
+        ``(latencySeconds, attempts, attemptCeiling, rawReturn)``. This reads
+        (and consumes) it via ``revl_take_model_call()``: a present observation
+        IS the model-hop discriminator, so a NON-model crossing (nothing stashed)
+        returns ``None`` and its record stays byte-identical.
+
+        From the observation this threads the revl-OWNED numbers (the latency
+        bracket, the attempt count against the item-257 static ``N + 1`` ceiling)
+        straight through; the HOST-reported model/tokens/cost are a best-effort
+        passthrough off the return (:func:`_host_usage`). The salted, suppressible
+        `promptDigest` is computed over the crossing's revl-typed `args` (never
+        the host string) and the `producedSeq` value-flow edge is resolved via
+        the fiber-local token — present ONLY when the token's activation id
+        matches (`revl_produced_seq`), OMITTED (never adjacency-guessed) else.
+        Digest/token/host-usage all honest-degrade to absent; the assembly and
+        every provenance tag live in `revl_model_hop`."""
+        take = getattr(self.runtime, "revl_take_model_call", None)
+        obs = take() if take is not None else None
+        if obs is None:
+            return None
+        latency, attempts, ceiling, raw = obs
+        model, tokens_in, tokens_out, cost = _host_usage(raw)
+        digest = None
+        if args is not None:
+            digest = self.runtime.revl_prompt_digest(
+                args, arg_origins, taint_engaged)
+        produced = self.runtime.revl_produced_seq(activation_id)
+        return self.runtime.revl_model_hop(
+            model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost=cost,
+            latency_seconds=latency, attempts=attempts, attempt_ceiling=ceiling,
+            verified_by=verified_by or [], produced_seq=produced,
+            prompt_digest=digest)
 
     @staticmethod
     def _failure_code(err) -> str | None:
@@ -1003,13 +1074,28 @@ class _Driver:
                     # v2 emit event: one per crossing. The emission is scoped to
                     # a capability (the target service) and labelled `key.method`.
                     detail = step.get("detail") or {}
+                    # item 121: if this crossing is a model completion, the
+                    # `validate_retry` seam stashed a fiber-local observation;
+                    # thread its `llm` payload + `activationId` onto the record.
+                    # A non-model crossing yields None here, so its record stays
+                    # byte-identical to a pre-121 v2 emit. The driver runs no
+                    # taint analysis, so the digest gate is left fail-closed
+                    # (`taint_engaged=False`): the hop is still recorded, just
+                    # with the digest suppressed (§4, the fail-closed default).
+                    activation_id = f"{timeline.component}#g{self.generation}"
+                    llm = self._model_crossing_payload(
+                        activation_id=activation_id,
+                        args=detail.get("args"))
                     self._record_emit(
                         timeline.component,
                         detail.get("service") or "",
                         step.get("label") or "",
                         why_runtime.cause_trigger(
                             f"crossed by step-back to {at} "
-                            f"(an emission has no inverse)"))
+                            f"(an emission has no inverse)"),
+                        llm=llm,
+                        activation_id=(activation_id if llm is not None
+                                       else None))
                 for step in report["failed"]:
                     self._log("FAIL", step["label"], step["error"] or "")
                 await self._flush()
