@@ -391,6 +391,17 @@ class Session:
         # self-evolution loop never swaps synchronously). Empty in every session
         # that does not admit, so nothing changes for one that does not.
         self._pending_admits: list[dict] = []
+        # item 250 (session branching): once a session is FORKED, it is FROZEN —
+        # retired at the fork step k, non-callable, so the shared rewound
+        # workspace has exactly one live owner, the branch (Decision 4). `_frozen`
+        # gates every op through `_require`; `_fork_at` names the step it was
+        # frozen at, for the refusal message. A fresh session is never frozen.
+        self._frozen = False
+        self._fork_at: int | None = None
+        # the pending fork enumeration (item 250, Decision 1): `fork` stores the
+        # hash-bound rewound span here, and `fork_confirm` re-derives the hash and
+        # refuses on any drift, exactly as the 245 commit binds its manifest hash.
+        self._fork_pending: dict | None = None
 
     # -- plumbing ----------------------------------------------------------
 
@@ -404,6 +415,15 @@ class Session:
         return self._driver is not None
 
     def _require(self):
+        if self._frozen:
+            # item 250, Decision 4: a forked parent is retired at k and
+            # non-callable — the branch is the only live continuation over the
+            # shared rewound workspace. This is what makes "a second concurrent
+            # fork" and any parent op after the fork a refusal, by construction.
+            raise SessionError(
+                f"session forked at step {self._fork_at}, frozen — a forked "
+                "parent is retired at k and non-callable; the branch is the only "
+                "live continuation over the shared workspace (item 250)")
         if self._driver is None:
             raise SessionError("nothing is loaded — call revl_load first")
         return self._driver
@@ -1635,6 +1655,273 @@ class Session:
                 "droppedDeferred": dropped, "prompts": prompts,
                 "compensationResidue": residue, **report}
 
+    # -- session branching (roadmap item 250) ------------------------------
+
+    def _fork_timeline(self, component: str | None):
+        """The timeline the fork rewinds, with `at` bound and enumeration ready.
+        Raises `SessionError` (recording off / unknown component / bad step)."""
+        return self._timeline(component)
+
+    def _fork_target(self, timeline, at: int) -> dict:
+        """The hash payload binding a fork (item 250, Decision 1): the rewound
+        span identity, the crossed set, the would-cross set, and the live
+        composition. Any drift since enumeration — a new effect, a new emission,
+        a swap — changes this, so `fork_confirm` refuses a stale hash exactly as
+        `SessionOwner.approve` refuses a stale commit hash."""
+        part = timeline.partition_tail(at)
+        return {
+            "component": timeline.component,
+            "at": part["at"],
+            "inversesRan": [e["index"] for e in part["inversesRan"]],
+            "provisionsWithdrawn": [e["index"] for e in part["provisionsWithdrawn"]],
+            "emissionsCrossed": [e["index"] for e in part["emissionsCrossed"]],
+            "emissionsCompensated": [e["index"] for e in part["emissionsCompensated"]],
+            "wouldCrossOnRewind": [e["index"] for e in part["wouldCrossOnRewind"]],
+            "unrestored": [e["index"] for e in part["unrestored"]],
+            "composition": sorted(
+                c.get("name") for c in (self.ir or {}).get("components") or []),
+        }
+
+    @staticmethod
+    def _fork_hash(target: dict) -> str:
+        import json  # noqa: PLC0415 — stdlib
+        return hashlib.sha256(
+            json.dumps(target, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _fork_report(self, timeline, at: int) -> dict:
+        """Build the honest fork report from the total tail partition (item 250,
+        Decision 3), plus the `residue.clean` verdict and the binding hash."""
+        part = timeline.partition_tail(at)
+        queue = []
+        if self._owner is not None:
+            queue = [d.descriptor() for d in self._owner._queue]
+        crossed = part["emissionsCrossed"]
+        offset = part["emissionsCompensated"]
+        would = part["wouldCrossOnRewind"]
+        unrestored = part["unrestored"]
+        clean = not (crossed or offset or would or unrestored)
+        outstanding = sorted(
+            e["index"] for e in (crossed + offset + would + unrestored))
+        target = self._fork_target(timeline, at)
+        report = {
+            "forked": False,                       # enumeration only; nothing rewound
+            "at": part["at"],
+            "atLabel": part["atLabel"],
+            "parent": self._session_id,
+            "rewound": {
+                "inversesRan": part["inversesRan"],
+                "provisionsWithdrawn": part["provisionsWithdrawn"],
+            },
+            "droppedDeferred": queue,              # held, never crossed
+            "emissionsCrossed": crossed,
+            "emissionsCompensated": offset,
+            "wouldCrossOnRewind": would,
+            "unrestored": unrestored,
+            "residue": {
+                "clean": clean,
+                "outstanding": outstanding,
+                "proof": (
+                    f"{len(crossed)} emission(s) crossed the boundary between step "
+                    f"{part['at']} and head and cannot be undone; {len(would)} "
+                    "inverse(s) whose scope crosses the boundary were enumerated "
+                    f"but not fired; {len(unrestored)} step(s) could not be "
+                    "restored. All are listed above. The host-confined fs state "
+                    "and provisions above this line were restored to step "
+                    f"{part['at']}; nothing else is claimed." if not clean else
+                    "the rewound span is only host-confined witnessed effects, "
+                    "provisions, and held sends: nothing crossed, nothing would "
+                    "cross on rewind, nothing was left unrestored — a provably "
+                    "exact rewind to step " + str(part["at"]) + "."),
+            },
+            "warning_emissions": (
+                f"{len(crossed)} emission(s) are still out in the world."
+                if crossed else "no emission crossed the boundary in the rewound "
+                "span."),
+            "guarantee": replay_module().GUARANTEE,
+            "hash": self._fork_hash(target),
+        }
+        return report
+
+    def fork(self, at: int, component: str | None = None) -> dict:
+        """Step 1 of the two-step, hash-bound session fork (item 250, Decision 1).
+
+        ENUMERATES: walks the whole tail (steps > `at`) into the total honest
+        partition (Decision 3) and returns the fork report plus a `hash` binding
+        the rewound span and the live composition. Nothing is rewound yet, no
+        workspace state changes, no branch is minted — the crossed-emission and
+        would-cross-on-rewind residue MUST be seen (and acknowledged through the
+        hash) before the rewind happens.
+
+        Refuses up front (a clear diagnostic, no side effect): a fork whose tail
+        contains a `KIND_OPAQUE` step the recorder cannot restore (Decision 3); a
+        fork whose rewound span holds a declared non-idempotent-total inverse
+        (Decision 5); and a fork before an already-flushed commit boundary
+        (Decision 6)."""
+        self._require()
+        timeline = self._fork_timeline(component)
+        try:
+            at = timeline._bound(at)
+        except replay_module().ReplayError as error:
+            raise SessionError(str(error)) from None
+        self._fork_refuse(timeline, at)
+        report = self._fork_report(timeline, at)
+        self._fork_pending = {
+            "hash": report["hash"], "at": at, "component": timeline.component,
+        }
+        return report
+
+    def _fork_refuse(self, timeline, at: int) -> None:
+        """The Slice-1 fork refusals (item 250, Decision 3/5/6). Each raises a
+        `SessionError` with a clear diagnostic and touches nothing."""
+        # Decision 6: a fork whose `at` lies before a crossing that has already
+        # durably committed (a `flushed`/`commit-approved` record exists) is
+        # refused — you cannot rewind past a send that already committed and
+        # closed. Within one uncommitted activation there are no such records.
+        if self._has_committed_boundary():
+            raise SessionError(
+                "fork refused: this session's WAL already carries a durably "
+                "committed crossing (a `flushed`/`commit-approved` record). A fork "
+                "cannot rewind to a point before a send that has already committed "
+                "and closed — the rewindable window is [last commit boundary, head] "
+                "(item 250, Decision 6)")
+        hazards = timeline.fork_hazards(at)
+        if hazards["opaque"]:
+            labels = ", ".join(e["label"] for e in hazards["opaque"])
+            raise SessionError(
+                "fork refused: the tail contains a KIND_OPAQUE step the recorder "
+                f"cannot restore ({labels}). The fork must not claim step-{at} "
+                "state over a disposer it cannot run, so it is refused up front "
+                "rather than shipping an unrestored item and a false 'actually at "
+                "step k' (item 250, Decision 3)")
+        if hazards["nonIdempotent"]:
+            labels = ", ".join(e["label"] for e in hazards["nonIdempotent"])
+            raise SessionError(
+                "fork refused: the rewound span contains a declared "
+                f"non-idempotent-total inverse ({labels}). A crash mid-fork could "
+                "re-run it against a partially rewound workspace and double-apply "
+                "it, so Slice 1 refuses the span rather than shipping an unsound "
+                "recovery (item 250, Decision 5)")
+
+    def _has_committed_boundary(self) -> bool:
+        """Whether this session's WAL already carries a durably committed crossing
+        (item 250, Decision 6). Reads the on-disk WAL through the tier-agnostic
+        core; a session with no WAL open has none."""
+        wal = self.recorder.wal if self.recorder is not None else None
+        if wal is None:
+            return False
+        from ..wal import read_wal  # noqa: PLC0415 — tier-agnostic core, lazy
+        try:
+            doc = read_wal(wal.path)
+        except OSError:
+            return False
+        return any(r.get("record") in ("flushed", "commit-approved")
+                   for r in doc["records"])
+
+    def _ensure_wal_open(self) -> None:
+        """Open this session's durable WAL if none is open (item 250): the fork
+        bracket (`fork-begin`/`fork-complete`/`fork-frozen`) must be durable, and
+        the MCP session otherwise leaves the WAL closed for a non-approval
+        composition."""
+        if self.recorder is not None and self.recorder.wal is None:
+            from ..wal import default_wal_path  # noqa: PLC0415
+            path = self._wal_path or default_wal_path(self._session_id)
+            self.recorder.open_wal(path, self._generation)
+
+    def fork_confirm(self, fork_hash: str) -> dict:
+        """Step 2 of the session fork — PERFORMS (item 250, Decision 1 sequence).
+
+        Re-derives the hash and refuses on any drift (a fresh report, a result not
+        an error, exactly as `commit_confirm` refuses a stale manifest). On match:
+        writes `fork-begin` to the parent WAL, runs the scope-gated rewind to k
+        (Decision 2, host-confined inverses only), drops the parent deferral queue,
+        FREEZES the parent (non-callable, Decision 4), snapshots the step-k state,
+        mints the branch identity (fresh session_id + WAL + SessionOwner, no
+        approval carry — item 246 invariant 5), restores the snapshot into the
+        branch, and writes `fork-frozen`/`fork-complete`.
+
+        Returns `{forked, at, parent, branch, rewound, residue, ..., branchSession}`
+        where `branchSession` is the live branch `Session` (the only live
+        continuation over the shared workspace)."""
+        self._require()
+        pending = self._fork_pending
+        if pending is None:
+            raise SessionError(
+                "no fork is pending — call `fork(at)` first to enumerate and "
+                "acknowledge the crossed and would-cross residue (item 250)")
+        timeline = self._fork_timeline(pending["component"])
+        at = pending["at"]
+        current = self._fork_hash(self._fork_target(timeline, at))
+        if fork_hash != current:
+            self._fork_pending = None
+            return {"forked": False, "refused": True,
+                    "reason": ("stale fork hash — the timeline or the live "
+                               "composition changed since enumeration, so the "
+                               "confirm is refused. Re-enumerate: what is rewound "
+                               "must be exactly what was acknowledged (item 250, "
+                               "Decision 1)"),
+                    **self._fork_report(timeline, at)}
+
+        report = self._fork_report(timeline, at)
+        crossed = report["emissionsCrossed"]
+        would = report["wouldCrossOnRewind"]
+        dropped = report["droppedDeferred"]
+
+        # 1. the fork bracket opens durably, BEFORE the rewind touches the fs.
+        self._ensure_wal_open()
+        wal = self.recorder.wal if self.recorder is not None else None
+        if wal is not None:
+            wal.record_fork_begin(parent=self._session_id, at=at,
+                                  crossed=crossed, would_cross=would)
+
+        # 2. the scope-gated, non-emitting rewind to k (Decision 2).
+        rewind = self._run(timeline.step_back(at, compensate=False))
+
+        # 3. drop the parent deferral queue — the held sends never crossed.
+        if self._owner is not None:
+            self._owner._queue = []
+
+        # 4/5. snapshot the step-k state, then FREEZE the parent.
+        snap = self.snapshot()
+        parent_id = self._session_id
+        branch_id = None
+
+        # 6. mint the branch identity over the (now rewound) shared workspace.
+        branch = Session()
+        branch.approval_policy = self.approval_policy
+        branch.sandbox = self.sandbox
+        branch.restore(snap)               # fresh session_id + owner; no approval carry
+        if self._wal_path:
+            # keep the branch's distinct WAL beside the parent's, rather than in
+            # the shared per-user state dir, when the parent named an explicit one
+            import os  # noqa: PLC0415 — stdlib
+            branch._wal_path = os.path.join(
+                os.path.dirname(os.path.abspath(self._wal_path)),
+                f"revl-branch-{branch._session_id}.wal")
+        branch._ensure_wal_open()          # a distinct branch WAL
+        branch_id = branch._session_id
+
+        # 7. close the bracket on the parent WAL and retire the parent.
+        if wal is not None:
+            wal.record_fork_frozen(parent=parent_id, at=at)
+            wal.record_fork_complete(branch=branch_id)
+            wal.close()
+        self._frozen = True
+        self._fork_at = at
+        self._fork_pending = None
+
+        return {
+            **report,
+            "forked": True,
+            "parent": parent_id,
+            "branch": branch_id,
+            "rewound": {
+                "inversesRan": rewind["inversesRan"],
+                "provisionsWithdrawn": rewind["provisionsWithdrawn"],
+            },
+            "droppedDeferred": dropped,
+            "branchSession": branch,
+        }
+
     # -- teardown plumbing -------------------------------------------------
 
     def _surface_compensation_residue(self, owner) -> list:
@@ -1732,6 +2019,11 @@ class Session:
         self._cache_inval_epoch = {}
         self._cache_inval_tokens = set()
         self._cache_hits = 0
+        # item 250: a torn-down session is not a frozen one — clear the fork state
+        # so a reused Session object starts fresh and callable.
+        self._frozen = False
+        self._fork_at = None
+        self._fork_pending = None
 
     # -- the per-turn admit+run crossing (roadmap item 330) ----------------
 

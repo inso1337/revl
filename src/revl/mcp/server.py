@@ -444,6 +444,49 @@ def _tool_commit_confirm(arguments: dict) -> dict:
     return {"ok": True, **result}
 
 
+def _tool_fork(arguments: dict) -> dict:
+    """Step 1 of the two-step, hash-bound session fork (item 250): ENUMERATE the
+    honest partition of the tail above step `at` and return it with a `hash`.
+    Nothing is rewound yet, no branch is minted. The crossed-emission and
+    would-cross-on-rewind residue MUST be seen and acknowledged through the hash
+    before `revl_fork_confirm` performs the rewind."""
+    if "at" not in arguments:
+        return _session_error("`at` is required — the step k to fork at "
+                              "(-1 rewinds the whole tail)")
+    try:
+        return {"ok": True, **SESSION.fork(arguments["at"],
+                                           arguments.get("component"))}
+    except SessionError as error:
+        # a refused fork (a KIND_OPAQUE tail, a non-idempotent span, a committed
+        # boundary below k) is a RESULT the caller reads, not a crash
+        return _session_error(str(error), refused=True)
+
+
+def _tool_fork_confirm(arguments: dict) -> dict:
+    """Step 2 of the session fork (item 250): re-derive the hash, refuse on drift,
+    then run the scope-gated rewind to k, drop the parent queue, FREEZE the
+    parent, snapshot, and mint the branch. On success the branch becomes the live
+    session — the only continuation over the shared, rewound workspace."""
+    global SESSION
+    fork_hash = arguments.get("hash")
+    if not fork_hash:
+        return _session_error("provide `hash` — the fork hash revl_fork returned, "
+                              "binding exactly the rewound span and residue")
+    try:
+        result = SESSION.fork_confirm(fork_hash)
+    except SessionError as error:
+        return _session_error(str(error))
+    if result.get("refused"):
+        return {"ok": False, **{k: v for k, v in result.items()
+                                if k != "branchSession"}}
+    # the branch is the live continuation: rebind the server's session to it so
+    # every subsequent verb drives the branch, and never serialize the live object
+    branch = result.pop("branchSession", None)
+    if branch is not None:
+        SESSION = branch
+    return {"ok": True, **result}
+
+
 def _approval_required(exc: ApprovalRequired) -> dict:
     """Shape a class-(c) refusal into the ticket two-step response (item 246).
     The call/load/swap did NOT fire: the ticket names what a yes would mean, and
@@ -1502,6 +1545,54 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_abort,
+    },
+    {
+        "name": "revl_fork",
+        "description": "Step 1 of the two-step session fork (item 250): ENUMERATE "
+                       "what forking at step k would rewind and what it cannot. "
+                       "Walks the whole tail above k into an honest, total "
+                       "partition — the host-confined witnessed effects and "
+                       "provisions that WILL be rewound, the held deferred sends "
+                       "that WILL be dropped, the emissions that already CROSSED "
+                       "the boundary and cannot be undone, the outbound-scoped "
+                       "inverses that WOULD cross on rewind (enumerated, never "
+                       "fired), and any step the recorder cannot restore — and "
+                       "returns a `hash` binding the rewound span. Nothing is "
+                       "rewound yet. Refuses a fork whose tail has a KIND_OPAQUE "
+                       "step, a non-idempotent inverse, or a committed boundary "
+                       "below k. Call revl_fork_confirm(hash) to perform it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string"},
+                "at": {"type": "integer",
+                       "description": "the step k to fork at; -1 rewinds the whole tail"},
+            },
+            "required": ["at"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_fork,
+    },
+    {
+        "name": "revl_fork_confirm",
+        "description": "Step 2 of the session fork (item 250): PERFORM the fork the "
+                       "hash from revl_fork bound. Re-derives the hash and refuses "
+                       "on any drift (a fresh report, a result not an error). On "
+                       "match it runs the SCOPE-GATED, non-emitting rewind to k "
+                       "(host-confined inverses only — an outbound-scoped inverse "
+                       "is enumerated, never fired), drops the parent deferral "
+                       "queue, FREEZES the parent (retired at k, non-callable), "
+                       "snapshots the step-k state, and mints the branch (fresh "
+                       "session id + WAL, no approval carry). The branch is then "
+                       "the only live continuation over the shared workspace.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"hash": {"type": "string",
+                                    "description": "the fork hash from revl_fork"}},
+            "required": ["hash"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_fork_confirm,
     },
     {
         "name": "revl_approve",

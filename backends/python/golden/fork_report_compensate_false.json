@@ -1,0 +1,29 @@
+{
+  "component": "C",
+  "to": -1,
+  "toLabel": "(before activation)",
+  "compensate": false,
+  "inversesRan": [
+    {"index": 3, "kind": "effect", "label": "fs.write", "site": null, "scope": {"caps": ["fs"]}}
+  ],
+  "provisionsWithdrawn": [
+    {"index": 5, "kind": "provision", "label": "provide store", "site": null, "scope": null}
+  ],
+  "emissionsCrossed": [
+    {"index": 0, "key": "bare", "method": "send", "service": "Bus", "args": ["x"], "site": null}
+  ],
+  "emissionsCompensated": [
+    {"index": 1, "key": "notify", "method": "ping", "service": "Ping", "args": ["y"], "site": null, "compensation": 2}
+  ],
+  "wouldCrossOnRewind": [
+    {"index": 4, "kind": "effect", "label": "net.put", "scope": {"caps": ["net"]}, "site": null},
+    {"index": 2, "kind": "compensation", "label": "compensate notify.ping", "scope": null, "site": null, "for": 1}
+  ],
+  "unrestored": [
+    {"index": 8, "kind": "opaque", "label": "buf.opaque", "repr": "<Buffer 4 bytes>"}
+  ],
+  "failed": [],
+  "live": true,
+  "guarantee": "the inverses registered for the unwound steps ran, newest first (LIFO). Whether that restores state is the application's own equivalence, not something the runtime observes or asserts.",
+  "warning_emissions": "1 emission(s) were crossed with no compensation. Those effects are still out in the world."
+}
