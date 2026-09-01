@@ -1,0 +1,10 @@
+// REJECTED — revl has no `print` (item 384). Pure code has no I/O; output is
+// an effect emitted through a service.
+//
+// expected error:
+//   revl has no `print`
+
+fn f(n: Int) -> Int {
+  print(n)
+  return n
+}

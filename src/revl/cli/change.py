@@ -274,8 +274,8 @@ def _print_undo(result: dict, args) -> None:
     print(f"state dropped (provisions withdrawn): "
           f"{', '.join(p['key'] for p in dropped) or '—'}")
     given_up = crossings.get("givenUp") or []
-    print(f"\ninterim boundary crossings that NO undo can un-emit "
-          f"(compensation is not inversion — §6.1):")
+    print("\ninterim boundary crossings that NO undo can un-emit "
+          "(compensation is not inversion — §6.1):")
     for token in crossings.get("crossings") or []:
         mark = "  ! " if token in set(given_up) else "  ~ "
         note = "  (given up going forward, already exercised)" \
@@ -292,9 +292,12 @@ def _run_recover(args) -> int:
     persisted generation (roll-forward), and prints a checked verdict with a
     residue proof. Exit status follows the residue: 0 when clean, 1 when honest
     residue remains."""
-    # the recovery module reads `replay.WriteAheadLog`, a backend module — put
-    # backends/python on the path exactly as `run` does, but *without* needing a
-    # cordis runtime (recovery works from the durable log, the process is dead).
+    # The recovery core reads the WAL through the tier-agnostic `revl.wal`
+    # reader (item 322), so recover itself needs NO backend — it works from the
+    # durable log alone, for a py OR a non-py (go/rust/java/wasm) tier's WAL.
+    # backends/python is still put on the path for the `--restore` roll-forward
+    # path, which re-admits the persisted generation through a real cordis
+    # runtime; the core roll-back/roll-forward decision never touches it.
     backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:
         sys.path.insert(0, str(backend_dir))
@@ -312,6 +315,21 @@ def _run_recover(args) -> int:
             return 1
         from ..mcp.session import Session  # noqa: PLC0415 — lazy: cordis only if resuming
         session = Session()
+        # re-establish the operator-flag approval posture the snapshot was taken
+        # under (item 246). Without it, `persist.restore` refuses a policy-recorded
+        # snapshot rather than boot the recovered generation ungated; with it, the
+        # activation gate re-arms and a class-(c) crossing re-prompts on resume
+        # exactly as on first boot.
+        if getattr(args, "policy", None):
+            from ..policy import PolicyError, load_policy  # noqa: PLC0415
+            try:
+                session.sandbox = load_policy(args.policy)
+            except (OSError, PolicyError) as error:
+                print(f"error: cannot load policy {args.policy}: {error}",
+                      file=sys.stderr)
+                return 1
+        if getattr(args, "approval_policy", None):
+            session.approval_policy = args.approval_policy
 
     try:
         report = recover(args.wal, session=session, snapshot=snapshot)

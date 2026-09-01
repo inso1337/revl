@@ -1,0 +1,22 @@
+# item 322 Slice 2: the rust crash-recovery proof crate. `src/lib.rs` is
+# GENERATED from crashproof.ir.json in RECORD mode (see regen.sh) — the
+# witnessed transactional step writes a durable discharge-descriptor to the rust
+# WAL sink. `src/bin/crash_producer.rs` is the real process the python driver
+# (tests/test_rust_crash_recovery.py) boots and crashes.
+[package]
+name = "revl_crashproof"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+cordis = { package = "cordis-rs", version = "0.3" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "revl_crashproof"
+path = "src/lib.rs"
+
+[[bin]]
+name = "crash_producer"
+path = "src/bin/crash_producer.rs"

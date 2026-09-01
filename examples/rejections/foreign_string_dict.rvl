@@ -1,0 +1,11 @@
+// REJECTED — a string-keyed literal `{"k": v}` is a Python/JS dict; revl
+// records take bare identifier keys, and dynamic string keys use `Map` (item
+// 384). The string key used to report `expected ident, found 'k'`.
+//
+// expected error:
+//   revl records use identifier keys
+
+fn f() -> Int {
+  let d = {"k": 1}
+  return 0
+}

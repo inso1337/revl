@@ -20,7 +20,6 @@ back. These tests establish, in order:
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -86,6 +85,89 @@ def test_the_wal_appends_each_step_as_it_commits(tmp_path):
     assert len([r for r in replay.WriteAheadLog.read(str(path))["records"]
                 if r["record"] == "effect"]) == 2
     wal.close()
+
+
+def _boundary_op(name: str) -> dict:
+    return {"receiver": "fs", "method": "remove", "args": [name]}
+
+
+def test_reopening_a_wal_resumes_the_seq_space_instead_of_resetting_it(tmp_path):
+    """Item 325 regression. A --watch reload builds a FRESH `WriteAheadLog`
+    over the existing file in append mode. The seq counter must RESUME from the
+    log's maximum seq, never restart at 0 — a reset collides in seq-space with
+    the records the prior generation already wrote, and recover keys discharge
+    descriptors by seq. This drives the real reload path (`Recorder.open_wal`
+    again on the same path) and asserts the post-reopen seqs strictly continue
+    the pre-reopen sequence."""
+    path = str(tmp_path / "session.wal")
+    recorder = replay.Recorder({})
+
+    wal1 = recorder.open_wal(path, generation=1)
+    r0 = wal1.record_boundary("C", "a", resource="file:/a",
+                              inverse_op=_boundary_op("/a"))
+    r1 = wal1.record_boundary("C", "b", resource="file:/b",
+                              inverse_op=_boundary_op("/b"))
+    assert [r0["seq"], r1["seq"]] == [0, 1]
+
+    # --watch reload: same path, a brand-new WriteAheadLog instance.
+    wal2 = recorder.open_wal(path, generation=2)
+    assert wal2 is not wal1  # genuinely a fresh instance, not the same object
+    r2 = wal2.record_boundary("C", "c", resource="file:/c",
+                              inverse_op=_boundary_op("/c"))
+    r3 = wal2.record_boundary("C", "d", resource="file:/d",
+                              inverse_op=_boundary_op("/d"))
+    # the whole point: 2 and 3, NOT a reset to 0 and 1.
+    assert [r2["seq"], r3["seq"]] == [2, 3]
+    wal2.close()
+
+    # the durable log carries one strictly increasing, collision-free seq space.
+    seqs = [r["seq"] for r in replay.WriteAheadLog.read(path)["records"]
+            if "seq" in r]
+    assert seqs == [0, 1, 2, 3]
+    assert len(seqs) == len(set(seqs))  # no duplicate seq across the reload
+
+
+def test_a_fresh_empty_wal_still_starts_its_seq_space_at_zero(tmp_path):
+    """The resume must not perturb the ordinary first open: a new (or empty)
+    log begins at seq 0."""
+    path = str(tmp_path / "new.wal")
+    wal = replay.WriteAheadLog(path, ir={}, generation=1).open()
+    first = wal.record_boundary("C", "a", resource="file:/a",
+                                inverse_op=_boundary_op("/a"))
+    assert first["seq"] == 0
+    wal.close()
+
+
+def test_recover_keys_discharge_across_a_watch_reload_by_distinct_seqs(tmp_path):
+    """Item 325, recover-path regression. A transactional descriptor written
+    before a --watch reload and one written after it must land at DISTINCT seqs,
+    so a discharge record naming the post-reload seq skips exactly that
+    (committed) transaction and leaves the pre-reload (aborted) one to roll
+    back. With the seq-reset bug both descriptors share seq 0 and the discharge
+    becomes ambiguous — recover would skip the aborted rollback or replay the
+    committed one."""
+    path = str(tmp_path / "session.wal")
+    recorder = replay.Recorder({})
+
+    wal1 = recorder.open_wal(path, generation=1)
+    before = wal1.record_discharge_descriptor(
+        "transactional", receiver="ledgerA", method="rollback", args=["A"])
+
+    wal2 = recorder.open_wal(path, generation=2)  # --watch reload
+    after = wal2.record_discharge_descriptor(
+        "transactional", receiver="ledgerB", method="rollback", args=["B"])
+    # only the post-reload transaction committed before the crash.
+    wal2.record_discharge([after["seq"]])
+    wal2.close()
+
+    assert before["seq"] != after["seq"]  # the collision the bug caused
+
+    report = recover(path, world=DictWorld())
+    assert report["verdict"] == "rolled-back"
+    rolled_back = {e["seq"] for e in report["transactionalRolledBack"]}
+    retained = {e["seq"] for e in report["dischargedSkipped"] if e["retained"]}
+    assert rolled_back == {before["seq"]}   # aborted A rolled back
+    assert retained == {after["seq"]}       # committed B retained, not replayed
 
 
 def test_an_emission_is_a_process_crossing_with_no_inverse():
@@ -291,6 +373,59 @@ def test_a_real_recorded_activation_persists_and_recovers(session, tmp_path):
     assert any(e["kind"] == "emission" for e in report["unreconstructible"])
 
 
+# A supervisor whose provide-method reaches an emission THROUGH a spawn handle
+# (`emit w.inner.charge(n)`), not off a required service. Item 414: the runtime
+# recorder wrapped only required services, so this crossing produced no WAL record
+# and recover/erase-report silently missed it. The spawner is the one doing the
+# crossing, so the crossing must record against the spawner (Supervisor).
+_SPAWN_EMIT = """
+service Charger { emission fn charge(n: Int) -> Int }
+service Sup { emission fn run(n: Int) -> Int }
+component Worker provides inner: Charger {
+  provide inner { fn charge(n: Int) = n }
+}
+component Supervisor provides sup: Sup {
+  let w = effect spawn Worker with { } undo w.dispose()
+  provide sup { fn run(n: Int) { emit w.inner.charge(n) return n } }
+}
+"""
+
+
+@needs_cordis
+def test_a_spawn_handle_emission_is_recorded_in_the_wal(session, tmp_path):
+    """Item 414 (runtime counterpart to the spawn-fold static fix). An emission
+    reached through a spawn handle (`emit w.inner.charge(n)`) must land in the WAL
+    exactly as a required-service emission does, on the SPAWNER's timeline, so the
+    crash-recovery no-residue proof and the erase-report overlay see it. Before the
+    fix the spawned crossing left no record and recover reported it clean."""
+    session.load(compile_source(_SPAWN_EMIT, "<spawn>.rvl"), record=True)
+    assert session.call("sup", "run", [5])["result"] == 5
+
+    tl = session.recorder.timeline("Supervisor")
+    spawned = [s for s in tl.steps
+               if s.kind == replay.KIND_EMISSION
+               and (s.detail or {}).get("service") == "Charger"]
+    assert len(spawned) == 1  # the crossing THROUGH the spawn handle was recorded
+    assert spawned[0].detail["method"] == "charge"
+    assert spawned[0].detail["args"] == [5]
+
+    path = str(tmp_path / "spawn.wal")
+    with replay.WriteAheadLog(path, ir=session.ir, generation=1) as wal:
+        wal.append_timeline(tl)  # NO commit -> crashed mid-activation
+
+    loaded = replay.WriteAheadLog.read(path)
+    assert "emission" in [r["boundary"]["class"] for r in loaded["records"]
+                          if r["record"] == "effect"]
+
+    report = recover(path)
+    assert report["verdict"] == "rolled-back"
+    # the spawned crossing has no inverse: it surfaces as honest residue, no
+    # longer invisible to the recovery proof.
+    assert any(e["kind"] == "emission"
+               and "charge" in e.get("label", "")
+               for e in report["unreconstructible"])
+
+
 @needs_cordis
 def test_roll_forward_resumes_the_persisted_generation(session, tmp_path):
     """Roll-forward composes with item 15: a completed activation's WAL, plus
@@ -315,3 +450,109 @@ def test_roll_forward_resumes_the_persisted_generation(session, tmp_path):
     finally:
         if fresh.loaded:
             fresh.unload()
+
+
+# --------------------------------- roll-forward carries the approval posture
+
+
+def _c_activation_source(sink: str) -> str:
+    """A composition whose ACTIVATION body reaches a class-(c) emission (a plain
+    process crossing with no checked inverse) — the crossing an enabled approval
+    policy prompts on before boot."""
+    return (
+        "extern emission fn announce(sink: Str, msg: Str) = @py {\n"
+        "    with open(sink, 'a') as _f:\n"
+        "        _f.write('announce:' + msg + '\\n')\n"
+        "    return\n"
+        "}\n"
+        "service Ops { fn ping() -> Int }\n"
+        "component Quiet provides ops: Ops {\n"
+        f'  emit announce("{sink}", "boot")\n'
+        "  provide ops { fn ping() = 1 }\n"
+        "}\n"
+    )
+
+
+def _sink_lines(sink: str) -> list:
+    p = Path(sink)
+    return p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+
+
+@needs_cordis
+def test_a_class_c_activation_body_does_not_refire_unprompted_on_resume(tmp_path):
+    """The HIGH hole: roll-forward resume must NOT boot the recovered generation
+    into a policy-less session, or a class-(c) activation crossing that prompted a
+    human on first boot re-fires UNPROMPTED on recovery, past an approval already
+    spent. Restore refuses a policy-recorded snapshot into a policy-less session;
+    re-establishing the posture re-arms the gate so the crossing re-prompts."""
+    from revl.mcp.approval import ApprovalRequired
+    from revl.mcp import persist
+
+    sink = str(tmp_path / "sink.log")
+    src = _c_activation_source(sink)
+    ir = compile_source(src, "<boot>.rvl")
+
+    # first boot under the operator-flag approval policy: the class-(c) activation
+    # crossing turns the load itself into the ticket two-step and PROMPTS. Nothing
+    # crosses the boundary yet.
+    live = Session()
+    live.approval_policy = "auto"
+    with pytest.raises(ApprovalRequired) as first:
+        live.load(ir, record=True, origin={"source": src})
+    assert first.value.ticket["kind"] == "activation"
+    assert _sink_lines(sink) == []
+
+    # human approves; the re-issued load boots and the emission fires exactly once.
+    live.approve_ticket(first.value.ticket["hash"])
+    live.load(ir, record=True, origin={"source": src})
+    assert _sink_lines(sink) == ["announce:boot"]
+
+    # the snapshot must record the approval posture that governed admission.
+    snap = live.snapshot()
+    assert snap["meta"]["approval"]["policy"] == "auto"
+    live.unload()  # the process "died"; only snapshot + WAL survive
+
+    path = str(tmp_path / "done.wal")
+    with replay.WriteAheadLog(path, ir={}, generation=1) as wal:
+        wal.commit_activation(["Quiet"])
+
+    # (the hole) resume into a POLICY-LESS session would silently re-fire the
+    # activation crossing. (the fix) restore REFUSES, naming the missing policy,
+    # and the sink is untouched — the boundary was NOT crossed a second time.
+    bare = Session()
+    report = recover(path, session=bare, snapshot=snap)
+    assert report["verdict"] == "roll-forward-refused"
+    assert "approval policy" in report["message"]
+    assert "--approval-policy" in report["message"]
+    assert not bare.loaded
+    assert _sink_lines(sink) == ["announce:boot"]  # NOT re-fired
+
+    # re-establish the posture: `restore` re-arms the activation gate, so the
+    # class-(c) crossing RE-PROMPTS on resume exactly as on first boot — the
+    # ticket is raised, the boundary is not crossed.
+    armed = Session()
+    armed.approval_policy = "auto"
+    try:
+        with pytest.raises(ApprovalRequired) as reprompt:
+            persist.restore(armed, snap)
+        assert reprompt.value.ticket["kind"] == "activation"
+        assert not armed.loaded
+        assert _sink_lines(sink) == ["announce:boot"]  # still not re-fired
+    finally:
+        if armed.loaded:
+            armed.unload()
+
+    # and through the `recover` CLI seam the same posture yields a fail-closed
+    # verdict a human must clear — recovery NEVER auto-answers the ticket.
+    armed2 = Session()
+    armed2.approval_policy = "auto"
+    try:
+        report2 = recover(path, session=armed2, snapshot=snap)
+        assert report2["verdict"] == "roll-forward-needs-approval"
+        assert report2["residue"]["clean"] is False
+        assert report2["ticket"]["component"] == "Quiet"
+        assert not armed2.loaded
+        assert _sink_lines(sink) == ["announce:boot"]  # still not re-fired
+    finally:
+        if armed2.loaded:
+            armed2.unload()

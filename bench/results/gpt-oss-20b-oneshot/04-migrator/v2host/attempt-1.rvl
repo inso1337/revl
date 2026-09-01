@@ -1,0 +1,14 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component Migrator requires db: Database {
+  let _ = effect db.query(`SELECT pg_advisory_lock(12345)`)
+    undo db.query(`SELECT pg_advisory_unlock(12345)`)
+
+  await Job.run("migrations")
+
+  emit db.execute(`INSERT INTO migration_log (timestamp) VALUES (NOW())`)
+    compensate db.execute(`DELETE FROM migration_log WHERE timestamp = NOW()`)
+}

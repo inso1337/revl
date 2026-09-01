@@ -9,9 +9,10 @@
 //
 // Output is line-prefixed `[name]` so the conductor can interleave processes.
 
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { Context, FiberState } from 'cordis'
 
@@ -20,6 +21,41 @@ import { assertNoResidue, snapshotRuntime } from './runtime.ts'
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const name: string = spec.name
+
+// item 396 option B: a `@ts ref` thunk resolves its host module at call time
+// through `globalThis.__REVL_REF_ROOT__` joined with the recorded relative path
+// (so the emitted artifact carries no machine path). Set it BEFORE the module is
+// imported, and HASH-CHECK each ref's file against the IR pin before any host
+// code can run — the ts twin of the py driver's plug-time refusal.
+;(globalThis as any).__REVL_REF_ROOT__ = spec.refRoot ?? ''
+// item 410: the SECOND root a stdlib-origin `@ts ref` resolves against — the
+// install tree. The runner LIVES at backends/typescript/placement_runner.ts, and
+// in both supported layouts (source checkout, installed wheel) the install root
+// is exactly two directories up, so we self-derive it when the spec omits the
+// key. This makes multi-process placement work without threading the stdlib root
+// through placement.py's spec, and never falls back to the user root.
+const _stdlibRefRoot: string =
+  spec.stdlibRefRoot ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+;(globalThis as any).__REVL_STDLIB_REF_ROOT__ = _stdlibRefRoot
+for (const ref of (spec.refs || []) as Array<{ extern: string; path: string; sha256: string; root?: string }>) {
+  // per-kind: a stdlib ref hash-checks against the install root, a user ref
+  // against the user root. No cross-domain fallback — the two roots are the two
+  // trust domains (item 410 invariants 1 and 2).
+  const base = ref.root === 'stdlib' ? _stdlibRefRoot : (spec.refRoot ?? '')
+  const abs = path.resolve(base, ref.path)
+  let got: string
+  try {
+    got = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex')
+  } catch (e) {
+    throw new Error(`revl @ts ref for extern \`${ref.extern}\`: cannot read ${abs} (${e})`)
+  }
+  if (got !== ref.sha256)
+    throw new Error(
+      `revl @ts host-module ref for extern \`${ref.extern}\` does not match the ` +
+      `file pinned at compile: expected sha256 ${ref.sha256} for ${ref.path}, ` +
+      `but ${abs} hashes ${got} (item 396 option B / 410 deploy contract)`,
+    )
+}
 
 const STATE: Record<number, string> = {
   [FiberState.PENDING]: 'PENDING',

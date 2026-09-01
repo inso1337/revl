@@ -38,6 +38,9 @@ npm run typecheck  # tsc --noEmit over runtime.ts, demo.ts, golden/
 | `tests/semantics.test.ts` | R1–R5, each test named for the requirement it covers |
 | `tests/emitter.test.ts` | golden diff, determinism, contract rejections |
 | `tests/upstream.test.ts` | pinned reproductions of two upstream cordis lifecycle gaps — finding 1 (top-level effects disposed concurrently) is current upstream behavior; finding 2 (effects registered during teardown) is FIXED in the pinned fork and pins the fixed behavior (see `REPORT.md`) |
+| `tests/frame_teardown.test.ts` | `Frame` unit coverage — bracket / transactional / compensation on one LIFO stack, two-phase abort, residue records (item 243 Slice 2b) |
+| `tests/witnessed_teardown.test.ts` | the three-entry-kind teardown loop end to end through a real cordis composition (item 243 Slice 2b) |
+| `tests/method_witnessed.test.ts` | THE H1 GATE (item 318 → 324): a witnessed fs mutation fired from a PROVIDE-METHOD, per tool call — persists on clean unload, reverts on `frame.abort()`, residue enumerable (`Frame.transactionalMethod`) |
 | `REPORT.md` | impedance mismatches, upstream bugs, IR contract notes, LOC, ship-first recommendation |
 
 The reference IR is read from `../../examples/user_cache.ir.json` when this

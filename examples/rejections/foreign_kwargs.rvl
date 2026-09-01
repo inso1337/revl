@@ -1,0 +1,13 @@
+// REJECTED — `f(k=v)` is a Python keyword argument; revl calls are positional
+// (item 384). The `=` used to report `expected ), found '='`.
+//
+// expected error:
+//   revl has no keyword arguments
+
+fn g(k: Int) -> Int {
+  return k
+}
+
+fn f() -> Int {
+  return g(k=1)
+}

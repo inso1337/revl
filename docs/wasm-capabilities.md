@@ -148,6 +148,108 @@ instantiation-config channel yet (a spawn *target* is the exception...)
 | `match`/variants | ✅ now supported (tagged-union cells); the old "no tagged unions in core Wasm" README row is stale |
 | non-scalar config *fields* | scalar-only, same reason as the boundary |
 
+## Witnessed-effects teardown (item 243 Slice 2b)
+
+The compiled teardown accumulator (`activate_step`/`deactivate`, above) now
+carries THREE entry kinds, per docs/design/teardown-contract.md: `bracket`
+(an ordinary `acquire`, unchanged), `transactional` (a `witnessed` extern's
+declared inverse), and `compensation` (an `emit ... compensate ...`). Two
+qualifications are specific to this tier and do not lift with this slice:
+
+- **Over ACTIVATION-REGISTERED entries only.** The accumulator is fixed at
+  activation (the state-machine row above: method-time effects and
+  method-time compensation are both still hard `EmitError`s). The contract's
+  "mixed-entry LIFO in both phases" therefore reads, on wasm, over the
+  entries a component's top-level body registers — never a provide-method's.
+- **Epoch/fuel is a wasmtime CAPABILITY the first-party driver wires, not a
+  property of the compiled module.** The compiled WAT needs no special code
+  for this — a Phase-2 `compensate` expression is an ordinary `call`, and
+  wasmtime's epoch/fuel interruption is transparent to guest code once a HOST
+  arms it. `backends/wasm/lifecycle.py`'s `drive_teardown` is that host: it
+  drives the module's `deactivate_step` export one entry at a time (the same
+  per-call idiom `activate_step` already uses), arming a fresh epoch deadline
+  around each Phase-2 call. Host IMPORTS a compensation calls into are NOT
+  preemptible this way — wasmtime only checks the deadline at a function-call
+  entry or loop back-edge in GUEST code, so a compensation that blocks
+  entirely inside a `req`/coeffect call is not cut off. This is the
+  substrate's honest ceiling, not a partial implementation of the bound.
+
+**Additive: the scaffold only appears on a component that actually registers
+a `transactional`/`compensation` entry.** A component with no `witnessed`
+extern and no `emit ... compensate ...` step has nothing for a commit/abort
+split to distinguish (every entry is a `bracket`, which replays on commit AND
+abort alike), so it emits `deactivate` in the exact single-pass shape it did
+before this slice — no `$__committed`/`$__dstep` globals, no `committed()`/
+`deactivate_step()` exports, byte-identical output. This mirrors the go/rust
+Slice-2b landings' own gates (go's `_COMP_NEEDS_TEARDOWN`, rust's
+`_body_has_witnessed`/`_body_has_compensate`). New exports, present only when
+the gate is on (in addition to `activate_step`/`deactivate`, whose SIGNATURES
+are unchanged either way, for backward compatibility with an existing host —
+e.g. cordis-wasm's `Runtime.unplug` — that only knows the single-call
+teardown hook):
+
+| export | purpose |
+|---|---|
+| `committed() -> i32` | the abort-vs-commit discriminator: 1 iff `activate_step` ran every segment to completion without trapping |
+| `deactivate_step() -> i32` | processes exactly ONE accumulator entry per call (1 = more remain, 0 = done) — a first-party host driver can catch a trap per entry (continue-and-record) and bound a compensation's epoch/fuel individually; `deactivate` itself is now a thin loop calling this to completion in one host call |
+
+A `revl:teardown` custom section is emitted alongside `revl:isolate`/
+`revl:intercept` (§v2 realms) whenever a component registers at least one
+`transactional`/`compensation` entry: a STATIC, compile-time index (seq,
+kind, `deactivate_step` dispatch position) of those entries, and the
+Phase-1/Phase-2 dispatch-chain split. It is the honest ceiling of a "WAL
+descriptor" on this tier: runtime argument/witness VALUES live in the
+component's own linear memory, and this tier's teardown loop is compiled
+state with zero host bookkeeping (the README's own framing), so there is no
+channel here that durably persists a runtime value without a host choosing
+to add one — this section is the STARTING INDEX such a host would build
+against, not a claim of durability the substrate does not carry.
+`backends/wasm/lifecycle.py`'s `parse_teardown_descriptor` reads it back.
+
+### Provide-method witnessed effects, per tool call (item 324)
+
+The accumulator above is fixed at compile time — it indexes exactly the
+`witnessed`/`emit … compensate` steps the ACTIVATION body spells out. Item 318's
+H1 gate is the agent case, where a `witnessed` fs mutation instead fires from a
+PROVIDE-METHOD body, once per tool call, an unbounded number of times only known
+at runtime. The wasm tier admits that position now, with a **runtime**
+accumulator alongside the static one:
+
+- each Ok mutation in a method body `$alloc`s a 24-byte cell — `[witness:8]
+  [undo_id:8][next:8]` — and pushes it onto `$__mw_head`, a newest-first linked
+  list, incrementing `$__mw_count`. The witness is the exact Ok payload, copied
+  out of the transient Result before the next call reuses it.
+- the list is drained ONLY by `deactivate`/`deactivate_step`, gated on
+  `$__committed`, one cell per call (the same one-entry-per-call idiom the static
+  chain uses), newest-first — so method inverses (the newer ones) replay ahead of
+  the activation-body chain, the component-level LIFO the contract asks for. A
+  clean unload never walks the list (discharge: the mutation persists, witness GC
+  by the cell going out of scope with the instance); an abort replays each cell's
+  declared inverse, dispatched by its `undo_id`.
+- **the disposal-ordering hazard** (item 318 found it on py, checked here): a
+  per-call disposal at method return would observe `$__committed == 0` while the
+  session is still live and WRONGLY revert the deliverable. Parking the entry and
+  draining it only at teardown, where the commit/abort bit is settled, is this
+  tier's park-for-drain. This is consistent with the per-tier preemption row
+  below (`activation-registered-only`): `$__mw_head` is component-instance state,
+  drained by the component's own teardown, never a per-call epoch that could tear
+  it down early.
+
+Two exports appear, present ONLY when a component actually has a method-body
+witnessed effect (gated on that, not on the broader teardown scaffold — a
+non-method-witnessed program's output is byte-identical):
+
+| export | purpose |
+|---|---|
+| `abort()` | flips an already-cleanly-activated component back to not-committed, so its next `deactivate` reverts the per-tool-call mutations instead of committing them — item 245's session-reject seam (py's `Frame.abort()`) |
+| `mw_live() -> i32` | the count of outstanding per-tool-call crossings — the wasm analogue of reading the WAL discharge descriptors; rises as calls register, falls to 0 as an abort drain replays them |
+
+Only the witnessed position is lifted. A non-witnessed method effect, a method
+`let-effect`, and method-time compensation all stay the hard `EmitError`s they
+were. Cross-tier design lives in the shared docs/design/243-witnessed-externs.md
+(item 318) and docs/design/teardown-contract.md; this section is the wasm-tier
+realization, proven by `backends/wasm/test_provide_method_witnessed.py`.
+
 ## Lifecycle tests on the substrate (item 142)
 
 A `lifecycle test` (docs/syntax-2.0.md §7.1) *runs* on the wasm tier when every

@@ -1,0 +1,17 @@
+service Flags {
+  fn enabled(name: Str) -> Opt[Str]
+  fn set_flag(name: Str, on: Str)
+}
+
+component FeatureFlags provides flags: Flags {
+  let store = effect Map.new() undo store.drop()
+
+  provide flags {
+    fn enabled(name) = store.get(name)
+
+    fn set_flag(name, on) {
+      effect store.insert(name, on)
+      undo   store.remove(name)
+    }
+  }
+}

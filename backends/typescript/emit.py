@@ -11,16 +11,26 @@ Lowering summary (see REPORT.md for the reasoning):
   one `fiber.effect(generator)` are run strictly sequentially in LIFO order.
   One generator per body is what makes R1 (LIFO) and R3 (dependents fully
   deactivate before the provider's earlier effects are reverted) hold.
-- `let-effect` / `effect` steps -> plain evaluation + `yield () => <undo>`.
+- `let-effect` / `effect` steps -> plain evaluation + `yield $revl_frame.bracket(...)`.
+  A witnessed acquisition (item 243) instead registers through
+  `$revl_frame.transactional(...)`, Ok-conditional. Both, plus a compensation
+  (`emit ... compensate ...` -> `$revl_frame.compensation(...)`, item 247),
+  join the SAME LIFO stack via one `Frame` per activation (item 243 Slice 2b,
+  docs/design/teardown-contract.md) — see runtime.ts's Frame section for the
+  two-phase abort mechanism (the `begin`/`drain` sentinel yields).
 - `provide` steps -> `yield ctx.provide(name, impl)`.  The withdrawal inverse
   is the runtime's own (R5); yielding the wrapper reparents it into the body
   effect at the correct LIFO position.
-- `emit` steps -> plain calls (nothing accumulated).
+- `emit` steps -> plain calls; a `compensate` clause additionally registers a
+  compensation entry (see above).
 - `req` expressions -> `ctx.<name>` (the fiber's committed view; stays
   readable during teardown).
 - `effect` steps inside provide-method bodies -> `ctx.effect(() => ...)`,
   which joins the component fiber's accumulator (coeffect operations are
-  effects).
+  effects). NOT routed through `Frame` (item 243's witnessed/transactional
+  entry kind is activation-body-only, matching the frontend's own refusal of
+  a witnessed call outside effect position; ordinary method-body
+  brackets/compensations are unchanged by this slice).
 - `format` expressions -> template literals.
 
 CLI: `python3 emit.py <ir.json> [> out.ts]`.
@@ -32,6 +42,7 @@ import json
 import re
 import sys
 import textwrap
+from typing import Any, Optional
 
 __all__ = ["emit", "EmitError"]
 
@@ -441,6 +452,21 @@ def _float_operand(node: object, ctx: "_Ctx") -> str:
     return rendered if _is_float_expr(node) else f"Number({rendered})"
 
 
+# item 397: a compare-and-set host verb (`insert_if_absent`) whose site-spelled
+# `undo` must be RESULT-GUARDED, registered only when the CAS actually
+# inserted. A `false` CAS (key already present) inserted nothing, so its inverse
+# is the identity; replaying `remove(k)` at teardown would delete the WINNING
+# claimant's entry, the exact corruption single-use exists to prevent. Mirrors
+# backends/python/emit.py and backends/go/emit.py, which guard the same way.
+_MAP_CAS_VERBS = frozenset({"insert_if_absent"})
+
+
+def _is_map_cas(acquire: object) -> bool:
+    """Whether an acquisition node is a result-guarded map CAS (item 397)."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 def _int_as_number(node: object, ctx: "_Ctx") -> str:
     """Render an `Int`-typed expression as the JS `number` an index/count API
     needs. `xs[i]`, `slice`, `charAt` and `repeat` all take a `number` on the
@@ -711,6 +737,10 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         operand = _expr(node.get("operand"), ctx)
         if node.get("op") == "!":
             return f"(!{operand})"
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): JS `~` returns a signed i32
+            # `number`, so it needs no re-wrap and never traps.
+            return f"(~{operand})"
         if node.get("op") == "-":
             if node.get("operands") == "Int":
                 # BigInt negation is unbounded; re-impose the i64 bound so
@@ -727,6 +757,14 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value in
+            # a component position (the frontend keeps it a `field` node here and
+            # marks it, since this emitter has no static type at the field site).
+            # It is the code-point/element count, not a record member read — the
+            # same `revlLen` the `len` node routes through (code points for a
+            # `Str`, not UTF-16 units).
+            return f"revlLen({target})"
         return _member(target, node.get("name"), "field")
 
     if kind == "index":
@@ -842,6 +880,9 @@ def _expr(node: object, ctx: "_Ctx") -> str:
     if kind == "match":
         return _v3_match_expr(node, ctx)
 
+    if kind == "do":
+        return _v3_do_expr(node, ctx)
+
     if kind == "interp":
         parts = node.get("parts") or []
         segs = ["`"]
@@ -921,7 +962,9 @@ def _expr(node: object, ctx: "_Ctx") -> str:
 
 
 def _method_body(steps: list, ctx: "_Ctx", indent: str,
-                 method_is_async: bool = False) -> list[str]:
+                 method_is_async: bool = False, frame_var: Optional[str] = None,
+                 provide_name: Optional[str] = None,
+                 method_name: Optional[str] = None) -> list[str]:
     """Steps inside a provide-method body.
 
     These run while the component is ACTIVE; `effect` steps go through
@@ -929,6 +972,12 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
     `async` service operation (services 2.0 §5) lowers to an `async` method,
     whose body may `await` a host async value or an instance disposal (A1);
     a `sync` method rejects `await`, matching the reference tier.
+
+    item 318: a WITNESSED effect in a method body is the per-tool-call H1 seam —
+    it does NOT go through `ctx.effect` (unsound: disposed before the body's
+    `drain`), but registers into the component's activation `Frame` directly via
+    `_method_witnessed_step`. `frame_var` is that frame (always present when a
+    method body has a witnessed effect, because `_needs_frame` forces it).
     """
     scope = ctx.component_scope
     lines: list[str] = []
@@ -947,6 +996,19 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
                 lines.append(f"{indent}return")
             else:
                 lines.append(f"{indent}return {_expr(step['expr'], ctx)}")
+        elif kind in ("effect", "let-effect") \
+                and _witnessed_extern(step.get("acquire"), ctx) is not None:
+            # item 318: a per-tool-call witnessed fs mutation. Registered into
+            # the component activation frame (parked for `drain`), NOT adopted as
+            # a sibling `ctx.effect` — see `_method_witnessed_step` /
+            # `Frame.transactionalMethod`.
+            wit = _witnessed_extern(step.get("acquire"), ctx)
+            ctx._counter[0] += 1
+            site = f"{provide_name or 'provide'}.{method_name or 'method'}#{ctx._counter[0]}"
+            bind = None
+            if kind == "let-effect":
+                bind = scope.bind(step["bind"])
+            _method_witnessed_step(step, wit, ctx, indent, lines, frame_var, bind, site)
         elif kind in ("effect", "let-effect"):
             bind = None
             if kind == "let-effect":
@@ -959,15 +1021,51 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
                 lines.append(f"{indent}  {bind} = {acquire}")
             else:
                 lines.append(f"{indent}  {acquire}")
-            lines.append(f"{indent}  return () => {undo}")
+            if bind is not None and _is_map_cas(step.get("acquire")):
+                # item 397: result-guarded undo. A `false` CAS registers the
+                # identity inverse (a no-op disposer), so teardown never removes
+                # the winning claimant's entry.
+                lines.append(f"{indent}  return {bind} ? () => {undo} : () => {{}}")
+            else:
+                lines.append(f"{indent}  return () => {undo}")
             lines.append(f"{indent}}})")
         elif kind == "emit":
             if step.get("compensate") is not None:
-                # v1/A5: the compensation joins the fiber's accumulator
-                lines.append(f"{indent}ctx.effect(() => {{")
-                lines.append(f"{indent}  {_expr(step['expr'], ctx)}")
-                lines.append(f"{indent}  return () => {_expr(step['compensate'], ctx)}")
-                lines.append(f"{indent}}})")
+                # item 247 (method-body compensate remainder): a method-body `emit ... compensate ...` is a first-
+                # class COMPENSATION on the component's activation frame (the
+                # method-body analog of item 247's activation-body site), NOT a
+                # bare `ctx.effect(() => { ...; return () => <offset> })` bracket.
+                # A bare bracket is disposed by cordis BEFORE the body `drain`, so
+                # it fires the offset on a CLEAN unload (destroying the
+                # deliverable), interleaves with proof inverses, and is unguarded.
+                # `frame.compensationMethod` makes it abort-only: discharged on a
+                # commit, drained in Phase 2 after every proof inverse, guarded
+                # and residue-collected. Fire the emission first, then register —
+                # mirrors the activation-body site and py's `_method_step`. Args
+                # are bound to temps HERE, at registration (the "no data hazard"
+                # reason for the phase split).
+                lines.append(f"{indent}{_expr(step['expr'], ctx)}")
+                ctx._counter[0] += 1
+                n = ctx._counter[0]
+                site = f"{provide_name or 'provide'}.{method_name or 'method'}#{n}"
+                comp_node = step["compensate"]
+                bound_call = _bind_call_temps(comp_node, ctx, lines, indent, f"$revl_comp{n}")
+                if bound_call is not None:
+                    target_ts, key_str, method, temps = bound_call
+                    run_ts = _replay_call(comp_node, target_ts, method, temps)
+                    crossing = _crossing_literal(key_str, method, temps, site)
+                    args_list = f"[{', '.join(temps)}]"
+                else:
+                    snap = f"$revl_comp{n}"
+                    lines.append(f"{indent}const {snap} = {_expr(comp_node, ctx)}")
+                    run_ts = snap
+                    crossing = _crossing_literal(provide_name or "provide", "compensate", [], site)
+                    args_list = "[]"
+                lines.append(
+                    f"{indent}{frame_var}.compensationMethod({crossing}, "
+                    f"{_string(method if bound_call is not None else 'compensate')}, "
+                    f"{args_list}, () => {run_ts})"
+                )
             else:
                 lines.append(f"{indent}{_expr(step['expr'], ctx)}")
         elif kind == "await":
@@ -986,7 +1084,8 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
     return lines
 
 
-def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str) -> list[str]:
+def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str,
+                  frame_var: Optional[str] = None) -> list[str]:
     scope = ctx.component_scope
     service_name = step.get("service")
     service = services.get(service_name)
@@ -1030,17 +1129,300 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str) -> list[
         lines.append(f"{indent}{prefix}{name}({sig}) {{")
         lines.extend(_method_body(method.get("body") or [],
                                   ctx.with_scope(body_scope, in_async=method_is_async),
-                                  indent + "  ", method_is_async))
+                                  indent + "  ", method_is_async,
+                                  frame_var, provide_name=service_name,
+                                  method_name=name))
         lines.append(f"{indent}}},")
     return lines
 
 
-def _component_body(component: dict, services: dict, indent: str, doc_ctx: "_Ctx") -> list[str]:
+# ---------------------------------------------------------------------------
+# item 243 Slice 2b: the witnessed/compensation teardown loop
+# (docs/design/teardown-contract.md, docs/design/243-witnessed-externs.md).
+#
+# Every activation-body step whose disposer joins the Frame's LIFO stack
+# needs a `Crossing` (key/method/args/site) for its residue records. The
+# crossing's `args` must be captured ONCE, at registration — never re-read at
+# teardown (the contract's "no data hazard" reason for the phase split) — so
+# a recognised call shape (component `target.method(args)`, a plain `fn`
+# call, or a `host` builtin call) has each arg bound to a temp BEFORE the
+# real call runs, and the real call is rebuilt from those same temps: no
+# double evaluation, and the temps are `const`, so a later `assign` step
+# elsewhere in the body cannot retroactively change what a deferred
+# compensation closure sees.
+
+
+def _crossing_key_name(target: Any) -> str:
+    """A plain, compile-time STRING name for a call target — `Crossing.key`
+    is typed `string` (a capability/service key an operator reads), never the
+    runtime value itself. Covers every target shape `_expr` renders a local
+    /requirement reference from; falls back to `'?'` for anything else rather
+    than raising (a crossing's key is diagnostic, not load-bearing)."""
+    if isinstance(target, dict):
+        if target.get("kind") == "req":
+            return target.get("name") or "?"
+        if target.get("kind") == "name":
+            return target.get("id") or "?"
+        if target.get("kind") == "var":
+            return target.get("name") or "?"
+    return "?"
+
+
+def _bind_call_temps(node: dict, ctx: "_Ctx", out: list[str], indent: str,
+                     tmp_prefix: str) -> tuple[Optional[str], str, str, list[str]] | None:
+    """Bind a recognised call's target + args to temps (registration-time
+    capture) and return `(target_ts, key_str, method, temp_names)`, or `None`
+    for an unrecognised shape. `target_ts` is the renderable TS expression the
+    replayed call is invoked on (`None` for a bare `fn`/`host` call, which has
+    no separate target); `key_str` is always a plain string, for
+    `Crossing.key`. `out`/`indent` receive the `const` binding lines."""
+    if not isinstance(node, dict):
+        return None
+    if "target" in node and "method" in node:
+        target = node.get("target")
+        target_tmp = f"{tmp_prefix}_key"
+        out.append(f"{indent}const {target_tmp} = {_expr(target, ctx)}")
+        temps = []
+        for i, arg in enumerate(node.get("args") or []):
+            tmp = f"{tmp_prefix}_arg{i}"
+            out.append(f"{indent}const {tmp} = {_expr(arg, ctx)}")
+            temps.append(tmp)
+        return (target_tmp, _crossing_key_name(target), node.get("method"), temps)
+    if node.get("kind") in ("fn", "host"):
+        name = node.get("name") if node.get("kind") == "fn" else (node.get("fn") or "")
+        temps = []
+        for i, arg in enumerate(node.get("args") or []):
+            tmp = f"{tmp_prefix}_arg{i}"
+            out.append(f"{indent}const {tmp} = {_expr(arg, ctx)}")
+            temps.append(tmp)
+        return (None, name, name, temps)
+    return None
+
+
+def _call_method_name(node: Any) -> str:
+    """Best-effort callee name for a residue record's `attempted.call` /
+    `Frame.bracket`'s `undoMethod`, from any of the call shapes this document
+    uses. Never raises — falls back to a generic label for anything else.
+
+    An extern's declared `undo`/`compensate` slot is lowered by
+    `src/revl/lower.py`'s `_lower_extern_expr` (-> `_lower_pure_expr`), which
+    always produces the v3-dialect `{"kind": "call", "callee": {"kind":
+    "var", "name": ...}, "args": [...]}` shape — even inside a v1-`ir_version`
+    document, since an extern's own body is lowered independently of the
+    document dialect its callers use. A component-site `undo`/`compensate`
+    (a plain body step) instead uses whichever call shape that document's own
+    steps use (`target`/`method`, `fn`, or `host`)."""
+    if not isinstance(node, dict):
+        return "undo"
+    if "method" in node:
+        return node.get("method") or "undo"
+    if node.get("kind") == "fn":
+        return node.get("name") or "undo"
+    if node.get("kind") == "host":
+        return node.get("fn") or "undo"
+    if node.get("kind") == "call":
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var":
+            return callee.get("name") or "undo"
+    return "undo"
+
+
+def _replay_call(node: dict, target_ts: Optional[str], method: str, temps: list[str]) -> str:
+    """Rebuild the call expression from the temps `_bind_call_temps` bound,
+    so the deferred (Phase-2 / undo) invocation never re-reads the original
+    argument expressions."""
+    args = ", ".join(temps)
+    if "target" in node and "method" in node:
+        return f"{target_ts}.{_ident(method, 'method')}({args})"
+    if node.get("kind") == "fn":
+        return f"{_ident(method, 'name')}({args})"
+    if node.get("kind") == "host":
+        return f"host.{method}({args})"
+    raise EmitError(f"unreachable: _replay_call on unrecognised node {node!r}")
+
+
+def _crossing_literal(key_str: str, method: str, arg_temps: list[str], site: str) -> str:
+    args = ", ".join(arg_temps)
+    return (f"{{ key: {_string(key_str)}, method: {_string(method or '?')}, "
+           f"args: [{args}], site: {_string(site)} }}")
+
+
+def _witnessed_extern(acquire: Any, ctx: "_Ctx") -> Optional[dict]:
+    """The witnessed extern descriptor a step's acquisition calls, or `None`
+    (mirrors backends/python/emit.py `_ComponentEmitter._witnessed_extern`).
+    A witnessed effect is spelled as an effect-position call to a `witnessed`
+    extern; lower.py emits that as a plain `fn`-kind acquisition node with no
+    `undo` key (`_lower_effect_step`), so matching the callee name against the
+    witnessed table is how a call site is told apart from an ordinary bracket."""
+    if not ctx.witnessed or not isinstance(acquire, dict):
+        return None
+    if acquire.get("kind") != "fn":
+        return None
+    return ctx.witnessed.get(acquire.get("name"))
+
+
+def _witnessed_step(step: dict, ext: dict, ctx: "_Ctx", indent: str,
+                    lines: list[str], frame_var: str, bind: Optional[str],
+                    site: str) -> None:
+    """Emit a witnessed effect (item 243): run the mutation, and on `Ok`
+    register the extern's DECLARED inverse into the Frame as a TRANSACTIONAL
+    entry carrying the `Ok` witness. Mirrors
+    backends/python/emit.py._witnessed_step's Ok-conditional registration;
+    unlike a bracket (which always replays), this entry's disposer replays
+    ONLY on abort and is discharged on a clean commit
+    (`Frame.transactional`)."""
+    ctx._counter[0] += 1
+    n = ctx._counter[0]
+    tmp = f"$revl_wit{n}"
+    acquire = step["acquire"]
+    bound = _bind_call_temps(acquire, ctx, lines, indent, f"{tmp}_acq")
+    if bound is None:  # pragma: no cover — lower.py always emits a `fn` node here
+        raise EmitError(f"witnessed acquisition has an unrecognised shape: {acquire!r}")
+    target_ts, key_str, method, temps = bound
+    call_ts = _replay_call(acquire, target_ts, method, temps)
+    crossing = _crossing_literal(key_str, method, temps, site)
+    lines.append(f"{indent}const {tmp} = {call_ts}")
+    lines.append(f"{indent}if ({tmp}.kind === 'Ok') {{")
+    undo_node = ext["undo"]
+    # 243's Slice-1-as-implemented note 1: `undo` reuses the acquire slot and
+    # binds `result` to the `Ok` payload. `result` is a synthetic arrow
+    # parameter this codegen introduces, not an IR `let` binding, so it must
+    # be declared on a CHILD scope (mirrors `_method_body`'s per-parameter
+    # `scope.child()`) — rendering against the activation scope directly
+    # would raise "reference to unbound name 'result'" (`_expr`'s `name`
+    # branch checks `scope.locals`).
+    undo_method = _call_method_name(undo_node)
+    undo_scope = ctx.component_scope.child()
+    undo_scope.locals.add("result")
+    undo_ts = _expr(undo_node, ctx.with_scope(undo_scope))
+    lines.append(
+        f"{indent}  yield {frame_var}.transactional({crossing}, {_string(undo_method)}, "
+        f"(result) => {undo_ts}, {tmp}.value)"
+    )
+    lines.append(f"{indent}}}")
+    if bind is not None:
+        lines.append(f"{indent}const {bind} = {tmp}")
+
+
+def _method_witnessed_step(step: dict, ext: dict, ctx: "_Ctx", indent: str,
+                           lines: list[str], frame_var: str, bind: Optional[str],
+                           site: str) -> None:
+    """Emit a witnessed effect inside a PROVIDE-METHOD body (item 318): the
+    per-tool-call H1 seam. Run the mutation, and on `Ok` register the extern's
+    DECLARED inverse into the ENCLOSING COMPONENT'S activation frame as a
+    transactional entry carrying the `Ok` witness. Mirrors
+    backends/python/emit.py._method_witnessed_step.
+
+    The activation-body form (`_witnessed_step`) `yield`s the disposer into the
+    body generator's own LIFO stack. A method body has no such generator, and
+    adopting the entry as a sibling `ctx.effect` is unsound on this cordis-style
+    tier (disposed BEFORE the body's `drain`, so a clean unload would observe
+    `committed` still false and wrongly revert the deliverable — see
+    `Frame.transactionalMethod`). So this calls the frame DIRECTLY:
+    `frame.transactionalMethod(...)` parks the entry for `drain` to dispose once
+    the commit-vs-abort bit is settled. On `Err` nothing is registered
+    (Ok-conditional): a failed mutation touched nothing, so it schedules no
+    rollback. `frame_var` is the component's activation `Frame`, in scope in
+    every method body (the method closure captures the `apply`-local)."""
+    ctx._counter[0] += 1
+    n = ctx._counter[0]
+    tmp = f"$revl_wit{n}"
+    acquire = step["acquire"]
+    bound = _bind_call_temps(acquire, ctx, lines, indent, f"{tmp}_acq")
+    if bound is None:  # pragma: no cover — lower.py always emits a `fn` node here
+        raise EmitError(f"witnessed acquisition has an unrecognised shape: {acquire!r}")
+    target_ts, key_str, method, temps = bound
+    call_ts = _replay_call(acquire, target_ts, method, temps)
+    crossing = _crossing_literal(key_str, method, temps, site)
+    lines.append(f"{indent}const {tmp} = {call_ts}")
+    lines.append(f"{indent}if ({tmp}.kind === 'Ok') {{")
+    undo_node = ext["undo"]
+    # 243's Slice-1-as-implemented note 1: `undo` reuses the acquire slot and
+    # binds `result` to the `Ok` payload — a synthetic arrow parameter this
+    # codegen introduces, declared on a CHILD scope (mirrors `_witnessed_step`).
+    undo_method = _call_method_name(undo_node)
+    undo_scope = ctx.component_scope.child()
+    undo_scope.locals.add("result")
+    undo_ts = _expr(undo_node, ctx.with_scope(undo_scope))
+    lines.append(
+        f"{indent}  {frame_var}.transactionalMethod({crossing}, {_string(undo_method)}, "
+        f"(result) => {undo_ts}, {tmp}.value)"
+    )
+    lines.append(f"{indent}}}")
+    if bind is not None:
+        lines.append(f"{indent}const {bind} = {tmp}")
+
+
+def _method_body_needs_frame(steps: list, ctx: "_Ctx") -> bool:
+    """True iff a provide-method body registers a witnessed (transactional)
+    entry (item 318) OR a compensation (item 247 (method-body compensate remainder)) — the per-tool-call cases that
+    need the component's activation `Frame`. A WITNESSED effect parks a
+    transactional inverse (`transactionalMethod`); a method-body
+    `emit ... compensate ...` parks a compensation (`compensationMethod`) — both
+    must ride the frame's commit/abort discipline, NOT a bare `ctx.effect(...)`
+    bracket (which cordis disposes before the body `drain`, firing the offset on
+    a CLEAN unload — the item-247 soundness bug left on the method-body site).
+    An ordinary method-body bracket still stays the pre-existing bare
+    `ctx.effect(...)`, so the gate stays tight."""
+    for step in steps or []:
+        kind = step.get("step")
+        if kind in ("let-effect", "effect") \
+                and _witnessed_extern(step.get("acquire"), ctx) is not None:
+            return True
+        if kind == "emit" and step.get("compensate") is not None:
+            return True
+    return False
+
+
+def _needs_frame(component: dict, ctx: "_Ctx") -> bool:
+    """True iff this component's activation body registers at least one
+    transactional (witnessed) or compensation entry — the two entry kinds
+    that actually need the `Frame` apparatus (item 243 Slice 2b).
+
+    A plain bracket never needs `Frame` (it stays the pre-existing bare
+    `yield () => <undo>`, matching backends/python/emit.py byte-for-byte —
+    see `_component_step`'s comment), so a component using ONLY brackets, and
+    a document with no such component at all, must emit with NO `Frame`
+    construction and no `begin`/`drain` sentinels — byte-identical to before
+    this slice. Walks `if` branches (the only nesting an activation-body step
+    reaches in this document's `body` list), but does NOT descend into a
+    `timer` step's nested body: a timer body is emission-only (item 57 —
+    `_component_step`'s own invariant check refuses anything else), so it can
+    never carry a `compensate`, and a witnessed call is refused outside
+    activation effect position, so a timer body never contributes either
+    way."""
+    def walk(steps: list) -> bool:
+        for step in steps or []:
+            kind = step.get("step")
+            if kind in ("let-effect", "effect") and _witnessed_extern(step.get("acquire"), ctx) is not None:
+                return True
+            if kind == "emit" and step.get("compensate") is not None:
+                return True
+            if kind == "if":
+                if walk(step.get("then") or []) or walk(step.get("else") or []):
+                    return True
+            # item 318: a provide-method body that does a WITNESSED effect
+            # (per-tool-call H1) registers into this activation frame, so the
+            # component needs `Frame` even when its activation body alone would
+            # not. Only witnessed method effects count (see
+            # `_method_body_needs_frame`) — an ordinary method-body bracket does
+            # not, keeping the gate tight.
+            if kind == "provide":
+                for method in step.get("methods") or []:
+                    if _method_body_needs_frame(method.get("body") or [], ctx):
+                        return True
+        return False
+
+    return walk(component.get("body") or [])
+
+
+def _component_body(component: dict, services: dict, indent: str, doc_ctx: "_Ctx",
+                    frame_var: Optional[str]) -> list[str]:
     """The activation body, lowered into one ctx.effect generator."""
     ctx = doc_ctx.with_scope(_Scope(component))
     lines: list[str] = []
     for step in component.get("body") or []:
-        _component_step(step, component, services, ctx, indent, lines)
+        _component_step(step, component, services, ctx, indent, lines, frame_var)
     return lines
 
 
@@ -1071,35 +1453,149 @@ def _ts_emission_is_async(expr: dict, ctx: "_Ctx") -> bool:
              or callee.get("name") in ctx.async_locals)
 
 
+def _await_statement(expr: dict, ctx: "_Ctx") -> str:
+    """Render `expr` as a KEYWORD-LED `await …` statement (item 131).
+
+    The activation-body await positions that discard the awaited value — the
+    `await` step, an `await emit`, and an unbound `effect await` — emit an
+    expression statement. Rendered under an in_async view, the shared `_expr`
+    seeds the `await` for whatever the position suspends on: a req-target async
+    op (`ctx.w.heat()` -> `(await ctx.w.heat())`), an async extern, or an async-
+    colored fn (the sources the await step widened to under item 131). The
+    `await` is hoisted to the front so the statement never begins with `(`,
+    which JS ASI would otherwise glue to a preceding `yield () => <undo>` arrow
+    (a real merge — verified: it makes `await` land in a sync arrow, a syntax
+    error). This is exactly the `await <call>` shape the plain await step has
+    always emitted; a req-op await is therefore byte-identical to before."""
+    actx = ctx.with_scope(ctx.component_scope, in_async=True)
+    rendered = _expr(expr, actx)
+    if rendered.startswith("(await ") and rendered.endswith(")"):
+        return "await " + rendered[len("(await "):-1]
+    return "await " + rendered
+
+
 def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
-                    indent: str, lines: list[str]) -> None:
+                    indent: str, lines: list[str], frame_var: Optional[str]) -> None:
     """One step of the activation body, appended to `lines`.
 
-    Recursive because `if` branches hold ordinary body steps.
+    Recursive because `if` branches hold ordinary body steps. `frame_var` is
+    the emitted `Frame` local this component's `apply` builds (item 243
+    Slice 2b) — every disposer this step yields is registered through it, so
+    the three entry kinds (bracket / transactional / compensation) share its
+    one LIFO stack (docs/design/teardown-contract.md).
     """
     scope = ctx.component_scope
     provides = component.get("provides") or {}
     kind = step.get("step")
     if kind in ("let-effect", "effect"):
-        acquire = _expr(step["acquire"], ctx)
-        if kind == "let-effect":
-            bind = scope.bind(step["bind"])
-            lines.append(f"{indent}const {bind} = {acquire}")
+        bind = step.get("bind") if kind == "let-effect" else None
+        wit = _witnessed_extern(step.get("acquire"), ctx)
+        if wit is not None:
+            ctx._counter[0] += 1
+            site = f"{component['name']}.body#{ctx._counter[0]}"
+            bound = bind
+            if kind == "let-effect":
+                # reserve the surface name now (single-assignment check),
+                # even though `_witnessed_step` binds it from a temp below —
+                # matches every other `let-effect` branch's ordering.
+                bound = scope.bind(step["bind"])
+            _witnessed_step(step, wit, ctx, indent, lines, frame_var, bound, site)
         else:
-            lines.append(f"{indent}{acquire}")
-        # `undo` may reference the binding; it types in teardown mode —
-        # by construction it cannot register further effects.
-        undo = _expr(step["undo"], ctx)
-        lines.append(f"{indent}yield () => {undo}")
+            # An ordinary bracket: UNCHANGED, byte-for-byte, from before this
+            # slice — a bare `yield () => <undo>`, exactly mirroring
+            # backends/python/emit.py's plain (non-witnessed) `let-effect`/
+            # `effect` branch (`yield lambda: <undo>`, emit.py:934/944). It is
+            # NOT routed through `Frame.bracket`: py's own reference keeps the
+            # plain acquire as a bare disposer the Frame's accumulator never
+            # sees (only a witnessed call registers through the Frame), so
+            # matching that byte-for-byte is what keeps every non-witnessed,
+            # non-compensating program's emission identical to before this
+            # slice (`_needs_frame`, below, is what makes the whole `Frame`
+            # apparatus itself conditional on the same basis).
+            # item 131: an async-flagged acquisition awaits its landed result
+            # (not the in-flight Promise), THEN registers the inverse — the
+            # `yield () => undo` is the next action in the same generator step,
+            # so registration is boundary-atomic with the acquisition (design §4
+            # clause 1). The `undo` stays sync (rule 3 keeps teardown
+            # suspension-free). A sync acquisition carries no flag and is
+            # byte-identical to before.
+            cas_bind: Optional[str] = None
+            if step.get("async"):
+                if kind == "let-effect":
+                    bind_name = scope.bind(step["bind"])
+                    cas_bind = bind_name
+                    # `const c = await …` — a `const`-led statement is ASI-safe,
+                    # so the awaited call keeps its `(await …)` shape here.
+                    actx = ctx.with_scope(ctx.component_scope, in_async=True)
+                    lines.append(f"{indent}const {bind_name} = {_expr(step['acquire'], actx)}")
+                else:
+                    lines.append(f"{indent}{_await_statement(step['acquire'], ctx)}")
+            else:
+                acquire = _expr(step["acquire"], ctx)
+                if kind == "let-effect":
+                    bind_name = scope.bind(step["bind"])
+                    cas_bind = bind_name
+                    lines.append(f"{indent}const {bind_name} = {acquire}")
+                else:
+                    lines.append(f"{indent}{acquire}")
+            undo = _expr(step["undo"], ctx)
+            if cas_bind is not None and _is_map_cas(step.get("acquire")):
+                # item 397: result-guarded undo. A `false` CAS registers the
+                # identity inverse (a no-op disposer), so teardown never removes
+                # the winning claimant's entry. Mirrors py's `yield lambda:
+                # (<undo> if <bind> else None)`.
+                lines.append(f"{indent}yield {cas_bind} ? () => {undo} : () => {{}}")
+            else:
+                lines.append(f"{indent}yield () => {undo}")
     elif kind == "emit":
-        lines.append(f"{indent}{_expr(step['expr'], ctx)}")
+        # item 131: `await emit …` awaits the boundary crossing so the emission
+        # actually fires — a bare async emit would leave a floating, unordered
+        # Promise. Emitted keyword-led (`await …`) so it never begins with `(`;
+        # the compensation registers after, as in the sync spelling. A sync emit
+        # carries no flag and is byte-identical to before.
+        if step.get("async"):
+            lines.append(f"{indent}{_await_statement(step['expr'], ctx)}")
+        else:
+            lines.append(f"{indent}{_expr(step['expr'], ctx)}")
         if step.get("compensate") is not None:
-            # v1/A5: compensation accumulates LIFO like an inverse
-            lines.append(f"{indent}yield () => {_expr(step['compensate'], ctx)}")
+            # item 247: a compensation entry — audit-facing, best-effort,
+            # ABORT-ONLY, Phase 2 (never on a clean unload). Args are bound to
+            # temps HERE, at registration, per the contract's "no data
+            # hazard" — a deferred Phase-2 closure never re-reads a variable
+            # that a later step in this same body might have reassigned.
+            ctx._counter[0] += 1
+            n = ctx._counter[0]
+            site = f"{component['name']}.body#{n}"
+            comp_node = step["compensate"]
+            bound_call = _bind_call_temps(comp_node, ctx, lines, indent, f"$revl_comp{n}")
+            if bound_call is not None:
+                target_ts, key_str, method, temps = bound_call
+                run_ts = _replay_call(comp_node, target_ts, method, temps)
+                crossing = _crossing_literal(key_str, method, temps, site)
+                args_list = f"[{', '.join(temps)}]"
+            else:
+                # unrecognised compensate shape: eagerly snapshot its value
+                # now (registration time) rather than close over a live
+                # binding — see this function's module doc on the fallback's
+                # documented limitation for a non-call compensate expression.
+                snap = f"$revl_comp{n}"
+                lines.append(f"{indent}const {snap} = {_expr(comp_node, ctx)}")
+                run_ts = snap
+                crossing = _crossing_literal(component["name"], "compensate", [], site)
+                args_list = "[]"
+            lines.append(
+                f"{indent}yield {frame_var}.compensation({crossing}, "
+                f"{_string(method if bound_call is not None else 'compensate')}, "
+                f"{args_list}, () => {run_ts})"
+            )
     elif kind == "await":
         # v1/A1: the await lands (inertia), then the yield closes the
-        # iteration so a divert during the await skips every later step
-        lines.append(f"{indent}await {_expr(step['expr'], ctx)}")
+        # iteration so a divert during the await skips every later step.
+        # item 131 widens the await step's suspension sources from req-ops /
+        # `Job.run` to also include an async extern or an async-colored fn;
+        # `_await_statement` renders under an in_async view so those await too.
+        # A req-op await stays byte-identical (`await ctx.w.heat()`).
+        lines.append(f"{indent}{_await_statement(step['expr'], ctx)}")
         lines.append(f"{indent}yield () => {{}}  // iteration boundary (A1)")
     elif kind == "provide":
         name = step.get("name")
@@ -1121,7 +1617,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         # revertible); yielding the wrapper slots it into this body
         # effect's LIFO sequence.
         lines.append(f"{indent}yield ctx.provide({_string(name)}, {{")
-        lines.extend(_provide_impl(step, ctx, services, indent + "  "))
+        lines.extend(_provide_impl(step, ctx, services, indent + "  ", frame_var))
         lines.append(f"{indent}}} satisfies {_ident(step['service'], 'service')})")
     elif kind == "if":
         # An activation guard (A8). Branches hold ordinary body steps, so a
@@ -1129,11 +1625,11 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         # being a generator body makes that work with no handling here.
         lines.append(f"{indent}if ({_expr(step['cond'], ctx)}) {{")
         for nested in step.get("then") or []:
-            _component_step(nested, component, services, ctx, indent + "  ", lines)
+            _component_step(nested, component, services, ctx, indent + "  ", lines, frame_var)
         if step.get("else"):
             lines.append(f"{indent}}} else {{")
             for nested in step["else"]:
-                _component_step(nested, component, services, ctx, indent + "  ", lines)
+                _component_step(nested, component, services, ctx, indent + "  ", lines, frame_var)
         lines.append(f"{indent}}}")
     elif kind == "fail":
         # A8: refusing activation is a throw out of the body. Whatever the
@@ -1274,8 +1770,26 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
         keys = ", ".join(_string(k) for k in provides)
         lines.append(f"  provide: [{keys}],")
 
+    # item 131: a body containing an `await` step (or an async-flagged
+    # `effect`/`let-effect`/`emit` — an awaited acquisition or emission) compiles
+    # to an async generator, whose awaited acquisitions land on LATER microtask
+    # turns, AFTER a synchronous `apply` would already have returned. `apply`
+    # must therefore be `async` and `await` that effect (see the `await
+    # ctx.effect(...)` site below) so the fiber only reaches ACTIVE — and
+    # `fiber.await()` only resolves — once the awaited acquisition has landed,
+    # exactly as the py tier's await-to-ACTIVE waits for it. Timer steps are
+    # excluded: a timer's async flag colors its OWN runtime-awaited firing (item
+    # 170), not the activation body generator.
+    is_async = any(
+        step.get("step") == "await"
+        or (step.get("step") in ("effect", "let-effect", "emit")
+            and step.get("async"))
+        for step in component.get("body") or []
+    )
+    apply_kw = "async apply" if is_async else "apply"
+
     if fields:
-        lines.append(f"  apply(ctx: Context, rawConfig: {name}Config) {{")
+        lines.append(f"  {apply_kw}(ctx: Context, rawConfig: {name}Config) {{")
         spec_parts = []
         for field in fields:
             fname = field["name"]
@@ -1291,7 +1805,21 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
             f"rawConfig, {{ {spec} }}) as Required<{name}Config>"
         )
     else:
-        lines.append("  apply(ctx: Context) {")
+        lines.append(f"  {apply_kw}(ctx: Context) {{")
+
+    # item 243 Slice 2b: the activation's teardown accumulator for its
+    # transactional (witnessed) and compensation entries — the ONLY two entry
+    # kinds that need it; an ordinary bracket stays the bare, pre-existing
+    # `yield () => <undo>` (see `_component_step`), matching
+    # backends/python/emit.py byte-for-byte, so `Frame` itself is built ONLY
+    # when this component actually registers one of those two kinds
+    # (`_needs_frame`). A component using brackets only — the overwhelming
+    # majority of existing programs — emits with NO `Frame`, no `begin`/
+    # `drain` sentinel, byte-identical to before this slice.
+    needs_frame = _needs_frame(component, doc_ctx)
+    frame_var = "$revl_frame" if needs_frame else None
+    if needs_frame:
+        lines.append(f"    const {frame_var} = new Frame(ctx, {_string(name)})")
 
     # item 167: build one router proxy per routed key before the body, so a
     # provide-method reading `<key>` fans each call out across its worker realms
@@ -1308,13 +1836,42 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     # One generator per body: cordis runs disposers of a single effect
     # strictly sequentially (LIFO); top-level fiber effects would be
     # disposed concurrently (see REPORT.md, finding 1). A body containing
-    # an `await` step compiles to an async generator (v1/A1).
-    is_async = any(
-        step.get("step") == "await" for step in component.get("body") or []
-    )
+    # an `await` step compiles to an async generator (v1/A1) — see the
+    # `is_async` computation above the `apply` signature (item 131), which also
+    # made `apply` `async`.
     generator = "async function*" if is_async else "function*"
-    lines.append(f"    ctx.effect({generator} () {{")
-    lines.extend(_component_body(component, services, "      ", doc_ctx))
+    # item 131: an async body's `ctx.effect(async function* ...)` drives its
+    # awaited acquisitions on LATER microtask turns, so the acquisitions
+    # themselves (ACQ B in async_effect_composition) and the disposers the
+    # generator yields land AFTER a synchronous `apply` would have returned.
+    # `ctx.effect(...)` returns a thenable wrapper whose `.then` resolves only
+    # once that async generator has run to completion — but the wrapper is a
+    # FUNCTION, so returning it from `apply` makes cordis' fiber-body runner
+    # collect it as a plain disposer (`_execute`, `typeof effect === "function"`,
+    # node_modules/cordis:809) and never await it. So `await` the wrapper inside
+    # an `async apply`: `apply` then returns a real Promise, which `_execute`
+    # DOES chain onto (`"then" in effect`, :814), so `_reload` (and thus
+    # `fiber.await()`) resolves only after the awaited acquisition has landed —
+    # exactly as the py tier's await-to-ACTIVE waits for it. The wrapper is
+    # already registered for disposal by the `ctx.effect` call itself
+    # (node_modules/cordis:892), so awaiting its VALUE does not dispose it; LIFO
+    # teardown across the suspension is unchanged. A SYNC body's generator runs
+    # to completion synchronously inside `ctx.effect`, so it stays a bare,
+    # non-awaited statement (unchanged, byte-identical for every prior program).
+    effect_stmt = "await " if is_async else ""
+    lines.append(f"    {effect_stmt}ctx.effect({generator} () {{")
+    # item 243 Slice 2b: two sentinel yields bracket the ordinary steps, ONLY
+    # when this component needs `Frame` at all (see above). `begin` yielded
+    # FIRST -> disposed LAST (cordis LIFO): on abort it is the Phase-2
+    # post-unwind hook; `drain` yielded LAST -> disposed FIRST, only reached
+    # if the body ran to completion, and is the commit signal every
+    # earlier-registered entry reads at its OWN disposal time. See
+    # runtime.ts's Frame section doc for the full mechanism.
+    if needs_frame:
+        lines.append(f"      yield {frame_var}.begin")
+    lines.extend(_component_body(component, services, "      ", doc_ctx, frame_var))
+    if needs_frame:
+        lines.append(f"      yield {frame_var}.drain")
     lines.append(f"    }}, {_string(name + '.body')})")
     lines.append("  },")
     if isolate:
@@ -1357,6 +1914,12 @@ _TS_V3_BIN_OPS = {
     "<": "<", ">": ">", "<=": "<=", ">=": ">=",
     "+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
     "&&": "&&", "||": "||",
+    # Int32 bitwise operators (item 366, docs/arithmetic.md). Int32 is a JS
+    # `number`, and JS's `& | ^ << >>` all coerce to a signed 32-bit int, mask a
+    # shift count to its low 5 bits (mod 32), and return a signed i32 `number` —
+    # which is exactly the Int32 semantics, so no `revlI32` re-wrap is needed.
+    # `>>` is the arithmetic (sign-propagating) shift (`>>>` would be logical).
+    "&": "&", "|": "|", "^": "^", "<<": "<<", ">>": ">>",
 }
 
 _HOST_ROOTS = {"Pool", "Map", "Job"}
@@ -1460,6 +2023,16 @@ class _Ctx:
         }
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # item 243 (docs/design/243-witnessed-externs.md): witnessed externs by
+        # name, so a call site can be recognised as a transactional effect and
+        # register its DECLARED inverse (not a site-spelled one) into the
+        # Frame accumulator. Mirrors backends/python/emit.py's
+        # `_ComponentEmitter.witnessed`. Absent/empty for every program that
+        # uses no witnessed extern, so their emission is unaffected.
+        self.witnessed = {
+            ext["name"]: ext for ext in (externs or [])
+            if ext.get("class") == "witnessed"
+        }
         # async callables (roadmap item 80): call sites naming one are awaited
         # (docs/design/async-extern.md §5). Seeded from async externs *and*
         # phase-2 async-colored module fns (both carry `"async": True` on their
@@ -1504,6 +2077,7 @@ class _Ctx:
         view.types = self.types
         view.function_names = self.function_names
         view.extern_names = self.extern_names
+        view.witnessed = self.witnessed
         view.async_names = self.async_names
         view.async_ops = self.async_ops
         view.async_locals = self.async_locals if async_locals is None else async_locals
@@ -1557,6 +2131,11 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
         return f"revlCharAt({target}, {args[0]})"
     if method == "charCodeAt":
         return f"revlCharCodeAt({target}, {args[0]})"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at index i, via the same astral-aware helper as
+    # charCodeAt (JS `.charCodeAt` would answer a lone surrogate).
+    if method == "codepoint_at":
+        return f"revlCharCodeAt({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). JS `/` is true division
     # and `%` takes the dividend's sign, so every one of these is built rather
     # than inherited — through helpers, so the divisor is evaluated once and a
@@ -1597,6 +2176,32 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
         return f"{target}.startsWith({args[0]})"
     if method == "endsWith":
         return f"{target}.endsWith({args[0]})"
+    # Single-character ASCII classification (item 233, docs/stdlib-2.0.md
+    # §Str.is_alnum), mirroring the python backend's native forms
+    # (backends/python/emit.py §is_digit/is_alpha/is_alnum/is_space) and the
+    # rust backend (backends/rust/emit.py). JS `<=`/`<` on strings is UTF-16
+    # code-unit lexicographic order, and code-unit order IS code-point order
+    # for ASCII, so it matches python's chained string comparison exactly. It
+    # stays total the same way: an empty receiver compares less than `"0"`, so
+    # the verdict is `false` rather than a fault, and multi-character input
+    # (outside the per-character contract) never raises. The receiver is bound
+    # once by an arrow IIFE (`_rc`) — correct even when it has side effects,
+    # since these builtins re-reference it — with no revl-fn call.
+    if method == "is_digit":
+        return f'((_rc: string) => "0" <= _rc && _rc <= "9")({target})'
+    if method == "is_alpha":
+        return (f'((_rc: string) => ("a" <= _rc && _rc <= "z") '
+                f'|| ("A" <= _rc && _rc <= "Z"))({target})')
+    if method == "is_alnum":
+        return (f'((_rc: string) => ("0" <= _rc && _rc <= "9") '
+                f'|| ("a" <= _rc && _rc <= "z") '
+                f'|| ("A" <= _rc && _rc <= "Z"))({target})')
+    # is_space: space, tab, LF, CR — equality with each element (python uses
+    # tuple membership; a `String.includes` would wrongly match the empty
+    # receiver, which is a substring of every string).
+    if method == "is_space":
+        return (f'((_rc: string) => _rc === " " || _rc === "\\t" '
+                f'|| _rc === "\\n" || _rc === "\\r")({target})')
     # The Map value type (docs/stdlib-2.0.md §Map): the built-in JS Map,
     # copied on write. There is no expression-form copy, so `set` goes
     # through an immediately-applied closure: operands evaluate exactly
@@ -1652,6 +2257,32 @@ def _v3_arm_body(arm: dict, ctx: "_Ctx") -> str:
     # match-temp counter, so a nested match inside the arm keeps unique temps.
     arm_scope.locals.add(_ident(bind, "match bind"))
     return _expr(arm.get("body"), ctx.with_scope(arm_scope))
+
+
+def _v3_do_expr(node: dict, ctx: "_Ctx") -> str:
+    """A statement-block match arm (`=> { let x = …; expr }`) lowered inline in
+    a provide-method body (roadmap item 361): an immediately-invoked arrow so
+    the block's `let` bindings and final value live in their own scope. In an
+    async method the arrow is `async` and its invocation awaited, so an async
+    extern reached in the block is awaited within the method's in-flight
+    window (the same async-shape the match IIFE uses for its arm arrows)."""
+    if ctx.component_scope is None:
+        raise EmitError("a `do` block arm requires a component/method body")
+    inner = ctx.component_scope.child()
+    body_ctx = ctx.with_scope(inner)
+    lines: list[str] = []
+    for st in node.get("stmts") or []:
+        if st.get("step") != "let":
+            raise EmitError(f"unsupported step in a `do` block arm: {st.get('step')!r}")
+        value = _expr(st.get("value"), body_ctx)
+        name = inner.bind(st.get("name"))
+        keyword = "let" if st.get("mutable") else "const"
+        lines.append(f"{keyword} {name} = {value};")
+    lines.append(f"return {_expr(node.get('tail'), body_ctx)};")
+    a = "async " if ctx.in_async else ""
+    body = " ".join(lines)
+    call = f"({a}() => {{ {body} }})()"
+    return f"(await {call})" if ctx.in_async else call
 
 
 def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
@@ -1729,6 +2360,21 @@ def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
 
 
 
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is
+# enforced whole-IR in the frontend; this is the cheap per-emitter guard.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: bool) -> None:
     step = node.get("step")
     if step in ("let", "assign"):
@@ -1754,16 +2400,22 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{'  ' * indent}}}")
     elif step == "while":
+        _guard_frame_neutral_loop(node.get("body"))
         out.append(f"{'  ' * indent}while ({_expr(node['cond'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{'  ' * indent}}}")
     elif step == "for":
+        _guard_frame_neutral_loop(node.get("body"))
         bind = _ident(node.get("bind"), "loop binding")
         out.append(f"{'  ' * indent}for (const {bind} of {_expr(node['iterable'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{'  ' * indent}}}")
+    elif step == "break":
+        out.append(f"{'  ' * indent}break")
+    elif step == "continue":
+        out.append(f"{'  ' * indent}continue")
     elif step == "let_pattern":
         value = _expr(node.get("value"), ctx)
         names = [_ident(n, "binding") for n in node.get("names") or []]
@@ -1848,8 +2500,8 @@ _TS_CHECKED_DIV = {
 # a `number`. `_ts_builtin` spells each conversion out per method; these tables
 # are the same facts in the form the `?.` path needs.
 _TS_INT_ARG_BUILTINS = {"slice": (0, 1), "charAt": (0,), "charCodeAt": (0,),
-                        "repeat": (0,)}
-_TS_INT_RESULT_BUILTINS = {"length", "indexOf", "charCodeAt"}
+                        "codepoint_at": (0,), "repeat": (0,)}
+_TS_INT_RESULT_BUILTINS = {"length", "indexOf", "charCodeAt", "codepoint_at"}
 
 # Int is 64-bit two's complement and overflow traps (docs/arithmetic.md).
 # BigInt is arbitrary precision, so this tier imposes the bound the way python
@@ -2187,7 +2839,8 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
   return BigInt(x.indexOf(v))
 }"""
 
-_STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "indexOf"}
+_STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "codepoint_at",
+                     "indexOf"}
 
 
 # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the ASCII digits
@@ -2222,6 +2875,11 @@ def _uses_str_methods(node) -> bool:
     at runtime; it is emitted only where one of these forms appears."""
     if isinstance(node, dict):
         if node.get("kind") == "len":
+            return True
+        # item 104: a component-position sized `.length` stays a `field` node
+        # marked `sized_length` and emits `revlLen(...)`, so the helper must be
+        # emitted for it too (else `revlLen` is undefined at runtime).
+        if node.get("kind") == "field" and node.get("sized_length"):
             return True
         if node.get("kind") == "builtin" and node.get("method") in _STR_METHOD_NAMES:
             return True
@@ -2325,8 +2983,160 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
     return lines
 
 
+def _emit_ts_ref_runtime() -> list[str]:
+    """item 396 option B: the module-level ref machinery. `_revl_ref_path` joins
+    a root the RUNNER provides at run time (`globalThis.__REVL_REF_ROOT__`, set
+    from the spec `run_ts` writes) with the recorded root-relative path — so the
+    emitted text carries no machine-specific path. `_revl_require` loads a
+    synchronous ESM graph for a sync ref (node's require(esm) support)."""
+    return [
+        "const _REVL_REFS = new Map<string, any>()",
+        "const _revl_require = _revl_createRequire(import.meta.url)",
+        "function _revl_ref_path(rel: string): string {",
+        "  const root = (globalThis as any).__REVL_REF_ROOT__",
+        "  if (root === undefined)",
+        "    throw new Error('revl: no host-ref root set; the runner must set "
+        "globalThis.__REVL_REF_ROOT__ (item 396 option B)')",
+        "  return _revl_pathmod.resolve(root, rel)",
+        "}",
+        # item 410: a stdlib-origin ref resolves against a SECOND runner-provided
+        # root (the install tree), never the user root. No fallback in either
+        # direction: a stdlib-kind thunk with no stdlib root set fails loudly
+        # naming the missing knob, and a user thunk never reads this global. The
+        # two globals ARE the two trust domains, and the emitted text stays
+        # machine-independent.
+        "function _revl_ref_path_stdlib(rel: string): string {",
+        "  const root = (globalThis as any).__REVL_STDLIB_REF_ROOT__",
+        "  if (root === undefined)",
+        "    throw new Error('revl: no stdlib host-ref root set; the runner must "
+        "set globalThis.__REVL_STDLIB_REF_ROOT__ (item 410 two-root scheme)')",
+        "  return _revl_pathmod.resolve(root, rel)",
+        "}",
+        "",
+    ]
+
+
+def _emit_ts_ref_thunk(name: str, params_decl: str, arg_names: str,
+                       returns: str, ext: dict, ref: dict) -> list[str]:
+    """The lazy import thunk for a `@ts ref` extern. Sync goes through
+    `createRequire` (a synchronous ESM load); async through a dynamic `import()`.
+    The colour assertion mirrors py's where the tier allows: a declared-SYNC ref
+    whose resolved symbol is an async function (`constructor.name ===
+    'AsyncFunction'`) is refused at first call. The async direction cannot be
+    asserted structurally (an ordinary function may legitimately return a
+    promise), so it stays awaited-by-name — loud-wrong at worst, never silent.
+    The `constructor.name` check has the same evasion the py `iscoroutinefunction`
+    check has (a wrapper/callable-instance can hide the async shape); stated, not
+    claimed away (design re-review #3)."""
+    rel = ref["path"]
+    symbol = _ident(ref["symbol"], "ref symbol")
+    where = f"{rel}#{symbol}"
+    is_async = bool(ext.get("async"))
+    # item 410: a stdlib-origin ref (`"root": "stdlib"`) resolves against the
+    # install root (`_revl_ref_path_stdlib`); a user ref against the user root
+    # (`_revl_ref_path`, unchanged). Kind-dispatched, no cross-domain fallback.
+    path_fn = ("_revl_ref_path_stdlib" if ref.get("root") == "stdlib"
+               else "_revl_ref_path")
+    lines: list[str] = []
+    if is_async:
+        lines.append(
+            f"export async function {name}({params_decl}): Promise<{returns}> {{")
+        lines.append(f"  let _f = _REVL_REFS.get({_string(name)})")
+        lines.append("  if (_f === undefined) {")
+        lines.append(f"    const _m = await import("
+                     f"_revl_pathToFileURL({path_fn}({_string(rel)})).href)")
+        lines.append(f"    _f = _m[{_string(symbol)}]")
+        lines.append(f"    if (typeof _f !== 'function') throw new Error("
+                     f"{_string(f'revl extern `{name}`: {where} is not a function')})")
+        lines.append(f"    _REVL_REFS.set({_string(name)}, _f)")
+        lines.append("  }")
+        lines.append(f"  return await _f({arg_names})")
+        lines.append("}")
+    else:
+        lines.append(f"export function {name}({params_decl}): {returns} {{")
+        lines.append(f"  let _f = _REVL_REFS.get({_string(name)})")
+        lines.append("  if (_f === undefined) {")
+        lines.append(f"    const _m = _revl_require({path_fn}({_string(rel)}))")
+        lines.append(f"    _f = _m[{_string(symbol)}]")
+        lines.append(f"    if (typeof _f !== 'function') throw new Error("
+                     f"{_string(f'revl extern `{name}`: {where} is not a function')})")
+        lines.append("    if (_f.constructor && _f.constructor.name === 'AsyncFunction')")
+        lines.append(f"      throw new Error({_string(f'revl extern `{name}` is declared sync but {where} is an async function; declare the extern async or ref a sync symbol')})")
+        lines.append(f"    _REVL_REFS.set({_string(name)}, _f)")
+        lines.append("  }")
+        lines.append(f"  return _f({arg_names})")
+        lines.append("}")
+    lines.append("")
+    return lines
+
+
+def _ts_extern_config_scaffold() -> list[str]:
+    """Module-level config seam for document-global config externs (item 378,
+    Stage 5). Mirrors the py tier's `_REVL_EXTERN_CONFIG` map + fail-loud
+    `_revl_extern_config` helper (backends/python/emit.py `_emit_externs`): a
+    mutable module-global config map, keyed by extern name, that a composition
+    driver fills at plug time, and a lookup that THROWS, naming the extern,
+    when a required (non-defaulted) field is absent, instead of handing the body
+    an empty object that fails late with an opaque `undefined`. A defaults-only
+    extern still resolves to its defaults driver-free. Emitted only when a
+    config extern is present, so a no-config program is byte-identical.
+    """
+    return [
+        "export const _REVL_EXTERN_CONFIG: "
+        "Record<string, Record<string, unknown>> = {};",
+        "",
+        "function _revlExternConfig(",
+        "  name: string, required: string[], "
+        "defaults: Record<string, unknown>,",
+        "): Record<string, unknown> {",
+        "  const cfg = _REVL_EXTERN_CONFIG[name];",
+        "  if (cfg === undefined) {",
+        "    if (required.length > 0) {",
+        "      throw new Error(",
+        '        "config extern `" + name + "` called before plug-time " +',
+        '        "configuration was installed (required config: " +',
+        '        required.join(", ") + "); configure it through the run " +',
+        "        \"driver's config seam\",",
+        "      );",
+        "    }",
+        "    return { ...defaults };",
+        "  }",
+        "  const missing = required.filter((f) => !(f in cfg));",
+        "  if (missing.length > 0) {",
+        "    throw new Error(",
+        '      "config extern `" + name + "` called before plug-time " +',
+        '      "configuration was installed (missing required config: " +',
+        '      missing.join(", ") + ")",',
+        "    );",
+        "  }",
+        "  return { ...defaults, ...cfg };",
+        "}",
+        "",
+    ]
+
+
+def _ts_extern_config_bind(ext: dict) -> str:
+    """The `const _revl_config = ...` first-body line for a config extern, or
+    None. Passes the required (non-defaulted) field names and the resolved
+    defaults from the schema to the fail-loud helper, mirroring the py bind."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    name = ext.get("name")
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = {f["name"]: f["default"] for f in schema
+                if f.get("default") is not None}
+    return (f"const _revl_config = _revlExternConfig("
+            f"{json.dumps(name)}, {json.dumps(required)}, "
+            f"{json.dumps(defaults)});")
+
+
 def _emit_ts_externs(externs: list) -> list[str]:
     lines: list[str] = []
+    # item 378 Stage 5: emit the config seam once, before the externs, when any
+    # extern carries a config schema (byte-identical when none do).
+    if any(ext.get("config") for ext in externs):
+        lines.extend(_ts_extern_config_scaffold())
     for ext in externs:
         name = _ident(ext.get("name"), "extern name")
         params = ", ".join(
@@ -2335,19 +3145,34 @@ def _emit_ts_externs(externs: list) -> list[str]:
         )
         returns = _ts_v3_type(ext.get("returns"))
         bodies = ext.get("bodies") or {}
+        refs = ext.get("refs") or {}
+        # item 396 option B: a `@ts ref` extern emits a lazy import thunk.
+        if "ts" in refs and "ts" not in bodies:
+            arg_names = ", ".join(
+                _ident(p.get("name"), "extern parameter name")
+                for p in ext.get("params") or [])
+            lines.extend(_emit_ts_ref_thunk(name, params, arg_names, returns,
+                                            ext, refs["ts"]))
+            continue
         if "ts" not in bodies:
             raise EmitError(
                 f"extern `{name}` has no @ts body — not portable to this backend "
-                f"(available: {', '.join(sorted(bodies)) or 'none'})"
+                f"(available: {', '.join(sorted(set(bodies) | set(refs))) or 'none'})"
             )
         # async extern (roadmap item 80, docs/design/async-extern.md §5): emit
         # an `async function` returning `Promise<T>`; the verbatim @ts body may
         # use `await`. Every admitted call site awaits it (see `_expr`). The
         # signature form mirrors the async service-op interface typing at
         # emit.py:2137/2222.
+        # item 378 Stage 5: a config extern binds `_revl_config` as the first
+        # body line, mirroring the py bind (backends/python/emit.py). None for a
+        # no-config extern, so its body splices byte-identically.
+        config_bind = _ts_extern_config_bind(ext)
         if ext.get("async"):
             lines.append(
                 f"export async function {name}({params}): Promise<{returns}> {{")
+            if config_bind:
+                lines.append("  " + config_bind)
             body = textwrap.dedent(bodies["ts"].strip("\n"))
             if body:
                 for line in body.splitlines() or [""]:
@@ -2358,6 +3183,8 @@ def _emit_ts_externs(externs: list) -> list[str]:
             lines.append("")
             continue
         lines.append(f"export function {name}({params}): {returns} {{")
+        if config_bind:
+            lines.append("  " + config_bind)
         body = textwrap.dedent(bodies["ts"].strip("\n"))
         if body:
             for line in body.splitlines() or [""]:
@@ -2557,11 +3384,30 @@ def _uses_lifecycle_tests(ir: dict) -> bool:
     return any(t.get("lifecycle") for t in (ir.get("tests") or []))
 
 
-def _runtime_imports(ir: dict, runtime_import: str) -> str:
+def _uses_frame(ir: dict, doc_ctx: "_Ctx") -> bool:
+    """True iff some component registers a transactional (witnessed) or
+    compensation entry (item 243 Slice 2b), reusing `_needs_frame` per
+    component — the document-level check the import line needs, ahead of any
+    per-component rendering. A document with neither feature imports no
+    `Frame`/`record` and emits every component's brackets exactly as before
+    this slice (see `_component_step`'s bracket branch)."""
+    return any(_needs_frame(c, doc_ctx) for c in ir.get("components") or [])
+
+
+def _runtime_imports(ir: dict, runtime_import: str, doc_ctx: "_Ctx") -> str:
     """The `import { ... } from '<runtime>'` line. `spawn` is added only when a
     spawn node is present (docs/design-v2-instances.md phase 2); the lifecycle
     drivers add `plug` + the no-residue introspection (FR-5, §7.1)."""
     names = ["host"]
+    if _uses_frame(ir, doc_ctx):
+        # item 243 Slice 2b: a document with a transactional (witnessed) or
+        # compensation entry imports `Frame`, the activation's teardown
+        # accumulator (docs/design/teardown-contract.md), and `record` so a
+        # witnessed/compensating extern's own `@ts` body can participate in
+        # the same shared observability trace every host builtin uses. A
+        # document using neither feature imports neither name — byte-identical
+        # to before this slice.
+        names += ["Frame", "record"]
     if _uses_routes(ir):
         # item 167: the router resolves its worker realms by label.
         names.append("realmLabel")
@@ -2591,7 +3437,7 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
         "// Generated by revl backends/typescript/emit.py — do not edit.",
         "// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).",
         "import type { Context } from 'cordis'",
-        _runtime_imports(ir, runtime_import),
+        _runtime_imports(ir, runtime_import, doc_ctx),
         "",
     ]
 
@@ -2667,11 +3513,25 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         # not just the type; pure documents keep the type-only import.
         ("import { Context } from 'cordis'"
          if _uses_lifecycle_tests(ir) else "import type { Context } from 'cordis'"),
-        _runtime_imports(ir, runtime_import),
+        _runtime_imports(ir, runtime_import, doc_ctx),
     ]
     if tests:
         out.append("import { expect, it } from 'vitest'")
+    # item 396 option B: a `@ts ref` extern emits a lazy thunk that resolves the
+    # ref'd module at CALL time through a root the runner provides (so the
+    # artifact text stays machine-independent) and imports the symbol then —
+    # never a module-top static import (which would run host code at module
+    # evaluation, the load-time execution point B forbids, and could not resolve
+    # from the _gen placement anyway). Emitted only when some extern carries a
+    # ts ref, so a ref-free module is byte-identical.
+    if any(ext.get("refs", {}).get("ts") for ext in externs):
+        out.append("import { createRequire as _revl_createRequire } from 'node:module'")
+        out.append("import { pathToFileURL as _revl_pathToFileURL } from 'node:url'")
+        out.append("import * as _revl_pathmod from 'node:path'")
     out.append("")
+
+    if any(ext.get("refs", {}).get("ts") for ext in externs):
+        out.extend(_emit_ts_ref_runtime())
 
     out.extend(_revl_helpers(ir))
     if _uses_lifecycle_tests(ir):
@@ -2790,11 +3650,44 @@ def _refuse_fault_tests(ir) -> None:
     )
 
 
+def _refuse_deferred_emissions(ir: dict) -> None:
+    """Roadmap 245 Decision 2 tier gate: a CALL to a `deferred` emission needs a
+    session-owner runtime (the deferral queue and the commit verb) this tier does
+    not have yet, so refuse it at emit time — surfaced through EmitError, this
+    tier's existing refusal channel. The reachability check and the single
+    canonical wording live in `revl.session_commit`, shared by all five ownerless
+    tiers so six backends do not invent six messages; a declared-but-never-called
+    deferred extern emits cleanly (call-site keyed)."""
+    try:
+        from revl.errors import RevlError
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
+    except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.errors import RevlError
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
+    try:
+        refuse_deferred_on_ownerless_tier(ir, "typescript")
+        refuse_approval_on_ownerless_tier(ir, "typescript")
+    except RevlError as exc:
+        raise EmitError(exc.message) from None
+
+
 def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be an object")
     _refuse_holes(ir)
+    _refuse_deferred_emissions(ir)
 
     _refuse_fault_tests(ir)
 

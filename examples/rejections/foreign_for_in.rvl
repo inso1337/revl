@@ -1,0 +1,14 @@
+// REJECTED — `for (x in xs)` (Python / JS key enumeration) is not revl syntax
+// (item 384). revl's `for (x of xs)` binds each ELEMENT. The `in` keyword used
+// to report the cryptic `expected of, found 'in'`.
+//
+// expected error:
+//   not `for (x in xs)`
+
+fn f(xs: List[Int]) -> Int {
+  var s = 0
+  for (x in xs) {
+    s += x
+  }
+  return s
+}

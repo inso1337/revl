@@ -45,10 +45,17 @@ public final class RunRuntimeValues {
             failures++;
         }
         comp.dispose();
-        // Teardown runs the two compensations LIFO: undo:b then undo:a.
-        var afterTeardown = java.util.List.of("do:a", "do:b", "undo:b", "undo:a");
+        // TCK A5 respec (docs/design/teardown-contract.md, exit test 1, a5a):
+        // `comp.dispose()` here is a CLEAN unload (no exception ever propagated
+        // out of apply()/ping()) — an implicit commit until item 245 lands the
+        // explicit commit UX. A committed `compensation` entry is DISCHARGED,
+        // never run: the forward emission was the deliverable, and best-effort
+        // cleanup on success is wrong (247 decision 1). This inverts the OLD
+        // placeholder assertion, which wrongly expected the compensations to
+        // fire on every teardown including a clean one.
+        var afterTeardown = java.util.List.of("do:a", "do:b");
         if (!LOG.equals(afterTeardown)) {
-            System.err.println("FAIL method-time compensations must run LIFO at teardown: "
+            System.err.println("FAIL a clean unload must DISCHARGE compensations, never run them: "
                 + "got " + LOG + " want " + afterTeardown);
             failures++;
         }

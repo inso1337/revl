@@ -31,12 +31,14 @@ from __future__ import annotations
 import asyncio
 import builtins
 import json
+import os
 import signal
 import sys
 import time
 import types
 from pathlib import Path
 
+from . import hostref as _hostref
 from ._paths import backends_root
 from .compiler import compile_files
 from .holes import refuse_admission
@@ -45,6 +47,35 @@ from . import diagnostics
 from . import why_runtime
 
 KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm", "go")
+
+
+class ActivationError(RuntimeError):
+    """A component's activation did not complete — "loaded" would be a lie
+    (roadmap item 372).
+
+    `ctx.plugin()` defers the component apply to the event loop via a `_LazyTask`
+    whose first statement is `await asyncio.sleep(0)`. On an offloaded/closing-
+    loop path (item 115's synchronous-`@py`-body `http_post` pins the single
+    loop, so dispatch is offloaded to a thread running `asyncio.run` with a
+    main-side timeout) the per-turn loop can close underneath that deferred
+    activation and SILENTLY cancel it — and because `str(CancelledError)` is the
+    empty string there is no diagnostic. The plugin is then left listed as
+    LOADED while `ROOT.get(key)` stays `None` forever.
+
+    The driver refuses that: a key that did not finish activating is never
+    counted loaded, and a cancelled/failed activation is surfaced LOUDLY through
+    this typed error naming the component and the unresolved key(s) — never a
+    silent empty string.
+    """
+
+    def __init__(self, component: str, keys, reason: str) -> None:
+        self.component = component
+        self.keys = list(keys)
+        self.reason = reason
+        keys_txt = ", ".join(self.keys) if self.keys else "(no provided keys)"
+        super().__init__(
+            f"activation of {component!r} did not complete "
+            f"[{keys_txt}]: {reason}")
 
 # fiber states that count as "settled" — a lifecycle transition has come to
 # rest, so it is worth one causal-trace record. UNLOADING/LOADING are
@@ -118,6 +149,19 @@ def _required_config_problem(ir: dict, config: dict) -> str | None:
                     f'{name} is missing required config "{field["name"]}"'
                     f" ({field.get('type') or '?'})"
                 )
+    # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md: a
+    # config extern is a document-global mechanism configured through the SAME
+    # --config seam a component is, keyed by extern name. Preflight its required
+    # fields (IR `config` with `default: null`) here, so a missing one fails
+    # loudly at admission — never as a runtime KeyError inside the host body.
+    for ext in _config_externs(ir):
+        supplied = config.get(ext["name"]) or {}
+        for field in ext.get("config") or []:
+            if field.get("default") is None and field["name"] not in supplied:
+                missing.append(
+                    f'extern {ext["name"]} is missing required config "{field["name"]}"'
+                    f" ({field.get('type') or '?'})"
+                )
     if not missing:
         return None
     rendered = "\n".join(f"  - {entry}" for entry in missing)
@@ -127,6 +171,75 @@ def _required_config_problem(ir: dict, config: dict) -> str | None:
         "  components are declarations — supply their config with "
         "--config <file>."
     )
+
+
+def _config_externs(ir: dict) -> list[dict]:
+    """The document-global externs that declare a typed `config` schema
+    (item 379). Absent/empty for every composition that uses none, so the
+    driver's config path is byte-identical there."""
+    return [e for e in (ir.get("externs") or []) if e.get("config")]
+
+
+def _resolve_extern_config(ir: dict, config: dict) -> dict:
+    """Resolve each config extern's schema once, from the composition config
+    map (item 379), merging supplied values over the declared defaults. This is
+    the plug-time seam: the value is fixed here, then installed into the emitted
+    module's `_REVL_EXTERN_CONFIG` for the host body to read as `_revl_config`.
+
+    Required-ness was already preflighted by :func:`_required_config_problem`;
+    this only materializes the resolved dicts (defaults + supplied)."""
+    resolved: dict[str, dict] = {}
+    for ext in _config_externs(ir):
+        supplied = config.get(ext["name"]) or {}
+        merged = {
+            field["name"]: field.get("default")
+            for field in ext.get("config") or []
+            if field.get("default") is not None
+        }
+        merged.update(supplied)
+        resolved[ext["name"]] = merged
+    return resolved
+
+
+def _secret_rows(ir: dict) -> list[dict]:
+    """The bound secrets a composition declares (item 256): name + capability
+    rows, never a value (the value lives only in the driver's `_REVL_SECRETS` at
+    run time). Empty for every composition that binds none, so the driver's
+    secret path is byte-identical there."""
+    return list(ir.get("secrets") or [])
+
+
+def _resolve_secrets(ir: dict, source: dict | None = None) -> dict:
+    """Resolve each bound secret's VALUE once at plug (item 256, §3), keyed by the
+    secret NAME. Sourced from `source` (a caller-supplied name->value store) or,
+    by default, the environment variable `REVL_SECRET_<NAME>` (NAME upper-cased),
+    so a secret store or a `--secret-file` seam can front it later without moving
+    the injection point.
+
+    Fail-loud, no defaults: a declared secret with no resolvable value RAISES here
+    at plug, naming the secret but NEVER its value - there is no silent fallback
+    for a provider key (unlike config's defaults path). The resolved value is
+    installed into the emitted module's `_REVL_SECRETS` and never logged, never
+    echoed by `--plan`, and never serialized into any trace."""
+    rows = _secret_rows(ir)
+    if not rows:
+        return {}
+    resolved: dict[str, str] = {}
+    for row in rows:
+        name = row["name"]
+        if source is not None and name in source:
+            resolved[name] = source[name]
+            continue
+        env_key = "REVL_SECRET_" + name.upper()
+        if env_key in os.environ:
+            resolved[name] = os.environ[env_key]
+            continue
+        # never name the value or a guessed default - a bound key has none.
+        raise RuntimeError(
+            f"capability-bound secret `{name}` has no value at plug: set the "
+            f"environment variable `{env_key}` (or supply it through the driver's "
+            f"secret source). There is no default for a secret (item 256).")
+    return resolved
 
 
 def _load_order(ir: dict) -> list[str]:
@@ -155,6 +268,13 @@ def _print_plan(ir: dict, config: dict, backend: str) -> None:
         print(f"\ncomponent {name}")
         print(f"  requires: {requires}")
         print(f"  provides: {provides}")
+        print(f"  config:   {cfg if cfg else '(none)'}")
+    # item 379: document-global config externs are configured at the same seam,
+    # so list them alongside components when a composition declares any.
+    for ext in _config_externs(ir):
+        cfg = config.get(ext["name"])
+        fields = ", ".join(f["name"] for f in ext.get("config") or [])
+        print(f"\nextern {ext['name']} (config: {fields})")
         print(f"  config:   {cfg if cfg else '(none)'}")
     keys = _key_to_service(ir)
     services = ir.get("services") or {}
@@ -337,10 +457,22 @@ class _Driver:
 
     def __init__(self, ir, config, emit, runtime_mod, Context, FiberState,
                  record: bool = False, trace_path: str | None = None,
-                 withdraw: str | None = None, wal_path: str | None = None):
+                 withdraw: str | None = None, wal_path: str | None = None,
+                 root_dirs: list | None = None, secrets: dict | None = None):
         self.ir = ir
         self.config = config
+        # item 256 Slice 1: an optional caller-supplied secret store (name ->
+        # value), consulted before the environment at plug. `None` means "source
+        # every bound secret from the environment" (`REVL_SECRET_<NAME>`). Never
+        # logged, never echoed by `--plan`.
+        self.secrets = secrets
         self.emit = emit
+        # item 396 option B: the composition's root compile directories, the
+        # import roots a `= @py ref` file must be reachable through at deploy.
+        # `_emit_module` APPENDS them to sys.path (never prepends) and hash-checks
+        # each ref, only when the IR carries refs — a ref-free run never touches
+        # sys.path (byte-identical driver behaviour).
+        self.root_dirs = list(root_dirs or [])
         self.runtime = runtime_mod
         self.FiberState = FiberState
         self.root = Context()
@@ -490,10 +622,36 @@ class _Driver:
         # kept so a replay recorder can quote the emitted line a step came
         # from — exec'd modules are invisible to linecache
         self.emitted = (filename, source)
+        # item 396 option B: at plug of a ref-carrying IR, prepare the host-import
+        # boundary BEFORE the module executes any extern — append the import
+        # root(s) to sys.path (append-only, so a project file cannot shadow a
+        # trusted runtime module), hash-check each ref's file against the IR pin
+        # (refuse a swap/shadow), and evict stale sys.modules entries so a replug
+        # runs the NEW code. No-op (and no sys.path touch) when the IR has no ref.
+        _hostref.plug_refs(ir, self.root_dirs)
         # register before exec: emitted record types are @dataclass, and
         # dataclasses resolves fields via sys.modules[cls.__module__]
         sys.modules[module.__name__] = module
         exec(compile(source, filename, "exec"), module.__dict__)
+        # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
+        # install the resolved config for each document-global config extern into
+        # the module's `_REVL_EXTERN_CONFIG` map, so a host body reads typed
+        # `_revl_config` at the sanctioned plug seam — resolved ONCE here, not per
+        # call. A composition with no config extern leaves the map (which the
+        # emitter only defines when one exists) untouched.
+        extern_config = _resolve_extern_config(ir, self.config)
+        if extern_config and hasattr(module, "_REVL_EXTERN_CONFIG"):
+            module._REVL_EXTERN_CONFIG.update(extern_config)
+        # item 256 Slice 1: resolve each bound secret's value once at plug and
+        # install it into the module's `_REVL_SECRETS` map, so a bound extern body
+        # reads the key as its first local at the sanctioned seam - resolved ONCE
+        # here, never per call, never logged. A composition with no bound secret
+        # leaves the map (which the emitter only defines when one exists)
+        # untouched. Sourced from `self.secrets` (the caller-supplied store) or the
+        # environment; fail-loud when a declared secret has no value.
+        secrets = _resolve_secrets(ir, getattr(self, "secrets", None))
+        if secrets and hasattr(module, "_REVL_SECRETS"):
+            module._REVL_SECRETS.update(secrets)
         if self.recorder is not None:
             # between emit and plugin: recording replaces each component's
             # `apply`, and the fiber's context chain is fixed at plugin time
@@ -537,13 +695,10 @@ class _Driver:
                 self.root, getattr(module, name), self.config.get(name, {}))
             self.fibers[name] = fiber
             await self._flush()
-            if fiber.state == self.FiberState.LOADING:  # an async (`await`) body in flight
-                try:
-                    await asyncio.wait_for(asyncio.shield(fiber), 2)
-                except asyncio.TimeoutError:
-                    self._log("note", name, "still LOADING after 2s")
-            if fiber.state == self.FiberState.PENDING:
-                self._log("note", name, f"PENDING — unmet requirement ({requires})")
+            # roadmap item 372: DRIVE the deferred activation to completion and
+            # refuse to count the key loaded unless its provision actually
+            # landed — "loaded means loaded". Loud on cancel/failure.
+            await self._drive_activation(name, comp, fiber, requires)
             if self.tracing:
                 # a component comes up because its providers were already up
                 # (load order is providers-first); a component with no
@@ -554,6 +709,121 @@ class _Driver:
                              f"PENDING -> {self.FiberState(fiber.state).name}",
                              load_causes.get(name, why_runtime.cause_boot()))
         await self._flush()
+
+    async def _drive_activation(self, name: str, comp: dict, fiber,
+                                requires: str) -> None:
+        """Drive one component's deferred activation to completion, LOUDLY
+        (roadmap item 372).
+
+        `ctx.plugin()` schedules the apply on the event loop as a `_LazyTask`;
+        the fiber can report ACTIVE while its `provide` has not yet run, and a
+        closing/offloaded loop can cancel the deferred activation with an empty-
+        string `CancelledError` and no diagnostic. This:
+
+        1. drives the `_LazyTask`/activation body to settlement (pumps the
+           fiber's `inertia`, then the loop, until the provisions resolve);
+        2. converts a cancelled activation — whose bare `CancelledError` renders
+           as the empty string — into a typed, named :class:`ActivationError`;
+        3. enforces the FIBERS/ROOT invariant: an ACTIVE fiber whose provision
+           never landed in ROOT is the false-loaded contradiction, refused here.
+
+        A component whose requirements are genuinely unmet stays PENDING — it
+        provides nothing and is reported, not counted loaded, and never raised.
+        A mid-body FAILED activation is likewise honest and observable (its keys
+        are simply absent from `resolved_keys()`); only the ACTIVE-but-unpublished
+        contradiction and a cancellation are raised.
+        """
+        provided = list((comp.get("provides") or {}).keys())
+        try:
+            await self._settle(fiber, comp, provided)
+        except asyncio.CancelledError as exc:
+            # the offloaded/closing loop cancelled the deferred activation.
+            # `str(CancelledError)` is empty — name it instead of losing it.
+            raise ActivationError(
+                name, provided,
+                "the event loop closed or the activation was cancelled before "
+                "it completed") from exc
+        if fiber.state == self.FiberState.PENDING:
+            # legitimately not up yet: its injected requirement has no provider.
+            # It publishes nothing, so there is no false-loaded key to guard.
+            self._log("note", name, f"PENDING — unmet requirement ({requires})")
+            return
+        # A FAILED activation is an honest, observable loaded-state: its `provide`
+        # never ran, so its keys are simply absent from `resolved_keys()` — the
+        # fiber is reported FAILED, not as a provider of a key ROOT lacks. That is
+        # NOT the false-loaded bug and must not abort the load (the replay
+        # mid-body-failure contract). The contradiction item 372 forbids is a
+        # fiber that reports ACTIVE while its provision never landed:
+        if fiber.state == self.FiberState.ACTIVE:
+            isolate = comp.get("isolate") or {}
+            missing = [key for key in provided
+                       if self._resolve_provision(key, isolate.get(key)) is None]
+            if missing:
+                raise ActivationError(
+                    name, missing,
+                    "the fiber is ACTIVE but its provision(s) never landed in "
+                    f"ROOT — 'loaded' would be a lie for {', '.join(missing)}")
+
+    async def _settle(self, fiber, comp: dict, provided: list) -> None:
+        """Drive a fiber's deferred activation to a settled state.
+
+        Mirrors cordis's own `fiber.await_()` — pump the fiber's `inertia` (its
+        `_LazyTask` reload) to `None` — but WITHOUT re-raising the fiber's own
+        `_error`: a mid-body activation failure lands the fiber FAILED, an
+        honest observable state the replay recorder and `revl run` both surface,
+        not a reason to abort the load. A provision published by a *synchronous*
+        body is in ROOT once the reload settles; an *asynchronous* body
+        publishes from a detached effect task, so pump a bounded number of loop
+        turns until the keys resolve. The bound is a safety net, not a timeout —
+        a well-behaved body resolves in the first turn (zero for a sync body),
+        and one that never resolves falls through to the loud FIBERS/ROOT
+        consistency check in the caller. A `CancelledError` (the loop closing
+        underneath the deferred task) propagates to be named there."""
+        while getattr(fiber, "inertia", None) is not None:
+            await fiber.inertia
+        if not provided:
+            return
+        isolate = comp.get("isolate") or {}
+        for _ in range(1000):
+            if all(self._resolve_provision(key, isolate.get(key)) is not None
+                   for key in provided):
+                return
+            await asyncio.sleep(0)
+
+    def _resolve_provision(self, key: str, realm):
+        """Resolve one provided key the way the composition publishes it: an
+        isolated key lives in its placement realm (a worker's provision lands in
+        `realm(w)`, not the shared root realm), so it is read through
+        `root.isolate(key, realm(w)).reflect.get(key)` — exactly how `_Router`
+        and the emitted routed-require resolve it. `realm` is the providing
+        component's own placement for `key` (`None` = the shared root realm), so
+        the SAME key provided by different workers in different realms resolves
+        per provider. Returns `None` when no live provider has published it."""
+        if realm is None:
+            return self.root.get(key)
+        return self.root.isolate(
+            key, self.runtime.realm_label(realm)).reflect.get(key)
+
+    def resolved_keys(self) -> set:
+        """The keys this composition actually provides — those with a live
+        provider (roadmap item 372), resolved in each provider's placement realm.
+
+        The FIBERS/ROOT consistency surface: a key appears here IFF it actually
+        resolves to a live provider (in root, or in the realm a worker was
+        isolated into), so a fiber that reports ACTIVE — or was left so by a
+        cancelled deferred activation — while its provision never landed can
+        never be reported as providing that key. `state()`'s `providedKeys`
+        derives from this, so "listed loaded but ROOT is None" is unreachable
+        through the report."""
+        resolved: set = set()
+        for comp in _components(self.ir or {}):
+            isolate = comp.get("isolate") or {}
+            for key in (comp.get("provides") or {}):
+                if key in resolved:
+                    continue
+                if self._resolve_provision(key, isolate.get(key)) is not None:
+                    resolved.add(key)
+        return resolved
 
     def _install_router(self, name: str, comp: dict) -> None:
         """Realize a router component's ``routes`` IR: for each routed key, build
@@ -898,6 +1168,16 @@ class _Driver:
 
 def run_command(args) -> int:
     if getattr(args, "placement", None):
+        # `--placement` splits the composition across processes, each with its
+        # own tier; a top-level `--backend` would name one tier for the whole
+        # composition, which the placement contradicts. Refuse loudly instead
+        # of silently ignoring `--backend` (item 363).
+        if getattr(args, "backend", "py") != "py":
+            print("error: --backend and --placement are mutually exclusive — a "
+                  "placement assigns a tier per component (or per process), so "
+                  "there is no single --backend for the whole composition; drop "
+                  "--backend, or run without --placement", file=sys.stderr)
+            return 2
         from .placement import run_placement  # noqa: PLC0415 — lazy: no cordis needed to orchestrate
         return run_placement(args.files, args.placement, once=getattr(args, "once", False))
 
@@ -954,8 +1234,21 @@ def run_command(args) -> int:
         if backend == "go":
             from .run_go import run_go  # noqa: PLC0415 — lazy: no go toolchain needed to compile/plan
             return run_go(ir, config, args.files, once=once, interactive=interactive)
+        # item 289: with a boundary policy in force, the wasm tier enforces the
+        # full least-authority chain (host imports subset-of declared caps
+        # subset-of policy-allowed) before booting; all three sets are
+        # statically decidable for a wasm module.
+        policy = None
+        if getattr(args, "policy", None):
+            from .policy import load_policy  # noqa: PLC0415
+            try:
+                policy = load_policy(args.policy)
+            except (RevlError, OSError) as exc:
+                print(f"error: cannot load policy: {exc}", file=sys.stderr)
+                return 1
         from .run_wasm import run_wasm  # noqa: PLC0415 — lazy: no wasmtime needed to compile/plan
-        return run_wasm(ir, config, args.files, once=once, interactive=interactive)
+        return run_wasm(ir, config, args.files, once=once,
+                        interactive=interactive, policy=policy)
 
     backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:
@@ -974,16 +1267,28 @@ def run_command(args) -> int:
         return 3
 
     withdraw = getattr(args, "withdraw", None)
+    # item 396 option B: the import roots a `@py ref` file resolves through are
+    # the root compile files' own directories (the deploy contract's "import
+    # root is the root compile file's directory"). The driver appends them only
+    # when the IR carries refs.
+    root_dirs = [os.path.dirname(os.path.abspath(f)) for f in args.files]
     driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState,
                      record=bool(getattr(args, "record", False)),
                      trace_path=getattr(args, "trace", None),
                      withdraw=withdraw,
-                     wal_path=getattr(args, "wal", None))
+                     wal_path=getattr(args, "wal", None),
+                     root_dirs=root_dirs)
     try:
         if withdraw is not None:
             return asyncio.run(driver.withdraw_once())
         if getattr(args, "watch", False):
             return asyncio.run(driver.watch(args.files))
         return asyncio.run(driver.hold_repl())
+    except ActivationError as exc:
+        # item 372: a component's deferred activation did not complete — report
+        # it loudly and named, rather than dropping into a REPL over a
+        # composition whose "loaded" would be a lie.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:  # pragma: no cover — signal handler covers unix
         return 130

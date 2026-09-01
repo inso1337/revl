@@ -245,8 +245,9 @@ def test_v3_stdlib_emit_shapes():
     # Opt/Result as generic sealed interfaces
     _has(src, "type RevlOpt[T any] interface { isRevlOpt() }")
     _has(src, "type RevlResult[T any, E any] interface { isRevlResult() }")
-    # optfield/optcall -> revlOptMap over the payload
-    _has(src, "revlOptMap(row, func(_x Row) string { return _x.name })")
+    # optfield/optcall -> revlOptMap over the payload; the record field is
+    # exported (item 390: json_stringify(record) needs exported struct fields)
+    _has(src, "revlOptMap(row, func(_x Row) string { return _x.Name })")
     _has(src, "revlOptMap(s, func(_x string) int64 { return revlStrCharCodeAt(_x, 0) })")
     # stdlib builtins dispatch Str vs List
     _has(src, "revlStrLen(s)")
@@ -365,6 +366,65 @@ def test_checked_in_generated_is_current(ir_path, pkg):
     norm = lambda s: " ".join(s.split())
     assert norm(fresh) == norm(committed), (
         f"{pkg}/gen.go is stale — run backends/go/regen.sh")
+
+
+# --- scenarios/emitted freshness gate --------------------------------------
+# The checked-in Go under scenarios/emitted/*/ (the `gen.go` component outputs
+# AND the `gen_<name>_test.go` lifecycle-test outputs) is regenerated from each
+# scenario's IR by backends/go/regen.sh. Nothing gated these against emit.py
+# drift before: a change to backends/go/emit.py that touches the shared prelude
+# can silently stale a scenario whose regen step was not re-run — exactly how
+# item 247's RevlFrame prelude change left the provide_method_witnessed golden
+# stale with no failing test. test_v3_checked_in_generated_is_current covers
+# only the v3/ fixtures, so this parametrized twin closes the gap for the
+# scenarios/emitted goldens. The table mirrors regen.sh's scenarios/emitted
+# stanzas one-to-one; each row pins (id, ir_path, package, output_rel_path).
+_EMITTED = HERE / "scenarios" / "emitted"
+SCENARIO_GOLDENS = [
+    ("usercache", USER_CACHE, "usercache", "usercache/gen.go"),
+    ("tenants", TENANTS, "tenants", "tenants/gen.go"),
+    ("memkv", _EMITTED / "memkv" / "memkv.ir.json", "memkv", "memkv/gen.go"),
+    ("counter", _EMITTED / "counter" / "counter.ir.json", "counter", "counter/gen.go"),
+    ("tagger", _EMITTED / "tagger" / "tagger.ir.json", "tagger", "tagger/gen.go"),
+    ("spawn", _EMITTED / "spawn" / "spawn.ir.json", "spawn", "spawn/gen.go"),
+    ("accessor", _EMITTED / "accessor" / "accessor.ir.json", "accessor", "accessor/gen.go"),
+    ("timer", _EMITTED / "timer" / "timer.ir.json", "timer", "timer/gen.go"),
+    ("advance", _EMITTED / "advance" / "advance.ir.json", "advance",
+     "advance/gen_advance_test.go"),
+    ("records", _EMITTED / "records" / "records.ir.json", "records",
+     "records/gen_records_test.go"),
+    ("jsonwire", _EMITTED / "jsonwire" / "jsonwire.ir.json", "jsonwire",
+     "jsonwire/gen_jsonwire_test.go"),
+    ("witnessed_teardown", _EMITTED / "witnessed_teardown" / "witnessed_teardown.ir.json",
+     "witnessedteardown", "witnessed_teardown/gen_witnessed_teardown_test.go"),
+    ("provide_method_witnessed",
+     _EMITTED / "provide_method_witnessed" / "provide_method_witnessed.ir.json",
+     "providemethodwitnessed",
+     "provide_method_witnessed/gen_provide_method_witnessed_test.go"),
+    ("method_compensate", _EMITTED / "method_compensate" / "method_compensate.ir.json",
+     "methodcompensate", "method_compensate/gen_method_compensate_test.go"),
+]
+
+
+@pytest.mark.parametrize(
+    "ir_path,pkg,rel",
+    [(ir, pkg, rel) for _id, ir, pkg, rel in SCENARIO_GOLDENS],
+    ids=[g[0] for g in SCENARIO_GOLDENS],
+)
+def test_scenario_checked_in_generated_is_current(ir_path, pkg, rel):
+    """Each scenarios/emitted golden must be byte-identical to a fresh
+    gofmt(emit(ir)) — the drift gate regen.sh guarantees. Parametrized per
+    scenario so a failure names the exact stale golden."""
+    fresh = emit.emit(_load(ir_path), package=pkg)
+    committed = (_EMITTED / rel).read_text(encoding="utf-8")
+    formatted = _gofmt(fresh)
+    if formatted is not None:  # gofmt present: compare gofmt-to-committed
+        assert formatted == committed, (
+            f"scenarios/emitted/{rel} is stale — run backends/go/regen.sh")
+        return
+    # no gofmt: fall back to a whitespace-insensitive check
+    assert _ws(fresh) == _ws(committed), (
+        f"scenarios/emitted/{rel} is stale — run backends/go/regen.sh")
 
 
 # host `Map.new()` iteration surface — `keys()` / `size()` (roadmap item 88).

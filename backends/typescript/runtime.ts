@@ -166,7 +166,13 @@ export function resetHost(): void {
   Clock.reset()
 }
 
-function record(entry: string): void {
+/** Append one entry to the shared observability trace (`hostLog`) and notify
+ * subscribers. Exported so an extern's own `@ts` host body can participate in
+ * the same trace every other host builtin uses — useful for a witnessed or
+ * compensating extern that wants its crossing to show up in ordering
+ * assertions alongside `Pool`/`Map`/`Job` events, without inventing a second
+ * ad hoc channel. */
+export function record(entry: string): void {
   hostLog.push(entry)
   for (const listener of listeners) listener(entry)
 }
@@ -555,6 +561,22 @@ export class MapHandle {
     this.data.set(key, value)
   }
 
+  insert_if_absent(key: any, value: any): boolean {
+    // item 397: the atomic compare-and-set. Node runs one event loop, so this
+    // synchronous method (no await) is atomic by run-to-completion: no task can
+    // interleave between the membership test and the insert. Returns whether it
+    // inserted; a `false` (key already present) leaves the existing value
+    // untouched.
+    this.assertLive('insert_if_absent')
+    if (this.data.has(key)) {
+      record(`${this.label}.insert_if_absent(${key}) -> false`)
+      return false
+    }
+    this.data.set(key, value)
+    record(`${this.label}.insert_if_absent(${key}) -> true`)
+    return true
+  }
+
   remove(key: any): void {
     this.assertLive('remove')
     record(`${this.label}.remove(${key})`)
@@ -595,6 +617,665 @@ export class MapHandle {
     this.data.clear()
     liveResources.delete(this.label)
     record(`${this.label}.drop`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Witnessed effects + the two-phase teardown loop
+// (items 243/247, docs/design/teardown-contract.md; item 243 Slice 2b)
+//
+// One LIFO disposer stack per activation, three entry kinds sharing it:
+//
+//   bracket        acquire's inverse. Replays on EVERY teardown, clean or
+//                  aborted (unchanged from before this slice).
+//   transactional  a `witnessed` extern's declared inverse (item 243).
+//                  Replays ONLY on abort; a clean commit DISCHARGES it and
+//                  drops the witness (GC) — the mutation is the deliverable.
+//   compensation   an `emit ... compensate ...` best-effort offset (item
+//                  247). Replays ONLY on abort, and only in PHASE 2, after
+//                  every bracket/transactional inverse has finished — never
+//                  on a clean commit (discharged, never run).
+//
+// `_component_body`/`emit.py` lowers one activation into a SINGLE
+// `ctx.effect(function* () {...})`, exactly as before this slice (REPORT.md
+// §1.1: only within one effect's own yields does cordis guarantee strict
+// LIFO disposal). Every step's disposer is now yielded through one of this
+// `Frame`'s registration methods instead of a raw arrow, so all three kinds
+// share that one stack in registration order — no second list.
+//
+// Commit-vs-abort discriminator: "did the body reach its final yield"
+// (mirrors backends/python/runtime.py `Frame.drain`, item 243 Slice 2a
+// decision 1 — no new cordis signal needed). The emitted body yields two
+// sentinels around the ordinary steps:
+//
+//   yield frame.begin   // FIRST yielded -> disposed LAST (cordis LIFO)
+//   ...ordinary steps...
+//   yield frame.drain   // LAST yielded  -> disposed FIRST, ONLY reached if
+//                       // the body ran to completion (a clean unload)
+//
+// `drain`, disposed first on a clean unload, flips `committed` before any
+// earlier-registered entry's own disposer runs — every bracket/transactional/
+// compensation entry then discharges (or, for bracket, still runs) in
+// whatever order cordis visits them; the commit path has no phase split
+// (docs/design/teardown-contract.md, "The teardown algorithm").
+//
+// On ABORT, `drain` is never yielded (the throw happens before the body's
+// final statement), so `committed` stays false. cordis' OWN disposal chain
+// runs each already-yielded disposer strictly sequentially (each `.then()`-
+// chained, REPORT.md §1.1) — this is the mechanism that gives Phase 1 (every
+// bracket + transactional inverse) automatic LIFO-to-completion, PROVIDED
+// each disposer catches its own failure so one throw cannot break the
+// `.then()` chain and starve every earlier (later-disposed) entry — the
+// contract's "continue-and-record" (both `bracket-fault` and
+// `restore-residue`). A compensation entry, invoked at ITS stack position
+// during this same chain, does NOT fire there — that would be the OLD
+// single-phase a5 behavior the contract retires. It ENQUEUES itself instead
+// and returns immediately; `begin`, yielded first and so disposed dead LAST,
+// is the "post-unwind hook" the contract's mechanism note describes — by the
+// time cordis reaches it every earlier disposer has already run, so Phase 1
+// is complete and the compensation queue is fully populated, in exactly the
+// LIFO order cordis visited them. `begin` then drains it as Phase 2,
+// best-effort and budget-bounded.
+//
+// No in-call preemption on this tier (teardown-contract.md's per-tier table:
+// "typescript: none — single-threaded event loop; nothing runs to observe a
+// deadline during a synchronous host call"). The only bound this tier can
+// honestly deliver is the NORMATIVE between-compensation deadline check.
+
+/** One boundary crossing's identity, captured at registration — never
+ * re-read at teardown (docs/design/teardown-contract.md, "No data hazard").
+ * `key` is the capability/service key, `method` the crossing's own method,
+ * `args` its captured (serializable) arguments, `site` a best-effort source
+ * label. */
+export interface Crossing {
+  key: string
+  method: string
+  args: unknown[]
+  site: string
+}
+
+/** The merged residue schema's `kind` discriminator
+ * (docs/design/teardown-contract.md, "The merged residue schema").
+ * `unreconstructible` is recovery-only (no durable WAL sink exists on this
+ * tier yet — see `DischargeDescriptor` below) and so never appears here. */
+export type ResidueKind = 'restore-residue' | 'bracket-fault' | 'compensation-residue'
+
+export interface AttemptedMeta {
+  /** The named inverse/compensation call, or `null` iff never attempted
+   * (a Phase-2 entry skipped under the budget). */
+  call: string | null
+  args: unknown[]
+  phase: 1 | 2
+}
+
+export interface ResidueRecord {
+  kind: ResidueKind
+  crossing: Crossing
+  attempted: AttemptedMeta
+  error: { type: string; message: string } | null
+  attemptedFlag: boolean
+  outcome: 'failed' | 'unknown' | 'not-attempted'
+  referent: string
+  hint: string
+}
+
+/** The envelope both the abort path (here) and `revl recover` (py-only,
+ * src/revl/recovery.py) return (docs/design/teardown-contract.md, "The
+ * merged residue schema"). */
+export interface AbortReport {
+  clean: boolean
+  outstanding: ResidueRecord[]
+  /** Referents still out in the world, derived from `outstanding` — this
+   * tier has no `World` adapter of its own (that is py's offline-recovery
+   * concern, src/revl/recovery.py), so this is the honest generic view: what
+   * the residue records themselves say is still out. */
+  worldRemaining: string[]
+  proof: string
+}
+
+/** The WAL discharge-descriptor shape (docs/design/teardown-contract.md,
+ * "WAL descriptor") — every `transactional` inverse and every `compensation`
+ * builds one of these AT REGISTRATION, in memory. There is no durable WAL
+ * sink wired to this tier yet (that plumbing lives on the py tier only,
+ * `backends/python/replay.py` / `src/revl/recovery.py`, out of this slice's
+ * scope — see the emitter's module docstring); `Frame.descriptors()` exposes
+ * the in-memory shape so a future WAL sink (or a test) can consume it
+ * without this Frame needing to know anything about persistence. */
+export interface DischargeDescriptor {
+  record: 'discharge-descriptor'
+  seq: number
+  entry: 'transactional' | 'compensation'
+  call: { receiver: string; method: string; args: unknown[] }
+  origin: Crossing
+  witness: unknown | null
+  idempotency: string | null
+}
+
+export interface DischargeRecord {
+  record: 'discharge'
+  discharged: number[]
+}
+
+const RESIDUE_HINTS: Record<ResidueKind, string> = {
+  'restore-residue':
+    'the witnessed inverse failed to restore on abort (anticipated — TOCTOU / ' +
+    'disk-full are expected failure modes, 243 rule 6); verify the world state ' +
+    'by hand and re-run the inverse if it is still safe to.',
+  'bracket-fault':
+    'a bracket inverse that claimed G5 infallibility raised on abort — this is ' +
+    'a CONTRACT-GRADE fault; do not keep trusting this activation\'s ' +
+    "'revertible' label without inspecting it by hand.",
+  'compensation-residue':
+    'the best-effort compensation was attempted (or owed) and did not land; ' +
+    'check whether the offsetting action still needs to run by hand.',
+}
+
+/** Read a `REVL_*` budget env var (milliseconds). Unset/blank -> `fallback`;
+ * `0` -> no bound (the between-compensation check still runs and records
+ * nothing expired); a non-finite or negative value falls back too, rather
+ * than silently producing a nonsensical deadline. Read once, at Frame
+ * construction (activation time) — docs/design/teardown-contract.md, "read
+ * once at activation". */
+function _revlBudgetMs(name: string, fallback: number): number {
+  const env = typeof process !== 'undefined' ? (process as any).env : undefined
+  const raw = env ? env[name] : undefined
+  if (raw === undefined || raw === '') return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+}
+
+interface _PendingCompensation {
+  seq: number
+  crossing: Crossing
+  methodName: string
+  args: unknown[]
+  run: () => unknown
+}
+
+/** A PROVIDE-METHOD-registered witnessed (transactional) entry (item 318) —
+ * the per-tool-call H1 seam. Unlike an activation-body transactional entry
+ * (whose disposer the body generator yields into cordis' LIFO stack), a method
+ * body has no generator to yield into, and adopting it as a sibling
+ * `ctx.effect` is UNSOUND on this cordis-style tier: cordis disposes an adopted
+ * effect BEFORE the body effect's final `yield frame.drain`, so on a CLEAN
+ * unload the disposer would observe `committed` still false and wrongly replay
+ * (revert) the deliverable. So the entry is PARKED here and disposed by `drain`
+ * itself, once `committed`/`aborting` are settled — see `transactionalMethod`
+ * and `drain`. The observable flags mirror
+ * backends/python/runtime.py's `_Transactional.discharged`/`replayed`, so a
+ * test can assert the commit-vs-abort fate per entry. */
+interface _DeferredTransactional {
+  crossing: Crossing
+  undoMethod: string
+  undo: ((witness: unknown) => unknown) | null
+  witness: unknown
+  /** committed: inverse skipped, mutation persists, refs GC'd. */
+  discharged: boolean
+  /** aborted: inverse ran, mutation reverted, refs GC'd. */
+  replayed: boolean
+}
+
+/** ctx -> the activation `Frame` on that context (item 318). Weak-keyed so a
+ * torn-down instance's frame is collected with its context. Mirrors
+ * backends/python/runtime.py's `_FRAME_BY_CTX`: the session-level abort seam
+ * (`Frame.abort`) reaches a live activation's frame through the fiber ctx it
+ * already holds. Populated in the `Frame` constructor; a component that never
+ * builds a `Frame` (no witnessed/compensation entry) registers nothing. */
+const _frameByCtx = new WeakMap<Context, Frame>()
+
+/** The activation `Frame` on `ctx`, or `undefined`. The handle the item-245
+ * commit/abort UX (and its tests) use to reach a live activation's frame and
+ * call `abort()` before the clean unload that would otherwise implicitly
+ * commit every per-tool-call mutation (item 318). */
+export function frameForCtx(ctx: Context): Frame | undefined {
+  return _frameByCtx.get(ctx)
+}
+
+/** One activation's teardown accumulator (item 243 Slice 2b) — the TS analog
+ * of `backends/python/runtime.py`'s `Frame`, extended with the `compensation`
+ * entry kind and the two-phase abort this tier had no precedent for (py's
+ * own `Frame` implements bracket + transactional only; item 247's runtime
+ * seam is new work here, built directly from
+ * docs/design/teardown-contract.md's algorithm). */
+export class Frame {
+  readonly ctx: Context
+  readonly name: string
+  /** Flips true the instant `drain` is disposed — the commit-vs-abort
+   * discriminator every registered entry reads at ITS OWN disposal time. */
+  committed = false
+
+  private seqCounter = 0
+  private descriptorList: DischargeDescriptor[] = []
+  private pending: _PendingCompensation[] = []
+  private residue: ResidueRecord[] = []
+  private readonly budgetMs: number
+  private readonly perCallMs: number
+  private dischargeRec: DischargeRecord | null = null
+  /** item 318: PROVIDE-METHOD-registered witnessed entries (per-tool-call H1),
+   * parked here rather than yielded into cordis' LIFO stack, and disposed by
+   * `drain` once the commit-vs-abort bit is settled. */
+  private deferredList: _DeferredTransactional[] = []
+  /** item 247 (method-body compensate remainder): PROVIDE-METHOD-registered COMPENSATION entries (`emit ...
+   * compensate ...` in a method body), the compensation analog of
+   * `deferredList`. A method body has no generator to yield the compensation
+   * disposer into, and adopting it as a sibling `ctx.effect` is unsound (cordis
+   * disposes it BEFORE the body `drain`, so it fires the offset on a CLEAN
+   * unload — destroying the deliverable, the item-247 bug left on the method-
+   * body site). So it is parked here and disposed by `drain`: DISCHARGED on a
+   * commit; ENQUEUED onto `pending` on an abort, so `begin`'s post-unwind
+   * `runPhase2` fires it after every Phase-1 inverse. */
+  private deferredCompensations: _PendingCompensation[] = []
+  /** item 318: the reject signal for a component that already activated
+   * cleanly. `committed` (flipped by `drain`) answers "did the ACTIVATION body
+   * complete"; but a per-tool-call mutation runs AFTER activation, so on any
+   * later clean unload `drain` runs and would always commit it. `abort()` sets
+   * this BEFORE that unload; `drain` then leaves `committed` false, so every
+   * transactional entry — activation-body and method-deferred alike — replays
+   * and the mutations revert. */
+  private aborting = false
+
+  constructor(ctx: Context, name: string) {
+    this.ctx = ctx
+    this.name = name
+    this.budgetMs = _revlBudgetMs('REVL_COMPENSATION_BUDGET_MS', 5000)
+    this.perCallMs = _revlBudgetMs('REVL_COMPENSATION_PER_CALL_MS', 1000)
+    // item 318: so the session-level abort seam can reach this live activation's
+    // frame through the fiber ctx it holds. A no-op for every prior program
+    // (nothing looks the frame up unless `abort()` is called).
+    _frameByCtx.set(ctx, this)
+  }
+
+  private nextSeq(): number {
+    this.seqCounter += 1
+    return this.seqCounter
+  }
+
+  private static errorOf(err: unknown): { type: string; message: string } {
+    if (err instanceof Error) return { type: err.constructor.name, message: err.message }
+    return { type: 'Error', message: String(err) }
+  }
+
+  private static referentOf(crossing: Crossing): string {
+    const args = crossing.args.map((a) => JSON.stringify(a)).join(', ')
+    return `${crossing.key}.${crossing.method}(${args})`
+  }
+
+  private pushResidue(
+    kind: ResidueKind,
+    crossing: Crossing,
+    attempted: AttemptedMeta,
+    err: unknown,
+    outcome: ResidueRecord['outcome'] = 'failed',
+  ): void {
+    this.residue.push({
+      kind,
+      crossing,
+      attempted,
+      error: err === undefined ? null : Frame.errorOf(err),
+      attemptedFlag: attempted.call !== null,
+      outcome,
+      referent: Frame.referentOf(crossing),
+      hint: RESIDUE_HINTS[kind],
+    })
+  }
+
+  // -- entry registration ---------------------------------------------------
+
+  /** Register a bracket (acquire) inverse. Replays on every teardown —
+   * unchanged in outward behavior — but now routed through the Frame so a
+   * Phase-1 failure is caught and recorded (`bracket-fault`) instead of
+   * throwing straight into cordis' disposer chain, where an uncaught raise
+   * would break the `.then()` chain and skip every earlier (later-disposed)
+   * entry — exactly the residue "continue-and-record" forbids. The
+   * contract's commit-path pseudocode has no catch on this arm ("still
+   * runs"): a failure there is not this loop's to swallow. */
+  bracket(crossing: Crossing, undoMethod: string, inverse: () => unknown): () => unknown {
+    return () => {
+      if (this.committed) return inverse()
+      try {
+        return inverse()
+      } catch (err) {
+        this.pushResidue('bracket-fault', crossing, { call: undoMethod, args: crossing.args, phase: 1 }, err)
+      }
+    }
+  }
+
+  /** Register a witnessed (transactional) inverse (item 243): abort-only
+   * replay, commit-time discharge + witness GC. `witness` is the `Ok`
+   * payload, captured once here at registration — never re-read at
+   * teardown. Builds the WAL discharge-descriptor eagerly (in memory; see
+   * `DischargeDescriptor`'s docstring for why there is no durable sink yet). */
+  transactional(
+    crossing: Crossing,
+    undoMethod: string,
+    undo: (witness: unknown) => unknown,
+    witness: unknown,
+  ): () => unknown {
+    const seq = this.nextSeq()
+    this.descriptorList.push({
+      record: 'discharge-descriptor',
+      seq,
+      entry: 'transactional',
+      call: { receiver: this.name, method: undoMethod, args: [witness] },
+      origin: crossing,
+      witness,
+      idempotency: null,
+    })
+    return () => {
+      // discharge (below, in `drain`) already accounted for this seq the
+      // instant `committed` flipped true — nothing left to do here.
+      if (this.committed) return
+      try {
+        return undo(witness)
+      } catch (err) {
+        this.pushResidue('restore-residue', crossing, { call: undoMethod, args: [witness], phase: 1 }, err)
+      }
+    }
+  }
+
+  /** Register a PROVIDE-METHOD witnessed (transactional) inverse (item 318) —
+   * the per-tool-call H1 seam. An agent's fs mutation fires from a
+   * provide-method (per request), and its inverse must OUTLIVE the method call:
+   * the method returns, but the rollback must survive until the
+   * component/session commits or aborts. This component's activation frame is
+   * that accumulator — component-long, and its `committed`/`aborting` bit
+   * already drives every transactional entry's discharge-vs-replay.
+   *
+   * Unlike `transactional` (whose disposer the activation body yields into
+   * cordis' LIFO stack), this does NOT return a disposer: a method body has no
+   * generator to yield into, and adopting a sibling `ctx.effect` is unsound on
+   * this cordis-style tier (disposed BEFORE the body's `drain`, so a clean
+   * unload would see `committed` false and wrongly revert the deliverable — the
+   * hazard item 318 found on py). So the entry is PARKED in `deferredList` and
+   * disposed by `drain`, where `committed`/`aborting` is already settled. The
+   * WAL discharge-descriptor is still built at registration, durably ahead of
+   * the commit-vs-abort decision, so `descriptors()` enumerates every crossing
+   * and `drain`'s discharge record names every committed one. Registration is
+   * unconditional here; the emitted call site invokes it only on the `Ok`
+   * branch, so a failed mutation that touched nothing schedules no rollback. */
+  transactionalMethod(
+    crossing: Crossing,
+    undoMethod: string,
+    undo: (witness: unknown) => unknown,
+    witness: unknown,
+  ): _DeferredTransactional {
+    const seq = this.nextSeq()
+    this.descriptorList.push({
+      record: 'discharge-descriptor',
+      seq,
+      entry: 'transactional',
+      call: { receiver: this.name, method: undoMethod, args: [witness] },
+      origin: crossing,
+      witness,
+      idempotency: null,
+    })
+    const entry: _DeferredTransactional = {
+      crossing,
+      undoMethod,
+      undo,
+      witness,
+      discharged: false,
+      replayed: false,
+    }
+    this.deferredList.push(entry)
+    return entry
+  }
+
+  /** Mark this activation ABORTING (item 318). A component that activated
+   * cleanly reaches its final `yield frame.drain`, so any later clean unload
+   * runs `drain` and would implicitly COMMIT every accumulated transactional
+   * entry. A session-level reject calls this first: `drain` then leaves
+   * `committed` false, so the activation-body transactional entries AND the
+   * per-tool-call deferred entries all replay their inverses and the mutations
+   * revert, residue-free. Idempotent; a no-op on the commit path. */
+  abort(): void {
+    this.aborting = true
+  }
+
+  /** The parked per-tool-call transactional entries not yet disposed
+   * (introspection for the H1 proof, mirroring
+   * backends/python/runtime.py's `_deferred_transactional`). */
+  deferredEntries(): _DeferredTransactional[] {
+    return [...this.deferredList]
+  }
+
+  /** Register a compensation (item 247): audit-facing, best-effort,
+   * ABORT-ONLY, Phase 2. `args` are captured here, at registration — never
+   * re-read at teardown (the "no data hazard" reason for the phase split).
+   * Never runs on a clean unload (discharged: the forward emission was
+   * already the deliverable). On abort it does not fire when cordis visits
+   * its stack position — see this section's module doc for the enqueue/
+   * post-unwind-hook mechanism. */
+  compensation(
+    crossing: Crossing,
+    method: string,
+    args: unknown[],
+    run: () => unknown,
+  ): () => unknown {
+    const seq = this.nextSeq()
+    this.descriptorList.push({
+      record: 'discharge-descriptor',
+      seq,
+      entry: 'compensation',
+      call: { receiver: this.name, method, args },
+      origin: crossing,
+      witness: null,
+      idempotency: null,
+    })
+    const entry: _PendingCompensation = { seq, crossing, methodName: method, args, run }
+    return () => {
+      // discharge (below, in `drain`) already accounted for this seq the
+      // instant `committed` flipped true — nothing left to do here.
+      if (this.committed) return
+      this.pending.push(entry)
+    }
+  }
+
+  /** Register a PROVIDE-METHOD `emit ... compensate ...` step's offset as a
+   * COMPENSATION on THIS component's activation frame (item 247 (method-body compensate remainder)) — the
+   * compensation analog of `transactionalMethod` (item 318), and the method-body
+   * analog of `compensation` (item 247). A per-tool-call emission fires from a
+   * provide-method; its offset must outlive the method call and is owed ONLY on
+   * an abort, never on a clean commit (the emission was the deliverable).
+   *
+   * Unlike `compensation` (whose disposer the activation body's generator yields
+   * into cordis' LIFO stack), a method body has no generator to yield into.
+   * Adopting the disposer as a sibling `ctx.effect` is UNSOUND — cordis disposes
+   * it BEFORE the body's `drain`, firing the offset on a clean unload (the
+   * placeholder-lowering bug this closes). So the entry is PARKED in
+   * `deferredCompensations` and disposed by `drain`: DISCHARGED on a commit
+   * (never runs — its seq still joins the discharge record); ENQUEUED onto
+   * `pending` on an abort, where `begin`'s post-unwind `runPhase2` fires it in
+   * Phase 2 after every proof inverse. `args` are captured at registration (the
+   * "no data hazard" reason for the phase split), exactly as `compensation`. */
+  compensationMethod(
+    crossing: Crossing,
+    method: string,
+    args: unknown[],
+    run: () => unknown,
+  ): void {
+    const seq = this.nextSeq()
+    this.descriptorList.push({
+      record: 'discharge-descriptor',
+      seq,
+      entry: 'compensation',
+      call: { receiver: this.name, method, args },
+      origin: crossing,
+      witness: null,
+      idempotency: null,
+    })
+    this.deferredCompensations.push({ seq, crossing, methodName: method, args, run })
+  }
+
+  // -- prologue / epilogue sentinels ----------------------------------------
+
+  /** Yielded FIRST -> disposed LAST. No-op on commit (nothing left to do —
+   * the commit path has no phase split). On abort this is the "post-unwind
+   * hook": every earlier-registered entry has already been disposed by the
+   * time cordis reaches this one, so Phase 1 is complete and the
+   * compensation queue is fully populated — drain it as Phase 2. */
+  begin = (): void => {
+    if (this.committed) return
+    this.runPhase2()
+  }
+
+  /** Yielded LAST -> disposed FIRST. Reaching disposal here IS the proof the
+   * body ran to completion: a clean, committing unload (mirrors
+   * backends/python/runtime.py `Frame.drain`'s "did drain run"
+   * discriminator). Flips `committed` before any earlier-registered entry's
+   * own disposer runs, later in this same `.then()` chain. */
+  drain = (): void => {
+    // item 318: `aborting` is the reject signal for an already-activated
+    // component (a session-level abort of per-tool-call work). When set,
+    // `drain` runs but does NOT commit: `committed` stays false, so every
+    // transactional entry — the activation body's cordis-yielded ones AND the
+    // method-registered deferred ones below — replays its inverse and the
+    // mutations revert. A plain unload never sets it, so this stays
+    // byte-identical to the previous unconditional commit for every existing
+    // activation-body-only program.
+    if (!this.aborting) this.committed = true
+    // Every registered transactional/compensation entry WILL discharge — the
+    // flag just flipped true, and every entry's own disposer reads it — so
+    // the discharge record can be built from the full registry right now,
+    // rather than waiting for each one to actually be disposed (which, for
+    // `begin`, yielded first and so disposed LAST, would still be pending at
+    // this point). Mirrors backends/python/runtime.py `Frame.drain`, which
+    // reads `self._transactional` the same way, eagerly, at this same point.
+    // The discharge record is the COMMIT proof; it must NOT be written for an
+    // aborting teardown, where the inverses are being replayed, not committed.
+    if (this.committed && this.descriptorList.length) {
+      this.dischargeRec = {
+        record: 'discharge',
+        discharged: this.descriptorList.map((d) => d.seq),
+      }
+    }
+    // item 318: dispose the method-registered (deferred) transactional entries
+    // HERE, now that the commit-vs-abort bit is settled. They are not cordis
+    // disposers, so this is their SOLE disposal — no double-free with the
+    // fiber's own unwind. On a commit each discharges (mutation persists,
+    // witness GC'd); on an abort each replays (reverts, residue-free). A
+    // Phase-1 restore failure is caught and recorded (`restore-residue`),
+    // never thrown into the disposer chain — same continue-and-record rule as
+    // the activation-body transactional inverse.
+    //
+    // item 369: replay in reverse INVOCATION order (LIFO), NOT registration
+    // order. `deferredList` is pushed newest-last as each provide-method fires
+    // (`transactionalMethod`), so it must be drained newest-FIRST — exactly
+    // like the activation-body path, where cordis unwinds its disposer stack
+    // LIFO. On a COMMIT order is immaterial (every entry no-op discharges);
+    // on an ABORT two inverses whose
+    // paths OVERLAP must undo newest-first or a FIFO replay leaves residue or
+    // DESTROYS pre-session data — every stdlib/fs.rvl inverse is idempotent-
+    // and-total, so the oldest inverse runs first, no-ops, and the newer one
+    // undoes into the hole (G7, 243 §2). Mirrors backends/python/runtime.py.
+    const deferred = [...this.deferredList].reverse()
+    this.deferredList = []
+    for (const entry of deferred) {
+      if (this.committed) {
+        entry.discharged = true
+        entry.undo = null
+        entry.witness = null
+        continue
+      }
+      entry.replayed = true
+      const undo = entry.undo
+      const witness = entry.witness
+      entry.undo = null
+      entry.witness = null
+      if (undo === null) continue
+      try {
+        undo(witness)
+      } catch (err) {
+        this.pushResidue(
+          'restore-residue',
+          entry.crossing,
+          { call: entry.undoMethod, args: [witness], phase: 1 },
+          err,
+        )
+      }
+    }
+    // item 247 (method-body compensate remainder): dispose the method-registered COMPENSATION entries now that the
+    // commit-vs-abort bit is settled — the compensation analog of the deferred
+    // transactional loop above, and the method-body analog of the activation-
+    // body `compensation` (item 247). On a COMMIT each DISCHARGES (never runs —
+    // the emission was the deliverable; its seq already joined the discharge
+    // record above). On an ABORT each is ENQUEUED onto `pending`, never fired
+    // inline here, so `begin`'s post-unwind `runPhase2` fires it in Phase 2
+    // strictly AFTER every Phase-1 inverse (the deferred transactional above AND
+    // the activation-body disposers cordis unwinds between `drain` and `begin`).
+    // Enqueued newest-first so Phase 2 runs the newest compensation first (LIFO),
+    // matching the activation-body path.
+    if (!this.committed) {
+      const deferredComp = [...this.deferredCompensations].reverse()
+      for (const entry of deferredComp) this.pending.push(entry)
+    }
+    this.deferredCompensations = []
+  }
+
+  private runPhase2(): void {
+    const total = this.budgetMs
+    const deadline = total === 0 ? Number.POSITIVE_INFINITY : Date.now() + total
+    // LIFO within Phase 2: `pending` is already in exactly that order — each
+    // compensation pushed itself in the order cordis called its disposer,
+    // which is cordis' own LIFO position order (its disposal chain visits
+    // yields newest-first) — no extra reverse needed.
+    for (const entry of this.pending) {
+      if (Date.now() >= deadline) {
+        this.pushResidue(
+          'compensation-residue', entry.crossing,
+          { call: null, args: entry.args, phase: 2 }, 'deadline-expired', 'not-attempted',
+        )
+        continue
+      }
+      // `perCallMs` is read (env parity across tiers) but cannot cut off an
+      // in-flight synchronous call on this tier — see the module doc above.
+      void this.perCallMs
+      try {
+        entry.run()
+      } catch (err) {
+        this.pushResidue(
+          'compensation-residue', entry.crossing,
+          { call: entry.methodName, args: entry.args, phase: 2 }, err,
+        )
+      }
+    }
+    this.pending = []
+  }
+
+  // -- introspection ---------------------------------------------------------
+
+  /** The WAL discharge-descriptors built at registration, in registration
+   * (`seq`) order — see `DischargeDescriptor`'s docstring. */
+  descriptors(): DischargeDescriptor[] {
+    return [...this.descriptorList]
+  }
+
+  /** The discharge record written when `drain` ran (a clean commit), or
+   * `null` before that or when nothing needed discharging. */
+  dischargeRecord(): DischargeRecord | null {
+    return this.dischargeRec
+  }
+
+  /** The merged residue envelope (docs/design/teardown-contract.md, "The
+   * merged residue schema"). Only meaningful once this frame's `ctx.effect`
+   * has finished disposing after an ABORT — nothing in the commit-path
+   * pseudocode can add a residue record, so `outstanding` is always empty
+   * after a clean unload. */
+  report(): AbortReport {
+    const outstanding = [...this.residue]
+    const worldRemaining = [...new Set(outstanding.map((r) => r.referent))]
+    return { clean: outstanding.length === 0, outstanding, worldRemaining, proof: this.proof(outstanding) }
+  }
+
+  private proof(outstanding: ResidueRecord[]): string {
+    if (outstanding.length === 0) {
+      return `${this.name}: every Phase-1 inverse and Phase-2 compensation completed; no residue.`
+    }
+    const counts: Record<string, number> = {}
+    for (const r of outstanding) counts[r.kind] = (counts[r.kind] ?? 0) + 1
+    const parts = Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(', ')
+    return `${this.name}: ${outstanding.length} residue record(s) (${parts}) — never claiming a ` +
+      "dead closure ran; see 'outstanding' for what to check by hand."
   }
 }
 

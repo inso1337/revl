@@ -45,11 +45,18 @@ def test_v3_ident_renames_go_keywords():
 
 def test_keyword_decls_and_uses_are_consistent():
     out = emit.emit(compile_source(PROGRAM))
-    assert "func_ string" in out                  # struct field + param
-    assert "range_ string" in out
+    # Params and locals that collide with a Go keyword get the `_` suffix at the
+    # declaration site and every use (item 165).
+    assert "func_ string" in out                  # keyword-named param
     assert "range_ := func_" in out               # local decl from keyword param
     assert "return range_" in out
-    assert "return b.func_" in out                # field access
+    # Record struct fields are EXPORTED (UpperCamel) with a `json:"<revl>"` tag
+    # preserving the source name (item 390); capitalizing sidesteps the keyword
+    # set, so `func`/`range` become `Func`/`Range` at the declaration and every
+    # access, keeping record round-trips byte-consistent across tiers.
+    assert 'Func string `json:"func"`' in out     # struct field decl
+    assert 'Range string `json:"range"`' in out
+    assert "return b.Func" in out                 # field access uses the exported spelling
     assert "return probe(x, x)" in out            # cross-fn call
     # no bare reserved word survives as an identifier
     assert "func func(" not in out and "b.func\n" not in out

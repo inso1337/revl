@@ -77,7 +77,7 @@ def _eval_probe(expr: str, namespace: dict):
 
 def _load_module(files: list[str]) -> types.ModuleType:
     from revl.compiler import compile_files  # noqa: PLC0415
-    import emit  # noqa: PLC0415; backend dir already on sys.path
+    import emit  # noqa: PLC0415  backend dir already on sys.path
 
     source = emit.emit(compile_files(files))
     module = types.ModuleType("revl_proc_mod")
@@ -127,7 +127,8 @@ async def run(spec: dict) -> None:
         target = info.get("endpoint") or info["socket"]
         proxy = bridge.proxy_component(key, info["methods"], target, module,
                                        deadline=info.get("deadline"),
-                                       deadlines=info.get("deadlines"))
+                                       deadlines=info.get("deadlines"),
+                                       async_methods=info.get("async_methods"))
         clients[key] = proxy["_client"]
         fiber = root.plugin(proxy)
         await fiber
@@ -176,7 +177,8 @@ async def run(spec: dict) -> None:
         # served endpoint is a UDS (`socket`) or a network TCP+mTLS seam
         # (`endpoint`); over TCP the provider demands the consumer's cert (mTLS).
         serve_target = serve.get("endpoint") or serve["socket"]
-        server = await bridge.serve(root, serve.get("methods") or serve["keys"], serve_target)
+        server = await bridge.serve(root, serve.get("methods") or serve["keys"], serve_target,
+                                    module=module)
         log("serve", ", ".join(serve["keys"]),
             f"-> {bridge.Endpoint.from_spec(serve_target).describe()}")
 
@@ -243,7 +245,7 @@ async def run(spec: dict) -> None:
         try:
             await fiber.dispose()
             await _flush()
-        except Exception:  # noqa: BLE001; teardown is best-effort
+        except Exception:  # noqa: BLE001  teardown is best-effort
             pass
 
     await teardown_lifo(fibers, _dispose)

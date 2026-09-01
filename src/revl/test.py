@@ -371,7 +371,18 @@ def run_go(ir: dict) -> tuple[str, str]:
             # the module is pinned and cached by the placement runner / the
             # conformance validator; an offline resolve is the honest gate
             env["GOPROXY"] = "off"
-        result = subprocess.run([go, "test", "./..."], cwd=tmp,
+        # item 314: run with `-vet=off`. `go test` invokes `go vet` by
+        # default, whose `bools` analyzer rejects tautological boolean
+        # operands (`a || a`, `a && a`, `false || false`) as "redundant or"/
+        # "redundant and". revl LEGITIMATELY admits redundant boolean
+        # expressions — the py reference evaluates them and every other tier
+        # runs them — so a program admitted by the frontend is failed on go
+        # only because a go-specific STYLE lint fires on machine-generated
+        # code the compiler itself accepts. The cross-tier contract is "the
+        # emitter's output runs", not "it passes go vet's style rules";
+        # `-vet=off` restores that contract without distorting revl's
+        # semantics to satisfy a linter (architect decision, roadmap 314).
+        result = subprocess.run([go, "test", "-vet=off", "./..."], cwd=tmp,
                                 capture_output=True, text=True, timeout=600,
                                 env=env)
         output = (result.stdout + result.stderr).strip()
@@ -748,6 +759,80 @@ def sweep_command(ir: dict) -> int:
     return 0
 
 
+_CROSS_TIER_CAP = int(os.environ.get("REVL_SWEEP_CAP", "0")) or None
+
+
+def cross_tier_sweep_command(ir: dict) -> int:
+    """`revl test --backend all --sweep`: the fault sweep on every tier.
+
+    Inject the same fault at the same step on every runtime whose toolchain is
+    present (py via the real activation interrogation, the compiled/hosted
+    tiers via their `--once` boot -> LIFO teardown -> no-residue proof), assert
+    each is residue-free at every fault point, and assert the tiers AGREE. A
+    tier whose toolchain is absent — or whose `--once` runner cannot yet drive
+    a *faulting* activation to a residue proof — is a loud skip with a reason,
+    never a false green (docs/fault-tests.md §10).
+
+    Heavy compiled tiers pay an emit+build per fault point, so set
+    ``REVL_SWEEP_CAP=N`` to take a representative corpus (first/middle/last step
+    per component); a full CI run leaves it unset and sweeps every step.
+    """
+    from .fault import cross_tier_sweep  # noqa: PLC0415 — lazy: pulls the tier runners
+
+    if not (ir.get("components") or []):
+        print("[sweep-all] no components to sweep")
+        return 0
+    failures, dossier = cross_tier_sweep(ir, cap=_CROSS_TIER_CAP)
+    if failures:
+        counts = dossier["counts"]
+        print(f"[sweep-all] {counts['tiersLeakingResidue']} tier(s) left "
+              f"residue, {counts['disagreements']} cross-tier disagreement(s)",
+              file=sys.stderr)
+        return 1
+    if dossier["counts"]["executed"] == 0:
+        # every tier loud-skipped: a skip is never a pass, but (like the rest
+        # of the cross-tier suite) a toolchain-absent environment exits 0 so a
+        # laptop without runtimes is not a red build.
+        print("[sweep-all] skipped: no tier could execute the sweep "
+              "(see the reasons above)")
+    return 0
+
+
+def schedule_command(ir: dict, seed=None, seeds: int = None) -> int:
+    """`revl test --schedule-seed <S>` / `--schedule-seeds <N>`: deterministic
+    concurrency / schedule testing (roadmap item 295, docs/design/295-schedule-
+    testing.md).
+
+    A `fault test` proves A8/R4 at one failure *point*; the fault sweep sweeps
+    every point. This sweeps every *interleaving*: a seeded scheduler drives the
+    composition through many orderings of its concurrent lifecycle steps and,
+    for each, checks residue-free / no-deadlock / stable-final-state / correct
+    teardown / no-use-after-withdrawal. Like the sweep it activates components
+    for real on the py reference tier, so a missing cordis-py runtime is a *skip
+    with a reason*, never a pass.
+    """
+    if not (ir.get("components") or []):
+        print("[schedule] no components to schedule")
+        return 0
+    if not _cordis_available():
+        print("[schedule] skipped: schedule testing activates components for "
+              "real and needs the cordis-py runtime, which this interpreter "
+              "does not have\n"
+              "        set it up:  sh backends/python/setup.sh\n"
+              "        then rerun under that interpreter:  "
+              "backends/python/.venv/bin/python -m revl test --schedule-seeds 200")
+        return 0
+
+    from .schedule import run_schedules  # noqa: PLC0415 — lazy: needs cordis
+
+    failures, _dossier = run_schedules(ir, seed=seed, seeds=seeds)
+    if failures:
+        print(f"[schedule] {failures} interleaving(s) violated a property",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def mock_requires_command(ir: dict) -> int:
     """`revl test --mock-requires`: run every `lifecycle test` in mock world
     (docs/auto-mocks.md).
@@ -784,7 +869,8 @@ def mock_requires_command(ir: dict) -> int:
 
 
 def test_command(ir: dict, backend: str, sweep: bool = False,
-                 mock_requires: bool = False) -> int:
+                 mock_requires: bool = False, schedule_seed=None,
+                 schedule_seeds: int = None) -> int:
     """Run the document's `test` blocks on the chosen tier(s); exit code.
 
     With ``sweep`` set, run the exhaustive fault sweep instead (py tier only —
@@ -793,7 +879,17 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     With ``mock_requires`` set, run every `lifecycle test` in mock world — every
     unmet `requires` satisfied by a generated mock, zero real providers (py tier
     only; docs/auto-mocks.md).
+
+    With ``schedule_seed`` / ``schedule_seeds`` set, run schedule testing — the
+    seeded interleaving sweep (py tier only; roadmap item 295,
+    docs/design/295-schedule-testing.md).
     """
+    if schedule_seed is not None or schedule_seeds is not None:
+        if backend not in ("py", "all"):
+            print(f"[schedule] note: schedule testing runs on the py reference "
+                  f"tier only, not `{backend}` (docs/design/295-schedule-testing.md)")
+        return schedule_command(ir, seed=schedule_seed, seeds=schedule_seeds)
+
     if mock_requires:
         if backend not in ("py", "all"):
             print(f"[mock-requires] note: mock world runs on the py reference "
@@ -801,9 +897,12 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
         return mock_requires_command(ir)
 
     if sweep:
-        if backend not in ("py", "all"):
-            print(f"[sweep] note: the fault sweep runs on the py reference "
-                  f"tier only, not `{backend}` (docs/fault-tests.md)")
+        if backend == "all":
+            return cross_tier_sweep_command(ir)
+        if backend != "py":
+            print(f"[sweep] note: the single-tier fault sweep runs on the py "
+                  f"reference tier, not `{backend}` — use `--backend all "
+                  f"--sweep` to sweep every runtime (docs/fault-tests.md)")
         return sweep_command(ir)
 
     from .fault import prop_units, roundtrip_units  # noqa: PLC0415 — no cordis to find them

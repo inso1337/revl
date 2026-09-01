@@ -65,6 +65,17 @@ _STEP_EFFECT = "effect"
 _STEP_COMPENSATION = "compensation"
 _STEP_BOUNDARY = "boundary"
 
+# item 247 gap 2 (docs/design/247-compensate.md, Decision 2): the THREE audit
+# states a boundary crossing can be in, on the same G8 audit surface that today
+# tags a crossing compensated-vs-bare. `unresolved` is the third — a
+# compensation that was attached AND attempted AND did not land (the runtime's
+# `compensation-residue`). "Never silently swallowed" means this state is
+# enumerable here, not merely a growing in-memory list.
+STATE_BARE = "bare"                 # nothing attached — an honest irreversible crossing
+STATE_COMPENSATED = "compensated"   # an offset was attached and ran clean
+STATE_UNRESOLVED = "unresolved"     # an offset was attached, attempted, and failed
+COMPENSATION_STATES = (STATE_BARE, STATE_COMPENSATED, STATE_UNRESOLVED)
+
 _ASSUMPTION_EXTERN = (
     "extern host bodies are opaque: a `pure` or `acquire` extern whose host "
     "code actually crosses the boundary is invisible here. The compiler "
@@ -193,6 +204,16 @@ class Composition:
                 if target is not None:
                     out.append({"scope": target, "key": call["key"],
                                 "method": call["method"]})
+            # the spawn/instance seam: a `s.<key>.<method>(...)` call resolves
+            # to the spawned component's own provide-method scope directly (the
+            # template component keeps its scopes even though it is excluded
+            # from the static composition), so the reach fold attributes the
+            # spawned emission's class and capabilities to the caller the same
+            # way a `req` crossing does (item 246).
+            for call in scope["facts"]["spawnCalls"]:
+                if call["scope"] in self.scopes:
+                    out.append({"scope": call["scope"], "key": call["key"],
+                                "method": call["method"]})
             self.edges[scope_id] = out
 
     # -- graph --------------------------------------------------------
@@ -221,12 +242,41 @@ class Composition:
         return [key for key in entry.get("inject") or []
                 if self.provider(component, key) is None]
 
+    def value_widens(self, nodes) -> bool:
+        """Whether `nodes` reference an emitting callable in VALUE position (an
+        arrow-typed argument, a stored binding). This is the `*` first-class
+        widening the G4 fixed point applies (`emission_analysis._emitting_
+        capabilities`): an emitting callable handed on as a value escapes this
+        scope and may be dispatched by whoever receives it, so the boundary it
+        may reach cannot be named (`*`) and can never be proven reversible.
+
+        It is exactly the reach the name-only extern walk misses and the
+        emitting-fn fixed point catches. Both the auto-approve `ClassMap`
+        (which raises a class-(c) `*` crossing) and the erase report consult
+        THIS one detection, so the two can never disagree about whether a scope
+        widens (item 414: the erase report was a second class fold blind to it)."""
+        from .lower import _calls_in
+
+        found: set = set()
+        values: set = set()
+        _calls_in(nodes, found, values=values)
+        return bool(values & self.emitting_fns)
+
     # -- per-scope boundary facts -------------------------------------
 
     def _facts(self, comp: dict, scope: dict) -> dict:
         nodes = scope["nodes"]
         emissions: dict = {}
         calls: dict = {}
+        # provision-method calls off a spawn handle (`s.<key>.<method>(...)`).
+        # These cross the spawn/instance seam, not the requires-wired service
+        # seam, so they carry no `req` target and are invisible to the `req`
+        # detection below. They are recorded separately here purely so the
+        # edge builder can wire the reach fold to the spawned component's
+        # matching provide-method scope (item 246): without this, an emission
+        # reached through a supervised spawn handle folds as class none at the
+        # caller and fires with no approval prompt.
+        spawn_calls: dict = {}
         awaits = 0
         compensated = 0
 
@@ -248,6 +298,13 @@ class Composition:
                 calls[(key, method)] = bool(spec.get("emission"))
                 if spec.get("emission"):
                     emissions.setdefault((key, method), False)
+            inst = self._spawn_call_target(node)
+            if inst is not None:
+                target_component, key, method, service = inst
+                sid = f"{target_component}:{key}.{method}"
+                decl = (((self.services.get(service) or {}).get("methods") or {})
+                        .get(method) or {})
+                spawn_calls[(sid, key, method)] = bool(decl.get("emission"))
 
         # host code: externs called directly, plus everything the pure fns
         # this scope calls reach transitively (lower/`__main__` own that walk)
@@ -270,15 +327,53 @@ class Composition:
                 {"kind": "extern", "name": name,
                  "class": (self.externs.get(name) or {}).get("class"),
                  "emission": (self.externs.get(name) or {}).get("class") == "emission",
+                 # item 245: the deferred flag rides the fact so the G8 crossing
+                 # surface can tag class (b) without re-deriving it.
+                 "deferred": bool((self.externs.get(name) or {}).get("deferred")),
                  "backends": sorted((self.externs.get(name) or {}).get("bodies") or {}),
                  "through": sorted(through) or None}
                 for name, through in sorted(host.items())
             ],
             "calls": [{"key": key, "method": method, "emission": flag}
                       for (key, method), flag in sorted(calls.items())],
+            # spawn-seam edges the reach fold must follow (item 246). Not part
+            # of the `req` service seam and never serialized into a query
+            # result: consumed only by the edge builder in `__init__`.
+            "spawnCalls": [{"scope": sid, "key": key, "method": method,
+                            "emission": flag}
+                           for (sid, key, method), flag
+                           in sorted(spawn_calls.items())],
             "awaits": awaits,
             "compensated": compensated,
         }
+
+    def _spawn_call_target(self, node: dict):
+        """`(component, key, method, service)` if `node` is a provision-method
+        call read off a spawn handle (`s.<key>.<method>(...)`), else None.
+
+        A provision call does not lower to a `req`-target call: the pure
+        expression stratum lowers `s.<key>` to an `instance-get` node (with the
+        spawned `component`, the provision `key`, and the `service` the key
+        yields frozen inline by `lower._lower_instance_get`), and the trailing
+        `.<method>(...)` wraps it in a `field` callee. So the crossing is
+        reached through `callee`, not the `target` slot a required-service call
+        uses, and every `req`-only predicate on the reach surface misses it.
+        This reads the frozen `instance-get` node lower already produced rather
+        than re-deriving the spawn graph (mirrors `lower._instance_get_call`)."""
+        if node.get("kind") != "call":
+            return None
+        callee = node.get("callee")
+        if not (isinstance(callee, dict) and callee.get("kind") == "field"):
+            return None
+        recv = callee.get("target")
+        if not (isinstance(recv, dict) and recv.get("kind") == "instance-get"):
+            return None
+        component = recv.get("component")
+        key = recv.get("key")
+        method = callee.get("name")
+        if component is None or key is None or method is None:
+            return None
+        return (component, key, method, recv.get("service"))
 
     def _method_spec(self, comp: dict, key, method) -> dict:
         service = (comp.get("requires") or {}).get(key)
@@ -868,6 +963,120 @@ def emitted_between(timeline, frm: int, to: int, component: str = None) -> dict:
         stepsInWindow=windowSteps,
         components=sorted({c["component"] for c in crossings if c["component"]}),
         uncompensated=[c for c in crossings if not c["compensated"]],
+    )
+
+
+def classify_compensation(crossings: list, residue: list = None) -> dict:
+    """Partition boundary crossings into the three audit states (item 247 gap 2,
+    docs/design/247-compensate.md Decision 2), overlaying the runtime's
+    compensation residue on the static/recorded compensated-vs-bare tag.
+
+    `crossings` — dicts each with a `component` and a `compensated` bool (an
+    offset was ATTACHED at compile time / in the recording). `residue` — the
+    `compensation-residue` records from an abort or `revl recover` (each names
+    its `component`; a best-effort offset that raised or was skipped).
+
+    A crossing is:
+
+      * ``bare`` — no offset attached (an honest irreversible crossing);
+      * ``compensated`` — an offset attached and no residue accounts for it;
+      * ``unresolved`` — an offset attached but a residue record shows it did
+        not land.
+
+    Residue is correlated to a compensated crossing by ``component`` (the
+    granularity the runtime residue and the crossing record share — the residue
+    names the OFFSET call, the crossing names the EMISSION, so a per-crossing
+    identity join is not available without threading the WAL seq through the
+    recording; that is left as a follow-up). Within a component the residue
+    records absorb its compensated crossings newest-first (Phase-2 LIFO). Any
+    residue with no compensated crossing to attach to — the common case when the
+    caller passes residue without a recording — is surfaced as a standalone
+    ``unresolved`` fact, so an operator always SEES it and it is never dropped.
+
+    Pure and byte-inert when ``residue`` is empty: every compensated crossing
+    stays ``compensated`` and the ``unresolved`` list is empty."""
+    residue = list(residue or [])
+    by_component: dict = {}
+    for record in residue:
+        by_component.setdefault(record.get("component"), []).append(record)
+
+    bare, compensated, unresolved = [], [], []
+    for crossing in crossings:
+        if not crossing.get("compensated"):
+            bare.append({**crossing, "residueState": STATE_BARE})
+            continue
+        pending = by_component.get(crossing.get("component"))
+        if pending:
+            record = pending.pop(0)
+            unresolved.append({**crossing, "residueState": STATE_UNRESOLVED,
+                               "residue": record})
+        else:
+            compensated.append({**crossing, "residueState": STATE_COMPENSATED})
+
+    # residue with no compensated crossing to attach to — still enumerated, so
+    # nothing is silently swallowed (the residue-only surfacing path).
+    unattached = [r for group in by_component.values() for r in group]
+    for record in unattached:
+        unresolved.append({"component": record.get("component"),
+                           "compensated": True, "residueState": STATE_UNRESOLVED,
+                           "residue": record, "crossing": None})
+    return {
+        "bare": bare,
+        "compensated": compensated,
+        "unresolved": unresolved,
+        "states": {STATE_BARE: len(bare),
+                   STATE_COMPENSATED: len(compensated),
+                   STATE_UNRESOLVED: len(unresolved)},
+    }
+
+
+def compensation_audit(timeline=None, residue: list = None,
+                       component: str = None) -> dict:
+    """The three-state compensation audit (item 247 gap 2). Enumerates every
+    recorded emission crossing as ``bare`` / ``compensated`` / ``unresolved``,
+    overlaying the runtime `compensation-residue` an abort (or `revl recover`)
+    produced. The one place an operator/harness asks "did every offset I owed
+    actually land?" — and the `unresolved` list answers when one did not.
+
+    `timeline` is an optional replay recording (as `emitted_between` reads);
+    `residue` is the `compensationResidue` list off a session-boundary report.
+    Either may be omitted: with only residue, this is the standalone
+    unresolved-fact surface (still complete — nothing is swallowed); with only a
+    timeline, it degrades to the pre-247 compensated-vs-bare split with an empty
+    `unresolved`."""
+    crossings = []
+    for tl in _timelines_of(timeline):
+        name = tl.get("component")
+        if component is not None and name != component:
+            continue
+        for step in tl.get("steps") or []:
+            if step.get("kind") != _STEP_EMISSION:
+                continue
+            detail = step.get("detail") or {}
+            crossings.append({
+                "component": name, "step": step.get("index"),
+                "label": step.get("label"),
+                "key": detail.get("key"), "method": detail.get("method"),
+                "compensatedBy": step.get("compensatedBy"),
+                "compensated": step.get("compensatedBy") is not None,
+            })
+    partition = classify_compensation(crossings, residue)
+    return _result(
+        "compensation-audit",
+        "which boundary crossings are bare, compensated, or left unresolved?",
+        EXACT,
+        "a crossing is bare (no offset), compensated (an offset attached and "
+        "ran clean), or unresolved (an offset attached but a best-effort "
+        "residue shows it did not land). Compensation is not inversion (paper "
+        "§6.1): even a compensated crossing already left the system, and an "
+        "unresolved one is still out there — this enumerates it so it is never "
+        "silently swallowed.",
+        [_ASSUMPTION_RECORDED, _ASSUMPTION_RECORDING_SCOPE],
+        mode=MODE_HISTORICAL,
+        component=component,
+        **partition,
+        crossings=len(crossings),
+        residueCount=partition["states"][STATE_UNRESOLVED],
     )
 
 

@@ -48,6 +48,14 @@ __all__ = ["emit", "EmitError"]
 
 CRATE = "cordis4j"
 
+# item 322 Slice 2: record mode. When True, a witnessed transactional step also
+# writes a durable discharge-descriptor to the java WAL sink
+# (`revlRecordTransactional`) and the recording preamble (the FileChannel.force
+# fsync sink) is emitted. Default False -> byte-identical output (the java
+# golden oracle + the selfhost mirror both run with record off, so neither
+# shifts). Mirrors backends/go/emit.py's `_RECORD_MODE`.
+_RECORD_MODE = False
+
 TYPE_MAP = {
     "Str": "String",
     "Int": "long",
@@ -360,6 +368,29 @@ def _string(value: str) -> str:
     return json.dumps(value)
 
 
+def _call_label(node: object) -> str:
+    """Best-effort human label for a residue record's `crossing`/`attempted`
+    fields (docs/design/teardown-contract.md, 'The merged residue schema').
+    Baked in as a Java string literal at EMIT TIME — the emitter already
+    knows the call's name, so unlike the py reference's bytecode-sniffing
+    fallback (`backends/python/runtime.py`, `_named_call_method`) this needs
+    no runtime introspection. Never raises: an unrecognized shape degrades to
+    a generic label rather than failing emission over a diagnostic string."""
+    if not isinstance(node, dict):
+        return "?"
+    kind = node.get("kind")
+    if kind == "fn":
+        return str(node.get("name") or "?")
+    if kind == "call":
+        if "callee" in node:
+            callee = node.get("callee") or {}
+            return str(callee.get("name") or "?")
+        return str(node.get("method") or "?")
+    if kind == "host":
+        return str(node.get("fn") or "?")
+    return "?"
+
+
 def _lit(value: object) -> str:
     if value is None:
         return "null"
@@ -379,6 +410,11 @@ _JAVA_V3_BIN_OPS = {
     "<": "<", ">": ">", "<=": "<=", ">=": ">=",
     "+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
     "&&": "&&", "||": "||",
+    # Int32 bitwise operators (item 366, docs/arithmetic.md). All native on a
+    # Java `int` and none trap: `& | ^` are the bit ops; a `<<`/`>>` on `int`
+    # masks the shift count to its low 5 bits (JLS 15.19), which is exactly the
+    # spec's mod-32 rule, and `>>` is the arithmetic (sign-extending) shift.
+    "&": "&", "|": "|", "^": "^", "<<": "<<", ">>": ">>",
 }
 
 _V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
@@ -493,6 +529,10 @@ class _V3Ctx:
         self.types = types or {}
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # item 243/318: witnessed externs by name, so a method/activation body's
+        # effect step can be recognised as a transactional crossing. Empty for
+        # every non-witnessed document, so their emission stays byte-identical.
+        self.witnessed = _witnessed_externs(externs)
         # Every component in the document, keyed by name, so a `spawn`
         # acquisition can resolve its target template's config layout (the
         # plugin-constructor argument order) and provided keys (the services to
@@ -596,6 +636,11 @@ def _v3_builtin(method: object, target: str, args: list[str],
     if method == "charAt":
         return f"revlCharAt(String.valueOf({target}), {args[0]})"
     if method == "charCodeAt":
+        return f"revlCharCodeAt(String.valueOf({target}), {args[0]})"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at code-point index i, via the same code-point-indexed
+    # helper as charCodeAt.
+    if method == "codepoint_at":
         return f"revlCharCodeAt(String.valueOf({target}), {args[0]})"
     if method == "concat":
         return f"revlConcat({target}, {args[0]})"
@@ -791,7 +836,10 @@ def _emit_stdlib_helpers() -> list[str]:
 
 
 def _uses_stdlib(ir: dict) -> bool:
-    """True when any builtin/len node appears anywhere in the document."""
+    """True when any builtin/len node appears anywhere in the document — or a
+    sized `.length` field (item 104): a component-position property-form
+    `.length` stays a `field` node marked `sized_length` and emits
+    `revlLength(...)`, so that helper must be emitted for it too."""
     found = False
 
     def walk(node) -> None:
@@ -799,7 +847,8 @@ def _uses_stdlib(ir: dict) -> bool:
         if found:
             return
         if isinstance(node, dict):
-            if node.get("kind") in ("builtin", "len"):
+            if node.get("kind") in ("builtin", "len") or (
+                    node.get("kind") == "field" and node.get("sized_length")):
                 found = True
                 return
             for value in node.values():
@@ -1261,6 +1310,10 @@ def _expr(
         operand = _expr(node.get("operand"), ctx, rename, env)
         if node.get("op") == "!":
             return f"(!{operand})"
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): Java's `~` on an `int`. A bit
+            # op, so it never traps.
+            return f"(~{operand})"
         if node.get("op") == "-":
             if node.get("operands") in ("Int", "Int32"):
                 # negating Long.MIN / Integer.MIN_VALUE overflows; Math.negateExact
@@ -1275,6 +1328,12 @@ def _expr(
         target = _expr(target_node, ctx, rename, env)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value in
+            # a component position — the code-point (Str) / element (List) count
+            # via `_v3_len`, the same as the `len` node, NOT a record member
+            # access (which would not resolve on a `String`).
+            return _v3_len(target)
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":
@@ -1596,6 +1655,23 @@ def _let_keyword(node: dict, ctx: _V3Ctx | None = None) -> str:
     return "var" if node.get("mutable") else "final var"
 
 
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is
+# enforced whole-IR in the frontend; this is the cheap per-emitter guard. It is
+# most load-bearing here: `_emit_setup_stmt` (the activation/setup tier) emits
+# loop steps, so a leak into an activation body would otherwise compile silently.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
@@ -1625,17 +1701,23 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "while":
+        _guard_frame_neutral_loop(node.get("body"))
         out.append(f"{pad}while ({_expr(node['cond'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "for":
+        _guard_frame_neutral_loop(node.get("body"))
         bind = _ident(node.get("bind"), "loop binding")
         ctx.arrows.pop(bind, None)
         out.append(f"{pad}for (var {bind} : {_expr(node['iterable'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
+    elif step == "break":
+        out.append(f"{pad}break;")
+    elif step == "continue":
+        out.append(f"{pad}continue;")
     elif step == "let_pattern":
         value = _expr(node.get("value"), ctx)
         tmp = f"__revl_destructure_{id(node)}"
@@ -1685,6 +1767,12 @@ def _uses_builtin_result(ir: dict) -> bool:
             return any(walk(v) for v in node)
         return False
 
+    # item 243: a witnessed extern returns `Result[Witness, Error]` and its
+    # emitted call site branches on `Ok` to register the transactional entry,
+    # so RevlResult must be present even when no surface `match`/`adt` names
+    # it (mirrors backends/python/emit.py's identical witnessed gate).
+    if any(ext.get("class") == "witnessed" for ext in ir.get("externs") or []):
+        return True
     return walk(ir.get("functions")) or walk(ir.get("tests")) or walk(ir.get("components"))
 
 
@@ -1807,8 +1895,90 @@ def _emit_v3_types(types: dict) -> list[str]:
     return lines
 
 
+# item 378 Stage 5: class-level config seam for document-global config externs.
+# Mirrors the py tier's `_REVL_EXTERN_CONFIG` map + fail-loud
+# `_revl_extern_config` helper: a mutable static config map, keyed by extern
+# name, that a composition driver fills at plug time, and a lookup that THROWS,
+# naming the extern, when a required (non-defaulted) field is absent, instead
+# of handing the body a null that fails opaquely later. A defaults-only extern
+# still resolves to its defaults driver-free. Fully-qualified `java.util.*` so
+# the seam adds no import; open-coded joins so it needs no `String.join`.
+# Emitted only when a config extern is present, so a no-config program is
+# byte-identical.
+_JAVA_EXTERN_CONFIG_SCAFFOLD = [
+    "static final java.util.Map<String, java.util.Map<String, Object>> "
+    "_REVL_EXTERN_CONFIG = new java.util.HashMap<>();",
+    "",
+    "static java.util.Map<String, Object> _revlExternConfig(",
+    "        String name, String[] required, "
+    "java.util.Map<String, Object> defaults) {",
+    "    java.util.Map<String, Object> out = new java.util.HashMap<>(defaults);",
+    "    java.util.Map<String, Object> cfg = _REVL_EXTERN_CONFIG.get(name);",
+    "    if (cfg == null) {",
+    "        if (required.length > 0) {",
+    "            String msg = \"\";",
+    "            for (int i = 0; i < required.length; i++) {",
+    "                if (i > 0) msg += \", \";",
+    "                msg += required[i];",
+    "            }",
+    "            throw new RuntimeException(\"config extern `\" + name +",
+    "                \"` called before plug-time configuration was installed "
+    "(required config: \" +",
+    "                msg + \"); configure it through the run driver's config "
+    "seam\");",
+    "        }",
+    "        return out;",
+    "    }",
+    "    String missing = \"\";",
+    "    int n = 0;",
+    "    for (String f : required) {",
+    "        if (!cfg.containsKey(f)) {",
+    "            if (n > 0) missing += \", \";",
+    "            missing += f;",
+    "            n++;",
+    "        }",
+    "    }",
+    "    if (n > 0) {",
+    "        throw new RuntimeException(\"config extern `\" + name +",
+    "            \"` called before plug-time configuration was installed "
+    "(missing required config: \" +",
+    "            missing + \")\");",
+    "    }",
+    "    out.putAll(cfg);",
+    "    return out;",
+    "}",
+    "",
+]
+
+
+def _java_extern_config_bind(ext: dict) -> str:
+    """The `_revl_config = ...` first-body line for a config extern, or None.
+    `_revl_config` is a `java.util.Map<String, Object>`; the verbatim @java body
+    reads a field as `(Cast) _revl_config.get("field")`, exactly as the py body
+    reads the resolved dict."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    name = ext.get("name")
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = {f["name"]: f["default"] for f in schema
+                if f.get("default") is not None}
+    req_lit = "new String[]{%s}" % ", ".join(_string(f) for f in required)
+    if defaults:
+        pairs = ", ".join(f"{_string(k)}, {_lit(v)}" for k, v in defaults.items())
+        def_lit = f"java.util.Map.<String, Object>of({pairs})"
+    else:
+        def_lit = "java.util.Map.<String, Object>of()"
+    return (f"java.util.Map<String, Object> _revl_config = _revlExternConfig("
+            f"{_string(name)}, {req_lit}, {def_lit});")
+
+
 def _emit_v3_externs(externs: list) -> list[str]:
     lines: list[str] = []
+    # item 378 Stage 5: emit the config seam once, before the externs, when any
+    # extern carries a config schema (byte-identical when none do).
+    if any(ext.get("config") for ext in externs):
+        lines.extend(_JAVA_EXTERN_CONFIG_SCAFFOLD)
     for ext in externs:
         name = _fn_name(ext.get("name"))
         params = ", ".join(
@@ -1823,6 +1993,11 @@ def _emit_v3_externs(externs: list) -> list[str]:
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         lines.append(f"public static {ret} {name}({params}) {{")
+        # item 378 Stage 5: a config extern binds `_revl_config` as the first
+        # body line; None for a no-config extern (byte-identical body splice).
+        config_bind = _java_extern_config_bind(ext)
+        if config_bind:
+            lines.append("    " + config_bind)
         body = bodies["java"].strip()
         if body:
             for line in body.splitlines() or [""]:
@@ -1887,6 +2062,11 @@ class _Env:
         self.name = component["name"]
         self.reqs: dict[str, str] = dict(component.get("requires") or {})
         self.provides: dict[str, str] = dict(component.get("provides") or {})
+        # item 173: routed requires (item 162 `routes` IR): key -> {"realms":
+        # [...], "strategy": ...}. A routed key resolves per named realm through
+        # an emitted router class, never a single `ctx.get(...)` handle. Empty
+        # for every routes-less component.
+        self.routes: dict[str, dict] = dict(component.get("routes") or {})
 
 
 def _format_java(template: str, args: list[str]) -> str:
@@ -1988,7 +2168,13 @@ def _emit_map_runtime() -> list[str]:
         "// The value type is generic — each site's `Map.create()` pins `V`",
         "// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).",
         "public static final class Map<V> {",
-        "    private final java.util.HashMap<String, V> values = new java.util.HashMap<>();",
+        "    // item 397: a ConcurrentHashMap, not a bare HashMap. The tier's",
+        "    // placement runner serves each bridge connection on its own thread,",
+        "    // so the former unsynchronized HashMap was not memory-safe under",
+        "    // concurrent put; migrating the backing class makes insert/remove/get",
+        "    // thread-safe AND gives insert_if_absent an atomic putIfAbsent.",
+        "    private final java.util.concurrent.ConcurrentHashMap<String, V> values =",
+        "        new java.util.concurrent.ConcurrentHashMap<>();",
         "    private Map() {}",
         "    // revl `Map.new()` — renamed: `new` is a Java reserved word.",
         "    public static <V> Map<V> create() {",
@@ -1999,6 +2185,15 @@ def _emit_map_runtime() -> list[str]:
         "    }",
         "    public void insert(String key, V value) {",
         "        values.put(key, value);",
+        "    }",
+        "    // The atomic compare-and-set (item 397): ConcurrentHashMap.putIfAbsent",
+        "    // is a single atomic operation over the test AND the insert. It returns",
+        "    // the previous value (null when absent), so a null return means this",
+        "    // call inserted. Under N concurrent callers, exactly one sees null.",
+        "    // (ConcurrentHashMap forbids null values; revl host inserts never pass",
+        "    // null, and `get` already wraps absence in Optional.)",
+        "    public boolean insert_if_absent(String key, V value) {",
+        "        return values.putIfAbsent(key, value) == null;",
         "    }",
         "    public void remove(String key) {",
         "        values.remove(key);",
@@ -2306,7 +2501,8 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
             elem = _map_value_expr_type(args[0], var_types, env, functions, v3_ctx)
             if elem is not None:
                 return f"List[{elem}]"
-        if method in ("length", "charCodeAt", "indexOf", "to_int"):
+        if method in ("length", "charCodeAt", "codepoint_at", "indexOf",
+                      "to_int"):
             return "Int"
         if method in ("charAt", "join", "repeat", "to_str", "slice"):
             return "Str"
@@ -2385,11 +2581,29 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
     return None
 
 
+# Map verbs that write a value at arg[1]; each pins the host Map's value type V.
+# Inferring V from ANY writer (not the literal name "insert") lets a CAS-only
+# writer (`insert_if_absent`, item 397) pin a concrete V instead of the Str
+# default (item 402).
+_MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+# item 397: the compare-and-set host verb whose bound result is a `boolean` and
+# whose site-spelled undo is registered only when the CAS actually inserted.
+_MAP_CAS_VERBS = ("insert_if_absent",)
+
+
+def _is_map_cas(acquire) -> bool:
+    """Whether a lowered acquisition node is a result-guarded map CAS."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
                       functions: list, v3_ctx: _V3Ctx | None,
                       candidates: list[str]) -> None:
-    """Collect candidate value types from `bind.insert(k, v)` anywhere in an
-    expression; recurses into sub-expressions. Handles both the v1 call shape
+    """Collect candidate value types from any map value-writing call
+    (`insert`, `insert_if_absent`, ...) on `bind` anywhere in an expression;
+    recurses into sub-expressions. Handles both the v1 call shape
     (`target`/`method`) and the 2.0 shape (`callee` as a field access)."""
     if not isinstance(node, dict):
         return
@@ -2397,7 +2611,7 @@ def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
         target = node.get("target") or {}
         if (target.get("kind") in ("name", "var")
                 and (target.get("id") or target.get("name")) == bind
-                and node.get("method") == "insert"):
+                and node.get("method") in _MAP_VALUE_WRITERS):
             args = node.get("args") or []
             if len(args) >= 2:
                 t = _map_value_expr_type(args[1], var_types, env, functions, v3_ctx)
@@ -2408,7 +2622,7 @@ def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
             ct = callee.get("target") or {}
             if (ct.get("kind") in ("name", "var")
                     and (ct.get("id") or ct.get("name")) == bind
-                    and callee.get("name") == "insert"):
+                    and callee.get("name") in _MAP_VALUE_WRITERS):
                 args = node.get("args") or []
                 if len(args) >= 2:
                     t = _map_value_expr_type(args[1], var_types, env, functions, v3_ctx)
@@ -2587,6 +2801,12 @@ def _contains_expr(node: object) -> bool:
 def _component_needs_modern(component: dict) -> bool:
     if component.get("isolate") or component.get("intercept"):
         return True
+    # item 173: a routed require needs the modern path — its emitted router
+    # class and the per-realm resolution live there. (A routed component's
+    # provide method already calls the routed service, so it reaches modern via
+    # `_contains_expr` anyway; this makes the routing dependence explicit.)
+    if component.get("routes"):
+        return True
     for step in component.get("body") or []:
         if step.get("setup"):
             return True
@@ -2610,6 +2830,516 @@ def _component_needs_modern(component: dict) -> bool:
             if key in step and _contains_expr(step[key]):
                 return True
     return False
+
+
+def _witnessed_externs(externs: list | None) -> dict[str, dict]:
+    """Witnessed externs (item 243) by name, so a call site's `acquire` can
+    be recognised as a transactional effect and register its DECLARED
+    inverse into the two-phase teardown loop instead of a site-spelled undo.
+    Mirrors `backends/python/emit.py`'s `_ComponentEmitter.witnessed` table.
+    Empty for every program that declares no witnessed extern, so those
+    programs' bracket-only components are unaffected by this slice."""
+    return {
+        ext["name"]: ext for ext in (externs or [])
+        if ext.get("class") == "witnessed"
+    }
+
+
+def _witnessed_extern_for(acquire: object, witnessed: dict[str, dict]) -> dict | None:
+    """The witnessed extern descriptor a step's `acquire` calls, or None. A
+    component-step acquisition renders as an IR `fn` node (v1/component
+    dialect); matching its name against `witnessed` is how the emitter tells
+    a transaction from an ordinary bracket (see `_witnessed_externs`)."""
+    if not witnessed or not isinstance(acquire, dict):
+        return None
+    if acquire.get("kind") != "fn":
+        return None
+    return witnessed.get(acquire.get("name"))
+
+
+def _component_needs_frame(component: dict, witnessed: dict[str, dict]) -> bool:
+    """True if this component registers at least one `transactional` (item
+    243) or `compensation` (item 247) teardown entry — the two entry kinds
+    beyond the plain `bracket`, per docs/design/teardown-contract.md. Gates
+    the RevlFrame two-phase teardown loop so a component that only ever uses
+    plain `acquire`/`undo` brackets keeps emitting exactly as before (same
+    precedent as `_witnessed_externs`/243 Slice 2a's byte-identical rule,
+    extended to compensation): scanned recursively through `if`/`else` and
+    into `provide`-method bodies, where a method-time `emit ... compensate`
+    or `effect ... undo` shares the SAME per-activation accumulator (the
+    provided service instance carries the owning activation's `fx`/`frame`,
+    see `_emit_component_modern`)."""
+
+    def step_needs(step: dict) -> bool:
+        kind = step.get("step")
+        if kind == "emit" and step.get("compensate") is not None:
+            return True
+        if kind in ("let-effect", "effect"):
+            if _witnessed_extern_for(step.get("acquire"), witnessed) is not None:
+                return True
+        if kind == "if":
+            return (any(step_needs(s) for s in step.get("then") or [])
+                    or any(step_needs(s) for s in step.get("else") or []))
+        if kind == "provide":
+            return any(
+                step_needs(s)
+                for method in step.get("methods") or []
+                for s in method.get("body") or []
+            )
+        return False
+
+    return any(step_needs(step) for step in component.get("body") or [])
+
+
+def _uses_revl_frame(ir: dict) -> bool:
+    """True if any component in the document needs the RevlFrame two-phase
+    teardown loop — gates emitting the shared helper class once per file."""
+    externs = ir.get("externs") or []
+    witnessed = _witnessed_externs(externs)
+    return any(
+        _component_needs_frame(component, witnessed)
+        for component in ir.get("components") or []
+    )
+
+
+def _emit_revl_frame_runtime() -> list[str]:
+    """The shared two-phase teardown accumulator (docs/design/teardown-
+    contract.md), emitted once per file when any component needs it.
+
+    cordis4j's `Context.EffectScope` (backends/java/stubs/io/cordis4j/core/
+    Context.java) is a dumb LIFO of `Disposable`s with no built-in commit/
+    abort signal and no per-item failure guard — `dispose()` just pops and
+    disposes, propagating whatever the first failing entry throws and
+    stopping there. RevlFrame supplies the three things that raw stack does
+    not: (1) a commit/abort discriminator (`committed`, flipped once by the
+    emitted `apply()` right before its success `return fx;` — strictly
+    before any disposal can occur, which is simpler than the py reference's
+    generator-ordering trick because Java's `apply()` is synchronous, so
+    there is no deferred-yield window to reason about); (2) a guard on every
+    bracket/transactional entry so a failing inverse is recorded as residue
+    and NEVER stops the remaining Phase-1 replay (continue-and-record, two
+    severities: `bracket-fault` is contract-grade, `restore-residue` is
+    anticipated); (3) the Phase-2 split for `compensation` entries — they
+    must not run inline during fx's native LIFO walk (that walk IS Phase 1),
+    so `compensation()`'s disposer only enqueues, and `runPhase2()` — called
+    by the emitted `apply()`'s catch block right after `fx.dispose()`
+    returns — drains the queue best-effort, bounded by the two `REVL_*`
+    budget env vars, after every Phase-1 inverse has already run to
+    completion.
+
+    Java per-tier rule (docs/design/teardown-contract.md, 'interruptible
+    blocking points only'): `Thread.interrupt` preempts only interruptible
+    IO/waits, not arbitrary synchronous host code, so `Future.get(timeout)` +
+    `cancel(true)` is a true in-call preemption ONLY when the compensation
+    honors the interrupt. When it does not, the task thread keeps running
+    DETACHED past the timeout — exactly go's abandon-the-wait shape — and the
+    record carries `outcome: unknown`; per the contract, go's concurrency
+    caveat then applies on java too (Phase-2 start order is pinned LIFO, but
+    two compensations may run concurrently once one has been abandoned).
+
+    The durable WAL discharge-descriptor is emitted SEPARATELY, only under
+    `--record` (item 322 Slice 2, `_emit_record_sink`): the recording sink and
+    the per-descriptor `revlRecordTransactional` calls ride alongside this frame
+    but never appear in the default (byte-identical) output, so this loop itself
+    is unchanged whether or not a WAL is being written. `residue` below is the
+    in-process record shape the contract specifies, still surfaced by observable
+    ordering in the scenario harnesses; the WAL is the crash-durable channel that
+    outlives the process (a JVM subprocess writes it to `$REVL_WAL` and fsyncs
+    per record), which `revl recover` reads tier-agnostically."""
+    return [
+        "// docs/design/teardown-contract.md: the shared bracket/transactional/",
+        "// compensation two-phase teardown loop (item 243 Slice 2b, item 247).",
+        "private static final class RevlFrame {",
+        "    private boolean committed = false;",
+        "    private final java.util.List<Residue> residue = new java.util.ArrayList<>();",
+        "    private final java.util.ArrayDeque<Phase2Task> phase2 = new java.util.ArrayDeque<>();",
+        "",
+        "    private record Residue(String kind, String crossing, String attempted,",
+        "                            boolean attemptedFlag, String error, String outcome) {}",
+        "",
+        "    private record Phase2Task(String crossing, String attempted, Runnable action) {}",
+        "",
+        "    void commit() {",
+        "        committed = true;",
+        "    }",
+        "",
+        "    /** `bracket` (acquire): replays on every teardown, clean unload and",
+        "     * abort alike. Guarded so a failed inverse never skips the remaining",
+        "     * Phase-1 entries (contract-grade severity: bracket-fault). */",
+        "    Disposable bracket(String crossing, String attempted, Runnable inverse) {",
+        "        return () -> {",
+        "            try {",
+        "                inverse.run();",
+        "            } catch (RuntimeException | Error err) {",
+        '                residue.add(new Residue("bracket-fault", crossing, attempted,',
+        '                        true, String.valueOf(err), "failed"));',
+        "            }",
+        "        };",
+        "    }",
+        "",
+        "    /** `transactional` (item 243, witnessed): replays the declared inverse",
+        "     * ONLY on abort; a committed activation DISCHARGES it (the mutation is",
+        "     * the deliverable and persists). Anticipated failure severity:",
+        "     * restore-residue. */",
+        "    Disposable transactional(String crossing, String attempted, Runnable undo) {",
+        "        return () -> {",
+        "            if (committed) {",
+        "                return;",
+        "            }",
+        "            try {",
+        "                undo.run();",
+        "            } catch (RuntimeException | Error err) {",
+        '                residue.add(new Residue("restore-residue", crossing, attempted,',
+        '                        true, String.valueOf(err), "failed"));',
+        "            }",
+        "        };",
+        "    }",
+        "",
+        "    /** `transactionalMethod` (item 318): the per-tool-call H1 seam — a",
+        "     * witnessed fs mutation fired from a PROVIDE-METHOD body (per request),",
+        "     * after activation, whose inverse must outlive the method call and",
+        "     * survive until the component/session commits or aborts. On java this",
+        "     * is BEHAVIOURALLY IDENTICAL to `transactional`, and deliberately so:",
+        "     * the py tier has to PARK a method-registered entry in a separate",
+        "     * `_deferred_transactional` list and dispose it inside `drain`, because",
+        "     * on py `_committed` only flips at TEARDOWN (drain), so a method entry",
+        "     * disposed as an ordinary sibling would observe committed==false on a",
+        "     * clean unload and wrongly revert the deliverable. Java has no such",
+        "     * window: `committed` flips once at ACTIVATION-END (the emitted",
+        "     * apply()'s `frame.commit()` before it returns), strictly before any",
+        "     * provide-method can run and before any teardown, so the disposer this",
+        "     * returns already observes the settled commit bit when the enclosing",
+        "     * component's `fx` disposes it at unload. The ONE soundness rule the",
+        "     * emitter must honour is that this entry is tracked into the COMPONENT",
+        "     * ACTIVATION `fx` (the provider struct's `this.fx`), never a per-call",
+        "     * scope: a per-call scope would dispose it at method-return with",
+        "     * committed==true, discharging it and dropping the undo, so a later",
+        "     * abort could not revert it (residue). */",
+        "    Disposable transactionalMethod(String crossing, String attempted, Runnable undo) {",
+        "        return transactional(crossing, attempted, undo);",
+        "    }",
+        "",
+        "    /** Session-level reject seam (item 318; item 245's explicit commit/abort",
+        "     * UX is the eventual driver). A component that activated cleanly has",
+        "     * already run `commit()`, so a later unload would discharge every",
+        "     * transactional entry and PERSIST its mutation. Calling `abort()` before",
+        "     * teardown flips the discriminator back to false, so the next `fx`",
+        "     * dispose replays every transactional inverse — the activation-body ones",
+        "     * AND the per-tool-call method-registered ones — and the mutations",
+        "     * revert. Idempotent. */",
+        "    void abort() {",
+        "        committed = false;",
+        "    }",
+        "",
+        "    /** `compensation` (item 247): abort-only, best-effort, Phase 2. A",
+        "     * committed activation DISCHARGES it (never runs). On abort this",
+        "     * disposer fires during fx's native Phase-1 walk, interleaved with",
+        "     * bracket/transactional entries, so it must not run inline: it",
+        "     * enqueues, and `runPhase2()` drains the queue after fx's walk (and",
+        "     * therefore every Phase-1 inverse) has returned. */",
+        "    Disposable compensation(String crossing, String attempted, Runnable emit) {",
+        "        return () -> {",
+        "            if (committed) {",
+        "                return;",
+        "            }",
+        "            phase2.addLast(new Phase2Task(crossing, attempted, emit));",
+        "        };",
+        "    }",
+        "",
+        "    private void runGuarded(Phase2Task task) {",
+        "        try {",
+        "            task.action().run();",
+        "        } catch (RuntimeException | Error err) {",
+        '            residue.add(new Residue("compensation-residue", task.crossing(), task.attempted(),',
+        '                    true, String.valueOf(err), "failed"));',
+        "        }",
+        "    }",
+        "",
+        "    /** Phase 2: LIFO within the compensation class (entries queue in the",
+        "     * order fx's native walk visits them, already reverse-registration",
+        "     * order), best-effort, bounded by REVL_COMPENSATION_BUDGET_MS /",
+        "     * REVL_COMPENSATION_PER_CALL_MS (default 5000/1000 ms). Never throws:",
+        "     * the abort always succeeds. */",
+        "    void runPhase2() {",
+        "        if (phase2.isEmpty()) {",
+        "            return;",
+        "        }",
+        '        long budgetMs = envMs("REVL_COMPENSATION_BUDGET_MS", 5000L);',
+        '        long perCallMs = envMs("REVL_COMPENSATION_PER_CALL_MS", 1000L);',
+        "        long deadline = budgetMs <= 0 ? Long.MAX_VALUE",
+        "                : System.nanoTime() + budgetMs * 1_000_000L;",
+        "        java.util.concurrent.ExecutorService pool = null;",
+        "        try {",
+        "            while (!phase2.isEmpty()) {",
+        "                Phase2Task next = phase2.pollFirst();",
+        "                if (budgetMs > 0 && System.nanoTime() >= deadline) {",
+        '                    residue.add(new Residue("compensation-residue", next.crossing(), next.attempted(),',
+        '                            false, "deadline-expired", "not-attempted"));',
+        "                    continue;",
+        "                }",
+        "                if (perCallMs <= 0) {",
+        "                    runGuarded(next);",
+        "                    continue;",
+        "                }",
+        "                if (pool == null) {",
+        "                    pool = java.util.concurrent.Executors.newCachedThreadPool(r -> {",
+        '                        Thread t = new Thread(r, "revl-compensation");',
+        "                        t.setDaemon(true);",
+        "                        return t;",
+        "                    });",
+        "                }",
+        "                java.util.concurrent.Future<?> future = pool.submit(() -> runGuarded(next));",
+        "                try {",
+        "                    future.get(perCallMs, java.util.concurrent.TimeUnit.MILLISECONDS);",
+        "                } catch (java.util.concurrent.TimeoutException timeout) {",
+        "                    // java per-tier rule: cancel(true) preempts only an",
+        "                    // interruptible blocking point. When the compensation",
+        "                    // ignores it, the task keeps running DETACHED past this",
+        "                    // point (go's abandon-the-wait shape) -> outcome unknown.",
+        "                    future.cancel(true);",
+        '                    residue.add(new Residue("compensation-residue", next.crossing(), next.attempted(),',
+        '                            true, "per-call bound exceeded", "unknown"));',
+        "                } catch (InterruptedException interrupted) {",
+        "                    Thread.currentThread().interrupt();",
+        '                    residue.add(new Residue("compensation-residue", next.crossing(), next.attempted(),',
+        '                            true, "teardown thread interrupted", "unknown"));',
+        "                } catch (java.util.concurrent.ExecutionException impossible) {",
+        "                    // runGuarded() already catches RuntimeException/Error",
+        "                    // internally, so the submitted task never actually",
+        "                    // throws; this branch only satisfies future.get()'s",
+        "                    // checked signature.",
+        '                    residue.add(new Residue("compensation-residue", next.crossing(), next.attempted(),',
+        '                            true, String.valueOf(impossible.getCause()), "failed"));',
+        "                }",
+        "            }",
+        "        } finally {",
+        "            if (pool != null) {",
+        "                pool.shutdown();",
+        "            }",
+        "        }",
+        "    }",
+        "",
+        "    private static long envMs(String name, long fallback) {",
+        "        String raw = System.getenv(name);",
+        "        if (raw == null || raw.isEmpty()) {",
+        "            return fallback;",
+        "        }",
+        "        try {",
+        "            return Long.parseLong(raw.trim());",
+        "        } catch (NumberFormatException bad) {",
+        "            return fallback;",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "// item 318: the per-activation Disposable an emitted frame-bearing apply()",
+        "// returns instead of the bare `fx` EffectScope. It carries the component's",
+        "// `RevlFrame` alongside `fx` so a session-level reject can reach it AFTER a",
+        "// clean activation (mirrors the py tier's ctx->Frame reachability, which",
+        "// item 245's commit/abort UX drives). `dispose()` runs the native Phase-1",
+        "// LIFO walk (`fx.dispose()`) and then drains any Phase-2 compensations the",
+        "// walk enqueued — a no-op on a clean unload (committed => every entry",
+        "// discharges, nothing enqueues) and the abort drain when `abort()` was",
+        "// called first. `abort()` flips the commit discriminator so that dispose",
+        "// reverts rather than persists. Existing callers that only `dispose()` the",
+        "// returned Disposable are unaffected.",
+        "public static final class RevlActivation implements Disposable {",
+        "    private final Context.EffectScope fx;",
+        "    private final RevlFrame frame;",
+        "",
+        "    RevlActivation(Context.EffectScope fx, RevlFrame frame) {",
+        "        this.fx = fx;",
+        "        this.frame = frame;",
+        "    }",
+        "",
+        "    /** Session-level reject: revert this activation's transactional work",
+        "     * (activation-body AND per-tool-call) on the next dispose. */",
+        "    public void abort() {",
+        "        frame.abort();",
+        "    }",
+        "",
+        "    @Override",
+        "    public void dispose() {",
+        "        fx.dispose();",
+        "        frame.runPhase2();",
+        "    }",
+        "}",
+        "",
+    ]
+
+
+# item 322 Slice 2: the durable WAL recording sink emitted into Components when
+# `--record` is set and the document carries a teardown frame. The java mirror of
+# backends/go/emit.py's `_RECORD_PREAMBLE`: one JSON line per record, fsync'd via
+# `FileChannel.force(true)` before the call that wrote it returns, opened from
+# `REVL_WAL` (unset -> every record is a no-op, so a non-record composition that
+# happens to compile this in is inert). The py JSONL schema, field-for-field:
+# `header`, `discharge-descriptor {seq, entry, call:{receiver,method,args},
+# origin, witness, idempotency}`, `discharge`, `activation-complete`. Written by
+# hand (no JSON dependency); the reader (`revl.wal.read_wal`) parses per line, so
+# object field ORDER is irrelevant — only the names/values must match. The three
+# `revlRecord*` methods are `public static` so a driver (the crash producer, and
+# the stub/real runners on a clean unload) can stamp discharge / the terminal
+# marker from outside Components. WAL_GUARANTEE is byte-identical to
+# src/revl/wal.py's constant (a header a py tool reads must agree on it).
+_RECORD_SINK_SOURCE = r'''
+// ---- durable WAL recording sink (item 322 Slice 2, the java host recording channel) ----
+
+private static final String REVL_WAL_GUARANTEE =
+        "the WAL records each committed effect's step identity, boundary "
+        + "classification and inverse DESCRIPTOR (not its closure). On restart, "
+        + "recovery runs the reconstructible boundary inverses newest-first (LIFO); "
+        + "in-process inverses are moot (their captured memory died with the "
+        + "process) and closure-only boundary inverses are reported as residue, "
+        + "never silently claimed to have run.";
+
+private static java.io.FileOutputStream revlWalOut;
+private static java.nio.channels.FileChannel revlWalChannel;
+private static int revlWalSeq = 0;
+private static final java.util.List<Integer> revlWalSeqs = new java.util.ArrayList<>();
+private static final Object revlWalLock = new Object();
+
+static {
+    revlWalOpen();
+}
+
+// Wire the sink to REVL_WAL (unset -> no-op recording) and stamp the header.
+// Runs once at class load. A failed open leaves the sink null (recording is
+// silently off) rather than crashing a composition that only wanted to run.
+private static void revlWalOpen() {
+    String path = System.getenv("REVL_WAL");
+    if (path == null || path.isEmpty()) {
+        return;
+    }
+    try {
+        revlWalOut = new java.io.FileOutputStream(path, true);
+        revlWalChannel = revlWalOut.getChannel();
+    } catch (java.io.IOException open) {
+        revlWalOut = null;
+        revlWalChannel = null;
+        return;
+    }
+    revlWalWrite("{\"record\":\"header\",\"walVersion\":1,\"generation\":1,\"guarantee\":"
+            + revlWalStr(REVL_WAL_GUARANTEE) + "}");
+}
+
+// One durable JSON line: write, flush, and fsync (FileChannel.force(true))
+// before returning — the write-ahead discipline the py tier uses, so a record a
+// caller saw acknowledged is on disk before the effect it describes may matter.
+private static void revlWalWrite(String json) {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        try {
+            revlWalOut.write((json + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            revlWalOut.flush();
+            revlWalChannel.force(true);
+        } catch (java.io.IOException ignored) {
+        }
+    }
+}
+
+// revlRecordTransactional appends the discharge-descriptor for one witnessed
+// transactional inverse: the re-issuable named call {receiver, method, args}
+// recover replays LIFO to undo the mutation, plus the forward `origin` it
+// reverses. Fsync'd before it returns, so a crash after this call still leaves
+// the inverse re-issuable from the log alone.
+public static void revlRecordTransactional(String receiver, String method, String[] args) {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        int seq = revlWalSeq++;
+        revlWalSeqs.add(seq);
+        String call = revlWalCall(receiver, method, args);
+        revlWalWrite("{\"record\":\"discharge-descriptor\",\"seq\":" + seq
+                + ",\"entry\":\"transactional\",\"call\":" + call
+                + ",\"origin\":" + call
+                + ",\"witness\":null,\"idempotency\":null}");
+    }
+}
+
+// revlRecordDischarge writes the commit-path proof that every recorded
+// transactional seq COMMITTED, so recover SKIPS it — a committed transaction is
+// never rolled back. Called on a clean unload, never on a crash.
+public static void revlRecordDischarge() {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        StringBuilder discharged = new StringBuilder("[");
+        for (int i = 0; i < revlWalSeqs.size(); i++) {
+            if (i > 0) {
+                discharged.append(',');
+            }
+            discharged.append(revlWalSeqs.get(i));
+        }
+        discharged.append(']');
+        revlWalWrite("{\"record\":\"discharge\",\"discharged\":" + discharged + "}");
+    }
+}
+
+// revlRecordActivationComplete stamps the terminal marker: its presence is the
+// whole roll-forward decision, its absence (a crash) is roll-back. Written only
+// after a clean unload.
+public static void revlRecordActivationComplete() {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        revlWalWrite("{\"record\":\"activation-complete\",\"generation\":1,\"components\":[]}");
+    }
+}
+
+private static String revlWalCall(String receiver, String method, String[] args) {
+    StringBuilder call = new StringBuilder("{\"receiver\":");
+    call.append(revlWalStr(receiver)).append(",\"method\":").append(revlWalStr(method))
+            .append(",\"args\":[");
+    for (int i = 0; i < args.length; i++) {
+        if (i > 0) {
+            call.append(',');
+        }
+        call.append(revlWalStr(args[i]));
+    }
+    call.append("]}");
+    return call.toString();
+}
+
+// Minimal JSON string escaper (quote/backslash/control chars) — enough for the
+// identifiers and stringified witnesses this schema carries, and it never
+// depends on a JSON library the emitted module would otherwise not need.
+private static String revlWalStr(String value) {
+    StringBuilder out = new StringBuilder("\"");
+    for (int i = 0; i < value.length(); i++) {
+        char c = value.charAt(i);
+        switch (c) {
+            case '"' -> out.append("\\\"");
+            case '\\' -> out.append("\\\\");
+            case '\n' -> out.append("\\n");
+            case '\r' -> out.append("\\r");
+            case '\t' -> out.append("\\t");
+            default -> {
+                if (c < 0x20) {
+                    out.append(String.format("\\u%04x", (int) c));
+                } else {
+                    out.append(c);
+                }
+            }
+        }
+    }
+    out.append('"');
+    return out.toString();
+}
+'''
+
+
+def _emit_record_sink() -> list[str]:
+    """The durable WAL recording sink (item 322 Slice 2), emitted into Components
+    only in record mode (`--record`) when the document carries a teardown frame.
+    Byte-identical default output is preserved by never emitting this otherwise —
+    the golden oracle and the selfhost mirror both run with record off."""
+    return _RECORD_SINK_SOURCE.strip("\n").split("\n")
 
 
 def _body_contains_step(node: object, target: str) -> bool:
@@ -2675,7 +3405,8 @@ def _bind_type(component: dict, bind: str, v3_ctx: _V3Ctx,
 
 
 def _method_body_lines(
-    env: _Env, method: dict, v3_ctx: _V3Ctx, *, returns_void: bool = False
+    env: _Env, method: dict, v3_ctx: _V3Ctx, *, returns_void: bool = False,
+    frame_expr: str | None = None,
 ) -> list[str]:
     lines: list[str] = []
     v3_ctx.arrows = {}  # arrow bindings are local to one body
@@ -2693,17 +3424,54 @@ def _method_body_lines(
             else:
                 lines.append(f"return {_expr(stmt['expr'], v3_ctx, rename, env)};")
         elif step == "effect":
-            lines.append(f"{_expr(stmt['acquire'], v3_ctx, rename, env)};")
-            lines.append(
-                f"fx.track(Disposables.of(() -> {_expr(stmt['undo'], v3_ctx, rename, env)}));"
-            )
+            wit = _witnessed_extern_for(stmt.get("acquire"), v3_ctx.witnessed)
+            if wit is not None:
+                # item 318: a per-tool-call witnessed fs mutation. Register the
+                # extern's declared inverse into the COMPONENT activation frame
+                # (this.fx/this.frame), disposed by the component's own unload,
+                # not at method-return — the per-tool-call H1 seam.
+                _emit_witnessed_step(
+                    lines, "", stmt, wit, v3_ctx, env, None, frame_expr,
+                    rename=rename, frame_method=True)
+            else:
+                lines.append(f"{_expr(stmt['acquire'], v3_ctx, rename, env)};")
+                _emit_bracket_track(
+                    lines, "", stmt["acquire"], stmt["undo"], v3_ctx, env, frame_expr, rename)
+        elif step == "let-effect":
+            wit = _witnessed_extern_for(stmt.get("acquire"), v3_ctx.witnessed)
+            if wit is not None:
+                bind = _ident(stmt["bind"], "binding")
+                _emit_witnessed_step(
+                    lines, "", stmt, wit, v3_ctx, env, bind, frame_expr,
+                    rename=rename, frame_method=True)
+            elif _is_map_cas(stmt.get("acquire")):
+                # item 397: a method-body host CAS. Bind the atomic `boolean`
+                # result and register the site-spelled undo guarded on it — a
+                # `false` CAS's inverse is the identity, so teardown never
+                # removes the winner's entry. It rides the same per-activation
+                # accumulator (`fx`/`frame`) as a bare method-body effect.
+                bind = _ident(stmt["bind"], "binding")
+                acquire_expr = _expr(stmt["acquire"], v3_ctx, rename, env)
+                lines.append(f"boolean {bind} = {acquire_expr};")
+                undo_expr = _expr(stmt["undo"], v3_ctx, rename, env)
+                guarded = f"() -> {{ if ({bind}) {{ {undo_expr}; }} }}"
+                if frame_expr is None:
+                    lines.append(f"fx.track(Disposables.of({guarded}));")
+                else:
+                    crossing = _string(_call_label(stmt["acquire"]))
+                    attempted = _string(_call_label(stmt["undo"]))
+                    lines.append(
+                        f"fx.track({frame_expr}.bracket({crossing}, {attempted}, "
+                        f"{guarded}));")
+            else:
+                raise EmitError(
+                    "a non-witnessed let-effect is not supported inside a method "
+                    "body on the java tier")
         elif step == "emit":
             lines.append(f"{_expr(stmt['expr'], v3_ctx, rename, env)};")
             if stmt.get("compensate") is not None:
-                lines.append(
-                    f"fx.track(Disposables.of(() -> "
-                    f"{_expr(stmt['compensate'], v3_ctx, rename, env)}));"
-                )
+                _emit_compensation_track(
+                    lines, "", stmt["expr"], stmt["compensate"], v3_ctx, env, frame_expr, rename)
         elif step == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
         elif step in ("let", "assign"):
@@ -2744,16 +3512,22 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
                 _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
         out.append(f"{pad}}}")
     elif kind == "while":
+        _guard_frame_neutral_loop(step.get("body"))
         out.append(f"{pad}while ({_expr(step['cond'], v3_ctx, None, env)}) {{")
         for child in step.get("body") or []:
             _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
         out.append(f"{pad}}}")
     elif kind == "for":
+        _guard_frame_neutral_loop(step.get("body"))
         bind = _ident(step.get("bind"), "loop binding")
         out.append(f"{pad}for (var {bind} : {_expr(step['iterable'], v3_ctx, None, env)}) {{")
         for child in step.get("body") or []:
             _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
         out.append(f"{pad}}}")
+    elif kind == "break":
+        out.append(f"{pad}break;")
+    elif kind == "continue":
+        out.append(f"{pad}continue;")
     elif kind == "let_pattern":
         value = _expr(step.get("value"), v3_ctx, None, env)
         tmp = f"__revl_destructure_{id(step)}"
@@ -2781,6 +3555,115 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
         raise EmitError(f"unsupported component setup step {kind!r}")
 
 
+def _emit_bracket_track(
+    out: list[str], pad: str, acquire: dict, undo: dict,
+    v3_ctx: _V3Ctx, env: _Env, frame_expr: str | None,
+    rename: dict[str, str] | None = None,
+) -> None:
+    """A plain `acquire`/`undo` bracket entry (docs/design/teardown-
+    contract.md): replays on every teardown, unchanged. When the owning
+    component needs the two-phase loop (`frame_expr` set — it registers at
+    least one transactional/compensation entry elsewhere), route the
+    inverse through `RevlFrame.bracket` so a failed inverse is recorded as
+    residue and never stops the remaining Phase-1 replay (mixed-entry LIFO,
+    docs/design/teardown-contract.md exit test 3). A component with ONLY
+    plain brackets (`frame_expr` is None) keeps emitting exactly as before."""
+    undo_expr = _expr(undo, v3_ctx, rename, env)
+    if frame_expr is None:
+        out.append(f"{pad}fx.track(Disposables.of(() -> {undo_expr}));")
+        return
+    crossing = _string(_call_label(acquire))
+    attempted = _string(_call_label(undo))
+    out.append(
+        f"{pad}fx.track({frame_expr}.bracket({crossing}, {attempted}, () -> {undo_expr}));"
+    )
+
+
+def _emit_compensation_track(
+    out: list[str], pad: str, forward: dict, compensate: dict,
+    v3_ctx: _V3Ctx, env: _Env, frame_expr: str | None,
+    rename: dict[str, str] | None = None,
+) -> None:
+    """An `emit ... compensate` entry (item 247): abort-only, best-effort,
+    Phase 2 — never on a clean unload. `frame_expr` is always set here in
+    practice (`_component_needs_frame` forces it whenever a `compensate` is
+    present); the plain-`Disposables` fallback is defensive only, kept so
+    this function never silently drops the compensation if that invariant is
+    ever violated (matching the honest-degrade spirit of the contract, not a
+    reachable path)."""
+    compensate_expr = _expr(compensate, v3_ctx, rename, env)
+    if frame_expr is None:  # pragma: no cover — _component_needs_frame forces frame_expr
+        out.append(f"{pad}fx.track(Disposables.of(() -> {compensate_expr}));")
+        return
+    crossing = _string(_call_label(forward))
+    attempted = _string(_call_label(compensate))
+    out.append(
+        f"{pad}fx.track({frame_expr}.compensation({crossing}, {attempted}, "
+        f"() -> {compensate_expr}));"
+    )
+
+
+def _emit_witnessed_step(
+    out: list[str], pad: str, step: dict, ext: dict,
+    v3_ctx: _V3Ctx, env: _Env, bind: str | None, frame_expr: str | None,
+    rename: dict[str, str] | None = None, frame_method: bool = False,
+) -> None:
+    """Emit a witnessed effect (item 243): run the mutation, and on `Ok`
+    register the extern's DECLARED inverse as a TRANSACTIONAL entry carrying
+    the `Ok` witness. Mirrors `backends/python/emit.py`'s `_witnessed_step`:
+    the inverse is the extern's own `undo` (no site-spelled undo — the
+    accumulator owns it), bound to the `Ok` payload as `result` (the
+    implicit witness binder, docs/design/243-witnessed-externs.md 'Slice 1
+    as implemented' #1). On `Err` nothing is registered — a failed mutation
+    touched nothing, so it must not schedule a rollback (Ok-conditional).
+    `frame_expr` is always set here (a witnessed acquire always forces
+    `_component_needs_frame`).
+
+    item 318: when `frame_method` is set the acquisition is inside a
+    PROVIDE-METHOD body (the per-tool-call H1 seam). The entry then routes
+    through `RevlFrame.transactionalMethod` rather than `.transactional`, and
+    the `fx`/`frame` referenced are the provider struct's activation-scope
+    fields (`this.fx`/`this.frame`) — the COMPONENT-long accumulator, so the
+    inverse outlives the method call and is disposed by the component's own
+    unload (commit -> persist, `abort()` -> revert), never at method-return.
+    `rename` maps requires/binds to `this.<name>` in method bodies (mirroring
+    the bracket path); it is `None` in the activation body."""
+    assert frame_expr is not None  # invariant: witnessed acquire => needs_frame
+    tag = id(step)
+    result_var = f"_revl_wit{tag}"
+    ok_var = f"_revl_ok{tag}"
+    witness_type = _java_v3_type(ext.get("witness"))
+    undo_expr = _expr(ext["undo"], v3_ctx, rename, env)
+    crossing = _string(_call_label(step["acquire"]))
+    attempted = _string(_call_label(ext["undo"]))
+    entry = "transactionalMethod" if frame_method else "transactional"
+    out.append(f"{pad}var {result_var} = {_expr(step['acquire'], v3_ctx, rename, env)};")
+    out.append(f"{pad}if ({result_var} instanceof RevlResult.Ok<?, ?> {ok_var}) {{")
+    out.append(f"{pad}    {witness_type} result = ({witness_type}) {ok_var}.value();")
+    if _RECORD_MODE:
+        # item 322 Slice 2: the durable exit. At REGISTRATION (this Ok branch
+        # runs during apply(), when the mutation happened) write the
+        # discharge-descriptor — the re-issuable named call `recover` replays
+        # LIFO to undo the mutation — and fsync it, so a crash BEFORE commit is
+        # still recoverable from the log alone. `receiver` is the witnessed
+        # extern, `method` its declared inverse, and the stringified witness is
+        # the referent argument (the go mirror stringifies `result` the same
+        # way). Byte-identical default output: emitted only under `--record`.
+        receiver = _string(_call_label(step["acquire"]))
+        method = _string(_call_label(ext["undo"]))
+        out.append(
+            f"{pad}    revlRecordTransactional({receiver}, {method}, "
+            f"new String[]{{String.valueOf(result)}});"
+        )
+    out.append(
+        f"{pad}    fx.track({frame_expr}.{entry}({crossing}, {attempted}, "
+        f"() -> {undo_expr}));"
+    )
+    out.append(f"{pad}}}")
+    if bind is not None:
+        out.append(f"{pad}var {bind} = {result_var};")
+
+
 def _emit_component_stmts(
     component: dict,
     env: _Env,
@@ -2790,14 +3673,41 @@ def _emit_component_stmts(
     steps: list[dict],
     pad: str,
     map_values: dict[str, str] | None = None,
+    witnessed: dict[str, dict] | None = None,
+    frame_expr: str | None = None,
 ) -> None:
     for step in steps:
         kind = step.get("step")
         if kind in ("let-effect", "effect"):
             for setup in step.get("setup") or []:
                 _emit_setup_stmt(env, v3_ctx, setup, out, pad)
+            wit = _witnessed_extern_for(step.get("acquire"), witnessed or {})
+            bind = _ident(step["bind"], "binding") if kind == "let-effect" else None
+            if wit is not None:
+                _emit_witnessed_step(out, pad, step, wit, v3_ctx, env, bind, frame_expr)
+                continue
+            if kind == "let-effect" and _is_map_cas(step.get("acquire")):
+                # item 397: a result-declared host CAS binds an atomic
+                # `boolean`; guard the site-spelled undo on it so a `false` CAS
+                # registers the identity inverse and teardown never removes the
+                # winner's entry. Bind `boolean` (not `var`), matching the
+                # method-body path, so a later `if (fresh)` in activation code
+                # compiles.
+                out.append(
+                    f"{pad}boolean {bind} = "
+                    f"{_expr(step['acquire'], v3_ctx, None, env)};")
+                undo_expr = _expr(step["undo"], v3_ctx, None, env)
+                guarded = f"() -> {{ if ({bind}) {{ {undo_expr}; }} }}"
+                if frame_expr is None:
+                    out.append(f"{pad}fx.track(Disposables.of({guarded}));")
+                else:
+                    crossing = _string(_call_label(step["acquire"]))
+                    attempted = _string(_call_label(step["undo"]))
+                    out.append(
+                        f"{pad}fx.track({frame_expr}.bracket({crossing}, "
+                        f"{attempted}, {guarded}));")
+                continue
             if kind == "let-effect":
-                bind = _ident(step["bind"], "binding")
                 # FR-4: a host Map binding pins its value type at the
                 # declaration (`Map<...> store = Map.create();`) — `var` would
                 # infer `Map<Object>` from the generic static factory and the
@@ -2807,23 +3717,19 @@ def _emit_component_stmts(
                 out.append(f"{pad}{decl} {bind} = {_expr(step['acquire'], v3_ctx, None, env)};")
             else:
                 out.append(f"{pad}{_expr(step['acquire'], v3_ctx, None, env)};")
-            out.append(
-                f"{pad}fx.track(Disposables.of(() -> "
-                f"{_expr(step['undo'], v3_ctx, None, env)}));"
-            )
+            _emit_bracket_track(out, pad, step["acquire"], step["undo"], v3_ctx, env, frame_expr)
         elif kind == "emit":
             out.append(f"{pad}{_expr(step['expr'], v3_ctx, None, env)};")
             if step.get("compensate") is not None:
-                out.append(
-                    f"{pad}fx.track(Disposables.of(() -> "
-                    f"{_expr(step['compensate'], v3_ctx, None, env)}));"
-                )
+                _emit_compensation_track(
+                    out, pad, step["expr"], step["compensate"], v3_ctx, env, frame_expr)
         elif kind == "provide":
             key = step.get("name")
             service = step.get("service")
             struct = f"{cname}{_camel(key)}"
             ctor_args = ", ".join(
-                ["ctx", "fx"] + list(env.reqs) + list(_binds(component))
+                ["ctx", "fx"] + (["frame"] if frame_expr else [])
+                + list(env.reqs) + list(_binds(component))
             )
             out.append(
                 f"{pad}fx.track(ctx.provide(ServiceKey.of({service}.class), "
@@ -2833,13 +3739,13 @@ def _emit_component_stmts(
             out.append(f"{pad}if ({_expr(step['cond'], v3_ctx, None, env)}) {{")
             _emit_component_stmts(
                 component, env, v3_ctx, cname, out, step.get("then") or [], pad + "    ",
-                map_values,
+                map_values, witnessed, frame_expr,
             )
             if step.get("else"):
                 out.append(f"{pad}}} else {{")
                 _emit_component_stmts(
                     component, env, v3_ctx, cname, out, step["else"], pad + "    ",
-                    map_values,
+                    map_values, witnessed, frame_expr,
                 )
             out.append(f"{pad}}}")
         elif kind == "fail":
@@ -2847,6 +3753,15 @@ def _emit_component_stmts(
             out.append(
                 f"{pad}throw new CordisException(String.valueOf({message}));"
             )
+            # A `fail` lowers to an unconditional `throw`, so every sibling
+            # step after it in THIS block never runs. Unlike go/rust/py —
+            # whose targets tolerate dead code after a return/panic/raise —
+            # javac hard-rejects an unreachable statement, so drop the
+            # post-fail tail rather than emitting it. Nested blocks (an
+            # `if`-branch) recurse through their own call, so this only prunes
+            # the failing block's own tail, never a sibling branch that is
+            # still reachable. (roadmap item 341 / fault-sweep item 125)
+            return
         elif kind == "await":
             out.append(f"{pad}{_await_join(step['expr'], env, v3_ctx)};")
         elif kind == "return":
@@ -2874,6 +3789,79 @@ def _await_join(node: dict, env: _Env, v3_ctx: _V3Ctx | None = None) -> str:
     return rendered
 
 
+def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str,
+                            route: dict, services: dict, render_type, out: list[str]) -> None:
+    """item 173: the emitted realization of a routed require on cordis4j,
+    mirroring src/revl/run.py::_Router and the go/rust backends.
+
+    A per-(component, key) class implementing the required service interface. It
+    holds no worker handle — every method re-resolves the live per-realm handle
+    off the cordis4j fork's strict single-realm liveness-checked read
+    (`ctx.serviceInRealm(<Svc>.class, realm)`, which returns an empty Optional
+    for a realm with no ACTIVE provider and — unlike `ctx.get` — never falls
+    back to a parent realm). So a withdrawn worker realm drops out of the live
+    set and its calls go to the survivors — reactive failover from the emitted
+    body. Wired as the component's handle for the routed key, so a provide
+    method's `<key>.<op>(..)` forwards through it (G2: one provider downstream).
+    """
+    struct = f"RevlRouter{cname}{_camel(key)}"
+    realms = list(route.get("realms") or [])
+    strategy = route.get("strategy") or "round_robin"
+    realm_lits = ", ".join(_string(r) for r in realms)
+    methods = (services.get(service_name, {}) or {}).get("methods", {}) or {}
+
+    out.append(f"public static final class {struct} implements {service_name} {{")
+    out.append("    private final Context ctx;")
+    out.append(f"    private final String[] realms = {{{realm_lits}}};")
+    out.append(f"    private final String strategy = {_string(strategy)};")
+    out.append("    private int cursor = 0;")
+    out.append("    private final java.util.Map<String, Long> served = new java.util.HashMap<>();")
+    out.append(f"    {struct}(Context ctx) {{ this.ctx = ctx; }}")
+    out.append("    private java.util.List<String> revlLive() {")
+    out.append("        java.util.List<String> out = new java.util.ArrayList<>();")
+    out.append("        for (String r : realms) {")
+    out.append(f"            if (ctx.serviceInRealm({service_name}.class, r).isPresent()) out.add(r);")
+    out.append("        }")
+    out.append("        return out;")
+    out.append("    }")
+    out.append(f"    private {service_name} revlSelect() {{")
+    out.append("        java.util.List<String> live = revlLive();")
+    out.append("        if (live.isEmpty()) throw new CordisException("
+               "\"revl: router for " + key + " has no live worker (all realms withdrawn)\");")
+    out.append("        if (strategy.equals(\"least_loaded\")) {")
+    out.append("            String best = live.get(0);")
+    out.append("            for (String l : live) {")
+    out.append("                if (served.getOrDefault(l, 0L) < served.getOrDefault(best, 0L)) best = l;")
+    out.append("            }")
+    out.append("            served.merge(best, 1L, Long::sum);")
+    out.append(f"            return ctx.serviceInRealm({service_name}.class, best).get();")
+    out.append("        }")
+    out.append("        int n = realms.length;")
+    out.append("        for (int off = 0; off < n; off++) {")
+    out.append("            String cand = realms[(cursor + off) % n];")
+    out.append("            if (live.contains(cand)) {")
+    out.append("                cursor = (cursor + off + 1) % n;")
+    out.append("                served.merge(cand, 1L, Long::sum);")
+    out.append(f"                return ctx.serviceInRealm({service_name}.class, cand).get();")
+    out.append("            }")
+    out.append("        }")
+    out.append("        throw new CordisException(\"revl: router selection unreachable\");")
+    out.append("    }")
+    for mname, decl in methods.items():
+        jname = _ident(mname, "method")
+        params_decl = decl.get("params", []) or []
+        params = ", ".join(f"{render_type(p.get('type'))} {_ident(p.get('name'), 'parameter')}"
+                           for p in params_decl)
+        ret = render_type(decl.get("returns")) if decl.get("returns") else "void"
+        args = ", ".join(_ident(p.get("name"), "parameter") for p in params_decl)
+        out.append(f"    public {ret} {jname}({params}) {{")
+        call = f"revlSelect().{jname}({args})"
+        out.append(f"        {'return ' if ret != 'void' else ''}{call};")
+        out.append("    }")
+    out.append("}")
+    out.append("")
+
+
 def _emit_component_modern(
     component: dict,
     services: dict,
@@ -2881,6 +3869,8 @@ def _emit_component_modern(
     functions: list | None = None,
     externs: list | None = None,
     components: list | None = None,
+    *,
+    render_type=_java_type,
 ) -> list[str]:
     env = _Env(component, services)
     v3_ctx = _V3Ctx(types or {}, functions or [], externs or [], components or [])
@@ -2897,6 +3887,13 @@ def _emit_component_modern(
         step.get("step") == "await" for step in component.get("body") or []
     )
     plugin_interface = "AsyncPlugin" if has_await else "Plugin"
+    # docs/design/teardown-contract.md: a component that registers at least
+    # one transactional (witnessed, 243) or compensation (247) entry needs
+    # the RevlFrame two-phase loop; a bracket-only component keeps emitting
+    # exactly as before (see `_component_needs_frame`).
+    witnessed = _witnessed_externs(externs)
+    needs_frame = _component_needs_frame(component, witnessed)
+    frame_expr = "frame" if needs_frame else None
 
     for key in isolate:
         if key not in env.reqs and key not in env.provides:
@@ -2913,6 +3910,8 @@ def _emit_component_modern(
         out.append(f"public static final class {struct} implements {service} {{")
         out.append("    private final Context ctx;")
         out.append("    private final Context.EffectScope fx;")
+        if needs_frame:
+            out.append("    private final RevlFrame frame;")
         for local, service in env.reqs.items():
             out.append(f"    private final {service} {local};")
         for b in _binds(component):
@@ -2920,12 +3919,15 @@ def _emit_component_modern(
             out.append(f"    private final {btype} {b};")
         ctor_params = ", ".join(
             ["Context ctx", "Context.EffectScope fx"]
+            + (["RevlFrame frame"] if needs_frame else [])
             + [f"{service} {local}" for local, service in env.reqs.items()]
             + [f"{_bind_type(component, b, v3_ctx, map_values)} {b}" for b in _binds(component)]
         )
         out.append(f"    {struct}({ctor_params}) {{")
         out.append("        this.ctx = ctx;")
         out.append("        this.fx = fx;")
+        if needs_frame:
+            out.append("        this.frame = frame;")
         for local in env.reqs:
             out.append(f"        this.{local} = {local};")
         for b in _binds(component):
@@ -2938,13 +3940,28 @@ def _emit_component_modern(
         )
         for method in provide.get("methods") or []:
             mname = _ident(method.get("name"), "method")
+            # Provider-method signatures MUST render with the SAME renderer as
+            # the service interface this class implements (`render_type`:
+            # `_java_type` for IR v1/v2, `_java_v3_type` for v3) — the exact
+            # `f(R)`-implemented-by-`f(Object)` contract `_emit_component`
+            # documents. The modern path used to hardcode `_java_v3_type`, so a
+            # v1/v2 component forced onto this path by a `fail`/`if`/`await`
+            # (e.g. the 125 fault sweep injecting a `fail`) rendered an
+            # undeclared v1 type literally (`List<Row>`) while its interface
+            # erased it to `List<Object>` — a javac "cannot find symbol" (Row)
+            # and a signature mismatch. Threading `render_type` here erases it
+            # consistently. Byte-identical for v3 (`render_type` IS
+            # `_java_v3_type`) and for any v1/v2 program using only declared
+            # types (both renderers agree via TYPE_MAP).
             params = ", ".join(
-                f"{_java_v3_type(_param_type(env, key, mname, p))} {p}"
+                f"{render_type(_param_type(env, key, mname, p))} {p}"
                 for p in method.get("params") or []
             )
-            ret = _java_v3_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
+            ret = render_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
             out.append(f"    public {ret} {mname}({params}) {{")
-            for line in _method_body_lines(env, method, v3_ctx, returns_void=ret == "void"):
+            for line in _method_body_lines(
+                env, method, v3_ctx, returns_void=ret == "void", frame_expr=frame_expr,
+            ):
                 out.append(("        " + line) if line else line)
             out.append("    }")
         out.append("}")
@@ -2972,7 +3989,18 @@ def _emit_component_modern(
             f"        ctx.intercept(ServiceKey.of({service}.class), {_metadata_lit(metadata)});"
         )
     out.append("        Context.EffectScope fx = ctx.effect();")
+    if needs_frame:
+        # docs/design/teardown-contract.md: one frame per activation, created
+        # BEFORE any step runs so every bracket/transactional/compensation
+        # registration below shares the same commit/abort discriminator.
+        out.append("        RevlFrame frame = new RevlFrame();")
     for local, service in env.reqs.items():
+        if local in env.routes:
+            # item 173: a routed require resolves per named realm through the
+            # emitted router, never a single committed-view `ctx.get`.
+            out.append(f"        {service} {local} = "
+                       f"new RevlRouter{cname}{_camel(local)}(ctx);")
+            continue
         out.append(f"        {service} {local} = ctx.get({service}.class);")
     # A8 self-revert: cordis4j's ctx.effect() scope is NOT owned by the
     # fiber until apply returns it, so a failing activation must dispose
@@ -2982,21 +4010,52 @@ def _emit_component_modern(
     body_lines: list[str] = []
     _emit_component_stmts(
         component, env, v3_ctx, cname, body_lines, component.get("body") or [],
-        "            ", map_values,
+        "            ", map_values, witnessed, frame_expr,
     )
     out.extend(body_lines)
     body_steps = component.get("body") or []
-    if not (body_steps and body_steps[-1].get("step") == "fail"):
-        # An unconditional trailing `fail` lowers to a throw; Java treats a
-        # statement after it as a hard "unreachable statement" error.
-        out.append("            return fx;")
+    if not any(s.get("step") == "fail" for s in body_steps):
+        # An unconditional top-level `fail` lowers to a throw; Java treats any
+        # statement after it (here the commit/return tail) as a hard
+        # "unreachable statement" error. A `fail` anywhere at the top level of
+        # the body — not only as the last step (item 341 / fault-sweep item
+        # 125) — makes this tail unreachable, so skip it whenever one is
+        # present. A `fail` nested inside an `if`-branch is conditional and
+        # does not reach here.
+        if needs_frame:
+            # Commit path (docs/design/teardown-contract.md): flip the
+            # discriminator BEFORE any disposal can occur — activation
+            # completed cleanly, so every bracket still runs at teardown and
+            # every transactional/compensation entry discharges instead of
+            # replaying.
+            out.append("            frame.commit();")
+        if needs_frame:
+            # item 318: return the frame-bearing Disposable so a session-level
+            # reject can reach `frame.abort()` after a clean activation, and so
+            # the unload drains Phase-2 compensations (a no-op on commit). A
+            # bracket-only / non-frame component still returns the bare `fx`.
+            out.append("            return new RevlActivation(fx, frame);")
+        else:
+            out.append("            return fx;")
     out.append("        } catch (RuntimeException | Error failure) {")
     out.append("            fx.dispose();")
+    if needs_frame:
+        # Abort path: fx.dispose() just ran Phase 1 (every bracket and
+        # transactional inverse, LIFO, continue-and-record — compensation
+        # disposers only enqueued, they did not run inline). Phase 2 starts
+        # only now, after Phase 1 has run to completion.
+        out.append("            frame.runPhase2();")
     out.append("            throw failure;")
     out.append("        }")
     out.append("    }")
     out.append("}")
     out.append("")
+
+    # item 173: one router class per routed require, implementing the required
+    # service interface by strict per-realm resolution + strategy + failover.
+    for rkey, route in env.routes.items():
+        _emit_java_router_class(
+            env, cname, rkey, env.reqs[rkey], route, services, render_type, out)
     return out
 
 
@@ -3020,7 +4079,8 @@ def _emit_component(
     """
     if _component_needs_modern(component):
         return _emit_component_modern(
-            component, services, types, functions, externs, components)
+            component, services, types, functions, externs, components,
+            render_type=render_type)
     env = _Env(component, services)
     # FR-4: bind -> revl surface value type for each host Map binding (the
     # legacy path builds its own lightweight v3 context when the document
@@ -3183,6 +4243,8 @@ def _emit_v1(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
     if _uses_float_interp(ir):
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
+    if _uses_revl_frame(ir):
+        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
     out.append("}")
@@ -3210,6 +4272,8 @@ def _emit_v2(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
     if _uses_float_interp(ir):
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
+    if _uses_revl_frame(ir):
+        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
     out.append("}")
@@ -3392,6 +4456,13 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     if _uses_spawn(ir):
         out.extend(["    " + line if line else line
                     for line in _emit_spawn_handle(with_get=_uses_instance_get(ir))])
+    if _uses_revl_frame(ir):
+        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
+        # item 322 Slice 2: the durable WAL sink rides alongside the teardown
+        # frame, but ONLY under `--record` — off, this whole block is absent and
+        # the output is byte-identical (the golden oracle + selfhost gate).
+        if _RECORD_MODE:
+            out.extend(["    " + line if line else line for line in _emit_record_sink()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(
             component, services, types, functions, externs, components,
@@ -3475,42 +4546,141 @@ def _refuse_lifecycle_tests(tests: list) -> None:
             )
 
 
-def emit(ir: dict, package_name: str = "revl") -> str:
-    """Emit one Java source file for an IR document (ir_version 1, 2, or 3)."""
+def _refuse_deferred_emissions(ir: dict) -> None:
+    """Roadmap 245 Decision 2 tier gate: a CALL to a `deferred` emission needs a
+    session-owner runtime (the deferral queue and the commit verb) this tier does
+    not have yet, so refuse it at emit time — surfaced through EmitError, this
+    tier's existing refusal channel. The reachability check and the single
+    canonical wording live in `revl.session_commit`, shared by all five ownerless
+    tiers so six backends do not invent six messages; a declared-but-never-called
+    deferred extern emits cleanly (call-site keyed)."""
+    try:
+        from revl.errors import RevlError
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
+    except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.errors import RevlError
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
+    try:
+        refuse_deferred_on_ownerless_tier(ir, "java")
+        refuse_approval_on_ownerless_tier(ir, "java")
+    except RevlError as exc:
+        raise EmitError(exc.message) from None
+
+
+_REVL_SYNC_SUFFIX = "_revl_sync"
+
+
+def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
+    """item 388, stage 6: on a colour-erasing tier (go/rust/java/wasm — suspension
+    is not a function colour) a caller-decided-colour extern's two clones — `X`
+    (async) and `X_revl_sync` (sync) — emit the SAME blocking host function.
+    Collapse them to ONE: drop the sync clone and rewrite its call sites to `X`.
+
+    Detected structurally: a `_revl_sync` extern whose origin twin is present with
+    identical `bodies`. A poly extern instantiated in only one colour has no twin,
+    so it is emitted unchanged under whatever name survived. Non-destructive (the
+    shared IR is also emitted by py/ts, which keep both colours), and a no-op that
+    returns the IR untouched when no such pair exists (every existing golden is
+    byte-identical)."""
+    externs = ir.get("externs") or []
+    by_name = {e.get("name"): e for e in externs}
+    alias: dict = {}
+    kept: list = []
+    for e in externs:
+        name = e.get("name") or ""
+        if name.endswith(_REVL_SYNC_SUFFIX):
+            origin = name[: -len(_REVL_SYNC_SUFFIX)]
+            twin = by_name.get(origin)
+            if twin is not None and twin.get("bodies") == e.get("bodies"):
+                alias[name] = origin
+                continue
+        kept.append(e)
+    if not alias:
+        return ir
+
+    def _rewrite(node):
+        if isinstance(node, dict):
+            return {k: (alias[v] if k == "name" and isinstance(v, str)
+                        and v in alias else _rewrite(v))
+                    for k, v in node.items()}
+        if isinstance(node, list):
+            return [_rewrite(x) for x in node]
+        return node
+
+    ir = dict(ir)
+    ir["externs"] = kept
+    for key in ("components", "functions", "tests", "prop_tests"):
+        if key in ir:
+            ir[key] = _rewrite(ir[key])
+    return ir
+
+
+def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
+    """Emit one Java source file for an IR document (ir_version 1, 2, or 3).
+
+    `record` (item 322 Slice 2) additionally emits the durable WAL recording
+    sink and the per-descriptor `revlRecordTransactional` calls at each witnessed
+    transactional registration. Default False -> byte-identical to the pre-feature
+    output, so the golden oracle and the selfhost mirror (both record off) are
+    unaffected. Mirrors backends/go/emit.py's `--record`."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
+    ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
     _refuse_holes(ir)
+    _refuse_deferred_emissions(ir)
 
     _refuse_fault_tests(ir)
 
     _refuse_lifecycle_tests(ir.get("tests") or [])
-    version = ir.get("ir_version")
-    if version == 1:
-        return _emit_v1(ir, package_name)
-    if version == 2:
-        return _emit_v2(ir, package_name)
-    if version == 3:
-        return _emit_v3(ir, package_name)
-    raise EmitError(
-        f"unsupported ir_version: {version!r} — the Java backend targets "
-        f"ir_version 1, 2, and 3"
-    )
+    global _RECORD_MODE
+    saved = _RECORD_MODE
+    _RECORD_MODE = record
+    try:
+        version = ir.get("ir_version")
+        if version == 1:
+            return _emit_v1(ir, package_name)
+        if version == 2:
+            return _emit_v2(ir, package_name)
+        if version == 3:
+            return _emit_v3(ir, package_name)
+        raise EmitError(
+            f"unsupported ir_version: {version!r} — the Java backend targets "
+            f"ir_version 1, 2, and 3"
+        )
+    finally:
+        _RECORD_MODE = saved
 
 
 def _main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: python3 emit.py <ir.json|->", file=sys.stderr)
+    # `--record` (item 322 Slice 2) wires the witnessed teardown to a durable
+    # WAL sink; an optional package name follows the IR path (default `revl`).
+    rest = [a for a in argv[1:] if a != "--record"]
+    record = "--record" in argv[1:]
+    if len(rest) not in (1, 2):
+        print("usage: python3 emit.py <ir.json|-> [package] [--record]", file=sys.stderr)
         return 2
     # `-` reads the IR from stdin. Callers used to pass `/dev/stdin`, which
     # works on macOS and fails on a GitHub runner with `OSError: [Errno 6] No
     # such device or address` — the emitted-code tests were red in CI for that
     # reason alone.
-    if argv[1] == "-":
+    if rest[0] == "-":
         ir = json.load(sys.stdin)
     else:
-        with open(argv[1], "r", encoding="utf-8") as handle:
+        with open(rest[0], "r", encoding="utf-8") as handle:
             ir = json.load(handle)
-    sys.stdout.write(emit(ir))
+    package = rest[1] if len(rest) == 2 else "revl"
+    sys.stdout.write(emit(ir, package, record=record))
     return 0
 
 

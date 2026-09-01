@@ -1,0 +1,31 @@
+// item 383 / 391 (self-host port): the receiver-first list transforms
+// `xs.map(f)` / `xs.filter(p)` / `xs.reduce(init, f)` are SUGAR for the free
+// functions `list_map` / `list_filter` / `list_reduce`. The redirect happens
+// before typing and lowering (parser.py `desugar_list_transform`), threading
+// the receiver in as the leading argument, so the existing generic-call +
+// arrow-argument path does all the work. Monomorphic here (the corpus pins a
+// concrete Int surface); the sugar itself is type-agnostic.
+fn list_map(xs: List[Int], f: (Int) -> Int) -> List[Int] {
+  var out = []
+  for (x of xs) { out = out.push(f(x)) }
+  return out
+}
+fn list_filter(xs: List[Int], p: (Int) -> Bool) -> List[Int] {
+  var out = []
+  for (x of xs) { if (p(x)) { out = out.push(x) } }
+  return out
+}
+fn list_reduce(xs: List[Int], init: Int, f: (Int, Int) -> Int) -> Int {
+  var acc = init
+  for (x of xs) { acc = f(acc, x) }
+  return acc
+}
+fn mapped(xs: List[Int]) -> List[Int] {
+  return xs.map((n: Int) => n + 1)
+}
+fn kept(xs: List[Int]) -> List[Int] {
+  return xs.filter((n: Int) => n > 0)
+}
+fn total(xs: List[Int]) -> Int {
+  return xs.reduce(0, (a: Int, x: Int) => a + x)
+}

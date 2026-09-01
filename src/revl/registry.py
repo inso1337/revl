@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from .compiler import compile_files
@@ -43,6 +43,34 @@ from .parser import MethodDecl, ServiceDecl
 
 INDEX_VERSION = "0"          # phase-0 index format; bumped only on a shape change
 INDEX_FILENAME = "index.json"
+
+# The evidence bundle a component carries alongside its source + manifest
+# (roadmap item 293). Each file is the verbatim output of an existing producer,
+# assembled - never re-implemented - at publish time:
+#
+#   attestation.json       revl.attest.make_attestation  (item 127)
+#   gauntlet.json          mcp.gauntlet.run dossier       (root dossier.json is
+#                          read as this facet when evidence/gauntlet.json absent)
+#   fault-sweep.json       fault.sweep_dossier            (item 30/125)
+#   inverse-roundtrip.json fault.roundtrip_dossier        (item 26)
+#   capabilities.json      __main__._boundary G8 surface  (docs/capabilities.md)
+#   provenance.json        assembled source/build provenance (the reproducible
+#                          hashes the index records + the interchange toolchain)
+#
+# A missing file is `unavailable` (ranked below present-and-valid), never read
+# as valid; a tampered attestation is `invalid` (ranked at the bottom, or
+# filtered when a resolve runs verify-required).
+EVIDENCE_DIRNAME = "evidence"
+EVIDENCE_ATTESTATION = "attestation.json"
+EVIDENCE_GAUNTLET = "gauntlet.json"
+EVIDENCE_FAULT_SWEEP = "fault-sweep.json"
+EVIDENCE_INVERSE_ROUNDTRIP = "inverse-roundtrip.json"
+EVIDENCE_CAPABILITIES = "capabilities.json"
+EVIDENCE_PROVENANCE = "provenance.json"
+EVIDENCE_FILES = (
+    EVIDENCE_ATTESTATION, EVIDENCE_GAUNTLET, EVIDENCE_FAULT_SWEEP,
+    EVIDENCE_INVERSE_ROUNDTRIP, EVIDENCE_CAPABILITIES, EVIDENCE_PROVENANCE,
+)
 
 
 # --------------------------------------------------------------- the index
@@ -66,6 +94,7 @@ class RegistryEntry:
     emissions: int                    # how many boundary crossings the entry declares
     source_hash: str
     manifest_hash: str
+    evidence_bundle: "EvidenceBundle" = None  # the item-293 evidence bundle
 
     @property
     def evidence(self) -> str:
@@ -80,10 +109,262 @@ class RegistryEntry:
         return "*" in self.capabilities
 
 
+# --------------------------------------------------------------- evidence bundle
+
+# Per-facet quality rank: 0 sorts first (best). A missing facet is `unavailable`
+# - always below any present-and-valid one, never silently valid; a tampered
+# attestation is `invalid`, the single worst rank a facet can carry.
+_ATTESTATION_RANK = {"valid": 0, "present": 1, "unavailable": 2, "invalid": 3}
+_SWEEP_RANK = {"full": 0, "partial": 1, "unavailable": 2}
+_INVERSE_RANK = {"pass": 0, "fail": 1, "unavailable": 2}
+_GAUNTLET_RANK = {"admissible": 0, "present": 1, "unavailable": 2}
+_PUBLISHER_RANK = {"trusted": 0, "present": 1, "unavailable": 2}
+
+
+@dataclass(frozen=True)
+class EvidenceBundle:
+    """The machine-verifiable evidence a registry component carries (item 293).
+
+    Every member is the verbatim JSON a producer already emits (or None when the
+    component published none of that facet). Nothing here re-derives evidence:
+    the bundle is loaded as data, and its quality is *assessed* - how strong the
+    present evidence is - only when a resolve ranks candidates.
+    """
+    attestation: dict | None = None
+    gauntlet: dict | None = None
+    fault_sweep: dict | None = None
+    inverse_roundtrip: dict | None = None
+    capabilities: dict | None = None
+    provenance: dict | None = None
+
+    def present(self) -> tuple[str, ...]:
+        """The facet names this bundle actually carries, for diagnostics."""
+        names = []
+        for name, value in (
+            ("attestation", self.attestation), ("gauntlet", self.gauntlet),
+            ("fault-sweep", self.fault_sweep),
+            ("inverse-roundtrip", self.inverse_roundtrip),
+            ("capabilities", self.capabilities), ("provenance", self.provenance),
+        ):
+            if value is not None:
+                names.append(name)
+        return tuple(names)
+
+
+@dataclass(frozen=True)
+class EvidenceAssessment:
+    """The graded quality of one component's evidence, as a resolve sees it.
+
+    `rank_key` sorts better evidence first (lower is better); `facets` is the
+    human/agent-readable status of each facet, surfaced in the resolve result so
+    the chosen candidate can say *why* it won.
+    """
+    facets: dict          # {facet: status}
+    rank_key: tuple       # deterministic, lower sorts first
+    sweep_coverage: tuple | None   # (passed, steps) when a fault sweep is present
+
+    def summary(self) -> str:
+        """A compact one-line evidence summary, e.g.
+        `fault sweep 12/12, attestation valid, gauntlet admissible`."""
+        parts: list[str] = []
+        if self.sweep_coverage is not None:
+            parts.append(f"fault sweep {self.sweep_coverage[0]}/"
+                         f"{self.sweep_coverage[1]}")
+        elif self.facets.get("fault-sweep") == "unavailable":
+            parts.append("fault sweep unavailable")
+        att = self.facets.get("attestation")
+        if att and att != "unavailable":
+            parts.append(f"attestation {att}")
+        if self.facets.get("inverse-roundtrip") == "pass":
+            parts.append("inverse round-trip pass")
+        if self.facets.get("gauntlet") == "admissible":
+            parts.append("gauntlet admissible")
+        if self.facets.get("publisher") == "trusted":
+            parts.append("trusted publisher")
+        return ", ".join(parts) if parts else "no evidence"
+
+
+def _sweep_status(dossier: dict | None) -> tuple[str, tuple | None]:
+    """Grade a fault-sweep dossier (fault.sweep_dossier shape). `full` means the
+    sweep ran and every swept step passed (e.g. 12/12); a partial or failed
+    sweep is `partial`; absent is `unavailable`. The (passed, steps) coverage
+    is carried through for the finer tiebreak and the `why`."""
+    if not isinstance(dossier, dict):
+        return "unavailable", None
+    counts = dossier.get("counts") or {}
+    steps = int(counts.get("steps") or 0)
+    passed = int(counts.get("passed") or 0)
+    coverage = (passed, steps)
+    if dossier.get("status") == "passed" and steps > 0 and passed == steps:
+        return "full", coverage
+    if dossier.get("status") == "passed" and steps == 0:
+        # a `passed` dossier with nothing to sweep is honest but weightless:
+        # present, but not the full-coverage tier.
+        return "partial", coverage
+    return "partial", coverage
+
+
+def _inverse_status(dossier: dict | None) -> str:
+    """Grade an inverse-roundtrip dossier (fault.roundtrip_dossier shape)."""
+    if not isinstance(dossier, dict):
+        return "unavailable"
+    return "pass" if dossier.get("status") == "passed" else "fail"
+
+
+def _gauntlet_status(dossier: dict | None) -> str:
+    """Grade a gauntlet dossier (mcp.gauntlet.run shape)."""
+    if not isinstance(dossier, dict):
+        return "unavailable"
+    return "admissible" if dossier.get("verdict") == "admissible" else "present"
+
+
+def _attestation_status(att: dict | None, *, key: bytes | None,
+                        ir: dict | None,
+                        bundle: "EvidenceBundle | None" = None) -> str:
+    """Grade an attestation (revl.attest shape).
+
+    Without a key an attestation can only be checked for *well-formedness*
+    (`present`); with a key it is cryptographically verified against the rebuilt
+    IR and is `valid` or `invalid`. A malformed record is `invalid`, never
+    `present` - a resolve must not read a broken attestation as merely
+    unverified.
+
+    When the attestation carries per-facet dossier bindings (item 290, §6.2), a
+    `valid` grade additionally requires every bound dossier in `bundle` to hash
+    to its signed value: a forged or copied dossier riding an honest signature
+    grades the whole attestation `invalid`, so it can never vouch for evidence
+    it does not cover. An attestation with no bindings is unaffected (the
+    dossiers it does not cover simply stay self-attested)."""
+    if att is None:
+        return "unavailable"
+    if not isinstance(att, dict) or "signature" not in att \
+            or "composition_hash" not in att:
+        return "invalid"
+    if key is not None:
+        from .attest import verify_attestation  # noqa: PLC0415
+        ok, _ = verify_attestation(att, key, ir)
+        if not ok:
+            return "invalid"
+        if bundle is not None and binding_mismatch(att, bundle) is not None:
+            return "invalid"
+        return "valid"
+    return "present"
+
+
+def _publisher_status(provenance: dict | None,
+                      trusted_publishers: frozenset) -> str:
+    """Grade the provenance's publisher against the caller's trust set. Trust is
+    supplied by the resolve, never self-asserted by the component."""
+    if not isinstance(provenance, dict):
+        return "unavailable"
+    publisher = provenance.get("publisher")
+    if publisher and publisher in trusted_publishers:
+        return "trusted"
+    return "present"
+
+
+def assess_evidence(bundle: EvidenceBundle, *, key: bytes | None = None,
+                    ir: dict | None = None,
+                    trusted_publishers: frozenset = frozenset()
+                    ) -> EvidenceAssessment:
+    """Grade an evidence bundle into a deterministic ranking key + facet report.
+
+    The ordering the key encodes, strongest signal first (docs/registry.md §2.3,
+    item 293): fault-sweep coverage, a valid attestation, a trusted publisher,
+    an inverse-roundtrip pass, a gauntlet admission - then finer sweep coverage.
+    Interface compatibility is decided elsewhere and stays a hard filter; this
+    only ranks the already-compatible set.
+    """
+    sweep, coverage = _sweep_status(bundle.fault_sweep)
+    attestation = _attestation_status(bundle.attestation, key=key, ir=ir,
+                                      bundle=bundle)
+    inverse = _inverse_status(bundle.inverse_roundtrip)
+    gauntlet = _gauntlet_status(bundle.gauntlet)
+    publisher = _publisher_status(bundle.provenance, trusted_publishers)
+    facets = {
+        "fault-sweep": sweep,
+        "attestation": attestation,
+        "inverse-roundtrip": inverse,
+        "gauntlet": gauntlet,
+        "publisher": publisher,
+        "capabilities": "present" if bundle.capabilities is not None
+                        else "unavailable",
+    }
+    passed = coverage[0] if coverage else 0
+    rank_key = (
+        _SWEEP_RANK[sweep],
+        _ATTESTATION_RANK[attestation],
+        _PUBLISHER_RANK[publisher],
+        _INVERSE_RANK[inverse],
+        _GAUNTLET_RANK[gauntlet],
+        -passed,                       # more swept steps proven is stronger
+    )
+    return EvidenceAssessment(
+        facets=facets, rank_key=rank_key,
+        sweep_coverage=coverage if sweep in ("full", "partial")
+        and coverage and coverage[1] > 0 else None)
+
+
 # --------------------------------------------------------------- hashing / io
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# The facets whose dossiers an attestation binds (item 290, §6.2): the runtime-
+# tested and enumerated evidence a `attestation valid` clause can root. Keyed by
+# facet name (the same names `assess_evidence` reports), mapped to the bundle
+# attribute the dossier is loaded into.
+_BOUND_FACETS = {
+    "fault-sweep": "fault_sweep",
+    "inverse-roundtrip": "inverse_roundtrip",
+    "gauntlet": "gauntlet",
+    "capabilities": "capabilities",
+}
+
+
+def _facet_hash(doc) -> str:
+    """The content hash of one evidence dossier, folded into the signed
+    attestation payload (item 290, §6.2). Canonical (sorted keys, compact
+    separators) so the hash is a pure function of the dossier's data, never of
+    its on-disk formatting — the publish side and the admission side compute the
+    same value from the same dict."""
+    canonical = json.dumps(doc, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def evidence_bindings(bundle: "EvidenceBundle") -> dict:
+    """The per-facet dossier hashes for the dossiers a bundle actually carries —
+    what `build_evidence` signs into the attestation so admission can prove the
+    dossiers were not forged after signing (item 290, §6.2)."""
+    out: dict = {}
+    for facet, attr in _BOUND_FACETS.items():
+        doc = getattr(bundle, attr, None)
+        if doc is not None:
+            out[facet] = _facet_hash(doc)
+    return out
+
+
+def binding_mismatch(att: dict | None, bundle: "EvidenceBundle") -> str | None:
+    """The first bound facet whose dossier in `bundle` does not hash to the
+    value signed into `att`, or None when every binding matches (or the
+    attestation binds nothing). A mismatch — or a bound dossier that is absent
+    from the bundle — is a tamper: the signed payload vouched for bytes that are
+    no longer there (item 290, §6.2, exit test 5)."""
+    if not isinstance(att, dict):
+        return None
+    bindings = att.get("evidence_bindings")
+    if not isinstance(bindings, dict):
+        return None
+    for facet, signed_hash in sorted(bindings.items()):
+        attr = _BOUND_FACETS.get(facet)
+        doc = getattr(bundle, attr, None) if attr else None
+        if doc is None:
+            return facet          # bound but not present: a dropped dossier
+        if _facet_hash(doc) != signed_hash:
+            return facet          # present but altered: a forged/copied dossier
+    return None
 
 
 def _capabilities_of(boundary: dict) -> tuple[tuple[str, ...], int]:
@@ -163,6 +444,38 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _read_json(path: Path) -> dict | None:
+    """Load a JSON evidence file, or None when it is absent - a missing file is
+    `unavailable`, the honest floor, never a fabricated pass."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(_read(path))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def load_evidence_bundle(entry_dir: str | os.PathLike) -> EvidenceBundle:
+    """Load a component's evidence bundle from ``<entry_dir>/evidence/`` (item
+    293). A missing bundle, or a missing facet within it, loads as None and
+    grades `unavailable`. For backward compatibility a root ``dossier.json``
+    (the gauntlet output earlier entries carried) is read as the gauntlet facet
+    when ``evidence/gauntlet.json`` is absent."""
+    entry_dir = Path(entry_dir)
+    ev = entry_dir / EVIDENCE_DIRNAME
+    gauntlet = _read_json(ev / EVIDENCE_GAUNTLET)
+    if gauntlet is None:
+        gauntlet = _read_json(entry_dir / "dossier.json")
+    return EvidenceBundle(
+        attestation=_read_json(ev / EVIDENCE_ATTESTATION),
+        gauntlet=gauntlet,
+        fault_sweep=_read_json(ev / EVIDENCE_FAULT_SWEEP),
+        inverse_roundtrip=_read_json(ev / EVIDENCE_INVERSE_ROUNDTRIP),
+        capabilities=_read_json(ev / EVIDENCE_CAPABILITIES),
+        provenance=_read_json(ev / EVIDENCE_PROVENANCE),
+    )
+
+
 def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
     """Regenerate ``index.json`` (and each component's ``manifest.json``) from
     the component sources. This is the CI regenerator — never hand-edit the
@@ -227,6 +540,119 @@ def verify(registry_dir: str | os.PathLike) -> list[str]:
     return problems
 
 
+# --------------------------------------------------------------- evidence publish
+
+def _write_evidence_file(entry_dir: Path, filename: str, doc: dict,
+                         *, write: bool) -> None:
+    text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
+    if write:
+        ev = entry_dir / EVIDENCE_DIRNAME
+        ev.mkdir(exist_ok=True)
+        (ev / filename).write_text(text, encoding="utf-8")
+
+
+def _provenance_document(source: str, manifest: dict, manifest_text: str,
+                         publisher: str | None) -> dict:
+    """The source/build provenance for a component - assembled from the
+    reproducible facts the registry and interchange already stamp (the same
+    `sourceHash` the index records, the manifest hash, and the interchange
+    toolchain version), not a novel producer. A consumer can recompute every
+    field from the component's own source."""
+    from .interchange import INTERCHANGE_VERSION  # noqa: PLC0415
+
+    doc = {
+        "kind": "revl.provenance",
+        "sourceSha256": _sha256(source),
+        "manifestSha256": _sha256(manifest_text),
+        "schemaVersion": manifest.get("schema_version"),
+        "toolchain": {"interchange": INTERCHANGE_VERSION},
+    }
+    if publisher:
+        doc["publisher"] = publisher
+    return doc
+
+
+def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
+                   signer: str | None = None, now=None,
+                   publisher: str | None = None, write: bool = True) -> dict:
+    """Assemble each component's evidence bundle (roadmap item 293) - the second
+    half of the publish path, run after `build_index` has written the manifests.
+
+    Nothing here re-implements evidence: it calls the existing producers and
+    writes their verbatim output under ``<component>/evidence/``. `capabilities`
+    (the G8 boundary) and `provenance` are always reproducible from source and
+    are always written; `attestation` is written when a signing `key` is given;
+    `fault-sweep` and `inverse-roundtrip` are the runtime-tested facets - written
+    when the cordis-py runtime is present, and honestly skipped (left
+    `unavailable`) when it is absent, never faked. Returns a per-component map of
+    the facets that were assembled.
+    """
+    from .__main__ import _boundary  # noqa: PLC0415
+
+    comps = _components_dir(registry_dir)
+    produced: dict = {}
+    for entry_dir in sorted(p for p in comps.iterdir() if p.is_dir()):
+        name = entry_dir.name
+        source_path = entry_dir / "component.rvl"
+        source = _read(source_path)
+        ir = compile_files([str(source_path)])
+        manifest = _audit_document(ir)
+        manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        facets: list[str] = []
+
+        # The dossiers are computed BEFORE the attestation is signed (item 290,
+        # §6.2), because the attestation binds their hashes into its signed
+        # payload; a dossier written after signing could never be bound. capsule
+        # + provenance are always reproducible with no runtime; the runtime-
+        # tested facets are honestly skipped (left unavailable) when cordis-py is
+        # absent, never faked.
+        dossiers: dict[str, tuple[str, dict]] = {}
+        dossiers["capabilities"] = (
+            EVIDENCE_CAPABILITIES,
+            {"kind": "revl.capabilities", "boundary": _boundary(ir)})
+        from . import fault  # noqa: PLC0415
+        try:
+            dossiers["fault-sweep"] = (EVIDENCE_FAULT_SWEEP,
+                                       fault.sweep_dossier(ir))
+        except (ModuleNotFoundError, ImportError):
+            pass  # cordis-py absent: honestly unavailable, never faked
+        try:
+            dossiers["inverse-roundtrip"] = (EVIDENCE_INVERSE_ROUNDTRIP,
+                                             fault.roundtrip_dossier(ir))
+        except (ModuleNotFoundError, ImportError):
+            pass
+
+        # write the bound dossiers, and collect their hashes for the signature.
+        bindings: dict = {}
+        for facet, (filename, doc) in sorted(dossiers.items()):
+            _write_evidence_file(entry_dir, filename, doc, write=write)
+            facets.append(facet)
+            if facet in _BOUND_FACETS:
+                bindings[facet] = _facet_hash(doc)
+
+        # provenance - reproducible source/build facts (not itself bound: it
+        # carries the source/manifest hashes the composition hash already roots).
+        _write_evidence_file(
+            entry_dir, EVIDENCE_PROVENANCE,
+            _provenance_document(source, manifest, manifest_text, publisher),
+            write=write)
+        facets.append("provenance")
+
+        # attestation - a signed admission record binding the dossier hashes,
+        # when a key is supplied (item 127 + item 290, §6.2).
+        if key is not None:
+            from .attest import make_attestation  # noqa: PLC0415
+            att = make_attestation(_normalize_ir_for_attest(ir), bytes(key),
+                                   now=now, signer=signer,
+                                   evidence_bindings=bindings or None)
+            _write_evidence_file(entry_dir, EVIDENCE_ATTESTATION, att,
+                                 write=write)
+            facets.append("attestation")
+
+        produced[name] = sorted(facets)
+    return produced
+
+
 # --------------------------------------------------------------- the registry
 
 class Registry:
@@ -268,12 +694,16 @@ class Registry:
                 emissions=int(row.get("emissions") or 0),
                 source_hash=row.get("sourceHash") or _sha256(source),
                 manifest_hash=row.get("manifestHash") or "",
+                evidence_bundle=load_evidence_bundle(entry_dir),
             ))
         return cls(entries)
 
     def resolve(self, need, manifest: dict | None = None,
-                limit: int = 5) -> dict:
-        return resolve(self, need, manifest=manifest, limit=limit)
+                limit: int = 5, *, verify_required: bool = False,
+                key: bytes | None = None, trusted_publishers=()) -> dict:
+        return resolve(self, need, manifest=manifest, limit=limit,
+                       verify_required=verify_required, key=key,
+                       trusted_publishers=trusted_publishers)
 
 
 # --------------------------------------------------------------- the need
@@ -390,21 +820,20 @@ class _Match:
         return (f"provides `{self.service}` as `{self.key}`: §5-compatible with "
                 f"the need ({fit})")
 
-    def rank(self) -> tuple:
-        # docs/registry.md §2 ranking, least authority first:
+    def authority_fit_key(self) -> tuple:
+        # docs/registry.md §2 ranking, least authority first - the part that
+        # sits ABOVE evidence quality:
         #   1. smallest declared capability set (unscoped `*` ranks last)
         #   2. tighter interface fit (exact over compatible-with-widening)
-        #   3. stronger evidence (a gauntlet dossier over audit-only)
-        #   4. smaller source (less for the agent to hold in context)
+        # Evidence quality (item 293) breaks the tie among candidates equal here;
+        # interface compatibility itself is a hard filter, decided in
+        # `_match_entry`, and never a ranking term.
         e = self.entry
         return (
             1 if e.unbounded else 0,
             len([c for c in e.capabilities if c != "*"]),
             e.emissions,
             0 if self.exact else 1,
-            0 if e.evidence == "gauntlet" else 1,
-            len(e.source),
-            e.name,
         )
 
 
@@ -460,8 +889,57 @@ _ASSUMPTIONS = [
 ]
 
 
+def _normalize_ir_for_attest(ir: dict) -> dict:
+    """The IR spelling an attestation binds - each component's `file` reduced to
+    its basename, the same normalization `_audit_document` and `truc reproduce`
+    apply so an attestation verifies regardless of the path the entry compiled
+    from (mirrors reproduce._normalized_ir)."""
+    import copy  # noqa: PLC0415
+
+    out = copy.deepcopy(ir)
+    for comp in (out.get("manifest") or {}).get("components") or []:
+        if comp.get("file"):
+            comp["file"] = os.path.basename(comp["file"])
+    # The compiled IR also stamps each component with its `source` path, which is
+    # cwd-dependent (a full path under `compile_files`, a bare name under
+    # `compile_source`). Basename it too so the attested composition hash is a
+    # pure function of the source, not of where the entry was compiled.
+    for comp in out.get("components") or []:
+        if comp.get("source"):
+            comp["source"] = os.path.basename(comp["source"])
+    return out
+
+
+def _assess_match(match: "_Match", *, key: bytes | None,
+                  trusted_publishers: frozenset,
+                  ir_cache: dict) -> EvidenceAssessment:
+    """Grade one candidate's evidence for ranking. When a key is supplied, the
+    candidate source is compiled once (cached) so the attestation can be
+    cryptographically verified against the rebuilt IR - the same honest check
+    `truc reproduce` runs, not a trust of the record's own say-so."""
+    entry = match.entry
+    bundle = entry.evidence_bundle or EvidenceBundle()
+    ir = None
+    if key is not None and bundle.attestation is not None:
+        ir = ir_cache.get(entry.name)
+        if ir is None:
+            from .compiler import compile_source  # noqa: PLC0415
+            try:
+                # compile under the stable published filename so the audit-
+                # normalized `file` basename (and thus the attested composition
+                # hash) matches what `build_evidence` signed from component.rvl.
+                ir = _normalize_ir_for_attest(
+                    compile_source(entry.source, "component.rvl"))
+            except RevlError:
+                ir = {}
+            ir_cache[entry.name] = ir
+    return assess_evidence(bundle, key=key, ir=ir,
+                           trusted_publishers=trusted_publishers)
+
+
 def resolve(registry, need, manifest: dict | None = None,
-            limit: int = 5) -> dict:
+            limit: int = 5, *, verify_required: bool = False,
+            key: bytes | None = None, trusted_publishers=()) -> dict:
     """Rank the registry's §5-admissible providers for a need (docs/registry.md §2).
 
     `registry` is a `Registry` or a directory path. `need` is a service
@@ -470,39 +948,89 @@ def resolve(registry, need, manifest: dict | None = None,
     candidate whose key the running composition already provides is dropped
     (G2 forbids two providers of one key). `source` and `manifest` ride inline
     on every candidate so the loop stays two round-trips.
+
+    Among the interface-compatible candidates the ranking is, in order: least
+    authority, tightest interface fit, then **evidence quality** (item 293) -
+    fault-sweep coverage, a valid attestation, a trusted publisher, an
+    inverse-roundtrip pass. Compatibility is a hard filter (an incompatible
+    candidate is never returned); evidence only ranks the compatible set, and
+    the chosen candidate's evidence is spelled out in its `why`.
+
+    `verify_required=True` (with `key`) turns the evidence check into a gate: a
+    candidate without a cryptographically **valid** attestation is filtered, and
+    a tampered attestation - which grades `invalid` - never survives. Without
+    `verify_required` a missing or unverifiable attestation only ranks a
+    candidate lower; it is never silently treated as valid.
     """
     if not isinstance(registry, Registry):
         registry = Registry.from_dir(registry)
     needs = _needs(need)
     taken = _manifest_provided_keys(manifest)
+    key_bytes = bytes(key) if key is not None else None
+    trusted = frozenset(trusted_publishers or ())
+    if verify_required and key_bytes is None:
+        raise RevlError(
+            "<resolve>", 0,
+            "verify_required resolve needs a signing key to verify attestations "
+            "(pass key=...)")
 
-    matches: list[_Match] = []
+    ir_cache: dict = {}
+    graded: list[tuple[_Match, EvidenceAssessment]] = []
     for entry in registry.entries:
         match = _match_entry(entry, needs)
         if match is None:
-            continue
+            continue  # interface-incompatible: the hard filter, never ranked in
         if match.key in taken:
             # admissible somewhere, but not *here*: the running composition
             # already provides this key, and G2 forbids a second provider.
             continue
-        matches.append(match)
-    matches.sort(key=_Match.rank)
+        assessment = _assess_match(match, key=key_bytes,
+                                   trusted_publishers=trusted, ir_cache=ir_cache)
+        if verify_required and assessment.facets.get("attestation") != "valid":
+            # verify-required: only a cryptographically valid attestation admits.
+            continue
+        graded.append((match, assessment))
+
+    # least authority, then fit, then evidence quality, then a stable tiebreak.
+    graded.sort(key=lambda pair: (
+        pair[0].authority_fit_key(),
+        pair[1].rank_key,
+        len(pair[0].entry.source),
+        pair[0].entry.name,
+    ))
 
     assumptions = list(_ASSUMPTIONS)
+    assumptions.append(
+        "among interface-compatible candidates the ranking is by evidence "
+        "quality (fault-sweep coverage, valid attestation, trusted publisher, "
+        "inverse-roundtrip pass); a missing facet is unavailable, never valid")
     if manifest:
         assumptions.append(
             "candidates are additionally admissible against the supplied "
             "manifest: a key the composition already provides is withheld (G2)")
+    if verify_required:
+        assumptions.append(
+            "verify-required: a candidate without a cryptographically valid "
+            "attestation was filtered, not merely ranked lower")
 
     candidates = []
-    for match in matches[:max(0, limit)]:
+    for match, assessment in graded[:max(0, limit)]:
         entry = match.entry
         candidate = {
             "name": entry.name,
             "source": entry.source,
             "manifest": entry.manifest,
-            "why": match.why(),
+            "why": f"{match.why()}; evidence: {assessment.summary()}",
+            "evidence": {
+                "summary": assessment.summary(),
+                "facets": assessment.facets,
+                "present": list((entry.evidence_bundle or EvidenceBundle())
+                                .present()),
+            },
         }
+        if assessment.sweep_coverage is not None:
+            candidate["evidence"]["faultSweepCoverage"] = list(
+                assessment.sweep_coverage)
         if entry.dossier is not None:
             candidate["dossier"] = entry.dossier
         candidates.append(candidate)
@@ -517,5 +1045,7 @@ def resolve(registry, need, manifest: dict | None = None,
     }
 
 
-__all__ = ["Registry", "RegistryEntry", "build_index", "verify", "resolve",
-           "INDEX_VERSION"]
+__all__ = ["Registry", "RegistryEntry", "EvidenceBundle", "EvidenceAssessment",
+           "build_index", "build_evidence", "verify", "resolve",
+           "load_evidence_bundle", "assess_evidence", "INDEX_VERSION",
+           "EVIDENCE_DIRNAME", "EVIDENCE_FILES"]

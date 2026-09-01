@@ -30,5 +30,24 @@ packages = ["src/revl"]
 # tests) breaks once installed — the checkout path does not exist under
 # site-packages. Ship the tree as `revl/backends`; `revl._backends_root()`
 # prefers the checkout location and falls back to this packaged copy.
+#
+# `stdlib/` ships the same way (roadmap 319): a `use "stdlib/..."` import
+# needs a real directory to fall back to when it does not resolve relative to
+# the importing file, and `site-packages` is exactly where an installed
+# consumer (the harness, say) runs from. `revl._paths.stdlib_root()` prefers
+# the checkout location and falls back to this packaged copy.
 [tool.hatch.build.targets.wheel.force-include]
 "backends" = "revl/backends"
+"stdlib" = "revl/stdlib"
+
+# Lint gate (roadmap 110d). The repo already carries a `# noqa` discipline whose
+# codes are overwhelmingly Pyflakes (F): unused imports/locals, undefined names,
+# placeholder-less f-strings. Pin ruff to that same F-level surface, not ruff's
+# broader default set (E4/E7/E9 + F), so the gate enforces the discipline that
+# exists without surfacing hundreds of pre-existing E/PL findings this sweep is
+# not meant to litigate. Widen deliberately (its own change), never by drift.
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F"]

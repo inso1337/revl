@@ -895,6 +895,105 @@ def _intercept_json_lit(value, base: str, defs: list[str], type_names: dict, cou
     raise EmitError(f"unsupported intercept metadata value: {value!r}")
 
 
+# ---------------------------------------------------------------------------
+# item 243 Slice 2b (rust): the witnessed-effects three-entry-kind teardown
+# loop. docs/design/teardown-contract.md is authoritative; the runtime
+# mechanism is `_revl_teardown_preamble` below. This block only DETECTS
+# whether a component needs that mechanism, so a program using neither a
+# `witnessed` extern nor `emit ... compensate` emits byte-identically to
+# before this slice (mirrors backends/python/emit.py's `self.witnessed` gate).
+# ---------------------------------------------------------------------------
+
+
+def _step_is_witnessed_effect(step: dict, witnessed: dict) -> bool:
+    """Is this an `effect`/`let-effect` step whose acquisition calls a
+    `witnessed` extern? Mirrors `backends/python/emit.py`'s
+    `_witnessed_extern` name-match (the checker refuses a witnessed call
+    anywhere else, so this is the only shape a component body carries one
+    in)."""
+    if not witnessed or step.get("step") not in ("effect", "let-effect"):
+        return False
+    acquire = step.get("acquire")
+    return (isinstance(acquire, dict) and acquire.get("kind") == "fn"
+            and acquire.get("name") in witnessed)
+
+
+def _body_has_witnessed(steps: list | None, witnessed: dict) -> bool:
+    for step in steps or []:
+        if _step_is_witnessed_effect(step, witnessed):
+            return True
+        if step.get("step") == "if":
+            if (_body_has_witnessed(step.get("then"), witnessed)
+                    or _body_has_witnessed(step.get("else"), witnessed)):
+                return True
+    return False
+
+
+def _body_has_compensation(steps: list | None) -> bool:
+    for step in steps or []:
+        if step.get("step") == "emit" and step.get("compensate") is not None:
+            return True
+        if step.get("step") == "if":
+            if (_body_has_compensation(step.get("then"))
+                    or _body_has_compensation(step.get("else"))):
+                return True
+    return False
+
+
+def _method_bodies_have_compensation(component: dict) -> bool:
+    for step in component.get("body") or []:
+        if step.get("step") != "provide":
+            continue
+        for method in step.get("methods") or []:
+            if _body_has_compensation(method.get("body")):
+                return True
+    return False
+
+
+def _method_bodies_have_witnessed(component: dict, witnessed: dict) -> bool:
+    """item 324: does any PROVIDE-METHOD body carry a witnessed effect (a
+    per-tool-call fs mutation)? The per-tool-call H1 gate: unlike a witnessed
+    effect in the ACTIVATION body (which `revl_teardown_begin` already sees),
+    one that fires from a method registers its transactional inverse into the
+    enclosing component's activation frame LATER, per request — the component
+    still needs the `RevlTeardown` accumulator built at activation so
+    `revl_teardown_of` can recover it. Mirrors `_method_bodies_have_compensation`
+    above (the method-body compensation case Slice 2b already handled)."""
+    for step in component.get("body") or []:
+        if step.get("step") != "provide":
+            continue
+        for method in step.get("methods") or []:
+            if _body_has_witnessed(method.get("body"), witnessed):
+                return True
+    return False
+
+
+def _component_needs_teardown(component: dict, witnessed: dict) -> bool:
+    body = component.get("body") or []
+    return (_body_has_witnessed(body, witnessed)
+            or _body_has_compensation(body)
+            or _method_bodies_have_compensation(component)
+            or _method_bodies_have_witnessed(component, witnessed))
+
+
+# item 322 Slice 2: record mode. When True, a witnessed transactional step also
+# writes a durable discharge-descriptor to the rust WAL sink
+# (revl_record_transactional) and the recording preamble is emitted. Default
+# False -> byte-identical output (every existing golden is the guard). Mirrors
+# backends/go/emit.py's `_RECORD_MODE`.
+_RECORD_MODE = False
+
+
+def _witnessed_extern_for(env: "_Env", acquire: object) -> dict | None:
+    """The witnessed extern descriptor a step's acquisition calls, or None.
+    Mirrors `backends/python/emit.py::_ComponentEmitter._witnessed_extern`."""
+    if not env.witnessed or not isinstance(acquire, dict):
+        return None
+    if acquire.get("kind") != "fn":
+        return None
+    return env.witnessed.get(acquire.get("name"))
+
+
 class _Env:
     """Per-component lowering context."""
 
@@ -927,6 +1026,32 @@ class _Env:
         self._v3_ctx: _V3Ctx | None = None
         # Per-component counter for unique timer local names (item 57).
         self.timer_counter = 0
+        # Per-component counter for unique witnessed-step temp names (item 243).
+        self.wit_counter = 0
+        # Activation-body `let`/`let-effect` bind names seen so far, in source
+        # order — so a later `emit ... compensate` closure knows which of the
+        # names it references are local Arc-wrapped bindings that need a
+        # `.clone()` before the `move` closure captures them (item 247 / the
+        # teardown-contract two-phase abort). Populated by `_emit_step` as it
+        # walks the body.
+        self.activation_binds: list[str] = []
+        # item 243 (docs/design/243-witnessed-externs.md): witnessed externs by
+        # name, so an activation-body call site can be recognised as a
+        # transactional effect and register its DECLARED inverse (not a
+        # site-spelled one) into the teardown accumulator. Absent/empty for
+        # every program that uses no witnessed extern, so their emission stays
+        # byte-identical (mirrors backends/python/emit.py's `self.witnessed`).
+        self.witnessed: dict[str, dict] = {
+            ext["name"]: ext for ext in self.externs
+            if ext.get("class") == "witnessed"
+        }
+        # docs/design/teardown-contract.md: does this component need the
+        # per-activation teardown accumulator (RevlTeardown) at all? True iff
+        # it registers at least one `transactional` (witnessed) or
+        # `compensation` (`emit ... compensate`, activation- or method-body)
+        # entry. Gated so a program using neither emits byte-identically to
+        # before this slice.
+        self.needs_teardown: bool = _component_needs_teardown(component, self.witnessed)
 
     def v3_ctx(self) -> _V3Ctx:
         if self._v3_ctx is None:
@@ -1081,6 +1206,18 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "    }",
                 "    pub fn insert(&self, key: String, value: V) {",
                 "        self.inner.lock().unwrap().insert(key, value);",
+                "    }",
+                "    // The atomic compare-and-set (item 397). ONE `lock()` spans the",
+                "    // membership test AND the insert via the entry API, so no thread",
+                "    // can witness the probe and the write as separable steps. Returns",
+                "    // whether it inserted; a `false` (key present) leaves the existing",
+                "    // value untouched. Under N concurrent callers, exactly one `true`.",
+                "    pub fn insert_if_absent(&self, key: String, value: V) -> bool {",
+                "        use std::collections::hash_map::Entry;",
+                "        match self.inner.lock().unwrap().entry(key) {",
+                "            Entry::Occupied(_) => false,",
+                "            Entry::Vacant(e) => { e.insert(value); true }",
+                "        }",
                 "    }",
                 "    pub fn remove(&self, key: &String) {",
                 "        self.inner.lock().unwrap().remove(key);",
@@ -1434,6 +1571,12 @@ def _host_of(component: dict, bind: str, map_values: dict[str, str] | None = Non
             # so a provide-method that captures it can call `.dispose()`.
             if acquire.get("kind") == "spawn":
                 return "RevlSpawnHandle"
+            # item 397: a result-declared host CAS binds the atomic `bool`
+            # result (`let fresh = Arc::new(ledger.insert_if_absent(...))`), not
+            # a host resource, so a provide struct that captures it holds an
+            # `Arc<bool>`, never the opaque `Arc<Value>` fallback (E0308).
+            if _is_map_cas(acquire):
+                return "bool"
             host = (acquire.get("fn") or "").split(".")[0] or "Value"
             # FR-4: the host Map is generic over its value type, learned from
             # the IR's `insert` sites (defaults to the historical `String`).
@@ -1495,7 +1638,8 @@ def _map_value_expr_type(node: dict, var_types: dict, env: _Env) -> str | None:
             elem = _map_value_expr_type(args[0], var_types, env)
             if elem is not None:
                 return f"List[{elem}]"
-        if method in ("length", "charCodeAt", "indexOf", "to_int"):
+        if method in ("length", "charCodeAt", "codepoint_at", "indexOf",
+                      "to_int"):
             return "Int"
         if method in ("charAt", "join", "repeat", "to_str", "slice"):
             return "Str"
@@ -1542,16 +1686,35 @@ def _map_value_expr_type(node: dict, var_types: dict, env: _Env) -> str | None:
     return None
 
 
+# Map verbs that write a value at arg[1]; each pins the host Map's value type V.
+# Inferring V from ANY writer (not the literal name "insert") lets a CAS-only
+# writer (`insert_if_absent`, item 397) pin a concrete V instead of the String
+# default (item 402).
+_MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+# item 397: the compare-and-set host verb whose bound result is a `bool` and
+# whose site-spelled undo is registered only when the CAS actually inserted.
+_MAP_CAS_VERBS = ("insert_if_absent",)
+
+
+def _is_map_cas(acquire) -> bool:
+    """Whether a lowered acquisition node is a result-guarded map CAS."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 def _map_expr_inserts(node, bind: str, var_types: dict, env: _Env,
                       candidates: list[str]) -> None:
-    """Collect candidate value types from `bind.insert(k, v)` anywhere in an
-    expression; recurses into sub-expressions."""
+    """Collect candidate value types from any map value-writing call
+    (`insert`, `insert_if_absent`, ...) on `bind` anywhere in an expression;
+    recurses into sub-expressions."""
     if not isinstance(node, dict):
         return
     if node.get("kind") == "call":
         target = node.get("target")
         if (isinstance(target, dict) and target.get("kind") == "name"
-                and target.get("id") == bind and node.get("method") == "insert"):
+                and target.get("id") == bind
+                and node.get("method") in _MAP_VALUE_WRITERS):
             args = node.get("args") or []
             if len(args) >= 2:
                 t = _map_value_expr_type(args[1], var_types, env)
@@ -1709,7 +1872,9 @@ def _component_has_effectful_methods(component: dict) -> bool:
             continue
         for method in step.get("methods") or []:
             for body_step in method.get("body") or []:
-                if body_step.get("step") in ("effect", "emit"):
+                # `let-effect` (item 397: a method-body host CAS) is effectful
+                # too — it registers a guarded inverse on the activation frame.
+                if body_step.get("step") in ("effect", "emit", "let-effect"):
                     return True
     return False
 
@@ -1779,7 +1944,7 @@ def _emit_config_application(component: dict, config_ty: str, indent: int) -> li
 
 def _method_has_effectful_steps(method: dict) -> bool:
     return any(
-        body_step.get("step") in ("effect", "emit")
+        body_step.get("step") in ("effect", "emit", "let-effect")
         for body_step in method.get("body") or []
     )
 
@@ -1917,38 +2082,70 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 out.append(f"{pad}return;")
             else:
                 out.append(f"{pad}return {_expr(step['expr'], env, rename)};")
-        elif kind in ("effect", "emit"):
+        elif kind == "effect":
+            wit = _witnessed_extern_for(env, step.get("acquire"))
+            if wit is not None:
+                # item 324: a witnessed effect in a provide-method body — the
+                # per-tool-call H1 gate. Register the extern's DECLARED inverse
+                # as a `transactional` entry on the enclosing component's
+                # activation frame (via `revl_teardown_of(&self.ctx)`), NOT as a
+                # plain always-replaying bracket. See `_emit_method_witnessed_step`
+                # for the disposal-ordering analysis (rust's eager commit means
+                # no park-for-drain is needed, unlike py).
+                _emit_method_witnessed_step(env, method, step, wit, out, indent)
+                continue
+            # bracket (acquire): unchanged by item 243/247 — replays on every
+            # teardown, clean unload and abort alike (docs/design/
+            # teardown-contract.md's "bracket... unchanged" row).
             undo_rename = _method_undo_rename(env, method)
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
                 acquire_rename[param] = f"{param}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.{kind}.{index}")
-            # An undo closure is registered for every effect, and for an emit
-            # only when it carries a compensate — the `*_undo` clones exist
-            # exactly when that closure exists.
-            registers_undo = kind == "effect" or step.get("compensate") is not None
-            undo_node = step.get("compensate") if kind == "emit" else step.get("undo")
+            undo_node = step.get("undo")
             acquire_node = step.get("acquire") or step.get("expr")
-            if registers_undo:
-                _method_undo_clones(env, method, out, indent)
-                # Pre-clone into `<l>_undo`, before the acquire runs, each
-                # method-body local the undo reads AND the acquire consumes by
-                # value (a host-Map `insert(key, ..)` moves its key without a
-                # call-site clone), so the move closure owns a copy the acquire's
-                # move cannot invalidate (item 114). Locals the acquire only
-                # borrows (`prev.push(..)`) or clones stay bare.
-                for local in sorted(_undo_reclone_locals(
-                        acquire_node, undo_node, body_locals, env.v3_ctx())):
-                    out.append(f"{pad}let {local}_undo = {local}.clone();")
-                    undo_rename[local] = f"{local}_undo"
+            _method_undo_clones(env, method, out, indent)
+            # Pre-clone into `<l>_undo`, before the acquire runs, each
+            # method-body local the undo reads AND the acquire consumes by
+            # value (a host-Map `insert(key, ..)` moves its key without a
+            # call-site clone), so the move closure owns a copy the acquire's
+            # move cannot invalidate (item 114). Locals the acquire only
+            # borrows (`prev.push(..)`) or clones stay bare.
+            for local in sorted(_undo_reclone_locals(
+                    acquire_node, undo_node, body_locals, env.v3_ctx())):
+                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                undo_rename[local] = f"{local}_undo"
             acquire = _expr(acquire_node, env, acquire_rename)
             out.append(f"{pad}let _ = {acquire};")
-            if not registers_undo:
-                continue
             undo = _expr(undo_node, env, undo_rename)
             out.append(
                 f"{pad}let _ = self.ctx.effect({label}, move || {{ {undo}; Ok(()) }});"
             )
+        elif kind == "emit":
+            acquire_rename = dict(rename)
+            for param in method.get("params") or []:
+                acquire_rename[param] = f"{param}.clone()"
+            acquire_node = step.get("expr")
+            acquire = _expr(acquire_node, env, acquire_rename)
+            out.append(f"{pad}let _ = {acquire};")
+            if step.get("compensate") is None:
+                continue
+            # `compensation` (item 247 / the teardown-contract two-phase
+            # abort): recover this activation's `RevlTeardown` through the
+            # SAME fiber's `ctx` (`revl_teardown_of` reads the metadata
+            # `revl_teardown_begin` stored there at activation), then register
+            # a disposer that discharges on commit or queues onto phase 2 on
+            # abort — never runs immediately, unlike the old placeholder.
+            undo_rename = _method_undo_rename(env, method)
+            _method_undo_clones(env, method, out, indent)
+            for local in sorted(_undo_reclone_locals(
+                    acquire_node, step.get("compensate"), body_locals, env.v3_ctx())):
+                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                undo_rename[local] = f"{local}_undo"
+            out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
+            _emit_compensation_registration(
+                env, step["compensate"], f"{env.name}.{method.get('name')}.compensate.{index}",
+                out, indent, undo_rename, ctx_expr="self.ctx", propagate=False)
         elif kind in ("let", "assign"):
             name = _ident(step.get("name"), "binding")
             # Seed the local's inferred type into the shared type table so a
@@ -1972,6 +2169,38 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 env.v3_ctx().var_types[step.get("name")] = inferred
             if kind == "let" and step.get("name") is not None:
                 body_locals.add(step.get("name"))
+        elif kind == "let-effect":
+            # item 397: the only let-effect admitted in a provide-method body is
+            # a result-declared host CAS (`insert_if_absent`). Mirror the bare
+            # `effect` bracket, but BIND the acquire's `bool` result and guard
+            # the site-spelled undo on it — a `false` CAS's inverse is the
+            # identity, so teardown never removes the winner's entry.
+            if not _is_map_cas(step.get("acquire")):
+                raise EmitError(
+                    "let-effect not allowed inside a provide method "
+                    "(Rust backend)")
+            bind = _ident(step["bind"], "binding")
+            undo_rename = _method_undo_rename(env, method)
+            acquire_rename = dict(rename)
+            for param in method.get("params") or []:
+                acquire_rename[param] = f"{param}.clone()"
+            label = _string(f"{env.name}.{method.get('name')}.let-effect.{index}")
+            undo_node = step.get("undo")
+            acquire_node = step.get("acquire")
+            _method_undo_clones(env, method, out, indent)
+            for local in sorted(_undo_reclone_locals(
+                    acquire_node, undo_node, body_locals, env.v3_ctx())):
+                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                undo_rename[local] = f"{local}_undo"
+            acquire = _expr(acquire_node, env, acquire_rename)
+            out.append(f"{pad}let {bind} = {acquire};")
+            env.v3_ctx().var_types[step.get("bind")] = "Bool"
+            body_locals.add(step.get("bind"))
+            undo = _expr(undo_node, env, undo_rename)
+            out.append(
+                f"{pad}let _ = self.ctx.effect({label}, "
+                f"move || {{ if {bind} {{ {undo}; }} Ok(()) }});"
+            )
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
         else:
@@ -2079,7 +2308,10 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 defs: list[str] = []
                 type_names: dict = {}
                 counter = [0]
-                meta_type = _intercept_json_type(intercept[local], base, defs, type_names, counter)
+                # called for its side effect: it appends the generated struct
+                # defs to `defs` (emitted below). Its return type string is not
+                # needed here, only the literal from `_intercept_json_lit`.
+                _intercept_json_type(intercept[local], base, defs, type_names, counter)
                 meta_lit = _intercept_json_lit(intercept[local], base, defs, type_names, counter)
                 out.extend(defs)
                 inject_parts.append(f".require_with({_string(local)}, {meta_lit})")
@@ -2101,6 +2333,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     out.append(f"        {_string(name)},")
     out.append(f"        cordis::{inject},")
     out.append(closure)
+    if env.needs_teardown:
+        _emit_teardown_begin(env, out, indent=3)
     out.extend(_emit_config_application(component, config_ty, indent=3))
     out.extend(_emit_provide_config_local(component, indent=3))
     # Realm isolation is NOT applied here. cordis evaluates a plugin's reactive
@@ -2127,6 +2361,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             out.append(f"            ctx.provide({_string(key)}, {key}_box)?;")
         else:
             _emit_step(step, env, out, indent=3)
+    if env.needs_teardown:
+        _emit_teardown_commit(env, out, indent=3)
     out.append("            Ok(cordis::PluginOutput::none())")
     out.append("        },")
     out.append("    )")
@@ -2386,11 +2622,15 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     out.append(f"        {_string(name)},")
     out.append(f"        cordis::{inject},")
     out.append(closure)
+    if env.needs_teardown:
+        _emit_teardown_begin(env, out, indent=3)
     out.extend(_emit_config_application(component, config_ty, indent=3))
     out.extend(_emit_provide_config_local(component, indent=3))
     _emit_req_bindings(env, cname, out, indent=3)
     for step in component.get("body") or []:
         _emit_step(step, env, out, indent=3)
+    if env.needs_teardown:
+        _emit_teardown_commit(env, out, indent=3)
     out.append("            Ok(cordis::PluginOutput::none())")
     out.append("        },")
     out.append("    )")
@@ -2405,6 +2645,31 @@ def _rust_inject(env: "_Env") -> str:
     waiting on one would hang Pending forever; the router resolves them per call."""
     gated = [k for k in env.reqs if k not in env.routes]
     return "Inject::none()" if not gated else f"Inject::new({_string(gated)})"
+
+
+def _emit_teardown_begin(env: "_Env", out: list[str], indent: int) -> None:
+    """item 243 Slice 2b: open this activation's `RevlTeardown` FIRST (before
+    any user step registers an effect), so the phase-2 drain hook it
+    registers is disposed LAST by cordis-rs's LIFO unload — see
+    `_revl_teardown_preamble`. `ctx` is rebound to the extended context
+    `revl_teardown_begin` returns, so every later use of `ctx` in this
+    activation (provide-struct construction included) carries the teardown
+    state a provide-method later recovers via `revl_teardown_of`."""
+    pad = "    " * indent
+    label = _string(env.name + ".teardown.phase2")
+    out.append(f"{pad}let (ctx, _revl_teardown) = revl_teardown_begin(&ctx, {label})?;")
+
+
+def _emit_teardown_commit(env: "_Env", out: list[str], indent: int) -> None:
+    """The abort-vs-commit discriminator: flip `committed` right before this
+    activation reports success, mirroring `Frame.drain` on py — every
+    transactional/compensation disposer collected so far discharges (rather
+    than replaying) from this instant on, whenever cordis-rs eventually
+    disposes this fiber for real."""
+    pad = "    " * indent
+    out.append(
+        f"{pad}_revl_teardown.committed.store(true, std::sync::atomic::Ordering::Release);"
+    )
 
 
 def _emit_req_bindings(env: "_Env", cname: str, out: list[str], indent: int) -> None:
@@ -2458,13 +2723,179 @@ def _emit_setup_step(step: dict, env: _Env, out: list[str], indent: int) -> None
         raise EmitError(f"unsupported setup step in Rust backend: {kind!r}")
 
 
+def _emit_witnessed_step(env: "_Env", step: dict, ext: dict, out: list[str],
+                         indent: int, bind: str | None) -> None:
+    """Emit a witnessed effect (item 243): run the mutation, and on `Ok`
+    register the extern's DECLARED inverse as a `transactional` entry in the
+    activation's `RevlTeardown` (docs/design/teardown-contract.md). Mirrors
+    backends/python/emit.py's `_witnessed_step`: unlike a bracket (a plain
+    `ctx.effect` that always replays), this disposer reads `committed` at
+    DISPOSAL time — discharge (drop the witness, do nothing) on a clean
+    commit, replay the declared inverse on abort. Registration is
+    unconditional over the `Ok` branch; an `Err` mutation touched nothing, so
+    it registers no rollback (243 rule: Ok-conditional). `bind`, when given,
+    holds the WHOLE `Result` (not unwrapped) — same as py's `_witnessed_step`."""
+    pad = "    " * indent
+    n = env.wit_counter
+    env.wit_counter += 1
+    tmp = f"_revl_wit{n}"
+    witv = f"_revl_witv{n}"
+    out.append(f"{pad}let {tmp} = {_expr(step.get('acquire'), env)};")
+    witness_ty = _rust_type(ext.get("witness"), env.types)
+    label = _string(env.name + "." + (step.get("bind") or "effect") + ".witnessed")
+    out.append(f"{pad}if let Ok(ref {witv}) = {tmp} {{")
+    out.append(f"{pad}    let result: {witness_ty} = {witv}.clone();")
+    if _RECORD_MODE:
+        # item 322 Slice 2: the durable exit. At REGISTRATION (this branch runs
+        # during activation, when the mutation happened) write the
+        # discharge-descriptor — the re-issuable named call recover replays LIFO
+        # to undo the mutation — and fsync it, so a crash BEFORE commit is still
+        # recoverable from the log alone. `result` (the Ok witness) is
+        # stringified as the referent argument; the borrow ends before `result`
+        # moves into the disposer closure below. Mirrors the go tier's
+        # `revlRecordTransactional` call at the same point.
+        undo_callee = (ext.get("undo") or {}).get("callee") or {}
+        undo_name = str(undo_callee.get("name") or undo_callee.get("id") or "undo")
+        out.append(
+            f'{pad}    revl_record_transactional({_string(ext.get("name"))}, '
+            f'{_string(undo_name)}, vec![format!("{{}}", result)]);')
+    out.append(f"{pad}    let _revl_state = _revl_teardown.clone();")
+    undo = _expr(ext["undo"], env)
+    out.append(f"{pad}    ctx.effect({label}, move || {{")
+    out.append(f"{pad}        if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{")
+    out.append(f"{pad}            let _ = {undo};")
+    out.append(f"{pad}        }}")
+    out.append(f"{pad}        Ok(())")
+    out.append(f"{pad}    }})?;")
+    out.append(f"{pad}}}")
+    if bind is not None:
+        out.append(f"{pad}let {bind} = {tmp};")
+
+
+def _emit_method_witnessed_step(env: "_Env", method: dict, step: dict, ext: dict,
+                                out: list[str], indent: int) -> None:
+    """Emit a witnessed effect inside a PROVIDE-METHOD body — item 324, THE
+    per-tool-call H1 gate (docs/design/243-witnessed-externs.md,
+    docs/design/teardown-contract.md). Mirrors backends/python/emit.py's
+    `_method_witnessed_step` / `Frame.transactional_method`: run the per-call
+    mutation, and on `Ok` register the extern's DECLARED inverse as a
+    `transactional` entry on the ENCLOSING COMPONENT's activation frame,
+    recovered through `self.ctx` (the SAME fiber `revl_teardown_begin` extended
+    at activation — `revl_teardown_of` reads the metadata stored there). The
+    method returns, but the inverse must outlive the call: it survives on the
+    component-long activation frame until the component/session commits or
+    aborts.
+
+    THE SOUNDNESS HAZARD, and why rust does NOT have it. On cordis-py the
+    obvious "adopt the entry as a sibling effect" is unsound: py flips
+    `_committed` LAZILY, inside `Frame.drain` at teardown, and cordis-py
+    disposes an adopted sibling effect BEFORE that drain — so on a clean unload
+    the disposer would observe `_committed` still False and wrongly revert the
+    deliverable. py's fix PARKS the entry (`_deferred_transactional`) for `drain`
+    to dispose after the commit bit is settled. The rust tier flips `committed`
+    EAGERLY, at activation-end (`_emit_teardown_commit`, the same instant py's
+    drain would). By the time a per-tool-call method runs and registers this
+    sibling `self.ctx.effect` disposer, `committed` is ALREADY settled (True on
+    a live activation), and cordis-rs disposes it in the fiber's single LIFO
+    unload pass where it reads that settled bit by construction — discharge
+    (drop the witness, do nothing) on a clean commit, replay the declared
+    inverse on abort (`revl_abort` cleared `committed` before unload). No
+    park-for-drain discipline is needed: eager commit sidesteps the premature-
+    disposal window entirely. Registration is fire-and-forget (`let _ =
+    self.ctx.effect(...)`) — a non-`Result` method signature cannot `?`-propagate
+    — matching every other method-body registration, and unconditional over the
+    `Ok` branch (an `Err` mutation touched nothing, so it schedules no
+    rollback: 243's Ok-conditional rule)."""
+    pad = "    " * indent
+    n = env.wit_counter
+    env.wit_counter += 1
+    tmp = f"_revl_wit{n}"
+    witv = f"_revl_witv{n}"
+    # The shared expression renderer already clones a typed non-Copy param used
+    # by value as a call argument (`_by_value_arg`), so the acquire needs only
+    # the component-scope rename — no extra param `.clone()` (that would double).
+    out.append(f"{pad}let {tmp} = {_expr(step.get('acquire'), env, _method_scope_rename(env))};")
+    witness_ty = _rust_type(ext.get("witness"), env.types)
+    label = _string(f"{env.name}.{method.get('name')}.witnessed")
+    undo = _expr(ext["undo"], env)
+    out.append(f"{pad}if let Ok(ref {witv}) = {tmp} {{")
+    out.append(f"{pad}    let result: {witness_ty} = {witv}.clone();")
+    out.append(f"{pad}    let _revl_state = revl_teardown_of(&self.ctx);")
+    out.append(f"{pad}    let _ = self.ctx.effect({label}, move || {{")
+    out.append(f"{pad}        if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{")
+    out.append(f"{pad}            let _ = {undo};")
+    out.append(f"{pad}        }}")
+    out.append(f"{pad}        Ok(())")
+    out.append(f"{pad}    }});")
+    out.append(f"{pad}}}")
+
+
+def _emit_compensation_registration(env: "_Env", compensate_node: dict, label_text: str,
+                                    out: list[str], indent: int, rename: dict[str, str],
+                                    ctx_expr: str = "ctx", propagate: bool = True) -> None:
+    """The shared tail of a `compensation` entry registration (item 247, the
+    teardown-contract two-phase abort): wrap the (already-renamed) compensate
+    call in a boxed `FnOnce`, and register a disposer that discharges on
+    commit or QUEUES onto the activation's phase-2 queue on abort, instead of
+    running immediately — see `_revl_teardown_preamble` for why that queueing
+    is what gives Phase 1 (bracket + transactional) priority over Phase 2
+    (compensation) for free, from cordis-rs's own LIFO dispose order.
+
+    `ctx_expr` is `"ctx"` (`?`-propagated, `propagate=True`) at activation
+    level and `"self.ctx"` (fire-and-forget, `propagate=False`, matching every
+    other method-body registration) inside a provide method."""
+    pad = "    " * indent
+    call = _expr(compensate_node, env, rename=rename)
+    label = _string(label_text)
+    tail = "?;" if propagate else ";"
+    lead = "" if propagate else "let _ = "
+    out.append(f"{pad}let _revl_state = _revl_teardown.clone();")
+    out.append(f"{pad}let _revl_call: Box<dyn FnOnce() + Send> = Box::new(move || {{ let _ = {call}; }});")
+    out.append(f"{pad}{lead}{ctx_expr}.effect({label}, move || {{")
+    out.append(f"{pad}    if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{")
+    out.append(f"{pad}        _revl_state.phase2.lock().unwrap().push(")
+    out.append(f"{pad}            RevlPendingCompensation {{ label: {label}.to_string(), call: _revl_call }});")
+    out.append(f"{pad}    }}")
+    out.append(f"{pad}    Ok(())")
+    out.append(f"{pad}}}){tail}")
+
+
+def _emit_activation_compensation(env: "_Env", step: dict, out: list[str], indent: int) -> None:
+    """`emit ... compensate` at activation level. Requires `env.needs_teardown`
+    (the caller guarantees `_revl_teardown`/`ctx` are the extended locals from
+    `_emit_teardown_begin`). Pre-clones every `req` and every prior
+    activation-body `let-effect` bind the compensate expression reads, so the
+    `move` closure owns copies the forward `emit` call cannot have moved out
+    from under it (mirrors the existing bracket-undo req cloning above)."""
+    pad = "    " * indent
+    referenced: set[str] = set()
+    _expr_var_names(step.get("compensate"), referenced)
+    rename: dict[str, str] = {}
+    for req in env.reqs:
+        req_c = f"{req}_comp"
+        out.append(f"{pad}let {req_c} = {req}.clone();")
+        rename[req] = req_c
+    for local in sorted(referenced & set(env.activation_binds)):
+        local_c = f"{local}_comp"
+        out.append(f"{pad}let {local_c} = {local}.clone();")
+        rename[local] = local_c
+    _emit_compensation_registration(
+        env, step["compensate"], env.name + ".compensate", out, indent, rename)
+
+
 def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
     pad = "    " * indent
     kind = step.get("step")
     if kind == "let-effect":
         for setup in step.get("setup") or []:
             _emit_setup_step(setup, env, out, indent)
+        wit = _witnessed_extern_for(env, step.get("acquire"))
+        if wit is not None:
+            _emit_witnessed_step(env, step, wit, out, indent, bind=_ident(step["bind"], "binding"))
+            env.activation_binds.append(step["bind"])
+            return
         bind = _ident(step["bind"], "binding")
+        env.activation_binds.append(step["bind"])
         acquire = _expr(step["acquire"], env)
         # FR-4: pin the host Map's value type at the constructor so rustc
         # never has to infer it — a binding no provider struct captures, or
@@ -2481,12 +2912,40 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             req_undo = f"{req}_undo"
             out.append(f"{pad}let {req_undo} = {req}.clone();")
             undo_rename[req] = req_undo
+        is_cas = _is_map_cas(step.get("acquire"))
+        if is_cas:
+            # item 397: a result-declared host CAS binds an `Arc<bool>`. Its
+            # site-spelled undo removes from a PRIOR activation bind (the
+            # ledger); a bare `move` closure would consume that bind, leaving
+            # the later provide struct's `.clone()` a use-after-move (E0382).
+            # Reclone every referenced prior activation bind into the closure,
+            # exactly as the reqs are recloned above.
+            referenced: set[str] = set()
+            _expr_var_names(step.get("undo"), referenced)
+            for local in sorted(referenced & set(env.activation_binds)):
+                if local == step["bind"]:
+                    continue
+                local_undo = f"{local}_undo"
+                out.append(f"{pad}let {local_undo} = {local}.clone();")
+                undo_rename[local] = local_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
         label = _string(env.name + "." + step["bind"] + ".undo")
-        out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
+        if is_cas:
+            # result-guarded undo: the identity inverse on a `false` CAS, so
+            # teardown never removes the winner's entry (`*` derefs the
+            # `Arc<bool>` clone the closure owns).
+            out.append(
+                f"{pad}ctx.effect({label}, "
+                f"move || {{ if *{undo_name} {{ {undo}; }} Ok(()) }})?;")
+        else:
+            out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "effect":
         for setup in step.get("setup") or []:
             _emit_setup_step(setup, env, out, indent)
+        wit = _witnessed_extern_for(env, step.get("acquire"))
+        if wit is not None:
+            _emit_witnessed_step(env, step, wit, out, indent, bind=None)
+            return
         acquire = _expr(step["acquire"], env)
         undo_rename: dict[str, str] = {}
         for req in env.reqs:
@@ -2499,6 +2958,8 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "emit":
         out.append(f"{pad}let _ = {_expr(step['expr'], env)};")
+        if step.get("compensate") is not None:
+            _emit_activation_compensation(env, step, out, indent)
     elif kind == "timer":
         # A `timer` step (item 57, docs/time-coeffect.md): a revertible
         # schedule. Arming the timer is the acquire, cancellation its derived
@@ -2552,7 +3013,23 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
                 _emit_step(nested, env, out, indent + 1)
         out.append(f"{pad}}}")
     elif kind == "await":
-        out.append(f"{pad}{_expr(step['expr'], env)}.await;")
+        # item 131 repair: rust erases method async-ness (async-extern.md §2
+        # family 2), so a req-target async op or an async-colored fn returns a
+        # plain value here, not a future — a blanket `.await` is a rustc error
+        # on it (`heat()` yields `String`, not `impl Future`). Only the host
+        # async seam (`Job.run`, which cordis-rs drives as a real future via
+        # `plugin_async`) takes `.await`; every other awaitable erases to a plain
+        # blocking call, matching the go/java erasure. The A1 ordering boundary
+        # is the statement position, preserved either way. This is the latent
+        # tier bug item 131's widened await-step admission would otherwise make
+        # live (design §5, the rust slice).
+        expr = step.get("expr")
+        rendered = _expr(expr, env)
+        if isinstance(expr, dict) and expr.get("kind") == "host" \
+                and expr.get("fn") == "Job.run":
+            out.append(f"{pad}{rendered}.await;")
+        else:
+            out.append(f"{pad}{rendered};")
     elif kind == "provide":
         key = step.get("name")
         service = step.get("service")
@@ -3193,6 +3670,17 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # over the emitted code — docs/conformance.md.)
             return (f'format!("{{}}{{}}", {_render_expr(node["left"], ctx, rename)}, '
                     f'{_render_expr(node["right"], ctx, rename)})')
+        if node.get("op") in ("&", "|", "^", "<<", ">>"):
+            # Int32 bitwise operators (item 366, docs/arithmetic.md). `& | ^`
+            # are native on i32 and never trap. Shifts mask the count to 0..31
+            # (mod 32): rust panics on a shift amount >= 32, so masking keeps
+            # `<<`/`>>` panic-free, and it matches wasm/JS. `<<` drops the high
+            # bits (i32 two's complement); `>>` on the signed i32 is arithmetic.
+            left = _render_expr(node["left"], ctx, rename)
+            right = _render_expr(node["right"], ctx, rename)
+            if node["op"] in ("&", "|", "^"):
+                return f"({left} {node['op']} {right})"
+            return f"({left} {node['op']} (({right}) & 31))"
         op = _V3_BIN_OPS.get(node.get("op"))
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
@@ -3222,6 +3710,11 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
     if kind == "un":
         operand = _render_expr(node.get("operand"), ctx, rename)
         if node.get("op") == "!":
+            return f"(!{operand})"
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): rust spells bitwise NOT on
+            # an integer as `!` (the same token it uses for logical not on
+            # bool). A bit op, so it never traps.
             return f"(!{operand})"
         if node.get("op") == "-":
             return f"(-{operand})"
@@ -3334,6 +3827,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         target = _render_expr(target_node, ctx, rename)
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value in
+            # a component position — the code-point (Str) / element (List) count
+            # via the helper trait (`String::len` is bytes), the same as the
+            # `len` node, NOT a struct field access.
+            return f"{target}.revl_length()"
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":
@@ -3582,6 +4081,12 @@ def _v3_builtin(method: str, target: str, args: list[str],
     if method == "charAt":
         return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap().to_string() }}"
     if method == "charCodeAt":
+        return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap() as u32 as i64 }}"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at code-point index i. Same char-indexed lowering as
+    # charCodeAt on this tier (the O(n)-per-access cost is item 277/282's
+    # separate concern — byte-identical to charCodeAt's shape here).
+    if method == "codepoint_at":
         return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap() as u32 as i64 }}"
     if method == "indexOf":
         return f"{target}.revl_index_of(&{args[0]})"
@@ -3919,6 +4424,21 @@ def _v3_self_append_inplace(target_name, recv: str, value_node,
     return _v3_inplace_persistent(method, recv, rendered)
 
 
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is
+# enforced whole-IR in the frontend; this is the cheap per-emitter guard.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
@@ -3981,11 +4501,13 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "while":
+        _guard_frame_neutral_loop(node.get("body"))
         out.append(f"{pad}while {_render_expr(node['cond'], ctx)} {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "for":
+        _guard_frame_neutral_loop(node.get("body"))
         bind = _ident(node.get("bind"), "loop binding")
         # `for x in v` consumes `v` via `.into_iter()`; a reused non-Copy Vec
         # binding iterated twice (`for ln in lines { .. } .. for ln in lines`)
@@ -3998,6 +4520,10 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
+    elif step == "break":
+        out.append(f"{pad}break;")
+    elif step == "continue":
+        out.append(f"{pad}continue;")
     elif step == "let_pattern":
         _v3_let_pattern(node, ctx, out, indent)
     elif step == "expr":
@@ -4198,8 +4724,120 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
     return out
 
 
+# item 378 Stage 5: module-level config seam for document-global config externs.
+# Mirrors the py tier's `_REVL_EXTERN_CONFIG` map + fail-loud
+# `_revl_extern_config` helper: a mutable module-global config map (a
+# `OnceLock<Mutex<..>>`, the safe-Rust equivalent of a plug-time mutable
+# global), keyed by extern name, that a composition driver fills at plug time,
+# and a lookup that PANICS, naming the extern, when a required (non-defaulted)
+# field is absent, instead of handing the body an empty map that fails opaquely
+# later. A defaults-only extern still resolves to its defaults driver-free.
+#
+# Rust has no dynamic value top-type with literal defaults (unlike ts `unknown`
+# / go `any` / java `Object`), so the config map is `HashMap<String, String>`
+# and a rust-bodied config extern is restricted to `Str` config fields
+# (`_rust_extern_config_bind` refuses a non-Str field LOUDLY, redirecting to
+# @py or option (c)). This covers the design's motivating case (provider
+# identity is a string); a typed heterogeneous carrier is a separate value-
+# carrier design step. Fully-qualified `std::` paths so the seam adds no `use`
+# (which could duplicate the module's own imports). Emitted only when a config
+# extern is present, so a no-config program is byte-identical.
+_RUST_EXTERN_CONFIG_SCAFFOLD = [
+    "fn _revl_extern_config_store() -> &'static std::sync::Mutex<",
+    "    std::collections::HashMap<String, "
+    "std::collections::HashMap<String, String>>,",
+    "> {",
+    "    static STORE: std::sync::OnceLock<",
+    "        std::sync::Mutex<std::collections::HashMap<String, "
+    "std::collections::HashMap<String, String>>>,",
+    "    > = std::sync::OnceLock::new();",
+    "    STORE.get_or_init(|| std::sync::Mutex::new("
+    "std::collections::HashMap::new()))",
+    "}",
+    "",
+    "#[allow(dead_code)]",
+    "fn _revl_extern_config(",
+    "    name: &str,",
+    "    required: &[&str],",
+    "    defaults: &[(&str, &str)],",
+    ") -> std::collections::HashMap<String, String> {",
+    "    let mut out: std::collections::HashMap<String, String> = "
+    "std::collections::HashMap::new();",
+    "    for (k, v) in defaults {",
+    "        out.insert((*k).to_string(), (*v).to_string());",
+    "    }",
+    "    let store = _revl_extern_config_store().lock().unwrap();",
+    "    match store.get(name) {",
+    "        None => {",
+    "            if !required.is_empty() {",
+    "                panic!(",
+    "                    \"config extern `{}` called before plug-time "
+    "configuration was installed (required config: {}); configure it through "
+    "the run driver's config seam\",",
+    "                    name,",
+    "                    required.join(\", \")",
+    "                );",
+    "            }",
+    "        }",
+    "        Some(cfg) => {",
+    "            let missing: Vec<&str> = required",
+    "                .iter()",
+    "                .copied()",
+    "                .filter(|f| !cfg.contains_key(*f))",
+    "                .collect();",
+    "            if !missing.is_empty() {",
+    "                panic!(",
+    "                    \"config extern `{}` called before plug-time "
+    "configuration was installed (missing required config: {})\",",
+    "                    name,",
+    "                    missing.join(\", \")",
+    "                );",
+    "            }",
+    "            for (k, v) in cfg {",
+    "                out.insert(k.clone(), v.clone());",
+    "            }",
+    "        }",
+    "    }",
+    "    out",
+    "}",
+    "",
+]
+
+
+def _rust_extern_config_bind(ext: dict) -> str:
+    """The `let _revl_config = ...` first-body line for a config extern, or None.
+    `_revl_config` is a `HashMap<String, String>`; the verbatim @rs body reads a
+    field as `_revl_config["field"]` (a `&String`). Refuses a non-`Str` config
+    field LOUDLY: the rust map is string-valued, so a heterogeneous field has no
+    faithful home on this tier yet."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    name = ext.get("name")
+    for field in schema:
+        if field.get("type") != "Str":
+            raise EmitError(
+                f"config extern `{name}`: field `{field.get('name')}` has type "
+                f"`{field.get('type')}`, but the @rs config seam is string-valued "
+                f"and supports only `Str` config fields today. Give this extern a "
+                f"@py body, or use option (c) (a home component that `requires` "
+                f"the service). See docs/design/378-sync-extern-service-reach.md.")
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = [(f["name"], f["default"]) for f in schema
+                if f.get("default") is not None]
+    req_lit = "&[%s]" % ", ".join(_string(f) for f in required)
+    def_lit = "&[%s]" % ", ".join(
+        f"({_string(k)}, {_string(v)})" for k, v in defaults)
+    return (f"let _revl_config = _revl_extern_config("
+            f"{_string(name)}, {req_lit}, {def_lit});")
+
+
 def _emit_v3_externs(externs: list, types: dict) -> list[str]:
     out: list[str] = []
+    # item 378 Stage 5: emit the config seam once, before the externs, when any
+    # extern carries a config schema (byte-identical when none do).
+    if any(ext.get("config") for ext in externs):
+        out.extend(_RUST_EXTERN_CONFIG_SCAFFOLD)
     for ext in externs:
         name = _ident(ext.get("name"), "extern name")
         params = ", ".join(
@@ -4215,6 +4853,11 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         out.append(f"fn {name}({params}) -> {returns} {{")
+        # item 378 Stage 5: a config extern binds `_revl_config` as the first
+        # body line; None for a no-config extern (byte-identical body splice).
+        config_bind = _rust_extern_config_bind(ext)
+        if config_bind:
+            out.append("    " + config_bind)
         body = bodies["rs"].strip()
         if body:
             for line in body.splitlines() or [""]:
@@ -4681,8 +5324,348 @@ def _revl_spawn_handle() -> list[str]:
     ]
 
 
+def _revl_teardown_preamble() -> list[str]:
+    """The three-entry-kind teardown loop's shared runtime substrate: item 243
+    (`transactional`, witnessed) plus the unified two-phase abort
+    (docs/design/teardown-contract.md), first-party on cordis-rs.
+
+    cordis-rs disposes one fiber's registered effects in a SINGLE
+    reverse-registration (LIFO) pass (`Fiber::dispose_effects`, upstream —
+    not ours to change, fork+PR only), mixing every kind together: there is
+    no second accumulator to plug a Phase-2 pass into. The contract
+    anticipates exactly this shape ("The teardown algorithm"): a tier may
+    implement the phase split "by having the compensation disposer enqueue
+    itself when invoked during an abort unwind and draining the queue in a
+    post-unwind hook". This is that hook, built entirely from cordis-rs's
+    public API, no upstream change:
+
+    * `RevlTeardown` is the per-activation accumulator: `committed` is the
+      abort-vs-commit discriminator (py's `Frame._committed` — here flipped
+      right before the emitted `apply` returns `Ok`, the same instant py's
+      `Frame.drain` flips it: both mark "this activation is not unwinding,
+      it succeeded"). `phase2` is the queue a compensation disposer feeds
+      instead of running immediately.
+    * The state rides on the fiber's own `Context`, via `Context::extend`/
+      `metadata` (cordis-rs's typed per-context metadata slot), instead of a
+      bespoke global registry — so a provide-method's stored `ctx` (the SAME
+      fiber, looked up later when a method runs) recovers the identical
+      instance. No global map, no manual lifecycle bookkeeping: it lives as
+      long as the `Arc` clones that hold it, one of which is this same
+      `Context`.
+    * The FIRST effect registered in the whole activation is the phase-2
+      drain hook (`revl_teardown_begin`'s own `ctx.effect` call, emitted
+      before any user step). Because cordis-rs disposes LIFO, "registered
+      first" means "disposed LAST" — after every bracket and transactional
+      inverse in this activation has already run to completion. Phase 1
+      finishing before Phase 2 starts falls out of registration order alone;
+      no separate stack walk is needed.
+    * A `transactional` disposer reads `committed` at DISPOSAL time (not
+      registration time, which is unknowable until later) exactly like py's
+      `_Transactional`: discharge (drop the witness, do nothing) on commit,
+      replay the declared inverse on abort.
+    * A `compensation` disposer reads `committed` too: discharge on commit
+      (never runs — the forward emission is the deliverable), or on abort
+      QUEUE itself onto `phase2` instead of running immediately — so every
+      compensation the one LIFO pass encounters lands in the queue in
+      reverse-registration order, i.e. already LIFO within itself, for free.
+      `revl_drain_phase2` (run by the sentinel, last) then runs the queue in
+      that order, honoring `REVL_COMPENSATION_BUDGET_MS` BETWEEN calls. rust
+      has no in-call preemption of a synchronous compensation
+      (teardown-contract.md, rust row: a compensation closure is not
+      guaranteed `Send` to a helper thread, so even go's abandon-the-wait
+      shape is unavailable) — `REVL_COMPENSATION_PER_CALL_MS` is read and
+      carried for config-surface parity (the two env vars are read once, at
+      activation, per the contract), but the between-call deadline is the
+      only bound this tier can honor, exactly as specced.
+    """
+    return [
+        "/// item 243 / docs/design/teardown-contract.md: the per-activation",
+        "/// three-entry-kind teardown accumulator (transactional + compensation).",
+        "/// See `_revl_teardown_preamble` in the emitter for the design.",
+        "struct RevlTeardown {",
+        "    committed: std::sync::atomic::AtomicBool,",
+        "    phase2: std::sync::Mutex<Vec<RevlPendingCompensation>>,",
+        "    budget_ms: u64,",
+        "    #[allow(dead_code)] // read for config-surface parity; see the",
+        "    // preamble docstring — rust has no in-call preemption to bound with it.",
+        "    per_call_ms: u64,",
+        "}",
+        "",
+        "struct RevlPendingCompensation {",
+        "    label: String,",
+        "    call: Box<dyn FnOnce() + Send>,",
+        "}",
+        "",
+        "fn revl_compensation_budget_ms() -> u64 {",
+        '    std::env::var("REVL_COMPENSATION_BUDGET_MS").ok()',
+        "        .and_then(|v| v.parse::<u64>().ok())",
+        "        .unwrap_or(5000)",
+        "}",
+        "",
+        "fn revl_compensation_per_call_ms() -> u64 {",
+        '    std::env::var("REVL_COMPENSATION_PER_CALL_MS").ok()',
+        "        .and_then(|v| v.parse::<u64>().ok())",
+        "        .unwrap_or(1000)",
+        "}",
+        "",
+        "/// item 324: the out-of-band abort registry — the faithful mirror of the",
+        "/// py runtime's `_FRAME_BY_CTX` + `_sole_frame`. A session-level reject",
+        "/// (item 245's explicit commit/abort UX) runs OUTSIDE the fiber and must",
+        "/// reach an already-activated component's `RevlTeardown` to clear",
+        "/// `committed`, so its next unload REPLAYS the per-tool-call (and",
+        "/// activation-body) transactional inverses instead of discharging them.",
+        "/// The state itself lives on the fiber's (private) extended context, which",
+        "/// no out-of-fiber caller can reach — cordis-rs's `Context::extend` derives",
+        "/// a child whose metadata the parent/fiber context cannot see — so this",
+        "/// weak, label-keyed registry is the reach-in seam. Weak so a disposed",
+        "/// activation's teardown is collected normally; the registry never keeps",
+        "/// one alive.",
+        "#[allow(clippy::type_complexity)]",
+        "static REVL_TEARDOWN_REGISTRY: std::sync::OnceLock<",
+        "    std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>>>",
+        "    = std::sync::OnceLock::new();",
+        "",
+        "fn revl_teardown_registry()",
+        "    -> &'static std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>> {",
+        "    REVL_TEARDOWN_REGISTRY.get_or_init(|| std::sync::Mutex::new(Vec::new()))",
+        "}",
+        "",
+        "fn revl_teardown_remember(label: &str, state: &std::sync::Arc<RevlTeardown>) {",
+        "    revl_teardown_registry().lock().unwrap()",
+        "        .push((label.to_string(), std::sync::Arc::downgrade(state)));",
+        "}",
+        "",
+        "/// Abort every live activation registered under `label`: clear `committed`",
+        "/// so the next teardown REPLAYS its transactional inverses (py's",
+        "/// `Frame.abort`). Idempotent; skips dead weak entries. The driver/harness",
+        "/// calls this before unloading the fiber to reject the session's work.",
+        "#[allow(dead_code)]",
+        "fn revl_abort(label: &str) {",
+        "    let registry = revl_teardown_registry().lock().unwrap();",
+        "    for (entry_label, weak) in registry.iter() {",
+        "        if entry_label == label {",
+        "            if let Some(state) = weak.upgrade() {",
+        "                state.committed.store(false, std::sync::atomic::Ordering::Release);",
+        "            }",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "/// Register the phase-2 drain hook FIRST — so cordis-rs's LIFO dispose",
+        "/// runs it LAST, after every bracket/transactional inverse — and return",
+        "/// the shared accumulator plus a `Context` extended to carry it, so a",
+        "/// provide-method on this same fiber can recover it later via",
+        "/// `revl_teardown_of`.",
+        "fn revl_teardown_begin(ctx: &cordis::Context, label: &str)",
+        "    -> cordis::Result<(cordis::Context, std::sync::Arc<RevlTeardown>)> {",
+        "    let state = std::sync::Arc::new(RevlTeardown {",
+        "        committed: std::sync::atomic::AtomicBool::new(false),",
+        "        phase2: std::sync::Mutex::new(Vec::new()),",
+        "        budget_ms: revl_compensation_budget_ms(),",
+        "        per_call_ms: revl_compensation_per_call_ms(),",
+        "    });",
+        '    let ctx = ctx.extend("_revl_teardown", state.clone());',
+        "    revl_teardown_remember(label, &state);  // item 324: out-of-band abort reach-in",
+        "    let sentinel = state.clone();",
+        "    ctx.effect(label.to_string(), move || {",
+        "        if !sentinel.committed.load(std::sync::atomic::Ordering::Acquire) {",
+        "            revl_drain_phase2(&sentinel);",
+        "        }",
+        "        Ok(())",
+        "    })?;",
+        "    Ok((ctx, state))",
+        "}",
+        "",
+        "/// A provide-method's own recovery of its activation's teardown state",
+        "/// (`self.ctx` is the same fiber `revl_teardown_begin` extended).",
+        "fn revl_teardown_of(ctx: &cordis::Context) -> std::sync::Arc<RevlTeardown> {",
+        '    (*ctx.metadata::<std::sync::Arc<RevlTeardown>>("_revl_teardown")',
+        "        .ok()",
+        "        .flatten()",
+        '        .expect("revl: teardown state missing — a compensated effect ran \\',
+        '                outside an activation that registered one"))',
+        "        .clone()",
+        "}",
+        "",
+        "/// Phase 2: best-effort compensation replay, LIFO within itself (the",
+        "/// queue already holds that order — see the preamble docstring), bounded",
+        "/// by `REVL_COMPENSATION_BUDGET_MS` checked BETWEEN calls (rust has no",
+        "/// in-call preemption of a synchronous compensation — see the rust row",
+        "/// of docs/design/teardown-contract.md). A panicking compensation is",
+        "/// caught (best-effort, never fails the abort) and logged; the loop",
+        "/// continues to the next queued compensation either way.",
+        "fn revl_drain_phase2(state: &RevlTeardown) {",
+        "    let queued: Vec<RevlPendingCompensation> = {",
+        "        let mut guard = state.phase2.lock().unwrap();",
+        "        std::mem::take(&mut *guard)",
+        "    };",
+        "    if queued.is_empty() {",
+        "        return;",
+        "    }",
+        "    let unbounded = state.budget_ms == 0;",
+        "    let deadline = std::time::Instant::now()",
+        "        + std::time::Duration::from_millis(state.budget_ms);",
+        "    for pending in queued {",
+        "        if !unbounded && std::time::Instant::now() >= deadline {",
+        "            eprintln!(",
+        '                "revl: compensation {:?} skipped (deadline-expired, budget={}ms)",',
+        "                pending.label, state.budget_ms,",
+        "            );",
+        "            continue;",
+        "        }",
+        "        let label = pending.label;",
+        "        let outcome = std::panic::catch_unwind(",
+        "            std::panic::AssertUnwindSafe(pending.call));",
+        "        if outcome.is_err() {",
+        '            eprintln!("revl: compensation {:?} failed", label);',
+        "        }",
+        "    }",
+        "}",
+        "",
+    ]
+
+
+def _revl_record_preamble() -> list[str]:
+    """item 322 Slice 2: the durable WAL recording sink — the rust host
+    recording channel, the faithful mirror of backends/go/emit.py's
+    `_RECORD_PREAMBLE`.
+
+    A witnessed transactional step, in record mode, writes the re-issuable
+    inverse's discharge-descriptor to a host-visible WAL file (`$REVL_WAL`) and
+    fsyncs it (`File::sync_all`) BEFORE the emitting call returns, so a crash
+    before commit still leaves the inverse re-issuable from the log alone —
+    exactly the write-ahead discipline the py tier uses and the go tier
+    mirrors. The JSONL schema is byte-for-byte the py one src/revl/wal.py
+    documents (`header` / `discharge-descriptor` / `discharge` /
+    `activation-complete`), read back by the tier-agnostic core with no py
+    backend on the path.
+
+    Gated: emitted only in record mode (`emit(ir, record=True)` /
+    `emit.py --record`). Unset `REVL_WAL` makes every recording call a no-op, so
+    the runtime is inert unless a host opts in; the whole preamble is absent when
+    record mode is off, so every existing golden emits byte-identically.
+
+    Direct-file-write, same mechanism as go (rust has a real filesystem). The
+    sink is a process-global opened once (`OnceLock`) from `REVL_WAL`, stamping
+    the header at open; the seq counter and committed-seq list live on it behind
+    a `Mutex`, matching go's `revlWAL{mu, f, seq, seqs}`."""
+    guarantee = (
+        "the WAL records each committed effect's step identity, boundary "
+        "classification and inverse DESCRIPTOR (not its closure). On restart, "
+        "recovery runs the reconstructible boundary inverses newest-first (LIFO); "
+        "in-process inverses are moot (their captured memory died with the "
+        "process) and closure-only boundary inverses are reported as residue, "
+        "never silently claimed to have run."
+    )
+    return [
+        "// ---- durable WAL recording sink (item 322 Slice 2, the rust host recording channel) ----",
+        "",
+        "/// The single sentence recovery is allowed to claim, written verbatim into",
+        "/// every WAL header — byte-identical to src/revl/wal.py's `WAL_GUARANTEE`.",
+        f"const REVL_WAL_GUARANTEE: &str = {_string(guarantee)};",
+        "",
+        "/// The process's durable append-only log. One line per record, JSON,",
+        "/// flushed + fsync'd (`sync_all`) before the call that wrote it returns —",
+        "/// the write-ahead discipline the py tier uses, so a record a caller saw",
+        "/// acknowledged is on disk before the effect it describes is allowed to",
+        "/// matter. Mirrors the go tier's `revlWAL`.",
+        "struct RevlWal {",
+        "    file: std::fs::File,",
+        "    seq: u64,",
+        "    seqs: Vec<u64>,",
+        "}",
+        "",
+        "impl RevlWal {",
+        "    fn write(&mut self, rec: &serde_json::Value) {",
+        "        use std::io::Write;",
+        "        if let Ok(mut line) = serde_json::to_string(rec) {",
+        "            line.push('\\n');",
+        "            let _ = self.file.write_all(line.as_bytes());",
+        "            let _ = self.file.sync_all(); // fsync per record",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "static REVL_WAL_SINK: std::sync::OnceLock<Option<std::sync::Mutex<RevlWal>>>",
+        "    = std::sync::OnceLock::new();",
+        "",
+        "/// Wire the sink to `REVL_WAL` (unset -> no-op recording) and stamp the",
+        "/// header the first time it is touched. Opened append-only so a producer",
+        "/// process writes one continuous log.",
+        "fn revl_wal_sink() -> Option<&'static std::sync::Mutex<RevlWal>> {",
+        "    REVL_WAL_SINK",
+        "        .get_or_init(|| {",
+        '            let path = match std::env::var("REVL_WAL") {',
+        "                Ok(p) if !p.is_empty() => p,",
+        "                _ => return None,",
+        "            };",
+        "            let file = match std::fs::OpenOptions::new()",
+        "                .create(true).write(true).append(true).open(&path)",
+        "            {",
+        "                Ok(f) => f,",
+        "                Err(_) => return None,",
+        "            };",
+        "            let mut wal = RevlWal { file, seq: 0, seqs: Vec::new() };",
+        "            wal.write(&serde_json::json!({",
+        '                "record": "header", "walVersion": 1, "generation": 1,',
+        '                "guarantee": REVL_WAL_GUARANTEE,',
+        "            }));",
+        "            Some(std::sync::Mutex::new(wal))",
+        "        })",
+        "        .as_ref()",
+        "}",
+        "",
+        "/// Append one witnessed transactional inverse's discharge-descriptor: the",
+        "/// re-issuable named call `{receiver, method, args}` recover replays LIFO to",
+        "/// undo the mutation, plus the forward `origin` it reverses. Fsync'd before",
+        "/// it returns, so a crash after this call still leaves the inverse",
+        "/// re-issuable from the log alone. No-op when `REVL_WAL` is unset.",
+        "pub fn revl_record_transactional(receiver: &str, method: &str, args: Vec<String>) {",
+        "    if let Some(sink) = revl_wal_sink() {",
+        "        let mut wal = sink.lock().unwrap();",
+        "        let seq = wal.seq;",
+        "        wal.seq += 1;",
+        "        wal.seqs.push(seq);",
+        '        let call = serde_json::json!({ "receiver": receiver, "method": method, "args": args });',
+        "        wal.write(&serde_json::json!({",
+        '            "record": "discharge-descriptor", "seq": seq, "entry": "transactional",',
+        '            "call": call, "origin": call, "witness": serde_json::Value::Null,',
+        '            "idempotency": serde_json::Value::Null,',
+        "        }));",
+        "    }",
+        "}",
+        "",
+        "/// The commit-path proof that every recorded transactional seq COMMITTED,",
+        "/// so recover SKIPS it — a committed transaction is never rolled back.",
+        "/// Called on a clean unload, never on a crash.",
+        "pub fn revl_record_discharge() {",
+        "    if let Some(sink) = revl_wal_sink() {",
+        "        let mut wal = sink.lock().unwrap();",
+        "        let seqs = wal.seqs.clone();",
+        '        wal.write(&serde_json::json!({ "record": "discharge", "discharged": seqs }));',
+        "    }",
+        "}",
+        "",
+        "/// The terminal marker: its PRESENCE is the whole roll-forward decision,",
+        "/// its ABSENCE (a crash) is roll-back. Written only after a clean unload.",
+        "pub fn revl_record_activation_complete() {",
+        "    if let Some(sink) = revl_wal_sink() {",
+        "        let mut wal = sink.lock().unwrap();",
+        "        wal.write(&serde_json::json!({",
+        '            "record": "activation-complete", "generation": 1, "components": []',
+        "        }));",
+        "    }",
+        "}",
+        "",
+    ]
+
+
 def _uses_stdlib(ir: dict) -> bool:
-    """True when any builtin/len node appears anywhere in the document."""
+    """True when any builtin/len node appears anywhere in the document — or a
+    sized `.length` field (item 104): a component-position property-form
+    `.length` stays a `field` node marked `sized_length`, and its emit routes
+    through the `revl_length` helper trait, so the trait must be emitted for it
+    too (else `String::revl_length` is an undefined method, E0599)."""
     found = False
 
     def walk(node) -> None:
@@ -4690,7 +5673,8 @@ def _uses_stdlib(ir: dict) -> bool:
         if found:
             return
         if isinstance(node, dict):
-            if node.get("kind") in ("builtin", "len"):
+            if node.get("kind") in ("builtin", "len") or (
+                    node.get("kind") == "field" and node.get("sized_length")):
                 found = True
                 return
             for value in node.values():
@@ -4827,7 +5811,7 @@ def _split_result(rtype: str):
 
 def _result_ok_err(value: str, ok_ty: str, err_ty: str) -> str:
     """Rust expr building a std Result from a canonical `{"$kind","$value"}`."""
-    payload = f'_r.get("$value").cloned().unwrap_or(serde_json::Value::Null)'
+    payload = '_r.get("$value").cloned().unwrap_or(serde_json::Value::Null)'
     return (f'{{ let _r = {value}.clone(); '
             f'if _r.get("$kind").and_then(|k| k.as_str()) == Some("Ok") {{ '
             f'Ok(serde_json::from_value::<{ok_ty}>({payload}).expect("bridge: decode Ok")) }} '
@@ -5114,6 +6098,15 @@ def _emit_bridge(ir: dict) -> list[str]:
     return out
 
 
+def _uses_teardown(components: list, externs: list) -> bool:
+    """item 243 Slice 2b: does any component need `RevlTeardown` (a
+    `witnessed` extern call, or `emit ... compensate`, activation- or
+    method-body)? Gates `_revl_teardown_preamble` so a program using
+    neither emits byte-identically to before this slice."""
+    witnessed = {ext["name"]: ext for ext in externs if ext.get("class") == "witnessed"}
+    return any(_component_needs_teardown(c, witnessed) for c in components)
+
+
 def _emit_components(ir: dict, components: list) -> list[str]:
     out: list[str] = []
     out.extend(_emit_service_traits(ir.get("services") or {}, ir.get("types") or {}))
@@ -5128,6 +6121,13 @@ def _emit_components(ir: dict, components: list) -> list[str]:
         out.extend(_revl_realm_helper(components))
     if _uses_spawn(components):
         out.extend(_revl_spawn_handle())
+    if _uses_teardown(components, ir.get("externs") or []):
+        out.extend(_revl_teardown_preamble())
+        if _RECORD_MODE:
+            # item 322 Slice 2: the durable WAL sink rides alongside the teardown
+            # accumulator (a witnessed transactional step needs both). Gated so a
+            # non-record emission — every existing golden — is byte-identical.
+            out.extend(_revl_record_preamble())
     for component in components:
         out.extend(_emit_component_auto(component, ir.get("services") or {}, ir))
     out.extend(_emit_bridge(ir))
@@ -5235,11 +6235,104 @@ def _refuse_fault_tests(ir) -> None:
     )
 
 
-def emit(ir: dict) -> str:
-    """Emit one Rust module (crate root) for an IR document."""
+def _refuse_deferred_emissions(ir: dict) -> None:
+    """Roadmap 245 Decision 2 tier gate: a CALL to a `deferred` emission needs a
+    session-owner runtime (the deferral queue and the commit verb) this tier does
+    not have yet, so refuse it at emit time — surfaced through EmitError, this
+    tier's existing refusal channel. The reachability check and the single
+    canonical wording live in `revl.session_commit`, shared by all five ownerless
+    tiers so six backends do not invent six messages; a declared-but-never-called
+    deferred extern emits cleanly (call-site keyed)."""
+    try:
+        from revl.errors import RevlError
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
+    except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.errors import RevlError
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
+    try:
+        refuse_deferred_on_ownerless_tier(ir, "rust")
+        refuse_approval_on_ownerless_tier(ir, "rust")
+    except RevlError as exc:
+        raise EmitError(exc.message) from None
+
+
+_REVL_SYNC_SUFFIX = "_revl_sync"
+
+
+def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
+    """item 388, stage 6: on a colour-erasing tier (go/rust/java/wasm — suspension
+    is not a function colour) a caller-decided-colour extern's two clones — `X`
+    (async) and `X_revl_sync` (sync) — emit the SAME blocking host function.
+    Collapse them to ONE: drop the sync clone and rewrite its call sites to `X`.
+
+    Detected structurally: a `_revl_sync` extern whose origin twin is present with
+    identical `bodies`. A poly extern instantiated in only one colour has no twin,
+    so it is emitted unchanged under whatever name survived. Non-destructive (the
+    shared IR is also emitted by py/ts, which keep both colours), and a no-op that
+    returns the IR untouched when no such pair exists (every existing golden is
+    byte-identical)."""
+    externs = ir.get("externs") or []
+    by_name = {e.get("name"): e for e in externs}
+    alias: dict = {}
+    kept: list = []
+    for e in externs:
+        name = e.get("name") or ""
+        if name.endswith(_REVL_SYNC_SUFFIX):
+            origin = name[: -len(_REVL_SYNC_SUFFIX)]
+            twin = by_name.get(origin)
+            if twin is not None and twin.get("bodies") == e.get("bodies"):
+                alias[name] = origin
+                continue
+        kept.append(e)
+    if not alias:
+        return ir
+
+    def _rewrite(node):
+        if isinstance(node, dict):
+            return {k: (alias[v] if k == "name" and isinstance(v, str)
+                        and v in alias else _rewrite(v))
+                    for k, v in node.items()}
+        if isinstance(node, list):
+            return [_rewrite(x) for x in node]
+        return node
+
+    ir = dict(ir)
+    ir["externs"] = kept
+    for key in ("components", "functions", "tests", "prop_tests"):
+        if key in ir:
+            ir[key] = _rewrite(ir[key])
+    return ir
+
+
+def emit(ir: dict, record: bool = False) -> str:
+    """Emit one Rust module (crate root) for an IR document.
+
+    `record=True` (item 322 Slice 2) wires the witnessed teardown to a durable
+    WAL sink (the rust host recording channel) so a crash BEFORE commit is
+    recoverable by `revl recover`. It is OFF by default and gated everywhere it
+    touches emission, so a non-recording program — every existing golden — emits
+    byte-identically; only a program emitted in record mode carries the
+    recording preamble and the per-descriptor `revl_record_transactional` calls.
+    Mirrors backends/go/emit.py's `emit(..., record=...)`.
+    """
+    global _RECORD_MODE
+    _RECORD_MODE = record
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
+    ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
     _refuse_holes(ir)
+    _refuse_deferred_emissions(ir)
 
     _refuse_fault_tests(ir)
 
@@ -5272,19 +6365,23 @@ def cargo_toml(name: str = "revl_components") -> str:
 
 
 def _main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: python3 emit.py <ir.json|->", file=sys.stderr)
+    # item 322 Slice 2: `--record` wires the witnessed teardown to a durable WAL
+    # sink (mirrors backends/go/emit.py's flag). Off by default -> byte-identical.
+    args = [a for a in argv[1:] if a != "--record"]
+    record = "--record" in argv[1:]
+    if len(args) != 1:
+        print("usage: python3 emit.py <ir.json|-> [--record]", file=sys.stderr)
         return 2
     # `-` reads the IR from stdin. Callers used to pass `/dev/stdin`, which
     # works on macOS and fails on a GitHub runner with `OSError: [Errno 6] No
     # such device or address` — the emitted-code tests were red in CI for that
     # reason alone.
-    if argv[1] == "-":
+    if args[0] == "-":
         ir = json.load(sys.stdin)
     else:
-        with open(argv[1], "r", encoding="utf-8") as handle:
+        with open(args[0], "r", encoding="utf-8") as handle:
             ir = json.load(handle)
-    sys.stdout.write(emit(ir))
+    sys.stdout.write(emit(ir, record=record))
     return 0
 
 

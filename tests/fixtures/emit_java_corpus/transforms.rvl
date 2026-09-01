@@ -1,0 +1,15 @@
+// item 383 / 391 (self-host port): the `xs.reduce(init, f)` receiver-first
+// transform desugars to `list_reduce(xs, init, f)` (parser.py
+// `desugar_list_transform`) before typing and lowering. `reduce` threads an
+// accumulator with no intermediate list, so — unlike map/filter — its body needs
+// no `.push`; it exercises the desugar, the `(A, T) -> A` function-value
+// parameter, and a two-parameter arrow argument on the tiers that lower a
+// function value (py/ts/go/rust) and refuse it (java/wasm).
+fn list_reduce(xs: List[Int], init: Int, f: (Int, Int) -> Int) -> Int {
+  var acc = init
+  for (x of xs) { acc = f(acc, x) }
+  return acc
+}
+fn total(xs: List[Int]) -> Int {
+  return xs.reduce(0, (a: Int, x: Int) => a + x)
+}

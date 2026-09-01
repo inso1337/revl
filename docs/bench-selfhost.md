@@ -114,6 +114,43 @@ the per-byte work (the functional lexer still allocates a 1-char string per
 `charAt`, copies records, and slices), so this is the share the native builtins
 reclaim; the rest is the value-layer tax that a native tier is what erases.
 
+## Lexer before→after — codepoint-at-index scan primitive (item 276)
+
+Item 276 added `Str.codepoint_at(i) -> Int` (docs/stdlib-2.0.md §Str.codepoint_at),
+lowered natively per backend, and adopted it in `selfhost/lexer.rvl`. The residual
+value-layer sites still spelled the code point at index `j` as
+`code0(source.charAt(j))`: `charAt(j)` produced a 1-char `Str`, then `code0` (a
+revl-fn call) indexed it a second time to reach `charCodeAt(0)`. Every
+guaranteed-in-bounds site — `scan_string`, `scan_triple`, `scan_interp`,
+`scan_template`, `scan_comment`, `count_nl`, `scan_host_body`, `step`, and the
+`@backend` whitespace scan — now reads `source.codepoint_at(j)` directly, dropping
+the `code0` call and the second index. `code0` remains only for the clamped-slice
+probes (`is_triple_at`, `scan_triple`'s leading-newline check, `is_space`) where a
+`slice` past the end can return `""` and the `-1` guard is required.
+
+Measured today on `macOS-26.2-arm64`, CPython 3.14.3, same corpus, median of three
+whole-corpus passes each (baseline = `origin/main`, after = this branch). The
+correctness gate confirms the self-host lexer stays **token-for-token identical**
+to the reference across the change:
+
+| lexer stage                     | ref ms | self-host ms | overhead |
+|---------------------------------|-------:|-------------:|---------:|
+| **before** (item 270 baseline)  |  5.55  |    25.14     | **4.5x** |
+| **after** (item 276)            |  5.53  |    24.90     | **4.5x** |
+
+On the **CPython tier the win is small (~1 %)** — and real (all three after-runs
+came in under the baseline median, despite the after-corpus being 8 LOC larger
+because the primitive's adoption is documented in `lexer.rvl` itself). CPython
+caches every 1-char Latin-1 string, so `source[j]` was already close to free
+there; what `codepoint_at` reclaims on py is the `code0` fn-call and its second
+index, not an allocation. **The primitive's real lever is the native tiers**: the
+rust lowering of `charAt(i)` is `…chars().nth(i).unwrap().to_string()` — a heap
+`String` allocation per byte — whereas `codepoint_at(i)` is
+`…chars().nth(i).unwrap() as u32 as i64`, no allocation. The self-host lexer's
+per-byte `charAt`→`String` churn on rust/go is exactly the value-layer tax item
+231a identified, and this primitive is what lets the hot path stop paying it once
+the native selfhost run adopts it end to end.
+
 ## Reading the numbers
 
 - **Heaviest overhead: the LEXER — not the emit stage.** The lexer does the

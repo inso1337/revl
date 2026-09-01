@@ -1,0 +1,15 @@
+{
+  "components": [],
+  "counts": {
+    "effects": 0,
+    "failed": 0,
+    "passed": 0,
+    "rounds": 16
+  },
+  "kind": "tested",
+  "note": "no `verified effect` declared.",
+  "roadmapItem": 26,
+  "status": "passed",
+  "tier": "py",
+  "title": "verified-effect inverse round-trips"
+}

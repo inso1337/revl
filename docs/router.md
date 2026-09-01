@@ -4,9 +4,10 @@
 (`stdlib/router.rvl`) plus runtime routing in `src/revl/run.py` route calls
 round-robin across N worker realms and fail over when a worker withdraws, with
 consumers seeing exactly one provider (G2). The per-tier *emitter* realization
-landed on py/ts/rust (item 167); go/java/wasm are pending a runtime liveness
-primitive (item 173), see §4. This note records the design, why the routing
-lives in the driver rather than the emitted body, and what the other tiers need.
+landed on py/ts/rust (item 167) and, via item 173, on wasm (first-party) and go
+(through a stc-go fork); java has the emitter and awaits an upstream cordis4j
+release — see §4. This note records the design, why the py reference keeps the
+routing in the driver, and how each emitter fans out from the emitted body.
 
 This is the runtime half of the load-balancer story; the *why* (G2 vs. load
 balancing, the two non-goals, the comparison table) is docs/distribution-model.md
@@ -120,15 +121,29 @@ out of scope for this item and are recorded here so they are not re-derived:
 
 * **Per-tier emitter routing (`backends/*/emit.py`).** To make the *emitted*
   router body itself route (so `revl run --backend rust` and the other tiers fan
-  out without the py driver), each emitter must, for a key carrying a `routes`
-  entry, emit **per-realm handle resolution** (the N handles, one per named
-  realm) plus the selection + strict-liveness skip, rather than a single
-  `inject`/committed-view read. Concretely, the emitter lowers a routed require
-  into: (a) N realm-scoped resolutions of the key, and (b) a strategy driver
-  over them that re-checks liveness per call. The py runtime shows the shape
-  (`_Router` in `src/revl/run.py`). **Item 167 landed this on py/ts/rust**;
-  go/java/wasm still need a runtime liveness primitive the emitter cannot
-  synthesize, tracked as item 173.
+  out without the py driver), each emitter lowers a key carrying a `routes` entry
+  into **per-realm handle resolution** (the N handles, one per named realm) plus
+  the selection + strict-liveness skip, rather than a single
+  `inject`/committed-view read: (a) N realm-scoped resolutions of the key, and
+  (b) a strategy driver over them that re-checks liveness per call. The py
+  runtime shows the shape (`_Router` in `src/revl/run.py`). **Item 167 landed
+  this on py/ts/rust; item 173 extended it to wasm and go, and wired the java
+  emitter:**
+  - **wasm** (first-party): the substrate grew a `route:<key>` host op — a
+    strict single-realm liveness-checked read + a `live` probe, no parent
+    fallback — and the emitter emits a selector + strict dispatch that consume
+    it (`backends/wasm/emit.py`, proven by `test_router_exec.py`).
+  - **go**: a `revlRouter<Comp><Key>` struct re-resolves live per-realm handles
+    each call via the stc-go fork's strict `ServiceInRealm` (no parent-chain
+    fallback); built + tested against the fork (`forks/stc-go`), upstream PR
+    pending.
+  - **java**: a `RevlRouter<Comp><Key>` class consumes `ctx.serviceInRealm(...)`
+    (same strict read); the primitive ships as a cordis4j fork PR spec +
+    reference stub (`forks/cordis4j`). Not built here — no JRE in this
+    environment — so java routing awaits the upstream cordis4j release.
+
+  Every routes-less program on the touched tiers emits byte-identically (the
+  routing paths are gated strictly on a non-empty `routes`).
 
 * **`least_loaded` with a real load signal.** The reference uses a local
   served-count. A faithful least-loaded wants each worker's *reported* load as a

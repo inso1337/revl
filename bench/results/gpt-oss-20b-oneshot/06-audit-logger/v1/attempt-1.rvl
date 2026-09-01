@@ -1,0 +1,16 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Audit {
+  emission fn log(event: Str)
+}
+
+component AuditLogger requires db: Database provides audit: Audit {
+  provide audit {
+    fn log(event) {
+      emit db.execute(`INSERT INTO audit_log VALUES (${event})`)
+    }
+  }
+}

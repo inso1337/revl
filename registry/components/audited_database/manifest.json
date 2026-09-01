@@ -15,6 +15,7 @@
         "execute: emission (sync)",
         "ping: not async fn"
       ],
+      "resources": [],
       "verdict": "address-space-bound"
     }
   },

@@ -208,7 +208,7 @@ def revl_version() -> str:
     """The installed revl version, or a best-effort read from the source tree
     when running uninstalled (no metadata)."""
     try:
-        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+        from importlib.metadata import version  # noqa: PLC0415
         return version("revl")
     except Exception:  # noqa: BLE001 — any metadata failure falls back
         pass
@@ -442,6 +442,33 @@ def check_otel(prober: Prober) -> Check:
                  "optional extra not installed (pip install revl[otel])")
 
 
+def check_stdlib_version(prober: Prober) -> Check:
+    """The stdlib version stamp (roadmap item 389).
+
+    Reports the version this compiler expects and, crucially, warns when the
+    stdlib the import resolver would actually LOAD carries a different stamp —
+    the drift a consumer's vendored byte-copy falls into (the item-104
+    `value_is_object` case). ``prober`` is unused: this check reads files, not
+    tools, but keeps the uniform signature so ``diagnose`` treats it like any
+    other check.
+    """
+    from .stdlib_version import (  # noqa: PLC0415 — lazy, no import-time cost
+        EXPECTED_STDLIB_VERSION,
+        check_drift,
+        read_stamp,
+        resolve_loaded_stdlib_dir,
+    )
+
+    loaded_dir = resolve_loaded_stdlib_dir()
+    drift = check_drift(loaded_dir, EXPECTED_STDLIB_VERSION)
+    if drift is None:
+        return Check("stdlib version stamp", OK, EXPECTED_STDLIB_VERSION,
+                     "loaded stdlib matches the version this compiler expects")
+    loaded = read_stamp(loaded_dir) or "unstamped"
+    return Check("stdlib version stamp", WARN, EXPECTED_STDLIB_VERSION,
+                 f"{drift} (loaded {loaded} from {loaded_dir})")
+
+
 # --------------------------------------------------------------- diagnose
 
 
@@ -467,6 +494,7 @@ def diagnose(prober: Prober | None = None,
         check_cordis_ts(prober, backends_dir),
         check_mtls(prober),
         check_otel(prober),
+        check_stdlib_version(prober),
     ]
     return Report(version, checks)
 
@@ -537,7 +565,6 @@ def _default_smoke_runner(tier: str, timeout: int) -> ProbeResult:
     subprocess, under this same interpreter. Success is exit 0 — the driver
     exits nonzero on a residue failure or a skip-with-reason, so the exit code
     is the honest signal without parsing markers."""
-    import os  # noqa: PLC0415
     import tempfile  # noqa: PLC0415
 
     prober = Prober()

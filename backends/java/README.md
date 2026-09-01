@@ -35,6 +35,47 @@ one Java source file (service interfaces + plugin classes).
   control flow, setup statements before acquisition, and
   `io.cordis4j.core.CordisException` respectively.
 
+## Witnessed effects and two-phase teardown (243 / 247 / 318)
+
+A component that registers a `witnessed` (transactional, item 243) or
+`emit … compensate` (item 247) entry emits a per-file `RevlFrame` — the
+shared bracket / transactional / compensation two-phase teardown accumulator
+from docs/design/teardown-contract.md. It supplies what cordis4j's raw
+`EffectScope` LIFO does not: a `committed` commit/abort discriminator (flipped
+once by `apply()`'s `frame.commit()` right before it returns), a per-inverse
+guard so a failing inverse is recorded as residue and never stops the Phase-1
+replay, and the Phase-2 split for compensations. A **bracket-only** component
+emits exactly as before — no `RevlFrame` (see `_component_needs_frame`).
+
+**Per-tool-call witnessed effects (item 318 — the agent H1 gate).** A witnessed
+fs mutation can fire from a **provide-method** body (per request), after
+activation. Each call registers the extern's declared inverse into the
+*enclosing component's activation frame* via `RevlFrame.transactionalMethod`,
+tracked on the provider struct's activation-scope `this.fx` / `this.frame` — so
+the inverse outlives the method call and is disposed by the component's own
+unload. On a clean unload the mutation **persists** (discharged — it is the
+deliverable); on a **`RevlActivation.abort()`** followed by unload it **reverts**
+residue-free, across *every* per-call mutation.
+
+*Disposal-ordering note (why java needs no py-style parking).* The py tier flips
+`_committed` at TEARDOWN (`drain`), so a method-registered entry disposed as an
+ordinary sibling would observe not-committed on a clean unload and wrongly
+revert the deliverable; py fixes that by parking the entry in
+`_deferred_transactional` and disposing it inside `drain`, after the flip. Java
+flips `committed` at ACTIVATION-END, strictly before any method runs and before
+any teardown, so the entry already observes the settled bit when `fx` disposes
+it — no deferred-yield window, no parking. The one rule the emitter honours is
+that the entry registers into the **component activation** `fx`/`frame`, never a
+per-call scope (which would discharge at method-return and leave a later abort
+unable to revert — residue). `apply()` returns a `RevlActivation` (wrapping
+`fx` + `frame`) so a session-level reject can reach `frame.abort()` after a
+clean activation; its `dispose()` runs Phase 1 then drains Phase 2. The WAL
+discharge-descriptor enumeration is a py-only owned deliverable (no java-side
+recording channel yet — teardown-contract.md, "Owned deliverable"); on java the
+persist-vs-revert outcome is proven by observable filesystem state
+(`scenarios/method_witnessed.rvl` + `scenarios/RunMethodWitnessedH1.java`,
+driven by `test_java_method_witnessed_h1_on_stub_runtime`).
+
 ## Verify
 
 The suite (`test_emit_java.py`) asserts emitted structure at the string

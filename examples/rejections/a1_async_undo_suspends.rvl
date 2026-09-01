@@ -1,0 +1,22 @@
+// REJECTED — A1 (roadmap item 131): silent leak #3. An acquisition's `undo`
+// slot reaches an async operation.
+//
+// Teardown is synchronous on every tier: the two-phase abort loop does not
+// await (docs/design/teardown-contract.md, the bound rule). A suspension in an
+// `undo` would be a teardown that can hang or silently no-op — today py builds
+// a coroutine the disposer drops. Item 131 makes it a compile error; teardown
+// stays forward-path-free by construction (design §4 clause 4).
+//
+// expected error:
+//   `undo` reaches async operation `w.heat`, but teardown is synchronous on
+//   every tier
+
+extern emission async fn ho(u: Str) -> Str = @py { return u }
+fn open_conn(u: Str) -> Str { return ho(u) }
+service W { emission async fn heat() -> Int  fn cool() -> Int }
+service Db { fn go() -> Str }
+component A requires w: W provides db: Db {
+  config { u: Str }
+  let c = effect await open_conn(config.u) undo emit w.heat()
+  provide db { fn go() { return c } }
+}

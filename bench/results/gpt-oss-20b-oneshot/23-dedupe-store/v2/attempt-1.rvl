@@ -1,0 +1,16 @@
+service Dedupe {
+  fn seen(id: Str) -> Opt[Str]
+  fn mark(id: Str)
+}
+
+component DedupeStore provides dedupe: Dedupe {
+  let store = effect Map.new() undo store.drop()
+
+  provide dedupe {
+    fn seen(id) = store.get(id)
+    fn mark(id) {
+      effect store.insert(id, "seen")
+      undo   store.remove(id)
+    }
+  }
+}

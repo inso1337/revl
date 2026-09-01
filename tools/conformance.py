@@ -138,6 +138,17 @@ CASES: list[tuple[str, str, str]] = [
 
     # ---- expressions (in a method body, the position that has diverged)
     ("expr", "arithmetic", _component("  provide s { fn f(x) = x + 1 * 2 }")),
+    # Int32 bitwise operators (item 366, docs/arithmetic.md): `& ^ ~ | << >>`
+    # in one kernel, plus the `.to_int32()` narrow and `.to_int()` widen that
+    # bracket it. Every tier lowers these to native bit ops with the same
+    # value (proved by execution in tests/test_cross_tier_execution.py); the
+    # matrix pins that each one still *emits* on all six.
+    ("expr", "Int32 bitwise",
+     "fn mask(a: Int32, b: Int32, n: Int32) -> Int32 {\n"
+     "  return (((a & b) ^ ~a) | (a << n)) >> 1.to_int32()\n"
+     "}\n"
+     + _component("  provide s { fn f(x) { let a = x.to_int32()\n"
+                  "    return mask(a, a, 2.to_int32()).to_int() } }")),
     ("expr", "comparison", _component("  provide s { fn f(x) { let b = x > 1  return x } }")),
     ("expr", "unary", _component("  provide s { fn f(x) = -x }")),
     ("expr", "ternary", _component("  provide s { fn f(x) = x > 0 ? 1 : 0 }")),
@@ -286,17 +297,28 @@ def run(all_cases: bool = False, validate: bool = False) -> dict:
                 {"case": label, "message": str(error).splitlines()[0]})
             continue
 
-        row = {"case": label, "ir_version": ir.get("ir_version"), "tiers": {}}
+        row = {"case": label, "ir_version": ir.get("ir_version"),
+               "tiers": {}, "emit_kind": {}}
         for tier in TIERS:
             try:
                 artifacts[tier].append(
                     (label, emitter(tier).emit(ir, **_emit_kwargs(tier, index))))
                 row["tiers"][tier] = "ok"
+                row["emit_kind"][tier] = "ok"
             except Exception as exc:  # noqa: BLE001 — any refusal is the datum
                 message = str(exc).splitlines()[0]
+                # A tier's own EmitError is a *deliberate* refusal — a named
+                # tier limit the emitter chose to raise rather than fall through
+                # (the wasm i32 boundary, java's lack of anonymous function
+                # types). Any other exception is an unhandled crash: the emitter
+                # had no case for a construct it should express, which is a real
+                # gap. This is the automatable form of docs/conformance.md's
+                # deliberate-vs-gap split, keyed on how the refusal was raised.
+                deliberate = isinstance(exc, getattr(emitter(tier), "EmitError", ()))
                 row["tiers"][tier] = message
+                row["emit_kind"][tier] = "limit" if deliberate else "gap"
                 report["gaps"].setdefault(tier, []).append(
-                    {"case": label, "message": message})
+                    {"case": label, "message": message, "deliberate": deliberate})
         report["cases"].append(row)
 
     if validate:
@@ -378,6 +400,288 @@ def _check_toolchains(*, as_json: bool = False) -> int:
     return 1 if missing else 0
 
 
+# --------------------------------------------------------------------------
+# the revl-native column: the self-host compiler compiling itself
+# --------------------------------------------------------------------------
+#
+# The six tiers above are *host* runtimes. revl also has a native path, and the
+# matrix should show revl conforming to itself, not only to its hosts. Two
+# facts stand for that native path:
+#
+#   * wasm is revl's *first-party* runtime (the cordis-wasm substrate) — it is
+#     one of the six columns, marked as first-party in the rendered legend.
+#   * the self-host compiler (`selfhost/compile.rvl`) compiles revl source to
+#     target code with no reference compiler in the chain (docs/selfhost-
+#     compile.md). Running every conformance construct through it, and checking
+#     the result byte-for-byte against the reference emitter, answers "does revl
+#     compile *itself* on this construct?".
+#
+# That check is the `revl` column below. It is cheap (the native pipeline loads
+# once and runs the whole corpus in well under a second) and deterministic (a
+# byte comparison), so it belongs in the regenerated matrix rather than a bench.
+
+SELFHOST_TIER = "revl"
+
+
+def _load_selfhost():
+    """Load `selfhost/compile.rvl` as the reference python backend runs it.
+
+    Mirrors `tests/test_selfhost_compile.py`'s harness exactly: compile the
+    native driver with the reference frontend, emit it to python through the
+    reference python backend, and exec it under a lazy `runtime` stub the pure
+    functions never touch. Returns `(compile_to, reference_py_emit, compile_source)`.
+    """
+    import types  # noqa: PLC0415
+
+    from revl import compile_files  # noqa: PLC0415
+
+    pyemit = emitter("python")  # backends/python/emit.py — the reference emitter
+    ir = compile_files([str(ROOT / "selfhost" / "compile.rvl")])
+    stub = types.ModuleType("runtime")
+    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    had = "runtime" in sys.modules
+    previous = sys.modules.get("runtime")
+    sys.modules["runtime"] = stub
+    try:
+        namespace: dict = {}
+        exec(compile(pyemit.emit(ir), "selfhost_compile.py", "exec"), namespace)  # noqa: S102
+    finally:
+        if had:
+            sys.modules["runtime"] = previous
+        else:
+            del sys.modules["runtime"]
+    return namespace["compile_to"], pyemit.emit, compile_source
+
+
+def selfhost_column() -> dict[str, str] | None:
+    """Per-case verdict for the revl-native self-compile, or None if it cannot load.
+
+    ok    — the native pipeline's output is byte-identical to the reference
+            emitter's: revl compiles itself correctly for this construct.
+    limit — the native pipeline runs but its output is not yet byte-exact, or
+            its own gate refuses the construct. This is the documented self-host
+            frontier (docs/selfhost-compile.md), not a regression.
+    gap   — the native pipeline crashed. A real defect.
+    """
+    try:
+        compile_to, reference_emit, compile_src = _load_selfhost()
+    except Exception:  # noqa: BLE001 — a self-host that will not even load is its own signal
+        return None
+
+    verdicts: dict[str, str] = {}
+    for group, name, source in CASES:
+        label = f"{group}/{name}"
+        try:
+            produced = compile_to(source, "py")
+        except Exception:  # noqa: BLE001 — an unexpected crash is the datum
+            verdicts[label] = "gap"
+            continue
+        if produced.startswith(("REFUSED", "UNKNOWN_TIER")):
+            verdicts[label] = "limit"  # the native gate declined — a frontier edge
+            continue
+        try:
+            expected = reference_emit(compile_src(source))
+        except Exception:  # noqa: BLE001 — no oracle to compare against; call it a frontier edge
+            verdicts[label] = "limit"
+            continue
+        verdicts[label] = "ok" if produced == expected else "limit"
+    return verdicts
+
+
+# --------------------------------------------------------------------------
+# the markdown matrix + its README embedding (roadmap item 328)
+# --------------------------------------------------------------------------
+
+_SHORT = {"python": "py", "typescript": "ts"}
+_GLYPH = {"ok": "ok", "limit": "lim", "gap": "**GAP**"}
+
+README_START = "<!-- CONFORMANCE-MATRIX:START -->"
+README_END = "<!-- CONFORMANCE-MATRIX:END -->"
+_README_ANCHOR = "## The toolchain is the developer surface"
+
+
+def _short(tier: str) -> str:
+    return _SHORT.get(tier, tier)
+
+
+def _perf_headline() -> str | None:
+    """The committed admission round-trip median from the bench result.
+
+    Read from `bench/results/admission-latency.md`, which is a committed
+    artifact (a re-run overwrites it deliberately), so the number is stable
+    across machines — unlike a live timing, which could never sit in a block a
+    staleness gate diffs. Live emit timings are a `--markdown` readout instead.
+    """
+    path = ROOT / "bench" / "results" / "admission-latency.md"
+    if not path.is_file():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "compile + admit" in line and line.count("|") >= 3:
+            cells = [c.strip().strip("*") for c in line.strip().strip("|").split("|")]
+            if len(cells) >= 2 and cells[1]:
+                return cells[1]
+    return None
+
+
+def _summary_rows(report: dict, selfhost: dict[str, str] | None) -> list[tuple[str, int, int, int]]:
+    """(tier, ok, limit, gap) per host tier, then the revl self-host row."""
+    rows = []
+    for tier in TIERS:
+        kinds = [row["emit_kind"][tier] for row in report["cases"]]
+        rows.append((_short(tier), kinds.count("ok"),
+                     kinds.count("limit"), kinds.count("gap")))
+    if selfhost is not None:
+        verdicts = [selfhost.get(row["case"], "gap") for row in report["cases"]]
+        rows.append((f"{SELFHOST_TIER} (self-host)", verdicts.count("ok"),
+                     verdicts.count("limit"), verdicts.count("gap")))
+    return rows
+
+
+def _markdown(report: dict, selfhost: dict[str, str] | None) -> str:
+    """The construct x tier matrix as a deterministic markdown block.
+
+    Emit-only (pure Python, no toolchain), so it regenerates byte-identically
+    on any machine — which is what lets a CI gate diff the committed copy
+    against a fresh generation. The `--validate` second question (does the
+    emitted code survive its real compiler?) needs every toolchain present and
+    is gated separately by `tests/test_conformance_validate.py`.
+    """
+    columns = list(TIERS) + ([SELFHOST_TIER] if selfhost is not None else [])
+    cases = report["cases"]
+    out: list[str] = []
+
+    out.append("_Generated by `python3 tools/conformance.py --write-readme`. "
+               "Do not edit by hand._")
+    out.append("")
+    out.append("`ok` the emitter produces code · `lim` a deliberate tier limit "
+               "· **GAP** a real gap (emitter has no case). "
+               "`wasm` is revl's first-party runtime; `revl` is the self-host "
+               "pipeline compiling itself, where `ok` means byte-identical to "
+               "the reference emitter and `lim` is the self-host frontier.")
+    out.append("")
+
+    out.append("| construct | " + " | ".join(_short(t) for t in columns) + " |")
+    out.append("|" + "|".join(["---"] * (len(columns) + 1)) + "|")
+    for row in cases:
+        cells = [_GLYPH[row["emit_kind"][t]] for t in TIERS]
+        if selfhost is not None:
+            cells.append(_GLYPH.get(selfhost.get(row["case"], "gap"), "**GAP**"))
+        out.append("| " + row["case"] + " | " + " | ".join(cells) + " |")
+
+    out.append("")
+    out.append(f"**Per tier** ({len(cases)} constructs emitted; "
+               f"{len(report['frontend_rejected'])} rejected by the frontend, below):")
+    out.append("")
+    out.append("| tier | ok | deliberate limit | real gap |")
+    out.append("|---|---|---|---|")
+    for tier, ok, limit, gap in _summary_rows(report, selfhost):
+        gap_cell = f"**{gap}**" if gap else "0"
+        out.append(f"| {tier} | {ok} | {limit} | {gap_cell} |")
+
+    if report["frontend_rejected"]:
+        out.append("")
+        rejected = ", ".join(f"`{item['case']}`" for item in report["frontend_rejected"])
+        out.append(f"Rejected by the frontend (a language-level limit, not a "
+                   f"backend gap): {rejected}.")
+
+    perf = _perf_headline()
+    if perf:
+        out.append("")
+        out.append(f"**Performance.** In-memory admission round-trip "
+                   f"(compile + gate) median **{perf}** per candidate component "
+                   f"([bench/results/admission-latency.md]"
+                   f"(bench/results/admission-latency.md)). This is the "
+                   f"per-candidate cost an agent loop pays at the v3.0 gate.")
+
+    return "\n".join(out)
+
+
+def _print_emit_timings(report: dict) -> None:
+    """A live per-tier emit-cost readout for the operator running `--markdown`.
+
+    Deliberately NOT part of the embedded block: a wall-clock number could never
+    survive the staleness diff. It times only the emit step (each construct's IR
+    lowered by each tier), which is the cheap measurement the walk already does;
+    the compile/typecheck cost is the `--validate` question, gated separately.
+    """
+    import time  # noqa: PLC0415
+
+    irs = []
+    for group, name, source in CASES:
+        try:
+            irs.append((f"{group}/{name}", compile_source(source)))
+        except RevlError:
+            pass
+
+    print("\n_Live per-tier emit timing (local, not embedded — timings are "
+          "non-deterministic):_\n")
+    print("| tier | emit (ms) | per construct |")
+    print("|---|---|---|")
+    for tier in TIERS:
+        module = emitter(tier)
+        started = time.perf_counter()
+        emitted = 0
+        for index, (label, ir) in enumerate(irs):
+            try:
+                module.emit(ir, **_emit_kwargs(tier, index))
+                emitted += 1
+            except Exception:  # noqa: BLE001 — a refusal is not timed work
+                pass
+        elapsed = (time.perf_counter() - started) * 1000
+        per = elapsed / emitted if emitted else 0.0
+        print(f"| {_short(tier)} | {elapsed:.1f} | {per:.2f} ms |")
+
+
+def readme_block(report: dict, selfhost: dict[str, str] | None) -> str:
+    return f"{README_START}\n{_markdown(report, selfhost)}\n{README_END}"
+
+
+def _splice_readme(text: str, block: str) -> str:
+    """Replace the marked block in README text, inserting a section if absent."""
+    if README_START in text and README_END in text:
+        pre = text[:text.index(README_START)]
+        post = text[text.index(README_END) + len(README_END):]
+        return pre + block + post
+    section = f"## Conformance matrix\n\n{block}\n\n"
+    if _README_ANCHOR in text:
+        return text.replace(_README_ANCHOR, section + _README_ANCHOR, 1)
+    return text.rstrip("\n") + "\n\n" + section
+
+
+def _write_readme(*, check_only: bool) -> int:
+    """Regenerate the README matrix block. `check_only` gates staleness for CI.
+
+    Returns 0 when the committed block already matches a fresh generation (or
+    was written), 1 when `check_only` finds it stale — the same shape as the
+    generated-artifact gates the rest of the tree uses.
+    """
+    report = run()
+    selfhost = selfhost_column()
+    block = readme_block(report, selfhost)
+    # The full construct matrix lives in docs/conformance.md, not the README —
+    # the README carries only a short qualitative summary, so the front page
+    # stays a front page. This block is still generated + gated, never authored.
+    doc = ROOT / "docs" / "conformance.md"
+    text = doc.read_text(encoding="utf-8")
+    updated = _splice_readme(text, block)
+
+    if check_only:
+        if updated == text:
+            print("docs/conformance.md matrix is up to date.")
+            return 0
+        print("docs/conformance.md matrix is STALE — regenerate it with "
+              "`python3 tools/conformance.py --write-readme` (or `make matrix`) "
+              "and commit the result.", file=sys.stderr)
+        return 1
+
+    if updated == text:
+        print("docs/conformance.md matrix already up to date.")
+    else:
+        doc.write_text(updated, encoding="utf-8")
+        print("docs/conformance.md matrix regenerated.")
+    return 0
+
+
 def _matrix(report: dict, cell) -> None:
     width = max(len(row["case"]) for row in report["cases"]) + 2
     print(f"{'case'.ljust(width)}" + "".join(t[:6].ljust(8) for t in TIERS))
@@ -398,10 +702,31 @@ def main() -> int:
                         help="report which tiers' validators can run and exit "
                              "non-zero if any cannot — for CI, where a missing "
                              "toolchain is a broken job, not a fact of life")
+    parser.add_argument("--markdown", action="store_true",
+                        help="print the construct x tier matrix as markdown "
+                             "(emit-only, deterministic), plus a revl self-host "
+                             "column and a live per-tier emit-timing readout")
+    parser.add_argument("--write-readme", action="store_true",
+                        help="regenerate the matrix block between the "
+                             "CONFORMANCE-MATRIX markers in README.md in place")
+    parser.add_argument("--check-readme", action="store_true",
+                        help="exit non-zero if README.md's committed matrix "
+                             "block differs from a fresh generation — the CI "
+                             "staleness gate")
     args = parser.parse_args()
 
     if args.check_toolchains:
         return _check_toolchains(as_json=args.json)
+
+    if args.write_readme or args.check_readme:
+        return _write_readme(check_only=args.check_readme)
+
+    if args.markdown:
+        report = run()
+        selfhost = selfhost_column()
+        print(_markdown(report, selfhost))
+        _print_emit_timings(report)
+        return 0
 
     report = run(validate=args.validate)
     if args.json:

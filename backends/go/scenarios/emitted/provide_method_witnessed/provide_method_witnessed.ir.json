@@ -1,0 +1,262 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Ops": {
+      "methods": {
+        "touch": {
+          "params": [
+            {
+              "name": "p",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        },
+        "mv": {
+          "params": [
+            {
+              "name": "a",
+              "type": "Str"
+            },
+            {
+              "name": "b",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Agent",
+      "source": "provide_method_witnessed.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "ops": "Ops"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "ops",
+          "service": "Ops",
+          "methods": [
+            {
+              "name": "touch",
+              "params": [
+                "p"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "fn",
+                    "name": "stash_path",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "p"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "mv",
+              "params": [
+                "a",
+                "b"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "fn",
+                    "name": "move_e",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "a"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "b"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Agent",
+        "file": "provide_method_witnessed.rvl",
+        "inject": [],
+        "provides": [
+          "ops"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Agent"
+    ]
+  },
+  "types": {
+    "Stash": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "path": "Str",
+        "bak": "Str"
+      }
+    },
+    "FsError": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "code": "Str"
+      }
+    },
+    "Move": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "from": "Str",
+        "to": "Str"
+      }
+    }
+  },
+  "externs": [
+    {
+      "name": "unstash",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "Stash"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\t//revl:import os\n\tif _, err := os.Stat(w.Bak); err == nil {\n\t\t_ = os.Rename(w.Bak, w.Path)\n\t}\n\treturn\n"
+      }
+    },
+    {
+      "name": "stash_path",
+      "class": "witnessed",
+      "params": [
+        {
+          "name": "p",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Stash, FsError]",
+      "bodies": {
+        "go": "\n\t//revl:import os\n\tbak := p + \".bak\"\n\tif err := os.Rename(p, bak); err != nil {\n\t\treturn RevlErr[Stash, FsError]{Value: FsError{Code: err.Error()}}\n\t}\n\treturn RevlOk[Stash, FsError]{Value: Stash{Path: p, Bak: bak}}\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "Stash",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unstash"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unmove",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "Move"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\t//revl:import os\n\tif _, err := os.Stat(w.To); err == nil {\n\t\t_ = os.Rename(w.To, w.From)\n\t}\n\treturn\n"
+      }
+    },
+    {
+      "name": "move_e",
+      "class": "witnessed",
+      "params": [
+        {
+          "name": "a",
+          "type": "Str"
+        },
+        {
+          "name": "b",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Move, FsError]",
+      "bodies": {
+        "go": "\n\t//revl:import os\n\tif err := os.Rename(a, b); err != nil {\n\t\treturn RevlErr[Move, FsError]{Value: FsError{Code: err.Error()}}\n\t}\n\treturn RevlOk[Move, FsError]{Value: Move{From: a, To: b}}\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "Move",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unmove"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    }
+  ],
+  "tests": [
+    {
+      "name": "clean unload of an un-called agent leaves no residue",
+      "lifecycle": true,
+      "body": [
+        {
+          "step": "load",
+          "component": "Agent",
+          "config": {}
+        },
+        {
+          "step": "unload",
+          "component": "Agent"
+        },
+        {
+          "step": "assert_no_residue"
+        }
+      ]
+    }
+  ]
+}

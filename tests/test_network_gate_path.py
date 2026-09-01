@@ -286,4 +286,11 @@ def test_full_conductor_boot_over_the_network_placement(capfd):
     assert "collide" in out and "clean" in out
     assert "(G2)" in out                                # the refusal crossed TCP
     assert "network seams (item 56): 1 over TCP+mTLS" in out
-    assert '"ok": true' in out or "'ok': True" in out   # the clean admit crossed
+    # the clean admit crossed. The verdict is a `Str`, so each consumer tier
+    # prints it in its own quoting convention: the py tier's repr(str) keeps the
+    # inner double quotes (`"ok": true`); a node/go consumer quotes the whole
+    # string and escapes the inner quotes (`\"ok\": true`, the form this
+    # node-tier `GateUser` emits); a dict verdict would print as `'ok': True`.
+    # Any of the three proves the ok=true verdict rode back over the seam.
+    assert ('"ok": true' in out or "'ok': True" in out
+            or r'\"ok\": true' in out), out                 # the clean admit crossed

@@ -170,3 +170,206 @@ def build_spec_test(test: dict) -> dict:
         elif kind == "assert_no_residue":
             steps.append({"step": "assert_no_residue"})
     return {"name": test.get("name") or "lifecycle", "steps": steps}
+
+
+# ---------------------------------------------------------------------------
+# witnessed-effects teardown (item 243 Slice 2b, docs/design/teardown-
+# contract.md): the first-party wasmtime-driving half of the two-phase
+# accumulator `backends/wasm/emit.py` compiles into every component's
+# `deactivate_step`/`deactivate`/`committed` exports.
+#
+# Everything above this line is pure Python (no wasmtime import) and runs in
+# the *revl* process. This section is the one place in this file that talks
+# to a live module, mirroring the split the module docstring already draws
+# between "revl-side" (this file) and "cordis-wasm-side" (`lifecycle_harness.
+# py`) — except this driver needs neither cordis-wasm nor its runtime module:
+# it drives the compiled component directly against the `wasmtime` Python
+# bindings, the same first-party pattern `test_accessor_exec.py`/
+# `test_spawn_exec.py` already use for exec-level proofs. `wasmtime` is
+# imported lazily inside `drive_teardown`, so importing this module (as
+# `src/revl/test.py` does, wasmtime-less) is unaffected.
+# ---------------------------------------------------------------------------
+
+import json as _json
+import re as _re
+
+#: matches the `revl:teardown` custom section `_ComponentEmitter.
+#: _teardown_section` (backends/wasm/emit.py) embeds — a WAT string literal,
+#: so an escaped inner `"` (`\"`) or `\\` must not end the match early.
+_TEARDOWN_SECTION_RE = _re.compile(r'\(@custom "revl:teardown" "((?:[^"\\]|\\.)*)"\)')
+
+
+def _wat_string_unescape(payload: str) -> str:
+    """The inverse of `emit.py`'s `_wat_string` (`\\` -> `\\\\` -> `\\"` ->
+    `\\n`, applied in that order at emit time, so undone in reverse here)."""
+    return payload.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+
+
+def parse_teardown_descriptor(wat: str) -> dict | None:
+    """This component's static WAL index (item 243 Slice 2b), or `None` when
+    it registers no `transactional`/`compensation` entry (the common case).
+
+    The shape (`_ComponentEmitter._teardown_section`, backends/wasm/emit.py):
+    ``{"record": "discharge-descriptor", "entries": [{"seq": int, "entry":
+    "transactional"|"compensation", "dispatch": int}, ...], "phase1Count":
+    int, "phase2Count": int}``. `dispatch` is the entry's `$__dstep` position
+    (0-based) — what a driver walking `deactivate_step` calls actually sees;
+    `seq` is its registration order on the shared stack (the contract's own
+    numbering). `phase1Count`/`phase2Count` locate the dispatch split
+    (bracket+transactional LIFO, then compensation LIFO) — the piece a host
+    driver needs and the entry list alone does not carry, since a bracket
+    needs no WAL row (G5 infallible) but still occupies a Phase-1 dispatch
+    slot.
+    """
+    match = _TEARDOWN_SECTION_RE.search(wat)
+    if match is None:
+        return None
+    return _json.loads(_wat_string_unescape(match.group(1)))
+
+
+def _residue_record(kind: str, seq: int, *, error: dict | None,
+                    attempted: bool, outcome: str) -> dict:
+    """One record in the merged residue schema (docs/design/teardown-
+    contract.md "The merged residue schema"), the wasm tier's honest subset:
+    `crossing`/`referent`/`hint` need durable argument capture this tier does
+    not carry (see `_teardown_section`'s docstring) and are left `None` rather
+    than faked; `kind`/`attempted`/`error`/`outcome` are exactly what a live
+    `deactivate_step` call can observe."""
+    return {
+        "kind": kind,
+        "seq": seq,
+        "attempted": {"call": None, "phase": 2} if attempted else None,
+        "attemptedFlag": attempted,
+        "error": error,
+        "outcome": outcome,
+        "crossing": None,
+        "referent": None,
+        "hint": None,
+    }
+
+
+def drive_teardown(engine, store, exports: dict, wat: str, *,
+                   phase2_budget_ms: int | None = None,
+                   phase2_per_call_ms: int | None = None) -> dict:
+    """Drive one already-instantiated component's two-phase teardown to
+    completion, one entry per `deactivate_step` call, bounding Phase 2
+    (compensations) with a wasmtime epoch deadline where the entry's own
+    inverse/compensate expression reaches guest code (item 243 Slice 2b's
+    first-party wiring, docs/design/teardown-contract.md "wasm" row).
+
+    Per-tier bound honesty (the contract's own qualification, restated here
+    because this is where it becomes an actual guarantee or the lack of one):
+    an epoch/fuel deadline only fires when wasmtime CHECKS it, and it checks
+    at a function-call entry or a loop back-edge — GUEST code. A Phase-2
+    compensation that calls another wasm function (`call $name`, the only
+    shape a `compensate` expression on this tier renders as) is bounded; a
+    HOST IMPORT the compensation calls into (a `req`/coeffect call) is not —
+    wasmtime cannot preempt code it does not control once control has left
+    the guest. This is not a partial implementation of the bound; it is the
+    substrate's real ceiling, and the contract says to state that honestly
+    rather than claim more.
+
+    `engine` must have been built with `Config().epoch_interruption = True`
+    when `phase2_per_call_ms` is given (a `wasmtime.WasmtimeError` surfaces
+    otherwise — this driver does not silently no-op the bound). `store` and
+    `exports` are the caller's: instantiation/import wiring is a runtime
+    composition concern this driver does not own.
+
+    Returns ``{"clean": bool, "outstanding": [Record, ...]}`` — the schema's
+    envelope, minus the fields this tier cannot durably carry (see
+    `_residue_record`).
+    """
+    import threading
+    import time as _time
+
+    import wasmtime
+
+    descriptor = parse_teardown_descriptor(wat) or {
+        "entries": [], "phase1Count": 0, "phase2Count": 0,
+    }
+    by_dispatch = {e["dispatch"]: e["entry"] for e in descriptor.get("entries") or []}
+    seq_by_dispatch = {e["dispatch"]: e["seq"] for e in descriptor.get("entries") or []}
+    phase1_count = descriptor.get("phase1Count", 0)
+    # `phase1Count`/`phase2Count` describe the ABORT dispatch chain only
+    # (`_module`'s `abort_chain`); a COMMITTED activation dispatches the
+    # shorter `commit_chain` (bracket entries only), whose length this
+    # descriptor does not carry — reading `committed()` up front, and driving
+    # `deactivate_step` off its OWN "more" return rather than a precomputed
+    # count, makes this correct for both without needing that extra count.
+    is_committed = bool(exports["committed"](store))
+
+    deactivate_step = exports["deactivate_step"]
+    outstanding: list[dict] = []
+    deadline = (_time.monotonic() + phase2_budget_ms / 1000.0
+               if phase2_budget_ms is not None else None)
+    # the ABORT dispatch chain's exact length (`phase1Count + phase2Count`,
+    # `_module`'s `abort_chain`) — needed only to record every REMAINING
+    # skipped entry once the budget expires, without calling the guest for
+    # them (there is nothing to advance `$__dstep` past for an entry never
+    # dispatched). The commit chain's length is not in the descriptor, but a
+    # committed activation never reaches the budget branch below (brackets
+    # carry no Phase-2 bound), so `more`, not this count, drives that case.
+    abort_total = phase1_count + descriptor.get("phase2Count", 0)
+
+    k = 0
+    more = 1
+    while more:
+        in_phase2 = (not is_committed) and k >= phase1_count
+        if in_phase2 and deadline is not None and _time.monotonic() >= deadline:
+            # between-compensation check (the contract's NORMATIVE minimum,
+            # every tier): the budget is already spent, so no further
+            # compensation starts. Every skip is recorded, none silently
+            # dropped — but this driver cannot advance `$__dstep` past a slot
+            # it never called, so it records the rest in one pass and stops;
+            # a caller that still wants the module's own teardown state fully
+            # advanced (e.g. before reusing the instance) can fall back to
+            # the legacy `deactivate` export, which has no such budget.
+            for skipped in range(k, abort_total):
+                outstanding.append(_residue_record(
+                    "compensation-residue", seq_by_dispatch.get(skipped, skipped + 1),
+                    error={"type": "deadline-expired", "message": "phase-2 budget exhausted"},
+                    attempted=False, outcome="not-attempted"))
+            break
+
+        timer = None
+        if in_phase2 and phase2_per_call_ms is not None:
+            store.set_epoch_deadline(1)
+            timer = threading.Timer(phase2_per_call_ms / 1000.0, engine.increment_epoch)
+            timer.start()
+        try:
+            more = deactivate_step(store)
+        except wasmtime.Trap as trap:
+            code = getattr(trap, "trap_code", None)
+            # `seq_by_dispatch` (and `by_dispatch`) are keyed by DISPATCH
+            # position (K, this loop's own `k`), not registration seq — a
+            # bracket entry carries no WAL row (see `_teardown_section`) and
+            # so has no seq to report; its dispatch position is the fallback,
+            # documented as such rather than silently substituted.
+            reported_seq = seq_by_dispatch.get(k, k + 1)
+            if code in (wasmtime.TrapCode.INTERRUPT, wasmtime.TrapCode.OUT_OF_FUEL):
+                outstanding.append(_residue_record(
+                    "compensation-residue", reported_seq,
+                    error={"type": str(code), "message": str(trap)},
+                    attempted=True, outcome="unknown"))
+            else:
+                kind = ("bracket-fault" if by_dispatch.get(k) is None
+                       else "restore-residue" if not in_phase2
+                       else "compensation-residue")
+                outstanding.append(_residue_record(
+                    kind, reported_seq, error={"type": "trap", "message": str(trap)},
+                    attempted=True, outcome="failed"))
+            # core wasm has no catch/continue across the trapping `call`
+            # inside `deactivate_step` itself, but each entry is its OWN
+            # call from THIS driver, and emit.py advances `$__dstep` BEFORE
+            # running the entry (`_dispatch`), so the driver — unlike a
+            # single legacy `deactivate()` call — simply continues to the
+            # NEXT entry on its next loop iteration. This is the per-entry
+            # continue-and-record the contract specifies, achieved at the
+            # granularity core wasm actually allows.
+            more = 1
+        finally:
+            if timer is not None:
+                timer.cancel()
+        k += 1
+
+    return {"clean": not outstanding, "outstanding": outstanding}

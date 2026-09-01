@@ -2,12 +2,14 @@
 //
 // Real tool calls carry structured args (DSH tools take JSON); before this
 // module the harness's mock wire protocol had to be flattened to
-// `TOOL_CALL name arg1 arg2` and parsed by hand. These two externs give a
+// `TOOL_CALL name arg1 arg2` and parsed by hand. These externs give a
 // component the JSON story the harness needs, scoped to the value types
 // revl already carries (Str/Int/Bool/Float/List/Opt/records): `parse` turns
 // a Str into a revl value (`Any` — the wildcard the type algebra uses for
 // values whose static type only the runtime knows), `stringify` turns one
-// back into a Str.
+// back into a Str, and `try_parse` is the TOTAL (never-raising) parse that
+// returns a `Result[Any, Str]` so a JSONL stream can be walked tolerantly in
+// pure revl (item 362) — see `json_try_parse` below.
 //
 // Each tier's implementation is the `@<backend>` body beside the signature
 // (the extern-body mechanism, docs/syntax-2.0.md §extern). Import with a
@@ -17,8 +19,13 @@
 //
 // Tier status (see docs/stdlib-json.md for the full table and the path to
 // the remaining tiers):
-//   * py — `json.loads` / `json.dumps`; executed by the test suite.
-//   * ts — `JSON.parse` / `JSON.stringify`; emitted by the test suite.
+//   * py — `json.loads` / `json.dumps(…, separators=(",",":"),
+//     ensure_ascii=False)` for the canonical compact form; executed by the
+//     test suite.
+//   * ts — a number-preserving parse (a JSON integer literal decodes to a JS
+//     `bigint` = revl `Int`, a float to a JS `number` = revl `Float`, item 311)
+//     / `JSON.stringify` with a bigint replacer (item 281); emitted by the test
+//     suite. Both directions keep full i64 precision, matching the py tier.
 //   * rs — `Any` erases to `cordis::Value`; the @rs body boxes a parsed
 //     `serde_json::Value` into it and recovers it to re-encode (serde_json
 //     is already pinned in the emitted crate). A structured document
@@ -28,18 +35,148 @@
 //   * java — where a provider's Jackson/Gson plugs in; no JDK JSON API, so
 //     none until a provider is on the `javac` classpath.
 //   * go — `Any` erases to Go's `any`; the @go body reaches `encoding/json`
-//     through a `//revl:import encoding/json` directive the emitter hoists
-//     into the module's import block (item 140).
+//     through `//revl:import` directives the emitter hoists into the module's
+//     import block (item 140). json_stringify encodes with
+//     `SetEscapeHTML(false)` for the canonical form (item 385); see the go
+//     record caveat below.
 //   * wasm — the substrate value model (Int/Bool/Str/List) cannot hold
 //     Float/Map/records, so a JSON value has no representation there.
 //
 // The `Any` return is what makes `parse` usable: it flows into any typed
 // position (`let tc: ToolCall = json_parse(s)`), which is how a harness
 // recovers a record of tool args from a wire string.
+//
+// ── CANONICAL FORM: json_stringify is byte-identical across tiers (item 385) ──
+//
+// json_stringify is a `pure` fn, so revl's cross-tier determinism guarantee
+// (docs/syntax-2.0.md §3.4: "no backend can diverge") requires the SAME BYTES
+// on every tier for the same value. It once did not: py emitted
+// `{"k": "v", "n": 1}` (Python's default `json.dumps` inserts `", "`/`": "`)
+// where ts/go emitted the compact `{"k":"v","n":1}`. Each tier was
+// self-consistent, so both tiers' tests passed — the drift only bit CROSS-TIER
+// (hashing a record, byte-comparing a ledger, a cassette transcript, a
+// signature over emitted JSON). The stated contract now, enforced by
+// tests/test_json_cross_tier_bytes.py (py + ts + go against one expected):
+//
+//   * COMPACT — no space after `:` or `,`  (ts `JSON.stringify` default; go;
+//     py `separators=(",", ":")`).
+//   * NON-ASCII stays RAW UTF-8  (py `ensure_ascii=False`; ts; go). `<`, `>`,
+//     `&` also stay raw (go's default `json.Marshal` HTML-escapes them, so the
+//     @go body uses an Encoder with `SetEscapeHTML(false)`).
+//   * KEY ORDER is record-declaration / insertion order (py dict, ts object).
+//   * booleans/null spelled `true`/`false`/`null`; ints exact incl. > 2^53.
+//   * FLOATS: values that share a decimal form across Python and JS (e.g. 1.5,
+//     -0.25) are byte-identical; a WHOLE-NUMBER float (1.0 vs 1), -0.0, or an
+//     extreme-exponent float can still format differently between the two
+//     runtimes — canonicalize integral quantities as `Int`, not `Float`.
+//   * GO RECORD CAVEAT — a SEPARATE, deeper defect that this @go body cannot
+//     fix: a revl record lowers to a Go struct whose fields are UNEXPORTED
+//     (lowercase) with no `json:` tags, so `encoding/json` drops them and a
+//     record stringifies to `{}` on go. go is canonical for scalars, strings
+//     and lists; the record `{}` behavior is pinned by
+//     test_go_record_is_the_known_separate_defect until the go emitter is
+//     taught to export + tag record fields (its own roadmap item).
 
 pub extern pure fn json_parse(s: Str) -> Any
   = @py { import json; return json.loads(s) }
-  = @ts { return JSON.parse(s) }
+  = @ts {
+    // The builtin JSON.parse decodes every JSON number to a JS number (f64),
+    // so an integer past 2^53 comes back rounded - a silent precision loss on
+    // the ts tier that the py tier (json.loads to a Python int) does not have
+    // (item 311). A JSON.parse reviver cannot recover it: the reviver is handed
+    // the already-rounded number. So this is a number-preserving recursive
+    // descent parse that decodes a JSON INTEGER literal (no dot, no exponent)
+    // to a JS bigint - revl Int, full i64 precision - and a JSON float (a
+    // literal carrying a dot, e, or E) to a JS number - revl Float - matching
+    // the py tier. Strings, arrays, objects, true, false and null decode as
+    // JSON defines. A bigint round-trips back to a bare JSON number through
+    // json_stringify's replacer, so parse and stringify agree with py both ways.
+    let i = 0;
+    const n = s.length;
+    function ws(): void {
+      while (i < n) {
+        const c = s.charCodeAt(i);
+        if (c === 32 || c === 9 || c === 10 || c === 13) i++; else break;
+      }
+    }
+    function fail(m: string): never {
+      throw new SyntaxError("json_parse: " + m + " at index " + i);
+    }
+    function digits(): void {
+      while (i < n) { const c = s.charCodeAt(i); if (c >= 48 && c <= 57) i++; else break; }
+    }
+    function num(): number | bigint {
+      const start = i;
+      if (s[i] === "-") i++;
+      digits();
+      let float = false;
+      if (s[i] === ".") { float = true; i++; digits(); }
+      if (s[i] === "e" || s[i] === "E") { float = true; i++; if (s[i] === "+" || s[i] === "-") i++; digits(); }
+      const tok = s.slice(start, i);
+      return float ? Number(tok) : BigInt(tok);
+    }
+    function str(): string {
+      i++;
+      let out = "";
+      while (i < n) {
+        const c = s[i++];
+        if (c === "\"") return out;
+        if (c === "\\") {
+          const e = s[i++];
+          if (e === "\"" || e === "\\" || e === "/") out += e;
+          else if (e === "b") out += "\b";
+          else if (e === "f") out += "\f";
+          else if (e === "n") out += "\n";
+          else if (e === "r") out += "\r";
+          else if (e === "t") out += "\t";
+          else if (e === "u") { out += String.fromCharCode(parseInt(s.slice(i, i + 4), 16)); i += 4; }
+          else fail("invalid escape");
+        } else out += c;
+      }
+      return fail("unterminated string");
+    }
+    function value(): any {
+      ws();
+      const c = s[i];
+      if (c === "{") {
+        i++; ws();
+        const o: { [k: string]: any } = {};
+        if (s[i] === "}") { i++; return o; }
+        for (;;) {
+          ws();
+          if (s[i] !== "\"") fail("expected a string key");
+          const k = str(); ws();
+          if (s[i] !== ":") fail("expected a colon");
+          i++;
+          o[k] = value(); ws();
+          if (s[i] === ",") { i++; continue; }
+          if (s[i] === "}") { i++; return o; }
+          fail("expected a comma or closing brace");
+        }
+      }
+      if (c === "[") {
+        i++; ws();
+        const a: any[] = [];
+        if (s[i] === "]") { i++; return a; }
+        for (;;) {
+          a.push(value()); ws();
+          if (s[i] === ",") { i++; continue; }
+          if (s[i] === "]") { i++; return a; }
+          fail("expected a comma or closing bracket");
+        }
+      }
+      if (c === "\"") return str();
+      if (c === "t") { if (s.slice(i, i + 4) === "true") { i += 4; return true; } return fail("invalid literal"); }
+      if (c === "f") { if (s.slice(i, i + 5) === "false") { i += 5; return false; } return fail("invalid literal"); }
+      if (c === "n") { if (s.slice(i, i + 4) === "null") { i += 4; return null; } return fail("invalid literal"); }
+      if (c === "-" || (c >= "0" && c <= "9")) return num();
+      return fail("unexpected token");
+    }
+    const result = value();
+    ws();
+    if (i < n) fail("unexpected trailing content");
+    return result;
+  }
   = @rs { Value::new(serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::Value::Null)) }
   = @go {
     //revl:import encoding/json
@@ -49,7 +186,15 @@ pub extern pure fn json_parse(s: Str) -> Any
   }
 
 pub extern pure fn json_stringify(v: Any) -> Str
-  = @py { import json; return json.dumps(v) }
+  = @py {
+    # CANONICAL FORM (item 385): compact separators (no space after ':' or
+    # ',') + ensure_ascii=False (non-ASCII stays raw UTF-8). The py default
+    # json.dumps(v) inserts ', '/': ' and escapes non-ASCII, both of which
+    # diverge from ts/go byte-for-byte. See the canonical-form contract in
+    # this file's header. (Comments here are '#': a @py body is real Python.)
+    import json
+    return json.dumps(v, separators=(",", ":"), ensure_ascii=False)
+  }
   = @ts {
     // `Int` maps to JS `bigint` (TYPE_MAP), which `JSON.stringify` refuses
     // ("Do not know how to serialize a BigInt"). A replacer parks each bigint
@@ -65,6 +210,78 @@ pub extern pure fn json_stringify(v: Any) -> Str
   = @rs { v.downcast::<serde_json::Value>().map(|j| serde_json::to_string(&*j).unwrap_or_default()).unwrap_or_default() }
   = @go {
     //revl:import encoding/json
-    b, _ := json.Marshal(v)
-    return string(b)
+    //revl:import bytes
+    // CANONICAL FORM (item 385): compact, and — unlike the default
+    // `json.Marshal`, which HTML-escapes `<`, `>`, `&` to `<>&`
+    // — `SetEscapeHTML(false)` so those bytes stay raw, matching py
+    // (`ensure_ascii=False`) and ts (`JSON.stringify`). `Encoder.Encode`
+    // appends a trailing '\n'; trim it so the bytes match the other tiers.
+    // (Go map keys marshal in ascending byte order; a scalar/list/string
+    // value is byte-identical to py/ts. See the canonical-form contract in
+    // this file's header for the go record caveat.)
+    var buf bytes.Buffer
+    enc := json.NewEncoder(&buf)
+    enc.SetEscapeHTML(false)
+    _ = enc.Encode(v)
+    return string(bytes.TrimRight(buf.Bytes(), "\n"))
+  }
+
+// A TOTAL (never-raising) parse: the same decode as `json_parse`, but the
+// parse error is returned as the `Err` channel of a `Result[Any, Str]`
+// instead of raised (item 362). `Ok(v)` carries the identical value a
+// successful `json_parse(s)` produces — this body *calls* `json_parse`, so
+// the success path is byte-for-byte the raising parse; only the failure path
+// is new. revl has no try/catch (docs/syntax-2.0.md §3.2: "failure is
+// `Result` in pure code"), so this is what lets a component walk a JSONL
+// stream tolerantly IN REVL — `match json_try_parse(line) { Ok(v) => …,
+// Err(_) => skip }` — with no classified host extern for the parse itself:
+//
+//     use "stdlib/json.rvl" { json_try_parse }
+//     match json_try_parse(line) {
+//       Ok(rec) => keep(rec.field),   // typed access off the parsed record
+//       Err(_)  => skip,              // a malformed line is skipped, not fatal
+//     }
+//
+// Tiers: py and ts — the two tiers where `json_parse` RAISES on invalid input
+// and so need the tolerant wrapper. The rs and go `json_parse` bodies are
+// already total (they decode a bad document to `null` rather than raising), so
+// a distinct tolerant primitive would carry no information there; a tier
+// without a body refuses honestly if `json_try_parse` is used on it.
+pub extern pure fn json_try_parse(s: Str) -> Result[Any, Str]
+  = @py {
+    try:
+        return Ok(json_parse(s))
+    except Exception as e:
+        return Err(str(e))
+  }
+  = @ts {
+    // json_parse throws a SyntaxError on invalid input; catch it and route the
+    // message into the Err channel. The Ok value is exactly json_parse's, so
+    // the success path is byte-identical to the raising parse.
+    try {
+      return { kind: "Ok", value: json_parse(s) };
+    } catch (e) {
+      return { kind: "Err", value: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  = @rs {
+    // `Result[Any, Str]` is native `Result<Value, String>`. The Ok payload is
+    // the same boxed `serde_json::Value` json_parse produces; the decode error
+    // is stringified into the Err channel instead of collapsed to Null.
+    match serde_json::from_str::<serde_json::Value>(&s) {
+        Ok(j) => Ok(Value::new(j)),
+        Err(e) => Err(e.to_string()),
+    }
+  }
+  = @go {
+    //revl:import encoding/json
+    // `Result[Any, Str]` lowers to the sealed interface `RevlResult[any,
+    // string]`, built by the `RevlOk`/`RevlErr` case structs. A decode error
+    // routes into the Err channel rather than being swallowed to nil as
+    // json_parse's @go body does.
+    var v any
+    if err := json.Unmarshal([]byte(s), &v); err != nil {
+        return RevlErr[any, string]{Value: err.Error()}
+    }
+    return RevlOk[any, string]{Value: v}
   }

@@ -319,6 +319,31 @@ component C provides cache: Cache {
   }
 }
 """),
+    # Int32 bitwise operators (item 366) are pure expressions with no bearing on
+    # the cordis guarantees: a helper full of `& | ^ << >> ~` must admit exactly
+    # as any other pure arithmetic does. This pins that the self-host gate walks
+    # the bitwise `bin`/`un` nodes without choking (the same generic-walk path
+    # the emitters' IR flows through).
+    ("bitwise pure helper stays clean", """
+fn mix(a: Int32, b: Int32, c: Int32) -> Int32 {
+  let band = a & b
+  let bor = a | b
+  let bxor = a ^ c
+  let shifted = a << b >> c
+  let inv = ~a
+  return band | bor & bxor ^ shifted | inv
+}
+service Cache { fn put(key: Str, value: Str) }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}
+"""),
     # G1 bare-value: a `config.<field>` read is a config access, not a bare
     # undeclared `config`, so the method admits.
     ("config field read is not a bare-value access", """

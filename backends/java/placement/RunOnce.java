@@ -59,23 +59,57 @@ public final class RunOnce {
         // 1. load this composition's components, in load order (providers first)
         List<String> order = new ArrayList<>();
         List<Disposable> fibers = new ArrayList<>();
+        List<String> faulted = new ArrayList<>();
         for (Object comp : components) {
             String cname = (String) comp;
             Class<?> cls = Class.forName(container + "$" + cname + "Plugin");
             Plugin plugin = (Plugin) instantiate(cls, (Map<String, Object>) config.getOrDefault(cname, Map.of()));
-            Disposable disposable = plugin.apply(ctx);
+            // A faulting activation (a `fail` step, or the fault sweep's
+            // injected `fail`) throws out of apply(). The emitted apply()
+            // SELF-REVERTS first — it disposes its own effect scope and runs
+            // the frame's Phase-2 compensations before rethrowing — so the
+            // failed component leaves nothing behind. Mirror the go/py runners
+            // (backends/go/placement_runner/main.go step 2 logs the load error
+            // and continues; src/revl/run.py the same): record the load error
+            // and press on to the LIFO teardown of the components that DID
+            // come up and the no-residue proof, rather than letting the throw
+            // abort the process. This is what lets the java tier drive a
+            // faulting activation and JOIN the cross-tier fault-sweep
+            // agreement (roadmap item 341 / fault-sweep item 125).
+            Disposable disposable;
+            try {
+                disposable = plugin.apply(ctx);
+            } catch (RuntimeException activationFault) {
+                faulted.add(cname);
+                log("load", cname, "load error: " + activationFault.getMessage());
+                continue;
+            }
             fibers.add(disposable);
             order.add(cname);
             log("load", cname, "state=Active");
         }
 
-        // 2. every provided key resolves while the composition is up
+        // 2. every provided key resolves while the composition is up. When a
+        //    component FAULTED during load (a `fail`; the fault sweep) the keys
+        //    it would have provided are legitimately absent — the composition
+        //    is up minus the failed provision — so a non-resolving key is
+        //    expected there, not an error. On a normal run (nothing faulted)
+        //    the UP proof stays strict: an absent key is a real failure and
+        //    still aborts, exactly as before.
         for (Object key : provides) {
             String iface = (String) ifaces.get((String) key);
             if (iface == null) {
                 continue;
             }
-            ctx.get(Class.forName(iface)); // throws (no provider) if it is NOT up
+            try {
+                ctx.get(Class.forName(iface)); // throws (no provider) if it is NOT up
+            } catch (RuntimeException notUp) {
+                if (faulted.isEmpty()) {
+                    throw notUp;
+                }
+                log("provide", (String) key, "not live (a component faulted this run)");
+                continue;
+            }
             log("provide", (String) key, "live [" + simple(iface) + "]");
         }
 
@@ -109,12 +143,35 @@ public final class RunOnce {
         }
         log("residue", "provisions", live + " service(s) still provided");
         if (live == 0) {
+            // item 322 Slice 2: a clean unload. Under REVL_WAL, stamp the WAL's
+            // discharge + terminal marker so `revl recover` rolls this activation
+            // FORWARD (a crash before this point leaves no marker -> roll-back).
+            recordCleanUnload(container);
             System.out.println("[" + name + "] NO-RESIDUE — the composition left nothing behind");
         } else {
             System.out.println("[" + name + "] RESIDUE-LEFT — see the residue lines above");
         }
         System.out.println("[" + name + "] DOWN");
         System.out.flush();
+    }
+
+    // Stamp the WAL commit-path proof + terminal marker via the emitted recording
+    // sink, reflectively so this runner still compiles against a Components
+    // emitted WITHOUT --record (no sink present) and no-ops when REVL_WAL is
+    // unset. The java mirror of go's crash producer calling revlRecordDischarge /
+    // revlRecordActivationComplete on a clean dispose.
+    static void recordCleanUnload(String container) {
+        String wal = System.getenv("REVL_WAL");
+        if (wal == null || wal.isEmpty()) {
+            return;
+        }
+        try {
+            Class<?> comp = Class.forName(container);
+            comp.getMethod("revlRecordDischarge").invoke(null);
+            comp.getMethod("revlRecordActivationComplete").invoke(null);
+        } catch (ReflectiveOperationException absent) {
+            // Components was emitted without --record (no sink): nothing to stamp.
+        }
     }
 
     static String simple(String binaryName) {
