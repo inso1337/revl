@@ -795,6 +795,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true",
         help="machine-readable metrics document instead of the human table")
 
+    trace_cmd = sub.add_parser(
+        "trace",
+        help="the causal trace with the model hop as a first-class span (item "
+             "121): per model completion, the model / tokens / cost / latency / "
+             "attempts-vs-ceiling / produced edge / verifying G-rule "
+             "(docs/design/121-revl-trace.md)")
+    trace_cmd.add_argument(
+        "trace", metavar="FILE",
+        help="a JSONL causal trace written by `revl run --trace`")
+    trace_cmd.add_argument(
+        "--json", action="store_true",
+        help="the machine-readable trace document instead of the human view")
+    trace_cmd.add_argument(
+        "--component", metavar="NAME", default=None,
+        help="only the hops of this component")
+    trace_cmd.add_argument(
+        "--model", action="store_true",
+        help="only model hops (the LLM view; the default view already is)")
+    trace_cmd.add_argument(
+        "--otel", action="store_true",
+        help="emit the trace through the OTel SDK (delegates to revl.otel)")
+
     profile_cmd = sub.add_parser(
         "profile",
         help="capability/emission profiling (item 124): diff a component's "

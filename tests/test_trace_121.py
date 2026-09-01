@@ -1,0 +1,441 @@
+"""`revl trace` — the model hop as a first-class span (roadmap item 121,
+docs/design/121-revl-trace.md), Slice 1.
+
+Every mechanism the REVISED design (adversarial review 2026-09-01) makes
+non-negotiable is pinned here on hand-built traces and direct runtime calls (no
+live run needed), so the fixtures cannot drift from the real record shape:
+
+* the widened `emit` record carries an `llm` payload + `activationId` (additive);
+  a NON-model emit carries neither and is byte-identical to a pre-121 v2 emit;
+* `producedSeq` is fiber-token-gated: present for a single-activation validated
+  model->tool flow, OMITTED (never adjacency-guessed) when two activations of
+  one component are live;
+* the `promptDigest` is a SALTED HMAC (not the raw sha256) with a COARSE bucket
+  (not an exact length); a secret/confidential arg SUPPRESSES it (no digest, hop
+  still recorded) and NEVER refuses; a `Secret[T]`-receiving model op still
+  compiles; the gate FAILS CLOSED when taint is disengaged;
+* the OTel export flattens `llm` onto the span, carries NO prompt/response text,
+  and adds a `model-produced` SpanLink ONLY when `producedSeq` is present.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "backends" / "python"))
+
+from revl import otel as ot  # noqa: E402
+from revl import trace as tr  # noqa: E402
+from revl import why_runtime as wr  # noqa: E402
+from revl.compiler import compile_source  # noqa: E402
+
+import runtime as rt  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_run_state():
+    """Each test starts from a fresh per-run trace state (nonce + fiber
+    registers), the run-start reset the driver performs."""
+    rt.revl_reset_run_trace_state()
+    yield
+    rt.revl_reset_run_trace_state()
+
+
+# ---------------------------------------------------------------------------
+# 1. the widened emit record: llm + activationId additive; non-model byte-identical
+# ---------------------------------------------------------------------------
+
+
+def test_non_model_emit_is_byte_identical_to_pre_121():
+    """A non-model emission passes no `llm` and no `activationId`, so its record
+    is byte-identical to what `make_emit_event` produced before item 121 (the
+    additive-v2 discipline metrics.py/otel.py already follow)."""
+    cause = wr.cause_trigger("a filesystem write crossed")
+    before = {
+        "v": wr.SCHEMA_VERSION, "seq": 4, "gen": 1, "event": wr.EMIT,
+        "component": "Reporter", "cause": cause, "capability": "fs",
+        "key": "Report.write", "ts": 12.5,
+    }
+    got = wr.make_emit_event(4, 1, "Reporter", "fs", "Report.write", cause,
+                             ts=12.5)
+    assert got == before
+    assert "llm" not in got and "activationId" not in got
+    # and the serialised bytes match exactly (the durable artifact is identical)
+    assert json.dumps(got, separators=(",", ":")) == \
+        json.dumps(before, separators=(",", ":"))
+
+
+def test_model_emit_llm_payload_shape_and_provenance():
+    llm = rt.revl_model_hop(
+        model="openai:gpt-4o", tokens_in=1204, tokens_out=88,
+        cost={"amount": 0.0121, "currency": "USD"}, latency_seconds=1.84,
+        attempts=1, attempt_ceiling=3, verified_by=["G9"])
+    ev = wr.make_emit_event(7, 3, "AgentLoop", "model", "Model.complete",
+                            wr.cause_trigger("decision point"), ts=99.0,
+                            llm=llm, activation_id="AgentLoop#g3#a1")
+    assert ev["activationId"] == "AgentLoop#g3#a1"
+    assert ev["llm"]["latencyProvenance"] == "revl-measured-bracket"
+    assert ev["llm"]["attemptsProvenance"] == "revl-controlled"
+    assert ev["llm"]["modelProvenance"] == "host-reported"
+    assert ev["llm"]["usageProvenance"] == "host-reported"
+    assert ev["llm"]["cost"]["provenance"] == "host-reported"
+
+
+# ---------------------------------------------------------------------------
+# 2. validate_retry: the attempt count and the attempts-vs-ceiling oracle
+# ---------------------------------------------------------------------------
+
+
+def test_validate_retry_records_attempts_and_latency_bracket():
+    """A `retry 2` completion that succeeds on the 3rd try records 3 attempts
+    against the ceiling `budget + 1 = 3`, and a non-negative latency bracket."""
+    calls = {"n": 0}
+
+    def make_call():
+        calls["n"] += 1
+        # first two returns fail validation (a string is not an object),
+        # the third validates
+        return {"tag": "ok"} if calls["n"] >= 3 else "not-a-dict"
+
+    schema = {"type": "object"}
+    out = rt.validate_retry(make_call, budget=2, schema=schema, where="Model")
+    assert out == {"tag": "ok"}
+    latency, attempts, ceiling, raw = rt.revl_take_model_call()
+    assert attempts == 3 and ceiling == 3
+    assert latency >= 0.0
+    # consumed: a second take is empty, so a later non-model emit inherits nothing
+    assert rt.revl_take_model_call() is None
+
+
+def test_attempt_ceiling_oracle_flags_an_over_retry():
+    """The one model-hop number revl can check against a compile-time proof
+    (§3.2): a recorded attempt count exceeding the static ceiling is a defect."""
+    over = rt.revl_model_hop(
+        model="m", tokens_in=1, tokens_out=1, cost=None, latency_seconds=0.1,
+        attempts=5, attempt_ceiling=3, verified_by=[])
+    ok = rt.revl_model_hop(
+        model="m", tokens_in=1, tokens_out=1, cost=None, latency_seconds=0.1,
+        attempts=2, attempt_ceiling=3, verified_by=[])
+    doc = tr.compute_trace([
+        wr.make_emit_event(1, 1, "A", "model", "M.c", wr.cause_boot(), llm=over),
+        wr.make_emit_event(2, 1, "A", "model", "M.c", wr.cause_boot(), llm=ok),
+    ])
+    defects = tr.attempt_ceiling_defects(doc)
+    assert len(defects) == 1
+    assert defects[0]["kind"] == "attempt-ceiling-exceeded"
+    assert defects[0]["seq"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 3. producedSeq: the fiber-local value-flow token and its honest degrade
+# ---------------------------------------------------------------------------
+
+
+def test_produced_seq_present_for_single_activation_match():
+    """A single-activation validated model->tool flow: the fiber holds the
+    completion token and the downstream emit's activation matches, so
+    `producedSeq` is present and correct."""
+    rt.revl_note_validated_completion("AgentLoop#g1#a1", 7)
+    assert rt.revl_produced_seq("AgentLoop#g1#a1") == [7]
+
+
+def test_produced_seq_omitted_when_activation_ids_differ():
+    """Two activations of the component are live: a token minted by activation a1
+    must NOT be attributed to a2's emit. The edge honest-degrades to absent —
+    NOT a guess, NOT trace adjacency (§4 attack 3, the NEW CRITICAL)."""
+    rt.revl_note_validated_completion("AgentLoop#g1#a1", 7)
+    assert rt.revl_produced_seq("AgentLoop#g1#a2") is None
+
+
+def test_produced_seq_omitted_when_no_token():
+    """A `Str`-returning non-validated completion mints no token (item 257 §1),
+    so a later emit in the fiber has nothing to back-reference: omitted."""
+    assert rt.revl_produced_seq("AgentLoop#g1#a1") is None
+
+
+def test_produced_seq_isolated_across_fibers():
+    """The token is fiber-local: a completion validated in one asyncio Task does
+    not leak its token to a SIBLING task (each gets its own copied context), so a
+    concurrent activation cannot cross-attribute."""
+    import asyncio
+
+    async def fiber(activation, seq, other):
+        rt.revl_note_validated_completion(activation, seq)
+        # this fiber sees its own token, and never the sibling's
+        assert rt.revl_produced_seq(activation) == [seq]
+        assert rt.revl_produced_seq(other) is None
+
+    async def main():
+        await asyncio.gather(
+            fiber("Loop#g1#a1", 7, "Loop#g1#a2"),
+            fiber("Loop#g1#a2", 11, "Loop#g1#a1"),
+        )
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# 4. the salted digest, the coarse bucket, and the suppression path
+# ---------------------------------------------------------------------------
+
+
+def test_digest_is_salted_not_raw_sha256():
+    """The recorded digest is an HMAC keyed by the per-run nonce, so the RAW
+    sha256 of the same canonical input does NOT match it — proving salting (§4
+    attack 4b, the confirmation-oracle defeat)."""
+    args = ["system prompt", "user question"]
+    digest = rt.revl_prompt_digest(args, arg_origins=set(), taint_engaged=True)
+    assert digest is not None
+    assert digest["salted"].startswith("hmac-sha256:")
+    raw = hashlib.sha256(rt._revl_canonical_args_bytes(args)).hexdigest()
+    assert digest["salted"] != "hmac-sha256:" + raw
+    assert digest["salted"] != raw
+
+
+def test_digest_bucket_is_coarse_not_exact_length():
+    """The record carries a coarse `bytesBucket`, never the exact byte count, so
+    it cannot narrow a candidate search (§4 attack 4b)."""
+    short = rt.revl_prompt_digest(["hi"], arg_origins=set(), taint_engaged=True)
+    assert short["bytesBucket"] == "0-64"
+    big = rt.revl_prompt_digest(["x" * 500], arg_origins=set(), taint_engaged=True)
+    assert big["bytesBucket"] == "256-1k"
+    # a bucket is a label, not a number
+    assert not short["bytesBucket"].isdigit()
+
+
+def test_digest_is_stable_within_run_and_varies_across_runs():
+    """Salting preserves the digest's ONLY purpose — within-run "same prompt
+    twice" equality — while the value varies across runs (a fresh nonce)."""
+    args = ["a", "b"]
+    d1 = rt.revl_prompt_digest(args, arg_origins=set(), taint_engaged=True)
+    d2 = rt.revl_prompt_digest(args, arg_origins=set(), taint_engaged=True)
+    assert d1["salted"] == d2["salted"]  # within one run: equal
+    rt.revl_reset_run_trace_state()      # a new run mints a new nonce
+    d3 = rt.revl_prompt_digest(args, arg_origins=set(), taint_engaged=True)
+    assert d3["salted"] != d1["salted"]  # across runs: differs
+
+
+def test_secret_arg_suppresses_digest_without_raising():
+    """A `secret` origin at the digest position SUPPRESSES (returns None, the
+    hop is still recorded) and NEVER raises (HIGH 2: suppression, not refusal)."""
+    d = rt.revl_prompt_digest(["k"], arg_origins={"secret"}, taint_engaged=True)
+    assert d is None
+
+
+def test_confidential_arg_suppresses_digest_without_raising():
+    d = rt.revl_prompt_digest(["t"], arg_origins={"confidential"},
+                              taint_engaged=True)
+    assert d is None
+
+
+def test_digest_fails_closed_when_taint_disengaged():
+    """Fail-closed default: with the analysis unavailable/disengaged the flow is
+    unproven and the digest is suppressed, even for otherwise-clean args."""
+    assert rt.revl_prompt_digest(["clean"], arg_origins=None,
+                                 taint_engaged=True) is None
+    assert rt.revl_prompt_digest(["clean"], arg_origins=set(),
+                                 taint_engaged=False) is None
+
+
+def test_clean_args_yield_a_digest_when_taint_engaged():
+    d = rt.revl_prompt_digest(["clean prompt"], arg_origins={"model", "input"},
+                              taint_engaged=True)
+    assert d is not None and d["provenance"] == "revl-side-args"
+
+
+def test_suppression_records_the_hop_with_the_digest_absent():
+    """The hop is still traced when the digest is suppressed — just without a
+    `promptDigest` field (the reader and otel copy only present fields)."""
+    llm = rt.revl_model_hop(
+        model="m", tokens_in=1, tokens_out=1, cost=None, latency_seconds=0.1,
+        attempts=1, attempt_ceiling=3, verified_by=["G9"],
+        prompt_digest=rt.revl_prompt_digest(["k"], arg_origins={"secret"},
+                                            taint_engaged=True))
+    assert "promptDigest" not in llm  # suppressed
+    ev = wr.make_emit_event(7, 1, "A", "model", "M.c", wr.cause_boot(), llm=llm)
+    hops = tr.compute_trace([ev])["modelHops"]
+    assert len(hops) == 1 and "promptDigest" not in hops[0]  # hop still recorded
+
+
+def test_secret_receiving_model_op_still_compiles():
+    """A model op whose prompt param is declared `Secret[T]` is a legal program;
+    tracing must not make it uncompilable. The default digest path adds NO
+    compile refusal (only the deferred `--capture-prompts` text sink would)."""
+    src = (
+        "extern emission[payment.charge] fn charge(a: Str) -> Secret[Str] "
+        "= @py { return a }\n"
+        "extern emission[model.complete] fn prompt(p: Secret[Str]) -> Str "
+        "= @py { return \"\" }\n"
+        "service Ops { emission fn go(u: Str) -> Int }\n"
+        "component Agent provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(u) {\n"
+        "      let t = charge(u)\n"
+        "      let r = prompt(t)\n"
+        "      return 0\n"
+        "    }\n"
+        "  }\n}\n")
+    compile_source(src, "secret_model.rvl")  # compiles — the receiver declared it
+
+
+# ---------------------------------------------------------------------------
+# 5. the OTel mapping: flattened llm, the gated SpanLink, no text ever
+# ---------------------------------------------------------------------------
+
+
+def _model_event(seq, activation, llm):
+    return wr.make_emit_event(seq, 1, "AgentLoop", "model", "Model.complete",
+                              wr.cause_boot(), ts=float(seq), llm=llm,
+                              activation_id=activation)
+
+
+def test_otel_flattens_llm_with_genai_names_and_provenance():
+    llm = rt.revl_model_hop(
+        model="openai:gpt-4o", tokens_in=1204, tokens_out=88,
+        cost={"amount": 0.0121, "currency": "USD"}, latency_seconds=1.84,
+        attempts=1, attempt_ceiling=3, verified_by=["G9"])
+    spans = ot.build_spans([_model_event(7, "AgentLoop#g1#a1", llm)])
+    hop = next(s for s in spans if s.kind == wr.EMIT)
+    a = hop.attributes
+    assert a["gen_ai.request.model"] == "openai:gpt-4o"
+    assert a["gen_ai.usage.input_tokens"] == 1204
+    assert a["gen_ai.usage.output_tokens"] == 88
+    assert a["revl.llm.cost"] == 0.0121
+    assert a["revl.llm.latency.provenance"] == "revl-measured-bracket"
+    assert a["revl.llm.cost.provenance"] == "host-reported"
+    assert a["revl.llm.attempts.provenance"] == "revl-controlled"
+    assert a["revl.activation.id"] == "AgentLoop#g1#a1"
+
+
+def test_otel_never_carries_prompt_or_response_text():
+    """No prompt/response text becomes a span attribute (§3.1 rule 2). Even with
+    a digest present, only the salted hash + coarse bucket ride — never the
+    GenAI `gen_ai.prompt`/`gen_ai.completion` text keys."""
+    llm = rt.revl_model_hop(
+        model="m", tokens_in=1, tokens_out=1, cost=None, latency_seconds=0.1,
+        attempts=1, attempt_ceiling=3, verified_by=["G9"],
+        prompt_digest=rt.revl_prompt_digest(["a secret user prompt string"],
+                                            arg_origins=set(), taint_engaged=True))
+    spans = ot.build_spans([_model_event(7, "A#a1", llm)])
+    hop = next(s for s in spans if s.kind == wr.EMIT)
+    keys = set(hop.attributes)
+    assert "gen_ai.prompt" not in keys and "gen_ai.completion" not in keys
+    # the digest rides only as the salted hash + bucket
+    assert hop.attributes["revl.llm.prompt.sha256"].startswith("hmac-sha256:")
+    assert hop.attributes["revl.llm.prompt.bytes_bucket"] == "0-64"
+    # and the raw prompt text appears in no attribute value
+    for v in hop.attributes.values():
+        assert "a secret user prompt string" != v
+
+
+def test_otel_spanlink_only_when_produced_seq_present():
+    """The `model-produced` SpanLink appears ONLY when `producedSeq` is present.
+    Absent producedSeq -> NO such link (the edge is never adjacency-guessed and
+    never exported as a hard proven cause, §4 attack 3)."""
+    with_edge = rt.revl_model_hop(
+        model="m", tokens_in=1, tokens_out=1, cost=None, latency_seconds=0.1,
+        attempts=1, attempt_ceiling=3, verified_by=["G9"], produced_seq=[9])
+    without = rt.revl_model_hop(
+        model="m", tokens_in=1, tokens_out=1, cost=None, latency_seconds=0.1,
+        attempts=1, attempt_ceiling=3, verified_by=["G9"])
+
+    spans_with = ot.build_spans([_model_event(7, "A#a1", with_edge)])
+    hop_with = next(s for s in spans_with if s.kind == wr.EMIT)
+    produced_links = [l for l in hop_with.links
+                      if l.attributes.get("revl.link.relation") == "model-produced"]
+    assert len(produced_links) == 1 and produced_links[0].target == "s9"
+
+    spans_without = ot.build_spans([_model_event(7, "A#a1", without)])
+    hop_without = next(s for s in spans_without if s.kind == wr.EMIT)
+    assert not any(l.attributes.get("revl.link.relation") == "model-produced"
+                   for l in hop_without.links)
+
+
+# ---------------------------------------------------------------------------
+# 6. the reader: projection, sort, filter, and the CLI (always exits 0)
+# ---------------------------------------------------------------------------
+
+
+def _trace_with_produced_flow():
+    """A single-activation validated model->tool flow, as recorded events: a
+    model completion at seq 7 that produced the fs emit at seq 9."""
+    llm = rt.revl_model_hop(
+        model="openai:gpt-4o", tokens_in=1204, tokens_out=88,
+        cost={"amount": 0.0121, "currency": "USD"}, latency_seconds=1.84,
+        attempts=1, attempt_ceiling=3, verified_by=["G9"], produced_seq=[9],
+        prompt_digest=rt.revl_prompt_digest(["ctx"], arg_origins=set(),
+                                            taint_engaged=True))
+    return [
+        wr.make_event(0, 1, wr.LOAD, "AgentLoop", "PENDING -> ACTIVE",
+                      wr.cause_boot(), ts=0.0),
+        _model_event(7, "AgentLoop#g1#a1", llm),
+        wr.make_emit_event(9, 1, "AgentLoop", "fs", "Report.write",
+                           wr.cause_trigger("model produced tool calls"),
+                           ts=9.0),
+    ]
+
+
+def test_reader_projects_and_resolves_the_produced_edge():
+    doc = tr.compute_trace(_trace_with_produced_flow())
+    assert doc["events"] == 3
+    assert len(doc["modelHops"]) == 1
+    hop = doc["modelHops"][0]
+    assert hop["seq"] == 7
+    assert hop["model"]["provenance"] == "host-reported"
+    assert hop["attempts"] == {"count": 1, "ceiling": 3,
+                               "provenance": "revl-controlled"}
+    assert hop["produced"] == [{"seq": 9, "capability": "fs",
+                                "key": "Report.write"}]
+    assert hop["promptDigest"]["salted"].startswith("hmac-sha256:")
+
+
+def test_reader_component_filter():
+    events = _trace_with_produced_flow()
+    other = rt.revl_model_hop(
+        model="m", tokens_in=1, tokens_out=1, cost=None, latency_seconds=0.1,
+        attempts=1, attempt_ceiling=3, verified_by=[])
+    events.append(wr.make_emit_event(11, 1, "OtherComp", "model", "M.c",
+                                     wr.cause_boot(), llm=other))
+    doc = tr.compute_trace(events)
+    assert len(doc["modelHops"]) == 2
+    only = tr.filter_document(doc, component="OtherComp")
+    assert [h["component"] for h in only["modelHops"]] == ["OtherComp"]
+
+
+def test_reader_render_is_text_and_marks_provenance():
+    doc = tr.compute_trace(_trace_with_produced_flow())
+    out = tr.render(doc)
+    assert "1 model hop(s)" in out
+    assert "host-reported - unverified" in out
+    assert "revl-measured bracket" in out
+    assert "fiber token matched" in out
+    # NO raw prompt/response text in the human view
+    assert "salted digest - no text captured" in out
+
+
+def test_cli_trace_exits_zero_and_emits_json(tmp_path):
+    path = tmp_path / "run.jsonl"
+    wr.write_trace(_trace_with_produced_flow(), str(path))
+    env = {"PYTHONPATH": str(ROOT / "src")}
+    import os
+    env = {**os.environ, **env}
+    res = subprocess.run(
+        [sys.executable, "-m", "revl", "trace", str(path), "--json"],
+        capture_output=True, text=True, env=env)
+    assert res.returncode == 0, res.stderr
+    doc = json.loads(res.stdout)
+    assert doc["modelHops"][0]["seq"] == 7
+    # human view too
+    res2 = subprocess.run(
+        [sys.executable, "-m", "revl", "trace", str(path)],
+        capture_output=True, text=True, env=env)
+    assert res2.returncode == 0, res2.stderr
+    assert "model hop(s)" in res2.stdout
