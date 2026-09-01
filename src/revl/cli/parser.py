@@ -619,6 +619,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="assert that a safe-by-spec operation (a `GET` that writes) is "
              "irreversible after all, overriding the verb. Named the same way. "
              "Repeatable")
+    imp_api.add_argument(
+        "--compensate", action="append", default=[], metavar="OP",
+        help="item 254 (Slice 1): promote a `PUT` to a COMPENSATE-grade network "
+             "effect — attach a best-effort, audit-surface reversal (PUT the GET "
+             "preimage back on abort) to its emission. Honoured on `PUT` only "
+             "(hard error on POST/PATCH). Pair with `--preimage OP=GETOP`. "
+             "Repeatable")
+    imp_api.add_argument(
+        "--preimage", action="append", default=[], metavar="OP=GETOP",
+        help="item 254: name the safe `GET` operation a compensate-grade `PUT` "
+             "reads its preimage from. Repeatable")
+    imp_api.add_argument(
+        "--undo", action="append", default=[], metavar="OP=PUTOP",
+        help="item 254: name the operation that writes the preimage back "
+             "(defaults to the `PUT` itself). Repeatable")
+    imp_api.add_argument(
+        "--if-match", action="append", default=[], metavar="OP", dest="if_match",
+        help="item 254: assert a compensate-grade endpoint exposes a version/ETag "
+             "token, so the reversal PUTs with `If-Match` and fails loudly on a "
+             "racing writer (else it is best-effort-may-clobber). Repeatable")
     imp_api.add_argument("-o", "--output", default=None,
                          help="output path (default: stdout)")
     imp_api.add_argument("--json-diagnostics", action="store_true",
