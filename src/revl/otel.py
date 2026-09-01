@@ -260,9 +260,16 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
         # plain span (unset status) so the mapping never regresses on it.
         if ev.get("ts") is not None:
             attributes["revl.ts"] = ev.get("ts")
+        if ev.get("activationId") is not None:
+            attributes["revl.activation.id"] = ev.get("activationId")
         if event_kind == wr.EMIT:
             attributes["revl.capability"] = ev.get("capability") or ""
             attributes["revl.emission.key"] = ev.get("key") or ""
+            # item 121: a model completion crossing carries an `llm` payload;
+            # flatten it onto the span as OTel-scalar attributes so it lights up
+            # as a model call, not an opaque emission (§3.1). Additive: a
+            # non-model emit has no `llm` and is mapped exactly as before.
+            links = links + _llm_attributes(ev.get("llm"), attributes)
 
         spans.append(SpanModel(
             span_id=_span_id(ev.get("seq")),
@@ -276,6 +283,67 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
             links=links,
         ))
     return spans
+
+
+def _llm_attributes(llm: dict | None, attributes: dict) -> list[SpanLink]:
+    """Flatten an `emit` event's item-121 `llm` payload onto the span
+    (`attributes`, in place) and return any `model-produced` span links.
+
+    GenAI semantic-convention names are used where they exist so the span reads
+    as a model call in Grafana/Datadog/Honeycomb; provenance rides onto the span
+    so a downstream dashboard cannot silently promote a host number to ground
+    truth (§3.1). Two invariants hold the safety line:
+
+    * NO prompt/response text ever becomes a span attribute (§3.1 rule 2). Only
+      the salted digest may ride, as ``revl.llm.prompt.sha256``, never the text;
+      a suppressed digest is simply absent (`build_spans` copies only present
+      fields, `otel.py` discipline).
+    * The `produced` edge is a `SpanLink` ONLY when `producedSeq` is present (the
+      fiber-local token proved it, §3.1 rule 1). When absent it is NEVER
+      adjacency-guessed and NEVER exported as a hard proven cause — a wrong
+      SpanLink shipped to a third-party backend reads as proof (§4 attack 3)."""
+    if not isinstance(llm, dict):
+        return []
+    if llm.get("model") is not None:
+        attributes["gen_ai.request.model"] = llm.get("model")
+    if llm.get("tokensIn") is not None:
+        attributes["gen_ai.usage.input_tokens"] = llm.get("tokensIn")
+    if llm.get("tokensOut") is not None:
+        attributes["gen_ai.usage.output_tokens"] = llm.get("tokensOut")
+    cost = llm.get("cost")
+    if isinstance(cost, dict):
+        attributes["revl.llm.cost"] = cost.get("amount")
+        attributes["revl.llm.cost.currency"] = cost.get("currency")
+        attributes["revl.llm.cost.provenance"] = cost.get("provenance") or "host-reported"
+    if llm.get("latencySeconds") is not None:
+        attributes["revl.llm.latency"] = llm.get("latencySeconds")
+        attributes["revl.llm.latency.provenance"] = \
+            llm.get("latencyProvenance") or "revl-measured-bracket"
+    if llm.get("attempts") is not None:
+        attributes["revl.llm.attempts"] = llm.get("attempts")
+    if llm.get("attemptCeiling") is not None:
+        attributes["revl.llm.attempt_ceiling"] = llm.get("attemptCeiling")
+    attributes["revl.llm.attempts.provenance"] = \
+        llm.get("attemptsProvenance") or "revl-controlled"
+    if llm.get("model") is not None:
+        attributes["revl.llm.model.provenance"] = \
+            llm.get("modelProvenance") or "host-reported"
+    if llm.get("tokensIn") is not None or llm.get("tokensOut") is not None:
+        attributes["revl.llm.usage.provenance"] = \
+            llm.get("usageProvenance") or "host-reported"
+    if llm.get("verifiedBy"):
+        attributes["revl.llm.verified_by"] = list(llm.get("verifiedBy"))
+    digest = llm.get("promptDigest")
+    if isinstance(digest, dict):
+        # the salted HMAC and coarse bucket only — never any prompt/response text
+        attributes["revl.llm.prompt.sha256"] = digest.get("salted")
+        attributes["revl.llm.prompt.bytes_bucket"] = digest.get("bytesBucket")
+
+    links: list[SpanLink] = []
+    for target_seq in llm.get("producedSeq") or []:
+        links.append(SpanLink(target=_span_id(target_seq), attributes={
+            "revl.link.relation": "model-produced"}))
+    return links
 
 
 # --------------------------------------------------------------------------

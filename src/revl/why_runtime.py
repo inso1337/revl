@@ -85,7 +85,9 @@ def make_event(seq: int, gen: int, event: str, component: str,
 
 
 def make_emit_event(seq: int, gen: int, component: str, capability: str,
-                    key: str, cause: dict, ts: float | None = None) -> dict:
+                    key: str, cause: dict, ts: float | None = None,
+                    llm: dict | None = None,
+                    activation_id: str | None = None) -> dict:
     """One ``emit`` trace record (v2). Recorded when an emission crosses an
     irreversible boundary at runtime (the driver's ``emissionsCrossed`` site).
 
@@ -94,7 +96,24 @@ def make_emit_event(seq: int, gen: int, component: str, capability: str,
     emission is scoped to (the target service) and the `key` — the emission
     label ``"<key>.<method>"``. `cause` explains why the crossing happened.
     A v1 reader never sees this kind; a v2 reader that does not model emissions
-    ignores it (it is neither a load nor a withdraw)."""
+    ignores it (it is neither a load nor a withdraw).
+
+    `llm` (item 121, additive) is the model-hop payload built at the item-257
+    ``validate_retry`` seam for a *model* completion crossing (see
+    :func:`revl.trace` / ``backends/python/runtime.py``): model id, host-reported
+    tokens/cost, a revl-measured latency bracket, the attempt count against the
+    static ``N + 1`` ceiling, the emission's verifying G-rule, an optional
+    fiber-token-gated ``producedSeq``, and an optional salted ``promptDigest``.
+    A NON-model emission passes ``llm=None`` and the record is byte-identical to
+    a pre-121 v2 emit (the field is simply absent) — the same additive discipline
+    :mod:`revl.metrics`/:mod:`revl.otel` follow for their v2 fields.
+
+    `activation_id` (item 121, additive) discriminates concurrent fibers of the
+    SAME component in ONE generation: ``gen`` is a process-global reload counter
+    (`run.py`), not a per-activation id, so ``component + gen`` alone cannot
+    separate two live activations. It is present on the record only when the
+    driver supplies one; a reader treats its absence as "no activation
+    discriminator recorded" rather than assuming a single activation."""
     record = {
         "v": SCHEMA_VERSION,
         "seq": seq,
@@ -107,6 +126,10 @@ def make_emit_event(seq: int, gen: int, component: str, capability: str,
     }
     if ts is not None:
         record["ts"] = ts
+    if activation_id is not None:
+        record["activationId"] = activation_id
+    if llm is not None:
+        record["llm"] = llm
     return record
 
 

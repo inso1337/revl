@@ -168,6 +168,48 @@ def _run_metrics(args) -> int:
     return 0
 
 
+def _run_trace(args) -> int:
+    """`revl trace <run.jsonl> [--json] [--component] [--model] [--otel]` — the
+    causal trace with the model hop as a first-class span (item 121,
+    docs/design/121-revl-trace.md). A read-only projection, not a gate — it
+    always exits 0. `--otel` delegates to :mod:`revl.otel` (the same OTel SDK
+    export the `--otel` flag drives elsewhere); the LLM `llm` payload rides onto
+    the emit span with GenAI-convention names and a `model-produced` SpanLink
+    that appears only when the fiber-local value-flow token proved the edge."""
+    from .. import trace as _trace  # noqa: PLC0415
+
+    try:
+        events = _trace.read_trace(args.trace)
+    except (OSError, ValueError) as error:
+        print(f"error: cannot read trace {args.trace}: {error}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "otel", False):
+        from .. import otel as _otel  # noqa: PLC0415
+        if args.json or not _otel.otel_available():
+            spans = _otel.build_spans(events)
+            print(json.dumps([_otel._model_to_dict(s) for s in spans], indent=2))
+        else:
+            result = _otel.export_to_otel(events)
+            if not result.get("exported"):
+                print(result.get("reason", "export failed"), file=sys.stderr)
+            else:
+                print(f"exported {result['spans']} spans to OpenTelemetry",
+                      file=sys.stderr)
+        return 0
+
+    doc = _trace.compute_trace(events)
+    doc = _trace.filter_document(
+        doc, component=getattr(args, "component", None),
+        model_only=getattr(args, "model", False))
+
+    if args.json:
+        print(json.dumps(doc, indent=2))
+    else:
+        print(_trace.render(doc))
+    return 0
+
+
 def _run_profile(args) -> int:
     """`revl profile <composition> <run.jsonl> [--json] [--strict]` — the
     least-privilege companion to `revl audit`/`revl metrics` (item 124). Diffs a
