@@ -1,4 +1,4 @@
-# findings — harness milestone 6/7, ts-record-params (agent/fr86-ts-record-params)
+# findings — lighthouse workload: ts-record-params (agent/fr86-ts-record-params)
 
 ## 1. Refusal log
 

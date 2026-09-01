@@ -1,9 +1,8 @@
-# Findings — timers in the harness (item 57 verification, finding #25)
+# Findings — timers in the lighthouse workload (item 57 verification, finding #25)
 
-Probe: the revl-harness verification of item 57 (`every`/`after` timers as
-revertible schedules, clock-as-coeffect replay). Milestone 30 of the harness
-(`src/timer_tests.rvl` + `tools/timer_demo.py` + `docs/item-57-verification.md`
-in `~/Projects/revl-harness`). One finding, and one consumer-side adaptation.
+Probe: the lighthouse workload's verification of item 57 (`every`/`after`
+timers as revertible schedules, clock-as-coeffect replay). One finding, and
+one consumer-side adaptation.
 
 ## 1. The firing half of item 57 is not expressible in `revl test`
 
@@ -63,7 +62,7 @@ that used `after` as an identifier no longer compile; the diagnostic is clear
 and the break is inherent to the syntax, so this is an adaptation, not a
 finding — recorded here so the picking agent knows the harness already moved:
 `src/approval_tests.rvl` / `src/session_tests.rvl` renamed `let after = …` to
-`let pending_list` / `let after_list` (milestone 30, commit ff162bd).
+`let pending_list` / `let after_list` (commit ff162bd).
 
 ## Verified green (the claims that do hold, pinned)
 

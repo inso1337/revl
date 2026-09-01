@@ -2,7 +2,7 @@
 
 Roadmap item 77(f), first half: lifecycle tests on the non-py tiers +
 a pass/skip:reason/fail verdict column for `revl test --all`. The task
-source was `~/Projects/revl-harness/FEATURE-REQUESTS.md` FR-5.
+source was the lighthouse workload's FR-5.
 
 ## 1. Refusal log
 

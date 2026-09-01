@@ -20,7 +20,7 @@
 
 - `[nit]` **The mtier mock echoes "echo hi" as "FINAL echo hi"** — the
   test expectation had to match the mock's verbatim echo (harness bug,
-  fixed; the same expectation bug appeared in milestone 1 and again here,
+  fixed; the same expectation bug appeared in an earlier milestone and again here,
   suggesting a `mock echo` convention worth documenting).
 
 ## 3. What revl gave us

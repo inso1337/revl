@@ -3,8 +3,8 @@
 Agent-experience probe: rate-limited caching composition built from scratch
 using only agent-facing docs (`docs/guide-ai-agents.md`, `README.md`,
 `docs/stdlib-2.0.md`, `docs/arithmetic.md`, `docs/function-types.md`,
-`docs/generics.md`, `docs/capabilities.md`, `examples/`). Worktree:
-`/Users/inso/revl-wt-probe`, branch `agent/ux-probe`.
+`docs/generics.md`, `docs/capabilities.md`, `examples/`). Branch:
+`agent/ux-probe`.
 
 ## 1. Refusal log
 

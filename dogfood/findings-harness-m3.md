@@ -1,8 +1,8 @@
-# findings — harness milestone 3 (agent/harness-m3)
+# findings — lighthouse workload: durable sessions + subagents (agent/harness-m3)
 
 Durable session persistence + subagents, built on devwip @ 66bfc2a (plus
-the fr13 extern-dedent fix, which this branch carries). Harness repo:
-`~/Projects/revl-harness`, commit `805ce91`.
+the fr13 extern-dedent fix, which this branch carries). Workload commit
+`805ce91`.
 
 ## 1. Refusal log
 

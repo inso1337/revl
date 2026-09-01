@@ -1,7 +1,6 @@
 # findings — agent/dogfood-fixes (wave-1 follow-through)
 
-Worktree: /Users/inso/revl-wt-dogfix, branch agent/dogfood-fixes off
-devwip. Task: turn three wave-1 dogfood findings into fixes — `revl test`
+Branch: agent/dogfood-fixes off devwip. Task: turn three wave-1 dogfood findings into fixes — `revl test`
 py-tier runtime preflight (uxprobe), TS generated-golden staleness pin
 (map), backend emitter module collision (map addendum). One commit each.
 

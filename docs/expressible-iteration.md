@@ -1,10 +1,9 @@
 # Expressible bounded iteration in components — a design
 
 **Status: spec, not implemented.** This document specifies how the agent
-loop — the roadmap's lighthouse workload (`~/Projects/revl-harness`, the
-first product written in revl) — becomes expressible *inside* a revl
-component. It is filed against roadmap item 77(a) and the harness's
-FEATURE-REQUESTS.md FR-1. Nothing here changes existing programs; every
+loop — the roadmap's lighthouse workload (the first product written in
+revl) — becomes expressible *inside* a revl component. It is filed against
+roadmap item 77(a) and the lighthouse workload's FR-1. Nothing here changes existing programs; every
 change is additive.
 
 ## The problem, precisely
