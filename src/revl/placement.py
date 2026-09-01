@@ -2418,7 +2418,12 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 _stop_all({succ: (sproc, smode)})
             return
 
-        # --- re-point every consumer of these keys onto the successor socket
+        # --- re-point every consumer of these keys onto the successor socket.
+        # The command carries the successor's admissible identity (`component`,
+        # `backend`) so the consumer process re-admits it against its own running
+        # manifest before accepting the cutover (item 337): the seam re-runs the
+        # same admission gate this conductor already passed, so a raced or
+        # injected repoint can never substitute an un-admitted provider.
         for key in serve_keys:
             for qname, qspec in specs.items():
                 if qname in (old, succ):
@@ -2426,8 +2431,9 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 if key in (qspec.get("proxies") or {}):
                     qproc = children[qname][0]
                     try:
-                        qproc.stdin.write(json.dumps({"op": "repoint", "key": key,
-                                                      "socket": new_sock}) + "\n")
+                        qproc.stdin.write(json.dumps(
+                            {"op": "repoint", "key": key, "socket": new_sock,
+                             "component": component, "backend": to_backend}) + "\n")
                         qproc.stdin.flush()
                     except OSError as exc:
                         print(f"swap: could not signal {qname}: {exc}", flush=True)

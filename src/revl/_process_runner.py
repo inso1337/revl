@@ -15,10 +15,17 @@ live migration (docs/swap.md). Today one command is understood:
 
   {"op": "repoint", "key": "<k>", "socket": "<successor.sock>"}
 
+  {"op": "repoint", "key": "<k>", "socket": "<successor.sock>",
+   "component": "<c>", "backend": "<tier>"}
+
 which re-points the proxy for `<k>` from its current provider to a successor
 serving at `<socket>` — a *planned cutover*, not the peer-death withdrawal a
-provider vanishing would trigger (`bridge._Client.repoint`). The process
-acknowledges with `[name] REPOINTED <k> -> <socket>`.
+provider vanishing would trigger (`bridge._Client.repoint`). The `component`
+and `backend` fields carry the admissible identity of the successor so this
+process can RE-ADMIT it against its own running manifest before accepting the
+cutover (item 337, `_repoint_decision`); a socket-only repoint with no such
+reference is refused fail-closed. The process acknowledges an accepted repoint
+with `[name] REPOINTED <k> -> <socket>`.
 
 All output is line-prefixed with the process name so the conductor can
 interleave several of these into one readable log. `[name] UP` marks a process
@@ -75,15 +82,75 @@ def _eval_probe(expr: str, namespace: dict):
     return target(*args)
 
 
-def _load_module(files: list[str]) -> types.ModuleType:
-    from revl.compiler import compile_files  # noqa: PLC0415
+def _load_module(ir: dict) -> types.ModuleType:
     import emit  # noqa: PLC0415  backend dir already on sys.path
 
-    source = emit.emit(compile_files(files))
+    source = emit.emit(ir)
     module = types.ModuleType("revl_proc_mod")
     sys.modules[module.__name__] = module
     exec(compile(source, "<revl-proc>", "exec"), module.__dict__)
     return module
+
+
+def _repoint_decision(spec_files: list, running_ir: dict, cmd: dict) -> tuple[bool, str | None]:
+    """Decide whether a `repoint` control command may be accepted, item 337.
+
+    A `repoint` re-points a live proxy onto a successor provider. It must pass
+    the SAME admission gate boot and `revl swap` use, so it can never substitute
+    an un-admitted provider at a placement seam. The wire command therefore
+    carries the successor's admissible identity (`component`, `backend`), and
+    this process re-admits that component against its OWN running manifest via
+    `placement.swap_admission` (the standalone admission gate, `placement.py`),
+    which is exactly what the conductor ran and is what this process has in
+    scope: every process spec carries the full composition source, so
+    `running_ir = compile_files(spec["files"])` IS the running manifest, with no
+    extra transport. (`gate.admit_into` admits a fresh source into a manifest,
+    the add-a-component shape, not a tier re-point, so `swap_admission` is the
+    fit here.) Returns (True, None) to accept, or (False, reason) to REFUSE.
+
+    Fail-closed: a legacy socket-only command that carries no admissible
+    reference is REFUSED, never silently accepted. This is a planned-cutover
+    gate only; the peer-death withdrawal path (`bridge._Client`) is untouched.
+    """
+    component, backend = cmd.get("component"), cmd.get("backend")
+    if not component or not backend:
+        return False, ("repoint carries no admissible successor reference "
+                       "(component/backend); refused fail-closed (item 337)")
+    from revl.placement import swap_admission  # noqa: PLC0415
+    try:
+        _candidate, error = swap_admission(list(spec_files), running_ir, component, backend)
+    except Exception as exc:  # noqa: BLE001  any admission failure fails closed
+        return False, f"admission raised {type(exc).__name__}: {exc}"
+    if error is not None:
+        return False, error.splitlines()[0]
+    return True, None
+
+
+def _apply_repoint(cmd: dict, clients: dict, spec_files: list, running_ir: dict,
+                   log=None) -> bool:
+    """Apply one `repoint` command: re-admit the successor against the running
+    manifest, and ONLY on admission re-point the proxy's `_Client`. Returns True
+    when the proxy was re-pointed, False when the command was refused (the proxy
+    keeps serving its CURRENT target, no blip). Split out of the control loop so
+    the admission seam is unit-testable (item 337)."""
+    key, sock = cmd.get("key"), cmd.get("socket")
+    client = clients.get(key)
+    if client is None:
+        if log:
+            log("repoint", key or "?", "no such proxy in this process")
+        return False
+    ok, reason = _repoint_decision(spec_files, running_ir, cmd)
+    if not ok:
+        if log:
+            log("repoint", key, f"REFUSED (admission): {reason}")
+        return False
+    try:
+        client.repoint(sock)
+        return True
+    except OSError as exc:
+        if log:
+            log("repoint", key, f"FAILED {type(exc).__name__}: {exc}")
+        return False
 
 
 async def _flush() -> None:
@@ -108,7 +175,13 @@ async def run(spec: dict) -> None:
     runtime_mod.set_trace(lambda event: log("host", event.split(" ", 1)[0],
                                             event.split(" ", 1)[1] if " " in event else ""))
 
-    module = _load_module(spec["files"])
+    from revl.compiler import compile_files  # noqa: PLC0415
+    # The full composition IR this process compiles from `spec["files"]`. Every
+    # process spec carries the whole composition source, so this is the RUNNING
+    # manifest a re-pointed successor must re-admit against at the seam (item
+    # 337, `_repoint_decision`); it also feeds the emitter for this slice.
+    running_ir = compile_files(spec["files"])
+    module = _load_module(running_ir)
     root = Context()
     root.on("internal/status", lambda _this, fiber, old:
             log("fiber", fiber.name, f"{FiberState(old).name} -> {FiberState(fiber.state).name}"))
@@ -221,16 +294,16 @@ async def run(spec: dict) -> None:
             except json.JSONDecodeError:
                 continue
             if cmd.get("op") == "repoint":
-                key, sock = cmd.get("key"), cmd.get("socket")
-                client = clients.get(key)
-                if client is None:
-                    log("repoint", key or "?", "no such proxy in this process")
-                    continue
-                try:
-                    client.repoint(sock)
-                    print(f"[{name}] REPOINTED {key} -> {sock}", flush=True)
-                except OSError as exc:
-                    log("repoint", key, f"FAILED {type(exc).__name__}: {exc}")
+                # item 337: a repoint must pass the SAME admission gate as boot
+                # and `revl swap` before it can substitute a provider at this
+                # seam. `_apply_repoint` re-admits the named successor against
+                # our running manifest and re-points the `_Client` ONLY on
+                # admission; on refusal the proxy keeps its current target (no
+                # blip). This is the planned-cutover path only, distinct from
+                # the peer-death withdrawal `bridge._Client` drives.
+                if _apply_repoint(cmd, clients, spec["files"], running_ir, log=log):
+                    print(f"[{name}] REPOINTED {cmd.get('key')} -> "
+                          f"{cmd.get('socket')}", flush=True)
 
     threading.Thread(target=control_reader, name="revl-control", daemon=True).start()
 
