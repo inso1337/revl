@@ -186,6 +186,15 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         raise RecoveryError(f"cannot read WAL {wal_path}: {error}") from None
 
     records = wal["records"]
+    frozen = next((r for r in records
+                   if r.get("record") == "fork-frozen"), None)
+    if frozen is not None:
+        # item 250, Decision 5: a forked parent was FROZEN at step k. Its history
+        # above k was rewound into the branch and it takes no further steps, so
+        # recover treats it as RETIRED at k — a terminal, non-live state — and
+        # does NOT re-admit it as a callable continuation. The branch (its own
+        # distinct WAL) recovers independently to its own fork point.
+        return _fork_retired(wal, frozen)
     approved = next((r for r in records
                      if r.get("record") == "commit-approved"), None)
     if wal["complete"]:
@@ -198,6 +207,49 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # forward. This dominates the discharge-set skip for a session-owned WAL.
         return _roll_forward_window(wal_path, wal, approved)
     return _roll_back(wal, world=world or DictWorld(), wal_path=wal_path)
+
+
+def _fork_retired(wal: dict, frozen: dict) -> dict:
+    """A forked parent's terminal recovery verdict (item 250, Decision 5).
+
+    The parent WAL carries ``fork-frozen``: the session was retired at step k when
+    a branch forked from it. Recovery neither rolls it forward (it never committed)
+    nor rolls it back live (its history above k was rewound into the branch, whose
+    own WAL recovers independently). It is a terminal, non-live state. The crossed
+    set and the enumerated would-cross inverses carried in ``fork-begin`` are
+    surfaced as the honest residue: they were durable BEFORE the rewind, so they
+    survive the crash and are not silently lost."""
+    begin = next((r for r in wal["records"]
+                  if r.get("record") == "fork-begin"), {})
+    complete = next((r for r in wal["records"]
+                     if r.get("record") == "fork-complete"), None)
+    crossed = begin.get("crossed") or []
+    would_cross = begin.get("wouldCross") or []
+    at = frozen.get("at")
+    outstanding = ([e.get("index") for e in crossed]
+                   + [e.get("index") for e in would_cross])
+    return {
+        "verdict": "fork-retired",
+        "decision": (
+            f"the WAL carries `fork-frozen`: this session was forked at step {at} "
+            "and RETIRED there. Its history above k was rewound into the branch, "
+            "so recovery does not re-admit it as a live continuation — the branch "
+            "(its own WAL) recovers independently to its own fork point."),
+        "at": at,
+        "branch": (complete or {}).get("branch"),
+        "forkComplete": complete is not None,
+        "residue": {
+            "clean": not outstanding,
+            "outstanding": outstanding,
+            "proof": (
+                f"{len(crossed)} emission(s) crossed the boundary before the fork "
+                f"and cannot be undone; {len(would_cross)} inverse(s) whose scope "
+                "crosses the boundary were enumerated but not fired. Both sets were "
+                "made durable in `fork-begin` before the rewind, so they survive "
+                "the crash. The parent is retired at k; nothing else is claimed."),
+        },
+        "guarantee": _guarantee(),
+    }
 
 
 def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -> dict:
