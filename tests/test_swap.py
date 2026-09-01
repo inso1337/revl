@@ -679,3 +679,96 @@ def test_conductor_refuses_a_swap_whose_new_tier_cannot_emit_the_component(
     assert set(procs) == {"backend", "worker"}
     out = capsys.readouterr().out
     assert "swap refused" in out and "Worker" in out and "node" in out
+
+
+# ---------------------------------------------------------------------------
+# item 337: repoint admission at the SEAM. The conductor already gates a `revl
+# swap` (swap_admission above), but the raw `repoint` control command reaching a
+# running process on stdin carried a socket and no source, so an injected or
+# raced repoint could substitute an UN-ADMITTED provider at a placement seam.
+# The process now re-admits the named successor against its OWN running manifest
+# before accepting the cutover, and refuses fail-closed otherwise. These tests
+# drive the handler/admission seam directly (the real control loop is heavy) and
+# prove the refusal BLOCKS the substitution, not merely that admission complains.
+# ---------------------------------------------------------------------------
+
+from revl import _process_runner as _pr  # noqa: E402
+
+
+class _StubClient:
+    """Enough of a proxy `_Client` for the seam test: records repoint calls and
+    tracks the target it currently serves, so a refused repoint is observable as
+    'still pointing at the original target'."""
+
+    def __init__(self, target: str):
+        self.target = target
+        self.repoints: list[str] = []
+
+    def repoint(self, sock: str) -> None:
+        self.repoints.append(sock)
+        self.target = sock
+
+
+_BOUND_CACHE_RVL = _CACHE_RVL.replace(
+    "  async fn get(k: Str) -> Opt[Str]\n", "  fn get(k: Str) -> Str\n", 1
+).replace("    async fn get(k) = m.get(k)\n", "    fn get(k) = k\n", 1)
+
+
+def test_repoint_refused_at_seam_when_successor_fails_admission(tmp_path):
+    """A repoint whose named successor FAILS admission against the running
+    manifest is refused AT THE SEAM: the proxy is never re-pointed, so it keeps
+    serving its original target (no blip). This is the closed gap: without the
+    re-admission the socket would have been accepted outright."""
+    src = _write(tmp_path, "bound.rvl", _BOUND_CACHE_RVL)
+    running = compile_files([src])
+    stub = _StubClient(target="orig.sock")
+    # MemCache's `cache` service is sync (address-space-bound) — swapping it to
+    # the rust tier cannot cross the seam, so admission refuses it.
+    cmd = {"op": "repoint", "key": "cache", "socket": "attacker.sock",
+           "component": "MemCache", "backend": "rust"}
+
+    ok, reason = _pr._repoint_decision([src], running, cmd)
+    assert ok is False
+    assert reason and ("address-space-bound" in reason or "transport" in reason)
+
+    # and the refusal actually BLOCKS the substitution at the seam:
+    accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running)
+    assert accepted is False
+    assert stub.repoints == []            # the client was never re-pointed
+    assert stub.target == "orig.sock"     # still serving the original provider
+
+
+def test_repoint_fail_closed_when_no_admissible_reference(tmp_path):
+    """A legacy socket-only repoint (no component/backend) cannot be admitted,
+    so it is refused fail-closed — never silently accepted."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    stub = _StubClient(target="orig.sock")
+    cmd = {"op": "repoint", "key": "cache", "socket": "attacker.sock"}
+
+    ok, reason = _pr._repoint_decision([src], running, cmd)
+    assert ok is False
+    assert reason and "fail-closed" in reason
+
+    accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running)
+    assert accepted is False
+    assert stub.repoints == []
+    assert stub.target == "orig.sock"
+
+
+def test_legit_repoint_still_admitted_and_repoints(tmp_path):
+    """A faithful tier swap (successor passes admission against the running
+    manifest) is admitted and the proxy re-points onto the successor socket."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    stub = _StubClient(target="orig.sock")
+    cmd = {"op": "repoint", "key": "cache", "socket": "successor.sock",
+           "component": "MemCache", "backend": "rust"}
+
+    ok, reason = _pr._repoint_decision([src], running, cmd)
+    assert ok is True and reason is None
+
+    accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running)
+    assert accepted is True
+    assert stub.repoints == ["successor.sock"]
+    assert stub.target == "successor.sock"
