@@ -1,0 +1,18 @@
+// REJECTED — A1 (roadmap item 131): silent leak #4. An awaited emission's
+// `compensate` slot reaches an async operation.
+//
+// A compensation runs best-effort in Phase 2 of the two-phase synchronous
+// abort loop (item 247); it may no more suspend than a bracket inverse may
+// (design §3 rule 3, §4 clause 4). Today the async compensate builds a
+// coroutine the frame drops — the compensation never runs. Item 131 refuses it.
+//
+// expected error:
+//   `compensate` reaches async operation `model.record`, but teardown is
+//   synchronous on every tier
+
+service Model { emission async fn record(m: Str) -> Int }
+service Db { fn go() -> Str }
+component A requires model: Model provides db: Db {
+  await emit model.record("up") compensate model.record("down")
+  provide db { fn go() { return "ok" } }
+}

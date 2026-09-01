@@ -120,6 +120,7 @@ CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_ts_corpus"
 # other fixture — no `xfail` remains.
 CORPUS = [
     "arith.rvl",       # bounded int/int32, division/modulo, comparisons, unary
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow
     "records.rvl",     # record literal, functional record update, list literal
@@ -160,6 +161,9 @@ CORPUS = [
                               # (compensation -> Frame two-phase teardown, item 323)
     "v2_isolate_only.rvl",    # isolate ONLY (no trivial v3 `fn`) -> ir_version 2 (closes item 234's flag)
     "v2_intercept_only.rvl",  # intercept ONLY (no trivial v3 `fn`) -> ir_version 2, dict-form inject
+    # item 383 / 391 (self-host port) — `.map`/`.filter`/`.reduce` desugar to the
+    # `list_*` free calls; the ts tier lowers the function-value params + arrows
+    "transforms.rvl",
 ]
 
 def _load_reference_emit():

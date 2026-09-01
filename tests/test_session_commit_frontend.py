@@ -50,8 +50,8 @@ def test_deferred_and_async_parse_in_either_order():
 @pytest.mark.parametrize("src,fragment", [
     ("extern pure deferred fn f() = @py { return }\n",
      "only valid on an `emission`"),
-    ("extern acquire deferred fn f() -> Str undo g(result) = @py { return }\n"
-     "extern pure fn g(x: Str) = @py { return }\n",
+    ("extern acquire deferred fn f() -> Handle undo g(result) = @py { return }\n"
+     "extern pure fn g(x: Handle) = @py { return }\n",
      "only valid on an `emission`"),
     ("extern emission deferred fn f(to: Str) -> Str = @py { return \"x\" }\n",
      "must return `Unit`"),
@@ -71,7 +71,7 @@ def test_deferred_is_refused_in_a_teardown_position():
     # an acquire's undo may not call a deferred emission (teardown runs at/after
     # the verdict; enqueueing into a flushing/dropped queue is unanswerable)
     src = (_SEND +
-           "extern acquire fn a() -> Str undo send(result) = @py { return \"r\" }\n")
+           "extern acquire fn a() -> Ticket undo send(result) = @py { return \"r\" }\n")
     with pytest.raises(RevlError) as exc:
         _compile(src)
     assert "teardown position" in str(exc.value)

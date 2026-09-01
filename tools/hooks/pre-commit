@@ -6,6 +6,12 @@
 #
 # Kept under ~20s on purpose. A hook people wait a minute for is a hook people
 # turn off. Anything slower belongs in CI.
+#
+# This hook is NOT the full pre-merge gate. Before a change reaches main run
+# `make pre-merge` (tools/pre_merge.sh): it also runs the per-backend emit/golden
+# suites that live outside `pytest tests/` — the drift that reds CI unnoticed
+# (roadmap item 327). This hook deliberately does not run those slow per-backend
+# suites; see CONTRIBUTING.md "The pre-merge gate".
 
 set -e
 root=$(git rev-parse --show-toplevel)
@@ -45,8 +51,40 @@ echo "pre-commit:"
 # The frontend suite, which includes tests/test_conformance_validate.py: every
 # tier's emitted code is handed to that tier's real compiler. That is the check
 # that catches "the emitter did not raise, but its output does not compile".
+#
+# Run only the tests AFFECTED by the staged change (tools/affected_tests.py),
+# not the whole minutes-long `tests/` suite: a docs-only commit selects nothing
+# and returns in seconds, a leaf change runs its own tests. The suite grew far
+# past this hook's ~20s promise, and a blanket `pytest tests/` on a worktree
+# commit is what made agents wait (and made this hook feel like something to
+# turn off with --no-verify). This is NOT a bypass: the affected selector is a
+# conservative superset that fails SAFE to the full suite for any core, unmapped,
+# or structural change, and `make pre-merge` still runs everything at land/CI.
+#
+# Fail safe twice over: if the selector is unavailable or says FULL, run all of
+# `tests/` exactly as before; and a --timeout backstop (when pytest-timeout is
+# present) means a single wedged cross-tier test can never hang the commit.
+TIMEOUT_ARGS=""
+if [ -n "$PYTEST" ] && "$PYTEST" --help 2>/dev/null | grep -q -- '--timeout'; then
+    TIMEOUT_ARGS="--timeout=60 --timeout-method=thread"
+fi
 if [ -n "$PYTEST" ]; then
-    step "frontend + emitted-code validation" "$PYTEST" tests/ -q
+    SEL=$(python3 tools/affected_tests.py --root "$root" --base HEAD --format machine 2>/dev/null)
+    SEL_FULL=$(printf '%s\n' "$SEL" | sed -n 's/^FULL //p')
+    if [ -z "$SEL" ] || [ -z "$SEL_FULL" ]; then
+        # selector unavailable (no python3, parse error) -> previous behavior
+        step "frontend + emitted-code validation" "$PYTEST" tests/ $TIMEOUT_ARGS -q
+    elif [ "$SEL_FULL" = "1" ]; then
+        step "frontend + emitted-code validation (full)" "$PYTEST" tests/ $TIMEOUT_ARGS -q
+    else
+        SEL_PYTEST=$(printf '%s\n' "$SEL" | sed -n 's/^PYTEST //p')
+        if [ -n "$SEL_PYTEST" ]; then
+            n=$(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ')
+            step "frontend (affected: $n node(s))" "$PYTEST" $SEL_PYTEST $TIMEOUT_ARGS -q
+        else
+            echo "  frontend                           no affected tests (docs/config-only change)"
+        fi
+    fi
 else
     echo "  frontend                           SKIPPED (no pytest)"
 fi

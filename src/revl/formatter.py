@@ -71,6 +71,7 @@ _KEYWORDS = {
     "every", "after",
     "spawn", "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail", "hole",
+    "break", "continue",
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
     "idempotent",
 }

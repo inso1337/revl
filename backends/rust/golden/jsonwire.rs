@@ -13,6 +13,16 @@ fn json_stringify(v: Value) -> String {
     v.downcast::<serde_json::Value>().map(|j| serde_json::to_string(&*j).unwrap_or_default()).unwrap_or_default()
 }
 
+fn json_try_parse(s: String) -> Result<Value, String> {
+    // `Result[Any, Str]` is native `Result<Value, String>`. The Ok payload is
+        // the same boxed `serde_json::Value` json_parse produces; the decode error
+        // is stringified into the Err channel instead of collapsed to Null.
+        match serde_json::from_str::<serde_json::Value>(&s) {
+            Ok(j) => Ok(Value::new(j)),
+            Err(e) => Err(e.to_string()),
+        }
+}
+
 fn roundtrip(s: String) -> String {
     return json_stringify(json_parse(s.clone()));
 }

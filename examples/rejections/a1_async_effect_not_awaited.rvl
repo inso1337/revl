@@ -1,0 +1,22 @@
+// REJECTED — A1 (roadmap item 131): silent leak #1. An `effect` acquisition
+// whose acquire reaches a req-target async service operation, with no `await`.
+//
+// `p.open` is a required async service op — a suspension source reached
+// through a required key (rule 3 of the item-92 async-reach), the family the
+// name-based async fence is blind to. A bare `let c = effect p.open(...) undo
+// p.close(c)` binds the IN-FLIGHT value, not the landed result: py binds the
+// coroutine object and registers the inverse against it; ts binds the Promise.
+// One of the four admitted-but-silently-wrong shapes item 131 flips to a
+// compile error. The one-token fix is `effect await`.
+//
+// expected error:
+//   component `A` acquires through async operation `p.open` but the effect is
+//   not awaited; the binding would hold the in-flight value, not the result
+
+service Pool { async fn open(u: Str) -> Str  fn close(c: Str) -> Int }
+service Db { fn go() -> Str }
+component A requires p: Pool provides db: Db {
+  config { u: Str }
+  let c = effect p.open(config.u) undo p.close(c)
+  provide db { fn go() { return c } }
+}

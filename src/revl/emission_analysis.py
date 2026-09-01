@@ -302,10 +302,15 @@ class _EmissionEvidence:
             if decl.classification == "emission"
         }
         # async externs (roadmap item 80): name -> decl, for the v1 coloring
-        # check to locate an async extern a body reaches (async-extern.md §3)
+        # check to locate an async extern a body reaches (async-extern.md §3).
+        # item 388: a poly extern (`fn|async`) is pre-seeded as the async form
+        # here too, so an awaited call site resolves during lowering and an A1
+        # diagnostic names it as an "extern" (the ordering wrinkle, design
+        # §"honest hard part" #3). Its sync clone is split off with the async
+        # membership cleared in the post-pass.
         self.async_externs = {
             decl.name: decl for decl in program.externs
-            if getattr(decl, "async_", False)
+            if getattr(decl, "async_", False) or getattr(decl, "colour_poly", False)
         }
 
     def locate(self, decl) -> tuple[str | None, int | None]:
@@ -382,6 +387,42 @@ def _method_emissions(body: list, env: "Env",
         capabilities = tuple(getattr(decl, "capabilities", ()) or ())
         return [TraceStep(label, "emission", file, line, detail, capabilities)]
 
+    def crossing_caps(local: str | None, method: str | None) -> set:
+        """The capability set a `req` seam crossing through `local.method`
+        contributes. Ordinarily the require KEY name (the composition-wide
+        wiring key naming this boundary). Under item 296 alias token carry-over,
+        an aliased require declared `carrying(...)` contributes the
+        consumer-facing tokens it stands in for instead, so an adapter's body
+        `emit backing.get(...)` computes the consumer's declared reach rather
+        than the internal alias key.
+
+        SAFETY (item 296, the load-bearing invariant): the carry must not let a
+        real emission escape the consumer's declared reach. So the carry is
+        honored only when it faithfully covers the candidate method's DECLARED
+        reach: if the candidate is a bare/unbounded emission, or reaches more
+        distinct boundaries than the carry names (at least one candidate
+        boundary would vanish through the alias), the crossing also contributes
+        `*` - the unnameable boundary no `emission[...]` list can name - so the
+        LOCAL G4 bound refuses the launder rather than passing it. This keeps
+        every fold seeing the candidate's real emission through the alias."""
+        carry_map = getattr(env, "require_carry", None) or {}
+        carried = carry_map.get(local) if local is not None else None
+        if not carried:
+            return {local}
+        service = env.services.get(env.requires.get(local) or "")
+        decl = service.methods.get(method) if service is not None else None
+        cand_caps = getattr(decl, "capabilities", None) if decl is not None else None
+        result = set(carried)
+        if decl is None or cand_caps is None:
+            # unknown, or a bare/unbounded candidate emission: a finite carry
+            # cannot bound it - refuse via the unnameable boundary.
+            result.add("*")
+        elif len(set(cand_caps)) > len(set(carried)):
+            # the carry names fewer boundaries than the candidate declares:
+            # at least one real boundary would be hidden through the alias.
+            result.add("*")
+        return result
+
     def walk(node):
         if isinstance(node, dict):
             if node.get("step") == "emit":
@@ -390,7 +431,7 @@ def _method_emissions(body: list, env: "Env",
                 if target.get("kind") == "req":
                     note(f"{target.get('name')}.{expr.get('method')}",
                          service_emission_step(target.get("name"), expr.get("method")))
-                    caps.add(target.get("name"))
+                    caps.update(crossing_caps(target.get("name"), expr.get("method")))
                 else:
                     note("a host emission")
                     # every host emission reaches a named `emission` extern
@@ -412,7 +453,7 @@ def _method_emissions(body: list, env: "Env",
                 if decl is not None and decl.emission:
                     note(f"{target.get('name')}.{node.get('method')}",
                          service_emission_step(target.get("name"), node.get("method")))
-                    caps.add(target.get("name"))
+                    caps.update(crossing_caps(target.get("name"), node.get("method")))
             calls: set = set()
             values: set = set()
             _calls_in(node, calls, values=values)

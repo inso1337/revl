@@ -1,0 +1,28 @@
+// REJECTED - G4/294: a spawn widens a parameterized capability.
+// `Router` holds `fs.write(path="/tmp")` (it requires a store whose emission is
+// bounded to `/tmp`). It spawns `Kid`, which reaches `fs.write(path="/etc")` -
+// a path OUTSIDE the parent's cone. A capability parameter only narrows down a
+// lineage; `/etc` is not within `/tmp`, so the spawn would widen authority and
+// is refused (attenuation, item 66 extended by item 294).
+//
+// expected error:
+//   `Router` spawns `Kid`, granting it `fs(path="/etc")`, but `Router` holds
+//   only `fs(path="/tmp")` - a spawn may narrow a child's capabilities, never
+//   widen them
+
+service TmpStore { emission[fs.write(path="/tmp")] fn ingest(row: Str) -> Int }
+service EtcStore { emission[fs.write(path="/etc")] fn ingest(row: Str) -> Int }
+service Worker { emission fn run() -> Str }
+
+component Kid requires fs: EtcStore provides worker: Worker {
+  provide worker {
+    fn run() {
+      emit fs.ingest("row")
+      return "k"
+    }
+  }
+}
+
+component Router requires fs: TmpStore {
+  let w = effect spawn Kid with { } undo w.dispose()
+}

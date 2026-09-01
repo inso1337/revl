@@ -29,8 +29,8 @@ from .cli.change import (
 from .cli.interop import (
     _run_contract, _run_export, _run_fmt, _run_import, _run_mcp, _run_serve)
 from .cli.observe import (
-    _run_attest, _run_dash, _run_diff, _run_explain, _run_history_query,
-    _run_metrics, _run_profile, _run_why)
+    _run_attest, _run_changelog, _run_dash, _run_diff, _run_explain,
+    _run_history_query, _run_metrics, _run_profile, _run_why)
 
 
 # G8 audit: the pseudo-boundary recorded when a component reaches host code
@@ -39,6 +39,16 @@ from .cli.observe import (
 # reason: no extern name can be given, because what runs is not statically
 # boundable. The concrete names that travel alongside it are reported too.
 _UNKNOWN_DISPATCH = "*"
+
+
+def _ref_provenance(ref: dict) -> str:
+    """The audit provenance string for one host-module ref (item 396/410):
+    `path#symbol`, prefixed with the root KIND for an install-origin ref
+    (`stdlib:backends/typescript/revl_fs_ts.ts#fsWrite`), so a reviewer sees
+    which trust domain a crossing reaches into. A user ref has no `root` key and
+    renders exactly as 396(B) did — byte-identical."""
+    prefix = f"{ref['root']}:" if ref.get("root") else ""
+    return f"{prefix}{ref['path']}#{ref['symbol']}"
 
 
 def _fn_call_names(node, out: set) -> None:
@@ -136,6 +146,29 @@ def _boundary(ir: dict) -> dict:
                         declared = spec.get("capabilities")
                         stats["capabilities"][label] = (
                             sorted(declared) if declared is not None else ["*"])
+                # the spawn/instance seam: a provision-method call read off a
+                # spawn handle (`s.<key>.<method>(...)`) carries no `req` target.
+                # The receiver is an `instance-get` reached through `callee`,
+                # not the `target` slot. Resolve the crossing to the spawned
+                # component's own service method the same way the `req` arm
+                # resolves a required method, so a granted-service emission
+                # routed through a spawned worker is still enumerated at C's
+                # boundary (item 246, G8 audit surface).
+                if node.get("kind") == "call":
+                    callee = node.get("callee")
+                    if isinstance(callee, dict) and callee.get("kind") == "field":
+                        recv = callee.get("target")
+                        if isinstance(recv, dict) and recv.get("kind") == "instance-get":
+                            service = recv.get("service")
+                            mname = callee.get("name")
+                            spec = (((ir.get("services") or {}).get(service) or {})
+                                    .get("methods") or {}).get(mname) or {}
+                            if spec.get("emission"):
+                                label = f"{recv.get('key')}.{mname}"
+                                stats["emissions"].add(label)
+                                declared = spec.get("capabilities")
+                                stats["capabilities"][label] = (
+                                    sorted(declared) if declared is not None else ["*"])
                 for value in node.values():
                     walk_expr(value)
             elif isinstance(node, list):
@@ -208,9 +241,20 @@ def _boundary(ir: dict) -> dict:
                 if name == _UNKNOWN_DISPATCH else
                 {"name": name,
                  "class": extern_class.get(name, {}).get("class"),
-                 "backends": sorted((extern_class.get(name, {}).get("bodies") or {}).keys())}
+                 # item 396: union ref tiers so a ref-only extern shows its tier
+                 # (not "no bodies"), and carry the ref provenance for the render.
+                 "backends": sorted(
+                     set(extern_class.get(name, {}).get("bodies") or {})
+                     | set(extern_class.get(name, {}).get("refs") or {})),
+                 **({"refs": {tier: _ref_provenance(r) for tier, r in
+                              (extern_class.get(name, {}).get("refs") or {}).items()}}
+                    if extern_class.get(name, {}).get("refs") else {})}
                 for name in sorted(host)
             ],
+            # taint provenance (item 249, Decision 5): origins that reach an
+            # emission here, and origins declassified here. Present only when the
+            # component touches taint, so a taint-free surface is byte-identical.
+            **({"taint": comp["taint"]} if comp.get("taint") else {}),
         }
     return report
 
@@ -237,7 +281,9 @@ def _run_query(args, ir: dict) -> int:
 def _run_test(args, ir: dict) -> int:
     """`revl test` — compile and run the composition's `test` blocks."""
     return test_command(ir, args.backend, sweep=getattr(args, "sweep", False),
-                        mock_requires=getattr(args, "mock_requires", False))
+                        mock_requires=getattr(args, "mock_requires", False),
+                        schedule_seed=getattr(args, "schedule_seed", None),
+                        schedule_seeds=getattr(args, "schedule_seeds", None))
 
 
 def _run_erase_report(args, ir: dict) -> int:
@@ -261,6 +307,95 @@ def _run_erase_report(args, ir: dict) -> int:
     return 1 if (residue_bad or breached) else 0
 
 
+def _run_policy(args) -> int:
+    """`revl policy evaluate` (item 290) — the dry-run explain verb. Runs the
+    SAME `policy.evaluate` and reports, per component, which rules select it and
+    which clauses pass/fail with the recorded fact vs the threshold. Never
+    admits, refuses, or mutates: exit 0 clean, 1 when anything would be refused,
+    2 on a parse/usage error."""
+    from .audit_diff import audit_report  # noqa: PLC0415
+    from .compiler import compile_source  # noqa: PLC0415
+    from .policy import (PolicyError, explain, load_policy,  # noqa: PLC0415
+                         render_explain)
+
+    try:
+        policy = load_policy(args.policy_file)
+    except (PolicyError, RevlError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    key = None
+    if getattr(args, "key", None):
+        from .attest import load_key  # noqa: PLC0415
+        key = load_key(args.key)
+    trusted = frozenset(getattr(args, "trusted_publisher", []) or [])
+
+    evidence: dict = {}
+    origins: dict = {}
+    evidence_ir: dict = {}
+
+    try:
+        if getattr(args, "registry", None):
+            # registry mode: evaluate a published entry as if admitted (§7).
+            from . import registry as reg  # noqa: PLC0415
+            if not args.candidate:
+                print("error: --registry needs --candidate NAME",
+                      file=sys.stderr)
+                return 2
+            registry = reg.Registry.from_dir(args.registry)
+            entry = next((e for e in registry.entries
+                          if e.name == args.candidate), None)
+            if entry is None:
+                print(f"error: no registry entry named {args.candidate!r}",
+                      file=sys.stderr)
+                return 2
+            ir = compile_source(entry.source, "component.rvl")
+            audit = audit_report(ir)
+            name = next(iter(audit.get("boundary") or {}), args.candidate)
+            evidence[name] = entry.evidence_bundle or reg.EvidenceBundle()
+            origins[name] = "registry"
+            evidence_ir[name] = reg._normalize_ir_for_attest(
+                compile_source(entry.source, "component.rvl"))
+        else:
+            if not args.files:
+                print("error: policy evaluate needs a POLICY and PROGRAM.rvl "
+                      "(or --registry --candidate)", file=sys.stderr)
+                return 2
+            ir = compile_files(args.files)
+            audit = audit_report(ir)
+            comps = list(audit.get("boundary") or {})
+            for name in comps:
+                origins[name] = "source"
+            if getattr(args, "evidence", None):
+                from . import registry as reg  # noqa: PLC0415
+                bundle = reg.load_evidence_bundle(args.evidence)
+                target = args.component or (comps[0] if len(comps) == 1 else None)
+                if target is None:
+                    print("error: --evidence needs --component NAME when the "
+                          "composition has more than one component",
+                          file=sys.stderr)
+                    return 2
+                evidence[target] = bundle
+                origins[target] = "registry"
+                evidence_ir[target] = reg._normalize_ir_for_attest(ir)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    scope = getattr(args, "mcp_scope", []) or []
+    mcp_components = (frozenset(audit.get("boundary") or {})
+                     if "*" in scope else frozenset(scope))
+
+    result = explain(policy, audit, mcp_components, evidence=evidence,
+                     origins=origins, trusted_publishers=trusted, key=key,
+                     evidence_ir=evidence_ir, component=args.component)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(render_explain(result))
+    return 1 if result["refused"] else 0
+
+
 def _run_audit(args, ir: dict) -> int:
     """`revl audit` — composition manifest + G8 boundary surface, with the
     item-33 policy gate (`--policy`) and the authority-drift gate (`--diff`)."""
@@ -277,7 +412,29 @@ def _run_audit(args, ir: dict) -> int:
         scope = args.mcp_scope
         mcp_components = (frozenset(audit.get("boundary") or {})
                          if "*" in scope else frozenset(scope))
-        violations = evaluate(policy, audit, mcp_components=mcp_components)
+        # item 290 plumbing: give the gate the evidence bundle, key, and trust
+        # set when the policy carries evidence rules. Absent otherwise, so a
+        # policy with none evaluates exactly as before.
+        evidence: dict = {}
+        origins: dict = {}
+        evidence_ir: dict = {}
+        key = None
+        if getattr(args, "key", None):
+            from .attest import load_key  # noqa: PLC0415
+            key = load_key(args.key)
+        trusted = frozenset(getattr(args, "trusted_publisher", []) or [])
+        if getattr(args, "evidence", None):
+            from . import registry as reg  # noqa: PLC0415
+            comps = list(audit.get("boundary") or {})
+            target = comps[0] if len(comps) == 1 else None
+            if target is not None:
+                evidence[target] = reg.load_evidence_bundle(args.evidence)
+                origins[target] = "registry"
+                evidence_ir[target] = reg._normalize_ir_for_attest(ir)
+        violations = evaluate(policy, audit, mcp_components=mcp_components,
+                              evidence=evidence, origins=origins,
+                              trusted_publishers=trusted, key=key,
+                              evidence_ir=evidence_ir)
         if args.json:
             print(json.dumps(
                 {"policy": args.policy,
@@ -302,10 +459,28 @@ def _run_audit(args, ir: dict) -> int:
         return 1 if result["widened"] else 0
     boundary = _boundary(ir)
     distribution = distributability(ir)
+    from .cardinality import cardinality  # noqa: PLC0415
+    card = cardinality(ir)
     manifest = ir.get("manifest") or {}
     declared_externs = [
         {"name": ext["name"], "class": ext.get("class"),
-         "backends": sorted((ext.get("bodies") or {}).keys())}
+         # item 396: a ref-only extern has no `bodies` key but DOES cross on its
+         # ref tier, so union the ref backends in — otherwise a ref-only extern
+         # would audit as "no bodies" while emitting fine.
+         "backends": sorted(set(ext.get("bodies") or {})
+                            | set(ext.get("refs") or {})),
+         # item 373: carry the reach onto the audit extern entry so the surface
+         # can name what a crossing is bounded to. Absent unless declared, so the
+         # `--json` audit of every existing composition is byte-identical.
+         **({"reach": ext["reach"]} if ext.get("reach") else {}),
+         # item 396 option B: the ref provenance (`tier: "path#symbol"`), so a
+         # review can see WHERE a crossing's implementation lives when it moved
+         # out of the audited document. item 410 prefixes the root KIND
+         # (`stdlib:path#symbol`) so a reviewer sees which trust domain the
+         # crossing reaches into at a glance. Absent unless a ref is used.
+         **({"refs": {tier: _ref_provenance(r)
+                      for tier, r in (ext.get("refs") or {}).items()}}
+            if ext.get("refs") else {})}
         for ext in ir.get("externs") or []
     ]
     if args.json:
@@ -314,10 +489,27 @@ def _run_audit(args, ir: dict) -> int:
         # `schema_version`/`kind` header additively, over the same body
         # earlier consumers already read.
         from .interchange import stamp  # noqa: PLC0415
+        # item 309 added capability_registers + recovery_surface to
+        # audit_report; the interchange body must carry them too so it stays the
+        # byte-for-byte unstamped audit report (test_version_is_additive_body_unchanged).
+        from .audit_diff import (  # noqa: PLC0415
+            _capability_registers, _recovery_surface, _secrets_surface)
+        from .cardinality import cardinality  # noqa: PLC0415
         print(json.dumps(stamp(
             {"manifest": manifest, "boundary": boundary,
              "externs": declared_externs,
-             "distributability": distribution}), indent=2))
+             "distributability": distribution,
+             "capability_registers": _capability_registers(ir),
+             "recovery_surface": _recovery_surface(ir),
+             # item 260: the per-component crossing-count ceilings, next to
+             # distributability. Must match audit_report byte-for-byte
+             # (test_version_is_additive_body_unchanged), so it is the same call.
+             "cardinality": cardinality(ir),
+             # item 256 Slice 2: the audit secrets table (name + capability only).
+             # ADDITIVE and present only when a secret is bound, so this must match
+             # audit_report byte-for-byte (test_version_is_additive_body_unchanged);
+             # `_secrets_surface` spreads `{}` for a secret-free composition.
+             **_secrets_surface(ir)}), indent=2))
         return 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
     for entry in manifest.get("components") or []:
@@ -357,13 +549,48 @@ def _run_audit(args, ir: dict) -> int:
             if stats["awaits"]:
                 detail.append(f"iteration boundaries: {stats['awaits']}")
             if host:
-                rendered = ", ".join(
-                    f"{e['name']} (reached through first-class function "
-                    "dispatch — what runs is not statically boundable)"
-                    if e.get("class") == "first-class dispatch" else
-                    f"{e['name']} ({e['class']}, {'+'.join(e['backends']) or 'no bodies'})"
-                    for e in host)
+                def _host_extern(e: dict) -> str:
+                    if e.get("class") == "first-class dispatch":
+                        return (f"{e['name']} (reached through first-class "
+                                "function dispatch — what runs is not statically "
+                                "boundable)")
+                    base = (f"{e['name']} ({e['class']}, "
+                            f"{'+'.join(e['backends']) or 'no bodies'})")
+                    # item 396 option B: name WHERE a ref crossing's host code
+                    # lives, so a review sees the implementation moved out of the
+                    # audited document.
+                    if e.get("refs"):
+                        prov = ", ".join(f"@{tier} ref {loc}"
+                                         for tier, loc in sorted(e["refs"].items()))
+                        base += f" [{prov}]"
+                    return base
+
+                rendered = ", ".join(_host_extern(e) for e in host)
                 detail.append(f"host code: {rendered}")
+            # item 260: the per-capability crossing-count ceiling, under the
+            # capabilities line. Bounded tokens join one clause; every unbounded
+            # token is loud on its own clause, never folded into a comma list
+            # (docs/design/260 §1.2).
+            card_entry = card.get(name)
+            if card_entry:
+                per_cap = card_entry.get("per_capability") or {}
+                bounded = [f"{token} <= {info['bound']} per activation"
+                           for token, info in per_cap.items()
+                           if info.get("kind") == "bounded"]
+                # a certified iteration whose initial fuel is still a config
+                # field: the ceiling is symbolic until composition pins it
+                # (docs/design/260 §2.2, §1.2).
+                bounded += [f"{token} <= {info['expr']} per activation "
+                            f"({info['per_iter']} per iteration)"
+                            for token, info in per_cap.items()
+                            if info.get("kind") == "bounded-symbolic"]
+                if bounded:
+                    detail.append(f"cardinality: {', '.join(bounded)}")
+                for token, info in per_cap.items():
+                    if info.get("kind") == "unbounded":
+                        detail.append(
+                            f"cardinality: {token} UNBOUNDED "
+                            f"({info.get('reason')})")
             print(f"  boundary: {'; '.join(detail)}")
         else:
             print("  boundary: none — fully revertible (G8)")
@@ -399,7 +626,15 @@ def _run_audit(args, ir: dict) -> int:
     if declared_externs:
         print("\nexterns (verbatim host code — unchecked inside, typed at the boundary):")
         for ext in declared_externs:
-            print(f"  {ext['name']}  [{ext['class']}]  backends: "
+            # item 373: name the REACH between the classification and the
+            # backends, so a confined crossing is visibly distinct from an
+            # unconfined one (`engine_run [emission] reach: confined(cwd)
+            # backends: py, ts`). A bare emission carries no reach and prints
+            # exactly as before — byte-compatible.
+            reach = ext.get("reach")
+            reach_str = (f"  reach: {reach['kind']}({reach['target']})"
+                         if reach else "")
+            print(f"  {ext['name']}  [{ext['class']}]{reach_str}  backends: "
                   f"{', '.join(ext['backends']) or '—'}")
     if distribution:
         print("\ndistributability (interop-bridge §4: which services may cross a process seam):")
@@ -408,7 +643,52 @@ def _run_audit(args, ir: dict) -> int:
             verdict = distribution[name]
             print(f"  {name:<{width}}  {verdict['verdict']:<20} "
                   f"{'; '.join(verdict['reasons'])}")
+    # item 411, Slice 1: the sandbox envelope + effective reach per sandboxed
+    # process, when a placement is supplied. `net=none` is printed alongside
+    # each seam-served key's provider reach, so it is never readable as a
+    # total-egress claim about the composition.
+    if getattr(args, "placement", None):
+        from .placement import _load_placement, sandbox_audit_view  # noqa: PLC0415
+        lines, sb_err = sandbox_audit_view(ir, _load_placement(args.placement))
+        if sb_err:
+            print(f"\nsandbox placement: error: {sb_err}")
+            return 1
+        if lines:
+            print()
+            for line in lines:
+                print(line)
+    # item 309: `revl audit --recovery` — the replay-class view. Every inverse,
+    # deferred emission, and compensation with its replay class (`replay: free`
+    # for a declared/keyed idempotent entry, `replay: fenced` for an undeclared
+    # inverse, `recovery: human-finish` for an unkeyed owed emission) and its
+    # register (`declared`/`keyed`/`shape-proven`).
+    if getattr(args, "recovery", None):
+        for line in _recovery_audit_view(ir):
+            print(line)
     return 0
+
+
+def _recovery_audit_view(ir: dict) -> list:
+    """The `--recovery` replay-class lines (item 309 §"question 4", point 1)."""
+    from .audit_diff import _recovery_surface  # noqa: PLC0415
+    surface = _recovery_surface(ir)
+    lines = ["recovery surface (item 309): replay class per boundary crossing"]
+    if not surface:
+        lines.append("  (none — no inverse, deferred emission, or compensation)")
+        return lines
+    for entry in surface:
+        register = entry.get("register")
+        kind = entry.get("kind")
+        if kind == "inverse":
+            cls = "replay: free" if register else "replay: fenced"
+        elif kind == "owed-emission":
+            cls = "replay: free" if register == "keyed" else "recovery: human-finish"
+        else:  # compensation
+            cls = ("compensate: keyed-retry" if register == "keyed"
+                   else "compensate: best-effort")
+        reg = f"idempotent: {register}" if register else "idempotent: none (fenced)"
+        lines.append(f"  {entry['name']:<24} {kind:<14} {cls:<24} {reg}")
+    return lines
 
 
 def _run_version(args, ir: dict) -> int:
@@ -530,6 +810,9 @@ def main(argv: list[str] | None = None) -> int:
         return run_verify(args)
     if args.command == "explain":
         return _run_explain(args)
+    if args.command == "adapt":
+        from .cli.adapt import _run_adapt
+        return _run_adapt(args)
     if args.command == "doctor":
         from .doctor import doctor_command  # noqa: PLC0415 — lazy: no heavy imports
         return doctor_command(args)
@@ -575,14 +858,28 @@ def main(argv: list[str] | None = None) -> int:
         return _run_contract(args)
     if args.command == "diff":
         return _run_diff(args)
+    # `revl changelog` has its own two-input loader (like `diff`), so it is
+    # routed before the shared single-source compile step.
+    if args.command == "changelog":
+        return _run_changelog(args)
     # historical query mode reads a recorded run (files, not source), so it is
     # routed before the compile-from-source step every other command shares
     if args.command == "query" and args.query_command in ("emitted-between",
                                                            "touched"):
         return _run_history_query(args)
 
+    # `revl policy evaluate` (item 290) compiles its own sources (or reads a
+    # registry entry), so it is routed before the shared compile step, like the
+    # history query.
+    if args.command == "policy":
+        return _run_policy(args)
+
     try:
-        ir = compile_files(args.files)
+        profile = None
+        if getattr(args, "taint_strict", False):
+            from .admit_profile import AdmissionProfile  # noqa: PLC0415 — lazy
+            profile = AdmissionProfile(taint_strict=True)
+        ir = compile_files(args.files, profile=profile)
     except RevlError as error:
         if getattr(args, "json_diagnostics", False):
             print(json.dumps(report(error), indent=2))

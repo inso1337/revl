@@ -1,0 +1,11 @@
+// REJECTED — `(a, b)` is a Python/JS tuple; revl has no tuple type (item 384).
+// Group related values in a named record. The comma used to report the
+// cryptic `expected ), found ','`.
+//
+// expected error:
+//   revl has no tuples
+
+fn f() -> Int {
+  let t = (1, 2)
+  return 0
+}

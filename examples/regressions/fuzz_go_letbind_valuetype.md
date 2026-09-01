@@ -16,7 +16,7 @@ result.
 ## Minimized program (`fuzz_go_letbind_valuetype.rvl`)
 
 ```revl
-extern acquire fn openHandle() -> Int undo closeHandle(result)
+extern pure fn openHandle() -> Int
   = @py { return 7 } = @go { return 7 }
 
 component ValueBracket provides probe: Probe {
@@ -24,6 +24,13 @@ component ValueBracket provides probe: Probe {
   provide probe { fn ping() = handle }
 }
 ```
+
+`openHandle` is `pure`, not `acquire`: item 308 R0 requires an `acquire` return
+to be a nominal opaque handle type (never a bare `Int`), while this regression
+is specifically about a VALUE-typed (`Int`) bracket acquisition. A plain-fn
+(`pure`) acquisition is the "plain fn call returning a value type" case named in
+the property under test, so the go value-vs-pointer bracket decision is guarded
+unchanged.
 
 ## Per-tier outcome
 

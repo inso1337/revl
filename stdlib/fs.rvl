@@ -54,9 +54,16 @@
 // See docs/witnessed-fs.md for the full discussion.
 //
 // ------------------------------------------------------------------ tier status
-// py tier only (the H1 reference). The `@py` bodies + the inverses' `@py`
-// bodies + backends/python/revl_fs_workspace.py are this slice; ts / rs / go /
-// java / wasm bodies are Slice 2b.
+// py + ts tiers (the H1 reference on each). The `@py` bodies + the inverses'
+// `@py` bodies + backends/python/revl_fs_workspace.py are the py slice; the
+// `@ts ref` imports of the per-extern entry points in
+// backends/typescript/revl_fs_ts.ts (the node host, imported directly through
+// the item-410 stdlib host-ref path — no `globalThis.__revlFs` seam) are the ts
+// peer (item 369) — semantically mirroring the
+// persist-on-commit / revert-residue-free-on-abort through the same witnessed
+// transactional frame (backends/typescript/runtime.ts `Frame.transactional`),
+// with LIFO abort replay proven in ts_witnessed_fs.test.ts. rs / go / java /
+// wasm bodies remain Slice 2b.
 //
 // Import the mutations with a named `use` (the inverses are auto-registered by
 // the accumulator — a consumer never names them):
@@ -113,7 +120,7 @@ pub extern pure fn restore(w: WriteWitness) -> Unit = @py {
     if os.path.exists(w["preimage"]):
         os.replace(w["preimage"], target)
     return
-}
+} = @ts ref fsRestore from "../backends/typescript/revl_fs_ts.ts"
 
 pub extern pure fn unrm(w: RmWitness) -> Unit = @py {
     import revl_fs_workspace as _ws
@@ -124,7 +131,7 @@ pub extern pure fn unrm(w: RmWitness) -> Unit = @py {
     if os.path.exists(w["garbage"]):
         os.replace(w["garbage"], target)
     return
-}
+} = @ts ref fsUnrm from "../backends/typescript/revl_fs_ts.ts"
 
 pub extern pure fn unmove(w: MoveWitness) -> Unit = @py {
     import revl_fs_workspace as _ws
@@ -135,7 +142,7 @@ pub extern pure fn unmove(w: MoveWitness) -> Unit = @py {
     if os.path.exists(dst):
         os.replace(dst, src)
     return
-}
+} = @ts ref fsUnmove from "../backends/typescript/revl_fs_ts.ts"
 
 pub extern pure fn rmdir_if_empty(w: MkdirWitness) -> Unit = @py {
     import revl_fs_workspace as _ws
@@ -149,7 +156,7 @@ pub extern pure fn rmdir_if_empty(w: MkdirWitness) -> Unit = @py {
     except OSError:
         pass
     return
-}
+} = @ts ref fsRmdirIfEmpty from "../backends/typescript/revl_fs_ts.ts"
 
 // ------------------------------------------------------- the witnessed mutations
 // Each returns Result and registers `undo <inverse>(result)` ONLY on Ok. The
@@ -186,7 +193,7 @@ pub extern witnessed[fs] fn write(path: Str, contents: Str) -> Result[WriteWitne
     with open(target, "w", encoding="utf-8") as fh:
         fh.write(contents)
     return Ok({"path": target, "preimage": preimage, "created": not existed})
-}
+} = @ts ref fsWrite from "../backends/typescript/revl_fs_ts.ts"
 
 // Remove `path` by parking it in the session garbage dir (inside the root).
 pub extern witnessed[fs] fn rm(path: Str) -> Result[RmWitness, FsError]
@@ -203,7 +210,7 @@ pub extern witnessed[fs] fn rm(path: Str) -> Result[RmWitness, FsError]
     parked = _ws.fresh_sidecar(_ws.garbage_dir(), "rm")   # must #3: inside root
     os.replace(target, parked)
     return Ok({"path": target, "garbage": parked})
-}
+} = @ts ref fsRm from "../backends/typescript/revl_fs_ts.ts"
 
 // Rename `from` -> `to` (both confined).
 pub extern witnessed[fs] fn move(src: Str, dst: Str) -> Result[MoveWitness, FsError]
@@ -221,7 +228,7 @@ pub extern witnessed[fs] fn move(src: Str, dst: Str) -> Result[MoveWitness, FsEr
         return Err({"code": "EEXIST", "message": "destination exists", "path": real_to})
     os.replace(real_from, real_to)
     return Ok({"from": real_from, "to": real_to})
-}
+} = @ts ref fsMove from "../backends/typescript/revl_fs_ts.ts"
 
 // Create directory `path`.
 pub extern witnessed[fs] fn mkdir(path: Str) -> Result[MkdirWitness, FsError]
@@ -236,4 +243,4 @@ pub extern witnessed[fs] fn mkdir(path: Str) -> Result[MkdirWitness, FsError]
         return Err({"code": "EEXIST", "message": "path already exists", "path": target})
     os.mkdir(target)
     return Ok({"path": target})
-}
+} = @ts ref fsMkdir from "../backends/typescript/revl_fs_ts.ts"

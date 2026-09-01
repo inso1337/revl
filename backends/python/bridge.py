@@ -210,6 +210,59 @@ class SeamDeadline(TimeoutError):
             f"(the provider is alive but did not answer in time)")
 
 
+class SeamMarshalError(TypeError):
+    """A value reached the wire encoder that cannot cross a process seam: it is
+    not a scalar, list, dict, declared value record, or emitted ADT/Result case
+    — an opaque host object (a cordis `Value`, a live resource handle).
+
+    The seam carries only value copies (docs/interop-bridge.md §3), so the
+    encoder REFUSES such a value fail-closed rather than degrading it to a dead
+    ``{"$kind": <typename>}`` tag that would arrive on the far side detached
+    from its host-side identity. This is the runtime backstop to the plan-time
+    resource-crossing refusal (`src/revl/placement.py`): a resource the name
+    check missed still cannot cross silently, on the return path or the argument
+    path. Subclasses `TypeError` (a marshaling failure is a type error) so the
+    provider's dispatch loop marshals it back as an error reply and any generic
+    `TypeError` handling still recognises it, while it stays distinctly
+    identifiable by type.
+    """
+
+    def __init__(self, value) -> None:
+        self.type_name = type(value).__name__
+        super().__init__(
+            f"cannot marshal a {self.type_name!r} across a process seam: it is "
+            "not a scalar, list, dict, value record, or ADT/Result case. A seam "
+            "carries only value copies; an opaque host object or a live resource "
+            "handle does not cross (docs/interop-bridge.md §3). Refusing rather "
+            "than shipping a dead tag.")
+
+
+def _is_emitted_case(value) -> bool:
+    """Is `value` an emitted ADT / Result case instance (as opposed to an opaque
+    host object)?
+
+    Recognised by the exact shape the Python emitter guarantees for cases
+    (`backends/python/emit.py` `_emit_types` and the built-in Ok/Err): a plain,
+    NON-dataclass, slots-only class whose only per-instance datum is an optional
+    ``value`` payload. A record value is a dict or a `@dataclass` and is handled
+    before this point; an opaque host object carries a per-instance ``__dict__``
+    or slots other than ``value``, so it is refused instead of shipped as a dead
+    ``$kind`` tag."""
+    cls = type(value)
+    # a case is always an instance of a NAMED emitted class, never bare `object`
+    # (a slots-less, dict-less `object()` would otherwise read as a nullary case).
+    if cls is object or dataclasses.is_dataclass(cls):
+        return False
+    # emitted cases are slots-only: no per-instance __dict__ anywhere in the MRO.
+    if hasattr(value, "__dict__"):
+        return False
+    slots: set[str] = set()
+    for klass in cls.__mro__:
+        declared = getattr(klass, "__slots__", ())
+        slots.update((declared,) if isinstance(declared, str) else declared)
+    return slots <= {"value"}
+
+
 def _encode_value(value):
     """Encode a revl value for the wire. ADT / Result case instances become
     ``{"$kind": Case, "$value": payload}`` (``$value`` omitted for a nullary
@@ -224,7 +277,14 @@ def _encode_value(value):
         return {key: _encode_value(item) for key, item in value.items()}
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {f.name: _encode_value(getattr(value, f.name)) for f in dataclasses.fields(value)}
-    # a native ADT / Result case instance (an emitted case class)
+    # Terminal: a native ADT / Result case instance (an emitted case class)
+    # becomes a `{"$kind", "$value"?}` tag. ANY OTHER object — an opaque host
+    # `Value`, a live resource handle — is REFUSED fail-closed rather than
+    # degraded to a dead `$kind` tag it once was (Finding B). A seam ships only
+    # value copies; this makes "the opaque host Value / a resource never crosses"
+    # a runtime guarantee, backstopping the plan-time crossing refusal.
+    if not _is_emitted_case(value):
+        raise SeamMarshalError(value)
     tagged = {"$kind": type(value).__name__}
     if hasattr(value, "value"):
         tagged["$value"] = _encode_value(value.value)
@@ -341,8 +401,15 @@ def _public_methods(service) -> frozenset:
     return frozenset(names)
 
 
-async def _invoke(ctx, exports: dict, req: dict) -> dict:
-    key, method, args = req.get("key"), req.get("method"), req.get("args") or []
+async def _invoke(ctx, exports: dict, req: dict, module=None) -> dict:
+    key, method = req.get("key"), req.get("method")
+    # Decode the arguments symmetrically with the client's `_encode_value`
+    # (Finding B): a tagged ADT/Result arg is rebuilt into its native case
+    # instance through `module`'s case classes; a plain value (scalar, list,
+    # record dict) passes through unchanged, so a value-typed call is byte-
+    # identical to the pre-encode wire. Without a module (the legacy serve form)
+    # a tagged value stays a plain dict, exactly as before.
+    args = _decode_value(req.get("args") or [], module)
     if key not in exports:
         return {"ok": False, "error": f"key {key!r} is not exported by this process"}
     try:
@@ -365,7 +432,7 @@ async def _invoke(ctx, exports: dict, req: dict) -> dict:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-async def serve(ctx, exports, endpoint):
+async def serve(ctx, exports, endpoint, module=None):
     """Listen on `endpoint` and answer calls against `ctx` for the exported
     surface.
 
@@ -377,8 +444,13 @@ async def serve(ctx, exports, endpoint):
     `exports` is either ``{key: [method, ...]}`` (the declared allowlist, what
     placement passes) or a bare iterable of keys (legacy; see `_export_table`).
     A request naming a key or a method outside that surface is refused with an
-    error reply — never dispatched. Returns the asyncio server; the caller
-    keeps it (and the process) alive."""
+    error reply — never dispatched.
+
+    `module` is the emitted module (its case classes rebuild ADT/Result args a
+    consumer encodes across the seam, symmetric with `proxy_component`'s
+    `module` on the return path). Optional: with no module a tagged argument
+    stays a plain dict, exactly the legacy behaviour. Returns the asyncio
+    server; the caller keeps it (and the process) alive."""
     ep = _as_endpoint(endpoint)
     table = _export_table(exports)
 
@@ -392,7 +464,7 @@ async def serve(ctx, exports, endpoint):
                     req = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                reply = await _invoke(ctx, table, req)
+                reply = await _invoke(ctx, table, req, module)
                 writer.write((json.dumps(reply) + "\n").encode())
                 await writer.drain()
         except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
@@ -465,10 +537,18 @@ class _Client:
 
     def call(self, key: str, method: str, args, deadline=None):
         seconds = self.deadline_for(method, deadline)
+        # Encode the arguments through the SAME fail-closed marshaller the return
+        # path uses (Finding B): a scalar/list/dict/record/ADT arg encodes (byte-
+        # identical for value-typed args, since `_encode_value` is the identity
+        # on scalars/lists/dicts), and an opaque host object or a live resource
+        # handle raises SeamMarshalError HERE, before it touches the socket,
+        # instead of the raw `json.dumps` degrading it to a bare TypeError deep
+        # in the encoder. Args and returns now both fail closed.
+        encoded_args = _encode_value(list(args))
         with self._lock:
             io = self._io
             rpc = self.rpc
-            io.write((json.dumps({"key": key, "method": method, "args": list(args)}) + "\n").encode())
+            io.write((json.dumps({"key": key, "method": method, "args": encoded_args}) + "\n").encode())
             io.flush()
             # Bound the blocking read on the reply. A wedged provider sends
             # nothing, so the recv times out at `seconds`; we surface that as
@@ -584,17 +664,38 @@ class _Client:
 class _Proxy:
     """Stands in for the remote provider of one key. Only the declared method
     names forward; everything else raises, so the runtime can introspect it
-    safely."""
+    safely.
 
-    def __init__(self, client: _Client, key: str, methods) -> None:
+    An `async fn` operation must forward as an *awaitable*, not as its resolved
+    value. `_Client.call` is a blocking synchronous round-trip that returns the
+    already-decoded value (e.g. a `str`), so a forwarding provide-method that
+    does `return await cache.get(k)` — the shape an `async fn` consumer emits —
+    would `await` a bare `str` and raise ``'str' object can't be awaited``
+    (roadmap item 331). The proxy therefore wraps every method the service
+    declares `async` in a coroutine that yields the round-trip's value, so the
+    caller's `await` resolves it correctly. A *sync* (`fn`/`emission fn`)
+    operation keeps returning its value directly — a fire-and-forget `emit
+    db.execute(...)` across a seam must not hand back an un-awaited coroutine.
+    `async_methods` is the subset of `methods` the IR marks `async`; placement
+    reads it off the service declaration (`src/revl/placement.py`)."""
+
+    def __init__(self, client: _Client, key: str, methods, async_methods=()) -> None:
         object.__setattr__(self, "_client", client)
         object.__setattr__(self, "_key", key)
         object.__setattr__(self, "_methods", set(methods))
+        object.__setattr__(self, "_async_methods", set(async_methods))
 
     def __getattr__(self, name: str):
         if name in object.__getattribute__(self, "_methods"):
             client = object.__getattribute__(self, "_client")
             key = object.__getattribute__(self, "_key")
+            if name in object.__getattribute__(self, "_async_methods"):
+                async def _forward_async(*args):
+                    # The round-trip is blocking (cordis-py's model); awaiting
+                    # the coroutine performs it and resolves to the value, so a
+                    # chained `await forward(await cross_seam_call())` works.
+                    return client.call(key, name, args)
+                return _forward_async
             return lambda *args: client.call(key, name, args)
         raise AttributeError(name)
 
@@ -619,16 +720,18 @@ def _require_network_contract(key: str, endpoint: Endpoint, deadline) -> None:
 
 
 def proxy_component(key: str, methods, endpoint, module=None,
-                    deadline=None, deadlines=None) -> dict:
+                    deadline=None, deadlines=None, async_methods=None) -> dict:
     """A cordis component that provides `key` via a proxy forwarding to the
     stub at `endpoint` (a UDS path string, or an `Endpoint` — a local UDS or a
     network TCP+mTLS seam). `module` (the emitted module) lets the proxy rebuild
     ADT / Result returns into native case instances. Its `_client` is exposed so
     the driver can `watch()` for peer death and dispose the fiber.
 
-    `deadline` sets the per-operation deadline default (seconds) every forwarded
-    call carries; `deadlines` (``{method: seconds}``) overrides it per named
-    operation. A breach raises `SeamDeadline` in the calling fiber, which the
+    `async_methods` is the subset of `methods` the service declares `async fn`;
+    those forward as awaitables so a chained `await` on the consuming side
+    resolves the cross-seam value (item 331). `deadline` sets the per-operation
+    deadline default (seconds) every forwarded call carries; `deadlines`
+    (``{method: seconds}``) overrides it per named operation. A breach raises `SeamDeadline` in the calling fiber, which the
     runtime unwinds like any other seam failure (A8: revert LIFO, no residue).
     Placement (`src/revl/placement.py`) reads these off the seam spec. A
     **network** seam is refused here unless it carries both an identity and a
@@ -639,7 +742,7 @@ def proxy_component(key: str, methods, endpoint, module=None,
     client = _Client(ep, module, deadline=deadline, deadlines=deadlines)
 
     def apply(ctx, config=None):
-        proxy = _Proxy(client, key, methods)
+        proxy = _Proxy(client, key, methods, async_methods or ())
 
         def body():
             yield lambda: client.close()   # undo: tear the transport down

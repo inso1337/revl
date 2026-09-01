@@ -272,8 +272,29 @@ action between classes.
 mark.** The modifier is spelled in the extern classification slot, in the
 same modifier position `async` occupies (parser.py, `ExternDecl.async_`):
 
-    extern emission[mail] deferred fn send(to: Str, body: Str)
-    extern emission[fs] deferred fn purge_garbage(dir: Str)
+    extern emission deferred fn send(to: Str, body: Str)
+    extern emission deferred fn purge_garbage(dir: Str)
+
+**An emission extern takes no capability scope; its NAME is its capability.**
+There is no bracket after `emission`. The shipped parser refuses one:
+`emission[mail]` fails with `` `emission` extern takes no capability scope —
+only a `witnessed[caps]` extern is capability-scoped `` (parser.py). Only a
+`witnessed` mutation carries a `[caps]` scope (243), because a witnessed
+capability names *where* a reversible mutation crosses. An emission is named
+by the extern itself, and the policy layer keys it that way: for an
+`emission` extern the class map does `caps.add(name)`
+(`revl.mcp.approval.ClassMap._classify_direct`), where a `witnessed` extern
+instead contributes its declared `[caps]` list. So a boundary-policy rule
+(item 246, Decision 3) that requires approval on a deferred or immediate
+emission names the extern, not a bracket scope:
+
+    capability send requires approval
+    capability purge_garbage requires approval
+
+The token is the extern name. (A realm-style scoped emission token — e.g.
+`emission[gateway.send]`, so emissions and `witnessed[caps]` would share one
+capability grammar — is the pending parser/emitter feature half of roadmap
+item 343; until it lands, an emission's capability is its name.)
 
 Declaration-owned for the same reason 243 made the inverse declaration-owned:
 deferral changes call-site semantics. A deferred emission returns before the

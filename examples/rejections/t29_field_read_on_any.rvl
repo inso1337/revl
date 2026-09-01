@@ -1,0 +1,26 @@
+// REJECTED — a field read off a value whose static type is `Any` (roadmap item
+// 380(2)). An erased value (a `json_parse` result, any `Any`) has no known
+// fields, so a field access on it is the 279/299 silent-divergence class: py
+// raises `KeyError` on an absent key, ts yields `undefined`, and neither is a
+// defensible total answer for a field the author declared present. The frontend
+// refuses it, so the divergence is a compile error rather than a runtime
+// surprise, uniformly on every tier.
+//
+// Legal spellings:
+//   * bind to a record type first — an `Opt[T]` field then reads TOTAL:
+//       `let e: EOpt = v; e.kind ?? "<none>"`   (item 380(1))
+//   * walk the erased value with the total shape accessors (stdlib/value.rvl):
+//       `value_is_object(v)`, `value_opt(v, "kind")`, `value_field_or(v, ...)`
+//
+// expected error:
+//   field read `.kind` on a value of type `Any` — an erased value has no known
+//   fields
+
+pub extern pure fn jp(s: Str) -> Any
+  = @py { import json; return json.loads(s) }
+  = @ts { return JSON.parse(s) }
+
+fn read_kind(s: Str) -> Str {
+  let v: Any = jp(s)
+  return v.kind
+}

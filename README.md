@@ -24,7 +24,7 @@
 
 ---
 
-revl is a research language for software that changes while it runs. Components
+revl is a language for software that changes while it runs. Components
 load, unload, and hot-swap inside a live system, and the properties that make
 that survivable are checked at compile time: unloading leaves no residue,
 dependencies stay coherent, nothing reaches state it never declared. The core

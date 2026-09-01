@@ -1,0 +1,14 @@
+// REJECTED — `i++` is not revl syntax (item 384; the diagnostic syntax-2.0
+// §3.3 PROMISED but never implemented). revl expressions are pure — there is
+// no increment operator. `i++` lexes as two `+` tokens and used to report the
+// cryptic `expected an expression, found '+'`; the redirect names the pure
+// mutation form `i += 1`.
+//
+// expected error:
+//   revl has no `++` increment operator
+
+fn f() -> Int {
+  var i = 0
+  i++
+  return i
+}

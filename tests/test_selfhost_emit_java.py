@@ -124,6 +124,7 @@ CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_java_corpus"
 CORPUS = [
     # slice 1 (item 199) — functions-only base surface
     "arith.rvl",     # bounded int/int32, /, %, comparisons, ==/!=, unary, ??
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # let/var/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls
     "strings.rvl",   # string `+`, `${..}` interpolation, literals
@@ -287,3 +288,19 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+def test_fn_type_param_refused(emitted, reference):
+    """item 383 / 391 (self-host port): a `.map`/`.filter`/`.reduce` transform
+    lowers (in the frontend) to a `list_*` free function with a function-value
+    parameter, and a declared function type is not representable on this tier.
+    The reference RAISES EmitError; a pure self-host emitter fn cannot `fail`, so
+    it refuses within the subset with a loud `<<DEFER-fn-type>>` marker instead of
+    silently emitting a mis-typed signature. Both refuse the same construct, so
+    tests/fixtures/emit_*_corpus/transforms.rvl stays OUT of the byte-identity
+    CORPUS above (the reference would raise there) and is checked only here."""
+    ir = compile_files([str(CORPUS_DIR / "transforms.rvl")])
+    with pytest.raises(reference.EmitError, match="function type"):
+        reference.emit(ir)
+    got = emitted["emit_src"](ir)
+    assert "<<DEFER-fn-type>>" in got

@@ -69,7 +69,16 @@ func TestEmitted_UserCache_Reactive(t *testing.T) {
 		t.Fatalf("put emission did not reach db.execute: %v", m)
 	}
 
-	// Withdraw the provider: UserCache must reactively deactivate (map.drop).
+	// Withdraw the provider: UserCache must reactively deactivate (its Map
+	// effect inverse, map.drop, runs) and settle back to Pending.
+	//
+	// The teardown marks (map.drop, pool.close) are recorded by inverses the
+	// orchestrator runs DURING the Unloading phase; the UserCache fiber only
+	// transitions Unloading -> Pending AFTER those inverses complete. Breaking
+	// on the marks alone races that final transition and can observe UserCache
+	// mid-flight in Unloading, so drive to reactive quiescence: require BOTH
+	// teardown marks present AND UserCache actually settled to Pending. The
+	// state is the deterministic quiescence signal, not a timed sleep.
 	pg.Dispose()
 	if err := pg.Gone(g); err != nil {
 		t.Fatalf("PgDatabase dispose: %v", err)
@@ -77,11 +86,12 @@ func TestEmitted_UserCache_Reactive(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		m := HostMarks()
-		if contains(m, "map.drop") && contains(m, "pool.close") {
+		teardownRan := contains(m, "map.drop") && contains(m, "pool.close")
+		if teardownRan && uc.State() == stc.StatePending {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("reactive teardown incomplete: %v", m)
+			t.Fatalf("reactive teardown did not reach quiescence: marks=%v state=%v", m, uc.State())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

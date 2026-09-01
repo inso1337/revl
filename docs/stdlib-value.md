@@ -55,6 +55,7 @@ untrusted or partially-shaped document cannot fault.
 | `value_is_null(v)` | `Value -> Bool` | is the value null |
 | `value_field(v, name)` | `(Value, Str) -> Value` | record field; missing/non-record → null `Value` |
 | `value_opt(v, name)` | `(Value, Str) -> Opt[Value]` | field as `Opt`; missing/null/non-record → `None` |
+| `value_field_or(v, name, default)` | `(Value, Str, Value) -> Value` | field or the caller's `default` — the `dict.get(k, default)` total read (item 368); missing/null/non-record → `default`, never a raise |
 | `value_has(v, name)` | `(Value, Str) -> Bool` | record carries a non-null key |
 | `value_keys(v)` | `Value -> List[Str]` | record field names in insertion order (item 188); non-record → `[]` |
 | `value_list(v)` | `Value -> List[Value]` | list elements; non-list → `[]` |
@@ -150,12 +151,13 @@ above is the specification for that rewrite.
 ## Tier status
 
 `Value` erases to each host's dynamic representation, exactly as
-`stdlib/json.rvl`'s `Any` does. Only the **py** tier ships in this slice.
+`stdlib/json.rvl`'s `Any` does. The **py** and **ts** tiers ship; rs/go/java are
+the additive follow-up.
 
 | tier | erases `Value` to | status |
 |---|---|---|
 | py | native object graph (`dict`/`list`/`bool`/`int`/`float`/`str`/`None`) | **executed by tests** (`tests/test_value_stdlib.py`) |
-| ts | `unknown` (`typeof` / `Array.isArray` discrimination) | **deferred** — add `@ts` bodies |
+| ts | JS value (record → object, list → array, `Int` → `bigint`, `Float` → `number`, null/absent → `null`/`undefined`), `typeof` / `Array.isArray` discrimination | **executed by tests** (`tests/test_value_total_field.py`, run under node) — the total field read is identical to py (item 368) |
 | rs | `cordis::Value` / `serde_json::Value` (as `json.rvl` already boxes) | **deferred** — add `@rs` bodies |
 | go | `any` (type-switch discrimination) | **deferred** — add `@go` bodies |
 | java | a provider's JSON tree (Jackson/Gson) | **deferred** — needs a provider on the classpath |

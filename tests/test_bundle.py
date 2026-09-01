@@ -26,6 +26,7 @@ The properties item 305 asks for, pinned here:
 """
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -162,6 +163,71 @@ def test_tampered_source_is_a_source_mismatch(signed_bundle):
     report = B.verify_bundle(str(signed_bundle), env=dict(KEY))
     assert not report.ok
     assert _tier(report, "source").status == B.MISMATCH
+
+
+def _stdlib_ref_bundle(tmp_path: Path, path: str, sha: str) -> Path:
+    """A minimal bundle dir whose recorded ir/ir.json carries one stdlib-kind
+    host ref, so `_check_stdlib_refs` (the item-410 verify tier) has a ref to
+    re-resolve. The ref `path` and `sha256` are attacker-supplied here, standing
+    in for a tampered bundle's recorded pin."""
+    b = tmp_path / "reftest.revlbundle"
+    (b / "ir").mkdir(parents=True)
+    doc = {"externs": [{"name": "helper", "refs": {
+        "ts": {"root": "stdlib", "path": path, "sha256": sha}}}]}
+    (b / "ir" / "ir.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    return b
+
+
+def test_stdlib_ref_escaping_the_install_tree_is_refused(tmp_path):
+    """A bundle-recorded stdlib ref whose `..`-bearing path resolves OUTSIDE the
+    install tree is refused at verify (a MISMATCH), never re-hashed and reported
+    OK against the attacker-chosen sha. This is the 410-escape twin: the verify
+    tier is a second install-origin resolution site and must apply the same
+    realpath-containment jail the compile-time resolver (hostref) does."""
+    import hashlib as _h
+    from revl._paths import stdlib_root
+
+    install_root = Path(str(stdlib_root().parent))
+    # A file the bundle never shipped, placed ABOVE the install root so no
+    # legitimate stdlib ref could ever point at it, pinned to its real sha.
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_bytes(b"a file outside the install tree\n")
+    outside_sha = _h.sha256(outside.read_bytes()).hexdigest()
+    up = os.path.relpath(str(outside), str(install_root))  # ..-bearing escape
+    assert up.startswith("..")
+
+    b = _stdlib_ref_bundle(tmp_path, up, outside_sha)
+    checks = B._check_stdlib_refs(b)
+    assert checks, "the crafted bundle must carry a stdlib ref to check"
+    statuses = {c.status for c in checks}
+    # The escape must be caught: refused as MISMATCH, and NEVER reported OK.
+    assert B.MISMATCH in statuses
+    assert B.OK not in statuses
+    esc = next(c for c in checks if c.status == B.MISMATCH)
+    assert "escapes the install tree" in esc.detail
+
+
+def test_stdlib_ref_absolute_path_is_refused(tmp_path):
+    """An absolute recorded ref path is refused before any read, independent of
+    what the join semantics would do with it."""
+    b = _stdlib_ref_bundle(tmp_path, "/etc/hostname", "0" * 64)
+    checks = B._check_stdlib_refs(b)
+    assert checks and all(c.status == B.MISMATCH for c in checks)
+    assert "absolute" in checks[0].detail
+
+
+def test_legit_in_tree_stdlib_ref_still_verifies_ok(tmp_path):
+    """The happy path is untouched: a stdlib ref whose path resolves INSIDE the
+    install tree, pinned to the real bytes, verifies OK."""
+    import hashlib as _h
+    from revl._paths import stdlib_root
+
+    install_root = Path(str(stdlib_root().parent))
+    legit = install_root / "stdlib" / "fs.rvl"
+    sha = _h.sha256(legit.read_bytes()).hexdigest()
+    b = _stdlib_ref_bundle(tmp_path, "stdlib/fs.rvl", sha)
+    checks = B._check_stdlib_refs(b)
+    assert checks and all(c.status == B.OK for c in checks)
 
 
 def test_tampered_policy_is_a_policy_mismatch(signed_bundle):
