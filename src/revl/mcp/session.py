@@ -854,6 +854,17 @@ class Session:
         self._install_session_owner(ir)
         try:
             self._run(driver._load(ir, self._prepare_module(ir)))
+            # item 334 (EDGE 1): the POST-ACTIVATION HEALTH GATE. `driver._load`
+            # returns WITHOUT raising for the two most likely candidate faults —
+            # item 372 makes a mid-body FAILED activation "honest and observable"
+            # (non-raising, run.py:_settle) and leaves an unmet-requirement fiber
+            # PENDING (also non-raising). Without a gate here, `swap` would have
+            # already disposed gen N above and would now install a broken gen N+1
+            # that provides nothing, with no gen N to fall back to — the exact
+            # opposite of the revert guarantee. So assert the successor activated
+            # CLEANLY and, if not, raise into the `_activation_error` branch below,
+            # which routes to `_abort_swap` (revert to gen N, keep serving gen N).
+            self._assert_successor_activated(ir)
         except _activation_error() as exc:
             # item 372: the successor's activation did not complete — roll the
             # whole swap back to the predecessor (which activated cleanly) so the
@@ -1025,6 +1036,68 @@ class Session:
                         res.__revl_restore__(snap)
                     except Exception:  # pragma: no cover — defensive
                         pass
+
+    def _assert_successor_activated(self, ir: dict) -> None:
+        """The item-334 post-activation health gate (EDGE 1).
+
+        `driver._load` returns cleanly even when the successor did not truly come
+        up: item 372 makes a mid-body FAILED activation non-raising and leaves an
+        unmet-requirement fiber PENDING. A swap that trusted the clean return
+        would dispose gen N and install a broken gen N+1 that provides nothing.
+        So assert, after the load, that the successor is HEALTHY:
+
+          * no successor fiber is left FAILED or PENDING, and
+          * every key ROOT is responsible for providing resolves to a live
+            provider (`driver.resolved_keys()`, run.py:807).
+
+        Part 2 is scoped to ROOT-provided keys and EXCLUDES keys provided by
+        TEMPLATE components (`manifest.templates`, roadmap item 10): a template's
+        provisions come up PER-INSTANCE through the dynamic instance layer during
+        `_reconcile_instances`, which `swap` runs AFTER this gate — so a
+        template-provided key is legitimately absent from `driver.resolved_keys()`
+        here and is not a ROOT provision this gate can judge. (A template
+        component gets no top-level fiber of its own, so Part 1 never sees it; a
+        genuinely broken instance migration is caught by the state-compat gate in
+        `_reconcile_instances`, not here.)
+
+        On any failure, raise `ActivationError` so the enclosing `swap` catches it
+        in its `_activation_error()` branch and routes to `_abort_swap` — reverting
+        to gen N exactly as a raised activation fault does. `_dispose_all` in the
+        predecessor reload has already run against the successor, so a witnessed
+        effect the successor's activation performed before it faulted is reverted
+        as part of the rollback (the 245 owner was installed before this load)."""
+        ActivationError = _activation_error()
+        driver = self._driver
+        # 1) no successor fiber may be FAILED or PENDING.
+        for name, fiber in driver.fibers.items():
+            state = driver.FiberState(fiber.state).name
+            if state in ("FAILED", "PENDING"):
+                comp = next((c for c in (ir.get("components") or [])
+                             if c.get("name") == name), {})
+                keys = list((comp.get("provides") or {}).keys())
+                raise ActivationError(
+                    name, keys,
+                    f"the successor fiber is {state} after the swap load — a swap "
+                    f"must not install a generation whose component failed to "
+                    f"activate (FAILED) or has an unmet requirement (PENDING). "
+                    f"item 372 makes both non-raising, so item 334's health gate "
+                    f"rejects them here")
+        # 2) every ROOT-provided key must resolve to a live provider. Skip
+        #    template components — their provisions resolve per-instance in
+        #    `_reconcile_instances` (which runs after this gate), never at ROOT.
+        templates = set((ir.get("manifest") or {}).get("templates") or [])
+        declared: set[str] = set()
+        for comp in (ir.get("components") or []):
+            if comp.get("name") in templates:
+                continue
+            declared.update((comp.get("provides") or {}).keys())
+        missing = sorted(declared - driver.resolved_keys())
+        if missing:
+            raise ActivationError(
+                "<successor>", missing,
+                "declared provided key(s) did not resolve to a live provider "
+                "after the swap load — the successor composition would report "
+                "loaded while ROOT lacks the provision (item 334 health gate)")
 
     # -- provider state hand-off (roadmap item 53) -------------------------
 
