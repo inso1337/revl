@@ -1,6 +1,6 @@
-# Findings — dynamic plugins (harness milestone 37, finding #32)
+# Findings — dynamic plugins (finding #32)
 
-Probe: the DSH-shaped dynamic-plugin loader in the harness — a revl
+Probe: the DSH-shaped dynamic-plugin loader in the lighthouse workload — a revl
 component source arrives at runtime, is admitted against the running
 composition (G2 gate), plugged into the live harness, used, and unloaded
 (fiber.dispose reverts its effects). Verified: `tools/plugin_demo.py` PASS

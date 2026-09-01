@@ -3,8 +3,8 @@
 **Status:** design only — nothing here is implemented.
 **Base:** `origin/main` @ `9958d75` — every `file:line` anchor below was
 verified against that sha.
-**Problem (harness milestone 2, finding #15; docs/v2.0-roadmap.md:2466):**
-the harness's single G8 crossing, `http_post`, has a `@ts` body
+**Problem (finding #15; docs/v2.0-roadmap.md:2466):**
+the lighthouse workload's single G8 crossing, `http_post`, has a `@ts` body
 `return fetch(url, ...).then(r => r.text())` — a `Promise<string>` — but the
 extern declares `-> Str` and the ts emitter types it `string`
 (backends/typescript/emit.py:1894, `returns = _ts_v3_type(...)`), so `tsc`

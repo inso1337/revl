@@ -1,7 +1,7 @@
-# findings — harness milestone 7 (agent/harness-m3, third wave)
+# findings — lighthouse workload: self-evolution (agent/harness-m3, third wave)
 
-Self-evolution — the harness rewriting its own composition, end to end.
-Harness repo: `~/Projects/revl-harness`, commits `1664b36` / `9f22ad9`.
+Self-evolution — the lighthouse workload rewriting its own composition, end
+to end. Workload commits `1664b36` / `9f22ad9`.
 
 ## 1. Refusal log
 

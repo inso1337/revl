@@ -1,6 +1,6 @@
 # findings — extern dedent (agent/fr13-extern-dedent)
 
-Found by revl-harness milestone 2 (the real HTTP ModelProvider): a
+Found by the lighthouse workload (the real HTTP ModelProvider): a
 multi-line `extern` body breaks the emitted Python.
 
 ## 1. Refusal log

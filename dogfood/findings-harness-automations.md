@@ -1,6 +1,6 @@
-# Findings — scheduled automations that RUN the agent (harness milestone 60, roadmap item 170)
+# Findings — scheduled automations that RUN the agent (roadmap item 170)
 
-Probe: revl-harness milestone 60 builds host-side scheduled automations
+Probe: the lighthouse workload builds host-side scheduled automations
 (create/list/cancel an automation {cadence, prompt, session}; the agent
 runs on schedule, approval-gated, persisted across restarts). The driver
 is HOST-side (`_start_automations` in `tools/web_server.py`) because the
@@ -26,7 +26,7 @@ colour today. So `every 60s { emit agent.run_in("cron", brief) }` is
 unexpressible; the harness's scheduled automations run the agent from a
 host loop on the session's event loop instead.
 
-## The workload's honest workaround (milestone 60)
+## The workload's honest workaround
 
 - `/api/schedule/automations` — create/list/cancel; each automation is
   `{name, every_ms, prompt, session}`.

@@ -1,6 +1,6 @@
-# Findings — workflows (harness milestone 33, finding #27)
+# Findings — workflows (finding #27)
 
-Probe: multi-agent fan-out + aggregation in the harness. First design
+Probe: multi-agent fan-out + aggregation in the lighthouse workload. First design
 spawned three workers and fanned tasks out through a per-index arrow whose
 body is a ternary chain of `emit <handle>.<key>.<method>()` calls. One real
 revl gap, plus the shipped workaround.
@@ -45,7 +45,7 @@ G2-clean) and the task list split by index into sublists, each driven
 through ONE worker with a plain tail-coroutine arrow (`task => emit
 w1.run(task)` — a `req` emission, correctly coloured), then interleaved
 back into task order. This also avoids the ternary-arrow shape entirely.
-Milestone 33 passes 2/2 py + ts; `tools/workflow_demo.py` PASS. When item
+The workflow passes 2/2 py + ts; `tools/workflow_demo.py` PASS. When item
 98 lands, the spawned design becomes expressible.
 
 Also recorded: `agent_loop` in `src/components/agent.rvl` is now `pub` —
