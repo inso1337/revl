@@ -985,6 +985,28 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_cmd.add_argument("--json", action="store_true",
                             help="print the bundle path and its runtime-manifest as JSON")
 
+    # `revl emit --target temporal` (roadmap item 253): render a backend's
+    # emitter in a chosen TARGET, a dimension orthogonal to `--backend`. A target
+    # selects a rendering of the backend's emitter (its native runtime by
+    # default); `temporal` is the Temporal TS-SDK rendering of the typescript
+    # emitter (docs/design/253-temporal-target.md §4). This is NOT a new tier.
+    emit_cmd = sub.add_parser(
+        "emit",
+        help="emit a backend's source in a chosen target (e.g. --target temporal "
+             "renders the typescript emitter for the Temporal TS SDK, item 253)")
+    emit_cmd.add_argument("files", nargs="+",
+                          help=".rvl sources to compile and emit")
+    emit_cmd.add_argument("--backend", default="typescript",
+                          choices=list(BUNDLE_BACKENDS),
+                          help="the backend emitter to render (default: typescript)")
+    emit_cmd.add_argument("--target", default=None, metavar="TARGET",
+                          help="a rendering of the backend's emitter, orthogonal "
+                               "to --backend. `temporal` renders the typescript "
+                               "emitter for the Temporal TS SDK (item 253); omit "
+                               "for the backend's native runtime")
+    emit_cmd.add_argument("-o", "--output", default=None, metavar="PATH",
+                          help="output path (default: stdout)")
+
     verify_cmd = sub.add_parser(
         "verify",
         help="recompile a .revlbundle and prove it rebuilds bit-for-bit: source "

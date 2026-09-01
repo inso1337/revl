@@ -733,6 +733,52 @@ def _run_compile(args, ir: dict) -> int:
     return 0
 
 
+def _run_emit(args) -> int:
+    """`revl emit` — render a backend's emitter in a chosen target (item 253).
+
+    A target is a dimension orthogonal to `--backend`: it selects a RENDERING of
+    the backend's emitter, defaulting to that backend's native runtime.
+    `--target temporal` renders the typescript emitter for the Temporal TS SDK
+    (docs/design/253-temporal-target.md §4). Wiring it as a target rather than a
+    seventh runnable backend is what keeps it a variant, not a tier."""
+    from .bundle import _emitter  # noqa: PLC0415 — lazy, the shared emitter loader
+
+    try:
+        ir = compile_files(args.files)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    module = _emitter(args.backend)
+    if module is None or not hasattr(module, "emit"):
+        print(f"error: no emitter for backend {args.backend!r}", file=sys.stderr)
+        return 2
+
+    target = args.target
+    if target is not None and args.backend != "typescript":
+        print(f"error: --target {target!r} is only available for the typescript "
+              f"backend in this release (item 253)", file=sys.stderr)
+        return 2
+
+    try:
+        rendered = module.emit(ir, target=target) if target is not None else module.emit(ir)
+    except (RevlError, ValueError) as error:
+        # ValueError covers the emitter's own EmitError channel (a closed-
+        # allowlist refusal travels here with its why-trace).
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if isinstance(rendered, dict):  # a multi-file emitter (wasm)
+        rendered = "\n".join(f"// === {name} ===\n{text}"
+                             for name, text in sorted(rendered.items()))
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as handle:
+            handle.write(rendered)
+    else:
+        sys.stdout.write(rendered)
+    return 0
+
+
 def _run_scaffold(args) -> int:
     """`revl scaffold` — a typed, holed skeleton from a spec (docs/scaffold.md).
 
@@ -808,6 +854,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify":
         from .bundle import run_verify  # noqa: PLC0415 — lazy
         return run_verify(args)
+    if args.command == "emit":
+        return _run_emit(args)
     if args.command == "explain":
         return _run_explain(args)
     if args.command == "adapt":
