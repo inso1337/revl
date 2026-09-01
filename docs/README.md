@@ -22,6 +22,7 @@ table, or **[vision.md](vision.md)** for what this is *for*. The
 - [mcp-reference.md](mcp-reference.md) — the MCP verbs, per-verb inputs and outputs
 - [mcp-bridge.md](mcp-bridge.md) — the compiler as an MCP server, full shapes
 - [guide-ai-agents.md](guide-ai-agents.md) — the agent-facing workflow guide
+- [authoring-for-agents.md](authoring-for-agents.md) — the authoring loop for an agent that writes revl: scaffold → fillSpec → fmt → explain → admit
 - [harness-gate-guide.md](harness-gate-guide.md) — driving the 245/246 approval gate from a harness: the three action classes, the MCP verbs, the commit two-step, and the `session.state()` metrics
 
 ## Testing and guarantees
@@ -36,6 +37,7 @@ table, or **[vision.md](vision.md)** for what this is *for*. The
 ## Working in a live system
 
 - [plan.md](plan.md) — a dry run for admission · [apply.md](apply.md) — execute a plan artifact · [swap.md](swap.md) — migrate a live component across tiers
+- [composition-bootstrap.md](composition-bootstrap.md) — a composition manifest that declares its own file list, and the two-stage host bootstrap that gets it running
 - [queries.md](queries.md) — ask the composition questions
 - [why-traces.md](why-traces.md) — derivations behind a rejection · [why-runtime.md](why-runtime.md) — cause chains for a recorded run
 - [crash-recovery.md](crash-recovery.md) — WAL roll-forward/back · [persistence.md](persistence.md) — snapshot/restore an evolved session · [erase-report.md](erase-report.md) — right-to-erasure evidence

@@ -2,7 +2,9 @@
 
 **Status:** implemented (2026-08-26). Companion to docs/holes.md — that
 document owns the `hole` construct and the scaffold-then-fill loop (§8); this
-one owns the command that writes the scaffold.
+one owns the command that writes the scaffold. If you are building an agent
+that authors revl, [authoring-for-agents.md](authoring-for-agents.md) names
+this command alongside `fmt` and `explain` as one loop.
 
 Agents and humans write top-down, and a hole is what lets them (docs/holes.md):
 a placeholder that has a type, satisfies the checker, and is recorded as an

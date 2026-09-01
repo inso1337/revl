@@ -300,3 +300,7 @@ a diagnostic that describes one line at a time. With fill specs the loop is
 Each fill is a bounded, local decision against a spec, rather than a whole-file
 gamble against a refusal. The token economics of the two loops are the subject
 of the note in `bench/README` under item 20's demand harness.
+
+This loop, named end to end with the CLI verb for each step (scaffold, fmt,
+explain, admit, with fill specs as this section), is
+[authoring-for-agents.md](authoring-for-agents.md).

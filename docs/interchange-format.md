@@ -13,6 +13,11 @@ The format's identity lives in one module, `src/revl/interchange.py`, and its
 shape is published as a machine-readable JSON Schema at
 [`schema/revl-interchange-v1.schema.json`](../schema/revl-interchange-v1.schema.json).
 
+This is the linker's manifest, a snapshot of an already-compiled composition.
+A different sense of "manifest" shows up when a composition declares its own
+file list from inside a revl document (`manifest.rvl`); that document and the
+host bootstrap it needs are [composition-bootstrap.md](composition-bootstrap.md).
+
 ---
 
 ## The document
