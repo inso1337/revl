@@ -43,6 +43,13 @@ slice entries record then-current state, not present-tense product claims).
   not yet wired" tier limitation worth confirming against current tier support
   before it is trusted (usually accurate, but the first thing to re-check).
 
+**Naming convention (item 255).** The dogfood workload is named uniformly as
+**the lighthouse workload** across `docs/` and `dogfood/`. Public text does not
+carry absolute local paths or the workload's internal milestone numbers; a
+findings file cites its own finding id, not the workload's build scaffolding.
+Item 248 is the single anchor entry for the workload in `docs/v2.0-roadmap.md`.
+Forward rule: new text uses the lighthouse-workload framing only.
+
 Front-door files outside `docs/` were also refreshed this pass: `README.md`
 (stale `self_hosted: in_progress` badge replaced; 8 missing CLI verbs added;
 self-hosting status added; em-dash-free), `site/index.html`, `site/README.md`,

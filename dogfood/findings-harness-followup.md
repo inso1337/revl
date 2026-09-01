@@ -1,9 +1,9 @@
 # findings — harness follow-up (agent/harness-dogfood, second wave)
 
-The FR-1…FR-11 re-test: the harness was re-run against the merged features.
-Three per-tier follow-ups surfaced; each is a small, named emitter gap, not
-a design problem. The harness repo is `~/Projects/revl-harness`
-(commit `34fad68`), re-tested on `origin/devwip` @ `ccb2d4a`.
+The FR-1…FR-11 re-test: the lighthouse workload was re-run against the
+merged features. Three per-tier follow-ups surfaced; each is a small, named
+emitter gap, not a design problem. The workload (commit `34fad68`) was
+re-tested on `origin/devwip` @ `ccb2d4a`.
 
 ## 1. Refusal log
 

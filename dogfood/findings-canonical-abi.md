@@ -1,10 +1,9 @@
-# Findings — canonical ABI in the harness (item 41 slice-3, finding #26)
+# Findings — canonical ABI in the lighthouse workload (item 41 slice-3, finding #26)
 
-Probe: the revl-harness verification of item 41 slice-3 (`wasm/canonical.rvl`
-+ `tools/canonical_demo.py` + `docs/item-41-slice3-verification.md`, milestone
-31 in `~/Projects/revl-harness`). One finding: the slice's honest scope is
-"pure functions whose whole signature is Str" — and on the wasm tier that
-subset is smaller than the harness's own wire protocol needs.
+Probe: the lighthouse workload's verification of item 41 slice-3
+(`wasm/canonical.rvl` + `tools/canonical_demo.py`). One finding: the slice's
+honest scope is "pure functions whose whole signature is Str" — and on the
+wasm tier that subset is smaller than the workload's own wire protocol needs.
 
 ## Verified green (pinned by the harness)
 

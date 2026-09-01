@@ -1,8 +1,7 @@
-# findings — harness milestone 6 (agent/harness-m3, second wave)
+# findings — lighthouse workload: self-hosting admission gate (agent/harness-m3, second wave)
 
 Self-hosting admission gate (the roadmap's "glitch agents" lighthouse
-shape) + multi-session UI. Harness repo: `~/Projects/revl-harness`,
-commits `ad4403a` / `605b88e`.
+shape) + multi-session UI. Commits `ad4403a` / `605b88e`.
 
 ## 1. Refusal log
 
@@ -23,7 +22,7 @@ commits `ad4403a` / `605b88e`.
   same host Map, joined to the same effect accumulator so it reverts on
   unload.
 - **No `if` in provide bodies (again)** — the web dispatch wanted four
-  branches; G6 allows none. Verdict: `friction` (known since milestone 1)
+  branches; G6 allows none. Verdict: `friction` (known since early on)
   — the fix pattern is now automatic (ternary chain, `emit` as
   expression), but it is the single most-encountered friction in the
   whole harness. Every new author hits it.

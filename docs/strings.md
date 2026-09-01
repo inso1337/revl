@@ -170,8 +170,8 @@ every backend's existing string escaper already renders an embedded newline as
 that host's `\n` escape (py `repr`, ts/java `json.dumps`, go/rust/wasm
 hand-written escapers), emitting a valid single-line literal on all six tiers.
 Nothing downstream of the lexer changed. The motivating use is an agent
-authoring a real multi-line `.rvl` component from inside the harness without
-string concatenation (harness milestone 6).
+authoring a real multi-line `.rvl` component from inside the lighthouse
+workload without string concatenation.
 
 ### The float-rendering sub-decision — **ECMAScript `Number::toString`**
 

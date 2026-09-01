@@ -1,8 +1,8 @@
-# Findings — service-level canonical ABI (harness milestone 35, finding #28)
+# Findings — service-level canonical ABI (finding #28)
 
 Probe: the service-level slice of item 41 (`provide` methods cross the
 WASI-P2 canonical boundary; `wasm/service.rvl` + extended
-`tools/canonical_demo.py` in revl-harness). Verified green — the harness's
+`tools/canonical_demo.py` in the lighthouse workload). Verified green — the workload's
 `Msg` wire record, `List[Msg]`, and `Opt` all round-trip under wasmtime's
 component model. One cross-tier inconsistency surfaced along the way.
 

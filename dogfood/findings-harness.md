@@ -2,11 +2,10 @@
 
 The lighthouse workload: a deepseek-harness-like agent harness
 (model provider, tool registry, session store, agent loop) as a revl
-composition, built to run on all six tiers. The harness repo lives at
-`~/Projects/revl-harness` (separate from the language repo); this file is
-the language-side harvest. The full log with repros is
-`~/Projects/revl-harness/FEEDBACK.md` / `FEATURE-REQUESTS.md`; the roadmap
-item this feeds is **77**.
+composition, built to run on all six tiers. The lighthouse workload lives
+in a separate repo from the language repo; this file is the language-side
+harvest. The full log with repros lives in the workload's own FEEDBACK.md /
+FEATURE-REQUESTS.md; the roadmap item this feeds is **77**.
 
 ## 1. Refusal log
 

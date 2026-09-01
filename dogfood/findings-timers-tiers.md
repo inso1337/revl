@@ -1,4 +1,4 @@
-# Findings — timers on all tiers (harness milestone 36, findings #29 + #30)
+# Findings — timers on all tiers (findings #29 + #30)
 
 Probe: verifying the timer wave — item 102 (`advance` lifecycle statement,
 firing half in-language) and item 99 (timers on go/rust) — against the

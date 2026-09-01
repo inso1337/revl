@@ -1,6 +1,6 @@
 # findings — agent/map-value-type (persistent Map value type)
 
-Worktree: /Users/inso/revl-wt-map, branch agent/map-value-type off devwip.
+Branch: agent/map-value-type off devwip.
 Task: spec + checker + 5 emitters + tests for `Map[Str, V]` value type
 (docs/stdlib-2.0.md §Map). Appended continuously per PROTOCOL.md.
 
