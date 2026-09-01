@@ -3682,10 +3682,60 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         raise EmitError(exc.message) from None
 
 
-def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
-    """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
+def _emit_temporal(ir: dict) -> str:
+    """Dispatch to the Temporal emission target (roadmap item 253, §4).
+
+    `--target temporal` is a rendering MODE of this emitter, not a new tier. The
+    Temporal sink lives in the sibling `emit_temporal.py` and reuses this
+    module's machinery, so this module is registered as `sys.modules["emit"]`
+    and its directory put on the path before the import, whatever name the
+    caller loaded emit.py under (`revl_bundle_typescript_emit`, a per-test name,
+    or `__main__`)."""
+    import importlib
+    import os
+    import sys as _sys
+    import types
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in _sys.path:
+        _sys.path.insert(0, here)
+    # Point the canonical name `emit` at THIS module's namespace so the sink's
+    # `from emit import ...` shares one `EmitError` class and one renderer set.
+    # emit.py is loaded under several names (`revl_bundle_typescript_emit` for
+    # the bundle, a per-test name, `__main__` for the standalone CLI) and is not
+    # always registered in sys.modules under its own `__name__`, so bind a proxy
+    # module whose namespace is this one — unless a real `emit` module already
+    # carries this exact `EmitError` (the standalone/test load), which we keep.
+    existing = _sys.modules.get("emit")
+    if existing is None or getattr(existing, "EmitError", None) is not EmitError:
+        proxy = types.ModuleType("emit")
+        proxy.__dict__.update(globals())
+        _sys.modules["emit"] = proxy
+    emit_temporal = importlib.import_module("emit_temporal")
+    return emit_temporal.emit_temporal(ir)
+
+
+def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
+         target: str = "cordis") -> str:
+    """Emit one TypeScript module for an IR document (docs/backend-ir.md).
+
+    `target` selects the RENDERING of this emitter (roadmap item 253 §4), a
+    dimension orthogonal to `--backend`: `"cordis"` (the default) is this
+    backend's native cordis-v4 runtime, byte-identical to before item 253;
+    `"temporal"` renders the same IR walk against the Temporal TS SDK. A target
+    is NOT a new tier — nothing new to boot or place."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be an object")
+    if target == "temporal":
+        # The Temporal target owns its own closed-allowlist refusal (a derived
+        # allowlist, not the cordis tier's open blocklist), so it does not run
+        # the cordis refusals below; a hole/fault-test still can't reach it
+        # because the frontend never admits one into a mappable component.
+        return _emit_temporal(ir)
+    if target != "cordis":
+        raise EmitError(
+            f"unknown emit target {target!r}: this backend renders `cordis` "
+            f"(default) or `temporal` (roadmap item 253)")
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
 
