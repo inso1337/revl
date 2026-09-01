@@ -23,10 +23,16 @@ lake env lean CheckAxioms.lean > .axioms.out 2>&1 || { cat .axioms.out; exit 1; 
 cat .axioms.out
 python3 scripts/axioms_gate.py \
   RevL.G1.declared_only_access \
+  RevL.G2.linkOK_provision_disjoint \
+  RevL.G2.linkOK_requires_closed \
+  RevL.G3.depPath_rank_lt \
+  RevL.G3.no_dependency_cycles \
   RevL.G4.inverse_or_emit \
   RevL.G5.teardown_registers_nothing \
   RevL.G6.confinement \
   RevL.G7.teardown_replays_all \
   RevL.G7.teardown_only_witnessed \
-  RevL.G7.teardown_eq_reversed_inverses < .axioms.out
+  RevL.G7.teardown_eq_reversed_inverses \
+  RevL.G8.boundary_enumerates_emissions \
+  RevL.G8.boundary_only_declared < .axioms.out
 python3 harness/diff_corpus.py
