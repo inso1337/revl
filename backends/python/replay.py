@@ -81,6 +81,39 @@ KIND_OPAQUE = "opaque"            # a disposer the recorder cannot describe
 KINDS = (KIND_EFFECT, KIND_PROVISION, KIND_EMISSION, KIND_COMPENSATION,
          KIND_BOUNDARY, KIND_HINGE, KIND_OPAQUE)
 
+#: item 250 (session branching), Decision 2: the capability tokens a witnessed
+#: inverse may declare and still be provably HOST-CONFINED — its rewind crosses
+#: no boundary, so the scope-gated fork rewind may run it. `fs` is the witnessed
+#: filesystem authority (a reach inside `REVL_FS_WORKSPACE`). Every other token
+#: (net/ipc/mail/http/db/...) names an OUTBOUND crossing, so an inverse whose
+#: scope includes it is enumerated as `wouldCrossOnRewind` and NEVER run — the
+#: headline correctness point that keeps the fork rewind from itself PUT-ing a
+#: preimage to a remote endpoint mid-fork (the CRITICAL the review found).
+HOST_CONFINED_CAPS = frozenset({"fs"})
+
+
+def scope_host_confined(scope: Optional[dict]) -> bool:
+    """Whether an inverse's recorded capability SCOPE is provably host-confined
+    (item 250, Decision 2). The fork rewind runs an inverse ONLY when this is
+    true; anything else is enumerated, never fired.
+
+    `None` is "no declared boundary-crossing capability" — an ordinary in-process
+    effect, host-confined by construction — so every pre-250 step reads confined
+    and the default rewind is byte-identical. A scope with an explicit `confined`
+    (item 373 reach) or `sandbox` (item 411 envelope) flag is host-confined. A
+    scope carrying `caps` is confined ONLY when every token is in
+    :data:`HOST_CONFINED_CAPS`; a single outbound token (network/IPC/...) makes it
+    cross, and an UNKNOWN token also reads as crossing (fail-safe: the honest
+    direction is to enumerate, never to run)."""
+    if scope is None:
+        return True
+    if scope.get("sandbox") or scope.get("confined"):
+        return True
+    caps = tuple(scope.get("caps") or ())
+    if not caps:
+        return True
+    return all(cap in HOST_CONFINED_CAPS for cap in caps)
+
 #: The single sentence this module is allowed to claim after a step-back.
 #: Deliberately not "state was restored" — see docs/replay.md §"What this
 #: cannot promise".
@@ -178,7 +211,7 @@ class Step:
 
     __slots__ = ("index", "kind", "label", "effect", "file", "lineno", "source",
                  "detail", "origin", "undo", "undone", "undone_by", "crossed",
-                 "compensation", "note", "error")
+                 "compensation", "note", "error", "scope", "undo_idempotent")
 
     def __init__(self, index: int, kind: str, label: str, effect: Optional[str],
                  origin: dict, file=None, lineno=None, source=None,
@@ -199,6 +232,22 @@ class Step:
         self.crossed = False          # an emission the unwind stepped over
         self.compensation: Optional[int] = None  # index of its compensation
         self.error: Optional[str] = None
+        # item 250 (session branching): the recorded CAPABILITY SCOPE of a
+        # boundary-crossing inverse, the axis the scope-gated fork rewind keys on
+        # (docs/design/250-session-branching.md, Decision 2). A dict of the shape
+        # `{"caps": (token, ...), "confined": bool, "sandbox": bool}` or None. None
+        # means "no declared boundary-crossing capability" — an in-process effect,
+        # host-confined by construction — so every pre-250 step reads host-confined
+        # and the default rewind is byte-identical. Set by the recorder/runtime (or
+        # a test) after `record_yield` classifies the step; the emitter is
+        # untouched, so a step carries a scope only when one is threaded in.
+        self.scope: Optional[dict] = None
+        # item 250 / item 309: whether the author DECLARED this inverse
+        # idempotent-total. None = not declared (every pre-309 step); True =
+        # declared idempotent (a mid-fork-crash re-run is a no-op); False =
+        # declared non-idempotent, which the fork REFUSES to rewind past (Decision
+        # 5). None never triggers the refusal, so byte-identity holds.
+        self.undo_idempotent: Optional[bool] = None
 
     # -- properties --------------------------------------------------------
 
@@ -241,6 +290,10 @@ class Step:
             out["note"] = self.note
         if self.error:
             out["error"] = self.error
+        if self.scope is not None:
+            out["scope"] = self.scope
+        if self.undo_idempotent is not None:
+            out["undoIdempotent"] = self.undo_idempotent
         return out
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
@@ -586,7 +639,92 @@ class Timeline:
 
     # -- stepping back -----------------------------------------------------
 
-    async def step_back(self, k: int, force: bool = False) -> dict:
+    def annotate_step(self, index: int, *, scope: Optional[dict] = None,
+                      undo_idempotent: Optional[bool] = None) -> "Step":
+        """Attach the fork-relevant metadata (item 250) to an already-recorded
+        step: its declared capability ``scope`` (Decision 2) and/or its
+        ``undo_idempotent`` classification (item 309, Decision 5).
+
+        Additive and out-of-band: ``record_yield`` classifies a step first; the
+        recorder/runtime (or a test constructing a witnessed timeline) then names
+        the scope here. The emitter is untouched, so a step carries a scope only
+        when one is threaded in, and a step with no scope reads host-confined."""
+        step = self.steps[self._bound(index)]
+        if scope is not None:
+            step.scope = scope
+        if undo_idempotent is not None:
+            step.undo_idempotent = undo_idempotent
+        return step
+
+    def _classify_tail(self, k: int) -> dict:
+        """Partition the tail (steps > ``k``) into buckets that are mutually
+        disjoint and provably TOTAL over all seven kinds (item 250, Decision 3).
+
+        Read-only — it runs nothing, so both the enumerating ``partition_tail``
+        and the performing ``_step_back_scoped`` share one classification. Steps
+        are ordered newest-first (LIFO) within each bucket, the order a teardown
+        (and the rewind) unwinds in."""
+        buckets: dict = {name: [] for name in (
+            "effects", "provisions", "crossed", "compensated",
+            "wouldCross", "unrestored")}
+        for step in reversed([s for s in self.steps if s.index > k]):
+            kind = step.kind
+            if kind == KIND_EMISSION:
+                (buckets["compensated"] if step.compensation is not None
+                 else buckets["crossed"]).append(step)
+            elif kind == KIND_COMPENSATION:
+                # a compensation is a second boundary crossing by its own recorder
+                # note — outbound by definition, so it is always enumerated, never
+                # fired, whatever its referent (Decision 2).
+                buckets["wouldCross"].append(step)
+            elif kind == KIND_PROVISION:
+                # an R5 in-process withdrawal — host-confined by construction.
+                buckets["provisions"].append(step)
+            elif kind == KIND_EFFECT:
+                (buckets["effects"] if scope_host_confined(step.scope)
+                 else buckets["wouldCross"]).append(step)
+            elif kind == KIND_OPAQUE:
+                buckets["unrestored"].append(step)
+            elif kind in (KIND_BOUNDARY, KIND_HINGE):
+                continue                       # provably empty: no undo, no crossing
+            else:
+                buckets["unrestored"].append(step)   # a future kind stays covered
+        return buckets
+
+    def partition_tail(self, k: int) -> dict:
+        """The honest fork partition of the tail as DATA, running nothing (item
+        250, Decision 3). This is what ``Session.fork`` enumerates and hashes
+        before any rewind touches the workspace."""
+        k = self._bound(k)
+        buckets = self._classify_tail(k)
+        would = [_would_cross_entry(s) for s in buckets["wouldCross"]]
+        return {
+            "component": self.component,
+            "at": k,
+            "atLabel": self.steps[k].label if k >= 0 else "(before activation)",
+            "inversesRan": [_scoped_entry(s) for s in buckets["effects"]],
+            "provisionsWithdrawn": [_scoped_entry(s) for s in buckets["provisions"]],
+            "emissionsCrossed": [_emission_entry(s) for s in buckets["crossed"]],
+            "emissionsCompensated": [_emission_entry(s) for s in buckets["compensated"]],
+            "wouldCrossOnRewind": would,
+            "unrestored": [_unrestored_entry(s) for s in buckets["unrestored"]],
+        }
+
+    def fork_hazards(self, k: int) -> dict:
+        """The Slice-1 fork REFUSAL inputs (item 250, Decision 3/5): the tail's
+        `KIND_OPAQUE` steps (the recorder cannot restore them) and any
+        host-confined inverse the rewind WOULD run that is declared
+        non-idempotent (a mid-fork-crash re-run would double-apply it)."""
+        k = self._bound(k)
+        buckets = self._classify_tail(k)
+        opaque = [_unrestored_entry(s) for s in buckets["unrestored"]
+                  if s.kind == KIND_OPAQUE]
+        non_idempotent = [_scoped_entry(s) for s in buckets["effects"]
+                          if s.undo_idempotent is False]
+        return {"opaque": opaque, "nonIdempotent": non_idempotent}
+
+    async def step_back(self, k: int, force: bool = False,
+                        compensate: bool = True) -> dict:
         """Unwind to step ``k`` by running inverses from the top down to ``k``.
 
         The component is left **live**, not torn down: nothing here disposes a
@@ -594,7 +732,19 @@ class Timeline:
 
         Refuses (``IrreversibleStep``) if the range contains an emission with
         no compensation, unless ``force=True``.
-        """
+
+        ``compensate`` (item 250, Decision 2) selects the rewind mode. The
+        default ``True`` is the pre-250 teardown-style unwind, BYTE-IDENTICAL for
+        every existing caller and golden: it runs compensations and every
+        non-emission inverse regardless of scope. ``compensate=False`` is the
+        non-emitting SCOPE-GATED fork rewind: it runs an inverse ONLY when its
+        recorded capability scope is provably host-confined, enumerates every
+        outbound-scoped inverse and every compensation into ``wouldCrossOnRewind``
+        without firing it, and never raises (the crossed set is enumerated, not
+        refused). It keys the run/skip decision on recorded SCOPE, never on step
+        KIND — the correction the adversarial review forced."""
+        if not compensate:
+            return await self._step_back_scoped(k)
         k = self._bound(k)
         tail = [s for s in self.steps if s.index > k]
         blocking = [s for s in tail
@@ -659,6 +809,77 @@ class Timeline:
                 "Those effects are still out in the world."} if crossed else {}),
         }
 
+    async def _step_back_scoped(self, k: int) -> dict:
+        """The non-emitting, SCOPE-GATED fork rewind (item 250, Decision 2/3).
+
+        Walks the tail newest-first (LIFO, G7) exactly as the default unwind
+        does, but runs an inverse ONLY when its recorded capability scope is
+        provably host-confined; every outbound-scoped inverse and every
+        compensation is enumerated in ``wouldCrossOnRewind`` and NEVER fired, so
+        the rewind itself crosses no boundary. Emissions in the span are
+        enumerated (crossed / compensated), `KIND_OPAQUE` and any future kind land
+        in ``unrestored``, and `KIND_BOUNDARY`/`KIND_HINGE` are provably empty. It
+        never raises: a fork enumerates the residue, it does not refuse the span.
+        """
+        k = self._bound(k)
+        ran, provisions, crossed, offset, would, unrestored, failed = (
+            [], [], [], [], [], [], [])
+        for step in reversed([s for s in self.steps if s.index > k]):
+            kind = step.kind
+            if kind == KIND_EMISSION:
+                step.crossed = True
+                (offset if step.compensation is not None else crossed).append(
+                    _emission_entry(step))
+                continue
+            if kind == KIND_COMPENSATION:
+                would.append(_would_cross_entry(step))     # outbound by definition
+                continue
+            if kind in (KIND_BOUNDARY, KIND_HINGE):
+                continue                                   # provably empty
+            if kind == KIND_OPAQUE:
+                unrestored.append(_unrestored_entry(step))
+                continue
+            if kind == KIND_PROVISION:
+                host_confined = True                       # R5, host-confined
+            elif kind == KIND_EFFECT:
+                host_confined = scope_host_confined(step.scope)
+            else:
+                unrestored.append(_unrestored_entry(step))  # a future kind
+                continue
+            if not host_confined:
+                would.append(_would_cross_entry(step))
+                continue
+            if step.undo is None or step.undone:
+                continue                                   # nothing left to run
+            try:
+                result = step.undo(_by="fork")
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001 — an unwind reports, never stops
+                step.error = f"{type(exc).__name__}: {exc}"
+                failed.append(_scoped_entry(step))
+                continue
+            (provisions if kind == KIND_PROVISION else ran).append(
+                _scoped_entry(step))
+        return {
+            "component": self.component,
+            "to": k,
+            "toLabel": self.steps[k].label if k >= 0 else "(before activation)",
+            "compensate": False,
+            "inversesRan": ran,
+            "provisionsWithdrawn": provisions,
+            "emissionsCrossed": crossed,
+            "emissionsCompensated": offset,
+            "wouldCrossOnRewind": would,
+            "unrestored": unrestored,
+            "failed": failed,
+            "live": True,
+            "guarantee": GUARANTEE,
+            **({"warning_emissions":
+                f"{len(crossed)} emission(s) were crossed with no compensation. "
+                "Those effects are still out in the world."} if crossed else {}),
+        }
+
     # -- replaying forward -------------------------------------------------
 
     def forward_plan(self, k: int) -> dict:
@@ -710,6 +931,56 @@ class Timeline:
 def _keys(steps: list) -> list:
     return sorted(k for k in ((s.detail or {}).get("key") for s in steps)
                   if k is not None)
+
+
+# ---------------------------------------------------------------------------
+# fork-partition entry shapes (item 250, Decision 3). Compact and stable — the
+# `compensate=False` report is pinned by a golden, so these are the schema.
+# ---------------------------------------------------------------------------
+
+
+def _scoped_entry(step: Step) -> dict:
+    """A rewound host-confined inverse (`inversesRan` / `provisionsWithdrawn`)."""
+    return {"index": step.index, "kind": step.kind, "label": step.label,
+            "site": step.site, "scope": step.scope}
+
+
+def _emission_entry(step: Step) -> dict:
+    """A crossed emission (`emissionsCrossed` / `emissionsCompensated`), verbatim
+    from its recorded detail so the residue names exactly what left the process.
+    A compensated crossing additionally carries the (unfired) compensation."""
+    detail = step.detail or {}
+    entry = {
+        "index": step.index,
+        "key": detail.get("key"),
+        "method": detail.get("method"),
+        "service": detail.get("service"),
+        "args": detail.get("args"),
+        "site": step.site,
+    }
+    if step.compensation is not None:
+        entry["compensation"] = step.compensation   # a step index, unfired
+    return entry
+
+
+def _would_cross_entry(step: Step) -> dict:
+    """An inverse the rewind refuses to fire because its scope crosses the
+    boundary (`wouldCrossOnRewind`): an outbound-scoped witnessed inverse or a
+    compensation. A compensation also carries `for` (its referent emission
+    index), which surfaces an ORPHAN compensation whose referent lies below k."""
+    entry = {"index": step.index, "kind": step.kind, "label": step.label,
+             "scope": step.scope, "site": step.site}
+    if step.kind == KIND_COMPENSATION:
+        entry["for"] = (step.detail or {}).get("for")
+    return entry
+
+
+def _unrestored_entry(step: Step) -> dict:
+    """A step the recorder cannot restore (`unrestored`): `KIND_OPAQUE` with its
+    recorded repr, plus any future kind (totality). Slice 1 refuses a fork whose
+    tail holds a `KIND_OPAQUE` step, so this stays present for future kinds."""
+    return {"index": step.index, "kind": step.kind, "label": step.label,
+            "repr": (step.detail or {}).get("repr")}
 
 
 def _lbl(effect_label: Optional[str], what: str) -> str:
@@ -1649,6 +1920,38 @@ class WriteAheadLog:
         rollback. Writing goes through the same fsync'd append discipline as every
         other record."""
         record = {"record": "discharge", "discharged": list(discharged)}
+        self._write(record)
+        return record
+
+    def record_fork_begin(self, *, parent: str, at: int,
+                          crossed: list, would_cross: list) -> dict:
+        """Append ``fork-begin`` to the PARENT WAL BEFORE the rewind touches the
+        workspace (item 250, Decision 5). It makes the irreversible residue (the
+        crossed set) and the enumerated unfired inverses (the would-cross set)
+        durable, so a crash mid-fork does not silently lose them, and it opens the
+        recoverable window: a WAL with ``fork-begin`` but no ``fork-complete`` is a
+        crashed mid-fork the parent rolls back over. Consumes no seq — it names a
+        lineage fact, it is not an effect."""
+        record = {"record": "fork-begin", "parent": parent, "at": at,
+                  "crossed": list(crossed), "wouldCross": list(would_cross)}
+        self._write(record)
+        return record
+
+    def record_fork_complete(self, *, branch: str) -> dict:
+        """Append ``fork-complete`` to the parent WAL AFTER the branch snapshot is
+        restored (item 250, Decision 5), naming the minted branch session. Its
+        presence closes the mid-fork window: the rewind finished and the branch is
+        the live continuation."""
+        record = {"record": "fork-complete", "branch": branch}
+        self._write(record)
+        return record
+
+    def record_fork_frozen(self, *, parent: str, at: int) -> dict:
+        """Append ``fork-frozen`` to the parent WAL (item 250, Decision 4/5): the
+        parent is RETIRED at step ``at``, a terminal non-live state. ``recover``
+        reads this and treats the parent as retired at k, never re-admitting it as
+        a live continuation (the freeze `fork_confirm` performed, made durable)."""
+        record = {"record": "fork-frozen", "parent": parent, "at": at}
         self._write(record)
         return record
 
