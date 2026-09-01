@@ -1047,8 +1047,18 @@ class Session:
         So assert, after the load, that the successor is HEALTHY:
 
           * no successor fiber is left FAILED or PENDING, and
-          * every key the successor declares it provides actually resolves to a
-            live provider (`driver.resolved_keys()`, run.py:807).
+          * every key ROOT is responsible for providing resolves to a live
+            provider (`driver.resolved_keys()`, run.py:807).
+
+        Part 2 is scoped to ROOT-provided keys and EXCLUDES keys provided by
+        TEMPLATE components (`manifest.templates`, roadmap item 10): a template's
+        provisions come up PER-INSTANCE through the dynamic instance layer during
+        `_reconcile_instances`, which `swap` runs AFTER this gate — so a
+        template-provided key is legitimately absent from `driver.resolved_keys()`
+        here and is not a ROOT provision this gate can judge. (A template
+        component gets no top-level fiber of its own, so Part 1 never sees it; a
+        genuinely broken instance migration is caught by the state-compat gate in
+        `_reconcile_instances`, not here.)
 
         On any failure, raise `ActivationError` so the enclosing `swap` catches it
         in its `_activation_error()` branch and routes to `_abort_swap` — reverting
@@ -1072,9 +1082,14 @@ class Session:
                     f"activate (FAILED) or has an unmet requirement (PENDING). "
                     f"item 372 makes both non-raising, so item 334's health gate "
                     f"rejects them here")
-        # 2) every declared provided key must resolve to a live provider.
+        # 2) every ROOT-provided key must resolve to a live provider. Skip
+        #    template components — their provisions resolve per-instance in
+        #    `_reconcile_instances` (which runs after this gate), never at ROOT.
+        templates = set((ir.get("manifest") or {}).get("templates") or [])
         declared: set[str] = set()
         for comp in (ir.get("components") or []):
+            if comp.get("name") in templates:
+                continue
             declared.update((comp.get("provides") or {}).keys())
         missing = sorted(declared - driver.resolved_keys())
         if missing:

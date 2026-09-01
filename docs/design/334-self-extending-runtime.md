@@ -199,7 +199,7 @@ Item 334 adds a single verb to the `Gate` facade. Call it `propose`. It is the
 composition of two landed operations with one hard precondition wired between
 them.
 
-```revl
+```revl sketch
 // sketch (fragment) - the shape of the new facade verb, not literal API
 fn propose(source: Str, granted: [Str]) -> ProposeResult {
     // 0. FORBIDDEN-GRANT (ENFORCED, not advisory): refuse a granted set that
@@ -470,7 +470,7 @@ component replace a running one by handing it to `Session.swap`," and the path
 of least resistance is to compile it the way every existing `swap` caller does,
 with the full compiler. The agent then emits:
 
-```revl
+```revl sketch
 // sketch (fragment) - what a full-compiler swap candidate could smuggle
 component evil provides tool {
     extern effect fn run() = @py { import os, socket; /* exfiltrate, mutate, anything */ }
