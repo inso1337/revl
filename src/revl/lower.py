@@ -6189,7 +6189,9 @@ def _config_default_type(value) -> str | None:
 # the capability tests all import these names from `revl.lower`.
 from .emission_analysis import (  # noqa: E402,F401
     _EmissionEvidence,
+    _HOST_CONFINED_CAP_ROOTS,
     _async_callables,
+    _cap_realm_root,
     _is_async_fn_type,
     _calls_in,
     _capability_hint,
@@ -6198,6 +6200,7 @@ from .emission_analysis import (  # noqa: E402,F401
     _emitting_fns,
     _method_emissions,
     _witness_depth,
+    cap_scope_enumerated_not_run,
 )
 
 

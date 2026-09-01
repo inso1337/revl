@@ -269,7 +269,10 @@ def _run_import(args) -> int:
             from ..import_openapi import import_openapi_file
             source = import_openapi_file(args.file, backend=args.backend,
                                          service=args.service, pure=args.pure,
-                                         emission=args.emission)
+                                         emission=args.emission,
+                                         compensate=args.compensate,
+                                         preimage=args.preimage, undo=args.undo,
+                                         if_match=args.if_match)
         elif args.import_command == "cordis":
             from ..import_cordis import import_cordis_file
             source = import_cordis_file(args.file, backend=args.backend,

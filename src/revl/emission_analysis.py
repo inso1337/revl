@@ -34,6 +34,54 @@ def _is_async_fn_type(type_name: str | None) -> bool:
     return parse_type(args[-1])[0] == "Async"
 
 
+# item 250 (session branching, fork-rewind review) — the cap-scope discriminator
+# a fork rewind keys on. A fork replays a reversal (a witnessed `undo` or an
+# item-247 `compensate`) to put the workspace back into an earlier step's state;
+# a HOST-CONFINED reversal is safe to run speculatively per explored branch, but
+# a reversal that crosses the NETWORK (or IPC, or any outbound boundary) would
+# issue a real remote effect per branch — exactly the external residue item 245
+# exists to prevent. So the rewind RUNS a reversal only when every cap in its
+# scope is host-confined, and ENUMERATES-NOT-RUNS it otherwise.
+#
+# The quantifier is the one item 254's HIGH 2 pins precisely: a reversal is
+# enumerated-not-run IFF its scope contains ANY non-host-confined cap. A single
+# net cap TAINTS the whole reversal, so a mixed `[fs, net.x]` scope is never
+# speculatively fired even though its `fs` component alone would have run. This
+# is deliberately fail-toward-enumerate: an unrecognised realm root is treated
+# as non-host-confined, so a new outbound boundary can never silently leak into
+# a speculative rewind before this set is taught about it.
+#
+# Item 250 is not itself landed; this ships the discriminator (and item 254's
+# tests pin it) so the contract is ready and cannot be relaxed underneath 250.
+_HOST_CONFINED_CAP_ROOTS = frozenset({"fs"})
+
+
+def _cap_realm_root(token: str) -> str:
+    """The realm root (first dotted segment) of a capability token, with any
+    item-294 parameter list (`fs.write(path="…")`) stripped first. `net.api` ->
+    `net`, `fs` -> `fs`, `fs.write(path="/d")` -> `fs`."""
+    return token.split("(", 1)[0].split(".", 1)[0]
+
+
+def cap_scope_enumerated_not_run(caps) -> bool:
+    """The item-250 fork-rewind predicate (item 254 HIGH 2): a reversal whose
+    capability scope is `caps` is ENUMERATED-not-run by a fork rewind iff any
+    cap in the scope is not host-confined.
+
+        enumerated_not_run(scope)  <=>  exists cap in scope: root(cap) not in
+                                        host-confined roots
+
+    A pure `[fs]` scope runs (host-confined); a `[net.*]` scope is
+    enumerated-not-run; a mixed `[fs, net.x]` scope is enumerated-not-run because
+    its `net.x` component taints the whole reversal. An empty scope is a bare,
+    name-as-capability crossing whose boundary cannot be proven host-confined, so
+    it is enumerated-not-run too (fail-toward-enumerate)."""
+    caps = tuple(caps)
+    if not caps:
+        return True
+    return any(_cap_realm_root(c) not in _HOST_CONFINED_CAP_ROOTS for c in caps)
+
+
 def _calls_in(node, found: set, values: set | None = None,
               stop_async_arrows: bool = False) -> None:
     """Function/extern names a lowered node calls. Component bodies lower a
