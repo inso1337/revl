@@ -1,0 +1,3 @@
+pub fn probe() -> List[Str] { return [] }
+
+test "cross_tier_probe" { assert probe() == [] }

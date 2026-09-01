@@ -1,1 +1,1 @@
-extern acquire fn listen(port: Int) -> Int = @py { return port }
+extern acquire fn listen(port: Int) -> Socket = @py { return port }

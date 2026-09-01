@@ -186,11 +186,15 @@ Unclassified → no compile. The inverse/compensation slots sit on the
 *declaration*, between the return type and the first host body:
 
 ```revl
-extern pure fn close_ledger(h: Int) = @py { pass }
+extern pure fn close_ledger(h: LedgerHandle) = @py { pass }
 
-extern acquire fn open_ledger(path: Str) -> Int undo close_ledger(1)
+extern acquire fn open_ledger(path: Str) -> LedgerHandle undo close_ledger(result)
   = @py { return abs(hash(path)) % 100000 }
 ```
+
+An `acquire` return is a NOMINAL OPAQUE HANDLE type (`LedgerHandle`), never a
+bare primitive: the handle carries the identity the ownership checks track
+(item 308). The `undo` names the inverse over the implicit `result` binding.
 
 | classification | `undo <expr>` | `compensate <expr>` |
 |---|---|---|
@@ -276,20 +280,25 @@ returns nothing).
 
 `python -m revl mcp serve` exposes the compiler over MCP, and the loop it
 enables is the point: a draft component never has to touch the filesystem. This
-is your primary interface. The complete advertised verb set (from
-`src/revl/mcp/server.py` and `query_tools.py`), grouped by what you reach for:
+is your primary interface. The complete advertised verb set (36 verbs, from
+`src/revl/mcp/server.py` and `query_tools.py`) is grouped below by what you
+reach for; each verb's exact inputs and outputs are in
+[mcp-reference.md](mcp-reference.md).
 
 | verb(s) | use | detail |
 |---|---|---|
-| `revl_check` | does this compile? structured diagnostics **and open holes' `fillSpec`** if not | [mcp-bridge.md](mcp-bridge.md) |
-| `revl_admit` | may it enter **this running composition**? | [mcp-bridge.md](mcp-bridge.md) |
+| `revl_check` | does this compile? structured diagnostics — code, guarantee, and the `fix` rewrite — **and open holes' `fillSpec`** if not | [mcp-reference.md](mcp-reference.md#revl_check) |
+| `revl_admit` | may it enter **this running composition**? | [mcp-reference.md](mcp-reference.md#revl_admit) |
 | `revl_plan` | and then what? the delta a swap would produce, without applying it | [plan.md](plan.md) |
+| `revl_ship` | check → admit → plan in one early-exit call; `apply:true` also swaps | [token-economy.md](token-economy.md) |
 | `revl_resolve` | is there already an admission-compatible component to **import** instead of regenerating? | [registry.md](registry.md) |
-| `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-bridge.md](mcp-bridge.md) |
-| `revl_load` · `revl_call` · `revl_state` | boot in memory, invoke a provided operation, inspect what is loaded | [mcp-bridge.md](mcp-bridge.md) |
-| `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor), you send the change, not the file | [mcp-bridge.md](mcp-bridge.md) |
-| `revl_swap` · `revl_rollback` · `revl_unload` | replace a generation, undo that, tear down + prove no residue (R4) | [mcp-bridge.md](mcp-bridge.md) |
-| `revl_gauntlet` | grade a candidate, a verdict dossier (proved / tested / claimed) from an isolated battery run | [gauntlet.md](gauntlet.md) |
+| `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-reference.md](mcp-reference.md#revl_audit) |
+| `revl_load` · `revl_call` · `revl_state` | boot in memory, invoke a provided operation, inspect what is loaded | [mcp-reference.md](mcp-reference.md#revl_load) |
+| `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor), you send the change, not the file | [mcp-reference.md](mcp-reference.md#revl_edit) |
+| `revl_swap` · `revl_rollback` · `revl_undo` · `revl_unload` | replace a generation, undo the last swap, return to an earlier generation through the gate, tear down + prove no residue (R4) | [mcp-reference.md](mcp-reference.md#revl_swap) · [generation-history.md](generation-history.md) |
+| `revl_gauntlet` · `revl_quarantine` | grade a candidate (proved / tested / claimed), or prove an untrusted one in the wasm sandbox | [gauntlet.md](gauntlet.md) · [quarantine-tier.md](quarantine-tier.md) |
+| `revl_repair` · `revl_canary` | run the repair loop within policy, or canary a successor onto one realm slice and decide on evidence | [repair-loop.md](repair-loop.md) · [verified-canary.md](verified-canary.md) |
+| `revl_lease` | claim/renew/release a TTL-bound lease on a component so co-agents do not replace it under you | [component-leases.md](component-leases.md) |
 | `revl_snapshot` · `revl_restore` | capture / re-admit your evolved composition across a restart | [persistence.md](persistence.md) |
 | `revl_timeline` · `revl_inspect_step` · `revl_step_back` · `revl_replay_bisect` · `revl_replay_forward` | walk, inspect, unwind, binary-search and re-run a recorded accumulator | [replay.md](replay.md) |
 | `revl_query_{emitters,withdraw,dependents,reach,drift}` · `revl_live_query` | who emits to X? what breaks if I withdraw C? over source, or against the live session | [queries.md](queries.md) |
@@ -298,7 +307,16 @@ is your primary interface. The complete advertised verb set (from
 Two properties worth relying on: a **rejected candidate cannot deploy** (the
 compile runs before the transition, so the running system keeps serving), and
 `revl_unload` **proves** the component left nothing behind before you commit
-it to disk. See [docs/mcp-bridge.md](mcp-bridge.md).
+it to disk. And every rejection carries its `fix` beside the guarantee, so the
+diagnostic tells you the rewrite, not just the rule. See
+[mcp-reference.md](mcp-reference.md) for the full verb set and
+[docs/mcp-bridge.md](mcp-bridge.md) for the shapes.
+
+MCP is your interface, but a human editing the same sources gets the same
+checker through a language server. `python -m revl.lsp` speaks LSP over stdio:
+diagnostics from the checker, hover from the diagnostic explanations, and
+go-to-definition from the resolver (`src/revl/lsp/`). Same admission gate, a
+different transport.
 
 ### The modern agent loop, scaffold → fill → resolve → admit
 

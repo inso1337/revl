@@ -6,5 +6,5 @@
 //   `ghost_fn` is not declared — the `undo` slot of extern `open_ledger`
 //   may only call a declared fn, extern, or host builtin
 
-extern acquire fn open_ledger(path: Str) -> Int undo ghost_fn(1)
+extern acquire fn open_ledger(path: Str) -> LedgerHandle undo ghost_fn(1)
   = @py { return abs(hash(path)) % 100000 }

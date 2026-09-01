@@ -247,33 +247,63 @@ the fix ([DESIGN.md](../DESIGN.md) §4):
 
 The complete subcommand index, every command wired in `src/revl/__main__.py`,
 one line each with the doc that details it. The flags and worked examples follow
-below.
+below; the exhaustive per-command flag reference is
+[commands-reference.md](commands-reference.md), and the MCP verbs are in
+[mcp-reference.md](mcp-reference.md).
 
 | command | what it does | docs |
 |---|---|---|
-| `revl compile FILES` | parse → check → link → IR (`-o OUT`, `--json-diagnostics`) | [backend-ir-v1.md](backend-ir-v1.md) |
-| `revl explain CODE` | what a diagnostic code guarantees and how to fix it | [why-traces.md](why-traces.md) |
+| `revl compile FILES` | parse → check → link → IR (`-o OUT`, `--json-diagnostics`) | [commands-reference.md](commands-reference.md#revl-compile) · [backend-ir-v1.md](backend-ir-v1.md) |
+| `revl explain CODE` | what a diagnostic code guarantees and how to fix it | [commands-reference.md](commands-reference.md#revl-explain) · [why-traces.md](why-traces.md) |
+| `revl doctor` | diagnose each backend tier, runtime and dependency (OK/WARN/MISSING + version), then smoke-test every available tier (`--json`, `--no-smoke`, `--smoke-timeout`) | [commands-reference.md](commands-reference.md#revl-doctor) |
+| `revl scaffold --service NAME` | generate a typed, holed composition skeleton from a spec (`--requires`/`--capabilities`/`--method`/`--emits`/`--config`, `-o`, `--json`) | [scaffold.md](scaffold.md) |
 | `revl audit FILES` | manifest + G8 boundary surface (`--json`); `--diff PREV.json` is the authority-drift gate, `--accept`/`--accept-all` acknowledge added crossings | [interchange-format.md](interchange-format.md) · [audit-diff.md](audit-diff.md) |
+| `revl diff PREV CURR` | semantic composition diff: components added/removed/changed, emissions gained/lost, provide/require edges, the PR-review tool for agent-generated compositions | [revl-diff.md](revl-diff.md) |
+| `revl version PREV CURR` | derive the required semver bump from the interface diff against a previous composition | [derived-versioning.md](derived-versioning.md) |
+| `revl contract FILES` | federated contracts between sovereign compositions: export a consumer surface, or check a provider against a pinned one | [federation.md](federation.md) |
 | `revl erase-report FILES --realm R` | right-to-erasure evidence for one realm (`--json`, `--no-residue-proof`) | [erase-report.md](erase-report.md) |
 | `revl plan FILES` | dry run for admission (`--manifest RUNNING.json`, `--replacing`); `-o change.plan` serializes an executable plan | [plan.md](plan.md) |
 | `revl apply change.plan` | execute a plan: drift-refuse, verify each step, roll back on failure (`--against RUNNING.json`) | [apply.md](apply.md) |
+| `revl undo --history H` | operator undo: replay a generation history and return to an earlier generation through the gate | [generation-history.md](generation-history.md) |
 | `revl query emits-to\|withdraw\|depends-on\|reaches\|drift TARGET FILES` | ask the composition a static question (`drift` takes `--gains`/`--loses`) | [queries.md](queries.md) |
 | `revl query emitted-between --timeline F --from X --to Y` | which emissions crossed between two steps of a recorded run | [queries.md](queries.md) |
 | `revl query touched COMPONENT` | everything a component touched (`--trace` lifecycle JSONL, `--timeline` replay recording) | [queries.md](queries.md) |
 | `revl fmt FILES` | canonical formatting (IR-equivalence gated); `--migrate` rewrites 1.x `$`, `--check` for CI | [fmt.md](fmt.md) |
 | `revl test FILES` | run `test`/`prop test`/`fault test`/`lifecycle test` blocks; `--backend {py,ts,rust,java,wasm,go,all}`, `--sweep` fault sweep | [prop-test.md](prop-test.md) · [fault-tests.md](fault-tests.md) |
+| `revl quarantine FILES [--service NAME] [--policy POLICY]` | grade a candidate with the gauntlet, then run its lifecycle + fault battery inside the wasm sandbox where an escape is a trap | [quarantine-tier.md](quarantine-tier.md) |
+| `revl canary FILES --candidate FILE --slice REALM` | run both generations at once, successor on one realm slice; promote (`--promote-to`) or revert on evidence | [verified-canary.md](verified-canary.md) |
+| `revl repair --component C [--candidate FILE] [--plan]` | the repair loop: diagnose a fault and re-admit a fix within declared policy bounds | [repair-loop.md](repair-loop.md) |
 | `revl run FILES` | boot on a Cordis runtime, see the tier table below and the flag list | [replay.md](replay.md) · [crash-recovery.md](crash-recovery.md) |
 | `revl recover --wal FILE` | crash recovery: roll a WAL forward/back to a checked verdict + residue proof (`--restore`, `--json`) | [crash-recovery.md](crash-recovery.md) |
 | `revl why COMPONENT --trace FILE` | explain a recorded lifecycle transition's cause chain; `--check FILES` runs the withdraw oracle | [why-runtime.md](why-runtime.md) |
+| `revl metrics --trace FILE` | capability-aware runtime metrics over a `run --trace` JSONL: emissions by capability, failures by G-rule, average lifecycle duration | [revl-metrics.md](revl-metrics.md) |
+| `revl profile --trace FILE` | diff a component's declared emission surface against what a run actually emitted, flagging over-declaration | [revl-profile.md](revl-profile.md) |
+| `revl attest FILES` | sign a portable record that this exact composition was admitted (IR hash + verdict + guarantees + timestamp); `--verify` checks one | [revl-attest.md](revl-attest.md) |
+| `revl dash` | the supervisor's cockpit: a read-only live view over a session or recorded run, the dependency graph, causal trace, and pending-decisions queue | [dash.md](dash.md) |
 | `revl serve --mcp FILES` | serve a booted composition's own provided operations as MCP tools (`--config`, `--composition`) | [mcp-bridge.md](mcp-bridge.md) |
 | `revl mcp serve` | the compiler itself as an MCP server (`--files` default composition, `--restore SNAPSHOT.json`) | [mcp-bridge.md](mcp-bridge.md) |
 | `revl mcp schema FILES` | project provided services to MCP tool definitions | [mcp-bridge.md](mcp-bridge.md) |
 | `revl mcp import MANIFEST` | turn an MCP `tools/list` manifest into revl source | [mcp-bridge.md](mcp-bridge.md) |
 | `revl import wit\|openapi\|cordis FILE` | import an external interface definition as typed revl source | [import-wit.md](import-wit.md) · [import-openapi.md](import-openapi.md) · [import-cordis.md](import-cordis.md) |
 | `revl export wit FILES --service N\|--composition` | generate the standard WIT interface for a revl service/composition | [wit-bridge.md](wit-bridge.md) |
+| `revl truc VERB …` | the component manager namespaced under the compiler, `add`/`rm`/`assemble`/`ship`/`reproduce`, tail passed through unchanged | [truc.md](truc.md) |
 
-`revl run` flags: `--backend {py,rust,java,wasm}` (ts accepted but **not
-runnable**), `--once` (boot → LIFO teardown → no-residue proof → exit),
+Two module entry points sit outside the `revl` subcommand tree. `python -m
+revl.lsp` runs the human-facing language server over stdio, so an editor gets
+inline diagnostics, hover, and go-to-definition: it pushes
+`textDocument/publishDiagnostics` from the checker, answers `textDocument/hover`
+from the diagnostic explanations and symbol info, and answers
+`textDocument/definition` from the resolver, all read-only over the existing
+compiler surfaces (`src/revl/lsp/`). `python -m revl.otel run.jsonl` exports a
+`revl run --trace` lifecycle trace to OpenTelemetry (a lifecycle transition
+becomes a span, its cause a span event, a causal edge a link), so a
+composition's causality lands in Grafana, Datadog, Honeycomb or Jaeger; the OTel
+SDK is the optional `revl[otel]` extra, and `--json` prints the span model
+without it ([opentelemetry.md](opentelemetry.md)).
+
+`revl run` flags: `--backend {py,ts,rust,java,wasm,go}` (all six boot live: py
+in-process, the other five each as a separate process over the bridge seam),
+`--once` (boot → LIFO teardown → no-residue proof → exit),
 `--watch` (recompile on edit; a rejected edit keeps the run alive), `--record`
 (record the accumulator for the replay REPL, `:timeline`, `:back`, `:forward`,
 `:inspect`, `:bisect`, see [replay.md](replay.md)), `--wal FILE` (durable
@@ -332,10 +362,16 @@ the runner's stub for the session); without `--once` on a TTY the rust driver
 says so and completes the same once round-trip rather than pretending to hold a
 REPL.
 
-The **java and wasm tiers are runnable on the same contract**, each boots the
-composition as its own process and runs the identical `--once` round-trip (boot
-→ LIFO teardown → no-residue proof → exit), behind its own runtime gate:
+The **ts, java, wasm and go tiers are runnable on the same contract**, each boots
+the composition as its own process and runs the identical `--once` round-trip
+(boot → LIFO teardown → no-residue proof → exit), behind its own runtime gate:
 
+- **`--backend ts`** emits the cordis-ts module → boots it on a **node process**
+  (node ≥ 23.6, cordis v4) over the same `placement_runner.ts` the cross-tier
+  bridge drives, and asserts the live runtime matches its pre-load snapshot
+  after teardown (`snapshotRuntime`/`assertNoResidue` from
+  `backends/typescript/runtime.ts`). Gated live by `tests/test_run_ts.py`; no
+  resolvable node/cordis-ts → skip with the reason.
 - **`--backend java`** emits `revl.Components` → `javac` → boots the composition
   on a JVM running the once-runner (`backends/java/placement/RunOnce.java`) on
   the in-repo cordis4j runtime, and proves no residue the tier-neutral way,
@@ -355,10 +391,15 @@ composition as its own process and runs the identical `--once` round-trip (boot
   host builtins, non-Int component services, and more are hard `EmitError`;
   [backends/wasm/README.md](../backends/wasm/README.md)), so a composition that
   uses one is an emit failure here, not a boot.
+- **`--backend go`** boots the composition on the **stc-go** placement runner
+  (`backends/go/placement_runner`) in its single-process once form, the same
+  seam the other non-py tiers use. Gated live by `tests/test_run_go.py`; no go
+  toolchain with the pinned stc-go → skip with the reason.
 
-`ts` remains accepted-but-unwired for `run` and says so. On every non-py tier the
-REPL is unwired for the same reason it is on rust; without `--once` the driver
-notes the gap and completes the once round-trip.
+On every non-py tier the interactive REPL over provided services is unwired for
+the same reason it is on rust (it needs an RPC client held against the runner's
+stub); without `--once` the driver notes the gap and completes the once
+round-trip rather than pretending to hold a REPL.
 
 Non-interactive round-trip (boot → trace → exit):
 
@@ -395,9 +436,9 @@ easiest place to overclaim:
 
 - **cordis-py** (Python), the reference backend, on a hardened lifecycle
   runtime. The tier every construct is checked against first.
-- **cordis** (TypeScript), v4.
-- **cordis-rs** (Rust) and **cordis4j** (Java), spikes. Each tier's emitted
-  code is run against its real runtime
+- **cordis** (TypeScript), v4, on node. `revl run --backend ts` boots it.
+- **cordis-rs** (Rust) and **cordis4j** (Java). Each tier's emitted code is run
+  against its real runtime
   (`backends/rust/test_emit_rust.py::test_runtime_scenarios_on_real_cordis_rs`,
   `backends/java/test_emit_java.py::test_runtime_scenarios_on_real_cordis4j`),
   and both skip without their toolchain. Consuming *and* serving across a
@@ -406,6 +447,12 @@ easiest place to overclaim:
   `demo/bridge_*` scripts; it is not covered by a test.
 - **cordis-wasm**, the sandboxed substrate, where confinement becomes
   physical. Deliberately i32-only at the service boundary.
+- **stc-go** (Go), the newest tier. `revl run --backend go` boots the stc-go
+  placement runner; it runs under `go test`, not yet in the conformance matrix.
+
+All six boot live under `revl run` (see the tier notes above); each non-py tier
+runs its `--once` round-trip behind a runtime gate that skips with a reason when
+its toolchain is absent.
 
 What each tier can and cannot express is measured, not asserted:
 `tools/conformance.py` runs every construct through all six and

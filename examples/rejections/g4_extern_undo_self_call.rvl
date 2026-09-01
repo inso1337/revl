@@ -6,5 +6,5 @@
 // expected error:
 //   extern `open_ledger`'s `undo` cannot call the extern itself
 
-extern acquire fn open_ledger(path: Str) -> Int undo open_ledger(path)
+extern acquire fn open_ledger(path: Str) -> LedgerHandle undo open_ledger(path)
   = @py { return abs(hash(path)) % 100000 }

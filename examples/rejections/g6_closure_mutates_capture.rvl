@@ -1,0 +1,22 @@
+// REJECTED — G6: a closure captures by value; it cannot write an enclosing cell.
+// revl closures capture strictly BY VALUE (syntax-2.0 §3.5): a lambda snapshots
+// the values it reads, so a `var` it names never escapes as a live cell. A
+// closure that ASSIGNS to a captured binding (`n = n + by`) would need a shared
+// mutable environment — reference capture — and that is exactly what the derived
+// LIFO teardown (G7) and no-residue containment (A8) cannot survive: an inverse
+// the teardown accumulator holds closes over the *values* the forward effect
+// used, and a closure that could write the live cell would let those values shift
+// out from under the inverse (docs/closures.md, roadmap item 129). So the write
+// form is refused here rather than silently snapshotted or accepted as a shared
+// cell. A read-only capture (`(x) => x + n`) is fine — it snapshots the value.
+//
+// expected error:
+//   a closure cannot assign to `n`: captures are by value, not by reference (G6)
+//   a revl closure snapshots the values it reads (syntax-2.0 §3.5, docs/closures.md)
+//   — there is no shared mutable cell to write through.
+
+fn counter(step: Int) -> Int {
+  var n = 0
+  let bump = (by: Int) => { n = n + by  n }
+  return bump(step)
+}

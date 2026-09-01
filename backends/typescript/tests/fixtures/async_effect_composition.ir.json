@@ -1,0 +1,246 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Database": {
+      "methods": {
+        "query": {
+          "params": [
+            {
+              "name": "sql",
+              "type": "Str"
+            }
+          ],
+          "returns": "List[Row]",
+          "emission": false
+        },
+        "slow_open": {
+          "params": [
+            {
+              "name": "sql",
+              "type": "Str"
+            }
+          ],
+          "returns": "List[Row]",
+          "emission": false,
+          "async": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "PgDatabase",
+      "source": "async_effect_composition.rvl",
+      "config": [
+        {
+          "name": "url",
+          "type": "Str",
+          "default": "postgres://localhost/app"
+        }
+      ],
+      "requires": {},
+      "provides": {
+        "db": "Database"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "acquire": {
+            "kind": "host",
+            "fn": "Pool.open",
+            "args": [
+              {
+                "kind": "config",
+                "field": "url"
+              },
+              {
+                "kind": "lit",
+                "value": 4
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "pool"
+            },
+            "method": "close",
+            "args": []
+          },
+          "bind": "pool"
+        },
+        {
+          "step": "provide",
+          "name": "db",
+          "service": "Database",
+          "methods": [
+            {
+              "name": "query",
+              "params": [
+                "sql"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "pool"
+                    },
+                    "method": "query",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "sql"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "slow_open",
+              "params": [
+                "sql"
+              ],
+              "body": [
+                {
+                  "step": "await",
+                  "expr": {
+                    "kind": "host",
+                    "fn": "Job.run",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "B"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "pool"
+                    },
+                    "method": "query",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "sql"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Consumer",
+      "source": "async_effect_composition.rvl",
+      "config": [],
+      "requires": {
+        "db": "Database"
+      },
+      "provides": {},
+      "body": [
+        {
+          "step": "let-effect",
+          "acquire": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "db"
+            },
+            "method": "query",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "ACQ A"
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "db"
+            },
+            "method": "query",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "UNDO A"
+              }
+            ]
+          },
+          "bind": "la"
+        },
+        {
+          "step": "let-effect",
+          "acquire": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "db"
+            },
+            "method": "slow_open",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "ACQ B"
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "db"
+            },
+            "method": "query",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "UNDO B"
+              }
+            ]
+          },
+          "bind": "lb",
+          "async": true
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "PgDatabase",
+        "file": "async_effect_composition.rvl",
+        "inject": [],
+        "provides": [
+          "db"
+        ]
+      },
+      {
+        "name": "Consumer",
+        "file": "async_effect_composition.rvl",
+        "inject": [
+          "db"
+        ],
+        "provides": []
+      }
+    ],
+    "loadOrder": [
+      "PgDatabase",
+      "Consumer"
+    ]
+  }
+}

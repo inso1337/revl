@@ -172,6 +172,75 @@ def _arg_ref_name(arg_node: object) -> str | None:
     return None
 
 
+def _body_multi_use(body: object, counts: dict[str, int]) -> None:
+    """Count every bare variable reference in a function body, so a binding
+    consumed by value more than once can be `.clone()`d at each move.
+
+    A `let`/`for` binding whose surface type the emitter cannot infer (a string
+    index, a block expression) is typed None, so `_by_value_arg` cannot tell
+    Copy from non-Copy for it. The safe fallback is reuse: a name referenced
+    once can always be moved, but a name referenced more than once must clone at
+    each by-value use or the second use borrows a moved value (E0382). Only the
+    reference kinds (`var`/`name`/`req`) are counted; a binding's def site is a
+    plain string field, so it is never miscounted as a use.
+    """
+    if isinstance(body, dict):
+        if body.get("kind") in ("var", "name", "req"):
+            ident = body.get("id") or body.get("name")
+            if ident is not None:
+                counts[ident] = counts.get(ident, 0) + 1
+        for value in body.values():
+            _body_multi_use(value, counts)
+    elif isinstance(body, list):
+        for item in body:
+            _body_multi_use(item, counts)
+
+
+def _by_value_field_clone(arg_node: object, rendered: str,
+                          ctx: "_V3Ctx") -> str | None:
+    """`f"{rendered}.clone()"` when the by-value argument is a non-Copy field
+    read `base.field` whose `base` is used more than once in the body, else
+    `None` (let the caller handle it).
+
+    revl field access is a value READ (a copy), never a move-out of the owning
+    struct: `is_bad(c.e)` then `IfN {{ cond: c.e, .. }}` reads `c.e` twice, and
+    `return c` still needs the whole `c`. Rust would MOVE the non-Copy field out
+    of `c` on the first by-value use, stranding every later use of `c`/`c.e`
+    (E0382). So a non-Copy field read is cloned exactly when its base binding is
+    reused — the same body-level reuse signal `_by_value_arg` uses for a bare
+    name. A single-use base (`relabel`'s `n.at`, `n` read once) stays a move,
+    byte-identical to before; a Copy field (`p.y: Int`) never clones; and an
+    un-inferable base/field type is left untouched (conservative: no needless
+    clone, so a fixture the emitter cannot type stays byte-identical)."""
+    if not isinstance(arg_node, dict) or arg_node.get("kind") != "field":
+        return None
+    # Walk a (possibly nested) field chain `root.f1.f2..` down to its root
+    # binding: `ck.ctx_.caps` partially moves `ck`, so the root's reuse is what
+    # decides the clone, and the field type is resolved along the chain.
+    chain: list[str] = []
+    cur = arg_node
+    while isinstance(cur, dict) and cur.get("kind") == "field":
+        chain.append(cur.get("name"))
+        cur = cur.get("target")
+    if not (isinstance(cur, dict) and cur.get("kind") in ("var", "name", "req")):
+        return None  # a root that is itself an index/call is not a plain reuse
+    root = cur.get("id") or cur.get("name")
+    if root is None or root not in ctx.multi_use:
+        return None
+    ty = ctx.var_types.get(root)
+    for field in reversed(chain):
+        ty = (ctx.record_field_types(ty).get(field)
+              if isinstance(ty, str) else None)
+    # A known-Copy field (`p.y: Int`) never needs a clone; a known non-Copy
+    # field, or one whose type the emitter cannot resolve (a loop/match binding
+    # root), is cloned — the root is reused, so moving the field out would strand
+    # the later use (E0382). An un-inferable Copy field is the only false clone
+    # this admits, and cloning a Copy value is sound, just redundant.
+    if isinstance(ty, str) and ty.split("[", 1)[0].strip() in _RUST_COPY_TYPES:
+        return None
+    return f"{rendered}.clone()"
+
+
 def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     """Wrap a by-value free-function argument so the call cannot consume a value
     the caller still needs (E0382). revl passes values, not moves, so a non-Copy
@@ -179,18 +248,299 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     — and a function-typed argument is passed by reference (`&F: Fn`), because an
     `impl Fn(..)` parameter is not `Clone`. Copy scalars and non-identifier
     argument expressions (fresh temporaries) are passed through untouched.
+
+    When the argument's surface type is unknown (a binding the emitter could not
+    infer, such as a string index or a block expression), Copy cannot be ruled
+    out, so the clone decision falls back to reuse: a name used more than once in
+    the body is cloned at each by-value move, while a single-use name is left
+    untouched. That keeps a lone move byte-identical to before and clones only
+    the reused shape that would otherwise fail to build.
     """
+    field_clone = _by_value_field_clone(arg_node, rendered, ctx)
+    if field_clone is not None:
+        return field_clone
     name = _arg_ref_name(arg_node)
     if name is None:
         return rendered
+    if name in ctx.borrowed_params:
+        # This argument is a borrowed `&str` parameter reaching an OWNED slot (a
+        # `String` callee param, a record field, a constructor payload). An owned
+        # `String` is produced with `.to_string()`, never `.clone()` (which stays
+        # a `&str`). The borrow analysis keeps a borrowed param out of owned
+        # slots, so this is a safety net that materialises rather than miscompiles.
+        return f"{rendered}.to_string()"
     ty = ctx.var_types.get(name)
-    if ty is None:
+    if ty is not None:
+        if _is_fn_type(ty):
+            return f"&{rendered}"
+        if str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
+            return rendered
+        return f"{rendered}.clone()"
+    if name in ctx.multi_use:
+        return f"{rendered}.clone()"
+    return rendered
+
+
+def _borrow_str_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
+    """Render an argument bound for a borrowed `&str` callee parameter (item 282).
+
+    The callee only reads the string, so the caller lends a borrow instead of
+    cloning it. A bare borrowed `&str` parameter passed straight through is
+    already a `&str`, so it goes untouched (no needless re-borrow); every other
+    string expression — an owned `String` local, a literal, a call result — is
+    borrowed with `&`, and `&String`/`&&str` both coerce to the `&str` slot.
+    """
+    name = _arg_ref_name(arg_node)
+    if name is not None and name in ctx.borrowed_params:
         return rendered
-    if _is_fn_type(ty):
+    if isinstance(arg_node, dict) and arg_node.get("kind") in _ATOMIC_KINDS:
         return f"&{rendered}"
-    if str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
+    return f"&({rendered})"
+
+
+def _by_value_tail(node: object, rendered: str, ctx: "_V3Ctx") -> str:
+    """Clone a bare identifier used as the tail VALUE of an `if`-expression
+    branch when the same binding is read again in the body.
+
+    Unlike a call argument (always consumed), a branch tail only strands a later
+    use when the binding is reused: `let kind = if .. { "arrow" } else { op }`
+    moves `op`, so a following `op.len()` borrows a moved value (E0382). A
+    single-use tail stays a move (byte-identical to before, no needless clone),
+    and a known-Copy binding never clones. Reuse is the same body-level signal
+    `_by_value_arg` uses for an un-inferred value.
+    """
+    name = _arg_ref_name(node)
+    if name is None:
         return rendered
-    return f"{rendered}.clone()"
+    if name in ctx.borrowed_params:
+        # A borrowed `&str` param materialised into an owned position (a branch
+        # tail typed `Str`) becomes an owned `String` via `.to_string()`, never
+        # `.clone()` (which would keep it a `&str`). The borrow analysis keeps a
+        # borrowed param out of owned positions, so this is a safety net.
+        return f"{rendered}.to_string()"
+    ty = ctx.var_types.get(name)
+    if ty is not None and str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
+        return rendered
+    if name in ctx.multi_use:
+        return f"{rendered}.clone()"
+    return rendered
+
+
+def _by_value_reuse(node: object, rendered: str, ctx: "_V3Ctx") -> str:
+    """Clone a value used by-value in a position that moves ONLY on reuse -- a
+    `match` scrutinee, a list element, a builtin/host method argument, a `for`
+    iterable. Unlike `_by_value_arg` (a free-fn/service argument, always passed
+    by value, so a known non-Copy is cloned even when used once), these positions
+    consume the value in place, so a single use can stay a move (byte-identical
+    to before) and only a REUSED binding must clone: a bare non-Copy name read
+    again in the body, or a non-Copy field whose base is reused. `_body_multi_use`
+    is the reuse signal; a Copy value and a fresh temporary go through untouched."""
+    field_clone = _by_value_field_clone(node, rendered, ctx)
+    if field_clone is not None:
+        return field_clone
+    return _by_value_tail(node, rendered, ctx)
+
+
+# `Str` values that a callee only READS lower to a borrowed `&str` parameter
+# instead of an owned `String`, so the call passes a borrow rather than cloning
+# the whole string (item 282). These are the string builtins whose *argument*
+# reads its operand — after the `RevlStrOps`/`RevlStrListOps` traits take `&str`
+# arguments, a `&str` operand coerces into them exactly as a `String` does — so
+# a borrowed param handed to one of these arg slots stays read-only.
+_STR_READONLY_ARG_BUILTINS = frozenset({
+    "concat", "indexOf", "split", "join", "startsWith", "endsWith",
+})
+
+# Builtins whose `_v3_builtin` lowering takes its argument BY REFERENCE (`&arg`),
+# so the argument is never moved and needs no reuse clone: the read-only string
+# ops above plus the Map key probes (`lookup`/`has`/`remove` all borrow `&key`).
+# Every other builtin (`push`, `set`, ...) MOVES its non-Copy argument in.
+_BORROW_ARG_BUILTINS = _STR_READONLY_ARG_BUILTINS | frozenset({
+    "lookup", "has", "remove",
+})
+
+
+def _free_fn_call(node: object, function_names: "frozenset[str] | set") -> tuple:
+    """`(callee_name, arg_nodes)` when `node` is a call to a first-party free
+    function, else `(None, None)`.
+
+    Only free functions declared in this document are borrow-aware: their
+    parameter list is under the emitter's control, so a read-only `Str` param
+    can be lowered to `&str`. Externs (their `@rs` body is hand-written against
+    `String`), constructors, service methods, and closure-valued locals are not,
+    so a call to any of those is treated as a by-value boundary.
+    """
+    if not isinstance(node, dict):
+        return None, None
+    kind = node.get("kind")
+    if kind == "fn":
+        name = node.get("name")
+    elif kind == "call" and isinstance(node.get("callee"), dict):
+        callee = node["callee"]
+        name = callee.get("name") if callee.get("kind") == "var" else None
+    else:
+        return None, None
+    if name in function_names:
+        return name, node.get("args") or []
+    return None, None
+
+
+def _str_param_escapes(body: object, params: "set[str]",
+                       fn_borrow: "dict[str, frozenset]",
+                       function_names: "frozenset[str] | set") -> "set[str]":
+    """The subset of `params` (a function's `Str` parameter names) that a `&str`
+    lowering could NOT represent: they reach a position that needs an owned
+    `String`.
+
+    A bare parameter reference is read-only — safe to borrow — only where its
+    immediate slot proves it: the receiver of a builtin (every `Str` builtin is
+    pure), a `&str` builtin argument, an equality/`+` operand or an interpolation
+    hole (all read by reference), or an argument to a free-fn slot the fixpoint
+    still holds borrowable. Every other slot (a `return` value, a record field, a
+    constructor/ADT payload, a `List` element, a `let` right-hand side, an owned
+    call argument) moves the value, so a parameter reached there escapes and must
+    stay an owned `String`. Unhandled shapes recurse in the escaping position, so
+    the pass only ever borrows a provably read-only parameter.
+    """
+    escaped: set[str] = set()
+
+    def walk(node: object, safe: bool) -> None:
+        if isinstance(node, dict):
+            kind = node.get("kind")
+            if kind in ("var", "name", "req"):
+                ident = node.get("id") or node.get("name")
+                if ident in params and not safe:
+                    escaped.add(ident)
+                return
+            if kind == "builtin":
+                walk(node.get("target"), True)
+                arg_safe = node.get("method") in _STR_READONLY_ARG_BUILTINS
+                for a in node.get("args") or []:
+                    walk(a, arg_safe)
+                return
+            if kind == "len":
+                walk(node.get("target"), True)
+                return
+            if kind == "interp":
+                for _pk, pv in node.get("parts") or []:
+                    walk(pv, True)
+                return
+            if kind == "bin":
+                op = node.get("op")
+                operand_safe = op in ("==", "!=", "+")
+                walk(node.get("left"), operand_safe)
+                walk(node.get("right"), operand_safe)
+                return
+            cname, arg_nodes = _free_fn_call(node, function_names)
+            if cname is not None:
+                borrow = fn_borrow.get(cname, frozenset())
+                for idx, a in enumerate(arg_nodes):
+                    walk(a, idx in borrow)
+                return
+            for value in node.values():
+                walk(value, False)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, safe)
+
+    walk(body, False)
+    return escaped
+
+
+def _functions_use_stdlib(functions: list) -> bool:
+    """True when some function body carries a `builtin`/`len` node — the same
+    stdlib signal `_uses_stdlib` gates the helper traits on, scoped to functions
+    (the only surface the borrow pass reshapes)."""
+    found = False
+
+    def walk(node: object) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            if node.get("kind") in ("builtin", "len"):
+                found = True
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(functions)
+    return found
+
+
+def _compute_str_param_borrows(functions: list) -> "dict[str, frozenset]":
+    """Map each free function to the set of parameter INDICES whose `Str`
+    argument the callee only reads, so the call can pass `&str` (a borrow)
+    instead of cloning the whole string (item 282).
+
+    This is an interprocedural fixpoint: a parameter threaded straight through to
+    another function's parameter is borrowable only when THAT parameter is, and
+    the self-host lexer threads `source` through a dozen scan helpers. Start with
+    every `Str` parameter a candidate, then repeatedly drop any that
+    `_str_param_escapes` finds in an owned position (including a pass-through to a
+    slot that has itself just been dropped). The set only shrinks, so it settles.
+
+    A `pub` function is exempt: its signature is the module's external contract,
+    called by hand-written Rust (the bench/test harness main, an embedder) that
+    expects the owned `Str` lowering (`String`), so its params stay owned. The
+    hot per-token clone item 282 targets lives in the module-internal scan
+    helpers, which a `pub` entry still lends its owned string to by borrow.
+
+    The pass is gated on the module actually using the stdlib (a `builtin`/`len`
+    node in some function): borrowing only reshapes the string-scanning surface,
+    which is exactly the surface the self-hosted `emit_rust.rvl` port leaves OUT,
+    so a stdlib-free module (`fn cat(a, b) = a + b`) still emits byte-identically
+    to that port. A module with no builtin has nothing item 282 speeds up anyway.
+    """
+    if not _functions_use_stdlib(functions):
+        return {fn.get("name"): frozenset() for fn in functions}
+    function_names = frozenset(
+        fn.get("name") for fn in functions if fn.get("name")
+    )
+    borrow: dict[str, frozenset] = {}
+    for fn in functions:
+        name = fn.get("name")
+        if fn.get("public"):
+            borrow[name] = frozenset()
+            continue
+        borrow[name] = frozenset(
+            idx for idx, p in enumerate(fn.get("params") or [])
+            if p.get("type") == "Str"
+        )
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            name = fn.get("name")
+            candidates = {
+                p.get("name") for idx, p in enumerate(fn.get("params") or [])
+                if idx in borrow[name]
+            }
+            if not candidates:
+                continue
+            escaped = _str_param_escapes(
+                fn.get("body") or [], candidates, borrow, function_names)
+            if escaped:
+                kept = frozenset(
+                    idx for idx in borrow[name]
+                    if (fn.get("params") or [])[idx].get("name") not in escaped
+                )
+                if kept != borrow[name]:
+                    borrow[name] = kept
+                    changed = True
+    return borrow
+
+
+def _render_param_type(borrowed: bool, ftype: object, types: dict) -> str:
+    """The Rust type of a free-function parameter, `&str` when the borrow
+    analysis lowered this read-only `Str` param to a borrow (item 282), else the
+    owned lowering `_rust_type` gives it."""
+    if borrowed:
+        return "&str"
+    return _rust_type(ftype, types, position="param")
 
 
 # A declared function type still has no single Rust lowering — but the choice
@@ -545,6 +895,105 @@ def _intercept_json_lit(value, base: str, defs: list[str], type_names: dict, cou
     raise EmitError(f"unsupported intercept metadata value: {value!r}")
 
 
+# ---------------------------------------------------------------------------
+# item 243 Slice 2b (rust): the witnessed-effects three-entry-kind teardown
+# loop. docs/design/teardown-contract.md is authoritative; the runtime
+# mechanism is `_revl_teardown_preamble` below. This block only DETECTS
+# whether a component needs that mechanism, so a program using neither a
+# `witnessed` extern nor `emit ... compensate` emits byte-identically to
+# before this slice (mirrors backends/python/emit.py's `self.witnessed` gate).
+# ---------------------------------------------------------------------------
+
+
+def _step_is_witnessed_effect(step: dict, witnessed: dict) -> bool:
+    """Is this an `effect`/`let-effect` step whose acquisition calls a
+    `witnessed` extern? Mirrors `backends/python/emit.py`'s
+    `_witnessed_extern` name-match (the checker refuses a witnessed call
+    anywhere else, so this is the only shape a component body carries one
+    in)."""
+    if not witnessed or step.get("step") not in ("effect", "let-effect"):
+        return False
+    acquire = step.get("acquire")
+    return (isinstance(acquire, dict) and acquire.get("kind") == "fn"
+            and acquire.get("name") in witnessed)
+
+
+def _body_has_witnessed(steps: list | None, witnessed: dict) -> bool:
+    for step in steps or []:
+        if _step_is_witnessed_effect(step, witnessed):
+            return True
+        if step.get("step") == "if":
+            if (_body_has_witnessed(step.get("then"), witnessed)
+                    or _body_has_witnessed(step.get("else"), witnessed)):
+                return True
+    return False
+
+
+def _body_has_compensation(steps: list | None) -> bool:
+    for step in steps or []:
+        if step.get("step") == "emit" and step.get("compensate") is not None:
+            return True
+        if step.get("step") == "if":
+            if (_body_has_compensation(step.get("then"))
+                    or _body_has_compensation(step.get("else"))):
+                return True
+    return False
+
+
+def _method_bodies_have_compensation(component: dict) -> bool:
+    for step in component.get("body") or []:
+        if step.get("step") != "provide":
+            continue
+        for method in step.get("methods") or []:
+            if _body_has_compensation(method.get("body")):
+                return True
+    return False
+
+
+def _method_bodies_have_witnessed(component: dict, witnessed: dict) -> bool:
+    """item 324: does any PROVIDE-METHOD body carry a witnessed effect (a
+    per-tool-call fs mutation)? The per-tool-call H1 gate: unlike a witnessed
+    effect in the ACTIVATION body (which `revl_teardown_begin` already sees),
+    one that fires from a method registers its transactional inverse into the
+    enclosing component's activation frame LATER, per request — the component
+    still needs the `RevlTeardown` accumulator built at activation so
+    `revl_teardown_of` can recover it. Mirrors `_method_bodies_have_compensation`
+    above (the method-body compensation case Slice 2b already handled)."""
+    for step in component.get("body") or []:
+        if step.get("step") != "provide":
+            continue
+        for method in step.get("methods") or []:
+            if _body_has_witnessed(method.get("body"), witnessed):
+                return True
+    return False
+
+
+def _component_needs_teardown(component: dict, witnessed: dict) -> bool:
+    body = component.get("body") or []
+    return (_body_has_witnessed(body, witnessed)
+            or _body_has_compensation(body)
+            or _method_bodies_have_compensation(component)
+            or _method_bodies_have_witnessed(component, witnessed))
+
+
+# item 322 Slice 2: record mode. When True, a witnessed transactional step also
+# writes a durable discharge-descriptor to the rust WAL sink
+# (revl_record_transactional) and the recording preamble is emitted. Default
+# False -> byte-identical output (every existing golden is the guard). Mirrors
+# backends/go/emit.py's `_RECORD_MODE`.
+_RECORD_MODE = False
+
+
+def _witnessed_extern_for(env: "_Env", acquire: object) -> dict | None:
+    """The witnessed extern descriptor a step's acquisition calls, or None.
+    Mirrors `backends/python/emit.py::_ComponentEmitter._witnessed_extern`."""
+    if not env.witnessed or not isinstance(acquire, dict):
+        return None
+    if acquire.get("kind") != "fn":
+        return None
+    return env.witnessed.get(acquire.get("name"))
+
+
 class _Env:
     """Per-component lowering context."""
 
@@ -577,6 +1026,32 @@ class _Env:
         self._v3_ctx: _V3Ctx | None = None
         # Per-component counter for unique timer local names (item 57).
         self.timer_counter = 0
+        # Per-component counter for unique witnessed-step temp names (item 243).
+        self.wit_counter = 0
+        # Activation-body `let`/`let-effect` bind names seen so far, in source
+        # order — so a later `emit ... compensate` closure knows which of the
+        # names it references are local Arc-wrapped bindings that need a
+        # `.clone()` before the `move` closure captures them (item 247 / the
+        # teardown-contract two-phase abort). Populated by `_emit_step` as it
+        # walks the body.
+        self.activation_binds: list[str] = []
+        # item 243 (docs/design/243-witnessed-externs.md): witnessed externs by
+        # name, so an activation-body call site can be recognised as a
+        # transactional effect and register its DECLARED inverse (not a
+        # site-spelled one) into the teardown accumulator. Absent/empty for
+        # every program that uses no witnessed extern, so their emission stays
+        # byte-identical (mirrors backends/python/emit.py's `self.witnessed`).
+        self.witnessed: dict[str, dict] = {
+            ext["name"]: ext for ext in self.externs
+            if ext.get("class") == "witnessed"
+        }
+        # docs/design/teardown-contract.md: does this component need the
+        # per-activation teardown accumulator (RevlTeardown) at all? True iff
+        # it registers at least one `transactional` (witnessed) or
+        # `compensation` (`emit ... compensate`, activation- or method-body)
+        # entry. Gated so a program using neither emits byte-identically to
+        # before this slice.
+        self.needs_teardown: bool = _component_needs_teardown(component, self.witnessed)
 
     def v3_ctx(self) -> _V3Ctx:
         if self._v3_ctx is None:
@@ -731,6 +1206,18 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "    }",
                 "    pub fn insert(&self, key: String, value: V) {",
                 "        self.inner.lock().unwrap().insert(key, value);",
+                "    }",
+                "    // The atomic compare-and-set (item 397). ONE `lock()` spans the",
+                "    // membership test AND the insert via the entry API, so no thread",
+                "    // can witness the probe and the write as separable steps. Returns",
+                "    // whether it inserted; a `false` (key present) leaves the existing",
+                "    // value untouched. Under N concurrent callers, exactly one `true`.",
+                "    pub fn insert_if_absent(&self, key: String, value: V) -> bool {",
+                "        use std::collections::hash_map::Entry;",
+                "        match self.inner.lock().unwrap().entry(key) {",
+                "            Entry::Occupied(_) => false,",
+                "            Entry::Vacant(e) => { e.insert(value); true }",
+                "        }",
                 "    }",
                 "    pub fn remove(&self, key: &String) {",
                 "        self.inner.lock().unwrap().remove(key);",
@@ -1084,6 +1571,12 @@ def _host_of(component: dict, bind: str, map_values: dict[str, str] | None = Non
             # so a provide-method that captures it can call `.dispose()`.
             if acquire.get("kind") == "spawn":
                 return "RevlSpawnHandle"
+            # item 397: a result-declared host CAS binds the atomic `bool`
+            # result (`let fresh = Arc::new(ledger.insert_if_absent(...))`), not
+            # a host resource, so a provide struct that captures it holds an
+            # `Arc<bool>`, never the opaque `Arc<Value>` fallback (E0308).
+            if _is_map_cas(acquire):
+                return "bool"
             host = (acquire.get("fn") or "").split(".")[0] or "Value"
             # FR-4: the host Map is generic over its value type, learned from
             # the IR's `insert` sites (defaults to the historical `String`).
@@ -1145,7 +1638,8 @@ def _map_value_expr_type(node: dict, var_types: dict, env: _Env) -> str | None:
             elem = _map_value_expr_type(args[0], var_types, env)
             if elem is not None:
                 return f"List[{elem}]"
-        if method in ("length", "charCodeAt", "indexOf", "to_int"):
+        if method in ("length", "charCodeAt", "codepoint_at", "indexOf",
+                      "to_int"):
             return "Int"
         if method in ("charAt", "join", "repeat", "to_str", "slice"):
             return "Str"
@@ -1192,16 +1686,35 @@ def _map_value_expr_type(node: dict, var_types: dict, env: _Env) -> str | None:
     return None
 
 
+# Map verbs that write a value at arg[1]; each pins the host Map's value type V.
+# Inferring V from ANY writer (not the literal name "insert") lets a CAS-only
+# writer (`insert_if_absent`, item 397) pin a concrete V instead of the String
+# default (item 402).
+_MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+# item 397: the compare-and-set host verb whose bound result is a `bool` and
+# whose site-spelled undo is registered only when the CAS actually inserted.
+_MAP_CAS_VERBS = ("insert_if_absent",)
+
+
+def _is_map_cas(acquire) -> bool:
+    """Whether a lowered acquisition node is a result-guarded map CAS."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 def _map_expr_inserts(node, bind: str, var_types: dict, env: _Env,
                       candidates: list[str]) -> None:
-    """Collect candidate value types from `bind.insert(k, v)` anywhere in an
-    expression; recurses into sub-expressions."""
+    """Collect candidate value types from any map value-writing call
+    (`insert`, `insert_if_absent`, ...) on `bind` anywhere in an expression;
+    recurses into sub-expressions."""
     if not isinstance(node, dict):
         return
     if node.get("kind") == "call":
         target = node.get("target")
         if (isinstance(target, dict) and target.get("kind") == "name"
-                and target.get("id") == bind and node.get("method") == "insert"):
+                and target.get("id") == bind
+                and node.get("method") in _MAP_VALUE_WRITERS):
             args = node.get("args") or []
             if len(args) >= 2:
                 t = _map_value_expr_type(args[1], var_types, env)
@@ -1359,7 +1872,9 @@ def _component_has_effectful_methods(component: dict) -> bool:
             continue
         for method in step.get("methods") or []:
             for body_step in method.get("body") or []:
-                if body_step.get("step") in ("effect", "emit"):
+                # `let-effect` (item 397: a method-body host CAS) is effectful
+                # too — it registers a guarded inverse on the activation frame.
+                if body_step.get("step") in ("effect", "emit", "let-effect"):
                     return True
     return False
 
@@ -1429,7 +1944,7 @@ def _emit_config_application(component: dict, config_ty: str, indent: int) -> li
 
 def _method_has_effectful_steps(method: dict) -> bool:
     return any(
-        body_step.get("step") in ("effect", "emit")
+        body_step.get("step") in ("effect", "emit", "let-effect")
         for body_step in method.get("body") or []
     )
 
@@ -1567,38 +2082,70 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 out.append(f"{pad}return;")
             else:
                 out.append(f"{pad}return {_expr(step['expr'], env, rename)};")
-        elif kind in ("effect", "emit"):
+        elif kind == "effect":
+            wit = _witnessed_extern_for(env, step.get("acquire"))
+            if wit is not None:
+                # item 324: a witnessed effect in a provide-method body — the
+                # per-tool-call H1 gate. Register the extern's DECLARED inverse
+                # as a `transactional` entry on the enclosing component's
+                # activation frame (via `revl_teardown_of(&self.ctx)`), NOT as a
+                # plain always-replaying bracket. See `_emit_method_witnessed_step`
+                # for the disposal-ordering analysis (rust's eager commit means
+                # no park-for-drain is needed, unlike py).
+                _emit_method_witnessed_step(env, method, step, wit, out, indent)
+                continue
+            # bracket (acquire): unchanged by item 243/247 — replays on every
+            # teardown, clean unload and abort alike (docs/design/
+            # teardown-contract.md's "bracket... unchanged" row).
             undo_rename = _method_undo_rename(env, method)
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
                 acquire_rename[param] = f"{param}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.{kind}.{index}")
-            # An undo closure is registered for every effect, and for an emit
-            # only when it carries a compensate — the `*_undo` clones exist
-            # exactly when that closure exists.
-            registers_undo = kind == "effect" or step.get("compensate") is not None
-            undo_node = step.get("compensate") if kind == "emit" else step.get("undo")
+            undo_node = step.get("undo")
             acquire_node = step.get("acquire") or step.get("expr")
-            if registers_undo:
-                _method_undo_clones(env, method, out, indent)
-                # Pre-clone into `<l>_undo`, before the acquire runs, each
-                # method-body local the undo reads AND the acquire consumes by
-                # value (a host-Map `insert(key, ..)` moves its key without a
-                # call-site clone), so the move closure owns a copy the acquire's
-                # move cannot invalidate (item 114). Locals the acquire only
-                # borrows (`prev.push(..)`) or clones stay bare.
-                for local in sorted(_undo_reclone_locals(
-                        acquire_node, undo_node, body_locals, env.v3_ctx())):
-                    out.append(f"{pad}let {local}_undo = {local}.clone();")
-                    undo_rename[local] = f"{local}_undo"
+            _method_undo_clones(env, method, out, indent)
+            # Pre-clone into `<l>_undo`, before the acquire runs, each
+            # method-body local the undo reads AND the acquire consumes by
+            # value (a host-Map `insert(key, ..)` moves its key without a
+            # call-site clone), so the move closure owns a copy the acquire's
+            # move cannot invalidate (item 114). Locals the acquire only
+            # borrows (`prev.push(..)`) or clones stay bare.
+            for local in sorted(_undo_reclone_locals(
+                    acquire_node, undo_node, body_locals, env.v3_ctx())):
+                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                undo_rename[local] = f"{local}_undo"
             acquire = _expr(acquire_node, env, acquire_rename)
             out.append(f"{pad}let _ = {acquire};")
-            if not registers_undo:
-                continue
             undo = _expr(undo_node, env, undo_rename)
             out.append(
                 f"{pad}let _ = self.ctx.effect({label}, move || {{ {undo}; Ok(()) }});"
             )
+        elif kind == "emit":
+            acquire_rename = dict(rename)
+            for param in method.get("params") or []:
+                acquire_rename[param] = f"{param}.clone()"
+            acquire_node = step.get("expr")
+            acquire = _expr(acquire_node, env, acquire_rename)
+            out.append(f"{pad}let _ = {acquire};")
+            if step.get("compensate") is None:
+                continue
+            # `compensation` (item 247 / the teardown-contract two-phase
+            # abort): recover this activation's `RevlTeardown` through the
+            # SAME fiber's `ctx` (`revl_teardown_of` reads the metadata
+            # `revl_teardown_begin` stored there at activation), then register
+            # a disposer that discharges on commit or queues onto phase 2 on
+            # abort — never runs immediately, unlike the old placeholder.
+            undo_rename = _method_undo_rename(env, method)
+            _method_undo_clones(env, method, out, indent)
+            for local in sorted(_undo_reclone_locals(
+                    acquire_node, step.get("compensate"), body_locals, env.v3_ctx())):
+                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                undo_rename[local] = f"{local}_undo"
+            out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
+            _emit_compensation_registration(
+                env, step["compensate"], f"{env.name}.{method.get('name')}.compensate.{index}",
+                out, indent, undo_rename, ctx_expr="self.ctx", propagate=False)
         elif kind in ("let", "assign"):
             name = _ident(step.get("name"), "binding")
             # Seed the local's inferred type into the shared type table so a
@@ -1622,6 +2169,38 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 env.v3_ctx().var_types[step.get("name")] = inferred
             if kind == "let" and step.get("name") is not None:
                 body_locals.add(step.get("name"))
+        elif kind == "let-effect":
+            # item 397: the only let-effect admitted in a provide-method body is
+            # a result-declared host CAS (`insert_if_absent`). Mirror the bare
+            # `effect` bracket, but BIND the acquire's `bool` result and guard
+            # the site-spelled undo on it — a `false` CAS's inverse is the
+            # identity, so teardown never removes the winner's entry.
+            if not _is_map_cas(step.get("acquire")):
+                raise EmitError(
+                    "let-effect not allowed inside a provide method "
+                    "(Rust backend)")
+            bind = _ident(step["bind"], "binding")
+            undo_rename = _method_undo_rename(env, method)
+            acquire_rename = dict(rename)
+            for param in method.get("params") or []:
+                acquire_rename[param] = f"{param}.clone()"
+            label = _string(f"{env.name}.{method.get('name')}.let-effect.{index}")
+            undo_node = step.get("undo")
+            acquire_node = step.get("acquire")
+            _method_undo_clones(env, method, out, indent)
+            for local in sorted(_undo_reclone_locals(
+                    acquire_node, undo_node, body_locals, env.v3_ctx())):
+                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                undo_rename[local] = f"{local}_undo"
+            acquire = _expr(acquire_node, env, acquire_rename)
+            out.append(f"{pad}let {bind} = {acquire};")
+            env.v3_ctx().var_types[step.get("bind")] = "Bool"
+            body_locals.add(step.get("bind"))
+            undo = _expr(undo_node, env, undo_rename)
+            out.append(
+                f"{pad}let _ = self.ctx.effect({label}, "
+                f"move || {{ if {bind} {{ {undo}; }} Ok(()) }});"
+            )
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
         else:
@@ -1729,7 +2308,10 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 defs: list[str] = []
                 type_names: dict = {}
                 counter = [0]
-                meta_type = _intercept_json_type(intercept[local], base, defs, type_names, counter)
+                # called for its side effect: it appends the generated struct
+                # defs to `defs` (emitted below). Its return type string is not
+                # needed here, only the literal from `_intercept_json_lit`.
+                _intercept_json_type(intercept[local], base, defs, type_names, counter)
                 meta_lit = _intercept_json_lit(intercept[local], base, defs, type_names, counter)
                 out.extend(defs)
                 inject_parts.append(f".require_with({_string(local)}, {meta_lit})")
@@ -1751,6 +2333,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     out.append(f"        {_string(name)},")
     out.append(f"        cordis::{inject},")
     out.append(closure)
+    if env.needs_teardown:
+        _emit_teardown_begin(env, out, indent=3)
     out.extend(_emit_config_application(component, config_ty, indent=3))
     out.extend(_emit_provide_config_local(component, indent=3))
     # Realm isolation is NOT applied here. cordis evaluates a plugin's reactive
@@ -1777,6 +2361,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             out.append(f"            ctx.provide({_string(key)}, {key}_box)?;")
         else:
             _emit_step(step, env, out, indent=3)
+    if env.needs_teardown:
+        _emit_teardown_commit(env, out, indent=3)
     out.append("            Ok(cordis::PluginOutput::none())")
     out.append("        },")
     out.append("    )")
@@ -2036,11 +2622,15 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     out.append(f"        {_string(name)},")
     out.append(f"        cordis::{inject},")
     out.append(closure)
+    if env.needs_teardown:
+        _emit_teardown_begin(env, out, indent=3)
     out.extend(_emit_config_application(component, config_ty, indent=3))
     out.extend(_emit_provide_config_local(component, indent=3))
     _emit_req_bindings(env, cname, out, indent=3)
     for step in component.get("body") or []:
         _emit_step(step, env, out, indent=3)
+    if env.needs_teardown:
+        _emit_teardown_commit(env, out, indent=3)
     out.append("            Ok(cordis::PluginOutput::none())")
     out.append("        },")
     out.append("    )")
@@ -2055,6 +2645,31 @@ def _rust_inject(env: "_Env") -> str:
     waiting on one would hang Pending forever; the router resolves them per call."""
     gated = [k for k in env.reqs if k not in env.routes]
     return "Inject::none()" if not gated else f"Inject::new({_string(gated)})"
+
+
+def _emit_teardown_begin(env: "_Env", out: list[str], indent: int) -> None:
+    """item 243 Slice 2b: open this activation's `RevlTeardown` FIRST (before
+    any user step registers an effect), so the phase-2 drain hook it
+    registers is disposed LAST by cordis-rs's LIFO unload — see
+    `_revl_teardown_preamble`. `ctx` is rebound to the extended context
+    `revl_teardown_begin` returns, so every later use of `ctx` in this
+    activation (provide-struct construction included) carries the teardown
+    state a provide-method later recovers via `revl_teardown_of`."""
+    pad = "    " * indent
+    label = _string(env.name + ".teardown.phase2")
+    out.append(f"{pad}let (ctx, _revl_teardown) = revl_teardown_begin(&ctx, {label})?;")
+
+
+def _emit_teardown_commit(env: "_Env", out: list[str], indent: int) -> None:
+    """The abort-vs-commit discriminator: flip `committed` right before this
+    activation reports success, mirroring `Frame.drain` on py — every
+    transactional/compensation disposer collected so far discharges (rather
+    than replaying) from this instant on, whenever cordis-rs eventually
+    disposes this fiber for real."""
+    pad = "    " * indent
+    out.append(
+        f"{pad}_revl_teardown.committed.store(true, std::sync::atomic::Ordering::Release);"
+    )
 
 
 def _emit_req_bindings(env: "_Env", cname: str, out: list[str], indent: int) -> None:
@@ -2108,13 +2723,179 @@ def _emit_setup_step(step: dict, env: _Env, out: list[str], indent: int) -> None
         raise EmitError(f"unsupported setup step in Rust backend: {kind!r}")
 
 
+def _emit_witnessed_step(env: "_Env", step: dict, ext: dict, out: list[str],
+                         indent: int, bind: str | None) -> None:
+    """Emit a witnessed effect (item 243): run the mutation, and on `Ok`
+    register the extern's DECLARED inverse as a `transactional` entry in the
+    activation's `RevlTeardown` (docs/design/teardown-contract.md). Mirrors
+    backends/python/emit.py's `_witnessed_step`: unlike a bracket (a plain
+    `ctx.effect` that always replays), this disposer reads `committed` at
+    DISPOSAL time — discharge (drop the witness, do nothing) on a clean
+    commit, replay the declared inverse on abort. Registration is
+    unconditional over the `Ok` branch; an `Err` mutation touched nothing, so
+    it registers no rollback (243 rule: Ok-conditional). `bind`, when given,
+    holds the WHOLE `Result` (not unwrapped) — same as py's `_witnessed_step`."""
+    pad = "    " * indent
+    n = env.wit_counter
+    env.wit_counter += 1
+    tmp = f"_revl_wit{n}"
+    witv = f"_revl_witv{n}"
+    out.append(f"{pad}let {tmp} = {_expr(step.get('acquire'), env)};")
+    witness_ty = _rust_type(ext.get("witness"), env.types)
+    label = _string(env.name + "." + (step.get("bind") or "effect") + ".witnessed")
+    out.append(f"{pad}if let Ok(ref {witv}) = {tmp} {{")
+    out.append(f"{pad}    let result: {witness_ty} = {witv}.clone();")
+    if _RECORD_MODE:
+        # item 322 Slice 2: the durable exit. At REGISTRATION (this branch runs
+        # during activation, when the mutation happened) write the
+        # discharge-descriptor — the re-issuable named call recover replays LIFO
+        # to undo the mutation — and fsync it, so a crash BEFORE commit is still
+        # recoverable from the log alone. `result` (the Ok witness) is
+        # stringified as the referent argument; the borrow ends before `result`
+        # moves into the disposer closure below. Mirrors the go tier's
+        # `revlRecordTransactional` call at the same point.
+        undo_callee = (ext.get("undo") or {}).get("callee") or {}
+        undo_name = str(undo_callee.get("name") or undo_callee.get("id") or "undo")
+        out.append(
+            f'{pad}    revl_record_transactional({_string(ext.get("name"))}, '
+            f'{_string(undo_name)}, vec![format!("{{}}", result)]);')
+    out.append(f"{pad}    let _revl_state = _revl_teardown.clone();")
+    undo = _expr(ext["undo"], env)
+    out.append(f"{pad}    ctx.effect({label}, move || {{")
+    out.append(f"{pad}        if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{")
+    out.append(f"{pad}            let _ = {undo};")
+    out.append(f"{pad}        }}")
+    out.append(f"{pad}        Ok(())")
+    out.append(f"{pad}    }})?;")
+    out.append(f"{pad}}}")
+    if bind is not None:
+        out.append(f"{pad}let {bind} = {tmp};")
+
+
+def _emit_method_witnessed_step(env: "_Env", method: dict, step: dict, ext: dict,
+                                out: list[str], indent: int) -> None:
+    """Emit a witnessed effect inside a PROVIDE-METHOD body — item 324, THE
+    per-tool-call H1 gate (docs/design/243-witnessed-externs.md,
+    docs/design/teardown-contract.md). Mirrors backends/python/emit.py's
+    `_method_witnessed_step` / `Frame.transactional_method`: run the per-call
+    mutation, and on `Ok` register the extern's DECLARED inverse as a
+    `transactional` entry on the ENCLOSING COMPONENT's activation frame,
+    recovered through `self.ctx` (the SAME fiber `revl_teardown_begin` extended
+    at activation — `revl_teardown_of` reads the metadata stored there). The
+    method returns, but the inverse must outlive the call: it survives on the
+    component-long activation frame until the component/session commits or
+    aborts.
+
+    THE SOUNDNESS HAZARD, and why rust does NOT have it. On cordis-py the
+    obvious "adopt the entry as a sibling effect" is unsound: py flips
+    `_committed` LAZILY, inside `Frame.drain` at teardown, and cordis-py
+    disposes an adopted sibling effect BEFORE that drain — so on a clean unload
+    the disposer would observe `_committed` still False and wrongly revert the
+    deliverable. py's fix PARKS the entry (`_deferred_transactional`) for `drain`
+    to dispose after the commit bit is settled. The rust tier flips `committed`
+    EAGERLY, at activation-end (`_emit_teardown_commit`, the same instant py's
+    drain would). By the time a per-tool-call method runs and registers this
+    sibling `self.ctx.effect` disposer, `committed` is ALREADY settled (True on
+    a live activation), and cordis-rs disposes it in the fiber's single LIFO
+    unload pass where it reads that settled bit by construction — discharge
+    (drop the witness, do nothing) on a clean commit, replay the declared
+    inverse on abort (`revl_abort` cleared `committed` before unload). No
+    park-for-drain discipline is needed: eager commit sidesteps the premature-
+    disposal window entirely. Registration is fire-and-forget (`let _ =
+    self.ctx.effect(...)`) — a non-`Result` method signature cannot `?`-propagate
+    — matching every other method-body registration, and unconditional over the
+    `Ok` branch (an `Err` mutation touched nothing, so it schedules no
+    rollback: 243's Ok-conditional rule)."""
+    pad = "    " * indent
+    n = env.wit_counter
+    env.wit_counter += 1
+    tmp = f"_revl_wit{n}"
+    witv = f"_revl_witv{n}"
+    # The shared expression renderer already clones a typed non-Copy param used
+    # by value as a call argument (`_by_value_arg`), so the acquire needs only
+    # the component-scope rename — no extra param `.clone()` (that would double).
+    out.append(f"{pad}let {tmp} = {_expr(step.get('acquire'), env, _method_scope_rename(env))};")
+    witness_ty = _rust_type(ext.get("witness"), env.types)
+    label = _string(f"{env.name}.{method.get('name')}.witnessed")
+    undo = _expr(ext["undo"], env)
+    out.append(f"{pad}if let Ok(ref {witv}) = {tmp} {{")
+    out.append(f"{pad}    let result: {witness_ty} = {witv}.clone();")
+    out.append(f"{pad}    let _revl_state = revl_teardown_of(&self.ctx);")
+    out.append(f"{pad}    let _ = self.ctx.effect({label}, move || {{")
+    out.append(f"{pad}        if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{")
+    out.append(f"{pad}            let _ = {undo};")
+    out.append(f"{pad}        }}")
+    out.append(f"{pad}        Ok(())")
+    out.append(f"{pad}    }});")
+    out.append(f"{pad}}}")
+
+
+def _emit_compensation_registration(env: "_Env", compensate_node: dict, label_text: str,
+                                    out: list[str], indent: int, rename: dict[str, str],
+                                    ctx_expr: str = "ctx", propagate: bool = True) -> None:
+    """The shared tail of a `compensation` entry registration (item 247, the
+    teardown-contract two-phase abort): wrap the (already-renamed) compensate
+    call in a boxed `FnOnce`, and register a disposer that discharges on
+    commit or QUEUES onto the activation's phase-2 queue on abort, instead of
+    running immediately — see `_revl_teardown_preamble` for why that queueing
+    is what gives Phase 1 (bracket + transactional) priority over Phase 2
+    (compensation) for free, from cordis-rs's own LIFO dispose order.
+
+    `ctx_expr` is `"ctx"` (`?`-propagated, `propagate=True`) at activation
+    level and `"self.ctx"` (fire-and-forget, `propagate=False`, matching every
+    other method-body registration) inside a provide method."""
+    pad = "    " * indent
+    call = _expr(compensate_node, env, rename=rename)
+    label = _string(label_text)
+    tail = "?;" if propagate else ";"
+    lead = "" if propagate else "let _ = "
+    out.append(f"{pad}let _revl_state = _revl_teardown.clone();")
+    out.append(f"{pad}let _revl_call: Box<dyn FnOnce() + Send> = Box::new(move || {{ let _ = {call}; }});")
+    out.append(f"{pad}{lead}{ctx_expr}.effect({label}, move || {{")
+    out.append(f"{pad}    if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{")
+    out.append(f"{pad}        _revl_state.phase2.lock().unwrap().push(")
+    out.append(f"{pad}            RevlPendingCompensation {{ label: {label}.to_string(), call: _revl_call }});")
+    out.append(f"{pad}    }}")
+    out.append(f"{pad}    Ok(())")
+    out.append(f"{pad}}}){tail}")
+
+
+def _emit_activation_compensation(env: "_Env", step: dict, out: list[str], indent: int) -> None:
+    """`emit ... compensate` at activation level. Requires `env.needs_teardown`
+    (the caller guarantees `_revl_teardown`/`ctx` are the extended locals from
+    `_emit_teardown_begin`). Pre-clones every `req` and every prior
+    activation-body `let-effect` bind the compensate expression reads, so the
+    `move` closure owns copies the forward `emit` call cannot have moved out
+    from under it (mirrors the existing bracket-undo req cloning above)."""
+    pad = "    " * indent
+    referenced: set[str] = set()
+    _expr_var_names(step.get("compensate"), referenced)
+    rename: dict[str, str] = {}
+    for req in env.reqs:
+        req_c = f"{req}_comp"
+        out.append(f"{pad}let {req_c} = {req}.clone();")
+        rename[req] = req_c
+    for local in sorted(referenced & set(env.activation_binds)):
+        local_c = f"{local}_comp"
+        out.append(f"{pad}let {local_c} = {local}.clone();")
+        rename[local] = local_c
+    _emit_compensation_registration(
+        env, step["compensate"], env.name + ".compensate", out, indent, rename)
+
+
 def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
     pad = "    " * indent
     kind = step.get("step")
     if kind == "let-effect":
         for setup in step.get("setup") or []:
             _emit_setup_step(setup, env, out, indent)
+        wit = _witnessed_extern_for(env, step.get("acquire"))
+        if wit is not None:
+            _emit_witnessed_step(env, step, wit, out, indent, bind=_ident(step["bind"], "binding"))
+            env.activation_binds.append(step["bind"])
+            return
         bind = _ident(step["bind"], "binding")
+        env.activation_binds.append(step["bind"])
         acquire = _expr(step["acquire"], env)
         # FR-4: pin the host Map's value type at the constructor so rustc
         # never has to infer it — a binding no provider struct captures, or
@@ -2131,12 +2912,40 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             req_undo = f"{req}_undo"
             out.append(f"{pad}let {req_undo} = {req}.clone();")
             undo_rename[req] = req_undo
+        is_cas = _is_map_cas(step.get("acquire"))
+        if is_cas:
+            # item 397: a result-declared host CAS binds an `Arc<bool>`. Its
+            # site-spelled undo removes from a PRIOR activation bind (the
+            # ledger); a bare `move` closure would consume that bind, leaving
+            # the later provide struct's `.clone()` a use-after-move (E0382).
+            # Reclone every referenced prior activation bind into the closure,
+            # exactly as the reqs are recloned above.
+            referenced: set[str] = set()
+            _expr_var_names(step.get("undo"), referenced)
+            for local in sorted(referenced & set(env.activation_binds)):
+                if local == step["bind"]:
+                    continue
+                local_undo = f"{local}_undo"
+                out.append(f"{pad}let {local_undo} = {local}.clone();")
+                undo_rename[local] = local_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
         label = _string(env.name + "." + step["bind"] + ".undo")
-        out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
+        if is_cas:
+            # result-guarded undo: the identity inverse on a `false` CAS, so
+            # teardown never removes the winner's entry (`*` derefs the
+            # `Arc<bool>` clone the closure owns).
+            out.append(
+                f"{pad}ctx.effect({label}, "
+                f"move || {{ if *{undo_name} {{ {undo}; }} Ok(()) }})?;")
+        else:
+            out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "effect":
         for setup in step.get("setup") or []:
             _emit_setup_step(setup, env, out, indent)
+        wit = _witnessed_extern_for(env, step.get("acquire"))
+        if wit is not None:
+            _emit_witnessed_step(env, step, wit, out, indent, bind=None)
+            return
         acquire = _expr(step["acquire"], env)
         undo_rename: dict[str, str] = {}
         for req in env.reqs:
@@ -2149,6 +2958,8 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "emit":
         out.append(f"{pad}let _ = {_expr(step['expr'], env)};")
+        if step.get("compensate") is not None:
+            _emit_activation_compensation(env, step, out, indent)
     elif kind == "timer":
         # A `timer` step (item 57, docs/time-coeffect.md): a revertible
         # schedule. Arming the timer is the acquire, cancellation its derived
@@ -2202,7 +3013,23 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
                 _emit_step(nested, env, out, indent + 1)
         out.append(f"{pad}}}")
     elif kind == "await":
-        out.append(f"{pad}{_expr(step['expr'], env)}.await;")
+        # item 131 repair: rust erases method async-ness (async-extern.md §2
+        # family 2), so a req-target async op or an async-colored fn returns a
+        # plain value here, not a future — a blanket `.await` is a rustc error
+        # on it (`heat()` yields `String`, not `impl Future`). Only the host
+        # async seam (`Job.run`, which cordis-rs drives as a real future via
+        # `plugin_async`) takes `.await`; every other awaitable erases to a plain
+        # blocking call, matching the go/java erasure. The A1 ordering boundary
+        # is the statement position, preserved either way. This is the latent
+        # tier bug item 131's widened await-step admission would otherwise make
+        # live (design §5, the rust slice).
+        expr = step.get("expr")
+        rendered = _expr(expr, env)
+        if isinstance(expr, dict) and expr.get("kind") == "host" \
+                and expr.get("fn") == "Job.run":
+            out.append(f"{pad}{rendered}.await;")
+        else:
+            out.append(f"{pad}{rendered};")
     elif kind == "provide":
         key = step.get("name")
         service = step.get("service")
@@ -2272,6 +3099,129 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
     return False
 
 
+def _list_element_type(surface: object) -> str | None:
+    """The element surface type of a `List[T]` surface type, else None."""
+    if isinstance(surface, str):
+        m = re.match(r"^List\[(.+)\]$", surface)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _v3_is_empty_list(node: object) -> bool:
+    return (isinstance(node, dict) and node.get("kind") == "list"
+            and not node.get("items"))
+
+
+def _v3_empty_vec_elem_types(body: object, ctx: "_V3Ctx") -> dict:
+    """Map each local bound to an EMPTY list literal (`let out = []`) to its
+    element surface type, when the body makes it knowable.
+
+    An empty `vec![]` gives Rust no element type, and the accumulator idiom
+    (`let mut out = []` then `out = out.push(x)` / `out = res`) reaches its type
+    only through later statements, so rustc reports `type annotations needed`
+    (E0282). This pre-pass recovers the element type from the pushes into the
+    binding and from aliasing assignments, so the `let` can be annotated
+    `Vec<T>`. It is conservative -- an un-inferable binding is simply left
+    unannotated (byte-identical to before) -- and runs on a scratch `var_types`
+    so it never perturbs the real emission."""
+    empties: set = set()
+
+    def collect(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("step") in ("let", "assign") and _v3_is_empty_list(node.get("value")):
+                empties.add(node.get("name"))
+            for v in node.values():
+                collect(v)
+        elif isinstance(node, list):
+            for v in node:
+                collect(v)
+
+    collect(body)
+    if not empties:
+        return {}
+
+    saved = ctx.var_types
+    scratch = dict(saved)
+    ctx.var_types = scratch
+    try:
+        # Forward-infer every `let`/`assign` type (params seed `scratch`), twice
+        # so a value referring to an earlier-typed local resolves; this types the
+        # indexed elements / call results that later feed a push.
+        def forward(node: object) -> None:
+            if isinstance(node, dict):
+                if node.get("step") in ("let", "assign"):
+                    t = _v3_infer_type(node.get("value"), ctx)
+                    if t is not None:
+                        scratch[node.get("name")] = t
+                elif node.get("step") == "for":
+                    # `for x in xs` types the loop binding as the element of the
+                    # iterable, so a push of `x` types the accumulator.
+                    it = _list_element_type(_v3_infer_type(node.get("iterable"), ctx))
+                    if it is not None:
+                        scratch[node.get("bind")] = it
+                for v in node.values():
+                    forward(v)
+            elif isinstance(node, list):
+                for v in node:
+                    forward(v)
+
+        forward(body)
+        forward(body)
+
+        elem: dict = {n: None for n in empties}
+
+        def value_elem(val: object) -> str | None:
+            """The element surface type a value would give an empty-vec binding."""
+            if _v3_is_empty_list(val):
+                return None
+            if isinstance(val, dict):
+                if val.get("kind") == "list" and val.get("items"):
+                    return _v3_infer_type(val["items"][0], ctx)
+                if val.get("kind") == "builtin" and val.get("method") in ("push", "concat", "slice"):
+                    tgt = val.get("target")
+                    if val.get("method") == "push" and val.get("args"):
+                        t = _v3_infer_type(val["args"][0], ctx)
+                        if t is not None:
+                            return t
+                    if isinstance(tgt, dict) and tgt.get("kind") == "var" and tgt.get("name") in elem:
+                        return elem[tgt.get("name")]
+                if val.get("kind") in ("var", "name", "req"):
+                    nm = val.get("id") or val.get("name")
+                    if nm in elem and elem[nm] is not None:
+                        return elem[nm]
+                    return _list_element_type(scratch.get(nm))
+            return None
+
+        def contributions(node: object, acc: list) -> None:
+            if isinstance(node, dict):
+                if node.get("kind") == "builtin" and node.get("method") == "push":
+                    tgt = node.get("target")
+                    if isinstance(tgt, dict) and tgt.get("kind") == "var" \
+                            and tgt.get("name") in elem and node.get("args"):
+                        acc.append((tgt.get("name"), _v3_infer_type(node["args"][0], ctx)))
+                if node.get("step") in ("let", "assign") and node.get("name") in elem:
+                    acc.append((node.get("name"), value_elem(node.get("value"))))
+                for v in node.values():
+                    contributions(v, acc)
+            elif isinstance(node, list):
+                for v in node:
+                    contributions(v, acc)
+
+        changed = True
+        while changed:
+            changed = False
+            acc: list = []
+            contributions(body, acc)
+            for name, t in acc:
+                if isinstance(t, str) and elem.get(name) is None:
+                    elem[name] = t
+                    changed = True
+        return {n: t for n, t in elem.items() if isinstance(t, str)}
+    finally:
+        ctx.var_types = saved
+
+
 def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
     """The surface type of an expression when it is knowable, else None.
 
@@ -2286,6 +3236,15 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
         kind = node.get("kind")
         if kind in ("name", "var", "req"):
             return ctx.var_types.get(node.get("id") or node.get("name"))
+        if kind == "lit":
+            # A bare `Int`/`Bool` literal is a Copy scalar, so typing it keeps a
+            # reused loop counter (`var i = 0` pushed each iteration) from being
+            # needlessly `.clone()`d. `bool` is checked first (it subclasses int).
+            value = node.get("value")
+            if isinstance(value, bool):
+                return "Bool"
+            if isinstance(value, int):
+                return "Int"
         if kind == "adt":
             return ctx.case_adt.get(node.get("case"))
         if kind == "fn":
@@ -2300,6 +3259,36 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
                     return ctx.fn_returns.get(cn)
         if kind == "list":
             return "List"
+        if kind == "index":
+            base_ty = _v3_infer_type(node.get("target"), ctx)
+            if isinstance(base_ty, str):
+                inner = _list_element_type(base_ty)
+                if inner is not None:
+                    return inner
+        if kind == "field":
+            base_ty = _v3_infer_type(node.get("target"), ctx)
+            if isinstance(base_ty, str):
+                ft = ctx.record_field_types(base_ty).get(node.get("name"))
+                if isinstance(ft, str):
+                    return ft
+        if kind == "record":
+            # Only when the field-set names EXACTLY ONE record; a field-set
+            # several records share (`{e, i}` -> `PR`/`AtExpr`) is ambiguous, so
+            # this must not guess a type and clobber a binding's more specific
+            # existing type. `record_by_fields` is already `None` for a shared
+            # field-set, so it is the unambiguous-only signal.
+            key = tuple(sorted(k for k, _ in node.get("fields") or []))
+            return ctx.record_by_fields.get(key)
+        if kind == "match":
+            # Every arm yields the same type, so the first arm body the emitter
+            # can type names the `match`'s type. This lets a `let x = match ..`
+            # bound value (e.g. a lookup-with-default) carry a type, so a later
+            # by-value use of it -- including one consumed inside a loop -- clones
+            # under the known-non-Copy rule instead of moving (E0382).
+            for arm in node.get("arms") or []:
+                arm_ty = _v3_infer_type(arm.get("body"), ctx)
+                if isinstance(arm_ty, str):
+                    return arm_ty
     if _v3_is_str(node, ctx):
         return "Str"
     if _v3_is_float(node):
@@ -2358,9 +3347,34 @@ class _V3Ctx:
         # disambiguates a non-unique field-set (item 268). Set per fn by
         # `_emit_v3_functions`; None everywhere the context is unknown.
         self.current_return: str | None = None
+        # Bindings referenced more than once in the fn body currently being
+        # emitted. A by-value use of one whose surface type is unknown must
+        # clone (see `_by_value_arg`); reset per fn by `_emit_v3_functions`,
+        # empty everywhere the reuse context is not established.
+        self.multi_use: set[str] = set()
+        # Local name -> element surface type for a binding introduced as an empty
+        # `vec![]` (E0282 annotation); reset per fn by `_emit_v3_functions`, empty
+        # in every other emit context (no empty-vec annotation needed there).
+        self.vec_elems: dict = {}
+        # Free function name -> set of parameter INDICES lowered to `&str`
+        # (read-only `Str` params, item 282). Computed once from the whole
+        # function list so a call site knows which argument slots take a borrow;
+        # shared by every ctx (function bodies, tests, lifecycle tests).
+        self.fn_borrow: dict[str, frozenset] = _compute_str_param_borrows(
+            functions or [])
+        # Parameters of the function CURRENTLY being emitted that are borrowed
+        # `&str` (a subset of its `Str` params). Set per fn by
+        # `_emit_v3_functions`, empty in every other emit context, so a read of a
+        # borrowed param renders as the `&str` it already is.
+        self.borrowed_params: set[str] = set()
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple[str, ...], str | None] = {}
+        # Recursive-ADT edges that carry a `Box` indirection (E0072), keyed by
+        # RAW `(enum, case)` / `(record, field)` — the same keys
+        # `_recursive_boxed_edges` and `_emit_v3_types` use, so construction Box-
+        # wraps exactly the edges the declaration boxed.
+        self.boxed_cases, self.boxed_fields = _recursive_boxed_edges(self.types)
         for name, spec in self.types.items():
             _ident(name, "type name")
             if spec.get("kind") == "record":
@@ -2375,6 +3389,19 @@ class _V3Ctx:
                         self.case_adt[cname] = None
                     else:
                         self.case_adt[cname] = name
+
+    def field_is_boxed(self, type_ident: str, field: str) -> bool:
+        """Whether the record whose EMITTED name is `type_ident` carries `field`
+        behind a `Box` (a recursive struct-field edge, E0072). `boxed_fields` is
+        keyed by the raw type name, so map the mangled ident back; empty in the
+        common case (recursion is broken at an enum payload, needing no boxed
+        field), so this is a cheap no-op then."""
+        if not self.boxed_fields:
+            return False
+        for raw in self.types:
+            if _ident(raw, "type name") == type_ident:
+                return (raw, field) in self.boxed_fields
+        return False
 
     def _records_with_fields(self, key: tuple[str, ...]) -> list[str]:
         """Every declared record whose field-set is EXACTLY `key`, sorted for a
@@ -2470,7 +3497,12 @@ class _V3Ctx:
                 return f"{adt}::{name}"
             if len(args) != 1:
                 raise EmitError(f"`{name}` takes exactly one payload argument")
-            return f"{adt}::{name}({args[0]})"
+            arg = args[0]
+            if (adt, name) in self.boxed_cases:
+                # recursive payload -> the variant holds `Box<Payload>` (E0072);
+                # move the constructed payload onto the heap to match.
+                arg = f"Box::new({arg})"
+            return f"{adt}::{name}({arg})"
         if name == "None":
             if args:
                 raise EmitError("`None` takes no arguments")
@@ -2599,9 +3631,11 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
     if kind == "fn":
         # component dialect: a free-function call `name(..)`.
         name = _ident(node.get("name"), "function")
+        borrow = ctx.fn_borrow.get(node.get("name"), frozenset())
         args = ", ".join(
-            _by_value_arg(a, _render_expr(a, ctx, rename), ctx)
-            for a in node.get("args") or []
+            _borrow_str_arg(a, _render_expr(a, ctx, rename), ctx) if idx in borrow
+            else _by_value_arg(a, _render_expr(a, ctx, rename), ctx)
+            for idx, a in enumerate(node.get("args") or [])
         )
         return f"{name}({args})"
 
@@ -2609,8 +3643,10 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # tagged ADT construction: user variants -> `Enum::Case(..)`, built-in
         # Result -> native `Ok(..)`/`Err(..)`. Reuses the constructor logic
         # the call/var paths already use.
+        adt_args = node.get("args") or []
         return ctx.constructor(
-            node["case"], [_render_expr(a, ctx, rename) for a in node.get("args") or []]
+            node["case"],
+            [_by_value_arg(a, _render_expr(a, ctx, rename), ctx) for a in adt_args]
         )
 
     if kind == "bin":
@@ -2634,6 +3670,17 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # over the emitted code — docs/conformance.md.)
             return (f'format!("{{}}{{}}", {_render_expr(node["left"], ctx, rename)}, '
                     f'{_render_expr(node["right"], ctx, rename)})')
+        if node.get("op") in ("&", "|", "^", "<<", ">>"):
+            # Int32 bitwise operators (item 366, docs/arithmetic.md). `& | ^`
+            # are native on i32 and never trap. Shifts mask the count to 0..31
+            # (mod 32): rust panics on a shift amount >= 32, so masking keeps
+            # `<<`/`>>` panic-free, and it matches wasm/JS. `<<` drops the high
+            # bits (i32 two's complement); `>>` on the signed i32 is arithmetic.
+            left = _render_expr(node["left"], ctx, rename)
+            right = _render_expr(node["right"], ctx, rename)
+            if node["op"] in ("&", "|", "^"):
+                return f"({left} {node['op']} {right})"
+            return f"({left} {node['op']} (({right}) & 31))"
         op = _V3_BIN_OPS.get(node.get("op"))
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
@@ -2664,6 +3711,11 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         operand = _render_expr(node.get("operand"), ctx, rename)
         if node.get("op") == "!":
             return f"(!{operand})"
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): rust spells bitwise NOT on
+            # an integer as `!` (the same token it uses for logical not on
+            # bool). A bit op, so it never traps.
+            return f"(!{operand})"
         if node.get("op") == "-":
             return f"(-{operand})"
         raise EmitError(f"unsupported unary operator {node.get('op')!r}")
@@ -2675,44 +3727,60 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # what selects the form.
         if "callee" in node:
             callee_node = node.get("callee") or {}
-            arg_exprs = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
+            arg_nodes = node.get("args") or []
+            arg_exprs = [_render_expr(a, ctx, rename) for a in arg_nodes]
             args = ", ".join(arg_exprs)
+            # A method/host call MOVES each by-value argument into the callee, so
+            # a reused non-Copy argument (`amb.push(cn)` then `ct.remove(&cn)`,
+            # `surf.insert(e.parent, ..)` then a later `e.parent`) is cloned under
+            # the reuse rule; a borrowed key (`get`/`remove`) keeps its `&`.
+            reuse_args = [
+                _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, arg_exprs)
+            ]
             if callee_node.get("kind") == "field":
                 target_node = callee_node.get("target") or {}
                 method = callee_node.get("name")
                 if target_node.get("kind") == "var" and target_node.get("name") in _V3_HOST_ROOTS:
-                    hargs = arg_exprs
-                    if target_node["name"] == "Map" and method in ("get", "remove") and hargs:
+                    hargs = list(reuse_args)
+                    if target_node["name"] == "Map" and method in ("get", "remove") and arg_exprs:
                         # FR-4: the host Map borrows its key, so the caller keeps
                         # owning it (read-then-write on one key compiles).
-                        hargs = [f"&{hargs[0]}", *hargs[1:]]
+                        hargs = [f"&{arg_exprs[0]}", *reuse_args[1:]]
                     return f"{target_node['name']}::{_mname(method)}({', '.join(hargs)})"
                 target = _render_expr(target_node, ctx, rename)
                 if target_node.get("kind") not in _ATOMIC_KINDS:
                     target = f"({target})"
+                margs = reuse_args
                 if (target_node.get("kind") == "var"
                         and method in ("get", "remove")
                         and str(ctx.var_types.get(target_node.get("name") or "") or "")
                             .startswith("Map[")):
                     # FR-4: same borrow for a host-Map binding read through a
                     # 2.0-style callee (`store.get(k)` in a pure fn body).
-                    arg_exprs = [f"&{arg_exprs[0]}", *arg_exprs[1:]] if arg_exprs else []
-                    args = ", ".join(arg_exprs)
-                return f"{target}.{_ident(method, 'method')}({args})"
+                    margs = ([f"&{arg_exprs[0]}", *reuse_args[1:]] if arg_exprs else [])
+                return f"{target}.{_ident(method, 'method')}({', '.join(margs)})"
             callee_name = callee_node.get("name") if callee_node.get("kind") == "var" else None
             if callee_name is not None and (
                 callee_name in ctx.case_adt or callee_name in _V3_BUILTIN_CONSTRUCTORS
             ):
-                return ctx.constructor(callee_name, arg_exprs)
+                # An ADT/Some/Ok payload MOVES its value in (an owned slot like a
+                # record field), so a non-Copy payload is cloned via `_by_value_arg`.
+                return ctx.constructor(callee_name, [
+                    _by_value_arg(a, r, ctx)
+                    for a, r in zip(arg_nodes, arg_exprs)])
             callee = _render_expr(callee_node, ctx, rename)
             if callee_node.get("kind") not in _ATOMIC_KINDS:
                 callee = f"({callee})"
             # A free-function / function-value call passes its arguments by value
             # (revl value semantics), so a non-Copy value or `impl Fn` argument
-            # reused after the call would otherwise move (E0382).
+            # reused after the call would otherwise move (E0382). A read-only
+            # `Str` param the callee lowered to `&str` takes a borrow instead of
+            # a clone (item 282), so its whole string is never copied at the call.
+            borrow = ctx.fn_borrow.get(callee_name, frozenset())
             bv_args = ", ".join(
-                _by_value_arg(a, r, ctx)
-                for a, r in zip(node.get("args") or [], arg_exprs)
+                _borrow_str_arg(a, r, ctx) if idx in borrow
+                else _by_value_arg(a, r, ctx)
+                for idx, (a, r) in enumerate(zip(node.get("args") or [], arg_exprs))
             )
             return f"{callee}({bv_args})"
         # component form: `target.method(args)`.
@@ -2732,9 +3800,10 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             args = ", ".join(arg_exprs)
         elif is_host_map:
             # Other host-Map methods (`insert`, ...) are calls on the
-            # first-party generic `Map<V>`, which already carries the right
-            # ownership at its own boundary — no service-call clone.
-            args = ", ".join(arg_exprs)
+            # first-party generic `Map<V>`; the value is MOVED in, so a reused
+            # non-Copy argument still clones under the reuse rule.
+            args = ", ".join(
+                _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, arg_exprs))
         else:
             # A service-method call passes its arguments by value (revl value
             # semantics): the generated trait methods take `String`/records/ADTs
@@ -2758,6 +3827,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         target = _render_expr(target_node, ctx, rename)
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value in
+            # a component position — the code-point (Str) / element (List) count
+            # via the helper trait (`String::len` is bytes), the same as the
+            # `len` node, NOT a struct field access.
+            return f"{target}.revl_length()"
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":
@@ -2769,11 +3844,14 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         return f"({target})[({_render_expr(node['index'], ctx, rename)}) as usize].clone()"
 
     if kind == "if":
-        return (
-            f"if {_render_expr(node['cond'], ctx, rename)} "
-            f"{{ {_render_expr(node['then'], ctx, rename)} }} "
-            f"else {{ {_render_expr(node['else'], ctx, rename)} }}"
-        )
+        # Each branch tail is a value position: a bare non-Copy binding reused
+        # after the `if`-expression must clone here or the later read borrows a
+        # moved value (E0382). A fresh temporary or a Copy scalar stays bare.
+        then_v = _by_value_tail(
+            node["then"], _render_expr(node["then"], ctx, rename), ctx)
+        else_v = _by_value_tail(
+            node["else"], _render_expr(node["else"], ctx, rename), ctx)
+        return f"if {_render_expr(node['cond'], ctx, rename)} {{ {then_v} }} else {{ {else_v} }}"
 
     if kind == "record_update":
         raise EmitError(
@@ -2797,16 +3875,28 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # (sound: revl values are immutable), leaving Copy scalars and fresh
         # temporaries untouched. A fn-typed field is impossible here — it is an
         # escaping position the type layer already refuses (`_FN_TYPE_REFUSAL`).
+        def _field_value(k, v):
+            rendered = _by_value_arg(
+                v, _render_expr(v, ctx, rename, field_types.get(k)), ctx)
+            if ctx.field_is_boxed(type_name, _ident(k, "record field")):
+                # recursive struct field -> the struct holds `Box<T>` (E0072);
+                # move the field value onto the heap to match.
+                rendered = f"Box::new({rendered})"
+            return rendered
+
         body = ", ".join(
-            f"{_ident(k, 'record field')}: "
-            f"{_by_value_arg(v, _render_expr(v, ctx, rename, field_types.get(k)), ctx)}"
+            f"{_ident(k, 'record field')}: {_field_value(k, v)}"
             for k, v in fields
         )
         return f"{type_name} {{ {body} }}"
 
     if kind == "list":
+        # A list literal MOVES each element into the `Vec`, so a reused non-Copy
+        # element (`vec![root_]` with `root_` read again) must clone; a Copy or
+        # single-use element goes through untouched.
         return ("vec![" + ", ".join(
-            _render_expr(item, ctx, rename) for item in node.get("items") or []) + "]")
+            _by_value_reuse(item, _render_expr(item, ctx, rename), ctx)
+            for item in node.get("items") or []) + "]")
 
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map). rustc infers the map's
@@ -2827,8 +3917,29 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         target = _render_expr(target_node, ctx, rename)
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
-        args = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
-        return _v3_builtin(node.get("method"), target, args, node.get("recv"))
+        arg_nodes = node.get("args") or []
+        args = [_render_expr(a, ctx, rename) for a in arg_nodes]
+        # `push`/`set` MOVE their non-Copy argument into the collection, so a
+        # reused value must clone (`stack.revl_push(name)` then `name` again).
+        # The borrow-arg builtins (`concat`/`indexOf`/... and the Map key
+        # probes) take `&arg`, so they never move it and are left untouched.
+        method = node.get("method")
+        if method not in _BORROW_ARG_BUILTINS:
+            args = [
+                _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, args)]
+        elif method == "indexOf" and arg_nodes:
+            # A List `revl_index_of` needle is `&T` (`&String` for `List[Str]`),
+            # not `&str`. Item 282 may have borrowed a read-only `Str` param to
+            # `&str` (safe for the *string* indexOf), but as a List needle that
+            # renders `&&str` (E0308), so a borrowed `&str` arg is materialised to
+            # an owned `String` here (`&s.to_string()` -> `&String`).
+            recv_ty = _v3_infer_type(target_node, ctx)
+            a0 = arg_nodes[0]
+            if (isinstance(recv_ty, str) and recv_ty.startswith("List[")
+                    and isinstance(a0, dict) and a0.get("kind") in ("var", "name", "req")
+                    and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
+                args[0] = f"{args[0]}.to_string()"
+        return _v3_builtin(method, target, args, node.get("recv"))
 
     if kind == "match":
         return _v3_match_expr(node, ctx, rename)
@@ -2971,6 +4082,12 @@ def _v3_builtin(method: str, target: str, args: list[str],
         return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap().to_string() }}"
     if method == "charCodeAt":
         return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap() as u32 as i64 }}"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at code-point index i. Same char-indexed lowering as
+    # charCodeAt on this tier (the O(n)-per-access cost is item 277/282's
+    # separate concern — byte-identical to charCodeAt's shape here).
+    if method == "codepoint_at":
+        return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap() as u32 as i64 }}"
     if method == "indexOf":
         return f"{target}.revl_index_of(&{args[0]})"
     if method == "split":
@@ -3081,22 +4198,26 @@ def _stdlib_helper_traits() -> list[str]:
     (docs/stdlib-2.0.md).
     """
     return [
+        # Implemented for `str`, not `String`, so BOTH an owned `String` receiver
+        # (via its deref to `str`) and a borrowed `&str` parameter (item 282)
+        # reach the same read-only surface, and the arguments take `&str` so a
+        # borrowed operand coerces in exactly as `&String` does.
         "trait RevlStrOps {",
         "    fn revl_length(&self) -> i64;",
         "    fn revl_slice(&self, a: i64, b: i64) -> String;",
-        "    fn revl_index_of(&self, needle: &String) -> i64;",
-        "    fn revl_concat(&self, other: &String) -> String;",
-        "    fn revl_split(&self, sep: &String) -> Vec<String>;",
+        "    fn revl_index_of(&self, needle: &str) -> i64;",
+        "    fn revl_concat(&self, other: &str) -> String;",
+        "    fn revl_split(&self, sep: &str) -> Vec<String>;",
         "    fn revl_repeat(&self, n: i64) -> String;",
-        "    fn revl_starts_with(&self, prefix: &String) -> bool;",
-        "    fn revl_ends_with(&self, suffix: &String) -> bool;",
+        "    fn revl_starts_with(&self, prefix: &str) -> bool;",
+        "    fn revl_ends_with(&self, suffix: &str) -> bool;",
         "}",
-        "impl RevlStrOps for String {",
+        "impl RevlStrOps for str {",
         "    fn revl_length(&self) -> i64 { self.chars().count() as i64 }",
         "    fn revl_slice(&self, a: i64, b: i64) -> String {",
         "        self.chars().skip(a.max(0) as usize).take((b - a).max(0) as usize).collect()",
         "    }",
-        "    fn revl_index_of(&self, needle: &String) -> i64 {",
+        "    fn revl_index_of(&self, needle: &str) -> i64 {",
         "        let hay: Vec<char> = self.chars().collect();",
         "        let nee: Vec<char> = needle.chars().collect();",
         "        if nee.is_empty() { return 0; }",
@@ -3106,23 +4227,23 @@ def _stdlib_helper_traits() -> list[str]:
         "        }",
         "        -1",
         "    }",
-        "    fn revl_concat(&self, other: &String) -> String { format!(\"{}{}\", self, other) }",
-        "    fn revl_split(&self, sep: &String) -> Vec<String> {",
+        "    fn revl_concat(&self, other: &str) -> String { format!(\"{}{}\", self, other) }",
+        "    fn revl_split(&self, sep: &str) -> Vec<String> {",
         "        if sep.is_empty() {",
         "            self.chars().map(|c| c.to_string()).collect()",
         "        } else {",
-        "            self.split(sep.as_str()).map(|s| s.to_string()).collect()",
+        "            self.split(sep).map(|s| s.to_string()).collect()",
         "        }",
         "    }",
         "    fn revl_repeat(&self, n: i64) -> String { self.repeat(n.max(0) as usize) }",
-        "    fn revl_starts_with(&self, prefix: &String) -> bool { self.starts_with(prefix.as_str()) }",
-        "    fn revl_ends_with(&self, suffix: &String) -> bool { self.ends_with(suffix.as_str()) }",
+        "    fn revl_starts_with(&self, prefix: &str) -> bool { self.starts_with(prefix) }",
+        "    fn revl_ends_with(&self, suffix: &str) -> bool { self.ends_with(suffix) }",
         "}",
         "trait RevlStrListOps {",
-        "    fn revl_join(&self, sep: &String) -> String;",
+        "    fn revl_join(&self, sep: &str) -> String;",
         "}",
         "impl RevlStrListOps for Vec<String> {",
-        "    fn revl_join(&self, sep: &String) -> String { self.join(sep.as_str()) }",
+        "    fn revl_join(&self, sep: &str) -> String { self.join(sep) }",
         "}",
         "trait RevlListOps<T> {",
         "    fn revl_length(&self) -> i64;",
@@ -3177,12 +4298,28 @@ def _v3_interp(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) ->
 
 
 def _v3_match_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
-    scrutinee = _render_expr(node.get("scrutinee"), ctx, rename)
+    scrut_node = node.get("scrutinee")
+    # A `match` consumes its scrutinee (a bound pattern moves the payload out),
+    # so a reused non-Copy scrutinee must be cloned or every later use borrows a
+    # moved value (E0382): `match recv { Var(n) => .. }` then `infer(recv)`. A
+    # single-use scrutinee stays a move, byte-identical to before.
+    scrutinee = _by_value_reuse(
+        scrut_node, _render_expr(scrut_node, ctx, rename), ctx)
     arms = node.get("arms") or []
     lines = [f"match {scrutinee} {{"]
     for arm in arms:
         pattern = ctx.match_pattern(arm)
         body = _render_expr(arm.get("body"), ctx, rename)
+        bind = arm.get("bind")
+        if bind and (ctx.case_adt.get(arm.get("pattern")), arm.get("pattern")) \
+                in ctx.boxed_cases:
+            # The payload of a recursive case is `Box<Payload>` (E0072), so the
+            # bind is a `Box`, not the payload. Unbox it up front (`let b = *b;`)
+            # so the arm body reads the owned payload exactly as an unboxed
+            # binding would -- no per-use deref, and byte-identical to the
+            # non-recursive case (a non-boxed enum grows no such wrapper).
+            b = _ident(bind, "match bind")
+            body = f"{{ let {b} = *{b}; {body} }}"
         lines.append(f"    {pattern} => {body},")
     if not any(arm.get("pattern") == "_" for arm in arms):
         # lower.py has already checked exhaustiveness for known ADTs.
@@ -3217,6 +4354,91 @@ def _v3_let_pattern(node: dict, ctx: _V3Ctx, out: list[str], indent: int) -> Non
         raise EmitError(f"unsupported let_pattern kind {pattern!r}")
 
 
+# The persistent-collection methods whose 2.0 lowering is a functional
+# clone-then-mutate-then-return: `revl_push` (List) and Map `set`/`remove` each
+# deep-copy the whole receiver, mutate the copy, and hand it back
+# (docs/collections.md). When such a call is bound straight back to its OWN
+# receiver -- `out = out.push(x)` -- the pre-image of `out` is overwritten and
+# can never be read again, so the copy is pure waste. Item 284 rewrites that one
+# shape to an in-place mutation, turning the self-host lexer's O(tokens^2)
+# accumulator append (item 283: ~85% of the rust native gap, 12.1M allocs/pass)
+# into O(1) amortised.
+#
+# Each entry renders the in-place statement from the receiver identifier and the
+# already-rendered argument expressions. Only methods that resolve to a SINGLE
+# receiver type are listed, so no receiver-type disambiguation is needed: `push`
+# is List-only and `set`/`remove` are Map-only, whereas `concat` is defined on
+# both Str and List and is deliberately left out (its receiver type is not known
+# at this node). The in-place value equals the clone-then-return value: a discard
+# of `HashMap::insert`/`remove`'s returned Option is the only difference, and the
+# resulting collection is identical.
+def _v3_inplace_persistent(method: str, recv: str, args: list[str]) -> str | None:
+    if method == "push" and len(args) == 1:
+        return f"{recv}.push({args[0]});"
+    if method == "set" and len(args) == 2:
+        return f"{recv}.insert({args[0]}, {args[1]});"
+    if method == "remove" and len(args) == 1:
+        return f"{recv}.remove(&{args[0]});"
+    return None
+
+
+def _v3_self_append_inplace(target_name, recv: str, value_node,
+                            ctx: "_V3Ctx") -> str | None:
+    """The in-place rewrite of a self-reassigned persistent append, or None.
+
+    Fires only for `<v> = <v>.<persistent>(..)`: the assignment target and the
+    call's receiver must name the SAME local, read as a bare variable. That is
+    the one shape the rewrite can prove both dead and uniquely owned:
+
+    * dead -- the call result rebinds the receiver over its own value, so the
+      pre-image is unreachable after this statement; and
+    * uniquely owned -- every persistent method borrows its receiver
+      (`&self` / `self.clone()`), so a second *live* owner of that buffer could
+      only arise from a by-value move of the receiver. Every such move the
+      backend emits already clones the value first (`_by_value_arg`/
+      `_by_value_tail`, record-field and closure captures), and a bare
+      `let a = out` that then reuses `out` fails to compile today (E0382,
+      moved-then-reused). So in exactly the cases that compile, the receiver is
+      the sole owner and the in-place write yields the identical value.
+
+    Restricted to a bare `var` receiver (what a plain-fn body produces) so no
+    rename-map indirection can make the printed receiver differ from the target.
+    """
+    if not isinstance(value_node, dict) or value_node.get("kind") != "builtin":
+        return None
+    tgt = value_node.get("target")
+    if not isinstance(tgt, dict) or tgt.get("kind") != "var":
+        return None
+    if tgt.get("name") != target_name:
+        return None
+    method = value_node.get("method")
+    arg_nodes = value_node.get("args") or []
+    rendered = [_render_expr(a, ctx) for a in arg_nodes]
+    # `push`/`set` MOVE the appended value(s) into the collection, so a reused
+    # non-Copy value (`amb = amb.push(cn)` with `cn` read again) must clone; the
+    # receiver's own liveness is proven separately by this rewrite. `remove`
+    # borrows its key (`&k`), so it is left untouched.
+    if method in ("push", "set"):
+        rendered = [
+            _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, rendered)]
+    return _v3_inplace_persistent(method, recv, rendered)
+
+
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is
+# enforced whole-IR in the frontend; this is the cheap per-emitter guard.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
@@ -3228,12 +4450,39 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         # over a typed local) is target-type context for a record-literal RHS
         # whose field-set is not unique (item 268).
         expected = ctx.var_types.get(node.get("name"))
+        # item 284: a self-reassigned persistent append (`out = out.push(x)`)
+        # lowers to an in-place mutation. Only an `assign` qualifies -- a `let`
+        # introduces a NEW binding, so its RHS receiver is a different value that
+        # stays live. The receiver type is unchanged, so `var_types` still holds.
+        inplace = (_v3_self_append_inplace(node.get("name"), name,
+                                           node.get("value"), ctx)
+                   if step == "assign" else None)
+        if inplace is not None:
+            if inferred is not None:
+                ctx.var_types[node.get("name")] = inferred
+            out.append(f"{pad}{inplace}")
+            return
         value = _render_expr(node.get("value"), ctx, expected=expected)
+        # A `let`/`assign` whose RHS is a bare non-Copy binding MOVES it, so a
+        # later read of that binding borrows a moved value (E0382):
+        # `let mut rendered = base;` then `base.concat(..)`. This is the same
+        # reuse shape a branch tail hits, so it clones under the same rule --
+        # bare identifier, reused in the body, not known-Copy -- and a single-use
+        # RHS stays a move (byte-identical to before).
+        value = _by_value_tail(node.get("value"), value, ctx)
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred
         if step == "let":
             keyword = "let mut" if node.get("mutable") else "let"
-            out.append(f"{pad}{keyword} {name} = {value};")
+            annot = ""
+            # An empty `vec![]` gives rustc no element type; when the body's
+            # pushes/aliases make it knowable, annotate so the accumulator idiom
+            # (`let mut out = []; .. out = out.push(x)`) compiles (E0282).
+            if _v3_is_empty_list(node.get("value")):
+                elem = ctx.vec_elems.get(node.get("name"))
+                if isinstance(elem, str):
+                    annot = f": Vec<{_rust_type(elem, ctx.types)}>"
+            out.append(f"{pad}{keyword} {name}{annot} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
     elif step == "return":
@@ -3252,16 +4501,29 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "while":
+        _guard_frame_neutral_loop(node.get("body"))
         out.append(f"{pad}while {_render_expr(node['cond'], ctx)} {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "for":
+        _guard_frame_neutral_loop(node.get("body"))
         bind = _ident(node.get("bind"), "loop binding")
-        out.append(f"{pad}for {bind} in {_render_expr(node['iterable'], ctx)} {{")
+        # `for x in v` consumes `v` via `.into_iter()`; a reused non-Copy Vec
+        # binding iterated twice (`for ln in lines { .. } .. for ln in lines`)
+        # moves on the first loop, so it is cloned when reused (a single-use
+        # iterable stays a move). Cloning the Vec keeps the loop binding owned, so
+        # the body is unchanged -- unlike a `&v` borrow, which would retype `x`.
+        iterable = _by_value_tail(
+            node["iterable"], _render_expr(node["iterable"], ctx), ctx)
+        out.append(f"{pad}for {bind} in {iterable} {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
+    elif step == "break":
+        out.append(f"{pad}break;")
+    elif step == "continue":
+        out.append(f"{pad}continue;")
     elif step == "let_pattern":
         _v3_let_pattern(node, ctx, out, indent)
     elif step == "expr":
@@ -3273,19 +4535,132 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
 
 
 
+def _recursive_boxed_edges(types: dict) -> tuple[set, set]:
+    """Return ``(boxed_cases, boxed_fields)`` — the enum-variant payload edges
+    and record-field edges that must be ``Box``-indirected so a recursive ADT is
+    finite-sized on the Rust tier (E0072), which also breaks the drop-check cycle
+    those recursive types otherwise trigger (E0391).
+
+    revl admits recursive datatypes (a self-host AST `Expr` whose cases carry
+    per-case structs — `BinN`, `IfN`, ... — that again contain `Expr` fields).
+    Rust requires a heap indirection on some edge of every containment *cycle* or
+    the type has infinite size. `Vec`/`Opt`/`Map`/`Box` already ARE indirection,
+    so only a *direct* (bare) user-type field/payload can be recursive; a
+    `List[Expr]` field never is. We break every cycle with the fewest boxes,
+    preferring an ENUM-variant payload edge over a struct field: boxing an enum
+    payload needs no read-site change (`Box<T>` auto-derefs for field access and
+    a field can be moved out of the box), whereas a boxed struct field would
+    force a deref at every read. Keys are the RAW type/member names (exactly as
+    they appear in `types`), so the declaration site, the constructor, and the
+    record literal all agree without threading the mangled idents.
+    """
+    adj: dict[str, list[tuple[str, str, str]]] = {}
+    enum_edges: list[tuple[str, str, str]] = []   # (owner, case, target)
+    field_edges: list[tuple[str, str, str]] = []  # (owner, field, target)
+    for name, spec in types.items():
+        edges: list[tuple[str, str, str]] = []
+        if spec.get("kind") == "record":
+            for field, ftype in (spec.get("fields") or {}).items():
+                # a *bare* user-type name is direct containment; a generic
+                # (`List[..]`/`Opt[..]`/`Map[..]`) is not in `types`, so it is
+                # already indirection and cannot make the type infinite.
+                if isinstance(ftype, str) and ftype in types:
+                    edges.append(("field", field, ftype))
+                    field_edges.append((name, field, ftype))
+        elif spec.get("kind") == "variant":
+            for case in spec.get("cases") or []:
+                payload = case.get("payload")
+                if isinstance(payload, str) and payload in types:
+                    edges.append(("case", case.get("name"), payload))
+                    enum_edges.append((name, case.get("name"), payload))
+        adj[name] = edges
+
+    boxed_cases: set = set()
+    boxed_fields: set = set()
+
+    def reaches(start: str, goal: str) -> bool:
+        """Can `goal` be reached from `start` in the graph with the
+        already-boxed (now-indirected) edges removed?"""
+        seen, stack = set(), [start]
+        while stack:
+            node = stack.pop()
+            for kind, member, target in adj.get(node, []):
+                if kind == "case" and (node, member) in boxed_cases:
+                    continue
+                if kind == "field" and (node, member) in boxed_fields:
+                    continue
+                if target == goal:
+                    return True
+                if target not in seen:
+                    seen.add(target)
+                    stack.append(target)
+        return False
+
+    # Greedy feedback-edge selection. An edge owner->target lies on a cycle iff
+    # `target` can still reach `owner`; box the first such edge, preferring enum
+    # payloads (in declaration order) over struct fields, then repeat until no
+    # cycle remains. Each pass boxes at most one edge, so this terminates.
+    changed = True
+    while changed:
+        changed = False
+        for owner, case, target in enum_edges:
+            if (owner, case) in boxed_cases:
+                continue
+            if reaches(target, owner):
+                boxed_cases.add((owner, case))
+                changed = True
+                break
+        if changed:
+            continue
+        for owner, field, target in field_edges:
+            if (owner, field) in boxed_fields:
+                continue
+            if reaches(target, owner):
+                boxed_fields.add((owner, field))
+                changed = True
+                break
+    return boxed_cases, boxed_fields
+
+
 def _emit_v3_types(types: dict) -> list[str]:
     # PartialEq is not decoration: revl has one equality and it is
     # structural (syntax-2.0 §3.4), so `{a: 1} == {a: 1}` must compile and
     # be true here as it is on python. Without the derive, rustc refuses
     # the comparison outright (E0369) and legal revl fails on this tier.
     out: list[str] = []
-    for name, spec in types.items():
-        name = _ident(name, "type name")
+    boxed_cases, boxed_fields = _recursive_boxed_edges(types)
+    # Two records with the IDENTICAL field->type shape are interchangeable in
+    # revl (structural equality, item 268), so a value of one is admitted where
+    # the other is declared -- `let one = [Bind {..}]` then `ArrowN { params:
+    # one }` with `params: List[ParamN]`. Rust sees `Bind` and `ParamN` as
+    # distinct nominal types (E0308), so the emitter designates ONE canonical
+    # struct per shape (first in declaration order) and lowers its structural
+    # twins to `pub type Twin = Canonical;`. The alias shares the canonical's
+    # constructor, fields, derives and serde form, so every twin is one Rust
+    # type and the two `Vec<_>`s unify. Distinct shapes (the common case, and the
+    # whole checked-in corpus) get no alias, so output stays byte-identical there.
+    canonical: dict[str, str] = {}   # raw record name -> canonical raw name
+    _by_shape: dict[tuple, str] = {}
+    for rn, sp in types.items():
+        if sp.get("kind") == "record":
+            shape = tuple(sorted((sp.get("fields") or {}).items()))
+            canonical[rn] = _by_shape.setdefault(shape, rn)
+    for raw_name, spec in types.items():
+        name = _ident(raw_name, "type name")
         if spec.get("kind") == "record":
+            twin = canonical.get(raw_name)
+            if twin is not None and twin != raw_name:
+                out.append(
+                    f"pub type {name} = {_ident(twin, 'type name')};")
+                out.append("")
+                continue
             out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
             out.append(f"pub struct {name} {{")
             for field, ftype in (spec.get("fields") or {}).items():
-                out.append(f"    {_ident(field, 'record field')}: {_rust_type(ftype, types)},")
+                rendered = _rust_type(ftype, types)
+                if (raw_name, field) in boxed_fields:
+                    rendered = f"Box<{rendered}>"
+                out.append(f"    {_ident(field, 'record field')}: {rendered},")
             out.append("}")
         elif spec.get("kind") == "variant":
             out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
@@ -3297,7 +4672,10 @@ def _emit_v3_types(types: dict) -> list[str]:
                 if payload is None:
                     out.append(f"    {cname},")
                 else:
-                    out.append(f"    {cname}({_rust_type(payload, types)}),")
+                    rendered = _rust_type(payload, types)
+                    if (raw_name, case.get("name")) in boxed_cases:
+                        rendered = f"Box<{rendered}>"
+                    out.append(f"    {cname}({rendered}),")
             out.append("}")
         else:
             raise EmitError(f"unsupported type kind {spec.get('kind')!r} for {name!r}")
@@ -3312,10 +4690,26 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         name = _ident(fn.get("name"), "function name")
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         ctx.current_return = fn.get("returns")
+        counts: dict[str, int] = {}
+        _body_multi_use(fn.get("body") or [], counts)
+        ctx.multi_use = {n for n, c in counts.items() if c > 1}
+        # Element types for this fn's empty-`vec![]` locals, so the `let` can be
+        # annotated `Vec<T>` (E0282). Computed before the body renders and after
+        # `var_types` is seeded with the params it reads.
+        ctx.vec_elems = _v3_empty_vec_elem_types(fn.get("body") or [], ctx)
+        # A read-only `Str` param lowers to a borrowed `&str` (item 282): the
+        # caller lends the string instead of cloning it. `_render_param_type`
+        # spells the borrow, and `ctx.borrowed_params` tells the body renderer
+        # the param is already a `&str`.
+        borrow = ctx.fn_borrow.get(fn.get("name"), frozenset())
+        param_list = fn.get("params") or []
+        ctx.borrowed_params = {
+            param_list[idx].get("name") for idx in borrow
+        }
         params = ", ".join(
             f"{_ident(p.get('name'), 'parameter name')}: "
-            f"{_rust_type(p.get('type'), types, position='param')}"
-            for p in fn.get("params") or []
+            f"{_render_param_type(idx in borrow, p.get('type'), types)}"
+            for idx, p in enumerate(param_list)
         )
         returns = _rust_type(fn.get("returns"), types, position="return")
         visibility = "pub " if fn.get("public") else ""
@@ -3330,8 +4724,120 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
     return out
 
 
+# item 378 Stage 5: module-level config seam for document-global config externs.
+# Mirrors the py tier's `_REVL_EXTERN_CONFIG` map + fail-loud
+# `_revl_extern_config` helper: a mutable module-global config map (a
+# `OnceLock<Mutex<..>>`, the safe-Rust equivalent of a plug-time mutable
+# global), keyed by extern name, that a composition driver fills at plug time,
+# and a lookup that PANICS, naming the extern, when a required (non-defaulted)
+# field is absent, instead of handing the body an empty map that fails opaquely
+# later. A defaults-only extern still resolves to its defaults driver-free.
+#
+# Rust has no dynamic value top-type with literal defaults (unlike ts `unknown`
+# / go `any` / java `Object`), so the config map is `HashMap<String, String>`
+# and a rust-bodied config extern is restricted to `Str` config fields
+# (`_rust_extern_config_bind` refuses a non-Str field LOUDLY, redirecting to
+# @py or option (c)). This covers the design's motivating case (provider
+# identity is a string); a typed heterogeneous carrier is a separate value-
+# carrier design step. Fully-qualified `std::` paths so the seam adds no `use`
+# (which could duplicate the module's own imports). Emitted only when a config
+# extern is present, so a no-config program is byte-identical.
+_RUST_EXTERN_CONFIG_SCAFFOLD = [
+    "fn _revl_extern_config_store() -> &'static std::sync::Mutex<",
+    "    std::collections::HashMap<String, "
+    "std::collections::HashMap<String, String>>,",
+    "> {",
+    "    static STORE: std::sync::OnceLock<",
+    "        std::sync::Mutex<std::collections::HashMap<String, "
+    "std::collections::HashMap<String, String>>>,",
+    "    > = std::sync::OnceLock::new();",
+    "    STORE.get_or_init(|| std::sync::Mutex::new("
+    "std::collections::HashMap::new()))",
+    "}",
+    "",
+    "#[allow(dead_code)]",
+    "fn _revl_extern_config(",
+    "    name: &str,",
+    "    required: &[&str],",
+    "    defaults: &[(&str, &str)],",
+    ") -> std::collections::HashMap<String, String> {",
+    "    let mut out: std::collections::HashMap<String, String> = "
+    "std::collections::HashMap::new();",
+    "    for (k, v) in defaults {",
+    "        out.insert((*k).to_string(), (*v).to_string());",
+    "    }",
+    "    let store = _revl_extern_config_store().lock().unwrap();",
+    "    match store.get(name) {",
+    "        None => {",
+    "            if !required.is_empty() {",
+    "                panic!(",
+    "                    \"config extern `{}` called before plug-time "
+    "configuration was installed (required config: {}); configure it through "
+    "the run driver's config seam\",",
+    "                    name,",
+    "                    required.join(\", \")",
+    "                );",
+    "            }",
+    "        }",
+    "        Some(cfg) => {",
+    "            let missing: Vec<&str> = required",
+    "                .iter()",
+    "                .copied()",
+    "                .filter(|f| !cfg.contains_key(*f))",
+    "                .collect();",
+    "            if !missing.is_empty() {",
+    "                panic!(",
+    "                    \"config extern `{}` called before plug-time "
+    "configuration was installed (missing required config: {})\",",
+    "                    name,",
+    "                    missing.join(\", \")",
+    "                );",
+    "            }",
+    "            for (k, v) in cfg {",
+    "                out.insert(k.clone(), v.clone());",
+    "            }",
+    "        }",
+    "    }",
+    "    out",
+    "}",
+    "",
+]
+
+
+def _rust_extern_config_bind(ext: dict) -> str:
+    """The `let _revl_config = ...` first-body line for a config extern, or None.
+    `_revl_config` is a `HashMap<String, String>`; the verbatim @rs body reads a
+    field as `_revl_config["field"]` (a `&String`). Refuses a non-`Str` config
+    field LOUDLY: the rust map is string-valued, so a heterogeneous field has no
+    faithful home on this tier yet."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    name = ext.get("name")
+    for field in schema:
+        if field.get("type") != "Str":
+            raise EmitError(
+                f"config extern `{name}`: field `{field.get('name')}` has type "
+                f"`{field.get('type')}`, but the @rs config seam is string-valued "
+                f"and supports only `Str` config fields today. Give this extern a "
+                f"@py body, or use option (c) (a home component that `requires` "
+                f"the service). See docs/design/378-sync-extern-service-reach.md.")
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = [(f["name"], f["default"]) for f in schema
+                if f.get("default") is not None]
+    req_lit = "&[%s]" % ", ".join(_string(f) for f in required)
+    def_lit = "&[%s]" % ", ".join(
+        f"({_string(k)}, {_string(v)})" for k, v in defaults)
+    return (f"let _revl_config = _revl_extern_config("
+            f"{_string(name)}, {req_lit}, {def_lit});")
+
+
 def _emit_v3_externs(externs: list, types: dict) -> list[str]:
     out: list[str] = []
+    # item 378 Stage 5: emit the config seam once, before the externs, when any
+    # extern carries a config schema (byte-identical when none do).
+    if any(ext.get("config") for ext in externs):
+        out.extend(_RUST_EXTERN_CONFIG_SCAFFOLD)
     for ext in externs:
         name = _ident(ext.get("name"), "extern name")
         params = ", ".join(
@@ -3347,6 +4853,11 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         out.append(f"fn {name}({params}) -> {returns} {{")
+        # item 378 Stage 5: a config extern binds `_revl_config` as the first
+        # body line; None for a no-config extern (byte-identical body splice).
+        config_bind = _rust_extern_config_bind(ext)
+        if config_bind:
+            out.append("    " + config_bind)
         body = bodies["rs"].strip()
         if body:
             for line in body.splitlines() or [""]:
@@ -3813,8 +5324,348 @@ def _revl_spawn_handle() -> list[str]:
     ]
 
 
+def _revl_teardown_preamble() -> list[str]:
+    """The three-entry-kind teardown loop's shared runtime substrate: item 243
+    (`transactional`, witnessed) plus the unified two-phase abort
+    (docs/design/teardown-contract.md), first-party on cordis-rs.
+
+    cordis-rs disposes one fiber's registered effects in a SINGLE
+    reverse-registration (LIFO) pass (`Fiber::dispose_effects`, upstream —
+    not ours to change, fork+PR only), mixing every kind together: there is
+    no second accumulator to plug a Phase-2 pass into. The contract
+    anticipates exactly this shape ("The teardown algorithm"): a tier may
+    implement the phase split "by having the compensation disposer enqueue
+    itself when invoked during an abort unwind and draining the queue in a
+    post-unwind hook". This is that hook, built entirely from cordis-rs's
+    public API, no upstream change:
+
+    * `RevlTeardown` is the per-activation accumulator: `committed` is the
+      abort-vs-commit discriminator (py's `Frame._committed` — here flipped
+      right before the emitted `apply` returns `Ok`, the same instant py's
+      `Frame.drain` flips it: both mark "this activation is not unwinding,
+      it succeeded"). `phase2` is the queue a compensation disposer feeds
+      instead of running immediately.
+    * The state rides on the fiber's own `Context`, via `Context::extend`/
+      `metadata` (cordis-rs's typed per-context metadata slot), instead of a
+      bespoke global registry — so a provide-method's stored `ctx` (the SAME
+      fiber, looked up later when a method runs) recovers the identical
+      instance. No global map, no manual lifecycle bookkeeping: it lives as
+      long as the `Arc` clones that hold it, one of which is this same
+      `Context`.
+    * The FIRST effect registered in the whole activation is the phase-2
+      drain hook (`revl_teardown_begin`'s own `ctx.effect` call, emitted
+      before any user step). Because cordis-rs disposes LIFO, "registered
+      first" means "disposed LAST" — after every bracket and transactional
+      inverse in this activation has already run to completion. Phase 1
+      finishing before Phase 2 starts falls out of registration order alone;
+      no separate stack walk is needed.
+    * A `transactional` disposer reads `committed` at DISPOSAL time (not
+      registration time, which is unknowable until later) exactly like py's
+      `_Transactional`: discharge (drop the witness, do nothing) on commit,
+      replay the declared inverse on abort.
+    * A `compensation` disposer reads `committed` too: discharge on commit
+      (never runs — the forward emission is the deliverable), or on abort
+      QUEUE itself onto `phase2` instead of running immediately — so every
+      compensation the one LIFO pass encounters lands in the queue in
+      reverse-registration order, i.e. already LIFO within itself, for free.
+      `revl_drain_phase2` (run by the sentinel, last) then runs the queue in
+      that order, honoring `REVL_COMPENSATION_BUDGET_MS` BETWEEN calls. rust
+      has no in-call preemption of a synchronous compensation
+      (teardown-contract.md, rust row: a compensation closure is not
+      guaranteed `Send` to a helper thread, so even go's abandon-the-wait
+      shape is unavailable) — `REVL_COMPENSATION_PER_CALL_MS` is read and
+      carried for config-surface parity (the two env vars are read once, at
+      activation, per the contract), but the between-call deadline is the
+      only bound this tier can honor, exactly as specced.
+    """
+    return [
+        "/// item 243 / docs/design/teardown-contract.md: the per-activation",
+        "/// three-entry-kind teardown accumulator (transactional + compensation).",
+        "/// See `_revl_teardown_preamble` in the emitter for the design.",
+        "struct RevlTeardown {",
+        "    committed: std::sync::atomic::AtomicBool,",
+        "    phase2: std::sync::Mutex<Vec<RevlPendingCompensation>>,",
+        "    budget_ms: u64,",
+        "    #[allow(dead_code)] // read for config-surface parity; see the",
+        "    // preamble docstring — rust has no in-call preemption to bound with it.",
+        "    per_call_ms: u64,",
+        "}",
+        "",
+        "struct RevlPendingCompensation {",
+        "    label: String,",
+        "    call: Box<dyn FnOnce() + Send>,",
+        "}",
+        "",
+        "fn revl_compensation_budget_ms() -> u64 {",
+        '    std::env::var("REVL_COMPENSATION_BUDGET_MS").ok()',
+        "        .and_then(|v| v.parse::<u64>().ok())",
+        "        .unwrap_or(5000)",
+        "}",
+        "",
+        "fn revl_compensation_per_call_ms() -> u64 {",
+        '    std::env::var("REVL_COMPENSATION_PER_CALL_MS").ok()',
+        "        .and_then(|v| v.parse::<u64>().ok())",
+        "        .unwrap_or(1000)",
+        "}",
+        "",
+        "/// item 324: the out-of-band abort registry — the faithful mirror of the",
+        "/// py runtime's `_FRAME_BY_CTX` + `_sole_frame`. A session-level reject",
+        "/// (item 245's explicit commit/abort UX) runs OUTSIDE the fiber and must",
+        "/// reach an already-activated component's `RevlTeardown` to clear",
+        "/// `committed`, so its next unload REPLAYS the per-tool-call (and",
+        "/// activation-body) transactional inverses instead of discharging them.",
+        "/// The state itself lives on the fiber's (private) extended context, which",
+        "/// no out-of-fiber caller can reach — cordis-rs's `Context::extend` derives",
+        "/// a child whose metadata the parent/fiber context cannot see — so this",
+        "/// weak, label-keyed registry is the reach-in seam. Weak so a disposed",
+        "/// activation's teardown is collected normally; the registry never keeps",
+        "/// one alive.",
+        "#[allow(clippy::type_complexity)]",
+        "static REVL_TEARDOWN_REGISTRY: std::sync::OnceLock<",
+        "    std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>>>",
+        "    = std::sync::OnceLock::new();",
+        "",
+        "fn revl_teardown_registry()",
+        "    -> &'static std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>> {",
+        "    REVL_TEARDOWN_REGISTRY.get_or_init(|| std::sync::Mutex::new(Vec::new()))",
+        "}",
+        "",
+        "fn revl_teardown_remember(label: &str, state: &std::sync::Arc<RevlTeardown>) {",
+        "    revl_teardown_registry().lock().unwrap()",
+        "        .push((label.to_string(), std::sync::Arc::downgrade(state)));",
+        "}",
+        "",
+        "/// Abort every live activation registered under `label`: clear `committed`",
+        "/// so the next teardown REPLAYS its transactional inverses (py's",
+        "/// `Frame.abort`). Idempotent; skips dead weak entries. The driver/harness",
+        "/// calls this before unloading the fiber to reject the session's work.",
+        "#[allow(dead_code)]",
+        "fn revl_abort(label: &str) {",
+        "    let registry = revl_teardown_registry().lock().unwrap();",
+        "    for (entry_label, weak) in registry.iter() {",
+        "        if entry_label == label {",
+        "            if let Some(state) = weak.upgrade() {",
+        "                state.committed.store(false, std::sync::atomic::Ordering::Release);",
+        "            }",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "/// Register the phase-2 drain hook FIRST — so cordis-rs's LIFO dispose",
+        "/// runs it LAST, after every bracket/transactional inverse — and return",
+        "/// the shared accumulator plus a `Context` extended to carry it, so a",
+        "/// provide-method on this same fiber can recover it later via",
+        "/// `revl_teardown_of`.",
+        "fn revl_teardown_begin(ctx: &cordis::Context, label: &str)",
+        "    -> cordis::Result<(cordis::Context, std::sync::Arc<RevlTeardown>)> {",
+        "    let state = std::sync::Arc::new(RevlTeardown {",
+        "        committed: std::sync::atomic::AtomicBool::new(false),",
+        "        phase2: std::sync::Mutex::new(Vec::new()),",
+        "        budget_ms: revl_compensation_budget_ms(),",
+        "        per_call_ms: revl_compensation_per_call_ms(),",
+        "    });",
+        '    let ctx = ctx.extend("_revl_teardown", state.clone());',
+        "    revl_teardown_remember(label, &state);  // item 324: out-of-band abort reach-in",
+        "    let sentinel = state.clone();",
+        "    ctx.effect(label.to_string(), move || {",
+        "        if !sentinel.committed.load(std::sync::atomic::Ordering::Acquire) {",
+        "            revl_drain_phase2(&sentinel);",
+        "        }",
+        "        Ok(())",
+        "    })?;",
+        "    Ok((ctx, state))",
+        "}",
+        "",
+        "/// A provide-method's own recovery of its activation's teardown state",
+        "/// (`self.ctx` is the same fiber `revl_teardown_begin` extended).",
+        "fn revl_teardown_of(ctx: &cordis::Context) -> std::sync::Arc<RevlTeardown> {",
+        '    (*ctx.metadata::<std::sync::Arc<RevlTeardown>>("_revl_teardown")',
+        "        .ok()",
+        "        .flatten()",
+        '        .expect("revl: teardown state missing — a compensated effect ran \\',
+        '                outside an activation that registered one"))',
+        "        .clone()",
+        "}",
+        "",
+        "/// Phase 2: best-effort compensation replay, LIFO within itself (the",
+        "/// queue already holds that order — see the preamble docstring), bounded",
+        "/// by `REVL_COMPENSATION_BUDGET_MS` checked BETWEEN calls (rust has no",
+        "/// in-call preemption of a synchronous compensation — see the rust row",
+        "/// of docs/design/teardown-contract.md). A panicking compensation is",
+        "/// caught (best-effort, never fails the abort) and logged; the loop",
+        "/// continues to the next queued compensation either way.",
+        "fn revl_drain_phase2(state: &RevlTeardown) {",
+        "    let queued: Vec<RevlPendingCompensation> = {",
+        "        let mut guard = state.phase2.lock().unwrap();",
+        "        std::mem::take(&mut *guard)",
+        "    };",
+        "    if queued.is_empty() {",
+        "        return;",
+        "    }",
+        "    let unbounded = state.budget_ms == 0;",
+        "    let deadline = std::time::Instant::now()",
+        "        + std::time::Duration::from_millis(state.budget_ms);",
+        "    for pending in queued {",
+        "        if !unbounded && std::time::Instant::now() >= deadline {",
+        "            eprintln!(",
+        '                "revl: compensation {:?} skipped (deadline-expired, budget={}ms)",',
+        "                pending.label, state.budget_ms,",
+        "            );",
+        "            continue;",
+        "        }",
+        "        let label = pending.label;",
+        "        let outcome = std::panic::catch_unwind(",
+        "            std::panic::AssertUnwindSafe(pending.call));",
+        "        if outcome.is_err() {",
+        '            eprintln!("revl: compensation {:?} failed", label);',
+        "        }",
+        "    }",
+        "}",
+        "",
+    ]
+
+
+def _revl_record_preamble() -> list[str]:
+    """item 322 Slice 2: the durable WAL recording sink — the rust host
+    recording channel, the faithful mirror of backends/go/emit.py's
+    `_RECORD_PREAMBLE`.
+
+    A witnessed transactional step, in record mode, writes the re-issuable
+    inverse's discharge-descriptor to a host-visible WAL file (`$REVL_WAL`) and
+    fsyncs it (`File::sync_all`) BEFORE the emitting call returns, so a crash
+    before commit still leaves the inverse re-issuable from the log alone —
+    exactly the write-ahead discipline the py tier uses and the go tier
+    mirrors. The JSONL schema is byte-for-byte the py one src/revl/wal.py
+    documents (`header` / `discharge-descriptor` / `discharge` /
+    `activation-complete`), read back by the tier-agnostic core with no py
+    backend on the path.
+
+    Gated: emitted only in record mode (`emit(ir, record=True)` /
+    `emit.py --record`). Unset `REVL_WAL` makes every recording call a no-op, so
+    the runtime is inert unless a host opts in; the whole preamble is absent when
+    record mode is off, so every existing golden emits byte-identically.
+
+    Direct-file-write, same mechanism as go (rust has a real filesystem). The
+    sink is a process-global opened once (`OnceLock`) from `REVL_WAL`, stamping
+    the header at open; the seq counter and committed-seq list live on it behind
+    a `Mutex`, matching go's `revlWAL{mu, f, seq, seqs}`."""
+    guarantee = (
+        "the WAL records each committed effect's step identity, boundary "
+        "classification and inverse DESCRIPTOR (not its closure). On restart, "
+        "recovery runs the reconstructible boundary inverses newest-first (LIFO); "
+        "in-process inverses are moot (their captured memory died with the "
+        "process) and closure-only boundary inverses are reported as residue, "
+        "never silently claimed to have run."
+    )
+    return [
+        "// ---- durable WAL recording sink (item 322 Slice 2, the rust host recording channel) ----",
+        "",
+        "/// The single sentence recovery is allowed to claim, written verbatim into",
+        "/// every WAL header — byte-identical to src/revl/wal.py's `WAL_GUARANTEE`.",
+        f"const REVL_WAL_GUARANTEE: &str = {_string(guarantee)};",
+        "",
+        "/// The process's durable append-only log. One line per record, JSON,",
+        "/// flushed + fsync'd (`sync_all`) before the call that wrote it returns —",
+        "/// the write-ahead discipline the py tier uses, so a record a caller saw",
+        "/// acknowledged is on disk before the effect it describes is allowed to",
+        "/// matter. Mirrors the go tier's `revlWAL`.",
+        "struct RevlWal {",
+        "    file: std::fs::File,",
+        "    seq: u64,",
+        "    seqs: Vec<u64>,",
+        "}",
+        "",
+        "impl RevlWal {",
+        "    fn write(&mut self, rec: &serde_json::Value) {",
+        "        use std::io::Write;",
+        "        if let Ok(mut line) = serde_json::to_string(rec) {",
+        "            line.push('\\n');",
+        "            let _ = self.file.write_all(line.as_bytes());",
+        "            let _ = self.file.sync_all(); // fsync per record",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "static REVL_WAL_SINK: std::sync::OnceLock<Option<std::sync::Mutex<RevlWal>>>",
+        "    = std::sync::OnceLock::new();",
+        "",
+        "/// Wire the sink to `REVL_WAL` (unset -> no-op recording) and stamp the",
+        "/// header the first time it is touched. Opened append-only so a producer",
+        "/// process writes one continuous log.",
+        "fn revl_wal_sink() -> Option<&'static std::sync::Mutex<RevlWal>> {",
+        "    REVL_WAL_SINK",
+        "        .get_or_init(|| {",
+        '            let path = match std::env::var("REVL_WAL") {',
+        "                Ok(p) if !p.is_empty() => p,",
+        "                _ => return None,",
+        "            };",
+        "            let file = match std::fs::OpenOptions::new()",
+        "                .create(true).write(true).append(true).open(&path)",
+        "            {",
+        "                Ok(f) => f,",
+        "                Err(_) => return None,",
+        "            };",
+        "            let mut wal = RevlWal { file, seq: 0, seqs: Vec::new() };",
+        "            wal.write(&serde_json::json!({",
+        '                "record": "header", "walVersion": 1, "generation": 1,',
+        '                "guarantee": REVL_WAL_GUARANTEE,',
+        "            }));",
+        "            Some(std::sync::Mutex::new(wal))",
+        "        })",
+        "        .as_ref()",
+        "}",
+        "",
+        "/// Append one witnessed transactional inverse's discharge-descriptor: the",
+        "/// re-issuable named call `{receiver, method, args}` recover replays LIFO to",
+        "/// undo the mutation, plus the forward `origin` it reverses. Fsync'd before",
+        "/// it returns, so a crash after this call still leaves the inverse",
+        "/// re-issuable from the log alone. No-op when `REVL_WAL` is unset.",
+        "pub fn revl_record_transactional(receiver: &str, method: &str, args: Vec<String>) {",
+        "    if let Some(sink) = revl_wal_sink() {",
+        "        let mut wal = sink.lock().unwrap();",
+        "        let seq = wal.seq;",
+        "        wal.seq += 1;",
+        "        wal.seqs.push(seq);",
+        '        let call = serde_json::json!({ "receiver": receiver, "method": method, "args": args });',
+        "        wal.write(&serde_json::json!({",
+        '            "record": "discharge-descriptor", "seq": seq, "entry": "transactional",',
+        '            "call": call, "origin": call, "witness": serde_json::Value::Null,',
+        '            "idempotency": serde_json::Value::Null,',
+        "        }));",
+        "    }",
+        "}",
+        "",
+        "/// The commit-path proof that every recorded transactional seq COMMITTED,",
+        "/// so recover SKIPS it — a committed transaction is never rolled back.",
+        "/// Called on a clean unload, never on a crash.",
+        "pub fn revl_record_discharge() {",
+        "    if let Some(sink) = revl_wal_sink() {",
+        "        let mut wal = sink.lock().unwrap();",
+        "        let seqs = wal.seqs.clone();",
+        '        wal.write(&serde_json::json!({ "record": "discharge", "discharged": seqs }));',
+        "    }",
+        "}",
+        "",
+        "/// The terminal marker: its PRESENCE is the whole roll-forward decision,",
+        "/// its ABSENCE (a crash) is roll-back. Written only after a clean unload.",
+        "pub fn revl_record_activation_complete() {",
+        "    if let Some(sink) = revl_wal_sink() {",
+        "        let mut wal = sink.lock().unwrap();",
+        "        wal.write(&serde_json::json!({",
+        '            "record": "activation-complete", "generation": 1, "components": []',
+        "        }));",
+        "    }",
+        "}",
+        "",
+    ]
+
+
 def _uses_stdlib(ir: dict) -> bool:
-    """True when any builtin/len node appears anywhere in the document."""
+    """True when any builtin/len node appears anywhere in the document — or a
+    sized `.length` field (item 104): a component-position property-form
+    `.length` stays a `field` node marked `sized_length`, and its emit routes
+    through the `revl_length` helper trait, so the trait must be emitted for it
+    too (else `String::revl_length` is an undefined method, E0599)."""
     found = False
 
     def walk(node) -> None:
@@ -3822,7 +5673,8 @@ def _uses_stdlib(ir: dict) -> bool:
         if found:
             return
         if isinstance(node, dict):
-            if node.get("kind") in ("builtin", "len"):
+            if node.get("kind") in ("builtin", "len") or (
+                    node.get("kind") == "field" and node.get("sized_length")):
                 found = True
                 return
             for value in node.values():
@@ -3959,7 +5811,7 @@ def _split_result(rtype: str):
 
 def _result_ok_err(value: str, ok_ty: str, err_ty: str) -> str:
     """Rust expr building a std Result from a canonical `{"$kind","$value"}`."""
-    payload = f'_r.get("$value").cloned().unwrap_or(serde_json::Value::Null)'
+    payload = '_r.get("$value").cloned().unwrap_or(serde_json::Value::Null)'
     return (f'{{ let _r = {value}.clone(); '
             f'if _r.get("$kind").and_then(|k| k.as_str()) == Some("Ok") {{ '
             f'Ok(serde_json::from_value::<{ok_ty}>({payload}).expect("bridge: decode Ok")) }} '
@@ -4246,6 +6098,15 @@ def _emit_bridge(ir: dict) -> list[str]:
     return out
 
 
+def _uses_teardown(components: list, externs: list) -> bool:
+    """item 243 Slice 2b: does any component need `RevlTeardown` (a
+    `witnessed` extern call, or `emit ... compensate`, activation- or
+    method-body)? Gates `_revl_teardown_preamble` so a program using
+    neither emits byte-identically to before this slice."""
+    witnessed = {ext["name"]: ext for ext in externs if ext.get("class") == "witnessed"}
+    return any(_component_needs_teardown(c, witnessed) for c in components)
+
+
 def _emit_components(ir: dict, components: list) -> list[str]:
     out: list[str] = []
     out.extend(_emit_service_traits(ir.get("services") or {}, ir.get("types") or {}))
@@ -4260,6 +6121,13 @@ def _emit_components(ir: dict, components: list) -> list[str]:
         out.extend(_revl_realm_helper(components))
     if _uses_spawn(components):
         out.extend(_revl_spawn_handle())
+    if _uses_teardown(components, ir.get("externs") or []):
+        out.extend(_revl_teardown_preamble())
+        if _RECORD_MODE:
+            # item 322 Slice 2: the durable WAL sink rides alongside the teardown
+            # accumulator (a witnessed transactional step needs both). Gated so a
+            # non-record emission — every existing golden — is byte-identical.
+            out.extend(_revl_record_preamble())
     for component in components:
         out.extend(_emit_component_auto(component, ir.get("services") or {}, ir))
     out.extend(_emit_bridge(ir))
@@ -4367,11 +6235,104 @@ def _refuse_fault_tests(ir) -> None:
     )
 
 
-def emit(ir: dict) -> str:
-    """Emit one Rust module (crate root) for an IR document."""
+def _refuse_deferred_emissions(ir: dict) -> None:
+    """Roadmap 245 Decision 2 tier gate: a CALL to a `deferred` emission needs a
+    session-owner runtime (the deferral queue and the commit verb) this tier does
+    not have yet, so refuse it at emit time — surfaced through EmitError, this
+    tier's existing refusal channel. The reachability check and the single
+    canonical wording live in `revl.session_commit`, shared by all five ownerless
+    tiers so six backends do not invent six messages; a declared-but-never-called
+    deferred extern emits cleanly (call-site keyed)."""
+    try:
+        from revl.errors import RevlError
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
+    except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.errors import RevlError
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
+    try:
+        refuse_deferred_on_ownerless_tier(ir, "rust")
+        refuse_approval_on_ownerless_tier(ir, "rust")
+    except RevlError as exc:
+        raise EmitError(exc.message) from None
+
+
+_REVL_SYNC_SUFFIX = "_revl_sync"
+
+
+def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
+    """item 388, stage 6: on a colour-erasing tier (go/rust/java/wasm — suspension
+    is not a function colour) a caller-decided-colour extern's two clones — `X`
+    (async) and `X_revl_sync` (sync) — emit the SAME blocking host function.
+    Collapse them to ONE: drop the sync clone and rewrite its call sites to `X`.
+
+    Detected structurally: a `_revl_sync` extern whose origin twin is present with
+    identical `bodies`. A poly extern instantiated in only one colour has no twin,
+    so it is emitted unchanged under whatever name survived. Non-destructive (the
+    shared IR is also emitted by py/ts, which keep both colours), and a no-op that
+    returns the IR untouched when no such pair exists (every existing golden is
+    byte-identical)."""
+    externs = ir.get("externs") or []
+    by_name = {e.get("name"): e for e in externs}
+    alias: dict = {}
+    kept: list = []
+    for e in externs:
+        name = e.get("name") or ""
+        if name.endswith(_REVL_SYNC_SUFFIX):
+            origin = name[: -len(_REVL_SYNC_SUFFIX)]
+            twin = by_name.get(origin)
+            if twin is not None and twin.get("bodies") == e.get("bodies"):
+                alias[name] = origin
+                continue
+        kept.append(e)
+    if not alias:
+        return ir
+
+    def _rewrite(node):
+        if isinstance(node, dict):
+            return {k: (alias[v] if k == "name" and isinstance(v, str)
+                        and v in alias else _rewrite(v))
+                    for k, v in node.items()}
+        if isinstance(node, list):
+            return [_rewrite(x) for x in node]
+        return node
+
+    ir = dict(ir)
+    ir["externs"] = kept
+    for key in ("components", "functions", "tests", "prop_tests"):
+        if key in ir:
+            ir[key] = _rewrite(ir[key])
+    return ir
+
+
+def emit(ir: dict, record: bool = False) -> str:
+    """Emit one Rust module (crate root) for an IR document.
+
+    `record=True` (item 322 Slice 2) wires the witnessed teardown to a durable
+    WAL sink (the rust host recording channel) so a crash BEFORE commit is
+    recoverable by `revl recover`. It is OFF by default and gated everywhere it
+    touches emission, so a non-recording program — every existing golden — emits
+    byte-identically; only a program emitted in record mode carries the
+    recording preamble and the per-descriptor `revl_record_transactional` calls.
+    Mirrors backends/go/emit.py's `emit(..., record=...)`.
+    """
+    global _RECORD_MODE
+    _RECORD_MODE = record
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
+    ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
     _refuse_holes(ir)
+    _refuse_deferred_emissions(ir)
 
     _refuse_fault_tests(ir)
 
@@ -4404,19 +6365,23 @@ def cargo_toml(name: str = "revl_components") -> str:
 
 
 def _main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: python3 emit.py <ir.json|->", file=sys.stderr)
+    # item 322 Slice 2: `--record` wires the witnessed teardown to a durable WAL
+    # sink (mirrors backends/go/emit.py's flag). Off by default -> byte-identical.
+    args = [a for a in argv[1:] if a != "--record"]
+    record = "--record" in argv[1:]
+    if len(args) != 1:
+        print("usage: python3 emit.py <ir.json|-> [--record]", file=sys.stderr)
         return 2
     # `-` reads the IR from stdin. Callers used to pass `/dev/stdin`, which
     # works on macOS and fails on a GitHub runner with `OSError: [Errno 6] No
     # such device or address` — the emitted-code tests were red in CI for that
     # reason alone.
-    if argv[1] == "-":
+    if args[0] == "-":
         ir = json.load(sys.stdin)
     else:
-        with open(argv[1], "r", encoding="utf-8") as handle:
+        with open(args[0], "r", encoding="utf-8") as handle:
             ir = json.load(handle)
-    sys.stdout.write(emit(ir))
+    sys.stdout.write(emit(ir, record=record))
     return 0
 
 

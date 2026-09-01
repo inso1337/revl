@@ -67,8 +67,6 @@ nonzero when anything is over-declared.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 
 from .why_runtime import EMIT, read_trace
 
@@ -252,6 +250,164 @@ def compute_profile(ir: dict, events: list[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------
+# repair patch: the least-authority emission a component should declare (item 307)
+# --------------------------------------------------------------------------
+#
+# `revl profile` (item 124) NAMES the over-declared reach; the repair patch turns
+# that into an actionable, least-authority SUGGESTION: the narrowed `emission[...]`
+# an author should write so the component declares only the authority its run
+# actually exercised. The suggestion is PROPOSED (printed, emitted as JSON) and
+# NEVER silently applied. The author (or an agent harness) applies it and re-runs
+# the admission gate, which is what turns an over-broad, agent-generated
+# declaration into a tight one without the agent understanding the whole
+# capability model.
+#
+# ### Why this is sound
+#
+# The declared side is a *sound over-approximation* of reach (the G8 static walk);
+# the observed side is one run, an *under-approximation* of reach. Narrowing to
+# the observed set is therefore a SUGGESTION to re-verify, not a proof, so the
+# output says exactly that, and the gate re-run is the backstop (if the code can
+# still reach a narrowed-away emission, admission rejects the patch and the author
+# widens back). Within that honest framing the patch is conservative in three
+# concrete ways, so it never proposes dropping a *real* reach:
+#
+# * **Never past `*`.** A `*` in the declared surface is an emission whose target
+#   is unnameable: a first-class emitting callable, or an unknown dispatch (see
+#   `_boundary`'s `*` widening). The trace can never *observe* a `*`, so a naive
+#   narrow would always drop it. The suggestion keeps every `*` that is declared;
+#   the least-authority set is `observed` plus the declared `*`, never less.
+# * **Never on a mismatch.** A component with under-declaration (used not declared)
+#   or one that emitted with no declared surface at all (`unknownComponents`) is a
+#   composition/trace *disagreement*, not an over-declaration, so narrowing it
+#   would narrow the wrong system. Such a component is passed through unnarrowed.
+# * **Only when strictly over-declared.** A component whose run exercised exactly
+#   its declared surface gets no patch: there is nothing to narrow.
+
+
+def _emission_decl(tokens: list[str]) -> str:
+    """The `emission[...]` declaration string for a suggested token set: the
+    exact spelling an author would write. An empty set (a component that emitted
+    nothing observable and declares no `*`) is a bare `emission` with no scope,
+    the least authority a declaration can name."""
+    inside = ", ".join(tokens)
+    return f"emission[{inside}]" if inside else "emission"
+
+
+def compute_repair_patch(profile: dict) -> dict:
+    """Turn a `compute_profile` document into a proposed least-authority patch:
+    per over-declaring component, the narrowed emission surface it should declare.
+
+    Pure over the profile document (so it is unit-testable without a runtime and
+    re-uses item 124's declared-vs-observed computation verbatim, never
+    recomputing either side). Returns the document `revl profile --patch [--json]`
+    prints. The patch is a SUGGESTION: `applied` is always `false`, and every
+    entry carries the `emission[...]` string plus the machine-readable token sets
+    an agent harness consumes.
+    """
+    components = profile.get("components") or {}
+    unknown = set(profile.get("unknownComponents") or [])
+
+    patch: dict[str, dict] = {}
+    caps_removed_total = 0
+    keys_removed_total = 0
+    minimizable = 0
+
+    for name in sorted(components):
+        entry = components[name]
+        declared_keys = list(entry["declared"]["keys"])
+        declared_caps = list(entry["declared"]["capabilities"])
+        observed_keys = set(entry["used"]["keys"])
+        observed_caps = set(entry["used"]["capabilities"])
+        over_keys = entry["overDeclared"]["keys"]
+        under_keys = entry["underDeclared"]["keys"]
+
+        # a `*` anywhere in the declared surface is an unnameable reach the trace
+        # cannot observe; it must survive every narrowing (never past `*`)
+        wildcard_keys = [k for k in declared_keys if _required_key(k) == _UNKNOWN_KEY]
+        wildcard_caps = [c for c in declared_caps if c == _UNKNOWN_KEY]
+        keeps_wildcard = bool(wildcard_keys or wildcard_caps)
+
+        # a composition/trace disagreement is not an over-declaration; do not
+        # narrow the wrong system
+        mismatch = name in unknown or bool(under_keys)
+
+        if mismatch or not over_keys:
+            # nothing to soundly propose: pass the declared surface through
+            # unchanged so a consumer sees "no narrowing" explicitly
+            reason = (
+                "composition and trace disagree (under-declared or unknown "
+                "emitter); not narrowed" if mismatch else
+                "run exercised exactly the declared surface; nothing to narrow")
+            patch[name] = {
+                "minimizable": False,
+                "reason": reason,
+                "declared": {"keys": declared_keys, "capabilities": declared_caps},
+                "suggested": {
+                    "keys": declared_keys, "capabilities": declared_caps},
+                "removed": {"keys": [], "capabilities": []},
+                "emission": _emission_decl(declared_keys),
+                "keepsWildcard": keeps_wildcard,
+            }
+            continue
+
+        # the least-authority set: what the run observed, plus every declared `*`
+        # (unnameable reach the trace cannot see), never less than that
+        suggested_keys = sorted(observed_keys | set(wildcard_keys))
+        suggested_caps = sorted(observed_caps | set(wildcard_caps))
+        removed_keys = sorted(set(declared_keys) - set(suggested_keys))
+        removed_caps = sorted(set(declared_caps) - set(suggested_caps))
+
+        keys_removed_total += len(removed_keys)
+        caps_removed_total += len(removed_caps)
+        minimizable += 1
+
+        note = None
+        if keeps_wildcard:
+            note = ("kept `*` (a first-class or unknown-dispatch emission the "
+                    "trace cannot observe); narrowing never drops it")
+
+        patch[name] = {
+            "minimizable": True,
+            "declared": {"keys": declared_keys, "capabilities": declared_caps},
+            "observed": {"keys": sorted(observed_keys),
+                         "capabilities": sorted(observed_caps)},
+            "suggested": {"keys": suggested_keys, "capabilities": suggested_caps},
+            "removed": {"keys": removed_keys, "capabilities": removed_caps},
+            "emission": _emission_decl(suggested_keys),
+            "keepsWildcard": keeps_wildcard,
+            **({"note": note} if note else {}),
+        }
+
+    return {
+        "patch": patch,
+        "summary": {
+            "components": len(patch),
+            "minimizable": minimizable,
+            "keysRemoved": keys_removed_total,
+            "capabilitiesRemoved": caps_removed_total,
+        },
+        # applied is ALWAYS false: the patch is proposed, never written. The
+        # author/agent applies it and re-runs the gate; observation is one run
+        # (an under-approximation of reach), so the gate re-run is the backstop.
+        "applied": False,
+        "advisory": (
+            "PROPOSED least-authority patch: printed, never applied. Each "
+            "`emission[...]` narrows a component to the authority its run "
+            "exercised (plus any `*` the trace cannot observe). It is one run, an "
+            "under-approximation of reach: apply it, then re-run `revl admit` or "
+            "`revl profile --strict` to confirm the narrowed component still "
+            "admits. If admission rejects, the emission was reachable, so widen "
+            "back."),
+    }
+
+
+def repair_patch_from_files(composition: str, trace: str) -> dict:
+    """Load a composition and a trace and compute the proposed repair patch."""
+    return compute_repair_patch(profile_from_files(composition, trace))
+
+
+# --------------------------------------------------------------------------
 # loaders
 # --------------------------------------------------------------------------
 
@@ -338,4 +494,43 @@ def render(profile: dict) -> str:
             f"component(s); "
             f"{summary.get('overDeclaredCapabilities', 0)} over-declared "
             f"capability(ies)")
+    return "\n".join(lines)
+
+
+def render_patch(patch: dict) -> str:
+    """The human view of a proposed repair patch: per over-declaring component,
+    the narrowed `emission[...]` to write and the authority it drops. Machine
+    consumers take `--json` instead."""
+    entries = patch.get("patch") or {}
+    summary = patch.get("summary") or {}
+    minimizable = summary.get("minimizable", 0)
+
+    lines = ["proposed minimal-capability repair patch (least authority)"]
+    lines.append("  PROPOSED ONLY: nothing is written; apply, then re-run the "
+                 "gate to confirm the narrowed component still admits")
+
+    proposed = [n for n, e in sorted(entries.items()) if e.get("minimizable")]
+    if not proposed:
+        lines.append("")
+        lines.append("  no component over-declares; nothing to narrow")
+        return "\n".join(lines)
+
+    for name in proposed:
+        entry = entries[name]
+        lines.append("")
+        lines.append(f"component {name}")
+        lines.append(f"  declared  : {_fmt_set(entry['declared']['keys'])}")
+        lines.append(f"  observed  : {_fmt_set(entry['observed']['keys'])}")
+        lines.append(f"  SUGGEST   : {entry['emission']}")
+        lines.append(f"  drops     : {_fmt_set(entry['removed']['keys'])} "
+                     f"[capabilities: {_fmt_set(entry['removed']['capabilities'])}]")
+        if entry.get("note"):
+            lines.append(f"  note      : {entry['note']}")
+
+    lines.append("")
+    lines.append(
+        f"summary: {minimizable} component(s) narrowable; "
+        f"{summary.get('keysRemoved', 0)} emission(s) / "
+        f"{summary.get('capabilitiesRemoved', 0)} capability(ies) would be dropped")
+    lines.append(patch.get("advisory", ""))
     return "\n".join(lines)

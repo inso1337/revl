@@ -16,7 +16,6 @@ Two layers, mirroring test_why_runtime.py's honesty split:
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -54,7 +53,7 @@ def _by_id(spans):
 
 
 def test_every_transition_becomes_a_span_under_the_run_root():
-    spans = build = otel.build_spans(_cascade_trace())
+    spans = otel.build_spans(_cascade_trace())
     # one synthetic run root + one span per trace event
     assert spans[0].span_id == otel.ROOT_SPAN_ID
     assert spans[0].kind == "run"

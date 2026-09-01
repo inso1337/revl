@@ -94,7 +94,7 @@
 // scan), no `@py` needed.
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field, value_keys,
-  value_list, value_at, value_str, value_bool
+  value_list, value_at, value_str, value_bool, value_opt, value_int
 }
 use "../stdlib/str.rvl" { trim, split_top, last_index_of, rstrip }
 use "../stdlib/list.rvl" { list_contains, list_sort, list_dedup }
@@ -209,6 +209,15 @@ fn java_bin_ops(op: Str) -> Str {
   if (op == "%") { return "%" }
   if (op == "&&") { return "&&" }
   if (op == "||") { return "||" }
+  // Int32 bitwise operators (item 366, docs/arithmetic.md). All native on a
+  // Java `int` and none trap: `& | ^` are the bit ops; a `<<`/`>>` on `int`
+  // masks the shift count to its low 5 bits (JLS 15.19), exactly the spec's
+  // mod-32 rule, and `>>` is the arithmetic (sign-extending) shift.
+  if (op == "&") { return "&" }
+  if (op == "|") { return "|" }
+  if (op == "^") { return "^" }
+  if (op == "<<") { return "<<" }
+  if (op == ">>") { return ">>" }
   return ""
 }
 fn exact_method(op: Str) -> Str {
@@ -317,6 +326,15 @@ fn java_v3_type(tv: Any, boxed: Bool) -> Str {
   if (raw == "Unit") { return "void" }
   let name = trim(raw)
   if (name == "") { return "Object" }
+  // item 383 (self-host port): a declared function type `(P, ..) -> R` is NOT
+  // lowerable on the Java tier — a Java lambda needs a nominal target type and
+  // the JDK's functional interfaces are neither generic over arity nor usable
+  // with primitives without boxing (the reference's `_reject_fn_type`, which
+  // RAISES). A pure emitter fn cannot `fail`, so the refusal surfaces as a loud
+  // out-of-subset `<<DEFER-fn-type>>` marker, keeping a byte diff from silently
+  // mangling the type. `.map`/`.filter`/`.reduce` reach here through their
+  // `list_map`/`list_filter`/`list_reduce` function-value parameters.
+  if (name.startsWith("(")) { return "<<DEFER-fn-type>>" }
   let tm = type_map(name)
   if (tm != "") { return box(tm, boxed) }
   if (name.indexOf("[") >= 0) {
@@ -433,6 +451,10 @@ fn render_un(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let op = node_op(node)
   let r = render_expr(value_field(node, "operand"), ctx, counter)
   if (op == "!") { return { text: `(!${r.text})`, counter: r.counter } }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): Java's `~` on an `int`. Never traps.
+    return { text: `(~${r.text})`, counter: r.counter }
+  }
   if (op == "-") {
     if (is_int_operand(node_operands(node))) { return { text: `Math.negateExact(${r.text})`, counter: r.counter } }
     return { text: `(-${r.text})`, counter: r.counter }
@@ -848,6 +870,9 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, counter: Int) -> Sout {
     let r = render_expr(value_field(node, "expr"), ctx, counter)
     return { lines: [pad.concat(`if (!(${r.text})) throw new AssertionError("assertion failed");`)], counter: r.counter }
   }
+  // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
+  if (step == "break") { return { lines: [pad.concat("break;")], counter: counter } }
+  if (step == "continue") { return { lines: [pad.concat("continue;")], counter: counter } }
   return { lines: [pad.concat(`<<UNSUPPORTED-STEP:${step}>>`)], counter: counter }
 }
 
@@ -1239,7 +1264,13 @@ fn map_runtime() -> List[Str] {
   o = o.push("// The value type is generic — each site's `Map.create()` pins `V`")
   o = o.push("// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).")
   o = o.push("public static final class Map<V> {")
-  o = o.push("    private final java.util.HashMap<String, V> values = new java.util.HashMap<>();")
+  o = o.push("    // item 397: a ConcurrentHashMap, not a bare HashMap. The tier's")
+  o = o.push("    // placement runner serves each bridge connection on its own thread,")
+  o = o.push("    // so the former unsynchronized HashMap was not memory-safe under")
+  o = o.push("    // concurrent put; migrating the backing class makes insert/remove/get")
+  o = o.push("    // thread-safe AND gives insert_if_absent an atomic putIfAbsent.")
+  o = o.push("    private final java.util.concurrent.ConcurrentHashMap<String, V> values =")
+  o = o.push("        new java.util.concurrent.ConcurrentHashMap<>();")
   o = o.push("    private Map() {}")
   o = o.push("    // revl `Map.new()` — renamed: `new` is a Java reserved word.")
   o = o.push("    public static <V> Map<V> create() {")
@@ -1250,6 +1281,15 @@ fn map_runtime() -> List[Str] {
   o = o.push("    }")
   o = o.push("    public void insert(String key, V value) {")
   o = o.push("        values.put(key, value);")
+  o = o.push("    }")
+  o = o.push("    // The atomic compare-and-set (item 397): ConcurrentHashMap.putIfAbsent")
+  o = o.push("    // is a single atomic operation over the test AND the insert. It returns")
+  o = o.push("    // the previous value (null when absent), so a null return means this")
+  o = o.push("    // call inserted. Under N concurrent callers, exactly one sees null.")
+  o = o.push("    // (ConcurrentHashMap forbids null values; revl host inserts never pass")
+  o = o.push("    // null, and `get` already wraps absence in Optional.)")
+  o = o.push("    public boolean insert_if_absent(String key, V value) {")
+  o = o.push("        return values.putIfAbsent(key, value) == null;")
   o = o.push("    }")
   o = o.push("    public void remove(String key) {")
   o = o.push("        values.remove(key);")
@@ -1469,8 +1509,16 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
   }
   return ""
 }
-// `_map_expr_inserts`: collect candidate value types from `bind.insert(k, v)`
-// anywhere in an expression (both call shapes), recursing into subexpressions.
+// `_is_map_value_writer`: a Map verb that writes a value at arg[1]; each pins
+// the host Map's value type V. Inferring V from ANY writer (not the literal
+// name "insert") lets a CAS-only writer (`insert_if_absent`, item 397) pin a
+// concrete V instead of the Str default (item 402).
+fn is_map_value_writer(method: Str) -> Bool {
+  return method == "insert" || method == "insert_if_absent"
+}
+// `_map_expr_inserts`: collect candidate value types from any map value-writing
+// call (`insert`, `insert_if_absent`, ...) on `bind` anywhere in an expression
+// (both call shapes), recursing into subexpressions.
 fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, services: Any,
                     functions: List[Any], ctx: Ctx, types: Any, cands: List[Str]) -> List[Str] {
   if (value_kind(node) != "record") { return cands }
@@ -1479,7 +1527,7 @@ fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, s
     let target = value_field(node, "target")
     let tk = value_str(value_field(target, "kind"))
     if ((tk == "name" || tk == "var") && node_ref_name(target) == bind
-        && value_str(value_field(node, "method")) == "insert") {
+        && is_map_value_writer(value_str(value_field(node, "method")))) {
       let args = value_list(value_field(node, "args"))
       if (args.length() >= 2) {
         let t = map_value_expr_type(args[1], var_types, comp, services, functions, ctx, types)
@@ -1491,7 +1539,7 @@ fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, s
       let ct = value_field(callee, "target")
       let ctk = value_str(value_field(ct, "kind"))
       if ((ctk == "name" || ctk == "var") && node_ref_name(ct) == bind
-          && value_str(value_field(callee, "name")) == "insert") {
+          && is_map_value_writer(value_str(value_field(callee, "name")))) {
         let args = value_list(value_field(node, "args"))
         if (args.length() >= 2) {
           let t = map_value_expr_type(args[1], var_types, comp, services, functions, ctx, types)
@@ -1667,6 +1715,337 @@ fn emit_setup_stmt(step: Any, ctx: Ctx, pad: Str, counter: Int) -> Sout {
   return { lines: [pad.concat(`<<DEFER-setup-step:${value_str(value_field(step, "step"))}>>`)], counter: counter }
 }
 
+// ============================================== RevlFrame teardown (item 321)
+// docs/design/teardown-contract.md Slice 2b: a component that registers a
+// `compensation` (`emit ... compensate`, item 247) or a `transactional`
+// (witnessed effect, item 243) teardown entry routes ALL its teardown through
+// the shared two-phase RevlFrame loop instead of the flat `Disposables.of`
+// stack. Ported from backends/java/emit.py (`_call_label`, `_witnessed_externs`,
+// `_component_needs_frame`, `_uses_revl_frame`, `_emit_revl_frame_runtime`).
+
+// `_call_label`: the human label baked as a Java string literal into a residue
+// record's `crossing`/`attempted` fields. Never raises — an unrecognised shape
+// degrades to a generic "?".
+fn call_label(node: Any) -> Str {
+  if (value_kind(node) != "record") { return "?" }
+  let kind = value_str(value_field(node, "kind"))
+  if (kind == "fn") {
+    let n = value_str(value_field(node, "name"))
+    if (n == "") { return "?" }
+    return n
+  }
+  if (kind == "call") {
+    let callee = value_field(node, "callee")
+    if (!value_is_null(callee)) {
+      let cn = value_str(value_field(callee, "name"))
+      if (cn == "") { return "?" }
+      return cn
+    }
+    let m = value_str(value_field(node, "method"))
+    if (m == "") { return "?" }
+    return m
+  }
+  if (kind == "host") {
+    let f = value_str(value_field(node, "fn"))
+    if (f == "") { return "?" }
+    return f
+  }
+  return "?"
+}
+
+// `_witnessed_externs`: the NAMES of the document's witnessed externs (item
+// 243), so a component-step `acquire` (an IR `fn` node) can be recognised as a
+// transactional effect. Empty for every program that declares no witnessed
+// extern, so those programs' bracket-only components are unaffected.
+fn witnessed_names(ir: Any) -> List[Str] {
+  var names = []
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (value_str(value_field(ext, "class")) == "witnessed") {
+      names = names.push(value_str(value_field(ext, "name")))
+    }
+  }
+  return names
+}
+
+// `_witnessed_extern_for`: does this step's `acquire` name a witnessed extern?
+fn acquire_is_witnessed(acq: Any, wnames: List[Str]) -> Bool {
+  if (value_str(value_field(acq, "kind")) != "fn") { return false }
+  return list_contains(wnames, value_str(value_field(acq, "name")))
+}
+
+// `_component_needs_frame`: true if the component registers at least one
+// `transactional` (witnessed) or `compensation` teardown entry — the two entry
+// kinds beyond the plain `bracket`. Scanned recursively through `if`/`else` and
+// into `provide`-method bodies (a method-time `emit ... compensate` or witnessed
+// `effect` shares the same per-activation accumulator).
+fn step_needs_frame(step: Any, wnames: List[Str]) -> Bool {
+  let kind = value_str(value_field(step, "step"))
+  if (kind == "emit" && !value_is_null(value_field(step, "compensate"))) { return true }
+  if (kind == "let-effect" || kind == "effect") {
+    if (acquire_is_witnessed(value_field(step, "acquire"), wnames)) { return true }
+  }
+  if (kind == "if") {
+    for (s of value_list(value_field(step, "then"))) { if (step_needs_frame(s, wnames)) { return true } }
+    for (s of value_list(value_field(step, "else"))) { if (step_needs_frame(s, wnames)) { return true } }
+  }
+  if (kind == "provide") {
+    for (method of value_list(value_field(step, "methods"))) {
+      for (s of value_list(value_field(method, "body"))) {
+        if (step_needs_frame(s, wnames)) { return true }
+      }
+    }
+  }
+  return false
+}
+fn component_needs_frame(comp: Any, wnames: List[Str]) -> Bool {
+  for (step of value_list(value_field(comp, "body"))) {
+    if (step_needs_frame(step, wnames)) { return true }
+  }
+  return false
+}
+
+// `_uses_revl_frame`: does any component in the document need the two-phase
+// loop — gates emitting the shared RevlFrame/RevlActivation helper once per file.
+fn uses_revl_frame(ir: Any) -> Bool {
+  let wnames = witnessed_names(ir)
+  let comps = value_field(ir, "components")
+  if (value_is_null(comps)) { return false }
+  for (comp of value_list(comps)) {
+    if (component_needs_frame(comp, wnames)) { return true }
+  }
+  return false
+}
+
+// `_emit_revl_frame_runtime` (item 321): the shared two-phase teardown
+// accumulator (docs/design/teardown-contract.md), emitted once per file when
+// any component needs it — RevlFrame (commit/abort discriminator + guarded
+// bracket/transactional/compensation entries + Phase-2 drain) and the
+// per-activation RevlActivation Disposable. Ported byte-for-byte from
+// backends/java/emit.py's `_emit_revl_frame_runtime`.
+fn revl_frame_runtime() -> List[Str] {
+  return [
+    "// docs/design/teardown-contract.md: the shared bracket/transactional/",
+    "// compensation two-phase teardown loop (item 243 Slice 2b, item 247).",
+    "private static final class RevlFrame {",
+    "    private boolean committed = false;",
+    "    private final java.util.List<Residue> residue = new java.util.ArrayList<>();",
+    "    private final java.util.ArrayDeque<Phase2Task> phase2 = new java.util.ArrayDeque<>();",
+    "",
+    "    private record Residue(String kind, String crossing, String attempted,",
+    "                            boolean attemptedFlag, String error, String outcome) {}",
+    "",
+    "    private record Phase2Task(String crossing, String attempted, Runnable action) {}",
+    "",
+    "    void commit() {",
+    "        committed = true;",
+    "    }",
+    "",
+    "    /** `bracket` (acquire): replays on every teardown, clean unload and",
+    "     * abort alike. Guarded so a failed inverse never skips the remaining",
+    "     * Phase-1 entries (contract-grade severity: bracket-fault). */",
+    "    Disposable bracket(String crossing, String attempted, Runnable inverse) {",
+    "        return () -> {",
+    "            try {",
+    "                inverse.run();",
+    "            } catch (RuntimeException | Error err) {",
+    "                residue.add(new Residue(\"bracket-fault\", crossing, attempted,",
+    "                        true, String.valueOf(err), \"failed\"));",
+    "            }",
+    "        };",
+    "    }",
+    "",
+    "    /** `transactional` (item 243, witnessed): replays the declared inverse",
+    "     * ONLY on abort; a committed activation DISCHARGES it (the mutation is",
+    "     * the deliverable and persists). Anticipated failure severity:",
+    "     * restore-residue. */",
+    "    Disposable transactional(String crossing, String attempted, Runnable undo) {",
+    "        return () -> {",
+    "            if (committed) {",
+    "                return;",
+    "            }",
+    "            try {",
+    "                undo.run();",
+    "            } catch (RuntimeException | Error err) {",
+    "                residue.add(new Residue(\"restore-residue\", crossing, attempted,",
+    "                        true, String.valueOf(err), \"failed\"));",
+    "            }",
+    "        };",
+    "    }",
+    "",
+    "    /** `transactionalMethod` (item 318): the per-tool-call H1 seam — a",
+    "     * witnessed fs mutation fired from a PROVIDE-METHOD body (per request),",
+    "     * after activation, whose inverse must outlive the method call and",
+    "     * survive until the component/session commits or aborts. On java this",
+    "     * is BEHAVIOURALLY IDENTICAL to `transactional`, and deliberately so:",
+    "     * the py tier has to PARK a method-registered entry in a separate",
+    "     * `_deferred_transactional` list and dispose it inside `drain`, because",
+    "     * on py `_committed` only flips at TEARDOWN (drain), so a method entry",
+    "     * disposed as an ordinary sibling would observe committed==false on a",
+    "     * clean unload and wrongly revert the deliverable. Java has no such",
+    "     * window: `committed` flips once at ACTIVATION-END (the emitted",
+    "     * apply()'s `frame.commit()` before it returns), strictly before any",
+    "     * provide-method can run and before any teardown, so the disposer this",
+    "     * returns already observes the settled commit bit when the enclosing",
+    "     * component's `fx` disposes it at unload. The ONE soundness rule the",
+    "     * emitter must honour is that this entry is tracked into the COMPONENT",
+    "     * ACTIVATION `fx` (the provider struct's `this.fx`), never a per-call",
+    "     * scope: a per-call scope would dispose it at method-return with",
+    "     * committed==true, discharging it and dropping the undo, so a later",
+    "     * abort could not revert it (residue). */",
+    "    Disposable transactionalMethod(String crossing, String attempted, Runnable undo) {",
+    "        return transactional(crossing, attempted, undo);",
+    "    }",
+    "",
+    "    /** Session-level reject seam (item 318; item 245's explicit commit/abort",
+    "     * UX is the eventual driver). A component that activated cleanly has",
+    "     * already run `commit()`, so a later unload would discharge every",
+    "     * transactional entry and PERSIST its mutation. Calling `abort()` before",
+    "     * teardown flips the discriminator back to false, so the next `fx`",
+    "     * dispose replays every transactional inverse — the activation-body ones",
+    "     * AND the per-tool-call method-registered ones — and the mutations",
+    "     * revert. Idempotent. */",
+    "    void abort() {",
+    "        committed = false;",
+    "    }",
+    "",
+    "    /** `compensation` (item 247): abort-only, best-effort, Phase 2. A",
+    "     * committed activation DISCHARGES it (never runs). On abort this",
+    "     * disposer fires during fx's native Phase-1 walk, interleaved with",
+    "     * bracket/transactional entries, so it must not run inline: it",
+    "     * enqueues, and `runPhase2()` drains the queue after fx's walk (and",
+    "     * therefore every Phase-1 inverse) has returned. */",
+    "    Disposable compensation(String crossing, String attempted, Runnable emit) {",
+    "        return () -> {",
+    "            if (committed) {",
+    "                return;",
+    "            }",
+    "            phase2.addLast(new Phase2Task(crossing, attempted, emit));",
+    "        };",
+    "    }",
+    "",
+    "    private void runGuarded(Phase2Task task) {",
+    "        try {",
+    "            task.action().run();",
+    "        } catch (RuntimeException | Error err) {",
+    "            residue.add(new Residue(\"compensation-residue\", task.crossing(), task.attempted(),",
+    "                    true, String.valueOf(err), \"failed\"));",
+    "        }",
+    "    }",
+    "",
+    "    /** Phase 2: LIFO within the compensation class (entries queue in the",
+    "     * order fx's native walk visits them, already reverse-registration",
+    "     * order), best-effort, bounded by REVL_COMPENSATION_BUDGET_MS /",
+    "     * REVL_COMPENSATION_PER_CALL_MS (default 5000/1000 ms). Never throws:",
+    "     * the abort always succeeds. */",
+    "    void runPhase2() {",
+    "        if (phase2.isEmpty()) {",
+    "            return;",
+    "        }",
+    "        long budgetMs = envMs(\"REVL_COMPENSATION_BUDGET_MS\", 5000L);",
+    "        long perCallMs = envMs(\"REVL_COMPENSATION_PER_CALL_MS\", 1000L);",
+    "        long deadline = budgetMs <= 0 ? Long.MAX_VALUE",
+    "                : System.nanoTime() + budgetMs * 1_000_000L;",
+    "        java.util.concurrent.ExecutorService pool = null;",
+    "        try {",
+    "            while (!phase2.isEmpty()) {",
+    "                Phase2Task next = phase2.pollFirst();",
+    "                if (budgetMs > 0 && System.nanoTime() >= deadline) {",
+    "                    residue.add(new Residue(\"compensation-residue\", next.crossing(), next.attempted(),",
+    "                            false, \"deadline-expired\", \"not-attempted\"));",
+    "                    continue;",
+    "                }",
+    "                if (perCallMs <= 0) {",
+    "                    runGuarded(next);",
+    "                    continue;",
+    "                }",
+    "                if (pool == null) {",
+    "                    pool = java.util.concurrent.Executors.newCachedThreadPool(r -> {",
+    "                        Thread t = new Thread(r, \"revl-compensation\");",
+    "                        t.setDaemon(true);",
+    "                        return t;",
+    "                    });",
+    "                }",
+    "                java.util.concurrent.Future<?> future = pool.submit(() -> runGuarded(next));",
+    "                try {",
+    "                    future.get(perCallMs, java.util.concurrent.TimeUnit.MILLISECONDS);",
+    "                } catch (java.util.concurrent.TimeoutException timeout) {",
+    "                    // java per-tier rule: cancel(true) preempts only an",
+    "                    // interruptible blocking point. When the compensation",
+    "                    // ignores it, the task keeps running DETACHED past this",
+    "                    // point (go's abandon-the-wait shape) -> outcome unknown.",
+    "                    future.cancel(true);",
+    "                    residue.add(new Residue(\"compensation-residue\", next.crossing(), next.attempted(),",
+    "                            true, \"per-call bound exceeded\", \"unknown\"));",
+    "                } catch (InterruptedException interrupted) {",
+    "                    Thread.currentThread().interrupt();",
+    "                    residue.add(new Residue(\"compensation-residue\", next.crossing(), next.attempted(),",
+    "                            true, \"teardown thread interrupted\", \"unknown\"));",
+    "                } catch (java.util.concurrent.ExecutionException impossible) {",
+    "                    // runGuarded() already catches RuntimeException/Error",
+    "                    // internally, so the submitted task never actually",
+    "                    // throws; this branch only satisfies future.get()'s",
+    "                    // checked signature.",
+    "                    residue.add(new Residue(\"compensation-residue\", next.crossing(), next.attempted(),",
+    "                            true, String.valueOf(impossible.getCause()), \"failed\"));",
+    "                }",
+    "            }",
+    "        } finally {",
+    "            if (pool != null) {",
+    "                pool.shutdown();",
+    "            }",
+    "        }",
+    "    }",
+    "",
+    "    private static long envMs(String name, long fallback) {",
+    "        String raw = System.getenv(name);",
+    "        if (raw == null || raw.isEmpty()) {",
+    "            return fallback;",
+    "        }",
+    "        try {",
+    "            return Long.parseLong(raw.trim());",
+    "        } catch (NumberFormatException bad) {",
+    "            return fallback;",
+    "        }",
+    "    }",
+    "}",
+    "",
+    "// item 318: the per-activation Disposable an emitted frame-bearing apply()",
+    "// returns instead of the bare `fx` EffectScope. It carries the component's",
+    "// `RevlFrame` alongside `fx` so a session-level reject can reach it AFTER a",
+    "// clean activation (mirrors the py tier's ctx->Frame reachability, which",
+    "// item 245's commit/abort UX drives). `dispose()` runs the native Phase-1",
+    "// LIFO walk (`fx.dispose()`) and then drains any Phase-2 compensations the",
+    "// walk enqueued — a no-op on a clean unload (committed => every entry",
+    "// discharges, nothing enqueues) and the abort drain when `abort()` was",
+    "// called first. `abort()` flips the commit discriminator so that dispose",
+    "// reverts rather than persists. Existing callers that only `dispose()` the",
+    "// returned Disposable are unaffected.",
+    "public static final class RevlActivation implements Disposable {",
+    "    private final Context.EffectScope fx;",
+    "    private final RevlFrame frame;",
+    "",
+    "    RevlActivation(Context.EffectScope fx, RevlFrame frame) {",
+    "        this.fx = fx;",
+    "        this.frame = frame;",
+    "    }",
+    "",
+    "    /** Session-level reject: revert this activation's transactional work",
+    "     * (activation-body AND per-tool-call) on the next dispose. */",
+    "    public void abort() {",
+    "        frame.abort();",
+    "    }",
+    "",
+    "    @Override",
+    "    public void dispose() {",
+    "        fx.dispose();",
+    "        frame.runPhase2();",
+    "    }",
+    "}",
+    ""
+  ]
+}
+
+
 // `_emit_component_stmts`: the modern `apply` activation body — `let-effect`
 // (host bind, `Map<V> b = Map.create();` + undo track), `effect` (`<acquire>;` +
 // undo track), `emit` (`<expr>;` + optional compensate track), `provide`
@@ -1674,7 +2053,8 @@ fn emit_setup_stmt(step: Any, ctx: Ctx, pad: Str, counter: Int) -> Sout {
 // CordisException(..)`), and `await` (join). Renders with the EMPTY rename (the
 // activation body names its req/bind LOCALS directly, unlike a provide method).
 fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], pad: Str, ctx: Ctx,
-                        map_values: Map[Str, Str], req_locals: List[Str], bind_names: List[Str], counter: Int) -> Sout {
+                        map_values: Map[Str, Str], req_locals: List[Str], bind_names: List[Str],
+                        needs_frame: Bool, counter: Int) -> Sout {
   var lines = []
   var c = counter
   for (step of steps) {
@@ -1699,7 +2079,15 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
         c = ar.counter
       }
       let ur = render_expr(value_field(step, "undo"), ctx, c)
-      lines = lines.push(pad.concat(`fx.track(Disposables.of(() -> ${ur.text}));`))
+      // A plain `acquire`/`undo` bracket: routed through `RevlFrame.bracket`
+      // when the component needs the two-phase loop, else the flat `Disposables`.
+      if (needs_frame) {
+        let crossing = json_dumps(call_label(value_field(step, "acquire")))
+        let attempted = json_dumps(call_label(value_field(step, "undo")))
+        lines = lines.push(pad.concat(`fx.track(frame.bracket(${crossing}, ${attempted}, () -> ${ur.text}));`))
+      } else {
+        lines = lines.push(pad.concat(`fx.track(Disposables.of(() -> ${ur.text}));`))
+      }
       c = ur.counter
     }
     if (kind == "emit") {
@@ -1709,7 +2097,16 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
       let cnode = value_field(step, "compensate")
       if (!value_is_null(cnode)) {
         let cr = render_expr(cnode, ctx, c)
-        lines = lines.push(pad.concat(`fx.track(Disposables.of(() -> ${cr.text}));`))
+        // `emit ... compensate` (item 247): abort-only Phase-2 entry through
+        // `RevlFrame.compensation` (needs_frame is always set when a compensate
+        // is present; the flat form is a defensive fallback).
+        if (needs_frame) {
+          let crossing = json_dumps(call_label(value_field(step, "expr")))
+          let attempted = json_dumps(call_label(cnode))
+          lines = lines.push(pad.concat(`fx.track(frame.compensation(${crossing}, ${attempted}, () -> ${cr.text}));`))
+        } else {
+          lines = lines.push(pad.concat(`fx.track(Disposables.of(() -> ${cr.text}));`))
+        }
         c = cr.counter
       }
     }
@@ -1717,6 +2114,7 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
       let svc = value_str(value_field(step, "service"))
       let struct = `${cname}${camel(value_str(value_field(step, "name")))}`
       var cargs = ["ctx", "fx"]
+      if (needs_frame) { cargs = cargs.push("frame") }
       for (l of req_locals) { cargs = cargs.push(l) }
       for (b of bind_names) { cargs = cargs.push(b) }
       lines = lines.push(pad.concat(`fx.track(ctx.provide(ServiceKey.of(${svc}.class), new ${struct}(${cargs.join(", ")})));`))
@@ -1725,13 +2123,13 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
       let cr = render_expr(value_field(step, "cond"), ctx, c)
       lines = lines.push(pad.concat(`if (${cr.text}) {`))
       c = cr.counter
-      let tr = emit_component_stmts(comp, services, cname, value_list(value_field(step, "then")), pad.concat("    "), ctx, map_values, req_locals, bind_names, c)
+      let tr = emit_component_stmts(comp, services, cname, value_list(value_field(step, "then")), pad.concat("    "), ctx, map_values, req_locals, bind_names, needs_frame, c)
       lines = lines.concat(tr.lines)
       c = tr.counter
       let els = value_list(value_field(step, "else"))
       if (els.length() > 0) {
         lines = lines.push(pad.concat("} else {"))
-        let er = emit_component_stmts(comp, services, cname, els, pad.concat("    "), ctx, map_values, req_locals, bind_names, c)
+        let er = emit_component_stmts(comp, services, cname, els, pad.concat("    "), ctx, map_values, req_locals, bind_names, needs_frame, c)
         lines = lines.concat(er.lines)
         c = er.counter
       }
@@ -1962,7 +2360,7 @@ fn needs_modern_subset(comp: Any) -> Bool {
 // (`<acquire>;` then `fx.track(Disposables.of(() -> <undo>))`) and `emit`
 // (`<expr>;` plus an optional `compensate` track). `ctx` carries the
 // this.<req>/this.<bind> rename map (`set_rn`). The match counter threads through.
-fn method_body_lines(method: Any, ret_is_void: Bool, ctx: Ctx, counter: Int) -> Sout {
+fn method_body_lines(method: Any, ret_is_void: Bool, ctx: Ctx, needs_frame: Bool, counter: Int) -> Sout {
   var lines = []
   var c = counter
   for (mstmt of value_list(value_field(method, "body"))) {
@@ -1988,7 +2386,15 @@ fn method_body_lines(method: Any, ret_is_void: Bool, ctx: Ctx, counter: Int) -> 
         let ra = render_expr(value_field(mstmt, "acquire"), ctx, c)
         lines = lines.push(ra.text.concat(";"))
         let ru = render_expr(value_field(mstmt, "undo"), ctx, ra.counter)
-        lines = lines.push(`fx.track(Disposables.of(() -> ${ru.text}));`)
+        // A method-body `effect`/`undo` bracket: routed through
+        // `RevlFrame.bracket` when the component needs the two-phase loop.
+        if (needs_frame) {
+          let crossing = json_dumps(call_label(value_field(mstmt, "acquire")))
+          let attempted = json_dumps(call_label(value_field(mstmt, "undo")))
+          lines = lines.push(`fx.track(frame.bracket(${crossing}, ${attempted}, () -> ${ru.text}));`)
+        } else {
+          lines = lines.push(`fx.track(Disposables.of(() -> ${ru.text}));`)
+        }
         c = ru.counter
       } else {
         if (step == "emit") {
@@ -1998,7 +2404,15 @@ fn method_body_lines(method: Any, ret_is_void: Bool, ctx: Ctx, counter: Int) -> 
           let comp = value_field(mstmt, "compensate")
           if (!value_is_null(comp)) {
             let rc = render_expr(comp, ctx, c)
-            lines = lines.push(`fx.track(Disposables.of(() -> ${rc.text}));`)
+            // A method-body `emit ... compensate` (item 247): Phase-2 entry
+            // through `RevlFrame.compensation`.
+            if (needs_frame) {
+              let crossing = json_dumps(call_label(value_field(mstmt, "expr")))
+              let attempted = json_dumps(call_label(comp))
+              lines = lines.push(`fx.track(frame.compensation(${crossing}, ${attempted}, () -> ${rc.text}));`)
+            } else {
+              lines = lines.push(`fx.track(Disposables.of(() -> ${rc.text}));`)
+            }
             c = rc.counter
           }
         }
@@ -2014,13 +2428,18 @@ fn method_body_lines(method: Any, ret_is_void: Bool, ctx: Ctx, counter: Int) -> 
 // `<Comp>Plugin` (config fields + `_emit_plugin_ctors`, and the `apply` that opens
 // the `Context.EffectScope`, resolves each requirement via `ctx.get(..)`, and
 // registers every provision under the A8 self-revert try/catch, returning `fx`).
-fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, functions: List[Any]) -> List[Str] {
+fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, functions: List[Any],
+                         wnames: List[Str]) -> List[Str] {
   let name = value_str(value_field(comp, "name"))
   let cname = mangle(name)
   let reqs_m = value_field(comp, "requires")
   let provs_m = value_field(comp, "provides")
   let config_fields = value_list(value_field(comp, "config"))
   let body = value_list(value_field(comp, "body"))
+  // docs/design/teardown-contract.md Slice 2b: a component that registers a
+  // transactional (witnessed) or compensation entry needs the RevlFrame two-
+  // phase loop; a bracket-only component keeps emitting exactly as before.
+  let needs_frame = component_needs_frame(comp, wnames)
   var req_locals = []
   if (!value_is_null(reqs_m)) { req_locals = value_keys(reqs_m) }
   let bind_names = binds(comp)
@@ -2047,6 +2466,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     out = out.push(`public static final class ${struct} implements ${srv} {`)
     out = out.push("    private final Context ctx;")
     out = out.push("    private final Context.EffectScope fx;")
+    if (needs_frame) { out = out.push("    private final RevlFrame frame;") }
     for (local of req_locals) {
       out = out.push(`    private final ${value_str(value_field(reqs_m, local))} ${local};`)
     }
@@ -2054,6 +2474,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
       out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${b};`)
     }
     var cparams = ["Context ctx", "Context.EffectScope fx"]
+    if (needs_frame) { cparams = cparams.push("RevlFrame frame") }
     for (local of req_locals) {
       cparams = cparams.push(`${value_str(value_field(reqs_m, local))} ${local}`)
     }
@@ -2063,6 +2484,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     out = out.push(`    ${struct}(${cparams.join(", ")}) {`)
     out = out.push("        this.ctx = ctx;")
     out = out.push("        this.fx = fx;")
+    if (needs_frame) { out = out.push("        this.frame = frame;") }
     for (local of req_locals) {
       out = out.push(`        this.${local} = ${local};`)
     }
@@ -2085,7 +2507,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
       let r = value_field(svc_method, "returns")
       if (!value_is_null(r)) { ret = java_v3_type(r, false) ret_is_void = false }
       out = out.push(`    public ${ret} ${mnm}(${params.join(", ")}) {`)
-      let sb = method_body_lines(method, ret_is_void, mctx, counter)
+      let sb = method_body_lines(method, ret_is_void, mctx, needs_frame, counter)
       counter = sb.counter
       for (l of sb.lines) { out = out.push(`        ${l}`) }
       out = out.push("    }")
@@ -2122,6 +2544,10 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     }
   }
   out = out.push("        Context.EffectScope fx = ctx.effect();")
+  // docs/design/teardown-contract.md: one frame per activation, created BEFORE
+  // any step runs so every bracket/transactional/compensation registration
+  // below shares the same commit/abort discriminator.
+  if (needs_frame) { out = out.push("        RevlFrame frame = new RevlFrame();") }
   for (local of req_locals) {
     let srvn = value_str(value_field(reqs_m, local))
     out = out.push(`        ${srvn} ${local} = ctx.get(${srvn}.class);`)
@@ -2130,7 +2556,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   // The activation body (item 238): `let-effect`/`effect`/`emit`/`if`/`fail`/
   // `await` steps as well as the `provide` registrations, rendered with the EMPTY
   // rename (the body names its req/bind LOCALS directly).
-  let sb = emit_component_stmts(comp, services, cname, body, "            ", base_ctx, map_values, req_locals, bind_names, counter)
+  let sb = emit_component_stmts(comp, services, cname, body, "            ", base_ctx, map_values, req_locals, bind_names, needs_frame, counter)
   out = out.concat(sb.lines)
   // An unconditional trailing `fail` lowers to a throw; a `return fx;` after it is
   // an unreachable statement (a javac hard error), so it is suppressed.
@@ -2138,9 +2564,22 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   if (body.length() > 0) {
     if (value_str(value_field(body[body.length() - 1], "step")) == "fail") { trailing_fail = true }
   }
-  if (!trailing_fail) { out = out.push("            return fx;") }
+  if (!trailing_fail) {
+    // Commit path: flip the discriminator BEFORE any disposal can occur, then
+    // return the frame-bearing RevlActivation so a session-level reject can reach
+    // `frame.abort()`. A bracket-only / non-frame component still returns `fx`.
+    if (needs_frame) {
+      out = out.push("            frame.commit();")
+      out = out.push("            return new RevlActivation(fx, frame);")
+    } else {
+      out = out.push("            return fx;")
+    }
+  }
   out = out.push("        } catch (RuntimeException | Error failure) {")
   out = out.push("            fx.dispose();")
+  // Abort path: fx.dispose() ran Phase 1 (bracket/transactional inverses, LIFO);
+  // Phase 2 (queued compensations) drains only now, after Phase 1 completes.
+  if (needs_frame) { out = out.push("            frame.runPhase2();") }
   out = out.push("            throw failure;")
   out = out.push("        }")
   out = out.push("    }")
@@ -2156,11 +2595,12 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
 // LIFO undo list (`_emit_plugin_ctors` no-config form + the A8 self-revert catch).
 // A non-simple component takes the modern path when supported (item 225), else a
 // loud DEFER marker.
-fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: List[Any]) -> List[Str] {
+fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: List[Any],
+                  wnames: List[Str]) -> List[Str] {
   let name = value_str(value_field(comp, "name"))
   if (!component_simple_ok(comp)) {
     if (modern_supported(comp) && needs_modern_subset(comp)) {
-      return emit_component_modern(comp, services, ctx, types, functions)
+      return emit_component_modern(comp, services, ctx, types, functions, wnames)
     }
     return [`<<DEFER-component-nonsimple:${name}>>`]
   }
@@ -2229,8 +2669,16 @@ pub fn emit_src(ir: Any) -> Str {
   let ctx = build_ctx(ir)
   let types = value_field(ir, "types")
   let functions = value_list(value_field(ir, "functions"))
+  // item 217: the reference dispatches on `ir_version` (`_emit_v1`/`_emit_v2`/
+  // `_emit_v3`). For the covered scalar service/comp surface only the banner
+  // version differs across those paths, so the front-door is a versioned banner
+  // over the shared body. A components-only document lowers to v1, a realm-only
+  // one to v2, everything else here to v3. (A v1/v2 document whose generics box
+  // to the SHORT `Long`/`Integer` form — vs v3's fully-qualified `java.lang.Long`
+  // — is out of this slice's byte-checked surface; see the test corpus note.)
+  let ver = value_int(value_opt(ir, "ir_version") ?? 3)
   var out = []
-  out = out.push("// Generated by the revl cordis4j backend (ir_version 3) — do not edit.")
+  out = out.push(`// Generated by the revl cordis4j backend (ir_version ${ver}) — do not edit.`)
   out = out.push("// Target: cordis4j (github.com/1na-ko/cordis4j).")
   out = out.push("package revl;")
   out = out.push("")
@@ -2265,12 +2713,20 @@ pub fn emit_src(ir: Any) -> Str {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
     }
   }
+  // The RevlFrame two-phase teardown runtime (item 321) precedes the components,
+  // emitted once when any component needs it (docs/design/teardown-contract.md).
+  if (uses_revl_frame(ir)) {
+    for (l of revl_frame_runtime()) {
+      if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+    }
+  }
   // Components close the class body (after the free functions), each provider +
   // plugin block 4-space indented into `Components`.
   let components = value_field(ir, "components")
   if (!value_is_null(components)) {
+    let wnames = witnessed_names(ir)
     for (comp of value_list(components)) {
-      for (l of emit_component(comp, services, ctx, types, functions)) {
+      for (l of emit_component(comp, services, ctx, types, functions, wnames)) {
         if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
       }
     }

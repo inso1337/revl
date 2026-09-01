@@ -62,7 +62,7 @@ def _cordis_runtime():
         spec.loader.exec_module(module)
     except Exception as exc:  # pragma: no cover - environment-dependent
         pytest.skip(f"cordis-wasm runtime failed to import: {exc}")
-    if not hasattr(module, "Runtime") or not hasattr(Runtime := module.Runtime, "register_template"):
+    if not hasattr(module, "Runtime") or not hasattr(module.Runtime, "register_template"):
         pytest.skip("cordis-wasm runtime predates instance-parametric spawn (no register_template)")
     return module
 
@@ -174,7 +174,7 @@ def test_request_scoped_reclaim_at_dispose_not_deferred():
     # reclaimed NOW: handle gone, its realm-scoped provision withdrawn, while
     # the supervisor and the sibling instance are still live.
     assert h1 not in rt.instance_states()
-    assert not any(k.startswith(f"#") and k.endswith("counter") and rt.table[k].uid == h1
+    assert not any(k.startswith("#") and k.endswith("counter") and rt.table[k].uid == h1
                    for k in rt.table)
     assert sup.state is State.ACTIVE
     assert rt.instance_states().get(h2) == "active"

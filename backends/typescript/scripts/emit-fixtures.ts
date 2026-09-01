@@ -43,6 +43,12 @@ export function emitFixtures(): void {
   emitFixture('fr1_loop.ir.json', 'fr1_loop.ts')
   // item 165: identifiers that are JS/TS reserved words, renamed uniformly
   emitFixture('reserved_words.ir.json', 'reserved_words.ts')
+  // item 279: a reserved-word JSON field on a DYNAMIC (json_parse/Any) value
+  // stays reachable via the raw key (`tc["function"]`), matching the py tier
+  emitFixture('dynamic_reserved_key.ir.json', 'dynamic_reserved_key.ts')
+  // item 281: json_stringify of a record carrying an `Int` (JS bigint) field
+  // must render a bare JSON number, not throw — the @ts bigint replacer.
+  emitFixture('fr3_json_int.ir.json', 'fr3_json_int.ts')
   // item 167: the routed-require scenario for router.test.ts. Generated here at
   // setup (so the test's static import resolves) but deliberately NOT checked in
   // and NOT enumerated as a checked-in fixture pair: it carries no `test`
@@ -51,6 +57,39 @@ export function emitFixtures(): void {
   // run, cold clone included. The alias keeps the pair off that gate's scan.
   const emitRouterModule = emitFixture
   emitRouterModule('router.ir.json', 'router.ts')
+  // item 243 Slice 2b: the three-entry-kind teardown loop (bracket +
+  // transactional + compensation on one LIFO stack, two-phase abort).
+  emitFixture('witnessed_teardown.ir.json', 'witnessed_teardown.ts')
+  // item 318 -> 324: the per-tool-call H1 seam — a provide-method witnessed fs
+  // mutation registered into the component activation frame
+  // (`Frame.transactionalMethod`), persisting on a clean unload and reverting
+  // on `frame.abort()`. Regenerated from its fixture every run (the whole
+  // `tests/generated/` dir is gitignored); carries no `test` blocks, so the
+  // alias keeps the pair off `generated_coverage.test.ts`'s regex scan, exactly
+  // like `emitRouterModule` above.
+  const emitMethodWitnessed = emitFixture
+  emitMethodWitnessed('method_witnessed.ir.json', 'method_witnessed.ts')
+  // item 247 (method-body compensate remainder): the method-body-compensation soundness fix — a per-tool-call
+  // `emit ... compensate ...` registered onto the activation frame
+  // (`Frame.compensationMethod`), discharged on a clean unload and fired in
+  // Phase 2 on `frame.abort()` (method_compensate.test.ts). Carries no `test`
+  // blocks, so the alias keeps the pair off `generated_coverage.test.ts`'s
+  // scan, like the method-witnessed fixture above.
+  const emitMethodCompensate = emitFixture
+  emitMethodCompensate('method_compensate.ir.json', 'method_compensate.ts')
+  // item 369: the H1 flagship on ts — the witnessed stdlib/fs.rvl catalog
+  // (real externs) driven through cordis, persisting on commit and reverting
+  // residue-free on abort (ts_witnessed_fs.test.ts). Carries no `test` blocks,
+  // so the alias keeps the pair off `generated_coverage.test.ts`'s scan, like
+  // the router/method-witnessed fixtures above.
+  const emitTsWitnessedFs = emitFixture
+  emitTsWitnessedFs('ts_witnessed_fs.ir.json', 'ts_witnessed_fs.ts')
+  // item 131: explicit async/await EFFECT composition — the LIFO teardown
+  // ACROSS an in-flight `effect await` acquisition (async_effect_composition.
+  // test.ts). Carries no `test` blocks, so the alias keeps the pair off
+  // `generated_coverage.test.ts`'s scan, like the fixtures above.
+  const emitAsyncEffectComposition = emitFixture
+  emitAsyncEffectComposition('async_effect_composition.ir.json', 'async_effect_composition.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone

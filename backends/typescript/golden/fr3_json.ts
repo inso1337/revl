@@ -38,11 +38,115 @@ export interface ToolCall {
 }
 
 export function json_parse(s: string): any {
-  return JSON.parse(s) 
+  // The builtin JSON.parse decodes every JSON number to a JS number (f64),
+  // so an integer past 2^53 comes back rounded - a silent precision loss on
+  // the ts tier that the py tier (json.loads to a Python int) does not have
+  // (item 311). A JSON.parse reviver cannot recover it: the reviver is handed
+  // the already-rounded number. So this is a number-preserving recursive
+  // descent parse that decodes a JSON INTEGER literal (no dot, no exponent)
+  // to a JS bigint - revl Int, full i64 precision - and a JSON float (a
+  // literal carrying a dot, e, or E) to a JS number - revl Float - matching
+  // the py tier. Strings, arrays, objects, true, false and null decode as
+  // JSON defines. A bigint round-trips back to a bare JSON number through
+  // json_stringify's replacer, so parse and stringify agree with py both ways.
+  let i = 0;
+  const n = s.length;
+  function ws(): void {
+    while (i < n) {
+      const c = s.charCodeAt(i);
+      if (c === 32 || c === 9 || c === 10 || c === 13) i++; else break;
+    }
+  }
+  function fail(m: string): never {
+    throw new SyntaxError("json_parse: " + m + " at index " + i);
+  }
+  function digits(): void {
+    while (i < n) { const c = s.charCodeAt(i); if (c >= 48 && c <= 57) i++; else break; }
+  }
+  function num(): number | bigint {
+    const start = i;
+    if (s[i] === "-") i++;
+    digits();
+    let float = false;
+    if (s[i] === ".") { float = true; i++; digits(); }
+    if (s[i] === "e" || s[i] === "E") { float = true; i++; if (s[i] === "+" || s[i] === "-") i++; digits(); }
+    const tok = s.slice(start, i);
+    return float ? Number(tok) : BigInt(tok);
+  }
+  function str(): string {
+    i++;
+    let out = "";
+    while (i < n) {
+      const c = s[i++];
+      if (c === "\"") return out;
+      if (c === "\\") {
+        const e = s[i++];
+        if (e === "\"" || e === "\\" || e === "/") out += e;
+        else if (e === "b") out += "\b";
+        else if (e === "f") out += "\f";
+        else if (e === "n") out += "\n";
+        else if (e === "r") out += "\r";
+        else if (e === "t") out += "\t";
+        else if (e === "u") { out += String.fromCharCode(parseInt(s.slice(i, i + 4), 16)); i += 4; }
+        else fail("invalid escape");
+      } else out += c;
+    }
+    return fail("unterminated string");
+  }
+  function value(): any {
+    ws();
+    const c = s[i];
+    if (c === "{") {
+      i++; ws();
+      const o: { [k: string]: any } = {};
+      if (s[i] === "}") { i++; return o; }
+      for (;;) {
+        ws();
+        if (s[i] !== "\"") fail("expected a string key");
+        const k = str(); ws();
+        if (s[i] !== ":") fail("expected a colon");
+        i++;
+        o[k] = value(); ws();
+        if (s[i] === ",") { i++; continue; }
+        if (s[i] === "}") { i++; return o; }
+        fail("expected a comma or closing brace");
+      }
+    }
+    if (c === "[") {
+      i++; ws();
+      const a: any[] = [];
+      if (s[i] === "]") { i++; return a; }
+      for (;;) {
+        a.push(value()); ws();
+        if (s[i] === ",") { i++; continue; }
+        if (s[i] === "]") { i++; return a; }
+        fail("expected a comma or closing bracket");
+      }
+    }
+    if (c === "\"") return str();
+    if (c === "t") { if (s.slice(i, i + 4) === "true") { i += 4; return true; } return fail("invalid literal"); }
+    if (c === "f") { if (s.slice(i, i + 5) === "false") { i += 5; return false; } return fail("invalid literal"); }
+    if (c === "n") { if (s.slice(i, i + 4) === "null") { i += 4; return null; } return fail("invalid literal"); }
+    if (c === "-" || (c >= "0" && c <= "9")) return num();
+    return fail("unexpected token");
+  }
+  const result = value();
+  ws();
+  if (i < n) fail("unexpected trailing content");
+  return result;
 }
 
 export function json_stringify(v: any): string {
-  return JSON.stringify(v) 
+  // `Int` maps to JS `bigint` (TYPE_MAP), which `JSON.stringify` refuses
+  // ("Do not know how to serialize a BigInt"). A replacer parks each bigint
+  // behind a quoted sentinel carrying its exact decimal digits, then the
+  // quotes are stripped so those digits land as a BARE JSON number - full
+  // i64 precision (a plain Number() cast would lose it past 2^53), matching
+  // the py tier `json.dumps`. With no bigint present the fast path returns
+  // the builtin result unchanged.
+  const marks: string[] = [];
+  const wire = JSON.stringify(v, (_k, x) => typeof x === "bigint" ? "@@revlBigInt:" + (marks.push(x.toString()) - 1) + "@@" : x);
+  return marks.length === 0 ? wire : wire.replace(/"@@revlBigInt:(\d+)@@"/g, (_m, i) => marks[Number(i)]);
 }
 
 export function tool_name(s: string): string {

@@ -402,11 +402,74 @@ worked rejections pin it — implicit narrowing
 (`examples/rejections/t21_int32_narrow_implicit.rvl`), width-mixing in
 arithmetic (`t22_int32_width_mix.rvl`), and `%` on `Int32` (`t23`).
 
+### Bitwise operators are `Int32`, and they do not trap
+
+A bit-manipulation kernel (SHA-256/HMAC, a bitset, a packing routine) needs `&`,
+`|`, `^`, `~`, `<<` and `>>`. `Int32` carries them. `Int` does not, and the
+asymmetry is deliberate.
+
+**They are `Int32`-only.** `Int` is 64-bit two's complement in *value*, so a
+bitwise meaning is mathematically well-defined at 64 bits. But two of the six
+tiers host `Int` at arbitrary precision (python `int`, TypeScript `BigInt`), and
+there `x << k` grows without bound. Keeping a uniform 64-bit result would mean
+re-imposing a 64-bit mask on every shift on exactly those tiers, which is a
+per-tier divergence of the same kind the sized-int design set out to avoid.
+`Int32` has a fixed hardware width on every tier, so the lowering is one shape
+everywhere. An `Int` operand is refused with a diagnostic that points at
+`.to_int32()` (`examples/rejections/t28_bitwise_non_int32.rvl` pins the `Float`
+case), and the motivating kernel, a 32-bit SHA-256 word, wanted `Int32`
+regardless.
+
+**Precedence follows C and TypeScript.** From loosest to tightest the new
+operators sit: `|`, then `^`, then `&` (all below `==`/`!=`), then the shifts
+`<< >>` (below the relational operators and above `+ -`); `~` joins the prefix
+unaries. So `a & b == c` parses as `a & (b == c)` and `a + b << c` as
+`(a + b) << c`, exactly as the shared syntax does in TypeScript (§0). Parenthesise
+when the C precedence is not what you meant.
+
+**They do not trap.** `+ - *` fault at the `Int32` edge because they are
+*arithmetic*, where a value that leaves the range is a bug. A bitwise operator
+produces a *bit pattern*, so `1 << 31` is `Int32.MIN` and `~0` is `-1`: results
+that "overflow" the positive range but are exactly the intended bits. No bound
+is imposed.
+
+**`>>` is arithmetic.** The right shift sign-extends, so `(-8) >> 1` is `-4` and
+`Int32.MIN >> 28` is `-8`. There is no logical-shift spelling in the surface;
+mask first if you want zero-fill.
+
+**The shift count is taken mod 32.** A count `k` shifts by `k & 31`, so
+`x << 32 == x` and `x << -1 == x << 31`. This is not a third choice bolted on. It
+is what wasm's `i32.shl`/`i32.shr_s`, JavaScript's `<<`/`>>` and Java's `int`
+shifts all do natively, so four of the six tiers need no count-handling code at
+all. The two that do not self-mask have it imposed: rust would *panic* on a
+count of 32 or more, and go does a full unbounded shift (`1 << 32` is `0`
+there), so both emit `& 31` (go as an unsigned count) to land on the same rule.
+Trapping the count instead would have made the common `x >> (32 - n)` rotation,
+whose count is 32 when `n == 0`, fault where every wasm/JS author expects a
+no-op.
+
+The one-line proof is the rotate every hash function needs, in pure revl:
+
+```revl
+fn rotl32(x: Int32, n: Int32) -> Int32 {
+  return (x << n) | (x >> (32.to_int32() - n))
+}
+```
+
+It compiles and runs to the **same** value on all six tiers
+(`tests/test_cross_tier_execution.py`, `BITWISE`, and on real wasmtime in
+`backends/wasm/test_v3_emit.py`). Per tier the lowering is: native `& | ^` and
+`~` everywhere (`~` is `!` on rust, unary `^` on go, `xor -1` on wasm); shifts
+native on wasm/java/ts, `& 31`-masked on rust/go, and on python a `<<` re-wraps
+into 32-bit two's complement (`_revl_i32_wrap`) while `& | ^ >> ~` stay in range
+for in-range operands and need no wrap.
+
 ### What is not `Int32` yet
 
-`+ - *`, unary `-`, the comparisons and the two conversions are the surface.
-Three things stay Int-only in this pass, each because extending it would ship a
-per-tier divergence rather than close one:
+`+ - *`, unary `-`, the comparisons, the bitwise operators (`& | ^ ~ << >>`, the
+section above) and the two conversions are the surface. Three things stay
+Int-only in this pass, each because extending it would ship a per-tier
+divergence rather than close one:
 
 - **`%` and the named `div_*` / `mod`.** The remainder is width-agnostic in
   value, but its zero-divisor *fault* is not uniform once `Int32` is a `number`

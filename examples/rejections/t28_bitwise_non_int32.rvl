@@ -1,0 +1,12 @@
+// REJECTED — bitwise operators are Int32-only (item 366, docs/arithmetic.md).
+// A bit pattern is a fixed-width object; Int (64-bit, arbitrary-precision on
+// the python/TypeScript hosts) and Float have no uniform bitwise meaning across
+// the six tiers, so the operators are restricted to Int32 rather than shipping a
+// per-tier divergence. Narrow an Int with `.to_int32()` to take its bits.
+//
+// expected error:
+//   `|` requires `Int32` operands, got `Float`
+
+fn flags(a: Float, b: Float) -> Int32 {
+  return a | b
+}

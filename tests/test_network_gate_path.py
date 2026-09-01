@@ -42,9 +42,6 @@ sys.path.insert(0, str(ROOT / "src"))
 if shutil.which("openssl") is None:
     pytest.skip("openssl CLI not available for test cert generation",
                 allow_module_level=True)
-if shutil.which("node") is None:
-    pytest.skip("node not on PATH for the ts network client",
-                allow_module_level=True)
 
 from revl import placement as _placement  # noqa: E402
 
@@ -52,6 +49,39 @@ PROVIDER = ROOT / "tests" / "_net_gate_provider.py"
 CLIENT = ROOT / "tests" / "_net_gate_client.ts"
 HOST = "127.0.0.1"
 SERVERNAME = "localhost"  # the cert carries SAN DNS:localhost + IP:127.0.0.1
+
+
+def _ts_gate_client_skip_reason() -> str | None:
+    """Why the ts network client cannot run here, or None when it can.
+
+    Every real test in this module drives the production client by spawning
+    `node <_net_gate_client.ts>`. Some node builds load a bare `.ts` entry point
+    as CommonJS (nothing marks the tree as an ES module), so the client's
+    top-level `import` raises "Cannot use import statement outside a module" and
+    the ts tier runtime is simply unusable on this box. Probe it once by loading
+    the real client: on that failure skip with a reason rather than report a
+    spurious failure; a healthy runtime loads the module cleanly (then exits on
+    the missing config argument), which counts as runnable.
+    """
+    node = shutil.which("node")
+    if node is None:
+        return "node not on PATH for the ts network client"
+    try:
+        probe = subprocess.run([node, str(CLIENT)],
+                               capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"could not probe the ts gate client with node: {exc}"
+    combined = probe.stdout + probe.stderr
+    if ("Cannot use import statement outside a module" in combined
+            or "Failed to load the ES module" in combined):
+        return (f"node ({node}) cannot load the .ts gate client as an ES module "
+                "here, so the ts tier runtime is unusable on this box")
+    return None
+
+
+_TS_CLIENT_SKIP = _ts_gate_client_skip_reason()
+if _TS_CLIENT_SKIP is not None:
+    pytest.skip(_TS_CLIENT_SKIP, allow_module_level=True)
 
 
 @pytest.fixture(scope="module")
@@ -256,4 +286,11 @@ def test_full_conductor_boot_over_the_network_placement(capfd):
     assert "collide" in out and "clean" in out
     assert "(G2)" in out                                # the refusal crossed TCP
     assert "network seams (item 56): 1 over TCP+mTLS" in out
-    assert '"ok": true' in out or "'ok': True" in out   # the clean admit crossed
+    # the clean admit crossed. The verdict is a `Str`, so each consumer tier
+    # prints it in its own quoting convention: the py tier's repr(str) keeps the
+    # inner double quotes (`"ok": true`); a node/go consumer quotes the whole
+    # string and escapes the inner quotes (`\"ok\": true`, the form this
+    # node-tier `GateUser` emits); a dict verdict would print as `'ok': True`.
+    # Any of the three proves the ok=true verdict rode back over the seam.
+    assert ('"ok": true' in out or "'ok': True" in out
+            or r'\"ok\": true' in out), out                 # the clean admit crossed

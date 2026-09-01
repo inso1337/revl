@@ -9,6 +9,11 @@ import argparse
 
 from ..run import KNOWN_BACKENDS, RUNNABLE_BACKENDS
 
+# The backends `revl bundle` can emit (the emitter package names under
+# backends/). Kept as a literal here so parser assembly stays import-light —
+# it mirrors `revl.bundle.DEFAULT_BACKENDS`, which is the authority.
+BUNDLE_BACKENDS = ("python", "typescript", "rust", "java", "go", "wasm")
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
@@ -21,10 +26,89 @@ def build_parser() -> argparse.ArgumentParser:
     cmd.add_argument("--json-diagnostics", action="store_true",
                      help="on rejection, print a structured diagnostic (code, guarantee, "
                           "expected/actual, hint) instead of the human rendering")
+    cmd.add_argument("--taint-strict", action="store_true",
+                     help="derive taint sinks and sources with no annotation (item 249, "
+                          "Slice D): a shell/exec/terminal-scoped crossing refuses "
+                          "untrusted input, and a web/net/fs/model/input emission mints "
+                          "its origin. Additive — a program that already passes without "
+                          "it is unaffected")
 
     exp = sub.add_parser("explain", help="what a diagnostic code means and how to fix it")
     exp.add_argument("code", help="a diagnostic code, e.g. G4 (case-insensitive)")
     exp.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # item 296: propose a safe adapter between a consumer's required service and
+    # a candidate's provided service (proposed, not silent).
+    adapt = sub.add_parser(
+        "adapt",
+        help="propose a safe contract adapter between a required and a "
+             "provided service (item 296)")
+    adapt.add_argument("need", help=".rvl file declaring the required service")
+    adapt.add_argument("candidate",
+                       help=".rvl file declaring the candidate's provided service")
+    adapt.add_argument("--need-service", default=None,
+                       help="name the required service (default: the sole one)")
+    adapt.add_argument("--candidate-service", default=None,
+                       help="name the candidate service (default: the sole one)")
+    adapt.add_argument("--adapt", default=None, metavar="JSON_FILE",
+                       help="opt-in map `D` (defaults, drops, merges, pairings)")
+    adapt.add_argument("--emit", action="store_true",
+                       help="also render the synthesized adapter .rvl source "
+                            "(the artifact to commit)")
+    adapt.add_argument("--name", default="Adapter",
+                       help="component name for --emit (default: Adapter)")
+    adapt.add_argument("--provide-key", default=None,
+                       help="provided key for --emit (default: the need "
+                            "service name, lowercased)")
+    adapt.add_argument("--require-key", default="backing",
+                       help="alias the candidate is required under for --emit "
+                            "(default: backing)")
+
+    doctor = sub.add_parser(
+        "doctor",
+        help="diagnose each backend tier, runtime and dependency (OK/WARN/"
+             "MISSING + version), then smoke-test every available tier")
+    doctor.add_argument("--json", action="store_true",
+                        help="machine-readable report (for an agent)")
+    doctor.add_argument("--no-smoke", action="store_true",
+                        help="skip the per-tier compile+boot smoke test (report only)")
+    doctor.add_argument("--smoke-timeout", type=int, default=None, metavar="SECONDS",
+                        help="per-tier smoke-test timeout (default: 90)")
+
+    scaffold = sub.add_parser(
+        "scaffold",
+        help="generate a typed, holed composition skeleton from a spec (docs/scaffold.md)")
+    scaffold.add_argument("--service", required=True, metavar="NAME",
+                          help="the service the component provides")
+    scaffold.add_argument("--provides", default=None, metavar="KEY",
+                          help="the provision key (default: the service, lowercased)")
+    scaffold.add_argument("--component", default=None, metavar="NAME",
+                          help="the component name (default: <Service>Provider)")
+    scaffold.add_argument("--requires", action="append", default=[], metavar="KEY[:Service]",
+                          help="an injected dependency; repeatable. A bare KEY defaults "
+                               "its service to KEY capitalized")
+    scaffold.add_argument("--capabilities", action="append", default=[], metavar="CAP",
+                          help="a boundary the component may emit through; repeatable. Only a "
+                               "capability whose boundary is injected (--requires) becomes an "
+                               "emission bound — an un-injected one stays a hole, never a "
+                               "silently widened permission")
+    scaffold.add_argument("--method", action="append", default=[], metavar="'name(p: T) -> R'",
+                          help="a pure service method; repeatable")
+    scaffold.add_argument("--emits", action="append", default=[], metavar="'name(p: T) -> R'",
+                          help="an emission service method, bound to the wired capabilities; "
+                               "repeatable")
+    scaffold.add_argument("--config", action="append", default=[], metavar="name:Type",
+                          help="a component config field; repeatable")
+    scaffold.add_argument("--resource", default=None, metavar="Type",
+                          help="the type of the effect-acquired resource "
+                               "(default: <Service>Resource)")
+    scaffold.add_argument("--no-effect", action="store_true",
+                          help="omit the acquire/undo effect block")
+    scaffold.add_argument("-o", "--out", default=None, metavar="PATH",
+                          help="write the .rvl skeleton here (default: stdout)")
+    scaffold.add_argument("--json", action="store_true",
+                          help="print the skeleton, its obligations, and each hole's fill spec "
+                               "as one JSON document")
 
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
@@ -51,6 +135,76 @@ def build_parser() -> argparse.ArgumentParser:
         help="treat COMPONENT as MCP/agent-admitted so the policy's `mcp` "
              "sandbox allow-list applies to it (repeatable); `*` = every "
              "component")
+    audit.add_argument(
+        "--placement", metavar="PLACEMENT", default=None,
+        help="a TOML/JSON placement map: also print the item-411 sandbox "
+             "envelope per sandboxed process: the fs/net grant, the effective "
+             "reach of each seam-served key, and the externs the [sandbox.needs] "
+             "table vouches (claimed, unverified). Human output only.")
+    # item 309: the replay-class view over the recovery surface.
+    audit.add_argument(
+        "--recovery", action="store_true", default=None,
+        help="also print the item-309 recovery view: every inverse, deferred "
+             "emission, and compensation with its replay class (free / fenced / "
+             "human-finish) and idempotency register. Human output only.")
+    # item 290: the confidence/evidence admission inputs, so the `--policy` gate
+    # can see a component's item-293 evidence bundle. Absent unless the policy
+    # carries evidence rules; a policy with none is byte-identical.
+    audit.add_argument(
+        "--evidence", metavar="DIR", default=None,
+        help="a component entry directory holding an `evidence/` bundle (item "
+             "293) for the single audited composition, so a `requires evidence` "
+             "rule can threshold its recorded facts (item 290)")
+    audit.add_argument(
+        "--key", metavar="PATH", default=None,
+        help="an attestation verification key, so `attestation valid` clauses "
+             "verify against the rebuilt IR (item 290; keyless `valid` fails "
+             "closed)")
+    audit.add_argument(
+        "--trusted-publisher", action="append", default=[], metavar="ID",
+        dest="trusted_publisher",
+        help="a publisher id in the operator trust set, for `publisher trusted` "
+             "clauses (repeatable; item 290)")
+
+    # item 290: `revl policy evaluate` — the dry-run explain verb. Runs the SAME
+    # `policy.evaluate` (one comparison site) and reports, per component, which
+    # rules select it and which clauses pass/fail with the recorded fact vs the
+    # threshold; never admits, refuses, or mutates.
+    policy_cmd = sub.add_parser(
+        "policy", help="boundary/evidence policy tools (item 33/290)")
+    policy_sub = policy_cmd.add_subparsers(dest="policy_command", required=True)
+    pol_eval = policy_sub.add_parser(
+        "evaluate",
+        help="dry-run: report per rule which clauses pass/fail and why "
+             "(fact vs threshold), for a policy over a composition (item 290)")
+    pol_eval.add_argument("policy_file", metavar="POLICY",
+                          help="the boundary policy file (DSL or JSON)")
+    pol_eval.add_argument("files", nargs="*", metavar="PROGRAM.rvl",
+                          help="the composition source(s) to evaluate the "
+                               "policy against")
+    pol_eval.add_argument("--json", action="store_true",
+                          help="machine-readable per-clause verdicts")
+    pol_eval.add_argument("--component", metavar="NAME", default=None,
+                          help="narrow the report to one component")
+    pol_eval.add_argument("--evidence", metavar="DIR", default=None,
+                          help="a component entry directory holding an "
+                               "`evidence/` bundle for a bare-source component "
+                               "(item 293)")
+    pol_eval.add_argument("--registry", metavar="DIR", default=None,
+                          help="evaluate a published registry entry instead of "
+                               "a bare source (with --candidate)")
+    pol_eval.add_argument("--candidate", metavar="NAME", default=None,
+                          help="the registry entry name to evaluate")
+    pol_eval.add_argument("--trusted-publisher", action="append", default=[],
+                          metavar="ID", dest="trusted_publisher",
+                          help="a publisher id in the operator trust set "
+                               "(repeatable)")
+    pol_eval.add_argument("--key", metavar="PATH", default=None,
+                          help="an attestation verification key")
+    pol_eval.add_argument("--mcp-scope", action="append", default=[],
+                          metavar="COMPONENT",
+                          help="treat COMPONENT as MCP/agent-admitted; `*` = "
+                               "every component")
 
     diff_cmd = sub.add_parser(
         "diff",
@@ -67,6 +221,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="the later composition (same accepted forms as BEFORE)")
     diff_cmd.add_argument("--json", action="store_true",
                           help="machine-readable delta an agent can consume")
+
+    # `revl changelog --from OLD --to NEW` (item 261) - the release note is
+    # computed, not written. Its own two-input loader (like `diff`), so it is
+    # routed before the shared single-source compile step.
+    changelog_cmd = sub.add_parser(
+        "changelog",
+        help="derive a release note from the structural delta between two "
+             "compositions: authority widenings and the item-64 semver bump "
+             "lead, every line traces to a differ fact (item 261)")
+    changelog_cmd.add_argument(
+        "--from", dest="from_", metavar="OLD", required=True,
+        help="the earlier composition: a compiled IR/interchange JSON document "
+             "(`revl compile -o` or `revl audit --json`) or a `.rvl` source")
+    changelog_cmd.add_argument(
+        "--to", dest="to", metavar="NEW", required=True,
+        help="the later composition (same accepted forms as --from)")
+    changelog_cmd.add_argument(
+        "--format", dest="format", choices=("markdown", "json", "plain"),
+        default="markdown",
+        help="the output form: `markdown` (the stable release-note skeleton, "
+             "default), `json` (the structured document a registry or bot "
+             "consumes), or `plain` (the skeleton with no Markdown markup)")
+    changelog_cmd.add_argument("--json", action="store_true",
+                               help="alias for `--format json`; the structured "
+                                    "changelog document a registry or bot can "
+                                    "consume")
+    changelog_cmd.add_argument(
+        "--no-semver", action="store_true",
+        help="skip the interface-diff semver headline (structural + authority "
+             "changelog only); implied when an input lacks the interface table")
+    changelog_cmd.add_argument(
+        "--current-version", metavar="X.Y.Z", default=None,
+        help="the earlier composition's declared version; when given, the "
+             "computed next version is printed in the headline")
+    changelog_cmd.add_argument(
+        "--title", metavar="TEXT", default=None,
+        help="an opaque header line for the Markdown note (e.g. a version and "
+             "date); never enters a derived line")
 
     version_cmd = sub.add_parser(
         "version",
@@ -306,13 +498,28 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("--sweep", action="store_true",
                       help="fault sweep: inject failure at every step of every "
                            "component and check L-Raise / no-residue / LIFO / "
-                           "siblings at each (py tier; docs/fault-tests.md)")
+                           "siblings at each (py tier). With `--backend all`, "
+                           "sweep every runtime whose toolchain is present and "
+                           "assert they agree — residue-free on every tier "
+                           "(docs/fault-tests.md §10)")
     test.add_argument("--mock-requires", action="store_true",
                       help="run every `lifecycle test` in mock world: each unmet "
                            "`requires` is filled by an auto-generated mock provider "
                            "(item-37-typed, seeded; emissions recorded-not-crossed), "
                            "so a consumer boots with zero real providers "
                            "(py tier; docs/auto-mocks.md)")
+    test.add_argument("--schedule-seed", type=int, default=None, metavar="SEED",
+                      help="schedule testing: replay one seeded interleaving of "
+                           "the composition's concurrent lifecycle steps and "
+                           "check residue / deadlock / stable-final-state / "
+                           "teardown / use-after-withdrawal — reproducible from "
+                           "the seed (py tier; docs/design/295-schedule-testing.md)")
+    test.add_argument("--schedule-seeds", type=int, default=None, metavar="N",
+                      help="schedule testing: sample N seeded interleavings "
+                           "(a random walk over the schedule space) plus the "
+                           "canonical sequential baseline, and report any "
+                           "interleaving that violates a property (py tier; "
+                           "docs/design/295-schedule-testing.md)")
 
     mcp = sub.add_parser("mcp", help="MCP bridge: serve the compiler, or project services <-> tools")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -346,6 +553,17 @@ def build_parser() -> argparse.ArgumentParser:
                                 "code, and `leases enforced` refuses a swap that "
                                 "would replace a component another operator leases "
                                 "(item 61). Omit for advisory-only leases")
+    # auto-approve policy (item 246): the second orthogonal gate. `auto` proceeds
+    # silently on class (a) (witnessed-revertible), enumerates class (b) (deferred)
+    # at commit, and prompts per call on class (c) (an irreversible emission with
+    # no checked inverse). Off by default — omit for byte-identical behaviour.
+    mcp_serve.add_argument("--approval-policy", default=None, metavar="MODE",
+                           choices=("auto",),
+                           help="enable the auto-approve policy (item 246): class "
+                                "(a)/(b) crossings auto-approve, class (c) prompts "
+                                "per call via the ticket two-step. Requires "
+                                "`record: true` at load. Omit for no policy "
+                                "(today's behaviour)")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
@@ -485,6 +703,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "runtime is a skip with a reason and a nonzero exit")
     run.add_argument("--config", default=None,
                      help="TOML/JSON file of `component-name = { ... }` config tables")
+    run.add_argument("--policy", default=None, metavar="POLICY",
+                     help="boundary policy file (item 33). With --backend wasm it "
+                          "enforces the item-289 least-authority chain (host "
+                          "imports subset-of declared caps subset-of policy-allowed) "
+                          "before booting; a wasm cell exceeding the allow-list is "
+                          "refused (docs/boundary-policy.md)")
     run.add_argument("--watch", action="store_true",
                      help="watch the sources and recompile on change; a rejected edit is refused, the run keeps going")
     run.add_argument("--record", action="store_true",
@@ -527,6 +751,23 @@ def build_parser() -> argparse.ArgumentParser:
     recover.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
                          help="on roll-forward, the item-15 snapshot to re-admit "
                               "so recovery resumes the persisted generation")
+    # re-establishing the approval posture on roll-forward (item 246): a snapshot
+    # taken under `--approval-policy`/`--policy` refuses to restore into a
+    # policy-less session, because that would replay a once-approved class-(c)
+    # activation crossing UNPROMPTED. Pass the SAME posture the original serve had
+    # so the gate re-arms and the crossing re-prompts (or is refused) as on first
+    # boot (docs/crash-recovery.md).
+    recover.add_argument("--approval-policy", default=None, metavar="MODE",
+                         choices=("auto",),
+                         help="on --restore, re-arm the auto-approve policy (item "
+                              "246) the snapshot was taken under, so a class-(c) "
+                              "activation crossing re-prompts on recovery instead "
+                              "of firing unprompted. Required when the snapshot "
+                              "records an approval policy")
+    recover.add_argument("--policy", default=None, metavar="POLICY",
+                         help="on --restore, re-bind the boundary-policy file (item "
+                              "33) the snapshot was taken under, so its `requires "
+                              "approval` gate re-arms on recovery")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
 
     why = sub.add_parser(
@@ -574,6 +815,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict", action="store_true",
         help="least-privilege gate: exit nonzero if any component over-declares "
              "an emission the run never exercised")
+    profile_cmd.add_argument(
+        "--patch", "--minimize", dest="patch", action="store_true",
+        help="repair mode (item 307): instead of the profile, PROPOSE the "
+             "least-authority `emission[...]` each over-declaring component "
+             "should declare (narrowed to the observed reach, never past a `*`). "
+             "Printed, never applied: apply it and re-run the gate. Combine "
+             "with --json for an agent-consumable patch document")
 
     attest_cmd = sub.add_parser(
         "attest",
@@ -690,6 +938,44 @@ def build_parser() -> argparse.ArgumentParser:
     repair.add_argument("--json", action="store_true",
                         help="print the incident dossier as JSON")
 
+    # `revl bundle <sources...> --out DIR` / `revl verify <bundle>` - the
+    # reproducible production bundle (roadmap item 305, docs/bundle.md). `bundle`
+    # assembles source + IR + lock + per-backend emitted + policy + attestation
+    # + gauntlet (+ optional topology) into one directory; `verify` recompiles it
+    # and proves it rebuilds bit-for-bit, tier by tier.
+    bundle_cmd = sub.add_parser(
+        "bundle",
+        help="assemble a reproducible production bundle: source, IR, lock, "
+             "per-backend emitted artifacts, policy, attestation and gauntlet "
+             "evidence in one .revlbundle directory (item 305, docs/bundle.md)")
+    bundle_cmd.add_argument("files", nargs="+",
+                            help=".rvl sources to bundle (the whole composition)")
+    bundle_cmd.add_argument("--out", required=True, metavar="DIR",
+                            help="the bundle directory to write (e.g. app.revlbundle)")
+    bundle_cmd.add_argument(
+        "--backend", action="append", default=[], metavar="BACKEND",
+        choices=list(BUNDLE_BACKENDS),
+        help="a backend to emit into the bundle; repeatable. Omit to emit every "
+             f"backend ({', '.join(BUNDLE_BACKENDS)}); an emitter that refuses "
+             "this IR is recorded as skipped, not a failure")
+    bundle_cmd.add_argument(
+        "--topology", default=None, metavar="PLACEMENT",
+        help="a placement/topology map (TOML or JSON) to carry in the bundle as "
+             "topology.json; omit for a single-process bundle")
+    bundle_cmd.add_argument("--json", action="store_true",
+                            help="print the bundle path and its runtime-manifest as JSON")
+
+    verify_cmd = sub.add_parser(
+        "verify",
+        help="recompile a .revlbundle and prove it rebuilds bit-for-bit: source "
+             "and IR hashes match, deps are locked, emitted artifacts correspond "
+             "to each backend, capabilities match policy, evidence is present "
+             "(item 305, docs/bundle.md)")
+    verify_cmd.add_argument("bundle", metavar="BUNDLE",
+                            help="a bundle directory written by `revl bundle`")
+    verify_cmd.add_argument("--json", action="store_true",
+                            help="machine-readable tier-by-tier report")
+
     # `revl truc <verb> ...` — a namespaced door onto the standalone `truc`
     # binary (roadmap item 136, slice S2). This is a pure passthrough: the tail
     # after `truc` is handed verbatim to truc's own launcher (`revl.truc:main`,
@@ -700,8 +986,8 @@ def build_parser() -> argparse.ArgumentParser:
     truc_cmd = sub.add_parser(
         "truc",
         help="the revl component manager — `revl truc <verb>` is the namespaced "
-             "form of the standalone `truc <verb>` (add/rm/assemble/ship); the "
-             "tail is passed through unchanged (docs/truc.md)")
+             "form of the standalone `truc <verb>` (add/rm/assemble/ship/"
+             "reproduce); the tail is passed through unchanged (docs/truc.md)")
     truc_cmd.add_argument("truc_args", nargs=argparse.REMAINDER, metavar="...",
                           help="the truc verb and its arguments, forwarded as-is")
     return parser

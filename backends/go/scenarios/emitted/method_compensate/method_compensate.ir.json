@@ -1,0 +1,218 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Ops": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "p",
+              "type": "Str"
+            },
+            {
+              "name": "msg",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Agent",
+      "source": "backends/go/scenarios/method_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "ops": "Ops"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "ops",
+          "service": "Ops",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "p",
+                "msg"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "fn",
+                    "name": "stash",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "p"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "note",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "msg"
+                      }
+                    ]
+                  },
+                  "compensate": {
+                    "kind": "fn",
+                    "name": "offset",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "msg"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Agent",
+        "file": "backends/go/scenarios/method_compensate.rvl",
+        "inject": [],
+        "provides": [
+          "ops"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Agent"
+    ]
+  },
+  "types": {
+    "Stash": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "path": "Str",
+        "bak": "Str"
+      }
+    },
+    "FsError": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "code": "Str"
+      }
+    }
+  },
+  "externs": [
+    {
+      "name": "unstash",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "Stash"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"unstash\")\n\treturn\n"
+      }
+    },
+    {
+      "name": "stash",
+      "class": "witnessed",
+      "params": [
+        {
+          "name": "p",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Stash, FsError]",
+      "bodies": {
+        "go": "\n\thostRecord(\"stash\")\n\treturn RevlOk[Stash, FsError]{Value: Stash{Path: p, Bak: p + \".bak\"}}\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "Stash",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unstash"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    },
+    {
+      "name": "note",
+      "class": "emission",
+      "params": [
+        {
+          "name": "msg",
+          "type": "Str"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"note \" + msg)\n\treturn\n"
+      }
+    },
+    {
+      "name": "offset",
+      "class": "pure",
+      "params": [
+        {
+          "name": "msg",
+          "type": "Str"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"compensate \" + msg)\n\treturn\n"
+      }
+    }
+  ],
+  "tests": [
+    {
+      "name": "clean unload of an un-called agent leaves no residue",
+      "lifecycle": true,
+      "body": [
+        {
+          "step": "load",
+          "component": "Agent",
+          "config": {}
+        },
+        {
+          "step": "unload",
+          "component": "Agent"
+        },
+        {
+          "step": "assert_no_residue"
+        }
+      ]
+    }
+  ]
+}

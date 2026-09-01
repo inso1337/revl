@@ -114,12 +114,17 @@ def key_id(key: bytes) -> str:
 
 
 def attested_guarantees() -> list[str]:
-    """The guarantee codes an `admitted` verdict proves — the composition-level
-    G-rules G1..G8 (DESIGN §4), drawn live from `diagnostics.GUARANTEES` so this
-    list cannot drift from the catalog. The lifecycle A-rules and type T-rules
-    are checked too, but the G-codes are the boundary/composition guarantees an
-    attestation is about, so those are what it records."""
-    return sorted(code for code in GUARANTEES if code.startswith("G"))
+    """The guarantee codes an `admitted` verdict proves — the numbered
+    composition-level G-rules G1..G9 (DESIGN §4), drawn live from
+    `diagnostics.GUARANTEES` so this list cannot drift from the catalog. The
+    lifecycle A-rules and type T-rules are checked too, but the G-codes are the
+    boundary/composition guarantees an attestation is about, so those are what it
+    records. Only the numbered G-rules are universal: a named guarantee like
+    `G-SECRET` (item 256) holds conditionally, for a composition that declares a
+    secret, so it is a diagnostic code but not part of the invariant set every
+    admitted verdict attests. Matching `G` followed by digits keeps it out."""
+    return sorted(code for code in GUARANTEES
+                  if code.startswith("G") and code[1:].isdigit())
 
 
 def _now_iso(now) -> str:
@@ -143,13 +148,20 @@ SIGNATURE_FIELD = "signature"
 
 
 def _body(ir_hash: str, timestamp: str, signer: str | None,
-          kid: str) -> dict:
+          kid: str, evidence_bindings: dict | None = None) -> dict:
     """The signed body of an attestation — every field EXCEPT the signature.
     `make_attestation` builds this, signs its canonical bytes, and appends the
     signature. `verify_attestation` signs over exactly the received members
     (everything but `signature`), so ANY altered, dropped, or added member
-    breaks the signature — the whole record is committed, not a chosen subset."""
-    return {
+    breaks the signature — the whole record is committed, not a chosen subset.
+
+    `evidence_bindings` (roadmap item 290, §6.2) is the per-facet sha256 of each
+    evidence dossier the bundle publishes, folded INTO the signed payload so a
+    forged or copied dossier is caught: `attestation valid` at admission means
+    the signature verifies AND every bound dossier hashes to its signed value.
+    The member is present only when bindings are supplied, so an attestation
+    with no dossiers to bind is byte-identical to the pre-290 record."""
+    body = {
         "kind": ATTEST_KIND,
         "version": ATTEST_VERSION,
         "verdict": VERDICT_ADMITTED,
@@ -161,6 +173,11 @@ def _body(ir_hash: str, timestamp: str, signer: str | None,
         "signer": signer,
         "key_id": kid,
     }
+    if evidence_bindings:
+        # sorted so the signed bytes are a pure function of the bindings, not of
+        # insertion order (the same discipline `_canonical_bytes` relies on).
+        body["evidence_bindings"] = dict(sorted(evidence_bindings.items()))
+    return body
 
 
 def _sign(body: dict, key: bytes) -> str:
@@ -172,16 +189,19 @@ def _sign(body: dict, key: bytes) -> str:
 
 
 def make_attestation(ir: dict, key: bytes, *, now=None,
-                     signer: str | None = None) -> dict:
+                     signer: str | None = None,
+                     evidence_bindings: dict | None = None) -> dict:
     """Build a signed attestation for an admitted composition IR.
 
-    Pure and deterministic given `now`: the same (ir, key, now, signer) always
-    produces byte-identical output, which is what makes the round-trip testable
-    and the attestation reproducible.
+    Pure and deterministic given `now`: the same (ir, key, now, signer,
+    evidence_bindings) always produces byte-identical output, which is what
+    makes the round-trip testable and the attestation reproducible.
 
-    Raises `RevlError` if the IR is not attestable — a draft with open holes
-    compiles but is NOT admitted (docs/holes.md), so attesting it would sign a
-    false verdict.
+    `evidence_bindings` (item 290, §6.2) binds the per-facet dossier hashes into
+    the signed payload; omit it and the record is byte-identical to the pre-290
+    attestation. Raises `RevlError` if the IR is not attestable — a draft with
+    open holes compiles but is NOT admitted (docs/holes.md), so attesting it
+    would sign a false verdict.
     """
     if not isinstance(key, (bytes, bytearray)) or not key:
         raise RevlError("<attest>", 0, "signing key must be non-empty bytes")
@@ -194,7 +214,7 @@ def make_attestation(ir: dict, key: bytes, *, now=None,
 
     ir_hash = canonical_hash(ir)
     kid = key_id(bytes(key))
-    body = _body(ir_hash, _now_iso(now), signer, kid)
+    body = _body(ir_hash, _now_iso(now), signer, kid, evidence_bindings)
     signature = _sign(body, bytes(key))
     return {**body, SIGNATURE_FIELD: signature}
 

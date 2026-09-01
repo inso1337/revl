@@ -136,6 +136,26 @@ def _run_mcp(args) -> int:
                 print(f"error: cannot load policy {args.policy}: {error}",
                       file=sys.stderr)
                 return 1
+        # auto-approve policy (item 246): the second orthogonal gate, off unless
+        # named here. Enabling it REQUIRES recording (enforced at load). With no
+        # operator profile that WITHHOLDS `approve` from the calling identity, the
+        # class-(c) prompt is self-answerable and the gate is advisory — warn at
+        # startup naming the hole (Decision 4; the diagnostic is not optional).
+        if getattr(args, "approval_policy", None):
+            from ..mcp.server import SESSION
+
+            SESSION.approval_policy = args.approval_policy
+            operator = getattr(SESSION, "operator", None)
+            self_approvable = operator is None or any(
+                g.allow and g.covers_verb("approve")
+                for g in getattr(operator, "grants", ()))
+            if self_approvable:
+                print("warning: the approval policy is enabled but the calling "
+                      "identity can answer its own class-(c) tickets (no operator "
+                      "profile withholds `approve`), so the per-call prompt is "
+                      "advisory, not a gate — bind --operator-profile that grants "
+                      "`approve` only to the human's identity (item 246, "
+                      "Decision 4)", file=sys.stderr)
         # composition persistence (docs/persistence.md): a snapshot passed on
         # the command line is re-admitted through the same gate a live restore
         # runs — a component the current checker rejects aborts the boot loudly

@@ -1,0 +1,23 @@
+// item 173 routed-require scenario for the cordis4j backend: three worker
+// realms behind one Router. The Router `requires worker in realms(...)` and
+// `provides worker`; its EMITTED body fans each call out across the worker
+// realms through the cordis4j fork's strict single-realm liveness read
+// (ctx.serviceInRealm) and fails over when a realm withdraws — mirror of
+// src/revl/run.py::_Router and the go/rust backends' router structs.
+service Worker { fn call(request: Str) -> Str }
+component W1 provides worker: Worker {
+  isolate worker in realm("w1")
+  provide worker { fn call(request) = "w1:" + request }
+}
+component W2 provides worker: Worker {
+  isolate worker in realm("w2")
+  provide worker { fn call(request) = "w2:" + request }
+}
+component W3 provides worker: Worker {
+  isolate worker in realm("w3")
+  provide worker { fn call(request) = "w3:" + request }
+}
+component Router requires worker: Worker provides worker: Worker {
+  isolate worker in realms("w1", "w2", "w3") strategy(round_robin)
+  provide worker { fn call(request) = worker.call(request) }
+}

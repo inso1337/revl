@@ -58,6 +58,17 @@ fn helper() -> Int { ... }                        // default: module-private
   interfaces), components are never exported (composed, not imported).
 - Import cycles between modules are a compile error (distinct from G3, which
   governs runtime component graphs).
+- **Resolution (roadmap 319).** `use` resolves the path relative to the
+  importing file first, and that always wins — a genuine local file is never
+  shadowed. Only when nothing sits there does the compiler fall back to a
+  search path, tried in order: each directory on `REVL_IMPORT_PATH` (like
+  `PYTHONPATH` — entries joined by the OS path separator), then the revl
+  stdlib's install location (a source checkout's `<repo>/stdlib`, or the copy
+  packaged into the wheel). That fallback is what lets `use "stdlib/fs.rvl"`
+  resolve for a module anywhere — not only ones that live inside the revl
+  checkout — without vendoring a copy of the stdlib into the consumer's own
+  tree. A path that resolves nowhere in that list is a compile error naming
+  the `use` path and the search path that was tried.
 
 ## 2. Types and data
 
@@ -187,9 +198,37 @@ Rules that keep this honest:
 - `var` never escapes: lambdas capture its *current value*, not the cell;
   a `var` cannot appear in a record, be returned by reference, or outlive
   its scope. Purity's boundary is the function, exactly like Koka's local
-  state or Rust's non-`mut`-escaping locals.
+  state or Rust's non-`mut`-escaping locals. Capture is therefore strictly
+  **by value**: a closure that *writes* a captured binding (reference capture,
+  a shared mutable cell) is refused, because the value-semantic equality the
+  derived LIFO teardown (G7) and no-residue containment (A8) rest on would not
+  survive it. The decision and the G7/A8 analysis are in
+  [docs/closures.md](closures.md); the executable rejection is
+  `examples/rejections/g6_closure_mutates_capture.rvl`.
 - `for (x of xs)` and `while` — TS syntax verbatim; both total-checked only
   in `verified` contexts (§7), unrestricted elsewhere.
+- `break` and `continue` — bare loop control (no label, no value), valid only
+  inside a `while`/`for` body, and TS-verbatim like the loops themselves
+  (item 379, [docs/design/379-break-continue.md](design/379-break-continue.md)).
+  `break` leaves the innermost enclosing loop; `continue` skips to its next
+  iteration. In a `while`, `continue` re-tests the condition **without** running
+  anything after it — a trailing `i += 1` in the loop body is skipped, exactly
+  as every C-family language does, so a `while` that mutates its own index
+  should advance it before the `continue`. Both are frame-neutral: a loop is
+  never a teardown boundary, so an early loop exit runs no disposer that a
+  header-flag exit would not (Decision 1 of the design note).
+
+```revl
+fn first_gap(xs: List[Int]) -> Int {
+  var i = 0
+  for (x of xs) {
+    if (x == 0) { i += 1  continue }   // skip zeros, but still advance i
+    if (x < 0) { break }               // stop at the first negative
+    i += 1
+  }
+  return i
+}
+```
 
 ## 4. Components and effects (unchanged core, new block forms)
 
@@ -397,6 +436,60 @@ extern emission fn send(sock: Socket, data: Bytes)
   place full fluency is wanted is exactly the place checking was never
   promised.
 
+### 6.0 `config` — static configuration for a document-global extern
+
+A document-global extern is context-free by construction: it has no component,
+so it cannot `require` a service to read configuration, and the historical
+workaround was ambient environment variables (the wart recorded in
+docs/design/378-sync-extern-service-reach.md, roadmap item 379). An extern that
+needs *static* configuration — provider identity, an endpoint, a model name —
+declares a typed `config` block, the same shape a component carries, resolved
+once at plug time from the composition `--config` map and bound in the host body
+as `_revl_config`:
+
+```revl
+extern emission fn raw_model_post(body: Str) -> Str
+  config { provider: Str, endpoint: Str, model: Str = "default" }
+  = @py {
+      return post(_revl_config["provider"], _revl_config["endpoint"], _revl_config["model"], body)
+  }
+```
+
+- The schema is checked like a component's: a non-`null` default must fit its
+  declared field type, and a required field (no default) missing at load is
+  refused at admission — the same `--config` preflight a component gets, never a
+  runtime `KeyError` inside the host body.
+- The value is resolved **once at plug**, so a config extern gets a static
+  identity, not a live service. A mechanism that must observe a service whose
+  state changes at runtime (a live provider swap) is not a config extern — it is
+  a `provide` method on a component that `requires` the service (option (c) in
+  the design note). Config is static data; a live reach needs a home component.
+- `config` touches neither color nor capability: a sync config extern stays
+  sync (A1 is untouched — config is data, not an async op), and it reaches no
+  service, so it needs no capability grant. A *secret* carried in config is
+  governed by the untrusted-author admission profile
+  (docs/design/329-untrusted-author-profile.md), unchanged: a model-authored
+  source that `no_extern` refuses still cannot declare one.
+- The coeffect works on **every seamful tier**, not just `@py` (item 378
+  Stage 5). Each backend emits a module- or class-global config map plus a
+  fail-loud lookup and binds `_revl_config` as the first line of the host body,
+  mirroring how that tier binds a component's config: py/ts/go/java carry the
+  resolved config as a dynamic value map (`dict` / `Record<string, unknown>` /
+  `map[string]any` / `Map<String, Object>`), so a field keeps its declared type;
+  the `@rs` seam is string-valued (`HashMap<String, String>`), so a rust config
+  extern is restricted to `Str` fields and a non-`Str` field is refused loudly
+  at emit rather than silently narrowed. `@wasm` is the one gap: a wasm extern
+  body is raw WAT and wasm's only config channel is a scalar-only, spawn-time
+  runtime import with no plug-time config dict, so a config extern carrying a
+  `@wasm` body is refused at compile, naming the tier and redirecting to
+  option (c).
+- The lookup **fails loud** on every tier. A required (non-defaulted) field that
+  is absent at the call raises or panics, naming the extern, instead of handing
+  the body an empty map that reads `undefined` later. A defaults-only extern
+  still resolves to its defaults driver-free.
+- An extern with no `config` block is byte-identical across parse, IR, and every
+  emitted tier: the clause is purely additive.
+
 ### 6.1 `acquire` and the two undos — the durable-resource discipline
 
 An `acquire` extern that opens a durable host resource — a socket, a pool, a
@@ -410,23 +503,25 @@ level — the handle is not nameable there. The slot still has to parse (G4),
 so it names the inverse operation against a placeholder:
 
 ```revl fragment
-// the extern undo NAMES the inverse; the literal `1` can never be the real
-// descriptor the acquisition returned — this slot is documentation
-extern acquire fn log_open(path: Str) -> Int undo log_close(1)
+// an `acquire` return is a NOMINAL OPAQUE HANDLE type (`LogHandle`), never a
+// bare primitive: the handle carries the identity ownership tracks (item 308).
+// the extern undo NAMES the inverse over the implicit `result` binding
+extern acquire fn log_open(path: Str) -> LogHandle undo log_close(result)
   = @py { ... }
 ```
 
 The real, revertible release is one level up, in the component that performs
 the acquisition. There the acquired handle *is* in scope — it is the effect's
 own binding — so the component's `undo` closes exactly the descriptor that was
-opened. Thread the handle through:
+opened. It is the acquiring binding's OWN undo, so item 308's own-undo
+exemption admits its call to the declared inverse. Thread the handle through:
 
 ```revl
-extern pure fn log_close(fd: Int) = @py { return None }
+extern pure fn log_close(fd: LogHandle) = @py { return None }
 
-extern pure fn log_write(fd: Int, line: Str) -> Int = @py { return 0 }
+extern pure fn log_write(fd: LogHandle, line: Str) -> Int = @py { return 0 }
 
-extern acquire fn log_open(path: Str) -> Int undo log_close(1)
+extern acquire fn log_open(path: Str) -> LogHandle undo log_close(result)
   = @py { return 1 }
 
 service AuditLog { emission fn record(line: Str) -> Int }
@@ -435,7 +530,7 @@ component FileAuditLog provides audit: AuditLog {
   config { path: Str }
 
   // `fd` is the descriptor `log_open` returned, in scope here — so this undo
-  // closes the handle that was really opened, unlike the extern's `log_close(1)`
+  // closes the handle that was really opened (the acquiring binding's own undo)
   let fd = effect log_open(config.path) undo log_close(fd)
 
   provide audit {
@@ -445,13 +540,14 @@ component FileAuditLog provides audit: AuditLog {
 ```
 
 `log_close(fd)` on the component effect is what the lifecycle machinery runs on
-teardown and what `no_residue` checks reverted; `log_close(1)` on the extern
-never runs against the live handle. The rule: **an `acquire` extern's `undo`
-documents the inverse; the component's `effect … undo …` performs it, with the
-acquired handle threaded through.** The worked, compiling, runtime-tested
-version — with real `os.open`/`os.write`/`os.close` bodies and a `lifecycle
-test` that opens the log, records a line, unloads, and asserts `no_residue` —
-is `examples/durable_log.rvl` (pinned by `tests/test_durable_log_example.py`).
+teardown and what `no_residue` checks reverted. The rule: **an `acquire`
+extern's `undo` names the inverse over its `result` handle; the component's
+`effect … undo …` performs the release with the acquired handle threaded
+through, and only that acquiring binding's own undo may call the inverse (item
+308, O1).** The worked, compiling, runtime-tested version — with real
+`os.open`/`os.write`/`os.close` bodies and a `lifecycle test` that opens the
+log, records a line, unloads, and asserts `no_residue` — is
+`examples/durable_log.rvl` (pinned by `tests/test_durable_log_example.py`).
 
 One ergonomic that *used* to complicate this is gone: a multi-line `@py`/`@ts`
 extern body no longer has to start in column 0 — the py and ts emitters
@@ -692,7 +788,9 @@ decl        := ['pub'] (typedecl | fndecl | service | component | extern)
 typedecl    := 'type' IDENT generics? '=' (record | variant ('|' variant)*)
 fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type] block
 component   := (unchanged from 1.x) + blockeffect + fail
-extern      := 'extern' class 'fn' sig ['undo' expr] ['compensate' expr] hostbody+
+extern      := 'extern' class 'fn' sig ['undo' expr] ['compensate' expr]
+                 ['config' '{' configfield (',' configfield)* '}'] hostbody+
+configfield := IDENT ':' type ['=' literal]         -- same as a component's
 hostbody    := '=' '@' IDENT '{' <verbatim host text, brace-balanced> '}'
                  -- brace-balancing skips host strings, char/rune literals and
                  -- block comments, so a `}` inside `"}"` or `/* } */` does not

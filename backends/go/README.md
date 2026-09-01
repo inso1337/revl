@@ -76,8 +76,71 @@ name. This is the Go analog of the Rust backend's `_revl_realm` fix.
   `undo w.dispose()` is a harmless no-op once the instance is gone and a
   safety net otherwise (an un-disposed instance cannot outlive its spawner).
   Proven on the real stc-go runtime by `scenarios/emitted/spawn/`.
+- **Witnessed-effect teardown** (items 243/247, docs/design/243-witnessed-externs.md,
+  docs/design/teardown-contract.md): a `witnessed[caps]` effect and an
+  `emit ... compensate ...` join a per-activation `RevlFrame` accumulator (the
+  go mirror of the py tier's `Frame`). A `witnessed` effect DISCHARGES on a
+  clean commit (the mutation is the deliverable and persists) and REPLAYS its
+  declared inverse against the captured witness on an abort; a compensation
+  runs only in Phase 2 of an abort, best-effort and bounded (goroutine
+  abandon-the-wait — go's per-tier preemption obligation). The commit marker is
+  Apply's own returned inverse (last-registered, so stc-go runs it FIRST on
+  unwind), flipping `committed` before any body inverse runs. Proven by
+  `scenarios/emitted/witnessed_teardown/`.
+- **Per-tool-call H1: witnessed effect in a provide METHOD** (item 318, the real
+  agent gate): a witnessed fs mutation that fires from a provide-method PER TOOL
+  CALL, after activation. Each call parks its inverse on the component's
+  activation frame via `RevlFrame.registerMethodWitnessed` (the go mirror of
+  `Frame.transactional_method` / `_deferred_transactional`); the mutation
+  PERSISTS on a clean unload and REVERTS on `RevlFrame.Abort()` (item 245's
+  reject seam). Disposal-ordering hazard, checked and avoided on go: a method
+  body has no activation-body generator to yield the disposer into, and
+  registering it as a sibling `ctx.Effect` after activation would land it LATER
+  in stc-go's LIFO stack than the commit marker — so on a clean unload it would
+  run BEFORE `commit()` flips `committed`, observe `committed == false`, and
+  WRONGLY REVERT THE DELIVERABLE (the same unsoundness item 318 found on py with
+  cordis's adopt-and-dispose-before-drain). The fix: the entry is NOT an stc-go
+  disposer — it is parked on the frame and disposed by `commit()` itself, after
+  the commit-vs-abort bit is settled, the go analog of py's park-for-drain.
+  Gated so non-witnessed / non-method-witnessed programs emit byte-identically
+  (the frame's `deferred`/`aborting` state and the `Abort`/registry helpers
+  appear only in the extended teardown preamble). Proven by
+  `scenarios/emitted/provide_method_witnessed/` (per-call persist, abort revert,
+  all-or-nothing, enumerable) against real files on disk — the go mirror of
+  `tests/test_provide_method_witnessed.py`.
 - **Out of scope** (rejected with a clear `EmitError`): ir_version 3 pure
   functions/records/variants/match.
+
+## Tier-fidelity fixes (fuzzer-found, E5 exit test)
+
+Three GO-tier defects where the frontend admitted a program the py reference ran
+but the go tier could not build (or vet rejected). Each carries a regression
+fixture under `examples/regressions/` and a test in `tests/test_run_go.py`.
+
+- **313 — `match` on an Opt/Result CONSTRUCTOR LITERAL.** `match Ok(1) { ... }`
+  lowered to `switch _m := RevlOk[..]{..}.(type)`: an unparenthesized composite
+  literal in the type-switch init clause (Go reads the `{` as the switch body —
+  `expected '}', found Value`), and `.(type)` on a concrete struct rather than an
+  interface. `_go_v3_match` now binds a non-identifier scrutinee to an
+  interface-typed temp (`var _s RevlResult[...] = ...`) before the switch; an
+  identifier scrutinee keeps the inline form byte-for-byte. Fixture:
+  `fuzz_go_matchlit_typeswitch.rvl`.
+- **320 — a value-typed bracket acquisition.** A bound `let x = effect <call>`
+  was always declared `var x *T` (and an `x *T` provide-impl struct field),
+  which only holds for a live pointer resource. A plain fn or service-method
+  acquisition returns a VALUE, so `*T` failed to compile. The pointer-vs-value
+  decision now follows the acquisition kind (`_bind_is_ptr`): only `host` and
+  `spawn` are pointers (unchanged, byte-identical); any other acquisition binds
+  a value declared by its resolved return type (`_acquire_value_go_type`).
+  Fixture: `fuzz_go_letbind_valuetype.rvl`.
+- **314 — `go vet` rejects redundant boolean ops (decision: `-vet=off`).** revl
+  legitimately admits `a || a` / `a && a` / `false || false` and the py
+  reference evaluates them, but `go test` runs `go vet`, whose `bools` analyzer
+  flags identical operands as `redundant or`/`redundant and`. This is a style
+  lint that does not apply to machine-generated code the compiler itself
+  accepts, not a codegen bug, so the go runner in `src/revl/test.py` runs with
+  `-vet=off` rather than distorting revl's semantics to match a go-specific
+  linter. Fixture: `fuzz_go_vet_redundant_bool.rvl`.
 
 ## Verify
 

@@ -1,0 +1,9 @@
+// REJECTED — the word operator `not` is not revl syntax (item 384). revl's
+// boolean negation is the prefix `!`.
+//
+// expected error:
+//   use the prefix `!`
+
+fn f(a: Bool) -> Bool {
+  return not a
+}

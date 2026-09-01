@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import RevlError, compile_files, compile_source  # noqa: E402
-from revl.diagnostics import FIXES, GUARANTEES, explain, report  # noqa: E402
+from revl.diagnostics import FIXES, GUARANTEES, classify, explain, report  # noqa: E402
 from revl.why import CHAIN, SET, TraceStep, WhyTrace, render  # noqa: E402
 
 EXAMPLES = ROOT / "examples"
@@ -235,6 +235,25 @@ def test_json_diagnostics_carry_the_trace():
     }
     # the whole diagnostic must survive a JSON round trip (MCP transport)
     assert json.loads(json.dumps(record)) == record
+
+
+def test_classify_carries_the_fix_beside_the_guarantee():
+    """A fixable rejection hands the agent the exact prose fix, not just the
+    guarantee it violated — no second `explain` call, no parsing the hint."""
+    record = report(_reject(MULTI_HOP_G4))["diagnostics"][0]
+    assert record["code"] == "G4"
+    assert record["guarantee"] == GUARANTEES["G4"]
+    assert record["fix"] == FIXES["G4"]
+
+
+def test_classify_adds_no_fix_for_a_code_outside_the_table():
+    """A code with no FIXES entry (a syntax/parse rejection is not a guarantee
+    code) carries no empty/None fix — the field is present only when there is
+    a real rewrite to name."""
+    error = RevlError("x.rvl", 1, "expected `}`, found `;`")
+    record = classify(error)
+    assert record["code"] == "SYNTAX" and "SYNTAX" not in FIXES
+    assert "fix" not in record
 
 
 def test_a_set_shaped_trace_has_no_path_key():

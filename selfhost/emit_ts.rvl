@@ -54,8 +54,9 @@
 //     awaited wherever it lands (return / let / a nested ternary arm), gated on
 //     `in_async && !in_arrow` and a per-component `ops` membership test;
 //   * the ASYNC-GENERATOR body — a component body with an `await` step renders
-//     `ctx.effect(async function* () {` (`component_lines`/`body_has_await`), and
-//     the `await` step lands + `yield () => {}` iteration boundary (A1).
+//     `async apply` + `await ctx.effect(async function* () {` (`component_lines`/
+//     `body_is_async`), and the `await` step itself where it lands + the
+//     `yield () => {}` iteration boundary (A1).
 // The async-colouring state (`in_async`/`in_arrow`/`ops`) is threaded EXPLICITLY
 // down the expr tree as an `ACx` — revl has no shared render context — like the
 // `$revl_match_N` counter (relates to the state-threading tax, item 195).
@@ -143,6 +144,11 @@ use "../stdlib/value.rvl" {
 }
 use "../stdlib/list.rvl" { list_contains }
 
+// The blessed threaded-accumulator combinator (item 195, option C): `render_seq`
+// threads the `$revl_match_N` counter left-to-right through a run of renders, and
+// `Rendered` is the shared `{text, counter}` cell every render here returns.
+use "../stdlib/render.rvl" { render_seq, Rendered }
+
 // ------------------------------------------------- host formatting (kept @py)
 // The reference emitter renders string/number LITERALS with `json.dumps`; this
 // is the item-180 "NOT obsoleted" host-output set (kin to emit_py.rvl's
@@ -186,10 +192,11 @@ fn node_method(n: Any) -> Str { return value_str(value_field(n, "method")) }
 
 fn ind(n: Int) -> Str { return "  ".repeat(n) }
 
-// A rendered expression: its text AND the running `$revl_match_N` counter (the
-// reference's `ctx._counter`, threaded here since revl has no method state — the
-// document-wide match-temp numbering is otherwise unreproducible).
-type Rendered = { text: Str, counter: Int }
+// A rendered expression is `Rendered = { text: Str, counter: Int }`: its text AND
+// the running `$revl_match_N` counter (the reference's `ctx._counter`, threaded
+// here since revl has no method state, so the document-wide match-temp numbering
+// is otherwise unreproducible). The cell is imported from stdlib/render.rvl (item
+// 195) so `render_seq` and every render fn below name the same threaded shape.
 
 // One or more statement lines AND the threaded match counter.
 type StmtOut = { lines: List[Str], counter: Int }
@@ -435,6 +442,16 @@ fn ts_bin_op(op: Str) -> Str {
   if (op == "%") { return "%" }
   if (op == "&&") { return "&&" }
   if (op == "||") { return "||" }
+  // Int32 bitwise operators (item 366, docs/arithmetic.md). Int32 is a JS
+  // `number`, and JS's `& | ^ << >>` coerce to a signed 32-bit int, mask a
+  // shift count to its low 5 bits (mod 32), and return a signed i32 `number` —
+  // exactly the Int32 semantics, so no `revlI32` re-wrap is needed. `>>` is the
+  // arithmetic (sign-propagating) shift (`>>>` would be logical).
+  if (op == "&") { return "&" }
+  if (op == "|") { return "|" }
+  if (op == "^") { return "^" }
+  if (op == "<<") { return "<<" }
+  if (op == ">>") { return ">>" }
   return ""
 }
 
@@ -496,14 +513,10 @@ fn paren_target(node: Any, counter: Int, acx: ACx) -> Rendered {
 }
 
 fn commajoin(nodes: List[Any], counter: Int, acx: ACx) -> Rendered {
-  var parts = []
-  var c = counter
-  for (e of nodes) {
-    let r = expr(e, c, acx)
-    parts = parts.push(r.text)
-    c = r.counter
-  }
-  return { text: parts.join(", "), counter: c }
+  // `render_seq` threads the counter through `expr` over each node in order
+  // (item 195); the hand-rolled seed/loop/hand-back is now the combinator's.
+  let r = render_seq(nodes, counter, (e, c) => expr(e, c, acx))
+  return { text: r.texts.join(", "), counter: r.counter }
 }
 
 // `_v3_var`: a bare name. None -> undefined, the Some/Ok/Err constructors ->
@@ -740,6 +753,11 @@ fn render_un(node: Any, counter: Int, acx: ACx) -> Rendered {
   let r = expr(value_field(node, "operand"), counter, acx)
   let op = node_op(node)
   if (op == "!") { return { text: `(!${r.text})`, counter: r.counter } }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): JS `~` returns a signed i32
+    // `number`, so it needs no re-wrap and never traps.
+    return { text: `(~${r.text})`, counter: r.counter }
+  }
   if (op == "-") {
     let opnd = node_operands(node)
     if (opnd == "Int") { return { text: `revlI64(-${r.text})`, counter: r.counter } }
@@ -1219,6 +1237,9 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
     let r = expr(value_field(node, "expr"), counter, a)
     return { lines: [`${pad}${r.text}`], counter: r.counter }
   }
+  // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
+  if (step == "break") { return { lines: [`${pad}break`], counter: counter } }
+  if (step == "continue") { return { lines: [`${pad}continue`], counter: counter } }
   return { lines: [`${pad}<<UNSUPPORTED-STEP:${step}>>`], counter: counter }
 }
 
@@ -1606,12 +1627,27 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str]
   return { lines: out, counter: c }
 }
 
+// `_crossing_key_name`: a plain compile-time STRING name for a call target —
+// `Crossing.key` is typed `string` (a capability/service key an operator reads),
+// never the runtime value. Falls back to `'?'` (a crossing key is diagnostic,
+// not load-bearing).
+fn crossing_key_name(target: Any) -> Str {
+  let k = node_kind(target)
+  if (k == "req") { let nm = value_field(target, "name"); if (value_is_null(nm) || value_str(nm) == "") { return "?" } return value_str(nm) }
+  if (k == "name") { let nm = value_field(target, "id"); if (value_is_null(nm) || value_str(nm) == "") { return "?" } return value_str(nm) }
+  if (k == "var") { let nm = value_field(target, "name"); if (value_is_null(nm) || value_str(nm) == "") { return "?" } return value_str(nm) }
+  return "?"
+}
+
 // `_component_step`: one activation-body step. Recursive (`if` branches hold
 // body steps). The activation body renders with `in_async` OFF (the reference's
 // `_component_body` scopes on `doc_ctx`, whose `in_async` is false): an `await`
 // step supplies its own `await`, so no await-seed is needed here. `timer` is
-// deferred. `ops` is passed through to the provide-method bodies.
-fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[Str], level: Int, counter: Int) -> StmtOut {
+// deferred. `ops` is passed through to the provide-method bodies. `comp_name` is
+// this component's RAW name (for a compensation entry's `site`); `frame_var` is
+// the emitted `Frame` local (`$revl_frame`, "" when the component needs none) —
+// a compensation entry registers through it (item 243 Slice 2b).
+fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[Str], comp_name: Str, frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let a = sync_acx()
   let kind = value_str(value_field(step, "step"))
@@ -1642,9 +1678,72 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     var out = [`${pad}${er.text}`]
     let comp = value_field(step, "compensate")
     if (value_is_null(comp)) { return { lines: out, counter: er.counter } }
-    let cr = expr(comp, er.counter, a)
-    out = out.push(`${pad}yield () => ${cr.text}`)
-    return { lines: out, counter: cr.counter }
+    // item 247/243 Slice 2b: a compensation entry — audit-facing, best-effort,
+    // ABORT-ONLY, Phase 2. Args are bound to temps HERE, at registration (the
+    // contract's "no data hazard"): a deferred Phase-2 closure never re-reads a
+    // variable a later step might reassign. The crossing's `args` is captured
+    // once, from those same `const` temps, and the replayed call is rebuilt from
+    // them (no double evaluation).
+    var c = er.counter + 1
+    let n = c
+    let site = `${comp_name}.body#${n}`
+    let target = value_field(comp, "target")
+    let method_f = value_field(comp, "method")
+    if (!value_is_null(target) && !value_is_null(method_f)) {
+      // a recognised component `target.method(args)` call.
+      let method = value_str(method_f)
+      let tr = expr(target, c, a)
+      c = tr.counter
+      let target_tmp = `$revl_comp${n}_key`
+      out = out.push(`${pad}const ${target_tmp} = ${tr.text}`)
+      var temps = []
+      var i = 0
+      for (arg of value_list(value_field(comp, "args"))) {
+        let ar = expr(arg, c, a)
+        c = ar.counter
+        let tmp = `$revl_comp${n}_arg${i}`
+        out = out.push(`${pad}const ${tmp} = ${ar.text}`)
+        temps = temps.push(tmp)
+        i += 1
+      }
+      let args_joined = temps.join(", ")
+      let run_ts = `${target_tmp}.${ident(method)}(${args_joined})`
+      let crossing = `{ key: ${json_dumps(crossing_key_name(target))}, method: ${json_dumps(method)}, args: [${args_joined}], site: ${json_dumps(site)} }`
+      out = out.push(`${pad}yield ${frame_var}.compensation(${crossing}, ${json_dumps(method)}, [${args_joined}], () => ${run_ts})`)
+      return { lines: out, counter: c }
+    }
+    let comp_kind = node_kind(comp)
+    if (comp_kind == "fn" || comp_kind == "host") {
+      // a bare `fn` or `host` builtin call: no separate target.
+      var name = ""
+      if (comp_kind == "fn") { name = value_str(value_field(comp, "name")) }
+      else { name = value_str(value_field(comp, "fn")) }
+      var temps = []
+      var i = 0
+      for (arg of value_list(value_field(comp, "args"))) {
+        let ar = expr(arg, c, a)
+        c = ar.counter
+        let tmp = `$revl_comp${n}_arg${i}`
+        out = out.push(`${pad}const ${tmp} = ${ar.text}`)
+        temps = temps.push(tmp)
+        i += 1
+      }
+      let args_joined = temps.join(", ")
+      var run_ts = `${ident(name)}(${args_joined})`
+      if (comp_kind == "host") { run_ts = `host.${name}(${args_joined})` }
+      let crossing = `{ key: ${json_dumps(name)}, method: ${json_dumps(name)}, args: [${args_joined}], site: ${json_dumps(site)} }`
+      out = out.push(`${pad}yield ${frame_var}.compensation(${crossing}, ${json_dumps(name)}, [${args_joined}], () => ${run_ts})`)
+      return { lines: out, counter: c }
+    }
+    // unrecognised compensate shape: eagerly snapshot its value now
+    // (registration time) rather than close over a live binding.
+    let snap = `$revl_comp${n}`
+    let cr = expr(comp, c, a)
+    c = cr.counter
+    out = out.push(`${pad}const ${snap} = ${cr.text}`)
+    let crossing = `{ key: ${json_dumps(comp_name)}, method: ${json_dumps("compensate")}, args: [], site: ${json_dumps(site)} }`
+    out = out.push(`${pad}yield ${frame_var}.compensation(${crossing}, ${json_dumps("compensate")}, [], () => ${snap})`)
+    return { lines: out, counter: c }
   }
   if (kind == "provide") {
     let name = value_str(value_field(step, "name"))
@@ -1659,7 +1758,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     var out = [`${pad}if (${cr.text}) {`]
     var c = cr.counter
     for (s of value_list(value_field(step, "then"))) {
-      let r = component_step(s, services, ops, known_types, level + 1, c)
+      let r = component_step(s, services, ops, known_types, comp_name, frame_var, level + 1, c)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -1667,7 +1766,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     if (els.length() > 0) {
       out = out.push(`${pad}} else {`)
       for (s of els) {
-        let r = component_step(s, services, ops, known_types, level + 1, c)
+        let r = component_step(s, services, ops, known_types, comp_name, frame_var, level + 1, c)
         out = out.concat(r.lines)
         c = r.counter
       }
@@ -1684,9 +1783,18 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
 
 // The activation body is an async generator when any TOP-LEVEL step is an
 // `await` (v1/A1) — mirrors the reference's `any(step == "await" …)`.
-fn body_has_await(steps: List[Any]) -> Bool {
+// `is_async` (item 131): a body containing an `await` step (or an async-flagged
+// `effect`/`let-effect`/`emit` — an awaited acquisition or emission) compiles to
+// an async generator whose awaited acquisitions land on LATER microtask turns,
+// AFTER a synchronous `apply` would already have returned. Such a body colors
+// `apply` `async` and `await`s its `ctx.effect(...)` so the fiber reaches ACTIVE
+// only once the acquisition has landed. A timer step is excluded: its async flag
+// colors its OWN runtime-awaited firing (item 170), not the activation body.
+fn body_is_async(steps: List[Any]) -> Bool {
   for (step of steps) {
-    if (value_str(value_field(step, "step")) == "await") { return true }
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "await") { return true }
+    if ((kind == "effect" || kind == "let-effect" || kind == "emit") && value_bool(value_field(step, "async"))) { return true }
   }
   return false
 }
@@ -1745,9 +1853,16 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
     for (k of provide_keys) { pk = pk.push(json_dumps(k)) }
     out = out.push(`  provide: [${pk.join(", ")}],`)
   }
+  // item 131: an async body colors `apply` `async` (and `await`s its
+  // `ctx.effect` below) so the fiber reaches ACTIVE only after the awaited
+  // acquisition lands. A sync body keeps the bare `apply`, byte-identical.
+  let body = value_list(value_field(comp, "body"))
+  let is_async = body_is_async(body)
+  var apply_kw = "apply"
+  if (is_async) { apply_kw = "async apply" }
   let fields = value_list(value_field(comp, "config"))
   if (fields.length() > 0) {
-    out = out.push(`  apply(ctx: Context, rawConfig: ${name}Config) {`)
+    out = out.push(`  ${apply_kw}(ctx: Context, rawConfig: ${name}Config) {`)
     var spec_parts = []
     for (field of fields) {
       let fname = value_str(value_field(field, "name"))
@@ -1760,22 +1875,47 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
     }
     out = out.push(`    const config = host.applyConfigDefaults(${json_dumps(name)}, rawConfig, { ${spec_parts.join(", ")} }) as Required<${name}Config>`)
   } else {
-    out = out.push("  apply(ctx: Context) {")
+    out = out.push(`  ${apply_kw}(ctx: Context) {`)
   }
-  // One generator per body (LIFO teardown). A body with an `await` step is an
-  // async generator (v1/A1). `ops` = the async operations reachable through this
-  // component's requirement keys, threaded to the provide-method await-seed.
-  let body = value_list(value_field(comp, "body"))
+  // item 243 Slice 2b: the activation's teardown accumulator, built ONLY when
+  // this component registers a compensation entry (`_needs_frame`). A
+  // bracket-only component emits no `Frame`, no `begin`/`drain` sentinel —
+  // byte-identical to before this slice. `frame_var` is threaded to
+  // `component_step`, where a compensation registers through it; "" otherwise.
+  let raw_name = value_str(value_field(comp, "name"))
+  let needs_frame = component_needs_frame(comp)
+  var frame_var = ""
+  if (needs_frame) {
+    frame_var = "$revl_frame"
+    out = out.push(`    const ${frame_var} = new Frame(ctx, ${json_dumps(name)})`)
+  }
+  // One generator per body (LIFO teardown). An async body compiles to an async
+  // generator (v1/A1) and its `ctx.effect(...)` is `await`ed inside the `async
+  // apply` (item 131): the wrapper is a thenable, so awaiting it makes `apply`
+  // return a real Promise that cordis' `_execute` chains onto, so `fiber.await()`
+  // resolves only after the awaited acquisition has landed. A sync body's
+  // generator runs to completion synchronously, so its `ctx.effect(...)` stays a
+  // bare, non-awaited statement, byte-identical for every prior program. `ops` =
+  // the async operations reachable through this component's requirement keys,
+  // threaded to the provide-method await-seed.
   var gen = "function*"
-  if (body_has_await(body)) { gen = "async function*" }
-  out = out.push(`    ctx.effect(${gen} () {`)
+  if (is_async) { gen = "async function*" }
+  var effect_stmt = ""
+  if (is_async) { effect_stmt = "await " }
+  out = out.push(`    ${effect_stmt}ctx.effect(${gen} () {`)
+  // Slice 2b: two sentinel yields bracket the ordinary steps when a `Frame` is
+  // built. `begin` yielded FIRST -> disposed LAST (LIFO): the Phase-2 post-unwind
+  // hook on abort. `drain` yielded LAST -> disposed FIRST: the commit signal every
+  // earlier entry reads at its own disposal time.
+  if (needs_frame) { out = out.push(`      yield ${frame_var}.begin`) }
   let ops = async_ops_of(value_field(comp, "requires"), services)
   var c = counter
   for (step of body) {
-    let r = component_step(step, services, ops, known_types, 3, c)
+    let r = component_step(step, services, ops, known_types, raw_name, frame_var, 3, c)
     out = out.concat(r.lines)
     c = r.counter
   }
+  if (needs_frame) { out = out.push(`      yield ${frame_var}.drain`) }
   out = out.push(`    }, ${json_dumps(name.concat(".body"))})`)
   out = out.push("  },")
   // v2: realm placements — `isolate: {key: realm, …},` applied by runtime.plug()
@@ -2062,13 +2202,48 @@ fn uses_spawn(n: Any) -> Bool {
   return false
 }
 
-// `_runtime_imports`: the `import { … } from '../runtime.ts'` line. `spawn` is
-// added only when a spawn node is present. (routed-require `realmLabel` and the
-// lifecycle-test drivers are deferred — no covered document exercises them, so
-// the list is byte-identical for the spawn/realm-placement AND v1/v2-dispatch
-// subsets. A routed require would need `realmLabel` here, hence it stays out.)
+// `_needs_frame` (item 243 Slice 2b, docs/design/teardown-contract.md): true iff
+// this component's activation body registers a compensation entry (`emit …
+// compensate …`), the entry kind that needs the `Frame` two-phase teardown
+// apparatus. Walks `if` branches (the only nesting an activation-body step
+// reaches here); a `timer` body is emission-only, so it never contributes. A
+// component using only plain brackets emits with NO `Frame`, byte-identical to
+// before this slice. (The witnessed/transactional entry kind is Slice-2b too but
+// no covered document declares a witnessed extern, so it is out of this port —
+// see item 324; a re-enabled witnessed fixture would extend this walk.)
+fn body_needs_frame(steps: List[Any]) -> Bool {
+  for (step of steps) {
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "emit" && !value_is_null(value_field(step, "compensate"))) { return true }
+    if (kind == "if") {
+      if (body_needs_frame(value_list(value_field(step, "then")))) { return true }
+      if (body_needs_frame(value_list(value_field(step, "else")))) { return true }
+    }
+  }
+  return false
+}
+
+fn component_needs_frame(comp: Any) -> Bool {
+  return body_needs_frame(value_list(value_field(comp, "body")))
+}
+
+// `_uses_frame`: document-level gate for the import line — true iff any component
+// registers a compensation entry.
+fn uses_frame(ir: Any) -> Bool {
+  for (comp of value_list(value_field(ir, "components"))) {
+    if (component_needs_frame(comp)) { return true }
+  }
+  return false
+}
+
+// `_runtime_imports`: the `import { … } from '../runtime.ts'` line. `Frame`/
+// `record` are added when a component registers a compensation entry (item 243
+// Slice 2b); `spawn` when a spawn node is present. (routed-require `realmLabel`
+// and the lifecycle-test drivers are deferred — no covered document exercises
+// them. A routed require would need `realmLabel` here, hence it stays out.)
 fn runtime_imports(ir: Any) -> Str {
   var names = ["host"]
+  if (uses_frame(ir)) { names = names.push("Frame"); names = names.push("record") }
   if (uses_spawn(value_field(ir, "components"))) { names = names.push("spawn") }
   return `import { ${names.join(", ")} } from '../runtime.ts'`
 }

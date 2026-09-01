@@ -32,7 +32,7 @@ claiming a runtime proved something it structurally cannot.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .adapter import Observation
@@ -181,12 +181,38 @@ def _a1_rs_divergence(obs: Observation) -> bool:
     return ran_emission and reverted
 
 
-def _a5(obs: Observation) -> tuple[bool, str]:
-    # compensate joins the accumulator: it runs before earlier inverses (LIFO),
-    # and a sibling provider is unaffected.
+def _a5a(obs: Observation) -> tuple[bool, str]:
+    # A5 respec, a5a (item 247, docs/contract-errata.md "TCK A5 respec"): a
+    # CLEAN unload DISCHARGES the compensation. The forward emission (the
+    # INSERT) survives as the deliverable, NO compensation DELETE runs, and only
+    # the bracket inverse (the advisory unlock) replays. A sibling provider is
+    # unaffected. This replaces the v0 placeholder's single-interleaved-LIFO
+    # "the DELETE reverts before the earlier unlock, on every teardown".
     return _all(obs,
-                _before(obs, "pool.execute DELETE FROM migration_log WHERE id = 42",
-                        "pool.query SELECT pg_advisory_unlock(42)"),
+                ("pool.execute INSERT INTO migration_log VALUES (42)" in obs.trace,
+                 "forward INSERT delivered"),
+                (not any("DELETE FROM migration_log" in e for e in obs.trace),
+                 "compensation DELETE discharged (never ran)"),
+                ("pool.query SELECT pg_advisory_unlock(42)" in obs.trace,
+                 "bracket inverse (advisory unlock) replays"),
+                _state(obs, "db", "ACTIVE"))
+
+
+def _a5b(obs: Observation) -> tuple[bool, str]:
+    # A5 respec, a5b (item 247, docs/contract-errata.md "TCK A5 respec"): an
+    # ABORT after the compensated emit runs teardown in two phases — Phase 1
+    # replays every proof inverse (bracket/transactional) LIFO to completion,
+    # THEN Phase 2 runs compensations LIFO within their class, best-effort. So
+    # the compensation DELETE fires AFTER the earlier bracket unlock (advisory
+    # unlock), the exact INVERSION of the old a5 ordering. The compensated
+    # emission itself crossed the boundary before the abort, the aborting fiber
+    # lands FAILED, and the sibling provider is unaffected.
+    return _all(obs,
+                ("pool.execute INSERT INTO migration_log VALUES (42)" in obs.trace,
+                 "the compensated emission crossed the boundary"),
+                _before(obs, "pool.query SELECT pg_advisory_unlock(42)",
+                        "pool.execute DELETE FROM migration_log WHERE id = 42"),
+                _state(obs, "aborter", "FAILED"),
                 _state(obs, "db", "ACTIVE"))
 
 
@@ -302,11 +328,25 @@ CATALOG: tuple[Case, ...] = (
                  "after divert' does not. Pinned in "
                  "backends/rust/scenarios/scenarios.rs."),
          )),
-    Case("a5_compensate_lifo", "A5", Kind.RUNTIME,
-         "compensate joins the accumulator",
-         "An emit's compensate expression reverts in LIFO order with the "
-         "activation inverses.",
-         ideal=_a5),
+    Case("a5a_compensate_discharged", "A5", Kind.RUNTIME,
+         "compensate discharges on a clean unload",
+         "A clean, successful unload DISCHARGES an emit's compensation: it "
+         "never runs, the forward emission (the INSERT) survives as the "
+         "deliverable, and only the bracket inverse (the advisory unlock) "
+         "replays. The v0 placeholder ran the compensation on every teardown; "
+         "the two-phase contract (247) discharges it on success "
+         "(docs/contract-errata.md, TCK A5 respec a5a).",
+         ideal=_a5a),
+    Case("a5b_two_phase_abort", "A5", Kind.RUNTIME,
+         "compensate runs in Phase 2 of a two-phase abort",
+         "On an abort after the compensated emit, teardown runs in two phases: "
+         "Phase 1 replays every proof inverse (bracket/transactional) LIFO to "
+         "completion, THEN Phase 2 runs compensations LIFO within their class. "
+         "So the compensation DELETE fires AFTER the earlier bracket unlock — "
+         "the exact inversion of the old single-interleaved-LIFO a5 ordering "
+         "(docs/contract-errata.md, TCK A5 respec a5b; "
+         "docs/design/247-compensate.md Decision 1).",
+         ideal=_a5b),
     Case("a8_sync_failure_contained", "A8", Kind.RUNTIME,
          "mid-body failure is contained (sync body)",
          "A refusing acquisition reverts accumulated effects, lands the fiber "

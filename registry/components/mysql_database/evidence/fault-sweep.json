@@ -1,0 +1,40 @@
+{
+  "components": [
+    {
+      "component": "MysqlDatabase",
+      "excludedSiblings": [],
+      "failed": 0,
+      "passed": 2,
+      "steps": [
+        {
+          "problems": [],
+          "status": "pass",
+          "step": 1,
+          "where": "step 1 (effect `pool`)"
+        },
+        {
+          "problems": [],
+          "status": "pass",
+          "step": 2,
+          "where": "step 2 (provision `db`)"
+        }
+      ],
+      "swept": 2,
+      "unreachable": []
+    }
+  ],
+  "counts": {
+    "components": 1,
+    "failed": 0,
+    "passed": 2,
+    "steps": 2,
+    "unreachable": 0
+  },
+  "kind": "tested",
+  "note": "every top-level body step of every component was made to fail in turn and checked for L-Raise / no-residue / LIFO / unaffected siblings; steps the scheme cannot address are named, never skipped (docs/fault-tests.md).",
+  "roadmapItem": 30,
+  "status": "passed",
+  "tier": "py",
+  "title": "fault sweep at every step",
+  "unreachable": []
+}

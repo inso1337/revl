@@ -1,0 +1,31 @@
+// Crash-recovery producer source (roadmap item 322, Slice 2 — the wasm half).
+//
+// The wasm analog of backends/go/scenarios/crashproof: a witnessed composition
+// whose activation registers ONE transactional mutation. Emitted in record mode
+// (revl.run_wasm's REVL_WAL path / crash_producer.py), that registration frames
+// its discharge-descriptor's runtime values out through the
+// `coeffect:revl:wal.record` host import, which the host drains + fsyncs into a
+// durable WAL — so the inverse (`deleteRow("row#1")`) is re-issuable from the
+// log alone after the process dies.
+//
+// `beginRow` returns a Str Ok witness ("row#1"); its declared inverse
+// `deleteRow(result)` is the re-issuable named call recover replays. The @wasm
+// bodies build the values at fixed scratch addresses (the test-only convention
+// backends/wasm/test_witnessed_teardown.py uses), no host state involved.
+
+extern witnessed[t] fn beginRow() -> Result[Str, Str]
+    undo deleteRow(result)
+    = @wasm {
+      (i32.store (i32.const 4200) (i32.const 5))
+      (i32.store (i32.const 4204) (i32.const 0x23776f72))
+      (i32.store8 (i32.const 4208) (i32.const 0x31))
+      (i32.store (i32.const 4096) (i32.const 0))
+      (i64.store (i32.const 4104) (i64.extend_i32_u (i32.const 4200)))
+      (i32.const 4096)
+    }
+
+extern pure fn deleteRow(id: Str) -> Unit = @wasm { }
+
+component Crasher {
+  effect beginRow()
+}

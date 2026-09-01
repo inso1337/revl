@@ -1,0 +1,5 @@
+# stdlib/str.rvl (item 181) embeds literal control bytes (HT and a newline LF)
+# inside backtick templates so str_char / str_tab / str_newline are pure revl.
+# Pin it to verbatim bytes so no autocrlf / EOL normalization rewrites the LF to
+# CRLF (which would make str_newline() a two-char string).
+stdlib/str.rvl -text

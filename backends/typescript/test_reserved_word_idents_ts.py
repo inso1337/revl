@@ -65,16 +65,23 @@ def test_keyword_param_local_and_call_are_consistent():
 
 
 def test_keyword_field_record_roundtrips_in_emit():
-    """A structural record with a keyword-named field renames the property
-    uniformly — interface declaration, literal construction, and member access
-    all use the same `class_` token, so the record round-trips within TS."""
+    """A structural record with a keyword-named field uses the RAW key uniformly
+    — interface declaration, literal construction, and member access all carry
+    the unrenamed `"class"` — so the record round-trips within TS AND matches the
+    key a dynamic JSON value carries at runtime (item 279, superseding the item
+    165 append-`_` rename for record FIELDS; bindings still mangle, above).
+
+    A reserved-word field is emitted as a raw quoted key and reached by bracket
+    access, exactly as the py tier keeps raw keys (`_revl_field(t, 'class')`),
+    so the same record has one meaning on both tiers instead of a ts-only
+    `class_` that a `json_parse` result could never produce."""
     out = _emit(
         "type Box = { class: Str, default: Str }\n"
         "fn make(a: Str) -> Box { return { class: a, default: a } }\n"
         "fn unbox(b: Box) -> Str { return b.class }\n"
     )
-    assert "class_: string" in out          # interface field
-    assert "{class_: a, default_: a}" in out  # literal construction
-    assert "return b.class_" in out          # member access
-    # no bare reserved-word property leaked
-    assert "class:" not in out and "b.class\n" not in out
+    assert '"class": string' in out            # interface field (raw key)
+    assert '{"class": a, "default": a}' in out  # literal construction
+    assert 'return b["class"]' in out           # member access (bracket)
+    # the append-`_` rename must NOT leak onto a record field any more
+    assert "class_" not in out and "default_" not in out

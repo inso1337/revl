@@ -305,9 +305,8 @@ def test_the_strict_tiers_refuse_a_declared_function_type_explicitly(tier):
     emitter = _emitter(tier)
     with pytest.raises(Exception) as excinfo:
         emitter.emit(compile_source(
-            "fn apply_(g: (Int) -> Int, x: Int) -> Int { return g(x) }\n"
-            "service S { fn f(x: Int) -> Int }\n"
-            "component C provides s: S { provide s { fn f(x) = apply_(x, 1) } }"))
+            "service S { fn f(g: (Int) -> Int) -> Int }\n"
+            "component C provides s: S { provide s { fn f(g) { return g(1) } } }"))
     message = str(excinfo.value)
     assert "function type" in message
     assert "docs/function-types.md" in message

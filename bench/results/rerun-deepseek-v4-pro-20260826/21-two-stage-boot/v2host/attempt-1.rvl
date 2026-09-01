@@ -1,0 +1,12 @@
+service Kv {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+component TwoStageBoot requires kv: Kv {
+  effect kv.put("stage", "one") undo kv.put("stage", "none")
+
+  await Job.run("stage-two")
+
+  effect kv.put("stage", "two") undo kv.put("stage", "one")
+}

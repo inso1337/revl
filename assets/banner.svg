@@ -1,75 +1,71 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 640" width="1400" height="640">
-  <title>revl: the agent-first programming language</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1640 560" width="1640" height="560">
+  <title>revl: revertible effects as a type system</title>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0d1117"/>
-      <stop offset="1" stop-color="#131a2a"/>
+      <stop offset="1" stop-color="#121927"/>
     </linearGradient>
-    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+    <radialGradient id="glow-t" cx="0.2" cy="0.35" r="0.55">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.09"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-v" cx="0.85" cy="0.9" r="0.6">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#2dd4bf"/>
       <stop offset="1" stop-color="#22d3ee"/>
     </linearGradient>
-    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="violet" x1="1" y1="0" x2="0" y2="0">
       <stop offset="0" stop-color="#a78bfa"/>
       <stop offset="1" stop-color="#818cf8"/>
     </linearGradient>
-    <marker id="ah-teal" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
-      <path d="M 0 1 L 9 5 L 0 9 z" fill="#2dd4bf"/>
-    </marker>
-    <marker id="ah-violet" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
-      <path d="M 0 1 L 9 5 L 0 9 z" fill="#a78bfa"/>
-    </marker>
   </defs>
 
-  <rect width="1400" height="640" fill="url(#bg)"/>
+  <rect width="1640" height="560" rx="28" fill="url(#bg)"/>
+  <rect width="1640" height="560" rx="28" fill="url(#glow-t)"/>
+  <rect width="1640" height="560" rx="28" fill="url(#glow-v)"/>
 
-  <!-- mark: revertible-effect loop -->
-  <g transform="translate(115, 195)">
-    <path d="M 62 118 A 120 120 0 0 1 270 118" fill="none" stroke="url(#teal)"
-          stroke-width="26" stroke-linecap="round" marker-end="url(#ah-teal)"/>
-    <path d="M 270 214 A 120 120 0 0 1 62 214" fill="none" stroke="url(#violet)"
-          stroke-width="26" stroke-linecap="round" marker-end="url(#ah-violet)"/>
-    <rect x="116" y="116" width="100" height="100" rx="24" fill="none" stroke="#e6edf3" stroke-width="13"/>
-    <circle cx="166" cy="166" r="15" fill="#e6edf3"/>
+  <!-- mark: the revertible-effect loop (effect out in teal, undo back in violet) -->
+  <g>
+    <path d="M 139 228.7 A 150 150 0 0 1 404.4 196.1" fill="none" stroke="url(#teal)"
+          stroke-width="30" stroke-linecap="round"/>
+    <path d="M 425.6 243.7 L 432.6 177.1 L 376.2 215.1 z" fill="#22d3ee"/>
+    <path d="M 421 331.3 A 150 150 0 0 1 155.6 363.9" fill="none" stroke="url(#violet)"
+          stroke-width="30" stroke-linecap="round"/>
+    <path d="M 134.4 316.3 L 127.4 382.9 L 183.8 344.9 z" fill="#818cf8"/>
+    <rect x="222" y="222" width="116" height="116" rx="26" fill="none" stroke="#e6edf3" stroke-width="15"/>
+    <circle cx="280" cy="280" r="16" fill="#e6edf3"/>
   </g>
 
   <!-- wordmark + tagline -->
-  <text x="520" y="225" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="100" font-weight="700" fill="#e6edf3">revl</text>
-  <text x="524" y="278" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"
-        font-size="28" fill="#2dd4bf">the agent-first programming language</text>
+  <text x="556" y="212" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="118" font-weight="700" fill="#e6edf3">revl</text>
+  <text x="562" y="272" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="33" fill="#2dd4bf">the language for systems that change while they run</text>
 
-  <!-- feature list -->
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">
-    <text x="524" y="345">
-      <tspan font-weight="700" fill="#2dd4bf">Dynamic</tspan>
-      <tspan fill="#3d4450"> · </tspan>
-      <tspan fill="#8b949e">hot-load, unload &amp; swap components in a running system</tspan>
+  <!-- differentiators -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">
+    <text x="562" y="348">
+      <tspan font-weight="700" fill="#2dd4bf">effect </tspan><tspan font-weight="700" fill="#8b949e">&#8644;</tspan><tspan font-weight="700" fill="#a78bfa"> undo</tspan>
+      <tspan fill="#3d4450">  · </tspan>
+      <tspan fill="#8b949e">every mutation carries an inverse the compiler checks</tspan>
     </text>
-    <text x="524" y="387">
-      <tspan font-weight="700" fill="#2dd4bf">Polyglot</tspan>
-      <tspan fill="#3d4450"> · </tspan>
-      <tspan fill="#8b949e">Python · TypeScript · Rust · Java · Go components interoperate live</tspan>
+    <text x="562" y="400">
+      <tspan font-weight="700" fill="#2dd4bf">hot-swap</tspan>
+      <tspan fill="#3d4450">  · </tspan>
+      <tspan fill="#8b949e">components load, unload and migrate live, with no residue</tspan>
     </text>
-    <text x="524" y="429">
-      <tspan font-weight="700" fill="#2dd4bf">Multiplatform</tspan>
-      <tspan fill="#3d4450"> · </tspan>
-      <tspan fill="#8b949e">one source, six targets, including WASM</tspan>
+    <text x="562" y="452">
+      <tspan font-weight="700" fill="#2dd4bf">six runtimes</tspan>
+      <tspan fill="#3d4450">  · </tspan>
+      <tspan fill="#8b949e">Python, TypeScript, Rust, Java, Go and Wasm, one source</tspan>
     </text>
-    <text x="524" y="471">
-      <tspan font-weight="700" fill="#2dd4bf">Self-mutating</tspan>
-      <tspan fill="#3d4450"> · </tspan>
-      <tspan fill="#8b949e">a component proposes new components; the compiler decides</tspan>
-    </text>
-    <text x="524" y="513">
-      <tspan font-weight="700" fill="#2dd4bf">Type-safe &amp; null-safe</tspan>
-      <tspan fill="#3d4450"> · </tspan>
-      <tspan fill="#8b949e">strict interfaces → fewer iterations to a reusable component</tspan>
-    </text>
-    <text x="524" y="555">
-      <tspan font-weight="700" fill="#2dd4bf">Revertible</tspan>
-      <tspan fill="#3d4450"> · </tspan>
-      <tspan fill="#8b949e">every effect has a compiler-derived undo; teardown leaves no residue</tspan>
+    <text x="562" y="504">
+      <tspan font-weight="700" fill="#a78bfa">agent gate</tspan>
+      <tspan fill="#3d4450">  · </tspan>
+      <tspan fill="#8b949e">the compiler admits or refuses generated components, over MCP</tspan>
     </text>
   </g>
 </svg>

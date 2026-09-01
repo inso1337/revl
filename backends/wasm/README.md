@@ -89,6 +89,69 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   `revl export wit` (slice-1). Records/lists/variants at the canonical boundary
   are the remaining follow-on. See `test_canonical_abi.py` (builds + runs it
   under wasmtime's component model) and docs/wit-bridge.md §5.
+- **witnessed-effects teardown (item 243 Slice 2b)** — the compiled
+  accumulator carries three entry kinds now (`bracket`/`transactional`/
+  `compensation`) and a two-phase abort, over ACTIVATION-REGISTERED entries
+  only (the state-machine restriction above is unchanged: method-time
+  compensation still refuses). ADDITIVE: a component with no `witnessed`
+  extern and no `emit ... compensate ...` step emits `deactivate` in its
+  pre-Slice-2b single-pass shape, byte-identical, with none of the new
+  machinery. On a component that does register one, new exports appear:
+  `committed()` (the abort-vs-commit discriminator) and `deactivate_step()`
+  (one entry per call, so a first-party host can catch a trap per entry and
+  bound a Phase-2 compensation's epoch/fuel individually — `lifecycle.py`'s
+  `drive_teardown`, no cordis-wasm needed); `deactivate()` keeps its old
+  signature, now a thin loop over `deactivate_step`. See
+  docs/wasm-capabilities.md §Witnessed-effects teardown and
+  `test_witnessed_teardown.py`.
+- **provide-method witnessed effects, per tool call (item 324)** — the H1 gate.
+  A `witnessed` extern is now valid in a PROVIDE-METHOD body, not just the
+  activation body: it is the agent case (an fs mutation firing per tool call,
+  after activation). Because the number of calls is only known at runtime, the
+  inverse cannot live in the compile-time-static accumulator above — it goes
+  into a RUNTIME accumulator, a newest-first linked list in linear memory
+  (`$__mw_head`, one `$alloc(24)` cell per Ok mutation, carrying the witness,
+  an `undo_id`, and the next pointer). The list is drained ONLY by
+  `deactivate`/`deactivate_step`, gated on `$__committed`: a clean unload
+  DISCHARGES every entry (the mutation is the deliverable, it persists), an
+  abort REPLAYS each declared inverse newest-first (all-or-nothing). Draining
+  at method return would instead see not-committed and wrongly revert a live
+  deliverable — the park-for-drain hazard item 318 found on py, avoided here
+  the same way. New exports, present ONLY when a component actually has a
+  method-body witnessed effect (byte-identical otherwise, gated strictly — the
+  same tight discipline as Slice-2b, not the whole-teardown scaffold gate):
+  `abort()` (flips an already-committed activation back to reverting — item
+  245's session-reject seam) and `mw_live() -> i32` (the outstanding-crossing
+  count, this tier's enumeration surface where py has WAL discharge
+  descriptors). Only the witnessed method position is lifted; a non-witnessed
+  method effect, a method `let-effect`, and method-time compensation all stay
+  refused. Consistent with the contract's `activation-registered-only` wasm
+  preemption row: the accumulator is component-instance state torn down with
+  the instance, never a per-call epoch. See `test_provide_method_witnessed.py`.
+- **durable WAL / crash recovery (item 322 Slice 2)** — the wasm tier is the
+  SPECIAL case: it has no direct filesystem, so where the go tier's emitted code
+  opens `REVL_WAL` and fsyncs a discharge-descriptor itself, a wasm module
+  cannot. Instead, in RECORD mode (`emit(ir, record=True)`, wired by
+  `revl.run_wasm` whenever `REVL_WAL` is set) each witnessed TRANSACTIONAL
+  registration FRAMES its descriptor's runtime values — `(seq, receiver, method,
+  witness)` — out through a `coeffect:revl:wal.record` host import. The host half
+  (`run_harness.py`, or `scenarios/crashproof/crash_producer.py`) reads the three
+  Str pointers back from the module's memory and RELAYS one `[wal] {…}` frame per
+  registration; `revl.run_wasm` DRAINS those frames and writes+fsyncs them into
+  the durable host WAL in the tier-agnostic py JSONL schema (`revl.wal`), so
+  `revl recover` reads a wasm-produced WAL with no wasm runtime on the path. A
+  crash after a descriptor is drained+fsynced but before the terminal
+  `activation-complete` marker is the roll-back case; a clean unload stamps
+  `discharge` + `activation-complete` and rolls forward. ADDITIVE and gated: a
+  module emitted without `--record`, and any module with no witnessed
+  transactional effect, carries none of it and is BYTE-IDENTICAL (the
+  `test_v3_emit.py` / `test_canonical_abi.py` golden oracle guards this). The
+  proof is `tests/test_wasm_crash_recovery.py` over `scenarios/crashproof`; the
+  witness marshals as a Str (a non-Str witness is refused in record mode rather
+  than silently narrowed). This is the durable channel the `revl:teardown`
+  static section (a compile-time index of seq/kind/dispatch) always pointed at
+  but deliberately did not itself carry: "a host wanting to build a real WAL on
+  this tier" is exactly `run_wasm`'s drain.
 
 ## Widths: `Int` is i64, addresses are i32
 

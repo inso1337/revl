@@ -1,0 +1,242 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Ops": {
+      "methods": {
+        "touch": {
+          "params": [
+            {
+              "name": "p",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        },
+        "mv": {
+          "params": [
+            {
+              "name": "a",
+              "type": "Str"
+            },
+            {
+              "name": "b",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Agent",
+      "source": "method_witnessed.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "ops": "Ops"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "ops",
+          "service": "Ops",
+          "methods": [
+            {
+              "name": "touch",
+              "params": [
+                "p"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "fn",
+                    "name": "stash_path",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "p"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "mv",
+              "params": [
+                "a",
+                "b"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "fn",
+                    "name": "move_e",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "a"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "b"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Agent",
+        "file": "method_witnessed.rvl",
+        "inject": [],
+        "provides": [
+          "ops"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Agent"
+    ]
+  },
+  "types": {
+    "Stash": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "path": "Str",
+        "bak": "Str"
+      }
+    },
+    "FsError": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "code": "Str"
+      }
+    },
+    "Move": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "from": "Str",
+        "to": "Str"
+      }
+    }
+  },
+  "externs": [
+    {
+      "name": "unstash",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "Stash"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  const world = (globalThis as any).__revlFsWorld\n  if (world[w.bak] !== undefined) {\n    world[w.path] = world[w.bak]\n    delete world[w.bak]\n  }\n  record('unstash ' + w.path)\n"
+      }
+    },
+    {
+      "name": "stash_path",
+      "class": "witnessed",
+      "params": [
+        {
+          "name": "p",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Stash, FsError]",
+      "bodies": {
+        "ts": "\n  const world = (globalThis as any).__revlFsWorld\n  const bak = p + '.bak'\n  world[bak] = world[p]\n  delete world[p]\n  record('stash ' + p)\n  return { kind: 'Ok', value: { path: p, bak } }\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "Stash",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unstash"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unmove",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "Move"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  const world = (globalThis as any).__revlFsWorld\n  if (world[w.to] !== undefined) {\n    world[w.from] = world[w.to]\n    delete world[w.to]\n  }\n  record('unmove ' + w.from + '<-' + w.to)\n"
+      }
+    },
+    {
+      "name": "move_e",
+      "class": "witnessed",
+      "params": [
+        {
+          "name": "a",
+          "type": "Str"
+        },
+        {
+          "name": "b",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Move, FsError]",
+      "bodies": {
+        "ts": "\n  const world = (globalThis as any).__revlFsWorld\n  world[b] = world[a]\n  delete world[a]\n  record('move ' + a + '->' + b)\n  return { kind: 'Ok', value: { from: a, to: b } }\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "Move",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unmove"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    }
+  ]
+}
