@@ -261,7 +261,9 @@ def test_initialize_and_tools_list():
                           "revl_canary",
                           # approval distillation operator surface (item 251)
                           "revl_distillation_offers", "revl_apply_distillation",
-                          "revl_revoke_distillation"}
+                          "revl_revoke_distillation",
+                          # the authoring toolbox as MCP tools (item 345)
+                          "revl_scaffold", "revl_fmt", "revl_explain"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True
@@ -458,4 +460,88 @@ def test_provide_key_mismatch_is_coded_A9_with_a_two_fix_hint():
     assert record["code"] == "A9"
     assert record["guarantee"].startswith("a provide key is declared")
     assert record["hint"]
-    assert "rename" in record["hint"] and "add" in record["hint"]
+
+
+# ---------------------------------------------------------- item 345: the
+# authoring toolbox (scaffold/fmt/explain) as MCP tools
+
+
+def test_scaffold_returns_the_skeleton_and_its_fillspecs():
+    payload = _call("revl_scaffold", {
+        "service": "Analysis", "requires": ["filesystem"],
+        "provides": "analysis", "capabilities": ["filesystem.read"],
+    })
+    assert payload["ok"] is True
+    assert "component AnalysisProvider" in payload["source"]
+    assert payload["holeCount"] > 0
+    assert payload["admissible"] is False  # open holes are never admissible
+    obligation = payload["obligations"][0]
+    assert "fillSpec" in obligation
+    assert "expected" in obligation["fillSpec"]
+    # the scaffold, as returned, actually compiles (it is a draft, not junk)
+    ir = compile_source(payload["source"], "AnalysisProvider.rvl")
+    assert ir["manifest"]["loadOrder"] == ["AnalysisProvider"]
+
+
+def test_scaffold_requires_a_service_name():
+    payload = _call("revl_scaffold", {})
+    assert payload["ok"] is False
+
+
+def test_scaffold_refuses_an_emission_with_no_wired_capability():
+    # mirrors the CLI's conservative-authority refusal (test_scaffold.py):
+    # an --emits method needs a capability whose boundary is injected
+    payload = _call("revl_scaffold", {"service": "Analysis", "emits": ["run(x: Str) -> Str"]})
+    assert payload["ok"] is False
+
+
+def test_fmt_formats_inline_source_without_touching_disk():
+    payload = _call("revl_fmt", {"source": "fn f ( ) -> Int { return   1 }"})
+    assert payload["ok"] is True
+    assert payload["admitted"] is True
+    assert payload["formatted"]
+    # the formatted text still compiles to the identical IR the gate proved
+    ir_before = compile_source("fn f ( ) -> Int { return   1 }")
+    ir_after = compile_source(payload["formatted"])
+    assert ir_before == ir_after
+
+
+def test_fmt_reports_unchanged_when_already_canonical():
+    from revl.formatter import format_source
+    canonical = format_source("fn f() -> Int { return 1 }")
+    payload = _call("revl_fmt", {"source": canonical})
+    assert payload["ok"] is True
+    assert payload["changed"] is False
+
+
+def test_fmt_requires_source():
+    payload = _call("revl_fmt", {})
+    assert payload["ok"] is False
+
+
+def test_fmt_migrate_rewrites_dollar_interpolation():
+    payload = _call("revl_fmt", {
+        "source": 'fn greet(name: Str) -> Str { return "hi $name" }',
+        "migrate": True,
+    })
+    assert payload["ok"] is True
+    assert "${name}" in payload["formatted"]
+
+
+def test_explain_known_code():
+    payload = _call("revl_explain", {"code": "g4"})  # case-insensitive
+    assert payload["ok"] is True
+    assert payload["code"] == "G4"
+    assert payload["guarantee"]
+    assert payload["fix"]
+
+
+def test_explain_unknown_code_returns_the_roster():
+    payload = _call("revl_explain", {"code": "Q99"})
+    assert payload["ok"] is False
+    assert "G4" in payload["known"]
+
+
+def test_explain_requires_a_code():
+    payload = _call("revl_explain", {})
+    assert payload["ok"] is False

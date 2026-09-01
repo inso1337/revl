@@ -779,6 +779,20 @@ def _run_emit(args) -> int:
     return 0
 
 
+def _run_grammar(args) -> int:
+    """`revl grammar` — the language surface small enough to carry in a prompt.
+
+    Default prints the short human-readable summary (the same text `revl_grammar`
+    hands back over MCP); `--prompt` prints the dense, complete grammar meant
+    for direct injection into an LLM authoring system prompt (roadmap item 346,
+    also shipped verbatim as docs/syntax-2.0.prompt.txt). Both live in
+    `grammar_summary.py`, not duplicated here."""
+    from .grammar_summary import PROMPT_GRAMMAR, PROSE_GRAMMAR
+
+    sys.stdout.write(PROMPT_GRAMMAR if args.prompt else PROSE_GRAMMAR)
+    return 0
+
+
 def _run_scaffold(args) -> int:
     """`revl scaffold` — a typed, holed skeleton from a spec (docs/scaffold.md).
 
@@ -858,6 +872,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_emit(args)
     if args.command == "explain":
         return _run_explain(args)
+    if args.command == "grammar":
+        return _run_grammar(args)
     if args.command == "adapt":
         from .cli.adapt import _run_adapt
         return _run_adapt(args)
