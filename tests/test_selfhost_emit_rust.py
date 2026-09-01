@@ -99,6 +99,7 @@ reproduce).
 """
 
 import importlib.util
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -113,6 +114,7 @@ from revl import compile_files  # noqa: E402
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_rust_corpus"
 CORPUS = [
     "arith.rvl",     # bounded int/int32, / widening, %, comparisons, unary, ??
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # let/var/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls + the by-value clone / Copy-scalar split
     "strings.rvl",   # string `+` via format!, `${..}` interpolation, literals
@@ -151,6 +153,10 @@ CORPUS = [
     # (version-1 banner + the SHORT `#![allow(dead_code, unused_variables)]`);
     # the covered service/comp body is byte-identical to the v3 path.
     "v1_components.rvl",
+    # item 383 / 391 (self-host port) — the `.reduce` transform desugars to the
+    # `list_reduce` free call; the rust tier lowers its `(A, T) -> A` param to
+    # `impl Fn(i64, i64) -> i64` (the monomorphisable param position) + the arrow
+    "transforms.rvl",
 ]
 
 
@@ -321,3 +327,77 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+# --------------------------------------------------------------------------
+# item 266 — the rust self-host BUILDS and RUNS end to end.
+#
+# The tests above hold the emitter to BYTE-EXACT emit against the reference.
+# The item-266 lesson (docs/v2.0-roadmap.md) is that byte-exact emit does NOT
+# prove the emitted rust BUILDS or RUNS: with 267/268/269 landed every self-host
+# stage EMITTED to rust, yet a full `cargo build` of the lexer crate still failed
+# with 8x E0382 (item 270, missing `.clone()` for a reused non-Copy `String`),
+# and parser/checker/lower hit further gaps (item 278). With 270 + 277 + 278
+# landed the full native pipeline builds and runs; this gate stops that from
+# SILENTLY regressing back to an emit-only check.
+#
+# It reuses the item-266 end-to-end harness verbatim (tools/bench_selfhost_rust.py
+# — emit -> assemble a cargo bin -> `cargo build --release` -> RUN over the
+# corpus), so a green here is the same build+run the roadmap says is verified,
+# not a re-implementation that could drift. It is gated LOUDLY: `cargo` absent,
+# or a cordis-rs runtime that does not resolve, skips with the reason rather than
+# passing vacuously.
+
+
+def _load_bench_rust():
+    """Load tools/bench_selfhost_rust.py by path (it inserts src/ + tools/ on
+    sys.path at import, exactly as running the tool does)."""
+    spec = importlib.util.spec_from_file_location(
+        "bench_selfhost_rust_gate", ROOT / "tools" / "bench_selfhost_rust.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.skipif(
+    shutil.which("cargo") is None,
+    reason="cargo not installed: cannot gate the rust self-host BUILD (item 266)",
+)
+def test_selfhost_stages_cargo_build_and_run(tmp_path):
+    """item 266: every buildable self-host stage EMITS to rust, `cargo build`s,
+    and RUNS its corpus to completion — the proof that the native self-host is
+    real, not just byte-exact emit. Reuses the verified item-266 harness so a
+    green is the harness's own emit->build->run; a residual build error (an
+    uncovered clone case or any other) fails here loudly instead of hiding
+    behind the byte-exact emit tests.
+
+    Loud gate: if the cordis-rs runtime does not resolve (the same honesty gate
+    tests/test_run_rust.py's `needs_cordis_rs` and the harness itself skip on),
+    this skips with the reason rather than passing vacuously."""
+    bench = _load_bench_rust()
+
+    reason = bench.rust_runtime_reason()
+    if reason is not None:
+        pytest.skip(f"cordis-rs runtime does not resolve here: {reason}")
+
+    stages = bench.stages()
+    buildable = [s for s in stages if s.kind == "str_in"]
+    assert buildable, "expected the str_in self-host stages (lexer/parser/checker/lower)"
+
+    for stage in buildable:
+        res = bench._build_stage(stage, tmp_path)
+        assert res.status == "ok", (
+            f"self-host stage {stage.name!r} did not build+run natively "
+            f"(item 266 regression):\n{res.reason}"
+        )
+        # status=="ok" means it emitted, cargo-built, ran, and printed a median.
+        assert res.build_ms is not None and res.run_ms is not None, stage.name
+
+    # emit_py is deliberately non-portable to rust (its CPython-only `py_repr`
+    # extern has no @rs body). Pin that it is an HONEST skip, not a silent build
+    # regression, so this stays a documented boundary rather than rot.
+    emit_py = next((s for s in stages if s.name == "emit_py"), None)
+    assert emit_py is not None
+    res = bench._build_stage(emit_py, tmp_path)
+    assert res.status == "unmeasured"
+    assert "py_repr" in res.reason or "IR" in res.reason, res.reason

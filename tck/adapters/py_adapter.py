@@ -126,6 +126,35 @@ _MIGRATOR = {
     ],
 }
 
+# a5b: abort AFTER a compensated emit. A bracket lock (Phase-1 proof inverse),
+# then an emit whose compensation is a Phase-2 entry, then a refusing acquire
+# that aborts the sync activation (L-Raise). On the abort, Phase 1 replays the
+# advisory unlock to completion, THEN Phase 2 runs the compensation DELETE — so
+# the DELETE fires AFTER the unlock, the exact inversion of the old a5 order.
+# The body is deliberately SYNC (no await): the py tier's Phase-2 drain hook
+# fires on a synchronous mid-body failure (backends/python/runtime.py
+# Frame.install / _drain_phase2); an async body would unwind through cordis's
+# async dispose path, which the py per-tier row of the teardown contract marks
+# "no preemption". This is the abort counterpart the clean-unload a5a case (the
+# Migrator) cannot express, since it only disposes a cleanly activated fiber.
+_ABORTER = {
+    "name": "Aborter", "config": [], "requires": {"db": "Database"}, "provides": {},
+    "body": [
+        {"step": "let-effect", "bind": "lock",
+         "acquire": _call(_REQ_DB, "query", "SELECT pg_advisory_lock(42)"),
+         "undo": _call(_REQ_DB, "query", "SELECT pg_advisory_unlock(42)")},
+        {"step": "emit",
+         "expr": _call(_REQ_DB, "execute", "INSERT INTO migration_log VALUES (42)"),
+         "compensate": _call(_REQ_DB, "execute",
+                             "DELETE FROM migration_log WHERE id = 42")},
+        {"step": "let-effect", "bind": "boom",
+         "acquire": {"kind": "host", "fn": "Pool.open",
+                     "args": [{"kind": "lit", "value": "boom://nope"},
+                              {"kind": "lit", "value": 1}]},
+         "undo": _call({"kind": "name", "id": "boom"}, "close")},
+    ],
+}
+
 # a component whose undo calls its required service — the R3 readability clause
 _DB_LOCK = {
     "name": "DbLock", "config": [], "requires": {"db": "Database"}, "provides": {},
@@ -175,7 +204,8 @@ class PyAdapter(RuntimeAdapter):
     _CASES = {
         "r1_lifo_recovery", "r2_reactive_resolution", "r3_withdrawal_ordering",
         "r4_no_residue", "r5_derived_withdrawal", "a1_divert_at_boundary",
-        "a5_compensate_lifo", "a8_sync_failure_contained", "a8_async_body_failure",
+        "a5a_compensate_discharged", "a5b_two_phase_abort",
+        "a8_sync_failure_contained", "a8_async_body_failure",
         "g7_lifo_complete_teardown",
     }
 
@@ -376,9 +406,9 @@ class PyAdapter(RuntimeAdapter):
             self._rt.set_trace(None)
             self._rt.Job.reset()
 
-    # -- A5 -----------------------------------------------------------------
+    # -- A5a: clean unload discharges the compensation ----------------------
 
-    async def _case_a5_compensate_lifo(self) -> Observation:
+    async def _case_a5a_compensate_discharged(self) -> Observation:
         events = self._new_trace()
         try:
             self._rt.Job.reset()
@@ -387,11 +417,38 @@ class PyAdapter(RuntimeAdapter):
             db = root.plugin(module.Db)
             migrator = root.plugin(module.Migrator)
             await _flush()
+            # a clean, successful unload: the compensation discharges (never
+            # runs), the INSERT stands, and only the advisory unlock replays.
             migrator.dispose()
             await _flush()
             return Observation(trace=self._ops(events),
                                states={"db": db.state.name,
                                        "migrator": migrator.state.name})
+        finally:
+            self._rt.set_trace(None)
+            self._rt.Job.reset()
+
+    # -- A5b: two-phase abort (Phase-1 proof LIFO, then Phase-2 compensation)-
+
+    async def _case_a5b_two_phase_abort(self) -> Observation:
+        events = self._new_trace()
+        try:
+            self._rt.Job.reset()
+            module = _load_module(self._emit, self._emit.emit(_v1_ir(_DB, _ABORTER)))
+            root = self._Context()
+            db = root.plugin(module.Db)
+            aborter = root.plugin(module.Aborter)
+            # the refusing acquire aborts the sync activation mid-body; give it
+            # the turns it needs to attempt (and be refused at) the boom pool.
+            await _flush()
+            for _ in range(60):
+                await asyncio.sleep(0)
+                if "pool.open refused boom://nope" in self._ops(events):
+                    break
+            await _flush()
+            return Observation(trace=self._ops(events),
+                               states={"db": db.state.name,
+                                       "aborter": aborter.state.name})
         finally:
             self._rt.set_trace(None)
             self._rt.Job.reset()

@@ -195,8 +195,8 @@ class _Exporter:
     def _resource_block(self, handle: str,
                         methods: list[tuple[str, dict]]) -> list[str]:
         wit = _kebab_type(handle)
-        lines = [f"  /// A resource (a live handle). Its revl construction is an",
-                 f"  /// `extern acquire` whose `undo` is this destructor (G4).",
+        lines = ["  /// A resource (a live handle). Its revl construction is an",
+                 "  /// `extern acquire` whose `undo` is this destructor (G4).",
                  f"  resource {wit} {{"]
         ext = self.acquire.get(handle) or {}
         ctor_params = ext.get("params") or []

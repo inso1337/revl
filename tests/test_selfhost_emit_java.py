@@ -124,6 +124,7 @@ CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_java_corpus"
 CORPUS = [
     # slice 1 (item 199) — functions-only base surface
     "arith.rvl",     # bounded int/int32, /, %, comparisons, ==/!=, unary, ??
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # let/var/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls
     "strings.rvl",   # string `+`, `${..}` interpolation, literals
@@ -154,36 +155,21 @@ CORPUS = [
     # comp_multi_effect.rvl (a NO-config, MULTI-provision modern component: the
     # no-arg-only `<Comp>Plugin` ctor, two provider classes routed in one
     # `apply`, an `emit ... compensate` pair, and an `effect`/`undo` body in a
-    # void observation method) is a KNOWN, TRACKED divergence as of item 243
-    # Slice 2b (docs/design/teardown-contract.md): the reference
-    # (backends/java/emit.py) now routes `compensate` and any bracket sharing
-    # its component through the two-phase `RevlFrame` teardown loop instead
-    # of the old unconditional `fx.track(Disposables.of(() -> ..))` shape this
-    # corpus entry's covered-subset note above still describes. Porting
-    # RevlFrame + the witnessed/transactional entry kind into
-    # selfhost/emit_java.rvl is its own item-199 slice (tracked by item 321),
-    # out of scope here (`backends/java/emit.py` + java coverage, not the
-    # self-hosted mirror). Marked `strict` so the xfail must be removed, not
-    # widened, the day that port lands.
-    #
-    # item 318 addendum: the reference emitter now ALSO emits, for a
-    # frame-bearing component, `RevlFrame.abort()` and
-    # `RevlFrame.transactionalMethod()`, a `RevlActivation` Disposable wrapper,
-    # a frame-bearing `apply()` return (`return new RevlActivation(fx, frame);`
-    # instead of `return fx;`), and method-body witnessed detection in
-    # `_method_body_lines` (an `effect`/`let-effect` whose acquire names a
-    # witnessed extern -> `fx.track(frame.transactionalMethod(...))`). Item 321
-    # must port ALL of that surface into selfhost/emit_java.rvl alongside the
-    # RevlFrame two-phase loop; comp_multi_effect.rvl does not exercise a
-    # method-body witnessed effect, so this xfail's shape is unchanged (still
-    # the compensate/bracket divergence), but the 199/321 port is now larger.
-    pytest.param("comp_multi_effect.rvl", marks=pytest.mark.xfail(
-        reason="selfhost/emit_java.rvl does not yet port the item-243-Slice-2b "
-               "RevlFrame two-phase teardown loop (compensate/bracket-in-same-"
-               "component shape), nor the item-318 method-witnessed/RevlActivation "
-               "surface — see the corpus comment above (item 321)",
-        strict=True,
-    )),
+    # void observation method) exercises the item-243-Slice-2b RevlFrame two-
+    # phase teardown loop (docs/design/teardown-contract.md): the reference
+    # (backends/java/emit.py) routes `compensate` and every bracket sharing its
+    # frame-bearing component through `RevlFrame.compensation`/`.bracket` instead
+    # of the flat `fx.track(Disposables.of(() -> ..))`, threads `frame` through
+    # each provider ctor, and returns a `RevlActivation(fx, frame)` after
+    # `frame.commit()`. Item 321 ported ALL of that surface — the shared
+    # `RevlFrame`/`RevlActivation` runtime, `_call_label`, `_component_needs_frame`
+    # and the bracket/compensation routing — into selfhost/emit_java.rvl, so this
+    # entry now emits byte-identical and is a plain string (no longer xfail). (The
+    # method-body WITNESSED/`transactionalMethod` path the reference also carries
+    # is not exercised by any corpus fixture — item 324 — and its per-body temp
+    # name is a host identity no port can reproduce, so it stays out of the
+    # byte-checked surface, like `let_pattern`.)
+    "comp_multi_effect.rvl",
     # slice 4 (item 235) — REALM placements (isolate/intercept) on the modern path
     "comp_realm_isolate.rvl",  # `isolate <provided-key> in realm("..")`: the modern path
                                # now admits a realm placement (a pure-`return` provider),
@@ -302,3 +288,19 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+def test_fn_type_param_refused(emitted, reference):
+    """item 383 / 391 (self-host port): a `.map`/`.filter`/`.reduce` transform
+    lowers (in the frontend) to a `list_*` free function with a function-value
+    parameter, and a declared function type is not representable on this tier.
+    The reference RAISES EmitError; a pure self-host emitter fn cannot `fail`, so
+    it refuses within the subset with a loud `<<DEFER-fn-type>>` marker instead of
+    silently emitting a mis-typed signature. Both refuse the same construct, so
+    tests/fixtures/emit_*_corpus/transforms.rvl stays OUT of the byte-identity
+    CORPUS above (the reference would raise there) and is checked only here."""
+    ir = compile_files([str(CORPUS_DIR / "transforms.rvl")])
+    with pytest.raises(reference.EmitError, match="function type"):
+        reference.emit(ir)
+    got = emitted["emit_src"](ir)
+    assert "<<DEFER-fn-type>>" in got

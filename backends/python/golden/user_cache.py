@@ -31,6 +31,7 @@ def _pg_database_apply(_revl_ctx, _revl_config):
     _revl_frame = _revl_Frame(_revl_ctx, 'PgDatabase')
 
     def _body():
+        yield _revl_frame.begin
         pool = Pool.open(_revl_config['url'], _revl_config['pool_size'])
         yield lambda: pool.close()
 
@@ -63,6 +64,7 @@ def _user_cache_apply(_revl_ctx, _revl_config):
     _revl_frame = _revl_Frame(_revl_ctx, 'UserCache')
 
     def _body():
+        yield _revl_frame.begin
         store = Map.new()
         yield lambda: store.drop()
 

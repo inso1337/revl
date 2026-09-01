@@ -24,6 +24,9 @@ KEYWORDS = {
     # v2.0 full-language (docs/syntax-2.0.md)
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail",
+    # loop control flow (docs/design/379-break-continue.md, roadmap item 379):
+    # bare `break`/`continue`, valid only inside a `while`/`for` body.
+    "break", "continue",
     # typed holes (docs/holes.md): a placeholder with a type and no body
     "hole",
     # reserved for later tiers
@@ -37,10 +40,17 @@ KEYWORDS = {
 SYMBOLS = {"{", "}", "(", ")", "[", "]", ",", ":", "=", "."}
 
 # Multi-character operators, longest first so `===` lexes before `==`.
-OPERATORS = ("===", "!==", "=>", "?.", "??", "<=", ">=", "==", "!=", "&&", "||", "->")
+# `<<`/`>>` are the Int32 bitwise shifts (docs/arithmetic.md, item 366); they
+# precede `<`/`>` so a doubled angle lexes as one shift token, and revl spells
+# generics with `[]` (never `<>`), so there is no `List<T>` ambiguity for `>>`.
+OPERATORS = ("===", "!==", "=>", "?.", "??", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "->")
 
-# Single-character operator tokens (checked after OPERATORS).
-SINGLE_OPERATORS = "+-*/%<>!?;|@"
+# Single-character operator tokens (checked after OPERATORS). `&`, `^` and `~`
+# are the Int32 bitwise AND/XOR/NOT (item 366); `&&`/`||` in OPERATORS above are
+# matched first, so a lone `&` still reaches here. `|` (already present) doubles
+# as bitwise OR and the variant/record-update separator — the parser tells them
+# apart by grammar position (docs/arithmetic.md).
+SINGLE_OPERATORS = "+-*/%<>!?;|@&^~"
 
 
 # --- string/comment-aware raw-brace balancing --------------------------------
@@ -251,45 +261,48 @@ def lex(source: str, filename: str) -> list[Token]:
         elif c == '"':
             i, value = _lex_string(source, i + 1, line, filename)
             tokens.append(Token("string", value, line))
+        elif c == "'":
+            # Single-quoted string (item 382). revl has no char type, so `'a'`
+            # / `'hello'` lex as a `Str`, identical in token kind and escape
+            # handling to `"..."` — the same dual-spelling muscle-memory ergonomic
+            # revl already grants with `==`/`===`. Only `\'` and `\\` are escapes.
+            i, value = _lex_string(source, i + 1, line, filename, quote="'")
+            tokens.append(Token("string", value, line))
         elif c == '`':
-            i, parts, line = _lex_template(source, i + 1, line, filename)
-            tokens.append(Token("template", parts, line))
+            i, parts, line, suspect = _lex_template(source, i + 1, line, filename)
+            tok = Token("template", parts, line)
+            if suspect is not None:
+                # Side-band marker for the parser's stray-backtick diagnostic
+                # (item 365). Not a Token field, so token equality and every
+                # accepted program lex identically; only the error path reads it.
+                tok.stray_backtick = suspect
+            tokens.append(tok)
         elif c.isalpha() or c == "_":
             j = i
             while j < n and (source[j].isalnum() or source[j] == "_"):
                 j += 1
             word = source[i:j]
+            # Item 380: a leading `f"..."` (a Python f-string by muscle memory)
+            # is not revl syntax — `f` lexes as an identifier and `"..."` as a
+            # separate string, so `return f"hi {name}"` silently parses as
+            # `return f` (the identifier) plus a dead string statement, and
+            # with an `f` in scope it type-checks unchecked. The `f`/`F` glued
+            # directly to a `"` (no space) is unambiguous — revl has no
+            # construct where an identifier abuts a string literal — so redirect
+            # to a backtick template rather than let it miscompile.
+            if word in ("f", "F") and j < n and source[j] == '"':
+                raise RevlError(
+                    filename, line,
+                    f"`{word}\"...\"` is not a revl string — revl has no "
+                    "f-string prefix",
+                    hint="interpolation needs a backtick template: write "
+                         "`` `hi ${name}` `` (docs/strings.md)",
+                )
             tokens.append(Token("kw" if word in KEYWORDS else "ident", word, line))
             i = j
         elif c.isdigit():
-            j = i
-            while j < n and source[j].isdigit():
-                j += 1
-            # A float needs a fraction or an exponent. `.` only starts one when
-            # a digit follows, so `7.div_trunc(2)` stays an Int and a method
-            # call; `1e10` only lexes as a float when real digits follow the
-            # exponent marker, so `1e` is an Int beside an ident, not an error.
-            is_float = False
-            if j < n and source[j] == "." and j + 1 < n and source[j + 1].isdigit():
-                j += 1
-                while j < n and source[j].isdigit():
-                    j += 1
-                is_float = True
-            if j < n and source[j] in "eE":
-                k = j + 1
-                if k < n and source[k] in "+-":
-                    k += 1
-                if k < n and source[k].isdigit():
-                    while k < n and source[k].isdigit():
-                        k += 1
-                    j = k
-                    is_float = True
-            text = source[i:j]
-            if is_float:
-                tokens.append(Token("float", float(text), line))
-            else:
-                tokens.append(Token("int", int(text), line))
-            i = j
+            i, tok = _lex_number(source, i, line, filename)
+            tokens.append(tok)
         elif c == "@" and i + 1 < n and (source[i + 1].isalpha() or source[i + 1] == "_"):
             # Host block: `@backend { <verbatim, brace-balanced> }`.
             # The body is host text, not revl, so it is consumed here by
@@ -318,14 +331,108 @@ def lex(source: str, filename: str) -> list[Token]:
         elif c in SYMBOLS or c in SINGLE_OPERATORS:
             tokens.append(Token(c, c, line))
             i += 1
+        elif c == "#":
+            # item 384: `#` is the Python/shell line-comment lead-in — revl
+            # comments are `//` (line 242). Redirect instead of the opaque
+            # `unexpected character '#'`.
+            raise RevlError(
+                filename, line,
+                "revl has no `#` comments",
+                hint="a line comment is `// ...` (syntax-2.0 §3.2)",
+            )
         else:
             raise RevlError(filename, line, f"unexpected character {c!r}")
     tokens.append(Token("eof", None, line))
     return tokens
 
 
-def _lex_string(source: str, i: int, line: int, filename: str):
-    """Plain double-quoted string.
+# Non-decimal integer prefixes (item 381): the letter after a leading `0`
+# selects the radix. The prefix letter and the a-f hex digits may be either
+# case, matching Python/JS so a model's `0XFF` or `0xff` both lex.
+_RADIX_PREFIX = {
+    "x": (16, "hexadecimal", "0123456789abcdefABCDEF"),
+    "b": (2, "binary", "01"),
+    "o": (8, "octal", "01234567"),
+}
+
+
+def _scan_grouped_digits(source, i, line, filename, valid, what):
+    """Scan a run of `valid` digits with `_` group separators (item 381).
+
+    `_` is a separator only: it may not lead, trail, or double, and there must
+    be at least one digit. Returns (index-after-run, digits-without-separators).
+    """
+    n = len(source)
+    buf: list[str] = []
+    prev_underscore = False
+    while i < n:
+        c = source[i]
+        if c == "_":
+            if not buf or prev_underscore:
+                raise RevlError(
+                    filename, line,
+                    f"'_' in {what} literal must appear between digits",
+                )
+            prev_underscore = True
+            i += 1
+        elif c in valid:
+            buf.append(c)
+            prev_underscore = False
+            i += 1
+        else:
+            break
+    if not buf:
+        raise RevlError(filename, line, f"{what} literal requires at least one digit")
+    if prev_underscore:
+        raise RevlError(
+            filename, line,
+            f"'_' in {what} literal must appear between digits",
+        )
+    return i, "".join(buf)
+
+
+def _lex_number(source: str, i: int, line: int, filename: str):
+    """Number literal: decimal int/float plus the item-381 additions —
+    `0x`/`0b`/`0o` non-decimal integers and `_` digit-group separators.
+
+    Decimal behavior is byte-identical to before for any input without a `_`:
+    a float needs a fraction or exponent; `.` only starts a fraction when a
+    digit follows (so `7.foo()` stays an int + method call), and `1e` with no
+    exponent digits stays an int beside an ident. Non-decimal literals are
+    always ints (no fraction/exponent). Returns (index-after-number, Token).
+    """
+    n = len(source)
+    # Non-decimal: a leading `0` followed by a radix letter.
+    if source[i] == "0" and i + 1 < n and source[i + 1] in "xXbBoO":
+        base, what, valid = _RADIX_PREFIX[source[i + 1].lower()]
+        i, digits = _scan_grouped_digits(source, i + 2, line, filename, valid, what)
+        return i, Token("int", int(digits, base), line)
+
+    # Decimal integer part (the caller guarantees source[i] is a digit).
+    i, int_digits = _scan_grouped_digits(source, i, line, filename, "0123456789", "number")
+    num = int_digits
+    is_float = False
+    if i < n and source[i] == "." and i + 1 < n and source[i + 1].isdigit():
+        i, frac = _scan_grouped_digits(source, i + 1, line, filename, "0123456789", "number")
+        num += "." + frac
+        is_float = True
+    if i < n and source[i] in "eE":
+        k = i + 1
+        sign = ""
+        if k < n and source[k] in "+-":
+            sign = source[k]
+            k += 1
+        if k < n and source[k].isdigit():
+            i, exp = _scan_grouped_digits(source, k, line, filename, "0123456789", "number")
+            num += "e" + sign + exp
+            is_float = True
+    if is_float:
+        return i, Token("float", float(num), line)
+    return i, Token("int", int(num), line)
+
+
+def _lex_string(source: str, i: int, line: int, filename: str, quote: str = '"'):
+    """Plain quoted string (`quote` is the closing delimiter, `"` or `'`).
 
     The escape set is deliberately minimal: `\\"` yields a literal `"` and
     `\\\\` a literal `\\`, so a string may contain either (item 183). Every
@@ -350,20 +457,48 @@ def _lex_string(source: str, i: int, line: int, filename: str):
     n = len(source)
     while i < n:
         c = source[i]
-        if c == "\\" and i + 1 < n and source[i + 1] in ('"', "\\"):
-            # `\"` and `\\` are the only escapes: emit the escaped character
-            # and consume both. A `\` before anything else is a literal
+        if c == "\\" and i + 1 < n and source[i + 1] in (quote, "\\"):
+            # `\<quote>` and `\\` are the only escapes: emit the escaped
+            # character and consume both. A `\` before anything else is a literal
             # backslash (so `\n` stays two characters — no escape processing).
             buf.append(source[i + 1])
             i += 2
             continue
-        if c == '"':
-            return i + 1, "".join(buf)
+        if c == quote:
+            text = "".join(buf)
+            if quote == '"':
+                _reject_dollar_interpolation(text, line, filename)
+            return i + 1, text
         if c == "\n":
             raise RevlError(filename, line, "unterminated string literal")
         buf.append(c)
         i += 1
     raise RevlError(filename, line, "unterminated string literal")
+
+
+def _reject_dollar_interpolation(text: str, line: int, filename: str) -> None:
+    """Item 380: a `${...}` inside a plain `"..."` string is a silent-wrong
+    interpolation — 2.0 interpolation lives ONLY in backtick templates, so the
+    `${...}` is emitted as LITERAL text (`"hi ${name}"` compiled clean and
+    produced the literal `${name}`). Redirect to a backtick template instead of
+    silently accepting it (§0/§10 exclusion-diagnostic philosophy).
+
+    Precise, not eager: fires only on a *complete* `${...}` shape (a closing
+    brace after the `${`), and never when the string carries a backtick — a
+    plain string that contains a backtick is deliberately quoting template or
+    shell source as DATA (the selfhost lexer/parser fixtures `"`hi ${name}!`"`,
+    and the ts emitter's fragment `"${"` which has no closing brace), not a
+    mistaken interpolation."""
+    at = text.find("${")
+    if at == -1 or "`" in text or "}" not in text[at + 2:]:
+        return
+    raise RevlError(
+        filename, line,
+        'a plain `"..."` string does not interpolate — the `${...}` is emitted '
+        "as literal text",
+        hint="interpolation needs a backtick template: write "
+             "`` `hi ${name}` `` (docs/strings.md)",
+    )
 
 
 def _lex_triple_string(source: str, i: int, line: int, filename: str):
@@ -402,24 +537,86 @@ def _lex_triple_string(source: str, i: int, line: int, filename: str):
         filename, start_line, "unterminated triple-quoted string literal")
 
 
+def _closing_backtick_is_stray(source: str, body_start: int, close: int) -> bool:
+    """Heuristic for item 365: does the backtick at `source[close]` look like a
+    STRAY backtick that closed the template early rather than its real end?
+
+    revl backtick templates most often carry a host language (JS/HTML/CSS), and
+    a host `//` line comment or `/* … */` block comment can legitimately contain
+    a backtick — ``// read the `answer` field``. Since the template has no
+    backtick escape, that first embedded backtick closes the template and the
+    host tail reparses as revl. We flag the close as suspect when BOTH hold:
+
+    * the closing backtick's own line, within the template body, opens a host
+      comment before the backtick — a `//` on the line, or an unclosed `/*`
+      anywhere earlier in the body — so the backtick sits *inside* a comment; and
+    * host text still trails the backtick on the same physical line, which a
+      normally-terminated template almost never leaves.
+
+    Both conditions are about the ERROR shape only: the return value is read
+    solely when the surrounding parse has already failed, so a false positive
+    can at worst reword a genuine error and can never reject accepted source.
+    """
+    line_start = source.rfind("\n", body_start, close) + 1
+    if line_start < body_start:
+        line_start = body_start
+    line_before = source[line_start:close]
+
+    # A `//` on the closing line, or an as-yet-unclosed `/*` from earlier in the
+    # body, means the backtick is inside a host comment.
+    in_line_comment = "//" in line_before
+    open_block = _has_open_block_comment(source, body_start, close)
+    if not (in_line_comment or open_block):
+        return False
+
+    # Live host text must trail the backtick on the same physical line.
+    line_end = source.find("\n", close + 1)
+    trailing = source[close + 1: line_end if line_end != -1 else len(source)]
+    return trailing.strip() != ""
+
+
+def _has_open_block_comment(source: str, start: int, end: int) -> bool:
+    """True when the last `/*` before `end` (at or after `start`) has no closing
+    `*/` before `end` — i.e. a host block comment is still open at `end`."""
+    last_open = source.rfind("/*", start, end)
+    if last_open == -1:
+        return False
+    return source.find("*/", last_open + 2, end) == -1
+
+
 def _lex_template(source: str, i: int, line: int, filename: str):
     """Backtick template with `${expr}` interpolation; bare `$` is literal.
 
-    Returns (index-after-closing-backtick, parts, line) where parts is a list
-    of ("text", str) and ("expr", raw_source) segments. The `${...}` body is
-    captured as raw source with balanced braces; the parser re-parses it into
+    Returns (index-after-closing-backtick, parts, line, suspect) where parts is
+    a list of ("text", str) and ("expr", raw_source) segments. The `${...}` body
+    is captured as raw source with balanced braces; the parser re-parses it into
     a full expression (§3.2).
+
+    `suspect` is `None`, or `(start_line, close_line)` when the closing backtick
+    looks like a STRAY backtick that closed the template early — one sitting
+    inside a host-language `//` line comment or an open `/*` block comment, with
+    live host text still trailing it on the same line (item 365). revl has no
+    backtick escape, so a contributor's `` // read the `answer` field `` closes
+    the template at the first embedded backtick and its tail reparses as revl
+    declarations; the parser turns this flag into a diagnostic that points back
+    here instead of naming the unrelated identifier the tail happens to hold.
+    The flag never changes what LEXES — it only lets the parser reword an error
+    it was already going to raise on the mis-parsed tail.
     """
     parts: list[tuple[str, str]] = []
     buf: list[str] = []
     n = len(source)
     start_line = line
+    body_start = i
     while i < n:
         c = source[i]
         if c == '`':
             if buf:
                 parts.append(("text", "".join(buf)))
-            return i + 1, parts, line
+            suspect = None
+            if _closing_backtick_is_stray(source, body_start, i):
+                suspect = (start_line, line)
+            return i + 1, parts, line, suspect
         if c == "\n":
             buf.append(c)
             line += 1

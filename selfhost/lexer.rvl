@@ -21,6 +21,10 @@ service TokenStream {
   fn lex(source: Str) -> List[Token]
 }
 
+// A code point that tolerates an empty receiver (returns -1). Since item 276
+// the in-bounds hot-path sites read `source.codepoint_at(j)` directly; code0
+// remains only for the clamped-slice probes (is_triple_at, scan_triple's
+// leading-newline check, is_space) where `slice` may hand back "" past the end.
 fn code0(c: Str) -> Int {
   if (c == "") { return 0 - 1 }
   return c.charCodeAt(0)
@@ -63,6 +67,7 @@ fn keywords() -> List[Str] {
     "spawn",
     "every", "after",
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
+    "break", "continue",
     "match", "test", "assert", "async", "as", "fail",
     "hole",
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
@@ -72,10 +77,13 @@ fn keywords() -> List[Str] {
 fn ops3() -> List[Str] { return ["===", "!=="] }
 
 fn ops2() -> List[Str] {
-  return ["=>", "?.", "??", "<=", ">=", "==", "!=", "&&", "||", "->"]
+  return ["=>", "?.", "??", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "->"]
 }
 
-fn singles() -> Str { return "{}()[],:=.+-*/%<>!?;|@" }
+// `&`, `^` and `~` are the Int32 bitwise AND/XOR/NOT (item 366); `&&`/`||`
+// above are matched first, so a lone `&` still reaches here. `|` (already
+// present) doubles as bitwise OR — the parser tells them apart by position.
+fn singles() -> Str { return "{}()[],:=.+-*/%<>!?;|@&^~" }
 
 // Longest-match operator at position i; "" when none.
 fn op_at(source: Str, i: Int) -> Str {
@@ -108,6 +116,105 @@ fn scan_digits(source: Str, i: Int) -> Scan {
   return { j: jj, out: source.slice(i, jj), nl: 0 }
 }
 
+// A run of `valid` digits with `_` group separators (item 381), mirroring the
+// reference `_scan_grouped_digits`: a `_` is a separator only, so it may not
+// lead, trail, or double, and the run needs at least one digit. `out` is the
+// digits with the separators removed, `j` is the index just past the run.
+// A malformed run (leading/trailing/doubled `_`, or no digit at all — e.g.
+// `0x` with nothing after it) returns j = -1, and the caller emits an error
+// token, matching the reference lexer's refusal (it raises RevlError there).
+fn scan_grouped(source: Str, i: Int, valid: Str) -> Scan {
+  var j = i
+  let n = source.length()
+  var out = ""
+  var prev_us = false
+  var has = false
+  var go = true
+  while (go && j < n) {
+    let ch = source.charAt(j)
+    if (ch == "_") {
+      if (!has || prev_us) { return { j: 0 - 1, out: "", nl: 0 } }
+      prev_us = true
+      j += 1
+    } else {
+      if (valid.indexOf(ch) != 0 - 1) {
+        out = out.concat(ch)
+        has = true
+        prev_us = false
+        j += 1
+      } else {
+        go = false
+      }
+    }
+  }
+  if (!has) { return { j: 0 - 1, out: "", nl: 0 } }
+  if (prev_us) { return { j: 0 - 1, out: "", nl: 0 } }
+  let jj = j
+  let text = out
+  return { j: jj, out: text, nl: 0 }
+}
+
+// The value of a single hex digit code point (also covers decimal/binary/octal
+// digits): `0`-`9` -> 0-9, `a`-`f`/`A`-`F` -> 10-15. -1 for anything else.
+fn digit_val(cc: Int) -> Int {
+  if (cc >= 48 && cc <= 57) { return cc - 48 }
+  if (cc >= 97 && cc <= 102) { return cc - 87 }
+  if (cc >= 65 && cc <= 70) { return cc - 55 }
+  return 0 - 1
+}
+
+// Fold an underscore-free digit string in `base` to its Int value. The token
+// TEXT must be the parsed value's decimal spelling (the reference canonicalizes
+// an int token as `str(int(digits, base))`), so `0xFF` -> `255` and `1_000` ->
+// `1000`. Folds in i64, so a magnitude beyond i64 wraps rather than promoting
+// to a bignum as the reference's Python int would (out-of-corpus edge).
+fn radix_value(digits: Str, base: Int) -> Int {
+  var v = 0
+  var i = 0
+  let n = digits.length()
+  while (i < n) {
+    v = v * base + digit_val(digits.codepoint_at(i))
+    i += 1
+  }
+  return v
+}
+
+// A plain string body after the opening quote, `q` being the closing quote's
+// code point (34 `"` or 39 `'`; item 382 adds the single-quote spelling, which
+// lexes to the same `string` token kind). The escape set is exactly the
+// reference `_lex_string`'s: `\<q>` yields a literal quote and `\\` a literal
+// backslash; every other backslash is preserved verbatim (so `\n` stays a
+// backslash and an `n`). `out` is the text, `j` the index AFTER the closing
+// quote. Unterminated / an embedded newline -> j = -1.
+fn scan_quoted(source: Str, i: Int, q: Int) -> Scan {
+  var j = i
+  let n = source.length()
+  var out = ""
+  while (j < n) {
+    let cc = source.codepoint_at(j)
+    if (cc == 92 && j + 1 < n) {
+      let ncc = source.codepoint_at(j + 1)
+      if (ncc == q || ncc == 92) {
+        out = out.concat(source.charAt(j + 1))
+        j += 2
+      } else {
+        out = out.concat(source.charAt(j))
+        j += 1
+      }
+    } else {
+      if (cc == q) {
+        let jj = j
+        let text = out
+        return { j: jj + 1, out: text, nl: 0 }
+      }
+      if (cc == 10) { return { j: 0 - 1, out: "", nl: 0 } }
+      out = out.concat(source.charAt(j))
+      j += 1
+    }
+  }
+  return { j: 0 - 1, out: "", nl: 0 }
+}
+
 // Plain string body after the opening quote; out is the text, j is the
 // index AFTER the closing quote. Unterminated / newline -> j = -1.
 fn scan_string(source: Str, i: Int) -> Scan {
@@ -115,8 +222,10 @@ fn scan_string(source: Str, i: Int) -> Scan {
   let n = source.length()
   var out = ""
   while (j < n) {
+    // j < n, so the code point exists: read it directly (item 276). `c` is
+    // kept for the out.concat below.
     let c = source.charAt(j)
-    let cc = code0(c)
+    let cc = source.codepoint_at(j)
     if (cc == 34) {
       let jj = j
       let text = out
@@ -170,7 +279,7 @@ fn scan_triple(source: Str, i: Int) -> Scan {
       return { j: jj + 3, out: text, nl: lines }
     }
     let c = source.charAt(j)
-    if (code0(c) == 10) { nl += 1 }
+    if (source.codepoint_at(j) == 10) { nl += 1 }
     out = out.concat(c)
     j += 1
   }
@@ -216,8 +325,7 @@ fn scan_interp(source: Str, i: Int) -> Scan {
   var depth = 1
   var nl = 0
   while (j < n) {
-    let c = source.charAt(j)
-    let cc = code0(c)
+    let cc = source.codepoint_at(j)
     if (cc == 123) { depth += 1 }
     if (cc == 125) {
       depth -= 1
@@ -244,8 +352,9 @@ fn scan_template(source: Str, i: Int) -> Scan {
   var buf = ""
   var nl = 0
   while (j < n) {
+    // `c` is kept for the buf.concat in the literal-text branch below.
     let c = source.charAt(j)
-    let cc = code0(c)
+    let cc = source.codepoint_at(j)
     if (cc == 96) {
       if (buf != "") { parts = parts.push("t:".concat(esc(buf))) }
       let jj = j
@@ -288,7 +397,7 @@ fn scan_template(source: Str, i: Int) -> Scan {
 fn scan_comment(source: Str, i: Int) -> Scan {
   var j = i
   let n = source.length()
-  while (j < n && code0(source.charAt(j)) != 10) { j += 1 }
+  while (j < n && source.codepoint_at(j) != 10) { j += 1 }
   let jj = j
   return { j: jj, out: "", nl: 0 }
 }
@@ -299,7 +408,7 @@ fn count_nl(s: Str) -> Int {
   var i = 0
   let n = s.length()
   while (i < n) {
-    if (code0(s.charAt(i)) == 10) { c += 1 }
+    if (s.codepoint_at(i) == 10) { c += 1 }
     i += 1
   }
   return c
@@ -317,7 +426,7 @@ fn scan_host_body(source: Str, k: Int) -> Scan {
   let n = source.length()
   var depth = 1
   while (j < n) {
-    let cc = code0(source.charAt(j))
+    let cc = source.codepoint_at(j)
     if (cc == 123) { depth += 1 }
     if (cc == 125) {
       depth -= 1
@@ -335,8 +444,10 @@ fn scan_host_body(source: Str, k: Int) -> Scan {
 // (kind "" means this step produced no token).
 fn step(source: Str, i: Int, line: Int) -> Step {
   let none = { kind: "", text: "", line: line }
+  // i < source.length() (the lex_src loop guard), so read the code point
+  // directly (item 276). `c` stays the token text / classifier receiver below.
   let c = source.charAt(i)
-  let cc = code0(c)
+  let cc = source.codepoint_at(i)
   if (cc == 10) { return { i: i + 1, line: line + 1, tok: none } }
   // c is not newline here (the cc == 10 case returned), so the classifier
   // builtin is exactly is_space(c) — call it directly, skipping the fn call.
@@ -385,32 +496,95 @@ fn step(source: Str, i: Int, line: Int) -> Step {
     let kind2 = keywords().indexOf(sw.out) != 0 - 1 ? "kw" : "ident"
     return { i: sw.j, line: line, tok: { kind: kind2, text: sw.out, line: line } }
   }
+  if (cc == 39) {
+    // Single-quoted string (item 382): revl has no char type, so `'a'` /
+    // `'hello'` lex to the same `string` token kind as `"..."`, with the same
+    // `\'` / `\\` escape set (reference lexer `_lex_string(quote="'")`).
+    let sq = scan_quoted(source, i + 1, 39)
+    if (sq.j == 0 - 1) {
+      return { i: source.length(), line: line,
+               tok: { kind: "error", text: "unterminated string", line: line } }
+    }
+    return { i: sq.j, line: line, tok: { kind: "string", text: sq.out, line: line } }
+  }
   if (is_digit(c)) {
-    let sd = scan_digits(source, i)
-    // A float needs a fraction or an exponent. `.` only starts one when a
-    // digit follows, so `7.div_trunc(2)` stays an Int and a method call;
-    // `1e` is an Int beside an ident, not an error.
-    var j = sd.j
+    // Non-decimal integer (item 381): a leading `0` then a radix letter. The
+    // prefix and hex a-f digits are case-insensitive (Python/JS parity). The
+    // token TEXT is the parsed value's decimal spelling, since the reference
+    // canonicalizes an int as `str(int(digits, base))` — `0xFF` -> `255`.
+    let nx = source.slice(i + 1, i + 2)
+    if (c == "0" && (nx == "x" || nx == "X" || nx == "b" || nx == "B" || nx == "o" || nx == "O")) {
+      var base = 16
+      var valid = "0123456789abcdefABCDEF"
+      if (nx == "b" || nx == "B") {
+        base = 2
+        valid = "01"
+      }
+      if (nx == "o" || nx == "O") {
+        base = 8
+        valid = "01234567"
+      }
+      let g = scan_grouped(source, i + 2, valid)
+      if (g.j == 0 - 1) {
+        return { i: source.length(), line: line,
+                 tok: { kind: "error", text: "bad numeric literal", line: line } }
+      }
+      let val = radix_value(g.out, base)
+      let gj = g.j
+      return { i: gj, line: line, tok: { kind: "int", text: val.to_str(), line: line } }
+    }
+    // Decimal int/float, now with `_` group separators (item 381). A float
+    // needs a fraction or an exponent. `.` only starts one when a digit
+    // follows, so `7.div_trunc(2)` stays an Int and a method call; `1e` is an
+    // Int beside an ident, not an error. The float TEXT is the reference's
+    // normalized form (`_`-stripped parts joined), which `float(...)` on both
+    // sides then denotes identically; the int TEXT is the parsed decimal.
+    let ip = scan_grouped(source, i, "0123456789")
+    if (ip.j == 0 - 1) {
+      return { i: source.length(), line: line,
+               tok: { kind: "error", text: "bad numeric literal", line: line } }
+    }
+    var j = ip.j
     var isf = false
+    var fracpart = ""
     if (source.slice(j, j + 1) == "." && is_digit(source.slice(j + 1, j + 2))) {
-      let frac = scan_digits(source, j + 1)
-      j = frac.j
+      let fr = scan_grouped(source, j + 1, "0123456789")
+      if (fr.j == 0 - 1) {
+        return { i: source.length(), line: line,
+                 tok: { kind: "error", text: "bad numeric literal", line: line } }
+      }
+      fracpart = ".".concat(fr.out)
+      j = fr.j
       isf = true
     }
+    var exppart = ""
     let e = source.slice(j, j + 1)
     if (e == "e" || e == "E") {
       var k = j + 1
       let sign = source.slice(k, k + 1)
-      if (sign == "+" || sign == "-") { k += 1 }
+      var signstr = ""
+      if (sign == "+" || sign == "-") {
+        signstr = sign
+        k += 1
+      }
       if (is_digit(source.slice(k, k + 1))) {
-        let ex = scan_digits(source, k)
+        let ex = scan_grouped(source, k, "0123456789")
+        if (ex.j == 0 - 1) {
+          return { i: source.length(), line: line,
+                   tok: { kind: "error", text: "bad numeric literal", line: line } }
+        }
+        exppart = "e".concat(signstr).concat(ex.out)
         j = ex.j
         isf = true
       }
     }
     let jj = j
-    let kind3 = isf ? "float" : "int"
-    return { i: jj, line: line, tok: { kind: kind3, text: source.slice(i, jj), line: line } }
+    if (isf) {
+      let ftext = ip.out.concat(fracpart).concat(exppart)
+      return { i: jj, line: line, tok: { kind: "float", text: ftext, line: line } }
+    }
+    let ival = radix_value(ip.out, 10)
+    return { i: jj, line: line, tok: { kind: "int", text: ival.to_str(), line: line } }
   }
   if (cc == 64) {
     // `@backend { ... }` host body -> a single `hostbody` token (reference
@@ -425,9 +599,9 @@ fn step(source: Str, i: Int, line: Int) -> Step {
       while (jb < n1 && (source.charAt(jb).is_alnum() || source.charAt(jb) == "_")) { jb += 1 }
       let backend = source.slice(i + 1, jb)
       var kb = jb
-      while (kb < n1 && code0(source.charAt(kb)) != 10 && source.charAt(kb).is_space()) { kb += 1 }
+      while (kb < n1 && source.codepoint_at(kb) != 10 && source.charAt(kb).is_space()) { kb += 1 }
       // whitespace before `{` may include a newline
-      while (kb < n1 && code0(source.charAt(kb)) == 10) { kb += 1 }
+      while (kb < n1 && source.codepoint_at(kb) == 10) { kb += 1 }
       if (kb < n1 && source.charAt(kb) == "{") {
         let hb = scan_host_body(source, kb)
         if (hb.j == 0 - 1) {

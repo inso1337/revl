@@ -29,7 +29,6 @@ weakened.
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
@@ -122,8 +121,8 @@ def test_imported_witnessed_call_with_site_undo_still_refused():
 
 _PLAIN_MOD_PATH = str(_ROOT / "test_witnessed_import_plainmod.rvl")
 _PLAIN_MOD_SRC = (
-    "pub extern acquire fn open_conn() -> Int undo close_conn(result) = @ts { return 1 }\n"
-    "pub extern pure fn close_conn(n: Int) -> Unit = @ts { return }\n"
+    "pub extern acquire fn open_conn() -> Conn undo close_conn(result) = @ts { return 1 }\n"
+    "pub extern pure fn close_conn(n: Conn) -> Unit = @ts { return }\n"
 )
 
 

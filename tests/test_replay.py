@@ -653,7 +653,6 @@ def test_bisect_when_the_predicate_flips_at_step_zero():
 
 
 def test_bisect_on_an_empty_timeline_flips_nothing():
-    harness = Harness(NOTES)  # a bare component with no accumulated steps? it has some
     empty = replay.Timeline("Nothing")
     report = empty.bisect("True")
     assert report["flipped"] is False

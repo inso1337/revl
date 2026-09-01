@@ -217,6 +217,23 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
     if not type_name:
         return
     head, args = parse_type(type_name)
+    if head == "Approval":
+        # item 246, Decision 3, invariant 5 (non-persistence): `Approval[C]` is
+        # produced ONLY by `await approval[C]` and is non-denotable as a written
+        # annotation, so it cannot appear in a snapshot, a handoff, a spawn
+        # config, or any record/signature that would carry it across the session
+        # boundary. A smuggled value fails the session binding at the crossing
+        # (the runtime half); this keeps the honest program honest.
+        raise RevlError(
+            filename, line,
+            f"`{type_name}` cannot be written as a type — an `Approval[C]` is "
+            "produced only by `await approval[C] { ... }` and cannot be stored, "
+            "returned, or persisted",
+            hint="thread the approval to its crossing with `emit … with a` in the "
+                 "same activation body; it may not cross a snapshot, handoff, or "
+                 "spawn boundary (item 246, non-persistence)",
+            code="G4", category="approval",
+        )
     if head == "Async":
         if not in_fn_return:
             raise RevlError(
@@ -274,6 +291,109 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
                            allow_async=False, in_fn_return=False)
 
 
+# ------------------------------------------------- config is data, not a capability
+#
+# item 378 (docs/design/378-sync-extern-service-reach.md) asserts "Config is
+# static data, not a capability, so the capability gate is untouched". That was
+# only a COMMENT. `config_block` parses a field type with the FULL type grammar,
+# so `config { handler: (Str) -> Str }` or `config { p: SomeService }` compiled,
+# and a provider invoking `config.handler(x)` reached host emission with no
+# ticket, no reach attribution, and no `emission[caps]` check: a live callable
+# arrives at plug/spawn/load time (or through the embedding API) and is invoked
+# past every authority fold. This makes the assertion a CHECK: a config value is
+# injected as static data, so its declared type must be built, transitively, out
+# of data. The only heads a config field may NOT reach are a function (arrow)
+# type (which carries a live callable) and a `service` reference (a capability
+# channel). Scalars, records/ADTs/aliases, and `Opt`/`List`/`Map` of data are all
+# fine, so the legitimate data-config feature (`config { url: Str, retries: Int,
+# opts: Options }`) is untouched.
+
+_CONFIG_DATA_HINT = (
+    "a config field must be static data (a scalar, or a record/list/Opt of "
+    "data); an arrow type / a service cannot be a config field, because config "
+    "is not a capability channel (item 378)"
+)
+
+
+def check_config_field_is_data(filename: str, line: int, field_name: str,
+                               owner: str, type_name: str | None, *,
+                               service_names: set[str],
+                               type_defs: dict) -> None:
+    """Refuse a config field whose declared type can carry a live callable or a
+    capability. `service_names` is the set of declared `service` names; each
+    entry of `type_defs` is a lowered type-table shape
+    (`{"kind": "record", "fields": {name: type}}` or
+    `{"kind": "variant", "cases": [{"name":…, "payload":…}]}`), used to resolve a
+    nominal record/ADT/alias into its component types."""
+    _walk_config_type(filename, line, field_name, owner, type_name, type_name,
+                      service_names=service_names, type_defs=type_defs,
+                      visited=frozenset())
+
+
+def _config_data_error(filename: str, line: int, field_name: str, owner: str,
+                       root: str | None, offender: str) -> RevlError:
+    return RevlError(
+        filename, line,
+        f"config field `{field_name}` of {owner} has type `{root}`, which "
+        f"reaches {offender}; a config field must be static data",
+        hint=_CONFIG_DATA_HINT,
+        code="G4", category="config-data",
+    )
+
+
+def _walk_config_type(filename: str, line: int, field_name: str, owner: str,
+                      type_name: str | None, root: str | None, *,
+                      service_names: set[str], type_defs: dict,
+                      visited: frozenset) -> None:
+    if not type_name:
+        return
+    type_name = type_name.strip()
+    # A structural record literal type `{a: T, ...}` (item 71) carries its field
+    # types inline; recurse into each so a smuggled arrow field is caught.
+    sfields = structural_fields(type_name)
+    if sfields is not None:
+        for ftype in sfields.values():
+            _walk_config_type(filename, line, field_name, owner, ftype, root,
+                              service_names=service_names, type_defs=type_defs,
+                              visited=visited)
+        return
+    head, args = parse_type(type_name)
+    if head == FN_HEAD:
+        raise _config_data_error(filename, line, field_name, owner, root,
+                                 "an arrow (function) type")
+    if head in service_names:
+        raise _config_data_error(filename, line, field_name, owner, root,
+                                 f"the service `{head}`")
+    info = type_defs.get(head or "")
+    if info is not None:
+        # A nominal record/ADT/alias: resolve it and walk its component types.
+        # Guard against a recursive type (`type Tree = Node(Tree)`) with the
+        # visited set (a cycle through data heads is still data).
+        if head not in visited:
+            child_visited = visited | {head}
+            if info.get("kind") == "record":
+                for ftype in (info.get("fields") or {}).values():
+                    _walk_config_type(filename, line, field_name, owner, ftype,
+                                      root, service_names=service_names,
+                                      type_defs=type_defs, visited=child_visited)
+            else:
+                for case in info.get("cases") or []:
+                    # A variant case carries either a parenthesised payload
+                    # (`Hit(Row)`) or, for an alias RHS (`type Rows = List[Row]`),
+                    # the target type spelled as the sole case name.
+                    target = case.get("payload") or case.get("name")
+                    _walk_config_type(filename, line, field_name, owner, target,
+                                      root, service_names=service_names,
+                                      type_defs=type_defs, visited=child_visited)
+    # A parametric head (builtin `Opt`/`List`/`Map`/`Result` or a user generic)
+    # carries its data in the type arguments; walk them regardless of whether the
+    # head itself resolved above.
+    for arg in args:
+        _walk_config_type(filename, line, field_name, owner, arg, root,
+                          service_names=service_names, type_defs=type_defs,
+                          visited=visited)
+
+
 # ------------------------------------------------- type parameters
 #
 # A `fn`/`extern` signature declares type parameters two ways, both feeding the
@@ -295,6 +415,28 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
 # and `render_type` strips it before any diagnostic is rendered.
 
 _TPARAM = "?"
+
+
+# item 386, Stage 2: the poison sentinel. When a component-body statement's
+# type-check raises a definite mismatch (T1/T2), the statement-boundary recovery
+# in `lower.py` records that ONE diagnostic and, for a binding form, binds the
+# failed value to `POISON` in the type environment before resuming at the next
+# statement. `POISON` is ABSORBING (every algebra operation treats it as a
+# wildcard, so a type derived from it stays unknown) and SILENT (it is
+# compatible with everything in both directions, so no later use of the poisoned
+# binding raises a second, fabricated mismatch). A diagnostic is emitted only
+# where poison is BORN — the failing statement — never where it PROPAGATES,
+# which is exactly what stops one real mismatch from spawning N cascades at every
+# later use of the poisoned binding. Like `_TPARAM` and `FN_HEAD`, the spelling
+# uses characters no identifier or declared type may contain, so it can never
+# collide with a user type and never has to be stripped from a rendered
+# diagnostic (poison is silent, so it never reaches one).
+POISON = "!poison"
+
+
+def is_poison(type_name: str | None) -> bool:
+    """Is this the Stage-2 poison sentinel (item 386)?"""
+    return type_name == POISON
 
 
 def is_tparam_name(name: str, declared: dict) -> bool:
@@ -446,6 +588,7 @@ def _is_wildcard(name: str | None) -> bool:
     return (
         name is None
         or name in ("Any", "Never")
+        or name == POISON            # item 386 Stage 2: absorbing + silent
         or name.startswith(_TPARAM)  # implicit fn type parameter
     )
 
@@ -622,6 +765,28 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
                 code="T1", category="type-mismatch",
             )
         return lt or rt
+    if op in ("&", "|", "^", "<<", ">>"):
+        # Bitwise operators are Int32-only (item 366, docs/arithmetic.md).
+        # Int (64-bit) is deliberately excluded: `<<` grows without bound on
+        # the arbitrary-precision hosts (python `int`, ts `BigInt`), so a
+        # uniform 64-bit two's-complement shift would need a re-imposed wrap on
+        # exactly those tiers — a per-tier divergence, the kind the sized-int
+        # design avoids. Int32 has a fixed hardware width everywhere, so the
+        # lowering is uniform. Bitwise ops do NOT trap (bit patterns, not
+        # arithmetic); `>>` is the arithmetic (sign-extending) shift and the
+        # shift count is taken mod 32. For a shift, both operands are Int32
+        # (the count too) and the result is Int32.
+        for t in (lt, rt):
+            if filename and t and parse_type(t)[0] != "Int32":
+                is_int = parse_type(t)[0] == "Int"
+                raise RevlError(
+                    filename, line,
+                    f"`{op}` requires `Int32` operands, got `{render_type(t)}`",
+                    hint=("bitwise operators are Int32-only — narrow with "
+                          "`.to_int32()` (docs/arithmetic.md)") if is_int else
+                         "bitwise operators are Int32-only (docs/arithmetic.md)",
+                    code="T1", category="type-mismatch")
+        return "Int32"
     if op == "+":
         if lt == "Str" or rt == "Str":
             if filename and (
@@ -693,6 +858,12 @@ _BUILTIN_SIG = {
     "slice": ("sized", ["Int", "Int"], "@self"),
     "charAt": ("Str", ["Int"], "Str"),
     "charCodeAt": ("Str", ["Int"], "Int"),
+    # Codepoint-at-index scan (roadmap item 276, docs/stdlib-2.0.md
+    # §Str.codepoint_at): the Unicode scalar at code-point index i, returned
+    # directly so the self-host lexer's per-byte hot path stops spelling it as
+    # `code0(source.charAt(j))` (a 1-char Str alloc + a revl-fn round-trip).
+    # Str receiver, one Int index, Int result — the family of charCodeAt.
+    "codepoint_at": ("Str", ["Int"], "Int"),
     "concat": ("sized", ["@self"], "@self"),
     "indexOf": ("sized", ["@member"], "Int"),
     "split": ("Str", ["Str"], "List[Str]"),
@@ -766,7 +937,33 @@ _BUILTIN_SIG = {
     # per tier by tests. remove() is persistent (new map) and TOTAL: an
     # absent key is a no-op returning an equal map, never an error.
     "size": ("Map", [], "Int"),
-    "keys": ("Map", [], "List[Str]"),
+    # `keys` is spelled for two receiver families: the Map key set (above) AND
+    # the Value record-key enumeration (roadmap item 189 — the dot-method form
+    # of stdlib/value.rvl's `value_keys`). Select the row by the receiver head,
+    # exactly as `to_int` does (Int32-widen vs Str-parse). The Value row is one
+    # of the four Value dot-accessors (`.field`/`.str`/`.list`/`.keys`); each
+    # lowers to a plain call of its `value_*` free function, so the dot form is
+    # PURE SUGAR that emits byte-identically to the nested free-function form.
+    "keys": {
+        "Map": ("Map", [], "List[Str]"),
+        "Value": ("Value", [], "List[Str]"),
+    },
+    # ------------------------------------------------------------- Value access
+    # The Value dot-method accessors (roadmap item 189, DECIDED option A):
+    # receiver-first sugar for stdlib/value.rvl's `value_*` free functions, so
+    # `node.field("callee").field("name").str()` reads left-to-right instead of
+    # the inside-out `value_str(value_field(value_field(node, "callee"),
+    # "name"))`. Registered here (and in lower._BUILTIN_METHODS) as builtin
+    # methods like `.charAt()` — NO new IR expr-kind. Each lowers to a plain
+    # CALL of its `value_*` equivalent (value_field/value_str/value_list, and
+    # `keys` above), so the emitted code is byte-identical to the free-function
+    # spelling on every tier value.rvl runs on. `.keys()` shares its name with
+    # `Map.keys()` above, hence the multi-receiver dict row. Total accessors:
+    # a shape mismatch reads back a typed default (never a fault), inherited
+    # verbatim from the free-function bodies (docs/stdlib-value.md).
+    "field": ("Value", ["Str"], "Value"),
+    "str": ("Value", [], "Str"),
+    "list": ("Value", [], "List[Value]"),
     "remove": ("Map", ["Str"], "@self"),
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): decimal
     # spelling, total over the whole i64 range including Int.MIN. A method
@@ -790,6 +987,7 @@ _HOST_ARG_SIG: dict[str, list[str]] = {
     "Map.new": [],
     "Map.drop": [],
     "Map.insert": ["Str", "Str"],
+    "Map.insert_if_absent": ["Str", "Str"],
     "Map.remove": ["Str"],
     "Map.get": ["Str"],
     "Pool.open": ["Str", "Int"],
@@ -797,6 +995,20 @@ _HOST_ARG_SIG: dict[str, list[str]] = {
     "Pool.query": ["Str"],
     "Pool.execute": ["Str"],
     "Job.run": ["Str"],
+}
+
+
+# Host builtin *results* (item 397). The frontier deliberately types arguments
+# and not results — a host stub returns a host-valued object the frontend does
+# not model (see the _HOST_ARG_SIG header). `insert_if_absent` is the first
+# host verb whose result the program MUST consume in checked code: the atomic
+# CAS returns a `Bool` the caller branches on with a pure `if`. So the frontier
+# gains a result column for exactly the verbs that declare one; every other
+# host verb's result stays opaque (`builtin_check` returns None below). This is
+# a deliberate one-verb breach of the opaque-result frontier, not a policy
+# change (docs/design/397-insert-if-absent.md §The result type).
+_HOST_RESULT_SIG: dict[str, str] = {
+    "Map.insert_if_absent": "Bool",
 }
 
 
@@ -900,12 +1112,24 @@ def host_family_check(family: str, method: str, arg_types: list,
 def builtin_check(method: str, target_type: str | None, arg_types: list,
                   filename: str | None, line: int) -> str | None:
     """Type a stdlib method call; raises on definite mismatches."""
+    # item 386, Stage 2: a poisoned receiver (a binding whose initializer was a
+    # recovered type error) is folded to the unknown receiver here, so the
+    # receiver-family refusals below stay silent — `compatible` already treats
+    # POISON as a wildcard, but the family checks compare type heads directly,
+    # and re-reporting a mismatch at every later use of the poisoned binding is
+    # exactly the cascade the sentinel exists to prevent. The diagnostic was
+    # already emitted where the poison was born.
+    if is_poison(target_type):
+        target_type = None
     # a method call on a constructor-tracked host receiver (`store.get(k)`
     # where `store = Map.new()`): checked against the family surface, result
     # opaque (see _HOST_FAMILIES)
     if target_type in _HOST_FAMILIES:
         host_family_check(target_type, method, arg_types, filename, line)
-        return None
+        # A result-declared host verb (item 397: `insert_if_absent -> Bool`)
+        # returns its declared type instead of the opaque `None`; every other
+        # host verb's result stays on the G8 audit surface.
+        return _HOST_RESULT_SIG.get(f"{target_type}.{method}")
     sig = _BUILTIN_SIG.get(method)
     if sig is None:
         return None
@@ -934,7 +1158,7 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
         if family == "sized" and thead not in _SIZED_HEADS:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`")
-        if family in ("List", "Str", "Int", "Int32", "Map") and thead != family:
+        if family in ("List", "Str", "Int", "Int32", "Map", "Value") and thead != family:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a {family} receiver, got `{render_type(target_type)}`")
     # `@elem` is the element/value parameter: a List's single argument for
@@ -1049,7 +1273,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         ExprArrow, ExprBin, ExprBlockArm, ExprCall, ExprField, ExprHole,
         ExprIf, ExprIndex, ExprList, ExprLit, ExprMatch, ExprOptCall,
         ExprOptField, ExprRecord, ExprRecordUpdate, ExprUn, ExprVar, Interp,
-        Lit,
+        Lit, LIST_TRANSFORMS, desugar_list_transform,
     )
 
     line = getattr(expr, "line", 0)
@@ -1098,6 +1322,24 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         if (case is not None and case.get("payload") is None
                 and not str(case.get("adt", "")).startswith(("Opt", "Result"))):
             return case["adt"]
+        # item 380 (the soundness hole): a bare reference to a top-level `fn`
+        # is a first-class function value (docs/function-types.md — arrows and
+        # fn names alike can be "checked, stored, passed and returned"), so it
+        # has a type: the fn's function type `(params...) -> returns`. Before
+        # this it inferred to `None` (unknown), and `None` short-circuits every
+        # downstream compatibility check — so `return f` in a `-> Str` fn, or
+        # `apply(wrong_sig_fn)`, type-checked as ANY type and silently
+        # miscompiled. Typing it here is what lets the return/argument check
+        # REFUSE the mismatch, while a return of a correctly function-typed
+        # value (item 92/342) still passes because the types now agree. Generic
+        # and unit-returning fns are left untyped (unchanged): a `_TPARAM`
+        # marker must not leak into a rendered type, and a bare value use of
+        # either is exotic — leaving them at `None` is a no-op, never a
+        # regression.
+        sig = (types.get(FNS_KEY) or {}).get(expr.name)
+        if sig is not None and not sig.get("tparams") \
+                and sig.get("returns") is not None:
+            return format_type(FN_HEAD, list(sig["params"]) + [sig["returns"]])
         return None
     if isinstance(expr, ExprBin):
         lt = infer_ast(expr.left, tenv, types, filename)
@@ -1109,6 +1351,20 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             if filename and t and t != "Bool":
                 raise mismatch(filename, line, "operand of `!`", "Bool", t)
             return "Bool"
+        if expr.op == "~":
+            # Bitwise complement is Int32-only (item 366), matching the binary
+            # bitwise operators; it does not trap. `~x == -x - 1` within the
+            # 32-bit range.
+            if filename and t and parse_type(t)[0] != "Int32":
+                is_int = parse_type(t)[0] == "Int"
+                raise RevlError(
+                    filename, line,
+                    f"`~` requires an `Int32` operand, got `{render_type(t)}`",
+                    hint=("bitwise `~` is Int32-only — narrow with `.to_int32()` "
+                          "(docs/arithmetic.md)") if is_int else
+                         "bitwise `~` is Int32-only (docs/arithmetic.md)",
+                    code="T1", category="type-mismatch")
+            return "Int32"
         if filename and t and t not in _NUMERIC:
             raise mismatch(filename, line, "operand of unary `-`", "Int", t)
         return t
@@ -1121,6 +1377,27 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                                    alt=f"?.{expr.name}")
         if expr.name == "length" and (thead in _SIZED_HEADS):
             return "Int"
+        # item 380: a field read off a value whose static type is `Any`/`Value`
+        # (the erased-dynamic types — a parsed JSON body, `json_parse`'s result)
+        # is the 279/299 silent-divergence class: py raises `KeyError` on an
+        # absent key, ts yields `undefined`, and neither is a defensible total
+        # answer for a field the author declared present. REFUSE it here so the
+        # divergence is a compile error, not a runtime surprise, and point the
+        # author at the two designed surfaces: cast to a record (an `Opt[T]`
+        # field then reads TOTAL — `let e: E = v; e.kind ?? default`), or walk
+        # the erased value with the total shape accessors (stdlib/value.rvl:
+        # `value_is_object` / `value_opt` / `value_field_or`).
+        if filename and thead in ("Any", "Value"):
+            raise RevlError(
+                filename, line,
+                f"field read `.{expr.name}` on a value of type "
+                f"`{render_type(target)}` — an erased value has no known fields",
+                hint=("bind it to a record type first "
+                      f"(`let e: SomeRecord = …; e.{expr.name}` — an `Opt[T]` "
+                      "field then reads back the empty Opt on absence), or walk "
+                      "it with stdlib/value.rvl (`value_is_object(v)`, "
+                      f"`value_opt(v, \"{expr.name}\")`, `value_field_or`)"),
+                code="T1", category="type-mismatch")
         struct = structural_fields(target)
         if struct is not None:
             # a read through an anonymous record binding is checked too (item 71)
@@ -1330,17 +1607,27 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             sig = (types.get(FNS_KEY) or {}).get(name)
             if sig is not None:
                 params = sig["params"]
+                # roadmap item 187: a call may omit trailing defaulted
+                # parameters. `required` is the count of leading parameters
+                # without a default; anything from `required` to `len(params)`
+                # arguments is well-formed. Signatures with no defaults keep
+                # `required == len(params)`, so the check is unchanged for them.
+                required = sig.get("required", len(params))
                 if filename:
-                    if len(expr.args) != len(params):
+                    if not (required <= len(expr.args) <= len(params)):
                         rendered = ", ".join(render_type(p) or "_"
                                              for p in params) or "no arguments"
+                        want = (f"{len(params)}" if required == len(params)
+                                else f"{required} to {len(params)}")
                         raise RevlError(
                             filename, line,
-                            f"`{name}` takes {len(params)} argument(s), "
+                            f"`{name}` takes {want} argument(s), "
                             f"{len(expr.args)} given",
-                            hint=f"`{name}` is declared `({rendered})` — revl has no "
-                                 "default, optional, or variadic parameters, so every "
-                                 "call supplies exactly the declared arity",
+                            hint=f"`{name}` is declared `({rendered})`"
+                                 + ("" if required == len(params) else
+                                    " — trailing parameters with a default may be "
+                                    "omitted, but revl calls are positional so only "
+                                    "trailing arguments can be dropped"),
                             code="T1", category="type-mismatch",
                         )
                 if not sig.get("tparams"):
@@ -1399,6 +1686,15 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                     host_check(dotted, arg_types, filename, line)
                     return expr.callee.target.name
             target_t = infer_ast(expr.callee.target, tenv, types, filename)
+            # item 383: receiver-first list transforms (`xs.map(f)` etc.)
+            # desugar to their generic free function so the existing
+            # generic-call + arrow-argument inference types them; a builtin
+            # sig cannot express `map`'s result `List[<f's return>]`. Skipped
+            # for a host-family receiver — that stays on the host stub surface.
+            if (expr.callee.name in LIST_TRANSFORMS
+                    and target_t not in _HOST_FAMILIES):
+                return infer_ast(desugar_list_transform(expr), tenv, types,
+                                 filename)
             return builtin_check(expr.callee.name, target_t, arg_types, filename, line)
         # any other callee expression: an arrow applied in place, a function
         # value read out of a `let` chain, …
@@ -1843,31 +2139,159 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
             t = infer_ir(e, tenv, types, services, filename, line)
             item = t if item is None else join(item, t)
         return f"List[{item}]" if item else "List[Never]"
+    if kind == "record":
+        # item 405: an anonymous record literal infers a STRUCTURAL record type
+        # from its fields (mirrors `infer_ast`'s `ExprRecord`, item 71). Without
+        # this, the lowered path left an anonymous binding untyped (None), so a
+        # later `a.missing` read on it was never field-checked inside a provide
+        # method — the residual of the 404 coverage class. Naming the structural
+        # type here is what lets the `field` case above refuse the bad read; at a
+        # declared boundary the structural type still meets the nominal record
+        # field-wise (`compatible`), so a valid record-literal return stays clean.
+        shape: dict[str, str | None] = {}
+        for name, value in node.get("fields") or []:
+            shape[name] = infer_ir(value, tenv, types, services, filename, line)
+        return format_structural(shape)
 
     if kind == "bin":
         lt = infer_ir(node.get("left"), tenv, types, services, filename, line)
         rt = infer_ir(node.get("right"), tenv, types, services, filename, line)
         return _binop_type(node.get("op"), lt, rt, filename, line)
     if kind == "un":
-        if node.get("op") == "!":
+        # item 404: bring the lowered-node unary checks to parity with
+        # `infer_ast`'s `ExprUn` (stratum 1). Before this, `!` returned `Bool`
+        # unconditionally and `~`/`-` returned the operand type unchecked, so a
+        # provide-method (stratum 3) accepted `~n` on a non-`Int32` or `-s` on a
+        # non-numeric that a `fn`/`test` body refuses — the item-392 class.
+        op = node.get("op")
+        t = infer_ir(node.get("operand"), tenv, types, services, filename, line)
+        if op == "!":
+            if filename and t and t != "Bool":
+                raise mismatch(filename, line, "operand of `!`", "Bool", t)
             return "Bool"
-        return infer_ir(node.get("operand"), tenv, types, services, filename, line)
+        if op == "~":
+            # Bitwise complement is Int32-only (item 366), matching the binary
+            # bitwise operators; it does not trap. `~x == -x - 1` in 32-bit range.
+            if filename and t and parse_type(t)[0] != "Int32":
+                is_int = parse_type(t)[0] == "Int"
+                raise RevlError(
+                    filename, line,
+                    f"`~` requires an `Int32` operand, got `{render_type(t)}`",
+                    hint=("bitwise `~` is Int32-only — narrow with `.to_int32()` "
+                          "(docs/arithmetic.md)") if is_int else
+                         "bitwise `~` is Int32-only (docs/arithmetic.md)",
+                    code="T1", category="type-mismatch")
+            return "Int32"
+        if filename and t and t not in _NUMERIC:
+            raise mismatch(filename, line, "operand of unary `-`", "Int", t)
+        return t
     if kind == "len":
         return "Int"
     if kind == "field":
         target = infer_ir(node.get("target"), tenv, types, services, filename, line)
         thead, targs = parse_type(target)
+        name = node.get("name")
         if filename and thead == "Opt":
             raise opt_escape_error(filename, line,
-                                   f"field access `.{node.get('name')}`", target,
+                                   f"field access `.{name}`", target,
                                    targs[0] if targs else None,
-                                   alt=f"?.{node.get('name')}")
+                                   alt=f"?.{name}")
+        # item 392: the provide-method twin of the item 380(2) refusal in
+        # `infer_ast`. A field read off a value whose static type is
+        # `Any`/`Value` (the erased-dynamic types — a `json_parse` result) is
+        # the 279/299 silent-divergence class: py raises `KeyError` on an absent
+        # key, ts yields `undefined`, and neither is a defensible total answer.
+        # `infer_ast` (stratum 1 — fn/test/module-fn bodies) already refuses it;
+        # component-body typing runs through this lowered path (stratum 3), which
+        # bypassed the check, so the SAME expression compiled clean inside a
+        # `provide` method body — the same context-scoping gap as the earlier
+        # `.length`-in-provide-method bug. Apply the identical refusal here so the
+        # divergence is a compile error on every tier, wherever the read sits.
+        if filename and thead in ("Any", "Value"):
+            raise RevlError(
+                filename, line,
+                f"field read `.{name}` on a value of type "
+                f"`{render_type(target)}` — an erased value has no known fields",
+                hint=("bind it to a record type first "
+                      f"(`let e: SomeRecord = …; e.{name}` — an `Opt[T]` "
+                      "field then reads back the empty Opt on absence), or walk "
+                      "it with stdlib/value.rvl (`value_is_object(v)`, "
+                      f"`value_opt(v, \"{name}\")`, `value_field_or`)"),
+                code="T1", category="type-mismatch")
+        # item 405: a read through an anonymous / structural record binding is
+        # field-checked in a `fn`/`test` body (`infer_ast`, item 71); apply the
+        # same refusal here so a provide-method body (stratum 3) no longer
+        # accepts `a.missing` on a `{h: Str}` binding. Mirrors `infer_ast`.
+        struct = structural_fields(target)
+        if struct is not None:
+            if filename and name not in struct:
+                raise RevlError(filename, line,
+                                f"`{render_type(target)}` has no field `{name}` "
+                                f"(fields: {', '.join(sorted(struct)) or 'none'})")
+            return struct.get(name)
         spec = types.get(target or "")
         if spec is not None and spec.get("kind") == "record":
-            return spec.get("fields", {}).get(node.get("name"))
+            fields = spec.get("fields", {})
+            # item 404: a read of a field a known record does not declare is
+            # refused in a `fn`/`test` body (`infer_ast`); apply the same
+            # refusal here so a provide-method body (stratum 3) no longer
+            # accepts `p.missing` on a record `p`.
+            if filename and name not in fields:
+                raise RevlError(filename, line,
+                                f"`{render_type(target)}` has no field `{name}` "
+                                f"(fields: {', '.join(sorted(fields)) or 'none'})")
+            return fields.get(name)
         return None
+    if kind in ("optfield", "optcall"):
+        # item 405: the provide-method (stratum 3) twin of `infer_ast`'s
+        # `ExprOptField`/`ExprOptCall`. `a?.b` short-circuits on absence, so it
+        # REQUIRES an optional on the left and always yields an optional on the
+        # right; on a non-optional it is dead syntax the strict tiers cannot
+        # render (Rust/Java have no `?.` on a plain value). `infer_ir` had no
+        # node case, so `?.` on a non-`Opt` inferred to None and the refusal
+        # never fired inside a provide method — the item-392/404 coverage gap.
+        # Apply `infer_ast`'s refusals (same diagnostics) here.
+        target = infer_ir(node.get("target"), tenv, types, services, filename, line)
+        thead, targs = parse_type(target)
+        member = node.get("name") if kind == "optfield" else node.get("method")
+        if filename and target and not _is_wildcard(target) and thead != "Opt":
+            raise RevlError(
+                filename, line,
+                f"`?.` needs an optional on the left, got `{render_type(target)}`",
+                hint=f"`{render_type(target)}` is always present, so the short-circuit is "
+                     f"dead — write `.{member}` (syntax-2.0 §2)",
+                code="T1", category="type-mismatch",
+            )
+        if thead != "Opt":
+            return None
+        inner = targs[0] if targs else None
+        if kind == "optcall":
+            args = [infer_ir(a, tenv, types, services, filename, line)
+                    for a in node.get("args") or []]
+            result = builtin_check(node.get("method"), inner, args, filename, line)
+        else:
+            spec = types.get(inner or "")
+            ihead, _ = parse_type(inner)
+            if inner == "Opt" or ihead == "Opt":
+                result = None
+            elif member == "length" and ihead in _SIZED_HEADS:
+                result = "Int"
+            elif spec is not None and spec.get("kind") == "record":
+                fields = spec.get("fields", {})
+                if filename and member not in fields:
+                    raise RevlError(filename, line,
+                                    f"`{render_type(inner)}` has no field `{member}` "
+                                    f"(fields: {', '.join(sorted(fields)) or 'none'})")
+                result = fields.get(member)
+            else:
+                result = None
+        if result is None:
+            return None
+        # already-optional inner results are not double-wrapped
+        return result if parse_type(result)[0] == "Opt" else f"Opt[{result}]"
     if kind == "index":
         target = infer_ir(node.get("target"), tenv, types, services, filename, line)
+        it = infer_ir(node.get("index"), tenv, types, services, filename, line)
         thead, targs = parse_type(target)
         if filename and thead == "Opt":
             raise opt_escape_error(filename, line, "index `[...]`", target,
@@ -1881,6 +2305,11 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
                      "— docs/stdlib-2.0.md",
                 code="T1", category="type-mismatch",
             )
+        # item 404: a non-`Int` index is refused in a `fn`/`test` body
+        # (`infer_ast`); apply the same refusal here so a provide-method body
+        # (stratum 3) no longer accepts `xs[s]` where a bare `fn` refuses it.
+        if filename and it and thead in ("List", "Str") and it != "Int":
+            raise mismatch(filename, line, "index", "Int", it)
         if thead == "List":
             return targs[0] if targs else None
         if thead == "Str":

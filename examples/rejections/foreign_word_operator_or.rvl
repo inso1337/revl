@@ -1,0 +1,10 @@
+// REJECTED — the word operator `or` is not revl syntax (item 384). It lexes
+// as an undeclared identifier; the redirect names the revl spelling instead
+// of the misleading generic G1.
+//
+// expected error:
+//   use `||`
+
+fn f(a: Bool, b: Bool) -> Bool {
+  return a or b
+}

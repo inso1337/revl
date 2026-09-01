@@ -211,6 +211,37 @@ def test_diverging_if_else_body_validates_and_runs(tmp_path):
     assert invoke("nested", 7) == 9
 
 
+def test_int32_bitwise_operators_execute(tmp_path):
+    """Int32 bitwise `& | ^ ~ << >>` on the real wasmtime substrate (item 366,
+    docs/arithmetic.md). wasm is the reference: every one is a single native
+    i32 instruction (`i32.and/or/xor/shl/shr_s`, `~` = xor -1), both shifts
+    self-mask the count to mod 32, and `>>` is `shr_s` (arithmetic). The
+    rotl32 kernel — the payoff for pure-revl SHA-256 — is exercised too. Each
+    result must match the value the other tiers produce
+    (tests/test_cross_tier_execution.py BITWISE)."""
+    source = """
+        fn band(a: Int32, b: Int32) -> Int32 { return a & b }
+        fn bor(a: Int32, b: Int32) -> Int32 { return a | b }
+        fn bxor(a: Int32, b: Int32) -> Int32 { return a ^ b }
+        fn bnot(a: Int32) -> Int32 { return ~a }
+        fn shl(a: Int32, n: Int32) -> Int32 { return a << n }
+        fn shr(a: Int32, n: Int32) -> Int32 { return a >> n }
+        fn rotl32(x: Int32, n: Int32) -> Int32 { return (x << n) | (x >> (32.to_int32() - n)) }
+    """
+    invoke = _run_module(tmp_path, source)
+    assert invoke("band", 240, 15) == 0
+    assert invoke("bor", 240, 15) == 255
+    assert invoke("bxor", 255, 15) == 240
+    assert invoke("bnot", 5) == -6
+    assert invoke("shl", 1, 4) == 16
+    assert invoke("shl", 1, 31) == -2147483648      # wraps into the sign bit
+    assert invoke("shl", 1, 32) == 1                # count is mod 32
+    assert invoke("shr", -8, 1) == -4               # arithmetic (sign-extending)
+    assert invoke("shr", -2147483648, 28) == -8
+    assert invoke("rotl32", 305419896, 8) == 878082066
+    assert invoke("rotl32", 305419896, 0) == 305419896
+
+
 def test_version_gate_accepts_1_2_3_and_rejects_4():
     emit = _emitter()
     base = {

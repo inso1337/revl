@@ -230,6 +230,17 @@ fn uses_true_division(n: Any) -> Bool {
   return false
 }
 
+// `_uses_i32_shl`: left shift is the one bitwise op whose result can leave the
+// 32-bit range (a bit op, not a trap), so python re-wraps it through
+// `_revl_i32_wrap`; `& | ^ >> ~` all stay in range and need no helper.
+fn uses_i32_shl(n: Any) -> Bool {
+  if (node_kind(n) == "bin" && node_op(n) == "<<") { return true }
+  for (c of value_children(n)) {
+    if (uses_i32_shl(c)) { return true }
+  }
+  return false
+}
+
 // -------------------------------------------------------------- expressions
 // `_is_float_expr` (backends/python/emit.py): syntactically-certain Float.
 fn is_float_expr(node: Any) -> Bool {
@@ -414,6 +425,22 @@ fn render_bin(node: Any) -> Str {
     let rhs = expr(value_field(node, "right"))
     return `(lambda _a, _b: abs(_a) % abs(_b) if _a >= 0 else -(abs(_a) % abs(_b)))(${lhs}, ${rhs})`
   }
+  if (op == "&" || op == "|" || op == "^") {
+    // Int32 bitwise AND/OR/XOR (item 366): for operands already in i32 range,
+    // python's `&`/`|`/`^` produce an in-range result, so no re-wrap is needed.
+    return `(${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))})`
+  }
+  if (op == ">>") {
+    // Arithmetic (sign-extending) right shift; the count is taken mod 32
+    // (`& 31`), matching wasm/JS. python `>>` is arithmetic and the magnitude
+    // only shrinks, so the result stays in i32 range.
+    return `(${expr(value_field(node, "left"))} >> (${expr(value_field(node, "right"))} & 31))`
+  }
+  if (op == "<<") {
+    // Left shift wraps into 32-bit two's complement (a bit op, no trap): the
+    // count is taken mod 32 and the result is re-wrapped.
+    return `_revl_i32_wrap(${expr(value_field(node, "left"))} << (${expr(value_field(node, "right"))} & 31))`
+  }
   let pop = py_bin_op(op)
   return `(${expr(value_field(node, "left"))} ${pop} ${expr(value_field(node, "right"))})`
 }
@@ -421,6 +448,11 @@ fn render_bin(node: Any) -> Str {
 fn render_un(node: Any) -> Str {
   let op = node_op(node)
   if (op == "!") { return `(not ${expr(value_field(node, "operand"))})` }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): `~x == -x - 1`, which stays in i32
+    // range for any in-range `x`, so no re-wrap is needed.
+    return `(~${expr(value_field(node, "operand"))})`
+  }
   if (op == "-") {
     let opnd = node_operands(node)
     if (opnd == "Int") { return `_revl_i64(-${expr(value_field(node, "operand"))})` }
@@ -566,6 +598,15 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
   if (step == "assert") {
     return emit_assert(value_field(node, "expr"), indent)
   }
+  // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
+  if (step == "break") {
+    out = out.push(line(indent, "break"))
+    return out
+  }
+  if (step == "continue") {
+    out = out.push(line(indent, "continue"))
+    return out
+  }
   out = out.push(line(indent, `<<UNSUPPORTED-STEP:${step}>>`))
   return out
 }
@@ -683,6 +724,16 @@ fn i32_block() -> List[Str] {
   o = o.push("    if v < _REVL_I32_MIN or v > _REVL_I32_MAX:")
   o = o.push("        raise OverflowError('revl: Int32 overflow')")
   o = o.push("    return v")
+  o = o.push("")
+  return o
+}
+
+fn i32_wrap_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_i32_wrap(v):")
+  o = o.push("    \"\"\"Wrap an Int32 `<<` result into 32-bit two's complement (docs/arithmetic.md).\"\"\"")
+  o = o.push("    v &= 0xFFFFFFFF")
+  o = o.push("    return v - 0x100000000 if v & 0x80000000 else v")
   o = o.push("")
   return o
 }
@@ -977,14 +1028,19 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
   }
   if (kind == "emit") {
     if (!value_is_null(value_field(step, "compensate"))) {
-      let fname = `_emit_${counter}`
-      var out = [line(indent, `def ${fname}():`)]
-      out = out.push(line(indent + 1, cexpr(value_field(step, "expr"))))
-      out = out.push(line(indent + 1, `yield lambda: ${cexpr(value_field(step, "compensate"))}`))
-      let c = counter + 1
-      let label = `${comp_name}.${provide_name}.${method_name}#${c}`
-      out = out.push(line(indent, `_revl_frame.adopt(_revl_ctx.effect(${fname}, ${py_repr(label)}))`))
-      return { lines: out, counter: c }
+      // item 247 (method-body compensate remainder) (docs/design/teardown-contract.md): a method-body
+      // `emit ... compensate ...` is a first-class COMPENSATION on the
+      // activation frame (`_revl_frame.compensation_method`), the compensation
+      // analog of item 318's method-witnessed wiring — NOT a bare
+      // `yield lambda: <offset>` adopted as a sibling effect. A bare adopted
+      // disposer is a bracket: it fires the offset on a CLEAN commit (destroying
+      // the deliverable), interleaves with proof inverses, and is unguarded.
+      // Routing through `compensation_method` makes it abort-only: discharged on
+      // commit, drained in Phase 2 after every proof inverse, guarded and
+      // residue-collected. Mirrors the reference emit.py's `_method_step`.
+      var out = [line(indent, cexpr(value_field(step, "expr")))]
+      out = out.push(line(indent, `_revl_frame.compensation_method(lambda: ${cexpr(value_field(step, "compensate"))})`))
+      return { lines: out, counter: counter }
     }
     var out = [line(indent, cexpr(value_field(step, "expr")))]
     return { lines: out, counter: counter }
@@ -1089,7 +1145,15 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int) -> Emit {
   if (kind == "emit") {
     var out = [line(indent, cexpr(value_field(step, "expr")))]
     if (!value_is_null(value_field(step, "compensate"))) {
-      out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "compensate"))}`))
+      // item 247 (docs/design/teardown-contract.md): a compensation is a
+      // first-class COMPENSATION entry on the frame's shared per-activation
+      // LIFO stack, not a bare disposer — it discharges (never runs) on a
+      // clean commit and runs best-effort in PHASE 2 of an abort, only after
+      // every proof inverse (bracket + transactional) in this activation has
+      // completed. This is the two-phase model, not the old
+      // single-interleaved-LIFO ordering (docs/contract-errata.md TCK A5
+      // respec, a5a/a5b); it is compensation, not inversion (§6.1).
+      out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(step, "compensate"))})`))
     }
     out = out.push("")
     return { lines: out, counter: counter }
@@ -1177,6 +1241,11 @@ fn component_body(comp: Any) -> List[Str] {
   out = out.push(line(1, `_revl_frame = _revl_Frame(_revl_ctx, ${py_repr(name)})`))
   out = out.push("")
   out = out.push(line(1, "def _body():"))
+  // item 247 second-pass (F1): `begin` yielded FIRST -> disposed LAST (cordis
+  // LIFO), the Phase-2 post-unwind hook at the bottom of the unwind stack, so a
+  // post-activation abort's activation-body offsets are drained after Phase 1
+  // instead of lost. Mirrors backends/python/emit.py (byte-agreement oracle).
+  out = out.push(line(2, "yield _revl_frame.begin"))
   let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0)
   out = out.concat(e.lines)
   out = out.push(line(2, "yield _revl_frame.drain"))
@@ -1587,6 +1656,7 @@ pub fn emit_py_src(ir: Any) -> Str {
   }
   if (uses_bounded_int(ir)) { out = out.concat(i64_block()) }
   if (uses_bounded_int32(ir)) { out = out.concat(i32_block()) }
+  if (uses_i32_shl(ir)) { out = out.concat(i32_wrap_block()) }
   if (uses_true_division(ir)) { out = out.concat(div_block()) }
   if (uses_float_interp(ir)) { out = out.concat(ftoa_block()) }
   out = out.concat(field_block())

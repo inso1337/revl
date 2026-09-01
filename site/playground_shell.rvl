@@ -114,19 +114,19 @@ component IRView requires tabs: Tabs {
 extern pure fn ui_unmount(id: Str) -> Int
   = @py { import playground_host; return playground_host.unmount(id) }
 
-extern acquire fn ui_mount(id: Str, label: Str) -> Int undo ui_unmount("")
+extern acquire fn ui_mount(id: Str, label: Str) -> UiSlot undo ui_unmount("")
   = @py { import playground_host; return playground_host.mount(id, label) }
 
 extern pure fn ui_unmount_region(id: Str) -> Int
   = @py { import playground_host; return playground_host.unmount_region(id) }
 
-extern acquire fn ui_mount_region(id: Str) -> Int undo ui_unmount_region("")
+extern acquire fn ui_mount_region(id: Str) -> UiSlot undo ui_unmount_region("")
   = @py { import playground_host; return playground_host.mount_region(id) }
 
 extern pure fn ui_theme_reset() -> Int
   = @py { import playground_host; return playground_host.theme_reset() }
 
-extern acquire fn ui_theme(name: Str) -> Int undo ui_theme_reset()
+extern acquire fn ui_theme(name: Str) -> ThemeSlot undo ui_theme_reset()
   = @py { import playground_host; return playground_host.theme(name) }
 
 extern emission fn ui_select(id: Str)

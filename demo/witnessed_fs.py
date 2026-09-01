@@ -34,12 +34,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "backends" / "python"))
 
-from revl.compiler import compile_source  # noqa: E402
+from revl.compiler import compile_files  # noqa: E402
 import replay  # noqa: E402
 import revl_fs_workspace as ws  # noqa: E402
 from revl.recovery import recover  # noqa: E402
 
-_BASE = compile_source((ROOT / "stdlib" / "fs.rvl").read_text(encoding="utf-8"), "fs.rvl")
+# item 410 stage 5: fs.rvl's `@ts` externs are `= @ts ref` imports, which need a
+# root compile tree to jail against, so compile from the real path (not a bare
+# `compile_source` string). The `@py` bodies this demo drives are unchanged.
+_BASE = compile_files([str(ROOT / "stdlib" / "fs.rvl")])
 
 
 def _lit(v):

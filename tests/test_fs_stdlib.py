@@ -42,7 +42,7 @@ from pathlib import Path
 
 import pytest
 
-from revl.compiler import compile_source
+from revl.compiler import compile_files
 
 _ROOT = Path(__file__).resolve().parents[1]
 _BACKEND = _ROOT / "backends" / "python"
@@ -50,7 +50,7 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 import replay  # noqa: E402
 import revl_fs_workspace as ws  # noqa: E402  (the confinement helper under test)
-from revl.recovery import DictWorld, recover  # noqa: E402
+from revl.recovery import recover  # noqa: E402
 
 needs_cordis = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,
@@ -58,11 +58,13 @@ needs_cordis = pytest.mark.skipif(
            "composition — install it with `sh backends/python/setup.sh`",
 )
 
-# The real module, compiled once. `compile_source` of the actual file text
-# yields the externs (write/rm/move/mkdir + their inverses) with the witnessed
-# classification and lowered `undo` the runtime seam keys off.
-_FS_SRC = (_ROOT / "stdlib" / "fs.rvl").read_text(encoding="utf-8")
-_BASE = compile_source(_FS_SRC, "fs.rvl")
+# The real module, compiled once. `compile_files` of the actual file yields the
+# externs (write/rm/move/mkdir + their inverses) with the witnessed
+# classification and lowered `undo` the runtime seam keys off. Compiled from the
+# real path (not `compile_source`) because item 410 stage 5 made the `@ts` bodies
+# `= @ts ref` imports, which need a root compile tree to jail against; the `@py`
+# bodies this suite drives are unchanged.
+_BASE = compile_files([str(_ROOT / "stdlib" / "fs.rvl")])
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +387,16 @@ def test_residue_surface_enumerates_aborted_crossings(workspace, tmp_path, monke
                   _effect("rm", "stale.txt")], abort=True)), record=True)
     assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
 
-    session.recorder.wal.close()                  # crash: no activation-complete
+    # Finalize the in-process abort the way the session lifecycle does: the
+    # activation failed and reverted its witnessed inverses in-process, and the
+    # session abort durably records that COMPLETION (the `aborted` record, item
+    # 309/5b191fd) before the process dies. Then no `activation-complete` marker
+    # is written — the crash point recover() reads. Closing the recorder directly
+    # here instead would skip the abort finalization, leaving fenced-before-apply
+    # records with no completion proof: recover() would then honestly (item 309's
+    # at-most-once contract) report the two undeclared inverses as fenced-residue
+    # of UNKNOWN outcome, not as rolled back — which is the design, not a defect.
+    session.abort()                               # crash: no activation-complete
 
     loaded = replay.WriteAheadLog.read(wal_path)
     descriptors = [r for r in loaded["records"]

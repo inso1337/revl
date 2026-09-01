@@ -1,0 +1,116 @@
+// The revl stdlib SHELL module — shell-to-witnessed lowering (roadmap item 252).
+// Classifier: backends/python/revl_shell_classify.py (pure). Catalog: item 244,
+// stdlib/fs.rvl. Measurement substrate: item 248.
+//
+// ---------------------------------------------------------------- what this is
+// The terminal tool is the workload's largest all-emission surface. Historically
+// `sh -c` is ONE opaque `emission` extern, so EVERY command prompts — even the
+// overwhelmingly common case where the command is just filesystem traffic in
+// disguise (`mv`, `rm`, `mkdir`, `cp`, `touch`). This module shrinks that
+// surface: a pure classifier parses the command line BEFORE execution and
+// LOWERS the recognizable, provably-fs-local subset onto the witnessed catalog
+// (stdlib/fs.rvl, item 244), which executes through the witnessed path with a
+// REAL inverse (a garbage-dir rename for `rm`, an atomic rename-back for `mv`,
+// …). Only the unrecognized tail stays one honest, irreversible `emission`.
+//
+// -------------------------------------------------------------- the two surfaces
+//   sh(cmd)        — the honest opaque fallback. One `emission`, no witness, no
+//                    inverse: irreversible by default. Reached for exactly the
+//                    commands the classifier could not PROVE fs-local.
+//   classify(cmd)  — the pure verdict. Returns a plan (Any): either a witnessed
+//                    lowering (an ordered list of catalog ops, each carrying its
+//                    real inverse) or an explicit "emission" verdict with a
+//                    reason. "cannot classify" is a FIRST-CLASS result, never a
+//                    fallthrough to witnessed.
+//
+// ------------------------------------------------------------- the lowering table
+//   mv SRC DST     -> fs.move(SRC, DST)     undo unmove           (rename)
+//   rm PATH...     -> fs.rm(PATH)           undo unrm             (garbage-dir park)
+//   mkdir PATH...  -> fs.mkdir(PATH)        undo rmdir_if_empty   (empty-dir create)
+//   cp SRC DST     -> fs.write(DST, <SRC>)  undo restore          (create/overwrite)
+//   touch PATH...  -> fs.write(PATH, "")    undo restore          (create-if-absent*)
+//
+//   (*) touch's reversibility depends on whether the target exists — state the
+//   pure classifier cannot see. The plan flags `create_only`, and the runtime
+//   honours the asymmetry: an ABSENT target is witnessed-created (reversible
+//   delete); an mtime bump on an EXISTING target routes to `sh` (one prompt).
+//
+// ------------------------------------------------------ what stays one emission
+// Pipelines, redirects, command substitution `$(...)` / backticks, subshells,
+// globs (expansion is not provably fs-local), variable expansion, comments,
+// command sequences (`;`, `&&`, `||`, `&`, newline), ANY flag (so `rm -rf`,
+// `cp -a`, `mv -f`, `mkdir -p` are all refused — each changes the semantics or
+// the reversibility the bare form guarantees), an unrecognized command name
+// (including a pathful `/bin/mv`), an operand that looks like a flag, the wrong
+// operand count, unbalanced quotes. The dangerous failure is a false "fs-local"
+// on an actually-irreversible command, so every ambiguity resolves to emission.
+//
+// -------------------------------------------------------------- confinement
+// The lowered ops execute through stdlib/fs.rvl, whose py bodies confine every
+// forward op AND every inverse to one session workspace root
+// (REVL_FS_WORKSPACE; backends/python/revl_fs_workspace.py). A lowered `rm` of a
+// path outside the root is refused by the witnessed body itself (returns Err,
+// registers no inverse) — fail-closed, so a classifier that names an out-of-root
+// path can never cause an irreversible mutation. Confinement is a RUNTIME
+// property the classifier need not (and, being pure, cannot) reason about.
+//
+// ------------------------------------------------------------------ tier status
+// py + ts tiers (the H1 reference on each), matching stdlib/fs.rvl. The py `sh`
+// + `classify` bodies delegate to backends/python/revl_shell_host.py and
+// backends/python/revl_shell_classify.py; the ts bodies delegate to
+// backends/typescript/revl_shell_ts.ts (node opaque `sh`) and
+// backends/typescript/revl_shell_classify_ts.ts (the pure classifier port),
+// reached via globalThis.__revlShell (item 369). The classifier is pure and
+// tier-agnostic, so py and ts return byte-identical plans (proven over the full
+// corpus in tests/test_ts_witnessed_parity.py). rs / go / java / wasm bodies
+// get theirs when the fs catalog's Slice 2b lands theirs.
+//
+// The recognized ops execute through the fs catalog directly — a consumer that
+// dispatches a witnessed plan imports the catalog and calls the op the plan
+// names (item 315 made the cross-module witnessed call site real):
+//
+//     use "stdlib/shell.rvl" { sh, classify, plan_is_witnessed }
+//     use "stdlib/fs.rvl" { move, rm, mkdir, write }
+
+// ------------------------------------------------------------------------ the fallback
+// The opaque terminal: one `emission`, irreversible by default. This is the
+// residue item 252 leaves — the commands the classifier could not lower.
+pub extern emission fn sh(cmd: Str) -> Str
+  = @py { import revl_shell_host; return revl_shell_host.run_opaque(cmd) }
+  = @ts { return (globalThis as any).__revlShell.runOpaque(cmd) }
+
+// ------------------------------------------------------------------------ the classifier
+// The pure verdict. `Any` is the plan record — inspect it with the accessors
+// below (or the stdlib/value.rvl accessors for the nested `ops`). PURE: no IO,
+// total (never faults), two-valued. This is the module's headline: the terminal
+// tool's reversibility decision is a pure, testable function of the command text.
+pub extern pure fn classify(cmd: Str) -> Any
+  = @py { import revl_shell_classify; return revl_shell_classify.classify(cmd) }
+  = @ts { return (globalThis as any).__revlShell.classify(cmd) }
+
+// --------------------------------------------------------------- plan accessors
+// Thin, total, pure readers over a plan, so a consumer can branch on the verdict
+// without threading the raw record shape.
+
+// The verdict tag: "witnessed" (lowerable) or "emission" (stays one prompt).
+pub extern pure fn plan_verdict(plan: Any) -> Str
+  = @py { return plan.get("verdict", "emission") }
+  = @ts { return plan.verdict ?? 'emission' }
+
+// True iff the command lowers onto the witnessed catalog. The consumer's branch:
+// true -> execute the ops through stdlib/fs.rvl (real inverses); false -> `sh`.
+pub extern pure fn plan_is_witnessed(plan: Any) -> Bool
+  = @py { return plan.get("verdict") == "witnessed" }
+  = @ts { return plan.verdict === 'witnessed' }
+
+// The human reason a command stayed an emission (empty for a witnessed plan) —
+// for the audit surface: WHY the terminal still had to prompt.
+pub extern pure fn plan_reason(plan: Any) -> Str
+  = @py { return plan.get("reason", "") }
+  = @ts { return plan.reason ?? '' }
+
+// How many witnessed catalog ops the command lowered to (0 for an emission
+// verdict). A single `mv` is 1; `rm a b c` is 3; a pipeline is 0.
+pub extern pure fn plan_op_count(plan: Any) -> Int
+  = @py { return len(plan.get("ops", [])) }
+  = @ts { return BigInt((plan.ops ?? []).length) }

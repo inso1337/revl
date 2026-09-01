@@ -4,8 +4,9 @@
 emit, and name the difference — the declared authority a run never used.*
 
 Implementation: `src/revl/profile.py` (the pure computation, the human render,
-the loaders), `src/revl/__main__.py` (`revl profile`), `tests/test_profile.py`.
-Roadmap item 124.
+the loaders, and the `--patch` repair mode), `src/revl/__main__.py` (`revl
+profile`), `tests/test_profile.py` and `tests/test_profile_patch.py`.
+Roadmap items 124 (profile) and 307 (repair patch).
 
 ---
 
@@ -163,7 +164,53 @@ as a loud warning, never folded into the over-declaration count and never
 silently dropped. `profile` does not guess which of the two is wrong; it reports
 the disagreement.
 
-## 7. Exit status
+## 7. Repair patch: the least-authority declaration (`--patch`)
+
+Naming an over-declared reach is half the job; `--patch` (alias `--minimize`)
+gives the other half: the exact narrowed declaration to write. For every
+component whose declared emission surface strictly exceeds its observed reach, it
+prints the least-authority `emission[...]` that component should declare:
+
+```
+$ revl profile agent.rvl run.jsonl --patch
+component Agent
+  declared  : filesystem.read, filesystem.write, network, shell
+  observed  : filesystem.read
+  SUGGEST   : emission[filesystem.read]
+  drops     : filesystem.write, network, shell [capabilities: network, shell]
+```
+
+The suggestion is **proposed, never applied**. `profile` writes nothing. The
+author (or an agent harness, via `--patch --json`) applies it and re-runs the
+admission gate; that re-run is the backstop, since one trace is an
+under-approximation of reach. Applying the suggestion above and re-running
+`revl profile --strict` (or `revl admit`) on the narrowed component admits
+cleanly, which is the whole point: an over-broad, machine-generated declaration
+is tightened to exactly the authority the run exercised, without the author
+having to understand the capability model.
+
+The narrowing is conservative in three concrete ways, so it never proposes
+dropping a *real* reach:
+
+* **Never past `*`.** A `*` in the declared surface is an emission whose target
+  is unnameable (a first-class emitting callable / unknown dispatch). The trace
+  can never observe a `*`, so it is always kept: the suggested set is
+  `observed ∪ {declared *}`, never less. Such a component is marked
+  `keepsWildcard`.
+* **Never on a mismatch.** A component with under-declaration, or one that
+  emitted with no declared surface at all (`unknownComponents`), is a
+  composition/trace disagreement, not an over-declaration, so it is passed through
+  unnarrowed (`minimizable: false`).
+* **Only when strictly over-declared.** A component whose run exercised exactly
+  its declared surface gets no patch (`minimizable: false`, nothing to narrow).
+
+`--patch` is a suggestion, not a gate: it always exits 0, even with `--strict`
+(the patch is what *clears* a strict failure, not the check itself). The
+`--json` document carries, per component, `declared` / `observed` / `suggested` /
+`removed` token sets, the `emission` string, and `keepsWildcard`, plus a top-level
+`applied: false` and an `advisory` restating that it must be re-verified.
+
+## 8. Exit status
 
 `revl profile` is descriptive, not a gate: it **exits 0** by default, like `revl
 metrics`. `--strict` opts into a least-privilege gate — it exits nonzero when any
@@ -171,7 +218,7 @@ component over-declares an emission the run never exercised, so CI can fail a
 component that has drifted wider than its behaviour. Under-declaration and
 unknown-emitter anomalies always print a warning regardless of `--strict`.
 
-## 8. Caveats
+## 9. Caveats
 
 * The declared surface is the **static** emission surface — the emission call
   sites the code actually contains. A required service the component never emits

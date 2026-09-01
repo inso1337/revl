@@ -55,10 +55,92 @@ import tempfile
 from pathlib import Path
 
 from ._paths import backends_root
+from .errors import RevlError
+from .wal import WAL_GUARANTEE
 
 _BACKENDS_DIR = backends_root()
 _WASM_DIR = _BACKENDS_DIR / "wasm"
 _HARNESS = _WASM_DIR / "run_harness.py"
+
+
+# ---------------------------------------------------------------------------
+# durable WAL: the host-side drain (item 322 Slice 2)
+# ---------------------------------------------------------------------------
+#
+# The wasm sandbox has no direct filesystem, so — unlike the go tier, whose
+# emitted code opens ``REVL_WAL`` and fsyncs directly (backends/go/emit.py's
+# ``revlRecordTransactional``) — a record-mode wasm module FRAMES each witnessed
+# transactional discharge-descriptor's runtime values out through the
+# ``coeffect:revl:wal.record`` host import. The harness reads those values back
+# from the module's memory and RELAYS them to stdout as one ``[wal] {…}`` frame
+# per registration (the exact stdout-framing pattern ``run_go.py`` drains for
+# its ``[run] …`` lines). This driver DRAINS those frames and writes+fsyncs them
+# into the durable host WAL, in the SAME py JSONL schema recover reads from any
+# tier (:mod:`revl.wal`): a ``header`` first, then one ``discharge-descriptor``
+# per drained frame, then — on a clean unload only — ``discharge`` +
+# ``activation-complete``. A crash before that terminal marker (the fsynced
+# descriptors already durable) is the roll-back case recover handles.
+
+_WAL_FRAME_PREFIX = "[wal] "
+
+
+def wal_header() -> dict:
+    """The WAL's first line — byte-for-byte the schema the go/py tiers write
+    (``walVersion``/``generation``/``guarantee``), so recover reads a wasm WAL
+    through the tier-agnostic core with no wasm-specific casing."""
+    return {"record": "header", "walVersion": 1, "generation": 1,
+            "guarantee": WAL_GUARANTEE}
+
+
+def wal_descriptor(seq: int, receiver: str, method: str, witness) -> dict:
+    """Assemble one witnessed transactional ``discharge-descriptor`` from a
+    module frame's runtime values. Field-for-field the go tier's record
+    (backends/go/emit.py ``revlRecordTransactional``): the re-issuable named
+    call ``{receiver, method, args:[witness]}`` recover replays LIFO to undo the
+    mutation, plus the forward ``origin`` it reverses."""
+    call = {"receiver": receiver, "method": method, "args": [witness]}
+    return {"record": "discharge-descriptor", "seq": seq, "entry": "transactional",
+            "call": call, "origin": call, "witness": None, "idempotency": None}
+
+
+def wal_discharge(seqs) -> dict:
+    """The commit-path proof that every recorded seq COMMITTED — recover SKIPS
+    a discharged seq (a committed transaction is never rolled back). Written
+    only on a clean unload."""
+    return {"record": "discharge", "discharged": list(seqs)}
+
+
+def wal_activation_complete() -> dict:
+    """The terminal marker: its PRESENCE is the whole roll-forward decision, its
+    ABSENCE (a crash) is roll-back. Written only after a clean unload."""
+    return {"record": "activation-complete", "generation": 1, "components": []}
+
+
+def write_wal_record(handle, record: dict) -> None:
+    """Append one JSONL record and fsync it — the write-ahead discipline the go
+    tier uses, so a descriptor a run saw drained is on disk before the effect it
+    describes is allowed to matter."""
+    handle.write(json.dumps(record) + "\n")
+    handle.flush()
+    try:
+        os.fsync(handle.fileno())
+    except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+        pass
+
+
+def drain_wal_frame(handle, line: str) -> int | None:
+    """If ``line`` is a ``[wal] {…}`` frame, assemble its discharge-descriptor
+    and write+fsync it to the open WAL ``handle``; return its seq. Otherwise
+    return ``None``. This is the host-side drain that makes a wasm module's
+    framed residue durable."""
+    text = line.strip()
+    if not text.startswith(_WAL_FRAME_PREFIX):
+        return None
+    frame = json.loads(text[len(_WAL_FRAME_PREFIX):])
+    seq = frame["seq"]
+    write_wal_record(handle, wal_descriptor(
+        seq, frame["receiver"], frame["method"], frame["witness"]))
+    return seq
 
 
 def _cordis_wasm_dir() -> Path:
@@ -112,34 +194,36 @@ def _load_order(ir: dict) -> list[str]:
     return manifest.get("loadOrder") or [c["name"] for c in ir.get("components") or []]
 
 
-def _emit_modules(ir: dict) -> dict[str, str]:
+def _emit_modules(ir: dict, record: bool = False) -> dict[str, str]:
     spec = importlib.util.spec_from_file_location("revl_wasm_emit", _WASM_DIR / "emit.py")
     emit_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(emit_module)
-    return emit_module.emit(ir)
+    return emit_module.emit(ir, record=record)
 
 
 def run_wasm(ir: dict, config: dict, files, once: bool = False,
-             interactive: bool = False) -> int:
+             interactive: bool = False, policy=None) -> int:
     """Emit -> boot the composition on the cordis-wasm runtime as a process,
     then run the once round-trip (LIFO teardown + no-residue proof) and exit.
     Returns 0 on a clean ``UP`` -> ``NO-RESIDUE`` -> ``DOWN``; nonzero otherwise.
     A missing cordis-wasm runtime is a skip-with-reason and exit 3, mirroring the
-    py/rust/java tiers (never a feint at passing)."""
-    reason = wasm_runtime_reason()
-    if reason is not None:
-        print(f"error: the cordis-wasm runtime is not available.\n"
-              f"       {reason}", file=sys.stderr)
-        return 3
+    py/rust/java tiers (never a feint at passing).
 
-    if once is False and interactive:
-        print("note: the interactive REPL is wired for the py tier only; the "
-              "wasm tier runs the\n      boot -> teardown -> no-residue "
-              "round-trip (as with --once) and exits.", flush=True)
+    ``policy`` (item 289) is an optional boundary policy. Emit is pure and needs
+    no runtime, so the least-authority chain that reads the emitted import
+    sections runs BEFORE the runtime-availability gate: an over-authority wasm
+    cell is refused as an admission decision whether or not wasmtime is present.
+    """
+    # item 322 Slice 2: with REVL_WAL set, emit in RECORD mode and drain the
+    # module's framed discharge-descriptors into that durable host WAL. Unset
+    # (every ordinary run), record mode is off and emission is byte-identical,
+    # so a normal wasm run is exactly as before.
+    wal_path = os.environ.get("REVL_WAL")
+    record = wal_path is not None
 
     order = _load_order(ir)
     try:
-        modules = _emit_modules(ir)
+        modules = _emit_modules(ir, record=record)
     except Exception as exc:  # noqa: BLE001 — surface any EmitError as one diagnostic
         print(f"error: could not emit the wasm composition (the substrate tier "
               f"is the strictest emitter; see backends/wasm/README.md):\n{exc}",
@@ -151,15 +235,47 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
               file=sys.stderr)
         return 1
 
+    # item 289: the least-authority chain. The import-subset-of-declared leg
+    # already fired inside the emitter (a by-construction invariant); with a
+    # policy in force we also refuse a wasm cell whose declared caps exceed the
+    # policy allow-list. No policy: the emit-time leg is the whole check and
+    # this is a no-op.
+    from .least_authority import enforce_wasm_least_authority  # noqa: PLC0415
+    try:
+        enforce_wasm_least_authority(ir, policy, modules)
+    except RevlError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    reason = wasm_runtime_reason()
+    if reason is not None:
+        print(f"error: the cordis-wasm runtime is not available.\n"
+              f"       {reason}", file=sys.stderr)
+        return 3
+
+    if once is False and interactive:
+        print("note: the interactive REPL is wired for the py tier only; the "
+              "wasm tier runs the\n      boot -> teardown -> no-residue "
+              "round-trip (as with --once) and exits.", flush=True)
+
     tmp = Path(tempfile.mkdtemp(prefix="revl_run_wasm_"))
+    wal_handle = None
+    drained_seqs: list[int] = []
     try:
         spec_file = tmp / "run.spec.json"
         spec_file.write_text(json.dumps({
             "name": "run",
             "once": True,
+            "record": record,
             "order": order,
             "modules": {name: modules[name] for name in order},
         }), encoding="utf-8")
+
+        if record:
+            # open the durable WAL and stamp the header BEFORE the harness boots,
+            # so a descriptor the drain sees is appended to a well-formed log.
+            wal_handle = open(wal_path, "w", encoding="utf-8")
+            write_wal_record(wal_handle, wal_header())
 
         env = dict(os.environ)
         env["CORDIS_WASM"] = str(_cordis_wasm_dir())
@@ -175,6 +291,13 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
         saw_up = saw_down = saw_no_residue = saw_residue_left = False
         assert proc.stdout is not None
         for line in proc.stdout:
+            # drain a `[wal] {…}` frame into the durable WAL (item 322 Slice 2);
+            # every other line is the harness's own `[run] …`/`_log` output.
+            if wal_handle is not None:
+                seq = drain_wal_frame(wal_handle, line)
+                if seq is not None:
+                    drained_seqs.append(seq)
+                    continue
             sys.stdout.write(line)
             sys.stdout.flush()
             text = line.strip()
@@ -187,7 +310,17 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
             elif text == "[run] DOWN":
                 saw_down = True
         rc = proc.wait()
+
+        # a clean unload commits: stamp the discharge (recover then SKIPS those
+        # seqs — a committed transaction is never rolled back) and the terminal
+        # marker (its presence rolls forward). A nonzero exit / residue leaves
+        # the descriptors on disk with no marker — the roll-back state.
+        if wal_handle is not None and rc == 0 and saw_down and saw_no_residue:
+            write_wal_record(wal_handle, wal_discharge(drained_seqs))
+            write_wal_record(wal_handle, wal_activation_complete())
     finally:
+        if wal_handle is not None:
+            wal_handle.close()
         shutil.rmtree(tmp, ignore_errors=True)
 
     if rc != 0:

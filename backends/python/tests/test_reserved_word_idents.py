@@ -16,7 +16,6 @@ call the emitted functions, proving the decl-site and use-site renames agree.
 
 from __future__ import annotations
 
-import keyword
 import sys
 import types
 
@@ -63,7 +62,6 @@ fn echo({kw}: Str) -> Str {{
 }}
 """
     module = load_module(_emit(src))
-    mangled = kw + "_" if keyword.iskeyword(kw) else kw
     assert hasattr(module, "echo")
     assert module.echo("payload") == "payload"
 

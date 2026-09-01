@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import dataclasses
 import keyword
-from dataclasses import dataclass
+import os
+import re
 
 from . import holes
-from .errors import RevlError
+from .errors import RevlError, RevlErrors
 from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
     CASES_KEY,
+    FN_HEAD,
     FNS_KEY,
     _SIZED_HEADS,
     check_ast,
@@ -30,37 +32,64 @@ from .typecheck import (
     render_type,
     mark_tparams,
     check_type_wellformed,
+    check_config_field_is_data,
     compatible,
     format_type,
     host_check,
+    _HOST_FAMILIES,
+    _HOST_RESULT_SIG,
     infer_ast,
     infer_ir,
     mismatch,
     pin_hole,
     null_error,
     parse_type,
+    POISON,
+    structural_fields,
     substitute,
     unify,
     _is_wildcard,
     _check_method_namespace_disjoint,
 )
+from .taint import (
+    extract_and_normalize,
+    check_taint,
+    splice_declassifiers,
+    strip_qualifiers,
+)
+from .mcp.schema import (
+    expressibility_reason,
+    fully_expressible,
+    has_revl_stub,
+    json_schema_for,
+)
+from .resources import (
+    NO_HANDLE_RETURNS,
+    acquire_return_is_nominal_handle,
+    closing_ops,
+    resource_in,
+    resource_taint,
+)
 from .parser import (
     _describe_expr,
+    AbortStmt,
     AdvanceStmt,
     AssertStmt,
     AssignStmt,
     AwaitStmt,
+    BreakStmt,
     CallStmt,
     ComponentDecl,
+    ContinueStmt,
     EffectStmt,
     EmitExpr,
     EmitStmt,
-    ExternDecl,
     FailStmt,
     ExprArrow,
     ExprBin,
     ExprBlockArm,
     ExprCall,
+    ExprEndorse,
     ExprField,
     ExprHole,
     ExprIf,
@@ -82,6 +111,8 @@ from .parser import (
     Interp,
     InterceptStmt,
     IsolateStmt,
+    LeaseAcquire,
+    LetApprovalStmt,
     LetEffect,
     LetPatternStmt,
     LetStmt,
@@ -90,7 +121,6 @@ from .parser import (
     Lit,
     Postfix,
     Program,
-    PropTestDecl,
     ProvideStmt,
     RecordPattern,
     ResidueStmt,
@@ -103,9 +133,70 @@ from .parser import (
     TypeDecl,
     UnloadStmt,
     WhileStmt,
+    LIST_TRANSFORMS,
+    desugar_list_transform,
 )
 
 IR_VERSION = 1
+
+# item 384: foreign-construct redirect table (name-resolver half).
+#
+# A large share of first-try authorship failures used a known-foreign idiom
+# that LEXES as an ordinary identifier — `and`/`or`/`not`, `True`/`False`,
+# `const`, `len(...)`, `print`, `throw` — and so fell through to the generic
+# G1 "`X` is not declared … declare it with `let`/`var`". That message
+# ACTIVELY MISLEADS: it tells the author to declare a variable when the real
+# fix is a different construct. This table implements syntax-2.0 §0/§10's
+# exclusion-diagnostic philosophy (already done for `null`/`class`/`switch`/
+# `let`-reassign) for the identifier-shaped holes: when an undeclared name is
+# a known foreign idiom, the resolver names the idiom and the revl spelling
+# instead of emitting G1.
+#
+# PRECISION: the redirect fires ONLY on an *undeclared* name. None of these
+# is a revl keyword, so an author who genuinely binds one (`let and = …`,
+# `fn len(...) { … }`) shadows the entry and never sees the redirect — the
+# resolver reaches this table only after `scope`/`callables` lookup has
+# already missed. So no valid revl program changes behaviour; only the
+# message on an already-failing program does. Each value is (message, hint).
+_FOREIGN_NAME_REDIRECTS = {
+    "and": ("`and` is not a revl operator",
+            "use `&&` for boolean conjunction (syntax-2.0 §3.2)"),
+    "or": ("`or` is not a revl operator",
+           "use `||` for boolean disjunction (syntax-2.0 §3.2)"),
+    "not": ("`not` is not a revl operator",
+            "use the prefix `!` for boolean negation (syntax-2.0 §3.2)"),
+    "True": ("revl booleans are lowercase",
+             "use `true`, not `True` (syntax-2.0 §3.2)"),
+    "False": ("revl booleans are lowercase",
+              "use `false`, not `False` (syntax-2.0 §3.2)"),
+    "const": ("revl has no `const`",
+              "use `let` (single-assignment) or `var` (mutable) (syntax-2.0 §3.5)"),
+    "len": ("revl has no `len(...)`",
+            "a list's length is `xs.length()` (docs/stdlib-2.0.md)"),
+    "print": ("revl has no `print`",
+              "pure code has no I/O — emit output through a service effect "
+              "(syntax-2.0 §4)"),
+    "throw": ("revl has no `throw`",
+              "a pure function returns a `Result`; a component activation body "
+              "signals failure with `fail` (syntax-2.0 §3.3, §4b.5)"),
+    "def": ("revl has no `def`",
+            "a function is declared with `fn` (syntax-2.0 §3.1)"),
+    "lambda": ("revl has no `lambda`",
+               "an anonymous function is an arrow `x => …` (syntax-2.0 §3.2)"),
+    "elif": ("revl has no `elif`",
+             "chain with `else if` (syntax-2.0 §3.2)"),
+}
+
+
+def _reject_foreign_name(name, filename, line):
+    """If `name` is a known foreign idiom that lexes as an identifier, raise
+    the specific redirect instead of the generic, misleading G1 (item 384).
+    Returns None (and the caller falls through to G1) for any other name."""
+    hit = _FOREIGN_NAME_REDIRECTS.get(name)
+    if hit is not None:
+        message, hint = hit
+        raise RevlError(filename, line, message, hint=hint)
+
 
 # finding 6: the specified stdlib surface (docs/stdlib-2.0.md). Method calls
 # on values must name one of these (arity-checked); everything else is a
@@ -114,7 +205,7 @@ IR_VERSION = 1
 # stub objects (open/close/query/execute/new/get/insert/remove/drop).
 _BUILTIN_METHODS = {
     "length": 0, "push": 1, "slice": 2, "charAt": 1,
-    "charCodeAt": 1, "indexOf": 1, "concat": 1,
+    "charCodeAt": 1, "codepoint_at": 1, "indexOf": 1, "concat": 1,
     "split": 1, "join": 1, "repeat": 1,
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
     # Str-only, one Str argument.
@@ -145,6 +236,24 @@ _BUILTIN_METHODS = {
     "size": 0, "keys": 0, "remove": 1,
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str).
     "to_str": 0,
+    # The Value dot-method accessors (roadmap item 189): receiver-first sugar
+    # for stdlib/value.rvl's `value_*` free functions. `.field(k)` takes one
+    # Str; `.str()`/`.list()`/`.keys()` take none (`keys` arity already set by
+    # the Map row above — the two share the name, disambiguated by the receiver
+    # type at lower time). Each is rewritten to a plain CALL of its `value_*`
+    # equivalent below (`_VALUE_ACCESSORS`), so it emits byte-identically to the
+    # nested free-function form and needs NO new IR expr-kind.
+    "field": 1, "str": 0, "list": 0,
+}
+
+# The Value dot-accessor method -> the `value_*` free function it desugars to
+# (roadmap item 189, stdlib/value.rvl). `node.field("k").str()` lowers to the
+# SAME call IR as `value_str(value_field(node, "k"))`, so it is pure sugar: the
+# emitted code is byte-identical on every tier value.rvl runs on, with zero
+# per-backend work (the existing call-rendering path handles all six tiers).
+_VALUE_ACCESSORS = {
+    "field": "value_field", "str": "value_str",
+    "list": "value_list", "keys": "value_keys",
 }
 
 # The disjointness this comment block promises is a *checked* claim, enforced
@@ -155,6 +264,55 @@ _BUILTIN_METHODS = {
 # the ONE sanctioned overlap (docs/stdlib-2.0.md §Map) — dispatch by receiver
 # kind is what makes it safe.
 _check_method_namespace_disjoint(_BUILTIN_METHODS, "_BUILTIN_METHODS")
+
+
+# item 246: a reserved key on the `types` table (like FNS_KEY/CASES_KEY) carrying
+# the declaration-owned approval facts so `_lower_emit_step` can consult them
+# without a signature change to `_lower_component`. `{"required": {cap, ...},
+# "externs": {name: entry}}`.
+APPROVAL_KEY = "__approval__"
+
+
+def _approval_index(externs: list) -> dict:
+    """The declaration-owned approval facts (item 246). `required` is the set of
+    capability tokens whose crossing needs a covering `with e` edge — a host
+    emission extern contributes its NAME (the token the G8 audit and the boundary
+    policy already use for it). `externs` indexes the lowered entries so a single
+    emit's crossed capabilities can be resolved at the crossing site."""
+    by_name = {e["name"]: e for e in externs}
+    required = {e["name"] for e in externs if e.get("requires_approval")}
+    return {"required": required, "externs": by_name}
+
+
+def _approval_covers(scope: str, token: str) -> bool:
+    """Whether an `Approval[scope]` covers a crossing of capability `token`:
+    `token` is within `scope`'s reach. Exact match, or a glob scope
+    (`prod.*`) matching the token (Decision 3, `C within C'`'s scope)."""
+    from fnmatch import fnmatchcase  # noqa: PLC0415 — stdlib, only on a crossing
+    return scope == token or fnmatchcase(token, scope)
+
+
+def _emit_crossed_caps(node: dict, env: "Env") -> list:
+    """The capability token(s) a single `emit <call>` crosses. A req-target
+    service emission contributes the method's `emission[...]` scope (or `*` when
+    bare); a direct host emission extern contributes its name (or its declared
+    scope). The same tokens the G8 boundary surface names, resolved for ONE
+    crossing so the approval obligation is per-crossing, not per-method."""
+    kind = node.get("kind")
+    target = node.get("target")
+    if kind == "call" and isinstance(target, dict) and target.get("kind") == "req":
+        service = env.requires.get(target.get("name"))
+        svc = env.services.get(service) if service else None
+        spec = svc.methods.get(node.get("method")) if svc is not None else None
+        caps = getattr(spec, "capabilities", None) if spec is not None else None
+        return list(caps) if caps else ["*"]
+    # a direct host-extern emission call: `{"kind": "fn", "name": <extern>}`.
+    if kind == "fn":
+        index = (env.types.get(APPROVAL_KEY) or {}).get("externs") or {}
+        entry = index.get(node.get("name"))
+        if entry is not None and entry.get("class") == "emission":
+            return list(entry.get("capabilities") or [node.get("name")])
+    return []
 
 
 # Integer division and modulo are undefined at zero, and every tier says so
@@ -294,8 +452,22 @@ def _key_binding(key: str) -> str:
 # A3: identifiers that must never appear verbatim in emitted code on either
 # host. Python keywords come from the keyword module; the rest is a curated
 # union of TS reserved words and backend-adapter names.
+#
+# item 406 (cross-tier consistency): every name the TS emitter reserves for its
+# own scaffolding (backends/typescript/emit.py `EMITTER_RESERVED` = ctx, config,
+# rawConfig, host, Context) is renamed HERE, at the tier-agnostic frontend, so a
+# user binding of one of them is made host-safe once and compiles uniformly on
+# every tier. `ctx`/`config` were always in this set; `rawConfig`/`host`/
+# `Context` were not, so a component/fn binding one of them (e.g. `let host = …`,
+# as selfhost/emit_java.rvl itself does) type-checked and ran on py/rust/java/go/
+# wasm but died LATE at TS emit with "collides with emitter scaffolding". They
+# are the cross-tier analogue of the py emitter's own reserved bare-names, made
+# to compile by item 160's aliasing rather than refused: a name that only a
+# backend's scaffolding claims is renamed, never rejected, because it is a
+# perfectly ordinary identifier the author is entitled to use.
 _HOST_RESERVED = {
     "ctx", "config", "frame", "fiber", "self",
+    "rawConfig", "host", "Context",
     "function", "var", "let", "const", "new", "class", "this", "typeof",
     "delete", "in", "of", "instanceof", "void", "export", "default",
     "require", "module", "exports", "import", "yield", "async", "await",
@@ -315,6 +487,17 @@ def _safe_name(name: str, taken: set[str]) -> str:
     return candidate
 
 
+# item 274: a minimal profile marker `navigate.is_untrusted` reads as the
+# untrusted-author view, so a body-level refusal can collapse its navigable map
+# without threading the whole `AdmissionProfile` down every lowering path. The
+# lowering layer only ever needs the one bit (`env.untrusted`).
+class _UntrustedProfile:
+    untrusted = True
+
+
+_UntrustedMark = _UntrustedProfile()
+
+
 class Env:
     def __init__(self, component: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                  types: dict | None = None):
@@ -322,6 +505,10 @@ class Env:
         self.services = services
         self.filename = filename
         self.types = types or {}
+        # item 274: whether this compile is under the untrusted-author profile, so
+        # a body-level navigable refusal (approval, ownership, ...) redacts its
+        # nearest-allowed map to the collapsed verdict. Set by `_lower_component`.
+        self.untrusted = False
         # names whose call reaches an irreversible host effect (set by
         # check_and_lower once externs/fns are lowered)
         self.emitting_fns: set = set()
@@ -354,6 +541,13 @@ class Env:
         # binding -> the qualified wiring key it resolves against; for an
         # unqualified requirement this is the binding itself (docs/namespacing.md)
         self.require_keys: dict[str, str] = dict()
+        # item 296: alias token carry-over. binding -> the consumer-facing
+        # capability tokens an emission crossing through this alias contributes
+        # (from the `carrying(...)` clause). Empty for every ordinary require,
+        # so emission attribution is byte-identical for programs that do not
+        # use the feature.
+        self.require_carry: dict[str, tuple[str, ...]] = dict()
+        _carry_src = getattr(component, "require_carry", None) or {}
         for key, svc, line in component.requires:
             if svc not in services:
                 raise RevlError(filename, line, f"unknown service `{svc}` in `requires` of {component.name}")
@@ -363,15 +557,23 @@ class Env:
             self.requires[binding] = svc
             self.require_keys[binding] = key
             self.type_env[f"req.{binding}"] = svc
+            carried = _carry_src.get(key) or _carry_src.get(binding)
+            if carried:
+                self.require_carry[binding] = tuple(carried)
         self.locals: dict[str, str] = {}  # surface name -> host-safe IR name (A3)
         self.params: dict[str, str] = {}
         self._taken: set[str] = set()
         # host provenance (docs/stdlib-2.0.md §Map): component locals bound to
-        # a host acquisition (`let store = effect Map.new()`). Their method
-        # calls belong to the host stub surface and stay verbatim — checked
-        # BEFORE the stdlib builtin table, so a value-type method that shares
-        # a spelling with a host verb (`remove`) cannot capture them.
-        self.host_locals: set[str] = set()
+        # a host acquisition (`let store = effect Map.new()`), mapping the
+        # host-safe IR name to the host family it belongs to (`Map`/`Pool`/
+        # `Job`). Their method calls belong to the host stub surface and stay
+        # verbatim — checked BEFORE the stdlib builtin table, so a value-type
+        # method that shares a spelling with a host verb (`remove`) cannot
+        # capture them, and checked AGAINST that family surface so an unknown
+        # verb (`store.frobnicate(k)`) is refused here rather than compiled as
+        # a pass-through that only fails at the host runtime (item 401, the
+        # item-84 crash shape).
+        self.host_locals: dict[str, str] = {}
 
     def bind_local(self, name: str, line: int) -> str:
         if name in self.locals or name in self.requires or name in self.params:
@@ -404,8 +606,136 @@ _BUILTIN_NONRECORD = {"Str", "Int", "Int32", "Bool", "Float", "Bytes", "Unit",
 
 # host roots a pure fn may call without an explicit binding (DESIGN §7 builtins)
 _HOST_CALLABLES = {"Map", "Pool", "Job"}
+
+# The host-Map iteration surface (items 84/86/88, docs/stdlib-2.0.md §Map).
+# `size`/`keys` are backed by EVERY tier's host Map runtime (py runtime.py
+# `Map.size`/`Map.keys`, ts `MapHandle.size`/`keys`, and their go/rust/java
+# mirrors), so they are legal verbs on a host-provenance local — but they
+# share a spelling with the VALUE-Map builtins and so live in
+# `_BUILTIN_METHODS`, not `_HOST_ARG_SIG` (whose names must stay disjoint from
+# the builtin table — the disjointness check at import time enforces it). On a
+# host local they dispatch as host verbs (a plain `call` node, selected by
+# receiver kind), the same dual dispatch the sanctioned `remove` overlap rides.
+# Kept beside `_HOST_CALLABLES` so the host-Map surface — `_HOST_FAMILIES`'s
+# `Map` row plus this — is enumerable in one place; maps verb -> arity.
+_HOST_MAP_ITER_VERBS: dict[str, int] = {"size": 0, "keys": 0}
+
+
+def _host_result_type(acquire: dict, env: "Env") -> str | None:
+    """The declared RESULT type of a result-declared host verb call on a host
+    local, or `None` when `acquire` is not such a call (item 397).
+
+    The host frontier types arguments and deliberately not results, except for
+    the one-verb-wide result column `_HOST_RESULT_SIG` (today: `Map.
+    insert_if_absent -> Bool`). A lowered host-verb call is
+    `{"kind": "call", "target": {"kind": "name", "id": <safe>}, "method": ...}`
+    where the target names a host local (its family lives in `env.host_locals`).
+    This is the compare-and-set (CAS) shape whose Bool the program consumes with
+    a pure `if` — the classification is a host verb in the effect stratum,
+    spelled as an acquisition, whose let-effect binding is TYPED
+    (docs/design/397-insert-if-absent.md §Classification)."""
+    if not isinstance(acquire, dict) or acquire.get("kind") != "call":
+        return None
+    target = acquire.get("target")
+    if not isinstance(target, dict) or target.get("kind") != "name":
+        return None
+    family = env.host_locals.get(target.get("id"))
+    if family is None:
+        return None
+    return _HOST_RESULT_SIG.get(f"{family}.{acquire.get('method')}")
+
+
+def _check_host_verb(family: str, verb: str, argc: int,
+                     filename: str | None, line: int) -> None:
+    """Admit a verb call on a host-provenance local (item 401).
+
+    The known surface is the family's stub verbs (`_HOST_FAMILIES`, derived
+    from `_HOST_ARG_SIG`) plus, for a host Map, the iteration verbs
+    (`_HOST_MAP_ITER_VERBS`). A verb in neither is refused with the same named
+    HOST-METHOD diagnostic the constructor-tracked receiver path uses, naming
+    the FULL surface — so a typo or a value-Map method wrongly aimed at a host
+    Map (`store.lookup(k)`, which no host runtime backs) is a compile error
+    here rather than an unchecked pass-through that only crashes at the host
+    runtime (the item-84 shape).
+
+    Only the VERB NAME and ARITY are checked, never the argument TYPES: a host
+    Map's key and value are generically typed on the tiers that genericized it
+    (`Map[V]`; items 113/176), the checker's `["Str","Str"]` row is the known
+    frontier/emitter disagreement the host boundary already carries opaquely
+    (`_HOST_ARG_SIG` header; docs/design/397-insert-if-absent.md), and the
+    pre-item-401 pass-through type-checked nothing here. Enforcing the row's
+    `Str` would reject valid programs (`m.insert(k, double(v))` with a non-Str
+    value/key), which is a separate frontier decision, not item 401's.
+    """
+    family_surface = _HOST_FAMILIES.get(family, {})
+    iter_verbs = _HOST_MAP_ITER_VERBS if family == "Map" else {}
+    if verb in family_surface:
+        arity = len(family_surface[verb])
+    elif verb in iter_verbs:
+        arity = iter_verbs[verb]
+    else:
+        if filename:
+            surface = ", ".join(sorted(set(family_surface) | set(iter_verbs)))
+            raise RevlError(
+                filename, line,
+                f"`{family}` has no method `{verb}` (its surface: {surface})",
+                hint="host objects are checked against the stub surface spelled "
+                     "in docs/stdlib-2.0.md — a misspelled method compiles on "
+                     "every tier and only fails at the host runtime",
+                code="HOST-METHOD", category="host-boundary")
+        return
+    if filename and argc != arity:
+        raise RevlError(
+            filename, line,
+            f"host `{family}.{verb}` takes {arity} argument"
+            f"{'' if arity == 1 else 's'}, got {argc}",
+            hint=f"the signature is `.{verb}("
+                 f"{', '.join(family_surface.get(verb, [])) if verb in family_surface else ''})`",
+            code="HOST-ARITY", category="host-boundary")
+
+
+# item 395 / Stage 5 gate of docs/design/378-sync-extern-service-reach.md: the
+# backend tiers whose emitter HAS the extern config-injection seam (binds
+# `_revl_config` in the extern body from the plug-time composition config map).
+# Item 378 landed option (b) py-ONLY; Stage 5 grew the seam to ts/go/java/rust,
+# each emitting a module-global config map + a fail-loud lookup that mirrors the
+# py `_REVL_EXTERN_CONFIG` / `_revl_extern_config` shape. wasm stays OUT: its
+# extern body is raw WAT and its only config channel is a scalar-only, spawn-
+# time runtime import, with no plug-time config dict to bind (see the design's
+# Stage 5 note and backends/wasm/emit.py config refusal). A config extern that
+# carries a host body for a tier NOT in this set is refused at compile
+# (`_lower_externs`), because that tier would emit the body with `_revl_config`
+# unbound: a late, mis-attributed failure. The key is the @-body spelling
+# (`py`/`ts`/`go`/`java`/`rs`).
+_CONFIG_INJECTION_TIERS = {"py", "ts", "go", "java", "rs"}
+# item 396 option B: the tiers on which a host-module `ref` is native (py, ts).
+# Imported from `hostref` so the compile-time gate and the resolver agree; a ref
+# on go/rust/java/wasm is refused in `_lower_externs`.
+from .hostref import EXTERN_REF_TIERS as _EXTERN_REF_TIERS  # noqa: E402
 # Opt/Result constructors, recognized so `Some(x)`/`Ok(r)` resolve (syntax-2.0 §2)
 _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
+# taint declassifier operators (roadmap item 249, Decision 3.2): `endorse(v)` is
+# the audited downgrade of an `Untrusted[T]` to a `Trusted[T]`. It is recognized
+# as a callable so it lowers through the ordinary call machinery; it is identity
+# on its argument's base type (typed and unwrapped as such), so after the taint
+# verdict runs it is spliced out of the IR and no emitter ever sees it.
+_DECLASSIFY_BUILTINS = {"endorse"}
+
+
+def _endorse_node(inner: dict, expr: "ExprEndorse", approval: dict | None) -> dict:
+    """Build the IR node for a scoped `endorse[<origin>](v, reason=...)` (item
+    249, Slice C). It keeps the SAME `call`-to-`endorse` shape Slice A produced —
+    so base typing (identity on the argument), the callable resolution, and the
+    post-verdict splice are all unchanged — and rides an additive `endorse`
+    metadata dict the taint checker reads: the declared origin it downgrades, its
+    mandatory reason, its source line, and any `with` approval edge. The whole
+    node splices out before any emitter sees it, metadata and all."""
+    meta: dict = {"origin": expr.origin, "reason": expr.reason,
+                  "line": expr.line}
+    if approval is not None:
+        meta["approval"] = approval
+    return {"kind": "call", "callee": {"kind": "var", "name": "endorse"},
+            "args": [inner], "endorse": meta}
 
 
 # Builtin heads a `type X = Y` right-hand side may name. `Any`/`Never` are the
@@ -650,9 +980,43 @@ def _validate_declared_types(program: Program, filename: str) -> None:
             check_type_wellformed(filename, field.line, field.type)
         for case in decl.cases:
             check_type_wellformed(filename, case.line, case.payload)
-    for comp in program.components:
-        for cfg in comp.config:
+    # item 378: a config value is injected as static data at plug/spawn/load
+    # time, so a config field's declared type must be built, transitively, out of
+    # data, never an arrow type (a live callable) or a `service` (a capability).
+    # Resolve nominal record/ADT/alias heads through a lightweight type-table and
+    # the set of declared service names. A duplicate type/field is reported by the
+    # dedicated lowering pass; `setdefault` here just avoids raising twice.
+    service_names = {svc.name for svc in program.services}
+    config_type_defs: dict[str, dict] = {}
+    for decl in program.type_decls:
+        if decl.fields:
+            config_type_defs.setdefault(
+                decl.name,
+                {"kind": "record",
+                 "fields": {f.name: f.type for f in decl.fields}})
+        else:
+            config_type_defs.setdefault(
+                decl.name,
+                {"kind": "variant",
+                 "cases": [{"name": c.name, "payload": c.payload}
+                           for c in decl.cases]})
+
+    def _check_config(owner: str, fields) -> None:
+        for cfg in fields:
             check_type_wellformed(filename, cfg.line, cfg.type)
+            check_config_field_is_data(
+                filename, cfg.line, cfg.name, owner, cfg.type,
+                service_names=service_names, type_defs=config_type_defs)
+
+    for comp in program.components:
+        _check_config(f"component `{comp.name}`", comp.config)
+    # item 379: an extern's typed config schema was NEVER wellformed-checked, so
+    # `extern pure fn thing(x) config { handler: (Str) -> Str }` compiled and its
+    # body could invoke the injected callable past every authority fold. Check it
+    # at the same data-only bar as a component's config.
+    for ext in program.externs:
+        if ext.config:
+            _check_config(f"extern `{ext.name}`", ext.config)
 
 
 def _lower_type_decls(program: Program, filename: str) -> dict:
@@ -808,6 +1172,25 @@ def _has_return(stmts) -> bool:
     return False
 
 
+def _loop_has_targeting_break(stmts) -> bool:
+    """True when a bare `break` in `stmts` targets the loop these statements are
+    the body of — i.e. a `break` at any statement depth that is not itself
+    inside a nested `while`/`for` (a nested loop captures its own `break`). With
+    only unlabeled `break`, "targets this loop" is exactly "not shadowed by a
+    nearer loop" (JLS 14.21's reachability rule for the same conservative
+    analysis, docs/design/379-break-continue.md)."""
+    for stmt in stmts:
+        if isinstance(stmt, BreakStmt):
+            return True
+        if isinstance(stmt, IfStmt):
+            if (_loop_has_targeting_break(stmt.then)
+                    or _loop_has_targeting_break(stmt.otherwise or [])):
+                return True
+        # a nested while/for is NOT descended: a `break` inside it targets that
+        # inner loop, not this one.
+    return False
+
+
 def _definitely_returns(stmts) -> bool:
     """True when control cannot reach the end of `stmts` without returning.
 
@@ -818,8 +1201,12 @@ def _definitely_returns(stmts) -> bool:
     - an `if` terminates only when it has an `else` *and* both arms terminate
       (a bare `if` may be skipped);
     - `for` and a conditional `while` may run zero times, so neither terminates;
-    - `while (true)` diverges (there is no `break` in the grammar), so nothing
-      after it is reachable — Java and Rust agree, and no tier needs a value.
+    - `while (true)` diverges — and so terminates the path — *iff* its body has
+      no reachable `break` that targets it (item 379,
+      docs/design/379-break-continue.md). A `while (true)` with a reachable
+      `break` may leave the loop and fall through, so it does NOT terminate;
+      one with no such `break` never exits, exactly as Java (JLS 14.21) and Rust
+      (`loop {}` : `!`) judge it, and no tier needs a fallthrough value.
     """
     for stmt in stmts:
         if isinstance(stmt, ReturnStmt):
@@ -830,7 +1217,8 @@ def _definitely_returns(stmts) -> bool:
                     and _definitely_returns(stmt.otherwise)):
                 return True
         elif isinstance(stmt, WhileStmt):
-            if isinstance(stmt.cond, ExprLit) and stmt.cond.value is True:
+            if (isinstance(stmt.cond, ExprLit) and stmt.cond.value is True
+                    and not _loop_has_targeting_break(stmt.body)):
                 return True
     return False
 
@@ -872,22 +1260,69 @@ def _check_returns_on_every_path(decl: FnDecl, filename: str) -> None:
     )
 
 
+def _same_file_two_copies(a: str, b: str) -> bool:
+    """True when `a` and `b` are distinct paths to a byte-identical file with
+    the same basename — the "two copies of one module" case (roadmap 394)."""
+    if os.path.basename(a) != os.path.basename(b):
+        return False
+    if os.path.abspath(a) == os.path.abspath(b):
+        return False
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
+
+
+def _duplicate_symbol_message(kind: str, name: str,
+                              first_file: str, second_file: str) -> str:
+    """A duplicate-symbol message that names BOTH declaring files by absolute
+    path (roadmap 394, revl-harness F-H39.3).
+
+    The two files that declare `name` are frequently the same module reached
+    under two `use` spellings — a search-path spelling (`use "stdlib/str.rvl"`)
+    and a vendored byte-identical copy (`use "../../stdlib/str.rvl"`). Naming
+    only one path reads as a bug in revl's own stdlib; naming both — and, when
+    they are byte-identical copies of one file, saying so — makes "you have two
+    copies of the same module" self-evident.
+    """
+    a = os.path.abspath(first_file)
+    b = os.path.abspath(second_file)
+    msg = (f"duplicate {kind} `{name}` — declared in both\n"
+           f"    {a}\n"
+           f"  and\n"
+           f"    {b}")
+    if _same_file_two_copies(a, b):
+        msg += ("\n  these are byte-identical copies of the same file under two "
+                "paths: you have two copies of one module (often a vendored "
+                "copy reached under two `use` spellings) — delete one copy, or "
+                "`use` a single shared path so it loads as one module")
+    return msg
+
+
 def _lower_fns(program: Program, filename: str, types: dict | None = None) -> list:
     _check_verified_totality(program, filename)
     types = types or {}
     default_callables = (
         _HOST_CALLABLES
         | _BUILTIN_CONSTRUCTORS
+        | _DECLASSIFY_BUILTINS
         | {fn.name for fn in program.fn_decls}
         | {ext.name for ext in program.externs}
     )
     fns: list[dict] = []
-    seen: set[str] = set()
+    # name -> the file that first declared it, so a duplicate names BOTH files
+    # (roadmap 394): a same-named fn reached under two `use` spellings loads as
+    # two modules, and the diagnostic must show both resolved paths.
+    seen: dict[str, str] = {}
     # Install the block-arm lift sink for the duration of fn-body lowering: a
     # statement-block match arm is lambda-lifted into a synthetic helper fn
     # (`_lift_block_arm`) collected here, then appended to `fns` below. `taken`
     # seeds the fresh-name search so a helper never shadows a user fn/extern.
-    sink = types.setdefault(LIFT_SINK, {
+    # setdefault installs the sink into `types` for the duration of fn-body
+    # lowering (drained below); `_lift_block_arm` reads it back via
+    # `types.get(LIFT_SINK)`, so the return value is not needed here.
+    types.setdefault(LIFT_SINK, {
         "fns": [],
         "n": 0,
         "taken": ({fn.name for fn in program.fn_decls}
@@ -899,8 +1334,18 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         # its diagnostics must name that file, not paths[0] (roadmap 312).
         decl_file = decl.source or filename
         if decl.name in seen:
-            raise RevlError(decl_file, decl.line, f"duplicate function `{decl.name}`")
-        seen.add(decl.name)
+            first_file = seen[decl.name]
+            if os.path.abspath(first_file) == os.path.abspath(decl_file):
+                # two fns of one name in ONE file: the terse message already
+                # points at the sole file, so keep it byte-identical (roadmap
+                # 394 only widens the CROSS-FILE case).
+                raise RevlError(decl_file, decl.line,
+                                f"duplicate function `{decl.name}`")
+            raise RevlError(
+                decl_file, decl.line,
+                _duplicate_symbol_message("function", decl.name,
+                                          first_file, decl_file))
+        seen[decl.name] = decl_file
         # the body sees the *marked* signature: this fn's own type parameters
         # are wildcards inside it (they are universally quantified there), while
         # a one-letter nominal type stays checked
@@ -916,7 +1361,7 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
             scope[param.name] = False
             type_env[param.name] = marked
         module_callables = program.fn_scopes.get(id(decl), default_callables)
-        callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | set(module_callables) | {ext.name for ext in program.externs}
+        callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS | set(module_callables) | {ext.name for ext in program.externs}
         alias_fns = program.fn_alias_scopes.get(id(decl), {})
         body: list[dict] = []
         for stmt in decl.body:
@@ -939,6 +1384,12 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         }
         if decl.verified:
             entry["verified"] = True
+        # item 310: a `cache pure` fn memoizes on its structural args digest. The
+        # metadata rides the IR (validated in `_check_cache_declarations` — only
+        # `cache pure`, crossing-free, survives to here). Absent unless declared,
+        # so every existing fn's IR is byte-identical.
+        if getattr(decl, "cache", None) is not None:
+            entry["cache"] = _cache_ir(decl.cache)
         if decl.source:
             _retarget_holes(entry["body"], decl.source)
         fns.append(entry)
@@ -974,12 +1425,47 @@ def _signature_table(program: Program, types: dict | None = None) -> dict:
             program.filename, decl.line)
         tparams = collect_tparams(raw_params + [decl.returns], declared,
                                   explicit=explicit)
+        # default-value expressions (roadmap item 187), aligned with `params`.
+        # `None` for a parameter without a default; the ordering invariant
+        # (defaults are trailing) is enforced in the parser, so `required` is
+        # simply the count of leading non-defaulted parameters. Externs never
+        # carry defaults (`FnParam.default` stays `None` there), so this is a
+        # no-op for the extern half of the table.
+        defaults = [getattr(p, "default", None) for p in decl.params]
+        required = next((i for i, d in enumerate(defaults) if d is not None),
+                        len(defaults))
         sigs[decl.name] = {
             "params": [mark_tparams(t, tparams) for t in raw_params],
             "returns": mark_tparams(decl.returns, tparams),
             "tparams": tparams,
+            "defaults": defaults,
+            "required": required,
         }
     return sigs
+
+
+def _with_default_args(callee_name: str, given: list, types: dict, lower_one):
+    """Append default-value IR for omitted trailing parameters (item 187).
+
+    Call-site resolution: the emitters only ever see a fully-supplied argument
+    list, so no tier needs default-parameter machinery. `given` is the
+    already-lowered actual arguments; `lower_one` lowers one default
+    *expression* AST to IR in the caller's context (a default is a pure
+    expression that closes over nothing, so the caller's scope is immaterial).
+    A signature with no defaults, or a call that supplies every argument,
+    returns `given` unchanged — byte-identical to before item 187."""
+    sig = (types.get(FNS_KEY) or {}).get(callee_name)
+    if not sig:
+        return given
+    defaults = sig.get("defaults") or []
+    if len(given) >= len(defaults):
+        return given
+    out = list(given)
+    for d in defaults[len(given):]:
+        # `d` is non-None here: the arity check admitted this call only because
+        # every omitted trailing parameter carries a default.
+        out.append(lower_one(d))
+    return out
 
 
 def _case_table(types: dict) -> dict:
@@ -1038,6 +1524,36 @@ def _expr_static_type(expr, type_env: dict, types: dict) -> str | None:
     """
     # delegated to the bidirectional checker's inference (non-raising form)
     return infer_ast(expr, type_env, types)
+
+
+def _field_declared_type(target_type: str | None, field_name: str,
+                         types: dict) -> str | None:
+    """The DECLARED type of ``target_type.field_name`` when the target resolves
+    to a record (structural or nominal), else ``None``.
+
+    Used to decide whether a field read is TOTAL: a field whose declared type is
+    ``Opt[T]`` reads back the empty Opt on absence rather than raising, so the
+    designed spelling `e.kind ?? default` means the same on every tier (item
+    380). A structural literal record binding is checked first (item 71 keeps
+    those field-checkable), then the nominal record table.
+    """
+    if not target_type:
+        return None
+    struct = structural_fields(target_type)
+    if struct is not None:
+        return struct.get(field_name)
+    head, _ = parse_type(target_type)
+    spec = types.get(head or "")
+    if spec is not None and spec.get("kind") == "record":
+        return (spec.get("fields") or {}).get(field_name)
+    return None
+
+
+def _field_is_opt(target_type: str | None, field_name: str, types: dict) -> bool:
+    """Whether ``target_type.field_name`` is declared ``Opt[...]`` — the trigger
+    for a TOTAL field read (item 380)."""
+    declared = _field_declared_type(target_type, field_name, types)
+    return bool(declared) and parse_type(declared)[0] == "Opt"
 
 
 def _type_arg(type_name: str | None, base: str) -> str | None:
@@ -1521,6 +2037,83 @@ def _check_deferred_extern(decl, filename: str) -> None:
             code="G4", category="deferred")
 
 
+def _check_poly_extern(decl, filename: str) -> None:
+    """The `fn|async` (caller-decided colour) checker obligations
+    (docs/design/388-caller-decided-extern-colour.md, option a, stages 2 and 7).
+
+    A poly extern is one authored host body whose colour is decided at the CALL
+    SITE — a sync call site clones it to a `def`/`function`, an async call site
+    to an `async def`/`async function`. That is sound only for a colour-agnostic
+    (await-free) body, which the compiler cannot verify inside opaque host text
+    (G8, item 24; the body is not sandboxed, docs/design/329-untrusted-author-
+    profile.md). So these are the honest-by-review envelope plus one cheap lint:
+
+    1. `fn|async` only on an `emission`. The colour it wears is the async/sync
+       emission colour; `pure`/`acquire`/`witnessed` have no async story (they
+       run on pure or synchronous teardown paths), exactly as a fixed `async`
+       extern is emission-only (lower.py async-validity block).
+    2. `fn|async` and a fixed `async` are mutually exclusive. A fixed `async`
+       already picks the colour, so pairing it with the "either colour" marker is
+       contradictory.
+    3. `fn|async` and `deferred` are mutually exclusive. A deferred emission
+       returns Unit at the call and fires later, so there is no call-site colour
+       to decide (the same reason `deferred` and `async` are exclusive).
+    4. A poly extern cannot declare `compensate`, exactly as a fixed `async`
+       extern cannot (the compensation seam is synchronous on every tier).
+    5. The `await`-keyword lint: refuse a `fn|async` `@py`/`@ts` body whose text
+       contains the tier's suspend keyword (`await`). A colour-agnostic body
+       cannot suspend, so its sync clone would be invalid host code (an `await`
+       outside an `async def` is a Python SyntaxError). Stated honestly as a LINT,
+       not a proof: a body can suspend without the keyword (an event-loop
+       `run_until_complete`), and the keyword can appear inside a string literal.
+    """
+    if decl.classification != "emission":
+        raise RevlError(
+            filename, decl.line,
+            f"`fn|async` (caller-decided colour) is only valid on an `emission` "
+            f"extern; `{decl.name}` is `{decl.classification}`",
+            hint="the marker chooses the sync-vs-async EMISSION colour at the call "
+                 "site; a `pure` extern is callable from pure positions with no "
+                 "async story, and an `acquire`/`witnessed` extern runs on the "
+                 "synchronous teardown path (docs/design/388-caller-decided-"
+                 "extern-colour.md)")
+    if decl.async_:
+        raise RevlError(
+            filename, decl.line,
+            f"extern `{decl.name}` is both `async` and `fn|async` — a fixed "
+            f"`async` already picks the colour",
+            hint="drop the `async` modifier to let the call site decide the "
+                 "colour, or drop `|async` to fix it async (item 388)")
+    if decl.deferred:
+        raise RevlError(
+            filename, decl.line,
+            f"a `fn|async` emission cannot be `deferred`; `{decl.name}` is both",
+            hint="a deferred emission returns Unit at the call and fires at the "
+                 "session commit, so there is no call-site colour to decide "
+                 "(item 388)")
+    if decl.compensate is not None:
+        raise RevlError(
+            filename, decl.line,
+            f"a `fn|async` emission cannot declare `compensate`; `{decl.name}` "
+            f"declares both",
+            hint="the compensation seam is synchronous on every tier, exactly as "
+                 "for a fixed `async` extern (item 388)")
+    for body in decl.bodies:
+        # word-boundary match so `await` the keyword is caught while an
+        # identifier like `awaited_result` or `no_await` is not.
+        if re.search(r"\bawait\b", body.text):
+            raise RevlError(
+                filename, body.line,
+                f"the `fn|async` extern `{decl.name}` has an `@{body.backend}` "
+                f"body containing `await`, but a caller-decided-colour body must "
+                f"be colour-agnostic (await-free)",
+                hint="a `fn|async` body is cloned into a sync `def`/`function` at "
+                     "sync call sites, where an `await` is invalid — author the "
+                     "suspending work as a fixed `async` extern instead, or (once "
+                     "item 373 lands) share only the await-free span through a "
+                     "host-body fragment (item 388)")
+
+
 def _check_deferred_not_in_teardown(program, filename: str) -> None:
     """Rule: deferred emissions are refused in teardown positions — the `undo`
     and `compensate` slots (docs/design/245-session-commit.md, Decision 2).
@@ -1557,7 +2150,8 @@ def _check_deferred_not_in_teardown(program, filename: str) -> None:
             _scan(decl.compensate, decl.name, "compensate")
 
 
-def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
+def _check_witnessed_inverse(decl, extern_class: dict, emitting_fns: set,
+                             emitting_witness: dict, filename: str) -> None:
     """Rule 3 (docs/design/243-witnessed-externs.md): a witnessed extern's
     declared inverse must be classified **non-emission AND non-witnessed**.
 
@@ -1571,7 +2165,19 @@ def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
     `mode="undo"` machinery only checks the callee is *declared*), so this walk
     is the explicit close: every extern a witnessed `undo` calls is held to the
     rule, which also fences the latent acquire hole the same expression opens.
-    """
+
+    The extern-name check alone was an escape (the 330->329-transitive shape on
+    the teardown path): a callee that is a plain top-level `fn` is not in
+    `extern_class`, so it passed, yet a `fn` body may itself reach an emission
+    (a legal emitting fn), so the emission still fires on abort, invisible to
+    every fold and the approval gate. `emitting_fns` is the emission-reach fixed
+    point over the fn call graph (emission_analysis.py): a fn is in it iff its
+    call transitively reaches an `emission`/`witnessed` extern. Refusing a
+    callee found there follows fn calls transitively, so a fn-wrapped emission in
+    an inverse is refused exactly like a direct one. `compensate` is walked
+    alongside `undo` so the same escape cannot open on that slot when a backend
+    wires it. A pure/local fn (no emission reach) is in neither table and still
+    passes."""
     from .parser import ExprCall, ExprVar
 
     def _walk(e):
@@ -1595,6 +2201,30 @@ def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
                              f"(docs/design/243-witnessed-externs.md)",
                         code="G5", category="witnessed",
                     )
+                if bad is None and name in emitting_fns:
+                    # a plain top-level `fn` whose body transitively reaches an
+                    # emission: the same boundary crossing as a direct emission
+                    # inverse, one `fn` indirection later. Name the reached
+                    # boundary and the fn path so the author reads the derivation.
+                    chain = _emission_chain(name, emitting_witness)
+                    reached = chain[-1]
+                    term = extern_class.get(reached)
+                    kind = ("an emission" if term == "emission"
+                            else "itself witnessed")
+                    path = " -> ".join(chain)
+                    raise RevlError(
+                        filename, e.line,
+                        f"the inverse of witnessed extern `{decl.name}` calls "
+                        f"`{name}`, a fn that reaches {kind} `{reached}` "
+                        f"(through {path}), so a witnessed inverse must be a "
+                        f"host-local restore (G5)",
+                        hint="emissions are one-way boundary crossings and may "
+                             "not run in teardown, even through a fn wrapper "
+                             "(G5); declare the inverse `pure` or `acquire`, or "
+                             "route no emission through it "
+                             "(docs/design/243-witnessed-externs.md)",
+                        code="G5", category="witnessed",
+                    )
             for a in e.args:
                 _walk(a)
             return
@@ -1608,6 +2238,45 @@ def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
                         _walk(x)
 
     _walk(decl.undo)
+    if decl.compensate is not None:
+        _walk(decl.compensate)
+
+
+# item 309: the idempotency register partial order (design §2, §"question 4").
+# `declared` (a trust-me claim) is the floor; `keyed` (dedup-by-construction on a
+# named key) and `shape-proven` (a statically-checked restore-to-recorded-value
+# native body) are the two STRONG peers, either satisfying a strong floor. The
+# 290 `requires register <level>` and 309 `requires idempotent-teardown(strength)`
+# policies read this order.
+# `strong` is a policy FLOOR level only (never an actual IR register): it means
+# "any strong register", so it ranks with the two strong peers at 1.
+_REGISTER_RANK = {"declared": 0, "keyed": 1, "shape-proven": 1, "strong": 1}
+
+
+def _idempotent_register(decl) -> str:
+    """The honesty register for `decl`'s idempotency claim (design §2).
+
+    A keyed emission is dedup-safe BY CONSTRUCTION (`keyed`). A native inverse in
+    restore-to-recorded-value form would be `shape-proven`, but that check needs
+    244's revl-expressed bodies — TODO(309-slice4): detect the shape and upgrade
+    an `undo idempotent` native body to `shape-proven`. Every other claim (a bare
+    `idempotent` emission, an `undo idempotent` over a host body) is the author's
+    `declared` claim, machine-checked only for shape."""
+    if decl.idempotency_key is not None:
+        return "keyed"
+    return "declared"
+
+
+def _register_satisfies(actual: str | None, floor: str) -> bool:
+    """True when the register `actual` meets or exceeds the policy `floor` under
+    309's PARTIAL order. `None` (no idempotency claim) never satisfies a floor.
+    `keyed` and `shape-proven` are peers: either satisfies a strong floor, and
+    neither satisfies the other only if the floor names the specific peer — which
+    the strength grammar never does (it names `declared`/`keyed`/`shape-proven`
+    as a MINIMUM rank, so the two strong forms are interchangeable at rank 1)."""
+    if actual is None:
+        return False
+    return _REGISTER_RANK.get(actual, -1) >= _REGISTER_RANK.get(floor, 0)
 
 
 def _witnessed_extern_names(program: Program) -> set[str]:
@@ -1664,28 +2333,265 @@ def _refuse_witnessed_outside_effect_position(program: Program, filename: str) -
             _walk(stmt, f"the body of test `{test.name}`")
 
 
-def _lower_externs(program: Program, filename: str, types: dict) -> list:
+def _refuse_teardown_bound_externs_in_fn_body(program: Program, filename: str) -> None:
+    """Items 399 and 400: the acquire-with-`undo` and `deferred`-emission twins
+    of the witnessed rule-1 refusal above. Each carries effect machinery that
+    exists only in effect position, so a bare call from a plain `fn`/`test` body
+    would silently drop it:
+
+    * item 399: an `acquire` extern that declares an `undo` has no teardown
+      accumulator to auto-register that `undo` in a fn/test body, so the teardown
+      is dropped on every path and the acquisition is silently irreversible.
+    * item 400: a `deferred` emission has no session commit in a fn/test body to
+      defer to, so it fires immediately (once per loop iteration), bypassing the
+      commit queue that `deferred` exists to feed (item 245: deferred emissions
+      fire at commit, an abort drops the queue).
+
+    An `acquire` with NO `undo`, and a non-deferred emission, are unaffected;
+    both stay callable from a fn/test body. Checked over the author's AST, beside
+    the witnessed refusal, where the call site still has a line."""
+    from .parser import ExprCall, ExprVar
+
+    acquire_undo = {
+        ext.name for ext in program.externs
+        if ext.classification == "acquire" and ext.undo is not None}
+    deferred = {ext.name for ext in program.externs if ext.deferred}
+    if not acquire_undo and not deferred:
+        return
+
+    def _walk(node, where: str):
+        if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
+            name = node.callee.name
+            if name in acquire_undo:
+                raise RevlError(
+                    filename, node.line,
+                    f"`acquire` extern `{name}` cannot be called in {where}; its "
+                    f"declared `undo` teardown would be dropped, leaving the "
+                    f"acquisition irreversible (G4)",
+                    hint="an `acquire` extern's `undo` is auto-registered by the "
+                         "teardown accumulator, which exists only in a component "
+                         "activation or provide-method body; call it from there so "
+                         "the teardown can run (docs/design/243-witnessed-"
+                         "externs.md)",
+                    code="G4", category="acquire",
+                )
+            if name in deferred:
+                raise RevlError(
+                    filename, node.line,
+                    f"`deferred` emission extern `{name}` cannot be called in "
+                    f"{where}; a fn/test body has no session commit for the "
+                    f"deferral to fire at (G4)",
+                    hint="a deferred emission enqueues onto the session deferral "
+                         "queue and fires at commit; that queue exists only inside "
+                         "a component activation or provide-method body, so call it "
+                         "from there (docs/design/245-session-commit.md)",
+                    code="G4", category="deferred",
+                )
+        if hasattr(node, "__dataclass_fields__"):
+            for f in type(node).__dataclass_fields__:
+                _walk(getattr(node, f), where)
+        elif isinstance(node, (list, tuple)):
+            for x in node:
+                _walk(x, where)
+
+    for fn in program.fn_decls:
+        for stmt in fn.body:
+            _walk(stmt, f"the body of fn `{fn.name}`")
+    for test in program.tests:
+        for stmt in test.body:
+            _walk(stmt, f"the body of test `{test.name}`")
+
+
+def _validated_response_schema(name: str, returns: str | None, is_emission: bool,
+                               types: dict, filename: str, line: int,
+                               kind_word: str) -> dict:
+    """Item 257 (§2, §3): check a `validated` emission and derive its boundary
+    schema, refusing at COMPILE TIME when the response type is not fully
+    expressible.
+
+    Two surface rules (the same place the sibling modifier-validity rules live):
+    `validated` is EMISSION-ONLY (a `pure`/`acquire`/`witnessed` classification
+    has no response to validate at a one-way boundary), and a validated emission
+    must declare a NON-`Unit` return type (there is nothing to validate
+    otherwise). Then the return type must be `fully_expressible` (§3.3), derived
+    on the QUALIFIER-STRIPPED type (§3.1, HIGH-2) so the secure default spelling
+    `-> Untrusted[AgentTurn] validated` derives the same union as
+    `-> AgentTurn validated`. `extract_and_normalize` already strips the
+    qualifier in place before lowering; `strip_qualifiers` here is idempotent and
+    makes the derivation self-documenting and order-robust.
+    """
+    if not is_emission:
+        raise RevlError(
+            filename, line,
+            f"`validated` {kind_word} `{name}` is not an emission",
+            hint="`validated` opts a boundary crossing into response validation, "
+                 "so it is emission-only: a pure/acquire/witnessed classification "
+                 "has no one-way response to validate "
+                 "(docs/design/257-typed-model-boundary.md, §2)",
+            code="G4", category="validated")
+    stripped = strip_qualifiers(returns)
+    if not stripped or stripped == "Unit":
+        raise RevlError(
+            filename, line,
+            f"`validated` emission `{name}` must declare a non-`Unit` return type",
+            hint="a validated emission validates its RESPONSE against a schema "
+                 "derived from the return type; a `Unit` (or absent) return has "
+                 "nothing to validate (§2)",
+            code="G4", category="validated")
+    if not fully_expressible(stripped, types):
+        reason = expressibility_reason(stripped, types) or "is not expressible"
+        raise RevlError(
+            filename, line,
+            f"`validated` emission `{name}` has response type `{stripped}`, which "
+            f"{reason}",
+            hint="a validating boundary refuses a response type it cannot derive an "
+                 "EXACT schema for (an unconstrained or ambiguous schema validates "
+                 "nothing while reading as safe). Refuse it at compile time rather "
+                 "than ship a vacuous guarantee "
+                 "(docs/design/257-typed-model-boundary.md, §3.3)",
+            code="G4", category="validated")
+    schema = json_schema_for(stripped, types, validated=True)
+    # Defense in depth (§3.3): the `fully_expressible` predicate already accepted
+    # this type, so the renderer must leave no unconstrained `x-revlType` stub. A
+    # firing here means the predicate and the renderer have drifted (a renderer
+    # bug), caught loudly rather than shipping an unconstrained boundary.
+    if has_revl_stub(schema):
+        raise RevlError(
+            filename, line,
+            f"internal: `validated` emission `{name}` derived an unconstrained "
+            f"schema for `{stripped}` despite passing the expressibility gate "
+            f"(renderer/predicate drift, item 257 §3.3)")
+    return schema
+
+
+def _validated_retry_ir(name: str, validated: bool, retry: int, filename: str,
+                        line: int, kind_word: str) -> dict:
+    """Item 257 (Slice 2, §5.2): the additive `retry` IR key for a `validated`
+    emission's validation-retry budget, or `{}` (byte-identical) when no `retry`
+    clause was written (budget 0, one attempt).
+
+    `retry N` is legal ONLY alongside `validated`: there is no validation fault to
+    re-issue on a non-`validated` emission, and it must never ride item 44's
+    idempotent-delivery path (a completion is not idempotent, §5.1). A `retry`
+    without `validated` is refused here, the same place the sibling
+    modifier-validity rules live."""
+    if retry <= 0:
+        return {}
+    if not validated:
+        raise RevlError(
+            filename, line,
+            f"`retry` {kind_word} `{name}` is not `validated`",
+            hint="`retry N` sets the VALIDATION-retry budget of a `validated` "
+                 "emission (re-issue the completion on a malformed response, §5.2); "
+                 "without `validated` there is no validation fault to retry. It is "
+                 "NOT item 44's idempotent-delivery retry — a completion is a read "
+                 "with a cost, not an idempotent write "
+                 "(docs/design/257-typed-model-boundary.md, §5.1)",
+            code="G4", category="validated")
+    return {"retry": retry}
+
+
+def _method_validated_ir(m, types: dict, filename: str) -> dict:
+    """Item 257: the additive `validated` + `response_schema` (+ Slice 2 `retry`)
+    IR keys for a service-method emission, or `{}` (byte-identical) when the method
+    is neither `validated` nor carries a `retry` clause. Refuses an unexpressible
+    return type, and a `retry` without `validated`, at compile time. `m.returns` is
+    already qualifier-stripped in place by `extract_and_normalize`."""
+    retry_ir = _validated_retry_ir(
+        m.name, getattr(m, "validated", False), getattr(m, "retry", 0),
+        filename, m.line, "operation")
+    if not getattr(m, "validated", False):
+        return {}
+    schema = _validated_response_schema(
+        m.name, m.returns, m.emission, types, filename, m.line, "operation")
+    return {"validated": True, "response_schema": schema, **retry_ir}
+
+
+def _lower_externs(program: Program, filename: str, types: dict,
+                   fns: list | None = None) -> list:
     externs: list[dict] = []
-    seen: set[str] = set()
+    # name -> first declaring file, so a cross-module duplicate names BOTH files
+    # (roadmap 394), same as `_lower_fns`. Externs carry provenance in
+    # `program.decl_files` (they have no `.source` field of their own).
+    seen: dict[str, str] = {}
     # classification of every extern by name, so a declared inverse can be held
     # to the "non-emission AND non-witnessed" rule (docs/design/243 rule 3): an
     # inverse that itself emits crosses a one-way boundary in teardown (G5), and
     # a witnessed inverse is infinite regress. Built before the loop so an
     # inverse may name an extern declared later in the file.
     extern_class = {d.name: d.classification for d in program.externs}
+    # G5 transitive teardown guard: a witnessed inverse that calls a plain `fn`
+    # which itself reaches an emission is as much a teardown emission as a direct
+    # one (the 330->329-transitive shape on the teardown path). Reuse the
+    # emission-reach fixed point over the lowered fn bodies (emission_analysis.py),
+    # seeded from the extern classifications, so `_check_witnessed_inverse` can
+    # follow fn calls transitively instead of inspecting extern names only.
+    # Computed once, lazily, and only when a witnessed extern actually declares an
+    # inverse, so every other program stays byte-identical and pays nothing.
+    _inverse_reach: dict = {}
+
+    def _witnessed_inverse_reach():
+        if not _inverse_reach:
+            witness: dict[str, str] = {}
+            extern_seed = [
+                {"name": d.name, "class": d.classification,
+                 "capabilities": list(d.capabilities or [])}
+                for d in program.externs]
+            reach = set(_emitting_capabilities(fns or [], extern_seed, witness))
+            _inverse_reach["fns"] = reach
+            _inverse_reach["witness"] = witness
+        return _inverse_reach["fns"], _inverse_reach["witness"]
     # item 245: a deferred emission may not appear in any extern's teardown slot
     # (a whole-program check, so an `undo`/`compensate` naming a deferred extern
     # declared later in the file is still caught).
     _check_deferred_not_in_teardown(program, filename)
     for decl in program.externs:
+        decl_file = program.decl_files.get(id(decl), filename)
         if decl.name in seen:
-            raise RevlError(filename, decl.line, f"duplicate extern `{decl.name}`")
-        seen.add(decl.name)
+            first_file = seen[decl.name]
+            if os.path.abspath(first_file) == os.path.abspath(decl_file):
+                # a same-file re-declaration: keep the terse single-file message
+                raise RevlError(decl_file, decl.line,
+                                f"duplicate extern `{decl.name}`")
+            raise RevlError(
+                decl_file, decl.line,
+                _duplicate_symbol_message("extern", decl.name,
+                                          first_file, decl_file))
+        seen[decl.name] = decl_file
         if decl.classification == "acquire" and decl.undo is None:
             raise RevlError(
                 filename, decl.line,
                 f"acquire extern `{decl.name}` must declare `undo` (G4)",
                 hint="an `acquire` crosses into an observable effect and needs a teardown inverse",
+            )
+        # R0 (item 308): an `acquire` return must be a NOMINAL OPAQUE HANDLE
+        # type. A primitive (`Int`) or a structural carrier (`Result[..]`,
+        # `Opt[..]`, `List[..]`, a function type, a record literal) is refused
+        # at the declaration. The acquire returns are the resource-taint base
+        # (`resources.resource_base`); promoting that base into the frontend
+        # ownership checks means the base must carry identity, and a primitive
+        # cannot — `-> Int` would make every integer a borrowed handle and the
+        # language unwritable (design doc 308, R0).
+        if (decl.classification == "acquire" and decl.returns is not None
+                and decl.returns not in NO_HANDLE_RETURNS
+                and not acquire_return_is_nominal_handle(decl.returns)):
+            from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+            raise RevlError(
+                filename, decl.line,
+                f"acquire extern `{decl.name}` returns `{decl.returns}`, which is "
+                f"not a nominal opaque handle type (item 308, R0)",
+                hint="an `acquire` return is an owned resource handle whose "
+                     "identity the ownership checks track; declare an opaque "
+                     "handle type (a bare nominal like `LogHandle`) and return "
+                     "that, not a primitive or a structural carrier "
+                     "(`Result[..]`, `Opt[..]`, `List[..]`, a function type)",
+                # R0 is unreachable under the untrusted-author profile (no_extern
+                # refuses any extern declaration before lowering), so the trusted
+                # view (profile=None) is the only one that can arise here.
+                navigate=_nav.ownership_navigate(
+                    kind="r0", returns=decl.returns,
+                    handle_name=decl.name[:1].upper() + decl.name[1:],
+                    profile=None),
             )
         if decl.classification == "pure" and (decl.undo is not None or decl.compensate is not None):
             raise RevlError(
@@ -1699,6 +2605,115 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                 f"emission extern `{decl.name}` cannot declare `undo`",
                 hint="emissions are one-way boundary crossings; use `compensate` for a best-effort cleanup",
             )
+        # item 246: `requires approval` gates a boundary CROSSING, and only an
+        # `emission` extern crosses irreversibly. A witnessed extern is already
+        # reversible (class a, auto-approved), a pure/acquire one crosses nothing,
+        # so the clause is meaningless there — reject the claim, don't drop it.
+        if decl.requires_approval and decl.classification != "emission":
+            raise RevlError(
+                filename, decl.line,
+                f"`{decl.classification}` extern `{decl.name}` cannot declare "
+                f"`requires approval`",
+                hint="only an `emission` extern crosses irreversibly; a witnessed "
+                     "extern is already revertible and a pure/acquire one crosses "
+                     "no boundary, so there is nothing to gate (item 246)",
+            )
+        # item 373: the reach clause `emission(confined: <param>)` names what an
+        # irreversible crossing is BOUNDED to, so `revl audit` can show the one
+        # property a reviewer needs (the confinement) and `audit --diff` can flag
+        # a weakening. Two rules, enforced here next to the sibling classification
+        # checks:
+        #   (1) reach is emission-only — a witnessed extern is already reversible,
+        #       a pure/acquire one crosses no boundary, so "confined to" is
+        #       meaningless there; reject the claim rather than drop it.
+        #   (2) the confinement TARGET must name a real PARAMETER, not a literal
+        #       the host body picks. This is the partial check that makes the
+        #       otherwise trust-me reach honest-by-review: a host body that
+        #       ignores the parameter and confines to a baked-in fallback is now a
+        #       reviewable lie, and a reach naming a non-parameter fails to compile.
+        if decl.reach is not None:
+            reach_kind, reach_target = decl.reach
+            if decl.classification != "emission":
+                raise RevlError(
+                    filename, decl.line,
+                    f"`{decl.classification}` extern `{decl.name}` cannot declare a "
+                    f"`({reach_kind}: ...)` reach clause",
+                    hint="only an `emission` crosses irreversibly, so only an emission "
+                         "is worth bounding; a witnessed extern is already revertible and "
+                         "a pure/acquire one crosses no boundary (item 373)",
+                )
+            param_names = {p.name for p in decl.params}
+            if reach_target not in param_names:
+                params_list = ", ".join(sorted(param_names)) or "(none)"
+                raise RevlError(
+                    filename, decl.line,
+                    f"emission `{decl.name}` is `confined: {reach_target}`, but "
+                    f"`{reach_target}` is not one of its parameters ({params_list})",
+                    hint="the confinement target must name a PARAMETER — the region an "
+                         "emission is bounded to has to be caller-supplied data the host "
+                         "body cannot swap for a literal, or the reach claim is "
+                         "unreviewable (item 373)",
+                )
+        # item 309: the `idempotent` emission modifier and its `idempotent(key: p)`
+        # keyed form. Two rules, enforced here next to the sibling reach checks:
+        #   (1) `idempotent`/`idempotent(key:)` is EMISSION-ONLY. It is item-44's
+        #       delivery claim (the remote treats re-delivery as delivery), and
+        #       only an emission crosses to a remote. Placed on a witnessed/acquire
+        #       extern it would read as a keyed INVERSE, which 243 rule 3 forbids
+        #       (inverses are non-emission); reject the claim rather than drop it.
+        #   (2) the key TARGET must name a real PARAMETER and be scalar-
+        #       serializable (`Str`/`Int`), so a fresh process can read the same
+        #       key VALUE off the WAL descriptor on every re-issue (§1b, §1c).
+        if decl.idempotent and decl.classification != "emission":
+            raise RevlError(
+                filename, decl.line,
+                f"`{decl.classification}` extern `{decl.name}` cannot be declared "
+                f"`idempotent`",
+                hint="`idempotent` is a delivery claim about a boundary crossing, "
+                     "so it is emission-only; a witnessed/acquire reversal is a "
+                     "non-emission INVERSE (243 rule 3), and its at-most-once claim "
+                     "is spelled `undo idempotent <inverse>(result)` instead "
+                     "(docs/design/309-idempotent-inverse.md, §1b)",
+                code="G4", category="idempotent")
+        if decl.idempotency_key is not None:
+            param_by_name = {p.name: p for p in decl.params}
+            if decl.idempotency_key not in param_by_name:
+                params_list = ", ".join(sorted(param_by_name)) or "(none)"
+                raise RevlError(
+                    filename, decl.line,
+                    f"emission `{decl.name}` declares `idempotent(key: "
+                    f"{decl.idempotency_key})`, but `{decl.idempotency_key}` is not "
+                    f"one of its parameters ({params_list})",
+                    hint="the idempotency key names the PARAMETER whose per-call "
+                         "value the remote dedups on; it must resolve against the "
+                         "signature (item 309, §1b)",
+                    code="G4", category="idempotent")
+            key_type = param_by_name[decl.idempotency_key].type
+            if key_type not in ("Str", "Int"):
+                raise RevlError(
+                    filename, decl.line,
+                    f"emission `{decl.name}` idempotency key "
+                    f"`{decl.idempotency_key}` has type `{key_type}`, which is not "
+                    f"scalar-serializable",
+                    hint="an idempotency key rides the WAL descriptor as durable "
+                         "data every re-issue reads back, so it must be a "
+                         "serializable scalar (`Str` or `Int`), not a host handle "
+                         "or a compound type (item 309, §1b)",
+                    code="G4", category="idempotent")
+        # item 257: a `validated` emission extern. Check emission-only + non-Unit
+        # and derive the boundary schema on the qualifier-stripped return type
+        # (already stripped in place by extract_and_normalize; re-stripped for
+        # order-robustness). Refuses an unexpressible return type at compile time.
+        validated_schema: dict | None = None
+        if decl.validated:
+            validated_schema = _validated_response_schema(
+                decl.name, decl.returns, decl.classification == "emission",
+                types, filename, decl.line, "extern")
+        # item 257 (Slice 2): the `retry N` budget, legal only alongside
+        # `validated` (refused otherwise), byte-identical when absent.
+        validated_retry_ir = _validated_retry_ir(
+            decl.name, decl.validated, getattr(decl, "retry", 0),
+            filename, decl.line, "extern")
         # witnessed-inverse externs (docs/design/243-witnessed-externs.md). A
         # witnessed mutation is a transaction, not a bracket: its declared `undo`
         # is auto-registered by the accumulator and replays on abort only. The
@@ -1787,8 +2802,8 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             if decl.compensate is not None:
                 raise RevlError(
                     filename, decl.line,
-                    f"an `async` extern cannot declare `compensate` yet — the "
-                    f"compensation seam is synchronous on every tier",
+                    "an `async` extern cannot declare `compensate` yet — the "
+                    "compensation seam is synchronous on every tier",
                 )
         # `deferred` validity (docs/design/245-session-commit.md, Decision 2).
         # The class of an action is a total function of its checked
@@ -1797,27 +2812,254 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
         # enforced here, before the flag reaches the IR.
         if decl.deferred:
             _check_deferred_extern(decl, filename)
+        # item 388: the caller-decided colour marker `fn|async`. A poly extern
+        # fixes no colour; lowering splits it into concrete sync/async clones per
+        # call-site colour (below, in the component-lowering post-pass). Its
+        # validity envelope mirrors the `async` one directly above, because a poly
+        # extern IS an emission that may be emitted async: emission-only, not
+        # `deferred`, not ALSO a fixed `async` (the two spellings are mutually
+        # exclusive — a fixed `async` already picks the colour), and no
+        # `compensate` (the compensation seam is synchronous, exactly as for a
+        # fixed `async` extern). Plus the cheap per-backend `await`-keyword lint:
+        # a colour-agnostic body cannot suspend, so an `await` in a `fn|async`
+        # host body is refused. This is a LINT, not a proof — colour-agnosticism
+        # is unprovable inside opaque host text (G8, item 24) — but it catches the
+        # common authoring mistake at compile time.
+        # item 396 option B: a `HostRef` body has no author-written TEXT, so the
+        # colour-poly await-lint (which scans body text) and 388's clone
+        # synthesis (which deep-copies `bodies`, not `refs`) do not cover it.
+        # Rather than risk a silently-dropped ref clone, refuse the poly+ref
+        # combination outright with a clear redirect (the decision recorded for
+        # item 388 composition). Fixed-colour refs compose freely.
+        from .parser import HostRef as _HostRef  # noqa: PLC0415
+        if decl.colour_poly and any(isinstance(b, _HostRef) for b in decl.bodies):
+            offender = next(b for b in decl.bodies if isinstance(b, _HostRef))
+            raise RevlError(
+                filename, offender.line,
+                f"a `fn|async` (caller-decided-colour) extern cannot use a "
+                f"host-module ref; `{decl.name}` declares both",
+                hint="a poly extern is cloned per call-site colour, and one host "
+                     "symbol cannot be both a coroutine and a plain callable, so "
+                     "a ref cannot serve both clones. Fix the colour "
+                     "(`async fn`/`fn`) and ref a matching sync-or-async symbol, "
+                     "or use an inline body (item 396 option B / 388)")
+        if decl.colour_poly:
+            _check_poly_extern(decl, filename)
+        # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
+        # validate the typed `config` schema the same way a component's config is
+        # validated (lower.py:4681 default-type compatibility). Config is STATIC
+        # data resolved once at plug, so there is no service reach and no async
+        # op: A1 and the capability gate are untouched (design "(b)"). Duplicate
+        # field names are refused, and a non-`null` default must fit its declared
+        # field type. The schema reaches the IR below only when non-empty, so an
+        # extern with no `config` block is byte-identical.
+        seen_cfg: set[str] = set()
+        for cfg in decl.config:
+            if cfg.name in seen_cfg:
+                raise RevlError(filename, cfg.line,
+                                f"duplicate config field `{cfg.name}` in extern `{decl.name}`")
+            seen_cfg.add(cfg.name)
+            if cfg.default is None:
+                continue
+            lit_type = _config_default_type(cfg.default)
+            if lit_type is not None and not compatible(cfg.type, lit_type):
+                raise mismatch(filename, cfg.line,
+                               f"config field `{cfg.name}` default of extern `{decl.name}`",
+                               cfg.type, lit_type)
+        # item 395 / Stage-5 TIER GATE (Fable review, before ts/go/rust/java
+        # config injection): option (b)'s config coeffect binds `_revl_config` in
+        # the extern body ONLY on a tier whose emitter has the injection seam
+        # (`_CONFIG_INJECTION_TIERS`, py-only today). A config extern that carries
+        # a host body for a seam-less tier would emit that body with `_revl_config`
+        # UNBOUND — a late, mis-attributed failure (runtime ReferenceError on ts;
+        # a compile error of the emitted artifact on go/rust/java). Refuse the
+        # whole hazard class HERE, at compile, naming the offending tier and
+        # redirecting to option (c). Gated on `decl.config`, so a non-config
+        # extern with any host body is untouched (byte-identical). Ordered by the
+        # author's @-body spelling for a deterministic first offender.
+        from .parser import HostBodyFile, HostRef  # noqa: PLC0415
+        if decl.config:
+            for body in decl.bodies:
+                # item 396 option B: a `config` extern binds `_revl_config` as
+                # the first line of the emitted BODY for that text to read; a ref
+                # has no author-written body, so binding it inside the thunk would
+                # bind a name the referenced host symbol cannot see. Refuse
+                # config+ref with a redirect to an inline body that forwards it.
+                if isinstance(body, HostRef):
+                    raise RevlError(
+                        decl_file, body.line,
+                        f"a config extern cannot use a host-module ref; "
+                        f"`{decl.name}` declares both",
+                        hint="`config` binds `_revl_config` inside the emitted "
+                             "body for the body text to read, but a ref has no "
+                             "body text — the referenced host symbol never sees "
+                             "the name. Use an inline `= @backend { ... }` body "
+                             "that reads `_revl_config` and forwards it to the "
+                             "host call (item 396 option B).")
+                if body.backend not in _CONFIG_INJECTION_TIERS:
+                    raise RevlError(
+                        decl_file, body.line,
+                        f"extern config is not yet supported on the @{body.backend} "
+                        f"tier (config extern `{decl.name}`)",
+                        hint=(
+                            f"only the @py emitter binds `_revl_config` from the "
+                            f"plug-time config map today; a @{body.backend} body "
+                            f"would emit with `_revl_config` unbound. Use option "
+                            f"(c): give the mechanism a home component that "
+                            f"`requires` the service "
+                            f"(docs/design/378-sync-extern-service-reach.md)."),
+                    )
         bodies: dict[str, str] = {}
+        # item 396: provenance for a body SPLICED from an external file. Absent
+        # unless the file form is used, so every existing extern's IR is
+        # byte-identical. Records the written path and the sha256 of the raw
+        # file bytes so two compiles are byte-comparable and `revl verify` can
+        # re-hash the file.
+        body_files: dict[str, dict] = {}
+        # item 396 option B: a per-tier host-MODULE ref (symbol + root-relative
+        # path + pinned content hash). Additive next to `bodies`; a backend key
+        # may appear in `bodies` OR `refs` but never both (the duplicate-body
+        # refusal, extended). Absent unless a ref is used, so every existing IR
+        # is byte-identical.
+        refs: dict[str, dict] = {}
         for body in decl.bodies:
-            if body.backend in bodies:
+            if isinstance(body, HostBodyFile):
+                # The compiler's body-file resolver replaces every HostBodyFile
+                # with a resolved HostBody before lowering; reaching here means
+                # the resolution seam was skipped (an internal error, not an
+                # author error).
+                raise RevlError(
+                    filename, body.line,
+                    f"internal: unresolved @{body.backend} host-body file for "
+                    f"extern `{decl.name}` reached lowering (item 396)")
+            if isinstance(body, HostRef):
+                # tier gate (mirrors the config-injection gate): "import a symbol
+                # from a checked file" is native on py and ts only; go/rust/java
+                # lack a file-addressable module primitive and wasm cannot import
+                # a file. Refuse the others at compile, naming the tier — never a
+                # broken artifact. A tier joins EXTERN_REF_TIERS only behind its
+                # own design note, not by analogy.
+                if body.backend not in _EXTERN_REF_TIERS:
+                    raise RevlError(
+                        filename, body.line,
+                        f"a host-module ref (`= @{body.backend} ref ...`) is not "
+                        f"supported on the @{body.backend} tier (extern "
+                        f"`{decl.name}`)",
+                        hint="`ref` imports a symbol from a file-addressable host "
+                             "module, which is native on @py and @ts only. go/"
+                             "rust/java have no file-addressable import primitive "
+                             "and wasm cannot import a file — each needs its own "
+                             "design. Use an inline `= @backend { ... }` body or "
+                             "a `= @backend file` splice on this tier "
+                             "(item 396 option B).")
+                if body.rel_path is None:
+                    raise RevlError(
+                        filename, body.line,
+                        f"internal: unresolved @{body.backend} host-module ref "
+                        f"for extern `{decl.name}` reached lowering (item 396)")
+                if body.backend in bodies or body.backend in refs:
+                    raise RevlError(filename, body.line,
+                                    f"duplicate @{body.backend} body for extern `{decl.name}`")
+                refs[body.backend] = {
+                    "symbol": body.symbol,
+                    "path": body.rel_path,
+                    "sha256": body.sha256,
+                    # item 410: the root KIND, ADDITIVE. Present only for an
+                    # install-origin (stdlib / REVL_IMPORT_PATH) ref, so a
+                    # user-origin ref IR is byte-identical to 396(B) (the
+                    # 342/388 additivity discipline: absent, never `"user"`).
+                    # Selects the runner's install root vs the user root at
+                    # deploy.
+                    **({"root": body.root_kind}
+                       if getattr(body, "root_kind", None) else {}),
+                }
+                continue
+            if body.backend in bodies or body.backend in refs:
                 raise RevlError(filename, body.line,
                                 f"duplicate @{body.backend} body for extern `{decl.name}`")
             bodies[body.backend] = body.text
+            if body.source_path is not None:
+                body_files[body.backend] = {"path": body.source_path,
+                                            "sha256": body.sha256}
         entry: dict = {
             "name": decl.name,
             "class": decl.classification,
             "params": [{"name": p.name, "type": p.type} for p in decl.params],
             "returns": decl.returns,
             "bodies": bodies,
+            # item 396 option A: file-splice provenance, present only when a
+            # `= @backend file` body was used (additive: every existing IR is
+            # byte-identical without it).
+            **({"body_files": body_files} if body_files else {}),
+            # item 396 option B: host-module refs (symbol + root-relative path +
+            # pinned content hash), present only when a `= @backend ref` body was
+            # used. The py/ts emitters generate a lazy import thunk from it and
+            # the py driver hash-checks the file at plug (additive).
+            **({"refs": refs} if refs else {}),
             # additive async flag (docs/design/async-extern.md §4), mirroring
             # the service-method spelling at lower.py:2583. Absent means sync;
             # `ir_version` stays 3 (confirmed human decision, §4).
-            **({"async": True} if decl.async_ else {}),
+            #
+            # item 388: a poly extern (`fn|async`) is PRE-SEEDED here as the async
+            # form (`async: True`) so awaited call sites resolve during the
+            # coloring fixpoint and component lowering (the ordering wrinkle,
+            # design §"honest hard part" #3). `colour_poly: True` marks the entry
+            # for `_finalize_poly_externs`, the post-pass that — after every
+            # component has recorded which colours its call sites requested —
+            # keeps this entry only if an async call site exists, splits off a
+            # `_revl_sync` clone only if a sync call site exists, and PRUNES the
+            # unused colour. The marker is stripped there, so the final IR carries
+            # only concrete clones and a poly extern nobody calls emits nothing
+            # (additive, the item-342 property extended to externs).
+            **({"async": True, "colour_poly": True} if decl.colour_poly
+               else {"async": True} if decl.async_ else {}),
             # additive deferred flag (docs/design/245-session-commit.md,
             # Decision 2): class (b), the deferrable emission. Absent means the
             # emission fires at the call (class c). Only an `emission` extern may
             # carry it (checked above), so no non-emission extern's IR changes.
             **({"deferred": True} if decl.deferred else {}),
+            # item 246: the declaration-owned `requires approval` floor. Absent
+            # unless the author wrote it, so every existing extern's IR is
+            # byte-identical. A crossing reaching this extern needs a covering
+            # `with e` edge or lowering refuses (Decision 3).
+            **({"requires_approval": True} if decl.requires_approval else {}),
+            # item 373: the reach clause, recorded as `{"kind", "target"}`. Absent
+            # unless the author wrote it, so every existing extern's IR is
+            # byte-identical (a bare emission is "unconfined" = no key). `revl
+            # audit` prints it and `audit --diff` reads it to flag a weakening.
+            **({"reach": {"kind": decl.reach[0], "target": decl.reach[1]}}
+               if decl.reach is not None else {}),
+            # item 309: the idempotency register, ADDITIVE. Absent unless the
+            # author declared one of the three surfaces, so every existing
+            # extern's IR is byte-identical. `undo_idempotent` marks an
+            # at-most-once INVERSE (undo slot); `idempotent`/`idempotency_key`
+            # mark a re-deliverable emission (bare = trust-me, keyed = by
+            # construction). `register` is the per-declaration honesty tier the
+            # audit prints and the 290/309 policy floors read (partial order:
+            # declared < keyed, declared < shape-proven; keyed/shape-proven are
+            # peers) (docs/design/309-idempotent-inverse.md, §2, §"question 4").
+            **({"undo_idempotent": True} if decl.undo_idempotent else {}),
+            **({"idempotent": True} if decl.idempotent else {}),
+            **({"idempotency_key": decl.idempotency_key}
+               if decl.idempotency_key is not None else {}),
+            **({"register": _idempotent_register(decl)}
+               if (decl.idempotent or decl.undo_idempotent) else {}),
+            # item 379: the typed config schema, in the SAME shape a component
+            # carries it (lower.py:4956 `[{"name","type","default"}]`), so the
+            # emitter and driver reuse the component config path verbatim. Absent
+            # unless the author wrote a `config` block, so every existing extern's
+            # IR is byte-identical.
+            **({"config": [{"name": f.name, "type": f.type, "default": f.default}
+                           for f in decl.config]} if decl.config else {}),
+            # item 257: the `validated` flag and the derived response schema, a
+            # compile-time-constant dict the emit-side validate seam checks the
+            # completion against. ADDITIVE: absent unless the author wrote
+            # `validated`, so every existing extern's IR is byte-identical.
+            **({"validated": True, "response_schema": validated_schema}
+               if decl.validated else {}),
+            # item 257 (Slice 2): the retry budget (§5.2), a static crossing
+            # attribute. Absent unless `retry N` was written, so byte-identical.
+            **validated_retry_ir,
         }
         if decl.classification == "witnessed":
             # The witnessed descriptor the Slice-2 runtime teardown loop reads
@@ -1834,6 +3076,14 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             entry["witness"] = witness_type
             if decl.capabilities:
                 entry["capabilities"] = list(decl.capabilities)
+        if decl.classification == "emission" and decl.capabilities:
+            # item 343: a capability-scoped `emission[gateway.send]` records its
+            # declared TOKEN in the IR, exactly as a witnessed extern does. The
+            # 246 class->approval classifier and 344 standing grants read this to
+            # key the crossing on the token instead of the extern name. Absent
+            # (a bare `emission`) means no key is written, so every existing
+            # emission extern's IR stays byte-identical (name-as-capability).
+            entry["capabilities"] = list(decl.capabilities)
         if decl.undo is not None:
             # An acquire binds its declared return as `result`; a witnessed
             # extern binds the `Ok` witness (the Result's success payload), which
@@ -1843,7 +3093,9 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             # Classification of the inverse before its arg types: a witnessed or
             # emission inverse is refused on principle, whatever it is applied to.
             if decl.classification == "witnessed":
-                _check_witnessed_inverse(decl, extern_class, filename)
+                reach, reach_witness = _witnessed_inverse_reach()
+                _check_witnessed_inverse(decl, extern_class, reach,
+                                         reach_witness, filename)
             _check_extern_undo(decl.undo, decl.name, "undo", types, filename,
                                result_type=undo_result_type)
             entry["undo"] = _lower_extern_expr(decl.undo, filename)
@@ -1853,6 +3105,408 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             entry["compensate"] = _lower_extern_expr(decl.compensate, filename)
         externs.append(entry)
     return externs
+
+
+def _extern_emission_caps(entry: dict) -> tuple:
+    """The declared emission capability tokens of a lowered extern IR entry
+    (item 256): its scoped `capabilities`, or its NAME when the emission is bare
+    (the name-as-capability rule, docs/capabilities.md). Empty for a non-emission
+    extern, which can never carry a bound secret."""
+    if entry.get("class") != "emission":
+        return ()
+    return tuple(entry.get("capabilities") or (entry["name"],))
+
+
+def _lower_secrets(program: Program, externs: list, filename: str) -> list:
+    """Cross-index `program.secrets` against the lowered extern emission
+    capabilities (item 256, Slice 1). For each `secret NAME for CAP`:
+
+      * find every emission extern whose declared capability includes CAP - the
+        bound bodies the runtime injects the key into, and nowhere else (§3);
+      * refuse a secret bound to a capability whose bound body's ONLY tier is a
+        non-injection tier (wasm has no plug-time secrets dict - §3 Cross-tier),
+        exactly as a config extern on wasm is refused;
+      * refuse a secret whose NAME collides with a bound extern's parameter name
+        (the injected `NAME = _revl_secret(...)` first local would shadow it);
+      * refuse a secret that binds NO emission extern at all - the key would be
+        injected nowhere, an inert binding is a footgun (fail-loud, §1b);
+      * annotate each bound extern entry with `entry["secrets"]` (the names it
+        receives) so the emitter binds them as the first body locals.
+
+    Returns the manifest-visible `[{"name","capability"}]` rows (name and
+    capability only - the value is NEVER in the IR, §1b). Empty and fully inert
+    for a program that binds no secret, so every existing IR is byte-identical."""
+    secrets = getattr(program, "secrets", None) or []
+    if not secrets:
+        return []
+    by_name = {e["name"]: e for e in externs}
+    # bound bodies per extern name, accumulated so the emitter injects once even
+    # when several secrets share a capability an extern serves.
+    bound_names: dict[str, list[str]] = {}
+    rows: list = []
+    seen: set[str] = set()
+    for sec in secrets:
+        if sec.name in seen:
+            raise RevlError(filename, sec.line,
+                            f"duplicate secret `{sec.name}`")
+        seen.add(sec.name)
+        bound = [e for e in externs if sec.capability in _extern_emission_caps(e)]
+        if not bound:
+            raise RevlError(
+                filename, sec.line,
+                f"secret `{sec.name}` is bound to capability `{sec.capability}`, "
+                f"but no emission extern serves it - the key would be injected "
+                f"nowhere",
+                hint="a secret injects only into the extern bodies of an "
+                     "`emission[<cap>]` whose token matches (a component/service "
+                     "method body never receives it). Declare a matching emission "
+                     "extern, or fix the capability token "
+                     "(docs/design/256-capability-bound-secrets.md §3).")
+        for e in bound:
+            # name / parameter collision: the injected first local would shadow a
+            # declared parameter (a bug the author would never diagnose at run
+            # time - the body would read the key instead of its argument).
+            for p in e.get("params") or []:
+                if p.get("name") == sec.name:
+                    raise RevlError(
+                        filename, sec.line,
+                        f"secret `{sec.name}` collides with a parameter of extern "
+                        f"`{e['name']}` - the injected secret local would shadow "
+                        f"the parameter",
+                        hint="rename the secret (or the parameter); the secret is "
+                             "bound as the first local of every extern body it "
+                             "reaches (item 256).")
+            # tier gate: the key is bound as a plug-time local, which only the
+            # injection-tier emitters (py/ts/go/java/rs) can do. A wasm-only bound
+            # body has no plug-time secrets dict, exactly as a wasm config extern
+            # has none - refuse at compile, naming the tier.
+            body_tiers = set(e.get("bodies") or {}) | set(e.get("refs") or {})
+            if body_tiers and not (body_tiers & _CONFIG_INJECTION_TIERS):
+                offending = ", ".join(sorted(body_tiers))
+                raise RevlError(
+                    filename, sec.line,
+                    f"secret `{sec.name}` is bound to a capability whose only "
+                    f"extern body is on the @{offending} tier, which has no "
+                    f"plug-time secret injection (emission extern `{e['name']}`)",
+                    hint="only the py/ts/go/java/rs emitters bind a secret as a "
+                         "body-scope local from the plug-time secrets map; wasm's "
+                         "raw body has no such dict, so a wasm-only bound "
+                         "capability cannot carry a secret (item 256, §3 "
+                         "Cross-tier).")
+            bound_names.setdefault(e["name"], []).append(sec.name)
+        rows.append({"name": sec.name, "capability": sec.capability})
+    # carry the resolved bound-body set into the IR: each bound extern lists the
+    # secret names it receives, so the emitter binds them as its first locals.
+    for ename, names in bound_names.items():
+        by_name[ename]["secrets"] = names
+    return rows
+
+
+# item 310: capability-aware caching (docs/design/310-capability-aware-caching.md).
+# The source class words map to the roadmap IR vocabulary; `cache` lowers to
+# metadata the emission fixed point NEVER reads (so every 414 static fold sees a
+# cached crossing identically hit and miss).
+_CACHE_IR_CLASS = {"pure": "pure_fn",
+                   "capability": "capability_result",
+                   "external": "external_effect"}
+
+
+def _cache_ir(cache) -> dict:
+    """The IR descriptor for a `CacheClause`. Additive: absent unless a
+    declaration carries `cache`, so every existing IR is byte-identical."""
+    entry = {"class": _CACHE_IR_CLASS[cache.cls]}
+    if cache.invalidated_by:
+        entry["invalidated_by"] = list(cache.invalidated_by)
+    if cache.ttl_ms is not None:
+        entry["ttl_ms"] = cache.ttl_ms
+    return entry
+
+
+def _crossable_cache_tokens(program: Program) -> set[str]:
+    """Every capability TOKEN a crossing in this composition can fire, for the
+    item-310 `invalidated_by` resolution check. An emission extern contributes
+    its declared scope tokens (or its name when unscoped); a scoped emission
+    service method contributes its declared tokens. A misspelled `invalidated_by`
+    token that matches none of these is a freshness claim that can never come
+    true, so it is refused rather than failing open into an effectively-ttl-less
+    cache (design §`invalidated_by`)."""
+    tokens: set[str] = set()
+    for ext in program.externs:
+        if ext.classification == "emission":
+            for cap in (ext.capabilities or (ext.name,)):
+                tokens.add(cap)
+    for svc in program.services:
+        for m in svc.methods.values():
+            if m.emission and m.capabilities:
+                for cap in m.capabilities:
+                    tokens.add(cap)
+    return tokens
+
+
+def _cache_token_resolves(token: str, crossable: set[str]) -> bool:
+    """Whether an `invalidated_by` token names a crossing the composition can
+    fire — exact match or covered in the item-294 capability partial order (a
+    wider declared token covers a narrower subscription)."""
+    if token in crossable:
+        return True
+    from . import cap_order  # noqa: PLC0415
+    for declared in crossable:
+        try:
+            if cap_order.covers(cap_order.parse_cap(declared),
+                                cap_order.parse_cap(token)):
+                return True
+        except cap_order.CapError:
+            continue
+    return False
+
+
+def _check_cache_freshness(cache, filename: str, line: int, what: str,
+                           untrusted: bool = False) -> None:
+    """The per-class freshness rules (design §"The freshness clauses"), class-
+    local (no reach needed). Shared by fn/method/extern so one word means one
+    thing on every surface."""
+    from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+    _prof = _UntrustedMark if untrusted else None
+    has_inval = bool(cache.invalidated_by)
+    has_ttl = cache.ttl_ms is not None
+    if cache.cls == "pure" and (has_inval or has_ttl):
+        raise RevlError(
+            filename, line,
+            f"`cache pure` on {what} cannot declare a freshness bound",
+            hint="a pure result cannot go stale, so `ttl`/`invalidated_by` is a "
+                 "category error (and probably a misclassified external read) — "
+                 "drop the clause, or declare `cache external` "
+                 "(docs/design/310-capability-aware-caching.md)",
+            code="G4", category="cache",
+            navigate=_nav.cache_navigate(kind="drop", what=what,
+                                         clause="freshness", profile=_prof))
+    if cache.cls == "capability" and has_inval:
+        raise RevlError(
+            filename, line,
+            f"`cache capability` on {what} cannot declare `invalidated_by`",
+            hint="`invalidated_by` names the staleness event of an EXTERNAL read; "
+                 "a capability result's freshness bound IS its authorizing scope "
+                 "(the grant + generation liveness), narrowable only by `ttl`. "
+                 "Drop `invalidated_by`, or declare `cache external` (item 310)",
+            code="G4", category="cache",
+            navigate=_nav.cache_navigate(kind="drop", what=what,
+                                         clause="invalidated_by", profile=_prof))
+    if cache.cls == "external" and not (has_inval or has_ttl):
+        raise RevlError(
+            filename, line,
+            "cache external requires a freshness bound: declare "
+            "`invalidated_by <token>` and/or `ttl <duration>`: an external "
+            "result changes without notice, so an unbounded cache serves the "
+            "past as the present",
+            code="G4", category="cache",
+            navigate=_nav.cache_navigate(kind="add", what=what, profile=_prof))
+
+
+def _check_cache_resource(cache, filename: str, line: int, what: str,
+                          param_types, return_type, resources: set[str],
+                          untrusted: bool = False) -> None:
+    """The structural resource-in-entry refusal (design, laundering point 8, the
+    E x 7 shape). An entry copies a result (and digests args) into a store that
+    outlives the call; a resource handle stored in an entry would be stored
+    authority, re-deliverable to a later access. The walk is STRUCTURAL over the
+    resource-taint closure (nested records, variants, generic instantiations),
+    never a type-name match, so a resource renamed or wrapped two levels deep
+    refuses identically."""
+    for role, tstr in (("result", return_type),
+                       *(("parameter", t) for t in param_types)):
+        hit = resource_in(tstr, resources)
+        if hit is not None:
+            from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+            raise RevlError(
+                filename, line,
+                f"cache on {what} would store a resource handle `{hit}` "
+                f"(in the {role} type `{tstr}`)",
+                hint="a cache entry outlives the call and re-delivers its stored "
+                     "value; a resource handle crosses a seam by proxy, never by "
+                     "copy, so a cached one is stored authority re-deliverable to "
+                     "a later access (item 310, surface E). Return/accept a value "
+                     "type, not a resource handle",
+                code="G4", category="cache",
+                navigate=_nav.cache_navigate(
+                    kind="blocked", what=what,
+                    category=f"it stores the resource handle `{hit}`",
+                    profile=(_UntrustedMark if untrusted else None)))
+
+
+def _check_cache_declarations(program: Program, externs: list, types: dict,
+                              emitting_caps: dict, filename: str,
+                              untrusted: bool = False) -> None:
+    """The item-310 admission checks, run once the emission fixed point and the
+    type/extern tables are known. Refuses in every case the seam-method slice
+    cannot soundly cache; the surviving declarations flow their `cache` metadata
+    into the IR (service-method and — grammar-forward — extern sites).
+
+    Layered exactly as the design scopes the slice:
+      * externs: the interior-crossing crossing is NOT the seam method's direct
+        body, so the whole extern surface is admission-refused — an escrow-shaped
+        reach (witnessed/acquire/deferred/compensate) with its specific G7 reason,
+        every other extern with the "later slice" reason (design §enforcement).
+      * plain `fn`: only `cache pure` is legal, and only when the fn crosses
+        nothing; a crossing reach or a capability/external class is refused.
+      * service methods: the class must match the method's declared reach shape
+        (`emission fn` <-> capability/external, plain `fn` <-> pure); freshness
+        and the structural resource walk apply. The full worst-over-reach
+        applicability fold over the provider closure (surface H) and the
+        distributed-placement refusal run at load, where the class map exists."""
+    from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+    _prof = _UntrustedMark if untrusted else None
+    resources = resource_taint(externs, types)
+    crossable = None  # computed lazily, only when an `invalidated_by` appears
+
+    def check_invalidated_by(cache, line, what):
+        nonlocal crossable
+        if not cache.invalidated_by:
+            return
+        if crossable is None:
+            crossable = _crossable_cache_tokens(program)
+        for token in cache.invalidated_by:
+            if not _cache_token_resolves(token, crossable):
+                raise RevlError(
+                    filename, line,
+                    f"`invalidated_by {token}` on {what} names a token no "
+                    f"crossing in this composition can fire",
+                    hint="a subscription nothing can fire is a freshness claim "
+                         "that can never come true; a misspelled token must not "
+                         "fail open into an effectively-ttl-less cache. Name an "
+                         "emission token some extern or service method crosses "
+                         "(item 310, §invalidated_by)",
+                    code="G4", category="cache")
+
+    # -- externs: the interior-crossing surface, admission-refused in this slice
+    for decl in program.externs:
+        cache = getattr(decl, "cache", None)
+        if cache is None:
+            continue
+        cls = decl.classification
+        # escrow-shaped reach: a hit would skip an escrow registration (G7).
+        if cls in ("witnessed", "acquire"):
+            noun = ("witnessed mutation" if cls == "witnessed"
+                    else "acquired resource")
+            raise RevlError(
+                filename, decl.line,
+                f"cache on a `{cls}` extern `{decl.name}` is refused",
+                hint=f"a {noun} is not a read — caching it would skip the escrow "
+                     "registration its teardown depends on, so an abort would "
+                     "replay an incomplete history (G7). `cache` reads, it does "
+                     "not mutate (item 310, §witnessed teardown)",
+                code="G7", category="cache",
+                navigate=_nav.cache_navigate(
+                    kind="blocked", what=f"a `{cls}` extern `{decl.name}`",
+                    category=f"a {noun}, not a read", profile=_prof))
+        if cls == "emission" and getattr(decl, "deferred", False):
+            raise RevlError(
+                filename, decl.line,
+                f"cache on a `deferred` emission extern `{decl.name}` is refused",
+                hint="a deferred emission is a QUEUED write; a hit that skips the "
+                     "firing skips the enqueue, so the commit would flush an "
+                     "incomplete history (G7). `cache` is read-shaped (item 310)",
+                code="G7", category="cache",
+                navigate=_nav.cache_navigate(
+                    kind="blocked",
+                    what=f"a `deferred` emission extern `{decl.name}`",
+                    category="a queued write, not a read", profile=_prof))
+        if cls == "emission" and decl.compensate is not None:
+            raise RevlError(
+                filename, decl.line,
+                f"cache on a `compensate`-declaring emission extern "
+                f"`{decl.name}` is refused",
+                hint="a compensated emission registers a compensation escrow entry "
+                     "at fire time; a hit that skips the firing skips the "
+                     "registration, so an abort after a hit replays an incomplete "
+                     "offset history (G7). `cache` reads, it does not write "
+                     "(item 310, §witnessed teardown)",
+                code="G7", category="cache",
+                navigate=_nav.cache_navigate(
+                    kind="blocked",
+                    what=f"a `compensate`-declaring emission extern `{decl.name}`",
+                    category="a compensated write, not a read", profile=_prof))
+        # every other extern: grammar-forward, enforcement-honest.
+        raise RevlError(
+            filename, decl.line,
+            f"cache on an interior crossing (extern `{decl.name}`) is not yet "
+            f"enforceable; declare it on the seam method",
+            hint="the seam consent gate decides the hit/miss transaction at the "
+                 "call, before execution, so `cache` is enforceable this slice "
+                 "only on a SEAM SERVICE METHOD where the call is the crossing. "
+                 "An interior extern crossing needs a crossing-level ledger "
+                 "transaction that is a later slice (item 310, §enforcement)",
+            code="G4", category="cache",
+            navigate=_nav.cache_navigate(
+                kind="blocked", what=f"an interior extern crossing `{decl.name}`",
+                category="an interior crossing, not a seam method", profile=_prof))
+
+    # -- plain fns: `cache pure` only, crossing-free only
+    for fn in program.fn_decls:
+        cache = getattr(fn, "cache", None)
+        if cache is None:
+            continue
+        what = f"fn `{fn.name}`"
+        _check_cache_freshness(cache, fn.source or filename, fn.line, what,
+                               untrusted)
+        crosses = fn.name in emitting_caps
+        if cache.cls in ("capability", "external"):
+            named = sorted(c for c in (emitting_caps.get(fn.name) or ()) if c != "*")
+            raise RevlError(
+                fn.source or filename, fn.line,
+                f"`cache {cache.cls}` on {what} is not allowed on a plain `fn`",
+                hint="freshness belongs on the boundary, not on a caller of it "
+                     "(two callers could declare contradictory staleness for one "
+                     "crossing). Declare `cache pure` to memoize a pure fn, or "
+                     "move the clause to the `emission` service method or extern "
+                     "that reads the boundary"
+                     + (f" ({', '.join(named)})" if named else "")
+                     + " (item 310)",
+                code="G4", category="cache")
+        if crosses:  # cache pure on a crossing reach
+            named = sorted(c for c in (emitting_caps.get(fn.name) or ()) if c != "*") \
+                or ["a boundary"]
+            raise RevlError(
+                fn.source or filename, fn.line,
+                f"the reach of {what} crosses {named[0]}: a crossing result is "
+                f"not pure",
+                hint="`cache pure` memoizes a function whose reach crosses "
+                     "nothing; move the clause to the emission that reads the "
+                     "boundary, as `cache capability` or `cache external` "
+                     "(item 310)",
+                code="G4", category="cache")
+        check_invalidated_by(cache, fn.line, what)
+
+    # -- service methods: class must match the declared reach shape
+    for svc in program.services:
+        for m in svc.methods.values():
+            cache = getattr(m, "cache", None)
+            if cache is None:
+                continue
+            what = f"`{svc.name}.{m.name}`"
+            _check_cache_freshness(cache, filename, m.line, what, untrusted)
+            if cache.cls == "pure" and m.emission:
+                raise RevlError(
+                    filename, m.line,
+                    f"the reach of {what} crosses a boundary (it is an "
+                    f"`emission` method): a crossing result is not pure",
+                    hint="declare `cache capability` (a capability-backed "
+                         "deterministic read) or `cache external` (an external "
+                         "read, which requires a freshness bound); `cache pure` "
+                         "is only for a method that crosses nothing (item 310)",
+                    code="G4", category="cache")
+            if cache.cls in ("capability", "external") and not m.emission:
+                raise RevlError(
+                    filename, m.line,
+                    f"the reach of {what} crosses nothing (a plain `fn` method): "
+                    f"declare `cache pure`",
+                    hint="`cache capability`/`external` name a boundary read; a "
+                         "non-emission method reads no boundary, so its only sound "
+                         "cache is pure memoization (item 310)",
+                    code="G4", category="cache")
+            param_types = [t for _, t in m.params]
+            _check_cache_resource(cache, filename, m.line, what,
+                                  param_types, m.returns, resources, untrusted)
+            check_invalidated_by(cache, m.line, what)
 
 
 def _lower_tests(program: Program, filename: str, types: dict,
@@ -1871,7 +3525,7 @@ def _lower_tests(program: Program, filename: str, types: dict,
     # Without the externs an in-module `extern pure fn` visible to fn bodies was
     # invisible inside a `test`, forcing every extern-backed helper to be
     # wrapped in a `fn` just to be unit-tested in-file (roadmap item 182).
-    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS
+    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
                  | {fn.name for fn in program.fn_decls}
                  | {ext.name for ext in program.externs})
     tests: list[dict] = []
@@ -1980,7 +3634,7 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
     """Lower `prop test` blocks to IR prop units (docs/prop-test.md)."""
     if not program.prop_tests:
         return []
-    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS
+    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
                  | {fn.name for fn in program.fn_decls}
                  | {ext.name for ext in program.externs})
     units: list[dict] = []
@@ -2163,6 +3817,28 @@ def _lower_lifecycle_body(decl: TestDecl, program: Program, services: dict, file
             # in a lifecycle test moves the clock, so this is what makes a
             # timer's firing an assertable timeline step.
             body.append({"step": "advance", "ms": stmt.ms})
+        elif isinstance(stmt, AbortStmt):
+            # item 377 (F-H1.7): drive the enclosing session frame's 245 abort —
+            # mark every live frame aborting, replay the witnessed inverses LIFO,
+            # drop the deferral queue. Like `Session.abort`, it tears the live
+            # composition down, so nothing is loaded afterwards. Refuse an abort
+            # with nothing loaded: there is no session frame to abort, exactly as
+            # `Session.abort` needs an owner (it would be a vacuous no-op).
+            if not loaded:
+                raise RevlError(
+                    filename, stmt.line,
+                    "`abort` has nothing to abort — no component is loaded at "
+                    "this point",
+                    hint="`abort` reverts the witnessed effects of the live "
+                         "composition; `load` a component and drive it first "
+                         "(item 377, docs/design/245-session-commit.md)")
+            body.append({"step": "abort"})
+            # the abort tears the composition down (session-abort semantics), so
+            # the checker's model of what is live returns to empty — a later
+            # `unload X` correctly reads as "not loaded", and a later `call`
+            # against a since-torn-down key is refused at compile time.
+            loaded.clear()
+            provided.clear()
         elif isinstance(stmt, ResidueStmt):
             body.append({"step": "assert_no_residue"})
         elif isinstance(stmt, AssertStmt):
@@ -2325,6 +4001,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         _lower_let_pattern_stmt(stmt, scope, callables, alias_fns, body, filename, type_env, types)
     elif isinstance(stmt, AssignStmt):
         if stmt.name not in scope:
+            _reject_foreign_name(stmt.name, filename, stmt.line)  # item 384
             raise RevlError(filename, stmt.line, f"`{stmt.name}` is not declared in this function",
                             hint="declare it with `let` (single-assignment) or `var` (mutable)")
         if not scope[stmt.name]:
@@ -2435,6 +4112,15 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
     elif isinstance(stmt, AssertStmt):
         _bool_cond(stmt.expr, type_env, types, filename, "assert")
         body.append({"step": "assert", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
+    elif isinstance(stmt, BreakStmt):
+        # item 379: additive step kind, no payload. The parser already refused a
+        # `break` outside a loop, so lowering only records it; teardown is
+        # untouched (break/continue are frame-neutral — no revl teardown
+        # boundary coincides with a loop boundary, docs/design/379-break-
+        # continue.md Decision 1).
+        body.append({"step": "break", "line": stmt.line})
+    elif isinstance(stmt, ContinueStmt):
+        body.append({"step": "continue", "line": stmt.line})
     else:  # pragma: no cover — grammar prevents it
         raise RevlError(filename, getattr(stmt, "line", 1), "unexpected statement in fn body")
 
@@ -2696,6 +4382,20 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
     types = types if types is not None else {}
     if isinstance(expr, ExprHole):
         return _lower_hole(expr, filename)
+    if isinstance(expr, ExprEndorse):
+        inner = _lower_pure_expr(expr.expr, scope, callables, alias_fns, filename,
+                                 type_env, types)
+        if expr.approval is not None:
+            # approvals are acquired in a component activation body (item 246),
+            # not in a top-level `fn`; a `with` here has nothing to bind.
+            raise RevlError(
+                filename, expr.line,
+                "`endorse ... with <approval>` is only available in a component "
+                "or provide-method body — a top-level `fn` cannot acquire an "
+                "`Approval[C]`",
+                hint="move the approval-gated endorse into the provide method, or "
+                     "drop the `with` clause (item 246/249)")
+        return _endorse_node(inner, expr, None)
     # ADT construction (Result / user variants) lowers to a tagged `adt` node
     # (Opt's Some/None are not tagged — handled as identity/null downstream).
     _cases = types.get(CASES_KEY) or {}
@@ -2739,6 +4439,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         return {"kind": "lit", "value": _str_literal_value(expr.value)}
     if isinstance(expr, ExprVar):
         if expr.name not in scope and expr.name not in callables:
+            _reject_foreign_name(expr.name, filename, expr.line)  # item 384
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
                             hint="declare it with `let`/`var` or add it as a parameter (G1)")
         return {"kind": "var", "name": expr.name}
@@ -2809,6 +4510,15 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         )
         if isinstance(expr.callee, ExprField) and not _host_receiver:
             method = expr.callee.name
+            # item 383: receiver-first list transforms (`xs.map(f)` etc.) are
+            # SUGAR for their generic free function; desugar to the plain call
+            # here (the checker already typed the desugared form) so the
+            # existing generic-call path lowers it. Pure syntactic redirect —
+            # no builtin-method row, so no new per-backend branch.
+            if method in LIST_TRANSFORMS:
+                return _lower_pure_expr(desugar_list_transform(expr), scope,
+                                        callables, alias_fns, filename,
+                                        type_env, types)
             arity = _BUILTIN_METHODS.get(method)
             if arity is None:
                 raise RevlError(
@@ -2836,6 +4546,22 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                                 f"builtin `{method}` takes {arity} argument(s), "
                                 f"{len(expr.args)} given")
             _refuse_zero_divisor(method, expr.args, filename, expr.line)
+            # Value dot-accessors (roadmap item 189): a `Value` receiver's
+            # `.field`/`.str`/`.list`/`.keys` is receiver-first SUGAR for the
+            # `value_*` free function — it desugars here to the SAME call IR
+            # `value_str(value_field(...))` lowers to, so the emitted code is
+            # byte-identical on every tier and no backend needs a new branch.
+            # Gated on a proven `Value` receiver: `.keys()` also names a Map
+            # builtin, which keeps the generic path below (recv head != Value).
+            # `.field`/`.str`/`.list` are Value-only, so the checker already
+            # proved the receiver is `Value` by the time lowering runs.
+            if method in _VALUE_ACCESSORS and parse_type(recv_t)[0] == "Value":
+                return {
+                    "kind": "call",
+                    "callee": {"kind": "var", "name": _VALUE_ACCESSORS[method]},
+                    "args": [_lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types)]
+                    + [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args],
+                }
             node: dict = {"kind": "builtin", "method": method,
                           "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
                           "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
@@ -2870,6 +4596,19 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                                       [infer_ast(a, type_env, types, None) for a in expr.args],
                                       lowered_args):
                     _mark_widen(p, a, node)
+                # item 187: fill omitted trailing arguments with each defaulted
+                # parameter's default expression. Lower each default here and
+                # mark the Int->Float widening on it exactly as a written
+                # argument would get, so a `Float = 0` default emits correctly.
+                sig = types.get(FNS_KEY, {}).get(expr.callee.name) or {}
+                defaults = sig.get("defaults") or []
+                for i in range(len(lowered_args), len(params)):
+                    dexpr = defaults[i]
+                    dnode = _lower_pure_expr(dexpr, scope, callables, alias_fns,
+                                             filename, type_env, types)
+                    _mark_widen(params[i], infer_ast(dexpr, type_env, types, None),
+                                dnode)
+                    lowered_args.append(dnode)
                 return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, alias_fns, filename, type_env, types),
                         "args": lowered_args}
         return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, alias_fns, filename, type_env, types),
@@ -2879,8 +4618,15 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         if expr.name == "length" and _is_sized_type(target_type):
             return {"kind": "len",
                     "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types)}
-        return {"kind": "field", "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
+        node = {"kind": "field",
+                "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
                 "name": expr.name}
+        # item 380: a field whose declared type is `Opt[T]` reads TOTAL — absent
+        # yields the empty Opt, never a raise (py) or a `??`-outliving `undefined`
+        # (ts) — so `e.kind ?? default` means the same on every tier.
+        if _field_is_opt(target_type, expr.name, types):
+            node["opt"] = True
+        return node
     if isinstance(expr, ExprIndex):
         return {"kind": "index", "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
                 "index": _lower_pure_expr(expr.index, scope, callables, alias_fns, filename, type_env, types)}
@@ -2920,6 +4666,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             else:
                 inner_type_env.pop(param, None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
+        _b1_capture_check(expr, type_env, types, filename, expr.line)
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": _lower_pure_expr(expr.body, inner, callables, alias_fns, filename, inner_type_env, types)}
         # IR v3: an arrow that the checker typed carries its signature, so a
@@ -3011,7 +4758,243 @@ def _inject_opt(expected: str | None, actual: str | None, node: dict) -> dict:
     return {"kind": "call", "callee": {"kind": "var", "name": "Some"}, "args": [node]}
 
 
-def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
+def _default_expr_callees(expr, out: set) -> None:
+    """Collect the names of every function/constructor *called* inside a
+    default-value expression (item 187 purity check). Only var-headed call
+    callees matter — an effectful operation is always a named extern/fn."""
+    if isinstance(expr, ExprCall):
+        if isinstance(expr.callee, ExprVar):
+            out.add(expr.callee.name)
+        _default_expr_callees(expr.callee, out)
+        for a in expr.args:
+            _default_expr_callees(a, out)
+    elif isinstance(expr, ExprBin):
+        _default_expr_callees(expr.left, out)
+        _default_expr_callees(expr.right, out)
+    elif isinstance(expr, ExprUn):
+        _default_expr_callees(expr.operand, out)
+    elif isinstance(expr, (ExprField, ExprOptField)):
+        _default_expr_callees(expr.target, out)
+    elif isinstance(expr, ExprOptCall):
+        _default_expr_callees(expr.target, out)
+        for a in expr.args:
+            _default_expr_callees(a, out)
+    elif isinstance(expr, ExprIndex):
+        _default_expr_callees(expr.target, out)
+        _default_expr_callees(expr.index, out)
+    elif isinstance(expr, ExprIf):
+        _default_expr_callees(expr.cond, out)
+        _default_expr_callees(expr.then, out)
+        _default_expr_callees(expr.otherwise, out)
+    elif isinstance(expr, ExprRecord):
+        for _, value in expr.fields:
+            _default_expr_callees(value, out)
+    elif isinstance(expr, ExprRecordUpdate):
+        _default_expr_callees(expr.base, out)
+        for _, value in expr.updates:
+            _default_expr_callees(value, out)
+    elif isinstance(expr, ExprList):
+        for item in expr.items:
+            _default_expr_callees(item, out)
+    elif isinstance(expr, Interp):
+        for kind, part in expr.parts:
+            if kind == "expr":
+                _default_expr_callees(part, out)
+
+
+def _validate_default_params(program: Program, types: dict,
+                             emitting_fns: set) -> None:
+    """Decl-site checks for default parameters (item 187): a default is a pure
+    expression that type-checks against its parameter. The ordering invariant
+    (defaults are trailing) is enforced in the parser; here we (a) refuse an
+    effectful default — one that reaches an emission/acquire/witnessed extern
+    or an emitting fn, which would smuggle an effect into an otherwise pure
+    call-site expansion — and (b) type-check the default against the declared
+    parameter type, once, at the declaration rather than at every call."""
+    effectful = {ext.name for ext in program.externs
+                 if ext.classification != "pure"} | set(emitting_fns or ())
+    for decl in program.fn_decls:
+        for p in decl.params:
+            default = getattr(p, "default", None)
+            if default is None:
+                continue
+            reached: set = set()
+            _default_expr_callees(default, reached)
+            bad = sorted(reached & effectful)
+            if bad:
+                raise RevlError(
+                    program.filename, p.line,
+                    f"default for parameter `{p.name}` calls `{bad[0]}`, which "
+                    "is effectful",
+                    hint="a default value must be a pure expression — it is "
+                         "evaluated at the call site whenever the argument is "
+                         "omitted, and an effect there would be invisible in the "
+                         "source",
+                    code="G6", category="purity",
+                )
+            dt = infer_ast(default, {}, types, program.filename)
+            if dt is not None and not compatible(p.type, dt):
+                raise mismatch(program.filename, p.line,
+                               f"default for parameter `{p.name}`", p.type, dt)
+
+
+def _component_header_stub(comp: ComponentDecl, filename: str) -> dict:
+    """A header-only placeholder for a component whose BODY lowering aborted
+    (item 386, Stage 1, Change 1 — the soundness fix).
+
+    Body lowering raised, so no lowered body exists — but DROPPING the component
+    corrupts `_link`: the multi-realm route check would fabricate "no component
+    provides key in realm" for a consumer routing to this component's key, and
+    G2 (provision conflict) / G3 (dependency cycle) would silently MISS a real
+    conflict or cycle on a key this component's HEADER declares. So we keep the
+    topology complete from the parts available BEFORE body lowering — the
+    `requires`/`provides` clauses on the `component` declaration — and mark it
+    `poisoned` so the body-walking post-passes (taint, spawn bounds/attenuation,
+    holes) skip it. `isolate`/`routes` are body statements, so a stub carries
+    none: its provisions sit in the shared realm, which is exactly enough to
+    stop the route-check fabrication and keep G2/G3 sound over its keys."""
+    return {
+        "name": comp.name,
+        "source": comp.source or filename,
+        "requires": {local for local, _svc, _line in comp.requires},
+        "provides": {key for key, _svc, _line in comp.provides},
+        "body": [],
+        "poisoned": True,
+    }
+
+
+def _raise_collected(errors: list[RevlError], program: Program) -> None:
+    """Dedup, order, and raise the collected refusals as a `RevlErrors` carrier
+    (item 386, Stage 1, Change 4).
+
+    Dedup key is `(code, filename, line, message)` — two recovery paths reaching
+    the same refusal collapse to one. Ordering is by COMPILE ORDER, not
+    alphabetical: `program.filename` (paths[0]) first, then each component's
+    `source` in declaration order (== the multi-file argument order, roadmap
+    312), then line. Python's sort is stable, so ties keep the pipeline
+    (append) order. This makes `diagnostics[0]` equal to what today's
+    single-error compile reports for the same input, keeping every existing
+    single-error test and consumer stable."""
+    file_rank: dict[str, int] = {}
+
+    def _rank(name: str) -> int:
+        if name not in file_rank:
+            file_rank[name] = len(file_rank)
+        return file_rank[name]
+
+    _rank(program.filename)
+    for comp in program.components:
+        _rank(comp.source or program.filename)
+
+    seen: set = set()
+    unique: list[RevlError] = []
+    for err in errors:
+        key = (err.code, err.filename, err.line, err.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(err)
+
+    unique.sort(key=lambda e: (file_rank.get(e.filename, len(file_rank)), e.line))
+    raise RevlErrors(unique)
+
+
+# --- item 379 / Decision 2 (docs/design/379-break-continue.md) --------------
+# The frame-neutrality of `break`/`continue` rests on a grammar accident: loops
+# live only in the fn statement grammar, and every teardown-registering form
+# lives only in the activation/method grammar, so the two never meet and no
+# emitter wraps a loop in teardown scaffolding. This pass makes that accident an
+# enforced whole-IR invariant, run once over the lowered IR: no registering step
+# may sit inside a `while`/`for` body, and — the same invariant read the other
+# way — no `while`/`for` step may sit in a component activation, provide-method,
+# or setup body. Either leak would let a future item register teardown at a loop
+# boundary; the java setup emitter (`_emit_setup_stmt`) would even compile the
+# loop-in-activation form silently, so a parse-time counter or a single
+# lowering-local assert would not catch it on every tier.
+
+_REGISTERING_STEP_KINDS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+_LOOP_STEP_KINDS = frozenset({"while", "for"})
+
+
+def _iter_all_fn_steps(steps):
+    """Every step in a fn-grammar body, descending `if` arms and loop bodies."""
+    for step in steps or []:
+        yield step
+        kind = step.get("step")
+        if kind in _LOOP_STEP_KINDS:
+            yield from _iter_all_fn_steps(step.get("body") or [])
+        elif kind == "if":
+            yield from _iter_all_fn_steps(step.get("then") or [])
+            yield from _iter_all_fn_steps(step.get("else") or [])
+
+
+def _iter_loop_scoped_steps(steps):
+    """Every step lexically inside a `while`/`for` body within a fn-grammar step
+    list (descending `if` arms, and nested loops via `_iter_all_fn_steps`)."""
+    for step in steps or []:
+        kind = step.get("step")
+        if kind in _LOOP_STEP_KINDS:
+            yield from _iter_all_fn_steps(step.get("body") or [])
+        elif kind == "if":
+            yield from _iter_loop_scoped_steps(step.get("then") or [])
+            yield from _iter_loop_scoped_steps(step.get("else") or [])
+
+
+def _find_loop_step(node):
+    """Deep-search an activation/method/setup IR subtree for a `while`/`for`
+    step. Expression nodes key on `kind`, never `step`, and component IR never
+    embeds a module `fn` body, so this never false-positives on a real loop."""
+    if isinstance(node, dict):
+        if node.get("step") in _LOOP_STEP_KINDS:
+            return node
+        for value in node.values():
+            found = _find_loop_step(value)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_loop_step(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
+    doc = "docs/design/379-break-continue.md"
+    fn_bodies: list[list] = [fn.get("body") or [] for fn in ir.get("functions") or []]
+    for key in ("tests", "fault_tests", "prop_tests"):
+        for unit in ir.get(key) or []:
+            body = unit.get("body")
+            if isinstance(body, list):
+                fn_bodies.append(body)
+    for body in fn_bodies:
+        for step in _iter_loop_scoped_steps(body):
+            kind = step.get("step")
+            if kind in _REGISTERING_STEP_KINDS:
+                raise RevlError(
+                    filename, step.get("line", 0),
+                    f"a `{kind}` step registers teardown and may not appear "
+                    f"inside a `while`/`for` body",
+                    hint="`break`/`continue` are frame-neutral only because loops "
+                         "and registration never meet; an item that wants them to "
+                         f"must first amend the teardown contract ({doc})",
+                )
+    for component in ir.get("components") or []:
+        loop = _find_loop_step(component)
+        if loop is not None:
+            raise RevlError(
+                filename, loop.get("line", 0),
+                "a `while`/`for` loop may not appear in a component activation "
+                "or provide-method body",
+                hint="iteration lives in the fn statement grammar; lift the loop "
+                     f"into a module `fn` and call it ({doc})",
+            )
+
+
+def check_and_lower(program: Program, ambient: dict | None = None,
+                    taint_strict: bool = False, untrusted: bool = False) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
     (a running manifest, DESIGN §4's runtime-admission gate): ambient services
     are in scope without redeclaration, and G2/G3 are checked over the union
@@ -3019,8 +5002,25 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     `ambient`: {"services": <v1 services table>, "components": [<manifest
     component entries>]} — see compile_files for how it is derived.
+
+    `taint_strict` (item 249, Slice D) turns on derived taint sinks and sources —
+    off by default and byte-identical when off, on under the untrusted-author
+    profile or `revl compile --taint-strict`.
+
+    `untrusted` (item 274) marks the untrusted-author profile so a G9 sink
+    refusal carries the collapsed navigable verdict (no author-side declassify
+    path exists under `no_declassify`). Purely additive: it changes only the
+    optional `navigate` field of the refusal, never the verdict or the IR.
     """
     ambient = ambient or {}
+
+    # Taint/provenance (roadmap item 249, Slice A). Read the `Untrusted[T]` /
+    # `Trusted[T]` qualifier surface off every declaration and STRIP it from the
+    # declared types in place, so base typing, method lookup and the emitted IR
+    # are byte-identical for any program that uses no qualifier. The flow verdict
+    # (`check_taint`, below) runs once every component body is lowered.
+    taint_model = extract_and_normalize(program, taint_strict=taint_strict)
+
     ambient_services = {
         name: _service_from_ir(name, spec)
         for name, spec in (ambient.get("services") or {}).items()
@@ -3040,6 +5040,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     component_callables = (
         _HOST_CALLABLES
         | _BUILTIN_CONSTRUCTORS
+        | _DECLASSIFY_BUILTINS
         | {fn.name for fn in program.fn_decls}
         | {ext.name for ext in program.externs}
     )
@@ -3052,11 +5053,37 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
-    externs = _lower_externs(program, program.filename, types)
+    externs = _lower_externs(program, program.filename, types, fns)
+    # item 256 Slice 1: cross-index the bound secrets against the extern emission
+    # capabilities - refuse a wasm-only or nowhere-bound secret and a name/param
+    # collision, annotate each bound extern with the secret names it receives, and
+    # produce the manifest-visible (name, capability) rows. Empty and inert for a
+    # program that binds no secret, so every existing IR is byte-identical.
+    secrets_ir = _lower_secrets(program, externs, program.filename)
+    # item 388: the poly externs (`fn|async`), pre-seeded above as async IR
+    # entries. `extern_colour_instances` is the shared registry each provide
+    # method fills with the colour its call sites of a poly extern requested (the
+    # analog of `sync_monomorphs`); `_finalize_poly_externs` reads it after the
+    # component loop to split/prune each poly entry into its concrete clones.
+    # Empty unless the program declares a poly extern, so every downstream section
+    # is byte-identical without one.
+    poly_extern_names: set = {
+        d.name for d in program.externs if getattr(d, "colour_poly", False)}
+    extern_colour_instances: dict = {}
+    # item 246: the declaration-owned approval facts, stashed on the type table so
+    # `_lower_emit_step`'s per-crossing obligation can read them with no signature
+    # change. Empty `required` set unless an extern declared `requires approval`,
+    # so a program with none is byte-identical.
+    types[APPROVAL_KEY] = _approval_index(externs)
     # witnessed externs are refused outside effect position (item 243 rule 1):
     # a fn/test body has no teardown accumulator, so the auto-registered inverse
     # would be dropped and the mutation would be silently irreversible.
     _refuse_witnessed_outside_effect_position(program, program.filename)
+    # items 399/400: the acquire-with-`undo` and `deferred`-emission twins of the
+    # witnessed rule-1 refusal. A fn/test body has no teardown accumulator and no
+    # session commit, so a bare call would drop the declared `undo` (399) or fire
+    # the deferred emission immediately, bypassing the commit queue (400).
+    _refuse_teardown_bound_externs_in_fn_body(program, program.filename)
     # Slice 2: the set every component's effect-position lowering consults to
     # tell a witnessed acquisition from an ordinary one (docs/design/243-
     # witnessed-externs.md). Computed once — every component shares the same
@@ -3069,12 +5096,55 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
 
+    # item 310: the capability-aware caching admission checks, run here once the
+    # emission fixed point and the type/extern tables are known (a `cache pure`
+    # crossing-reach refusal reads `emitting_caps`; the structural resource walk
+    # reads the extern/type tables). Refuses every declaration the seam-method
+    # slice cannot soundly cache; survivors flow their `cache` IR below. Inert for
+    # any program declaring no `cache` clause, so byte-identity holds.
+    _check_cache_declarations(program, externs, types, emitting_caps,
+                              program.filename, untrusted=untrusted)
+
+    # item 187: default-parameter values must be pure and well-typed. Checked
+    # here, once the emission fixed point is known, so an effectful default is
+    # refused before any call site expands it.
+    _validate_default_params(program, types, emitting_fns)
+
     # phase-2 async coloring (docs/design/async-extern.md §3): the async twin
     # of the emission fixed point above. Seed = async externs; a module `fn`
     # that reaches a colored callee — directly or transitively — is itself
     # colored. `async_witness` records the shortest derivation for diagnostics.
     async_witness: dict[str, str] = {}
     async_colored = _async_callables(fns, externs, async_witness)
+
+    # sync/async arrow polymorphism (roadmap item 342, the dual of item 92).
+    # A fn colored async *solely* because it calls its own async-typed callback
+    # parameter — and reaching no other suspension — is "colour-polymorphic":
+    # its async-ness is contingent on the arrow actually passed. When a sync
+    # caller hands it a genuinely-sync arrow (a value that trivially lifts into
+    # a completed async, item 92 §2), that call site does not suspend, so the
+    # fn is monomorphized to a SYNC clone there — one source loop serves an
+    # async evolve path and a sync tool-call path with no duplicated twin.
+    colour_polymorphic: set = _colour_polymorphic_fns(fns, async_colored)
+    # Filled by the sync call sites (provide methods, module fns, and — below —
+    # `test` bodies): monomorph-name -> origin fn name. Synthesized into `fns`
+    # once every call site has registered.
+    sync_monomorphs: dict[str, str] = {}
+
+    # item 387 (finishing item 342 phase 2): 342 hooked its monomorphization
+    # into `_lower_provide` alone, so a module `fn` reaching a colour-polymorphic
+    # loop only through genuinely-sync arrows was auto-colored async here instead
+    # of kept sync — and a sync context calling it then diverged (py ran to a
+    # bare coroutine, ts refused at emit, H29). Redirect those free-fn call
+    # sites to the sync monomorph and recolor, so a free fn whose only async
+    # reach was such a call is sync on BOTH tiers. No-op (and `async_colored`
+    # byte-identical) when no such call exists.
+    if colour_polymorphic:
+        async_colored = _monomorphize_free_fn_calls(
+            fns, externs, colour_polymorphic, async_colored, types,
+            sync_monomorphs, component_callables, async_witness)
+        colour_polymorphic = _colour_polymorphic_fns(fns, async_colored)
+
     # Stamp `"async": True` on every colored fn entry (the emitters read it
     # with `.get("async")`, needing no reachability analysis of their own),
     # mirroring the extern spelling in `_lower_externs`. And refuse first-class
@@ -3123,74 +5193,153 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         "sites": [],        # G4 spawn-boundary obligations, checked after lowering
     }
 
+    # item 386, Stage 1: collect ALL refusals in one pass instead of aborting
+    # on the first. `errors` accumulates every recoverable refusal; the
+    # carrier is raised once at the end (below). The component loop is the
+    # cleanest recovery unit — by this point the type and signature tables
+    # already exist, so one component's failure does not poison another's
+    # lowering.
+    errors: list[RevlError] = []
+
+    def _collect(fn, *args, **kwargs):
+        """Run a whole-composition post-pass, collecting a `RevlError` instead
+        of aborting so its sibling passes still run (item 386, Change 2). An
+        UNEXPECTED (non-`RevlError`) crash is dropped only when the compile is
+        ALREADY failing: a post-pass tripping over poisoned/partial state must
+        not replace N good diagnostics with a traceback. On an otherwise-clean
+        compile it propagates as the bug it is."""
+        try:
+            return fn(*args, **kwargs)
+        except RevlError as post_error:
+            errors.append(post_error)
+            return None
+        except Exception:  # noqa: BLE001 — see docstring: guarded only when failing
+            if errors:
+                return None
+            raise
+
     components = []
     seen = set()
     for comp in program.components:
         if comp.name in seen:
-            raise RevlError(comp.source or program.filename, comp.line,
-                            f"duplicate component `{comp.name}`")
+            # A duplicate component is already represented in the topology by
+            # its first declaration, so record the refusal but append NO stub
+            # (a second same-named entry would fabricate a `_link` G2 conflict).
+            errors.append(RevlError(comp.source or program.filename, comp.line,
+                                    f"duplicate component `{comp.name}`"))
+            continue
         seen.add(comp.name)
-        # A multi-file composition merges declarations from several sources into
-        # one Program whose `filename` is only the first argument (paths[0]).
-        # Body diagnostics render through `env.filename`, so a component from a
-        # LATER file must lower under its own `source`. Otherwise its rejection
-        # names the first source with this file's line number (roadmap 312).
-        lowered_comp = _lower_component(comp, services,
-                                        comp.source or program.filename,
-                                        component_callables, types, emitting_fns,
-                                        emitting_caps, emission_evidence, spawn_reg,
-                                        async_colored, witnessed_externs)
-        if comp.source:
-            _retarget_holes(lowered_comp, comp.source)
-        # async coloring (docs/design/async-extern.md §3, "Component bodies"):
-        # a setup/activation body (an `emit` step, an `effect`, an `await`
-        # step) may not reach an async callable — an async extern *or* a
-        # phase-2 colored fn — because divert/inertia semantics are out of
-        # scope for v1. Provide-method bodies are checked at their own site
-        # above, so they are pruned here.
-        if async_colored:
-            _reached: set = set()
-            _async_reached_outside_provide(lowered_comp, async_colored, _reached)
-            if _reached:
-                _culprit = sorted(_reached)[0]
-                _kind = "extern" if _culprit in {
-                    e.name for e in program.externs if e.async_} else "function"
-                raise RevlError(
-                    comp.source or program.filename, comp.line,
-                    f"component `{comp.name}` reaches async {_kind} "
-                    f"`{_culprit}` in a setup/activation body, which "
-                    f"cannot suspend a fiber (A1)",
-                    hint="wrap the suspending call in an `async fn` service "
-                         "operation and drive it from a provide method — v1 does "
-                         "not lower an awaited `emit` step",
-                    code="A1", category="async-propagation",
-                )
-        components.append(lowered_comp)
+        try:
+            # A multi-file composition merges declarations from several sources
+            # into one Program whose `filename` is only the first argument
+            # (paths[0]). Body diagnostics render through `env.filename`, so a
+            # component from a LATER file must lower under its own `source`.
+            # Otherwise its rejection names the first source with this file's
+            # line number (roadmap 312).
+            lowered_comp = _lower_component(comp, services,
+                                            comp.source or program.filename,
+                                            component_callables, types, emitting_fns,
+                                            emitting_caps, emission_evidence, spawn_reg,
+                                            async_colored, witnessed_externs,
+                                            colour_polymorphic, sync_monomorphs,
+                                            poly_extern_names, extern_colour_instances,
+                                            errors=errors, untrusted=untrusted)
+            if comp.source:
+                _retarget_holes(lowered_comp, comp.source)
+            # async coloring (docs/design/async-extern.md §3, "Component
+            # bodies"): a setup/activation body (an `emit` step, an `effect`, an
+            # `await` step) may not reach an async callable — an async extern
+            # *or* a phase-2 colored fn — because divert/inertia semantics are
+            # out of scope for v1. Provide-method bodies are checked at their
+            # own site above, so they are pruned here. A component that recovered
+            # past a refused statement (item 386, Stage 2) has a partial body and
+            # is already failing, so skip the reach sweep — walking its poisoned
+            # body could fabricate or crash, and its diagnostics are collected.
+            if async_colored and not lowered_comp.get("poisoned"):
+                _reached: set = set()
+                _async_reached_outside_provide(lowered_comp, async_colored, _reached)
+                if _reached:
+                    _culprit = sorted(_reached)[0]
+                    _kind = "extern" if _culprit in {
+                        e.name for e in program.externs if e.async_} else "function"
+                    raise RevlError(
+                        comp.source or program.filename, comp.line,
+                        f"component `{comp.name}` reaches async {_kind} "
+                        f"`{_culprit}` in a setup/activation body, which "
+                        f"cannot suspend a fiber (A1)",
+                        hint="wrap the suspending call in an `async fn` service "
+                             "operation and drive it from a provide method — v1 does "
+                             "not lower an awaited `emit` step",
+                        code="A1", category="async-propagation",
+                    )
+            components.append(lowered_comp)
+        except RevlError as comp_error:
+            # This component's BODY lowering aborted. DROPPING it would corrupt
+            # `_link` (the route check fabricates "no provider", G2/G3 silently
+            # miss real conflicts/cycles on its keys), so append a HEADER-ONLY
+            # stub — provides/requires from the `comp` declaration, marked
+            # `poisoned` — to keep the topology complete, and continue.
+            errors.append(comp_error)
+            components.append(_component_header_stub(comp, program.filename))
+            continue
+
+    # item 386: the body-walking post-passes run over the SUCCESSFULLY lowered
+    # components only. A poisoned header stub has no lowered body, so feeding it
+    # to taint / spawn / hole walks would crash or fabricate; `_link` alone sees
+    # the full list (stubs included) because it needs the complete topology.
+    live_components = [c for c in components if not c.get("poisoned")]
+
+    # sync/async arrow polymorphism (item 342): materialize the sync clones the
+    # sync call sites above requested. Additive — a program with no lifted call
+    # site registers none, so `fns` (and every downstream section) is
+    # byte-identical to before.
+    _collect(_synthesize_sync_monomorphs, fns, sync_monomorphs)
+
+    # Taint/provenance verdict (item 249, Slice A): refuse any untrusted-origin
+    # value that reaches a `Trusted[T]` sink without a declassifier on its path
+    # (G9). No-op and byte-identical when the program declared no qualifier.
+    _collect(check_taint, program, fns, live_components, taint_model,
+             program.filename, untrusted=untrusted)
 
     # state hand-off admission (roadmap item 53): a candidate provider that
     # *accepts* a `handoff` on a key some running provider *exports* must accept
     # a §5-compatible shape — else the swap would drop the predecessor's state.
     # No-op unless the ambient carries running hand-offs (a swap against a
     # stateful running provider), so a fresh compile is unaffected.
-    _admit_handoff_replacement(program, components, ambient)
+    _collect(_admit_handoff_replacement, program, live_components, ambient)
 
     # G4/G6 across the spawn boundary: a spawner's declared emission upper
     # bound must cover what its spawned instances emit (decision 8). Checked
     # here, after every component's emission surface is known.
-    _check_spawn_emission_bounds(components, services, spawn_reg, program.filename)
+    _collect(_check_spawn_emission_bounds, live_components, services, spawn_reg,
+             program.filename)
 
     # Capability attenuation across the spawn boundary (item 66): a child's
     # capability set must be a checked subset of its spawner's held authority,
     # so lineage narrows monotonically and a supervisor cannot amplify. Returns
     # the per-instance attenuation chain for the G8 audit surface.
-    attenuation_chain = _check_spawn_attenuation(
-        components, spawn_reg, program.filename)
+    attenuation_chain = _collect(_check_spawn_attenuation,
+                                 live_components, services, spawn_reg,
+                                 program.filename, untrusted=untrusted)
 
-    fault_tests = _lower_fault_tests(program, components, program.filename)
+    # Emission budgets, static check (item 260 §3.2): a declared `budget.requests`
+    # / `calls` ceiling that the proved cardinality max exceeds is a red compile,
+    # and a finite ceiling over an `unbounded`/symbolic body is unprovable. Gated
+    # on a declared ceiling, so a budget-free composition is byte-identical.
+    _collect(_check_declared_ceilings, live_components, services, fns, externs,
+             program.filename)
 
-    manifest = _link(program, components, ambient.get("components") or [],
-                     templates=spawn_reg["templates"])
-    if attenuation_chain:
+    fault_tests = _collect(_lower_fault_tests, program, live_components,
+                           program.filename)
+
+    # `_link` collects its own G2/G3 refusals into the shared `errors` sink
+    # (item 386, Change 2): it must see the FULL component list, stubs included,
+    # so its topology is complete — a real conflict/cycle on a refused
+    # component's declared key is still reported, and a consumer routing to it
+    # gets no fabricated "no provider" error.
+    manifest = _collect(_link, program, components, ambient.get("components") or [],
+                        templates=spawn_reg["templates"], errors=errors)
+    if manifest and attenuation_chain:
         # additive, spawn-only: a non-spawning composition has no `instances`
         # key, so its manifest is byte-identical to before (docs/capability-
         # attenuation.md).
@@ -3198,8 +5347,48 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
-    tests = _lower_tests(program, program.filename, types, services)
-    prop_tests = _lower_prop_tests(program, program.filename, types, services)
+    tests = _collect(_lower_tests, program, program.filename, types, services)
+    prop_tests = _collect(_lower_prop_tests, program, program.filename, types, services)
+
+    # item 387: a plain `test`/`prop test` body is a pure SYNC context. Finish
+    # item 342 there — monomorphize each colour-polymorphic call handed only
+    # genuinely-sync arrows to its sync clone, and refuse (A1) any residual reach
+    # of an async callable — so a test never emits a bare, un-awaited call to an
+    # async callable (py) that the ts emitter would refuse (the H29 divergence).
+    # Then re-run the sync-clone synthesis to materialize any clone a test body
+    # was the sole caller of. Both are no-ops (IR byte-identical) when no async
+    # callable and no colour-polymorphic fn exist.
+    if async_colored or colour_polymorphic:
+        _collect(_admit_sync_test_bodies, tests, prop_tests, async_colored,
+                 colour_polymorphic, types, sync_monomorphs, component_callables,
+                 program.filename)
+        _synthesize_sync_monomorphs(fns, sync_monomorphs)
+
+    # item 388: caller-decided extern colour — split and prune, run LAST so every
+    # section that can name an extern (fns, components, tests, prop tests) has
+    # been lowered. Each provide method has recorded which colours its poly-extern
+    # call sites requested (`extern_colour_instances`); the sync PROVIDE-method
+    # calls have already been rewritten to the `_revl_sync` clone. Materialize the
+    # concrete clones and PRUNE the colour no call site used (the eager-expand-
+    # and-prune resolution of the ordering wrinkle). The async clone additionally
+    # survives whenever the ORIGINAL name is still referenced anywhere — an async
+    # method, a module `fn`, or a `test` — so no such call dangles. Additive: no
+    # poly extern means `poly_extern_names` is empty and `externs` is unchanged.
+    if poly_extern_names:
+        poly_referenced: set = set()
+        for _section in (fns, live_components, tests, prop_tests):
+            _calls_in(_section or [], poly_referenced)
+        _collect(_finalize_poly_externs, externs, poly_extern_names,
+                 extern_colour_instances, poly_referenced)
+
+    # item 386: every recoverable refusal is now collected. Raise them together
+    # as a `RevlErrors` carrier BEFORE building the IR — the result dict reads
+    # `manifest`/`components`/etc. which may be partial or poisoned on the error
+    # path, so short-circuiting here keeps a failing compile from crashing while
+    # assembling an IR nobody will read. A clean compile has `errors == []` and
+    # falls straight through, byte-identical to before.
+    if errors:
+        _raise_collected(errors, program)
 
     uses_components_2 = any(
         isinstance(stmt, (FailStmt, IfStmt))
@@ -3271,6 +5460,18 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                         # delivery semantics (roadmap item 44): the checked
                         # right for the runtime to auto-retry this emission
                         **({"idempotent": True} if m.idempotent else {}),
+                        # item 310: the capability-aware cache descriptor, the
+                        # interface contract every provider inherits. Metadata the
+                        # emission fixed point never reads (so every 414 static
+                        # fold sees a cached crossing identically on both paths);
+                        # the seam gate reads it at the call. Absent unless the
+                        # method declares `cache`, so every existing method's IR
+                        # is byte-identical.
+                        **({"cache": _cache_ir(m.cache)} if m.cache else {}),
+                        # item 257: `validated` + the derived `response_schema`,
+                        # additive (byte-identical when absent). The gate refuses
+                        # an unexpressible return type at compile time.
+                        **_method_validated_ir(m, types, program.filename),
                     }
                     for m in svc.methods.values()
                 },
@@ -3287,6 +5488,13 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         result["functions"] = fns
     if externs:
         result["externs"] = externs
+    # item 256 Slice 1: the manifest-visible secret bindings (name + capability
+    # only, never a value). Present only when the program binds a secret, so every
+    # existing IR is byte-identical. The driver (run.py) resolves each name to a
+    # value at plug and installs it into `_REVL_SECRETS`; the value lives nowhere
+    # in the IR.
+    if secrets_ir:
+        result["secrets"] = secrets_ir
     if tests:
         result["tests"] = tests
     # the obligation ledger (docs/holes.md). Present only when the draft has
@@ -3299,6 +5507,15 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         result["fault_tests"] = fault_tests
     if prop_tests:
         result["prop_tests"] = prop_tests
+    # item 249: the taint verdict has run, so `endorse(v)` — identity on the base
+    # type — is spliced out of the IR here; no emitter or golden sees it. A
+    # program with no `endorse` is rebuilt identically (byte-identity).
+    if taint_model.active:
+        result = splice_declassifiers(result)
+    # item 379 Decision 2: the frame-neutrality invariant, enforced over the
+    # fully-assembled IR (after every body is lowered and any declassifier
+    # splice has run).
+    _validate_no_loop_scoped_registration(result, program.filename)
     return result
 
 
@@ -3360,6 +5577,74 @@ def _component_req_call(env: Env, root: str, method: str, args: list, line: int)
             "method": method, "args": args}
 
 
+def _refuse_block_arm_stmt(stmt, filename: str):
+    """A provide-method match block arm lowers only `let` bindings + a final
+    expression (roadmap item 361): that is the shape BOTH tiers emit as an
+    expression (an awaited walrus sequence on the expression-only python tier,
+    an IIFE on ts). A loop / reassignment / destructuring is refused with a
+    clear message rather than mis-compiled — the sound residual, narrower than
+    the former blanket "not lowerable here" refusal."""
+    desc = {
+        AssignStmt: "a reassignment",
+        WhileStmt: "a `while` loop",
+        ForStmt: "a `for` loop",
+        IfStmt: "a statement `if`",
+        LetPatternStmt: "a destructuring `let`",
+    }.get(type(stmt), "this statement")
+    raise RevlError(
+        filename, getattr(stmt, "line", 0),
+        f"{desc} is not lowered inside a provide-method match block arm",
+        hint="a block arm here supports `let` bindings and a final expression "
+             "(the shape both tiers emit as an expression); lift a loop or "
+             "reassignment into a module `fn`, or rewrite it with `let` / an "
+             "`if`-expression (docs/records.md §6)",
+        code="G6", category="block-arm",
+    )
+
+
+def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
+                               callables: set, pure_only: bool = False) -> dict:
+    """Lower a statement-block match arm (`=> { let x = …; expr }`) inside a
+    component / provide-method body (roadmap item 361).
+
+    A module-fn block arm is lambda-lifted into a synthetic helper `fn`
+    (`_lift_block_arm`), but a provide-method block arm may read component
+    `config` or a required service, which a module `fn` cannot hold — so it is
+    lowered *inline* as a `do` expression (a `let`-sequence + a final value).
+    The emitters render it as an IIFE (ts) / an awaited walrus sequence (py),
+    so an async extern reached in the block is awaited within the method's
+    in-flight window. The async-coloring fixed point and the A1 refusals are
+    left untouched: they walk the lowered body (`_calls_in`), see the async
+    callable inside the `do` node, and still refuse a *sync* method reaching
+    it — only an `async` method admits and awaits it."""
+    filename = env.filename
+    inner = dict(scope)
+    taken = set(inner.values())
+    saved_tenv = dict(env.type_env)
+    stmts: list[dict] = []
+    try:
+        for st in expr.stmts:
+            if not isinstance(st, LetStmt):
+                _refuse_block_arm_stmt(st, filename)
+            value = _lower_component_pure_expr(st.value, env, inner, callables, pure_only)
+            safe = _safe_name(st.name, taken)
+            taken.add(safe)
+            inner[st.name] = safe
+            if st.type is not None:
+                check_type_wellformed(filename, st.line, st.type)
+                env.type_env[safe] = st.type
+            else:
+                inferred = infer_ir(value, env.type_env, env.types, env.services)
+                if inferred is not None:
+                    env.type_env[safe] = inferred
+            stmts.append({"step": "let", "name": safe, "value": value,
+                          "mutable": bool(st.mutable)})
+        tail = _lower_component_pure_expr(expr.tail, env, inner, callables, pure_only)
+    finally:
+        env.type_env = saved_tenv
+    return {"kind": "do", "stmts": stmts, "tail": tail}
+
+
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
                                pure_only: bool = False) -> dict:
     filename = env.filename
@@ -3367,6 +5652,11 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
 
     if isinstance(expr, ExprHole):
         return _lower_hole(expr, filename)
+
+    if isinstance(expr, ExprEndorse):
+        inner = _lower_component_pure_expr(expr.expr, env, scope, callables, pure_only)
+        approval = _lower_endorse_approval(expr, env, scope, callables, pure_only)
+        return _endorse_node(inner, expr, approval)
 
     # ADT construction (Result / user variants) — same tagged `adt` node as
     # the pure-fn path; Opt's Some/None stay untagged.
@@ -3451,6 +5741,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 hint=f"component {env.component.name} requires {declared} — "
                      f"add `requires {name}: <Service>`?",
             )
+        _reject_foreign_name(name, filename, line)  # item 384
         raise RevlError(filename, line,
                         f"`{name}` is not declared in this component effect block",
                         hint="declare it with `let` in the effect block, or use a "
@@ -3469,7 +5760,50 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         inst = _instance_handle_component(lowered_target, env)
         if inst is not None:
             return _lower_instance_get(lowered_target, expr.name, line, inst, env)
-        return {"kind": "field", "target": lowered_target, "name": expr.name}
+        target_type = infer_ir(lowered_target, env.type_env, env.types, env.services)
+        # item 392: the provide-method / component-body twin of the item 380(2)
+        # refusal in `infer_ast`. A field read off a value whose static type is
+        # `Any`/`Value` (the erased-dynamic types — a `json_parse` result) is the
+        # 279/299 silent-divergence class: py raises `KeyError` on an absent key,
+        # ts yields `undefined`, and neither is a defensible total answer for a
+        # field the author declared present. `infer_ast` (stratum 1 — fn/test/
+        # module-fn bodies) already refuses it, and the component-setup sweep
+        # reaches the same refusal in `infer_ir`; but a `provide` method body and
+        # a component pure-expression position lower through here WITHOUT a
+        # filename-carrying sweep, so the same expression compiled clean — the
+        # same context-scoping gap as the `.length`-in-provide-method case marked
+        # just below. Refuse it here with the identical diagnostic so the
+        # divergence is a compile error on every tier, wherever the read sits.
+        _thead, _ = parse_type(target_type)
+        if filename and _thead in ("Any", "Value"):
+            raise RevlError(
+                filename, line,
+                f"field read `.{expr.name}` on a value of type "
+                f"`{render_type(target_type)}` — an erased value has no known fields",
+                hint=("bind it to a record type first "
+                      f"(`let e: SomeRecord = …; e.{expr.name}` — an `Opt[T]` "
+                      "field then reads back the empty Opt on absence), or walk "
+                      "it with stdlib/value.rvl (`value_is_object(v)`, "
+                      f"`value_opt(v, \"{expr.name}\")`, `value_field_or`)"),
+                code="T1", category="type-mismatch")
+        node = {"kind": "field", "target": lowered_target, "name": expr.name}
+        # item 104 (cross-tier): the property form `.length` in a COMPONENT
+        # position stays a `field` node (the fn-body form is a `len` node — that
+        # split is deliberate). But `.length` on a sized value (Str/Bytes/List)
+        # is the code-point/element count, not a record slot: each tier's field
+        # emitter reads a record field by `getattr`/member, which raises on a
+        # `Str`. The component emitters carry no static type at the field site
+        # (unlike the typed wasm/rust emitters), so the frontend marks the node
+        # here — with the SAME `_is_sized_type` check — and the field handlers
+        # honour the mark, rendering the code-point path. Gated on a sized type,
+        # so a record whose field is literally named `length` still reads its
+        # slot.
+        if expr.name == "length" and _is_sized_type(target_type):
+            node["sized_length"] = True
+        # item 380: an `Opt[T]`-declared field reads TOTAL on every tier.
+        elif _field_is_opt(target_type, expr.name, env.types):
+            node["opt"] = True
+        return node
     if isinstance(expr, ExprCall):
         args = [_lower_component_pure_expr(a, env, scope, callables, pure_only)
                 for a in expr.args]
@@ -3504,8 +5838,15 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             # host provenance (docs/stdlib-2.0.md §Map): a local bound to a
             # host acquisition keeps its stub verb surface verbatim — checked
             # BEFORE the builtin table so the sanctioned `remove` overlap
-            # dispatches by receiver kind, never by name alone.
+            # dispatches by receiver kind, never by name alone. The verb is
+            # checked against the acquisition's family surface (item 401): an
+            # unknown verb (`store.frobnicate(k)`) is refused here (HOST-METHOD)
+            # instead of compiling as a pass-through that only crashes at the
+            # host runtime, the item-84 shape.
             if scope.get(root) in env.host_locals:
+                _check_host_verb(
+                    env.host_locals[scope[root]], method, len(args),
+                    filename, line)
                 return {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
                         "method": method, "args": args}
@@ -3577,8 +5918,15 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 return {"kind": "call", "callee": {"kind": "var", "name": name},
                         "args": args}
             if name in callables:
+                # item 187: fill omitted trailing arguments with their default
+                # expressions before async coercion, so the module-fn call the
+                # emitters see is fully supplied (no per-tier default handling).
+                filled = _with_default_args(
+                    name, args, env.types,
+                    lambda d: _lower_component_pure_expr(d, env, scope,
+                                                         callables, pure_only))
                 return {"kind": "fn", "name": name,
-                        "args": _coerce_async_args(name, args, env, line)}
+                        "args": _coerce_async_args(name, filled, env, line)}
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
             # the same sliver guard as the var-root path above: a non-var
@@ -3661,7 +6009,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                                                               pure_only)]
                             for name, e in expr.updates]}
     if isinstance(expr, ExprBlockArm):
-        raise _block_arm_unimplemented(filename, expr.line)
+        return _lower_component_block_arm(expr, env, scope, callables, pure_only)
     if isinstance(expr, ExprList):
         return {"kind": "list",
                 "items": [_lower_component_pure_expr(e, env, scope, callables, pure_only)
@@ -3687,6 +6035,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             else:
                 env.type_env.pop(param, None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
+        _b1_capture_check(expr, env.type_env, env.types, filename, expr.line)
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": _lower_component_pure_expr(expr.body, env, inner, callables,
                                                    pure_only)}
@@ -3735,6 +6084,7 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
         out.append({"step": "let", "name": safe, "value": value})
     elif isinstance(stmt, AssignStmt):
         if stmt.name not in scope:
+            _reject_foreign_name(stmt.name, filename, stmt.line)  # item 384
             raise RevlError(filename, stmt.line,
                             f"`{stmt.name}` is not declared in this effect block",
                             hint="declare it with `let`/`var` first (G1)")
@@ -3852,18 +6202,30 @@ from .emission_analysis import (  # noqa: E402,F401
 
 
 def _async_reached_outside_provide(node, async_names: set, acc: set) -> None:
-    """Async extern names a lowered component body reaches, *excluding*
-    provide-method and timer bodies (those get their own in-flight window —
-    async-extern.md §3, item 170). Mirrors `_calls_in`'s call/value detection
-    but prunes provide steps and timer steps.
+    """Async extern names a lowered component body reaches, *excluding* the
+    positions that carry their own in-flight window or admission gate. Mirrors
+    `_calls_in`'s call/value detection but prunes provide steps, timer steps,
+    and — since item 131 — the `effect`/`let-effect`/`emit`/`await` steps.
 
     A `timer` body (item 57) reaching an async op is no longer refused here: a
     timer is a spawned in-flight handle (item 106's `Async[T]` window), so it is
     coloured async in `_lower_timer_step` and its firing is awaited/cancelled by
     the runtime, exactly like a provide method's own async reach is admitted at
-    its site above (docs/time-coeffect.md §async)."""
+    its site above (docs/time-coeffect.md §async).
+
+    Item 131: the `await` step is pruned (its suspension is admitted, widened to
+    async externs/colored fns), and an AWAIT-MARKED effect/emit step is pruned
+    (an awaited async acquisition/emission is admitted). A NON-await effect/emit
+    step is still walked, so an async-callable reached without `await` keeps this
+    legacy "reaches async … in a setup/activation body" refusal — the message
+    the self-hosted admission gate mirrors. The req-op family that gate is blind
+    to is caught instead by `_admit_effect_async`/`_admit_emit_async` (rule 1),
+    which run during lowering and set the `async` flag this prune reads."""
     if isinstance(node, dict):
-        if node.get("step") in ("provide", "timer"):
+        step = node.get("step")
+        if step in ("provide", "timer", "await"):
+            return
+        if step in ("effect", "let-effect", "emit") and node.get("async"):
             return
         kind = node.get("kind")
         if kind == "fn" and node.get("name") in async_names:
@@ -3925,6 +6287,154 @@ def _reached_async_req_ops(node, env, acc: list) -> None:
     elif isinstance(node, list):
         for value in node:
             _reached_async_req_ops(value, env, acc)
+
+
+def _first_suspension(node, env) -> str | None:
+    """The first suspension source a lowered ACTIVATION-body expression reaches,
+    named for a diagnostic, or None (item 131). A suspension source is either a
+    req-target `async fn` service operation (rule 3 of the item-92 async-reach,
+    the blind spot the name-based walk misses) or an async-colored callable — an
+    `async` extern or a phase-2 colored fn (rule 1). Nested arrows are pruned:
+    an arrow value's color is its own concern, refused by `_refuse_leaky_arrow`.
+
+    This is the shared predicate behind the four admission rules of item 131 §3.
+    It looks past the name-based `_async_reached_outside_provide` walk precisely
+    where that walk is blind — a req-target async op — closing the two silent
+    `effect`/`emit` leaks and the two silent teardown leaks the probe table
+    named."""
+    reached: list = []
+    _reached_async_req_ops(node, env, reached)
+    if reached:
+        req_name, method, _op = reached[0]
+        return f"{req_name}.{method}"
+    called: set = set()
+    _calls_in(node, called, stop_async_arrows=True)
+    hit = sorted(called & (getattr(env, "async_callables", None) or set()))
+    if hit:
+        return hit[0]
+    return None
+
+
+def _first_reqop_suspension(node, env) -> str | None:
+    """The first REQ-TARGET async service op a lowered expression reaches (rule
+    3 of the item-92 async-reach), or None. This is the family the name-based
+    `_async_reached_outside_provide` fence is blind to — the two silent leaks of
+    item 131's probe table. An async-colored callable (an async extern or a
+    phase-2 colored fn) is deliberately NOT reported here: that family is still
+    refused by the name-based fence with its legacy "reaches async … in a
+    setup/activation body" diagnostic (which the self-hosted gate mirrors), so
+    the effect-composition rule-1 refusal owns only the req-op family it is the
+    first to name."""
+    reached: list = []
+    _reached_async_req_ops(node, env, reached)
+    if reached:
+        req_name, method, _op = reached[0]
+        return f"{req_name}.{method}"
+    return None
+
+
+def _admit_effect_async(stmt, step: dict, env: "Env", filename: str) -> None:
+    """Enforce the exact `await`/async pairing on an `effect`/`let-effect`
+    acquisition and refuse a suspending teardown (item 131 §3, rules 1-3).
+
+    The acquisition (and any pure `setup`) is a FORWARD-path position: it may
+    reach a suspension iff the surface spelled `effect await`. The `undo` is a
+    TEARDOWN position: it may never reach one, because the two-phase abort loop
+    is synchronous on every tier (docs/design/teardown-contract.md). Sets the
+    additive IR `async` flag on the step whose surface carried `await`; a sync
+    acquisition carries no key and lowers byte-identically to before."""
+    is_async = getattr(stmt, "is_async", False)
+    # Rule 1 (async without `await`) fires here only for the REQ-OP family — the
+    # silent leak. The async-callable family (extern / colored fn) in a non-await
+    # acquisition is still refused by the name-based `_async_reached_outside_
+    # provide` fence with its legacy message, which the self-hosted gate mirrors.
+    reqop = _first_reqop_suspension(step.get("acquire"), env)
+    if reqop is None and step.get("setup"):
+        reqop = _first_reqop_suspension(step["setup"], env)
+    # Rule 2 (await without async) reads the FULL suspension surface (either
+    # family): an `await` marker must name a real divert window of any kind.
+    reach = _first_suspension(step.get("acquire"), env)
+    if reach is None and step.get("setup"):
+        reach = _first_suspension(step["setup"], env)
+    if reqop is not None and not is_async:
+        # Rule 1: async without `await`.
+        raise RevlError(
+            filename, stmt.line,
+            f"component `{env.component.name}` acquires through async operation "
+            f"`{reqop}` but the effect is not awaited; the binding would hold "
+            f"the in-flight value, not the result (A1)",
+            hint=f"write `effect await {reqop.split('.')[-1]}(...) undo ...`; the "
+                 "await is a divert boundary (paper §4.3.2), so it is spelled, "
+                 "never inserted",
+            code="A1", category="async-propagation")
+    if is_async and reach is None:
+        # Rule 2: `await` without async — the marker must name a real divert
+        # window, never decoration (exact pairing, both directions).
+        raise RevlError(
+            filename, stmt.line,
+            "`effect await` on an acquisition that reaches nothing async — an "
+            "`await` in an activation body is a real divert window (A1)",
+            hint="nothing here suspends; drop `await` and write `effect <expr> "
+                 "undo ...`",
+            code="A1", category="async-propagation")
+    if is_async:
+        step["async"] = True
+    undo_reach = _first_suspension(step.get("undo"), env)
+    if undo_reach is not None:
+        # Rule 3: teardown never suspends.
+        raise RevlError(
+            filename, stmt.line,
+            f"`undo` reaches async operation `{undo_reach}`, but teardown is "
+            "synchronous on every tier — a suspension there would be a teardown "
+            "that can hang or silently no-op (A1)",
+            hint="the two-phase abort loop does not await "
+                 "(docs/design/teardown-contract.md, the bound rule); keep the "
+                 "inverse a synchronous call",
+            code="A1", category="async-propagation")
+
+
+def _admit_emit_async(stmt, step: dict, env: "Env", filename: str) -> None:
+    """Enforce the `await`/async pairing on an `emit` step and refuse a
+    suspending `compensate` (item 131 §3, rules 1-3). The emission expression is
+    forward-path (awaited iff the surface spelled `await emit`); the
+    `compensate` slot is teardown-position and may never suspend."""
+    is_async = getattr(stmt, "is_async", False)
+    # Rule 1 fires here only for the REQ-OP family (the silent leak); an
+    # async-callable emission in a non-await step stays with the legacy fence.
+    reqop = _first_reqop_suspension(step.get("expr"), env)
+    reach = _first_suspension(step.get("expr"), env)
+    if reqop is not None and not is_async:
+        # Rule 1: async without `await`.
+        raise RevlError(
+            filename, stmt.line,
+            f"`emit` step reaches async operation `{reqop}` but the emission is "
+            "not awaited; py would build a coroutine it never awaits (the "
+            "emission never fires) and ts a floating unordered Promise (A1)",
+            hint=f"write `await emit {reqop.split('.')[-1]}(...)`; the await is a "
+                 "divert boundary (paper §4.3.2), so it is spelled, never inserted",
+            code="A1", category="async-propagation")
+    if is_async and reach is None:
+        # Rule 2: `await` without async.
+        raise RevlError(
+            filename, stmt.line,
+            "`await emit` on an emission that reaches nothing async — an `await` "
+            "in an activation body is a real divert window (A1)",
+            hint="nothing here suspends; drop `await` and write `emit <expr>`",
+            code="A1", category="async-propagation")
+    if is_async:
+        step["async"] = True
+    comp_reach = _first_suspension(step.get("compensate"), env)
+    if comp_reach is not None:
+        # Rule 3: teardown never suspends.
+        raise RevlError(
+            filename, stmt.line,
+            f"`compensate` reaches async operation `{comp_reach}`, but teardown "
+            "is synchronous on every tier — a suspension there would be a "
+            "compensation that can hang or silently no-op (A1)",
+            hint="the two-phase abort loop does not await "
+                 "(docs/design/teardown-contract.md, the bound rule); keep the "
+                 "compensation a synchronous call",
+            code="A1", category="async-propagation")
 
 
 def _arrow_reaches_async(body, env) -> bool:
@@ -4023,6 +6533,341 @@ def _coerce_async_args(callee_name, args, env, line):
     return out
 
 
+def _sync_monomorph_name(origin: str, env) -> str:
+    """A collision-free identifier for `origin`'s sync clone (item 342). Every
+    call site for the same origin computes the same name: it depends only on the
+    stable `env.callables` and the shared, converging `env.sync_monomorphs`."""
+    name = f"{origin}_revl_sync"
+    while name in (env.callables or set()) or (
+            name in env.sync_monomorphs and env.sync_monomorphs[name] != origin):
+        name += "_"
+    return name
+
+
+def _monomorph_callee(node):
+    """The colour-polymorphic callee name of a lowered call, and a setter that
+    rewrites it, for BOTH lowered call shapes: a component body's `{kind: fn,
+    name}` and a module-`fn`/`test` body's `{kind: call, callee: {kind: var,
+    name}}` (item 387 — 342 originally saw only the former). Returns
+    `(origin, set_name)` or `(None, None)`."""
+    if node.get("kind") == "fn" and isinstance(node.get("name"), str):
+        def _set(m, _n=node):
+            _n["name"] = m
+        return node["name"], _set
+    if node.get("kind") == "call":
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var" \
+                and isinstance(callee.get("name"), str):
+            def _set(m, _c=callee):
+                _c["name"] = m
+            return callee["name"], _set
+    return None, None
+
+
+def _monomorphize_sync_callback_calls(node, env) -> None:
+    """Sync/async arrow polymorphism at a sync call site (item 342 + item 387).
+
+    A sync context (a provide method — item 342; or a module `fn`/`test` body —
+    item 387) that calls a colour-polymorphic fn (one async solely by its own
+    callback parameter) with a genuinely-sync arrow does not suspend: the arrow
+    trivially lifts into a completed async. Instead of forcing the context async
+    (A1) or authoring a duplicate sync loop, the call is redirected to a SYNC
+    monomorph of the fn — `async` dropped, the callback de-async'd — and the
+    arrow is un-stamped back to a plain sync value. `env.sync_monomorphs` records
+    the request; the clone is synthesized once, after every call site is seen.
+
+    Only fires when EVERY async-typed-param argument is a genuinely-sync arrow.
+    If any such arrow reaches a real suspension, the call is left untouched: the
+    A1 admission then refuses it, because a sync context truly cannot await it."""
+    if isinstance(node, dict):
+        origin, set_name = _monomorph_callee(node)
+        if origin is not None and origin in env.colour_polymorphic:
+            sig = (env.types.get(FNS_KEY) or {}).get(origin) or {}
+            params = sig.get("params") or []
+            args = node.get("args") or []
+            async_arrows: list = []
+            liftable = True
+            for i, ptype in enumerate(params):
+                if not _is_async_fn_type(ptype):
+                    continue
+                arg = args[i] if i < len(args) else None
+                if (isinstance(arg, dict) and arg.get("kind") == "arrow"
+                        and not _arrow_reaches_async(arg.get("body"), env)):
+                    async_arrows.append((arg, ptype))
+                else:
+                    # a genuinely-async arrow (or a non-arrow) — not liftable;
+                    # leave the async loop in place for the A1 admission to judge
+                    liftable = False
+                    break
+            if liftable and async_arrows:
+                mono = _sync_monomorph_name(origin, env)
+                env.sync_monomorphs[mono] = origin
+                set_name(mono)
+                for arg, ptype in async_arrows:
+                    arg.pop("async", None)
+                    inner = parse_type(ptype)[1][-1]          # Async[T]
+                    unwrapped = parse_type(inner)[1]
+                    arg["returns"] = render_type(unwrapped[0]) if unwrapped else None
+        for value in node.values():
+            _monomorphize_sync_callback_calls(value, env)
+    elif isinstance(node, list):
+        for value in node:
+            _monomorphize_sync_callback_calls(value, env)
+
+
+def _resolve_poly_extern_calls(node, env, is_async: bool) -> None:
+    """Caller-decided extern colour at a call site (item 388, stage 3 — the
+    EXTERN analog of `_monomorphize_sync_callback_calls`).
+
+    A poly extern (`fn|async`) is pre-seeded as the async form (its IR entry
+    carries `async: True`, named `engine_run`). Walk a provide-method body and,
+    at each call of a poly extern, record the enclosing method's colour into the
+    shared `env.extern_colour_instances` map so the post-pass knows which clones
+    to keep:
+
+    - An ASYNC method's call resolves to the async clone (the pre-seeded entry,
+      original name), left in place: it is in `async_externs`/`_PY_ASYNC_EXTERNS`,
+      so the existing name-keyed await machinery awaits it, which A1 permits
+      inside an async method.
+    - A SYNC method's call is rewritten to the `_revl_sync` clone name and the
+      sync colour recorded. The rewrite runs BEFORE the A1 admission (exactly
+      where item 342's monomorph hook runs), so the sync call site has already
+      cleared async membership — the sync clone is a concrete `def` not in the
+      async set, so A1 never fires and no `await` lands in the sync function.
+
+    Reuses `_monomorph_callee` for both lowered call shapes (`{kind: fn, name}`
+    and `{kind: call, callee: {kind: var, name}}`)."""
+    if isinstance(node, dict):
+        origin, set_name = _monomorph_callee(node)
+        if origin is not None and origin in env.poly_externs:
+            inst = env.extern_colour_instances.setdefault(
+                origin, {"sync": False, "async": False, "sync_name": None})
+            if is_async:
+                inst["async"] = True
+            else:
+                sync_name = inst["sync_name"] or _sync_monomorph_name(origin, env)
+                inst["sync"] = True
+                inst["sync_name"] = sync_name
+                set_name(sync_name)
+        for value in node.values():
+            _resolve_poly_extern_calls(value, env, is_async)
+    elif isinstance(node, list):
+        for value in node:
+            _resolve_poly_extern_calls(value, env, is_async)
+
+
+def _finalize_poly_externs(externs: list, poly_names: set,
+                           instances: dict, referenced: set) -> None:
+    """Materialize and prune the concrete clones of every poly extern (item 388,
+    stage 4 — the EXTERN analog of `_synthesize_sync_monomorphs`, plus the
+    eager-expand-and-PRUNE resolution of the ordering wrinkle).
+
+    Each poly extern was pre-seeded as one async IR entry (`colour_poly: True`).
+    After every component has recorded which colours its call sites requested
+    (`instances[name]`), rewrite that single entry into the concrete clones that
+    are actually used, IN PLACE so emission order is deterministic:
+
+    - async requested -> keep the pre-seeded entry as the async clone (original
+      name, `async: True`);
+    - sync requested  -> a deep-copied clone with `async` dropped and the
+      `_revl_sync` name the sync call sites were rewritten to;
+    - a colour NObody requested is PRUNED. A poly extern called in only one
+      colour emits exactly one clone (a sync-only program emits no async clone
+      and vice-versa); a poly extern nobody calls emits nothing at all (additive:
+      parser, IR, and every golden stay byte-identical without a poly extern).
+
+    The `colour_poly` marker is stripped from every surviving clone, so the final
+    IR carries only ordinary concrete extern entries the emitters already
+    understand."""
+    import copy
+
+    for name in poly_names:
+        idx = next((i for i, e in enumerate(externs)
+                    if e.get("name") == name and e.get("colour_poly")), None)
+        if idx is None:
+            continue
+        preseed = externs[idx]
+        preseed.pop("colour_poly", None)
+        inst = instances.get(name) or {}
+        replacement: list = []
+        # keep the async clone if an async provide method requested it OR the
+        # original (async) name still appears anywhere in the final IR — a call
+        # from an async method, a module `fn`, or a `test` that was never
+        # monomorphized to the sync clone (only sync PROVIDE methods rewrite their
+        # calls). Without this second condition such a residual reference would
+        # dangle after the async clone was pruned.
+        if inst.get("async") or name in referenced:
+            replacement.append(preseed)          # keep as the async clone
+        if inst.get("sync"):
+            clone = copy.deepcopy(preseed)
+            clone["name"] = inst.get("sync_name") or f"{name}_revl_sync"
+            clone.pop("async", None)             # the sync clone is a blocking def
+            replacement.append(clone)
+        externs[idx:idx + 1] = replacement       # prune the unused colour
+
+
+def _synthesize_sync_monomorphs(fns: list, sync_monomorphs: dict) -> None:
+    """Materialize the sync clones requested by item-342 call sites, appending
+    each to `fns`. A clone is the origin fn with `async` dropped and every
+    async-typed callback parameter de-async'd (`(A) -> Async[T]` -> `(A) -> T`),
+    so both emitters render it as a plain sync fn awaiting nothing — the body is
+    byte-identical, only the header and the callback's colour differ."""
+    import copy
+
+    by_name = {f["name"]: f for f in fns}
+    for mono, origin in sorted(sync_monomorphs.items()):
+        if mono in by_name:            # already synthesized (shared clone)
+            continue
+        src = by_name.get(origin)
+        if src is None:                # origin vanished — nothing to clone
+            continue
+        clone = copy.deepcopy(src)
+        clone["name"] = mono
+        clone.pop("async", None)
+        for p in clone.get("params") or []:
+            if _is_async_fn_type(p.get("type")):
+                p["type"] = _strip_async_fn_return(p["type"])
+        fns.append(clone)
+        by_name[mono] = clone
+
+
+def _strip_async_fn_return(fn_type: str) -> str:
+    """`(A, B) -> Async[T]` -> `(A, B) -> T`: the sync reading of an async
+    callback type (item 342). A non-async fn type is returned unchanged."""
+    head, args = parse_type(fn_type)
+    if head != FN_HEAD or not args:
+        return fn_type
+    ret_head, ret_args = parse_type(args[-1])
+    if ret_head != "Async" or not ret_args:
+        return fn_type
+    parts = list(args[:-1]) + [ret_args[0]]
+    return f"({', '.join(render_type(p) for p in parts[:-1])}) -> {render_type(parts[-1])}"
+
+
+class _FreeFnMonoEnv:
+    """A lightweight `env` shim exposing exactly the attributes the item-342
+    monomorphization walk reads, so `_monomorphize_sync_callback_calls` and
+    `_arrow_reaches_async` can run over a module `fn` body or a `test`/`prop
+    test` body — none of which has a component `Env`. Such a body binds no
+    required key, so `services`/`requires` are empty and `_req_op_is_async` is
+    always False (rule 3 is component-only)."""
+
+    def __init__(self, colour_polymorphic, types, sync_monomorphs, callables,
+                 async_callables):
+        self.colour_polymorphic = colour_polymorphic
+        self.types = types
+        self.sync_monomorphs = sync_monomorphs
+        self.callables = callables
+        self.async_callables = async_callables
+        self.services: dict = {}
+        self.requires: dict = {}
+
+
+def _colour_polymorphic_fns(fns: list, async_colored: set) -> set:
+    """The item-342 colour-polymorphic set: a fn colored async SOLELY because it
+    calls its own async-typed callback parameter — it has such a param, it is
+    colored, and its body reaches no OTHER async name (`stop_async_arrows` prunes
+    a nested async arrow, whose suspension is its own value). Its async-ness is
+    contingent on the arrow actually passed: a genuinely-sync arrow lifts the fn
+    to a sync clone (`_monomorphize_sync_callback_calls`)."""
+    poly: set = set()
+    for entry in fns:
+        if entry["name"] not in async_colored:
+            continue
+        if not any(_is_async_fn_type(p.get("type"))
+                   for p in entry.get("params") or []):
+            continue
+        reached: set = set()
+        _calls_in(entry.get("body") or [], reached, stop_async_arrows=True)
+        if not (reached & async_colored):
+            poly.add(entry["name"])
+    return poly
+
+
+def _monomorphize_free_fn_calls(fns, externs, colour_polymorphic, preliminary,
+                                types, sync_monomorphs, callables,
+                                async_witness) -> set:
+    """Complete item-342 at MODULE-`fn` call sites (item 387).
+
+    342 hooked its sync monomorphization into `_lower_provide` alone, so a free
+    `fn` that reaches a colour-polymorphic loop ONLY by handing it genuinely-sync
+    arrows was auto-colored async by the phase-2 fixed point instead of being
+    kept sync. A sync context then calling that fn (a `test` block, a sync
+    provide method) diverged: py emitted a bare, un-awaited call yielding a
+    coroutine while ts refused at emit, naming this very frontend hole (H29).
+    Here such a fn is kept sync and its call redirected to the sync monomorph,
+    exactly as a sync provide method's call is.
+
+    An async caller is left untouched (item-92 coercion, the loop stays async):
+    `genuinely_async` is the colour of the call graph once EVERY liftable
+    polymorphic call is made sync, so a fn still colored there reaches a real
+    suspension on its own account (a real async extern, or a genuinely-async
+    arrow into the loop) and keeps its async loop. Returns the final
+    `async_colored` after the rewrite (== `genuinely_async` by construction)."""
+    import copy
+
+    # 1) genuinely-async fns: recolor a throwaway copy in which every liftable
+    #    polymorphic call is already synced. A fn still colored there is async on
+    #    its own account, independent of the arrows a caller happens to pass.
+    probe = copy.deepcopy(fns)
+    probe_env = _FreeFnMonoEnv(colour_polymorphic, types, {}, callables, preliminary)
+    for f in probe:
+        _monomorphize_sync_callback_calls(f.get("body") or [], probe_env)
+    genuinely_async = _async_callables(probe, externs)
+
+    # 2) rewrite the REAL bodies of the fns that end up sync. A genuinely-async
+    #    fn is skipped so its loop stays async — item 92's coercion, unchanged.
+    real_env = _FreeFnMonoEnv(colour_polymorphic, types, sync_monomorphs,
+                              callables, preliminary)
+    for f in fns:
+        if f["name"] in genuinely_async:
+            continue
+        _monomorphize_sync_callback_calls(f.get("body") or [], real_env)
+
+    # 3) recolor for the final verdict over the rewritten bodies.
+    async_witness.clear()
+    return _async_callables(fns, externs, async_witness)
+
+
+def _admit_sync_test_bodies(tests, prop_tests, async_colored, colour_polymorphic,
+                            types, sync_monomorphs, callables, filename) -> None:
+    """A plain `test`/`prop test` body is a pure SYNC context — it cannot await.
+    Complete item-342 there too (item 387): monomorphize each colour-polymorphic
+    call handed only genuinely-sync arrows to its sync clone, then refuse (A1)
+    any residual reach of an async callable. Without this a test calling an async
+    callable diverged — py emitted a bare, un-awaited call yielding a coroutine
+    while ts refused at emit, naming this frontend hole (H29). A `lifecycle test`
+    is untouched: it drives a live composition and awaits through the runtime."""
+    env = _FreeFnMonoEnv(colour_polymorphic, types, sync_monomorphs, callables,
+                         async_colored)
+    for unit in list(tests or []) + list(prop_tests or []):
+        if unit.get("lifecycle"):
+            continue
+        body = unit.get("body")
+        if not body:
+            continue
+        if colour_polymorphic:
+            _monomorphize_sync_callback_calls(body, env)
+        # residual reach of an async callable — a genuinely-async callee a sync
+        # test cannot await, or one passed as a value. Both tiers must refuse.
+        called: set = set()
+        values: set = set()
+        _calls_in(body, called, values=values)
+        hit = sorted((called | values) & (async_colored or set()))
+        if hit:
+            raise RevlError(
+                filename, 0,
+                f"test `{unit.get('name')}` reaches async callable `{hit[0]}`, "
+                f"but a `test` body is a synchronous context with no in-flight "
+                f"window to await it (A1)",
+                hint="drive the async operation from a `lifecycle test` (which "
+                     "runs a live composition and can await it through a provide "
+                     "method), or reach it only from an `async fn` service "
+                     "operation (docs/design/async-extern.md §3)",
+                code="A1", category="async-propagation",
+            )
+
+
 def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
     """The module-fn twin of `_refuse_leaky_arrow`: a sync-typed arrow whose
     body reaches an async callable (a colored name — pure fns have no req keys)
@@ -4082,6 +6927,23 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
     `raw_acquire` (the original AST expression) is needed only to render that
     message the same way `_describe_expr` always has."""
     step_kind = "let-effect" if bind is not None else "effect"
+    # item 397: the unbound statement form of a result-declared host verb (a
+    # CAS like `insert_if_absent`) is refused. A CAS whose Bool nobody reads is
+    # a plain `insert` with extra steps, and its site-spelled `undo` would be
+    # registered unconditionally — removing the WINNER's entry on a `false`
+    # CAS at teardown, exactly the corruption single-use exists to prevent
+    # (docs/design/397-insert-if-absent.md §Classification, two sharp edges).
+    if bind is None and _host_result_type(acquire, env) is not None:
+        verb = str(acquire.get("method"))
+        raise RevlError(
+            filename, line,
+            f"`{verb}` returns a value and must be bound: "
+            f"`let ok = effect <map>.{verb}(k, v) undo <map>.remove(k)`",
+            hint="a compare-and-set reports whether it inserted; discarding "
+                 "that Bool makes its `undo` unsound (it would remove the "
+                 "winning claimant's entry on a `false`). Bind the result, or "
+                 "use `insert` for an unconditional overwrite",
+            code="G4", category="host-boundary")
     wit_name = acquire.get("name") if acquire.get("kind") == "fn" else None
     if wit_name is not None and wit_name in env.witnessed_externs:
         if undo_expr is not None:
@@ -4112,6 +6974,468 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
     return step
 
 
+# ---------------------------------------------------------------------------
+# item 308: effect ownership modes (owned + borrowed v1). The resource-taint
+# base (R0: nominal opaque handles) lives in `resources.py`; these helpers are
+# the frontend consumers of it — O1 (no hand-call of a declared inverse) and B1
+# (a borrowed resource does not escape its scope). `owned` is the implicit mode
+# of a handle bound by `let x = effect <acquire> …` at activation scope; every
+# other resource-typed position is `borrowed` (positional, never dataflow — the
+# safe direction, since every wrong answer is a false positive, not an unsound
+# admission).
+#
+# Deferred, each with its landing place named in the design doc:
+#   TODO(308-followup): `shared` mode (a 294 lease binding); `shared`/`transfer`
+#     are reserved contextual keywords, not implemented in v1.
+#   TODO(308-followup): explicit `transfer` (a source marker that moves the
+#     bracket; the only honest future for a handoff of resource-carrying state).
+#   TODO(308-followup): the retaining-extern audit (F10) — a report-only `revl
+#     audit` listing of resource-typed arguments reaching a non-inverse extern
+#     or bridge service (the declaration-is-the-proof-surface limitation).
+#   TODO(308-followup): the method-scope acquire early-release surface (F9). v1
+#     does NOT refuse method-scope acquires wholesale — the corpus admits them
+#     (item 399, provide-method acquisitions), so refusing them here would break
+#     additivity. Their escape hazards (return/store/capture of the method-scoped
+#     handle) ARE caught by B1; the residual leak-until-unload lifetime concern
+#     is the deferred F9 decision.
+# ---------------------------------------------------------------------------
+
+
+def _resource_ctx(types: dict) -> tuple[set, set]:
+    """`(taint, closers)` from a lowering `types` table (its `APPROVAL_KEY`
+    carries the externs index). Cached on the table under a private key so a
+    per-site call is O(1) after the first."""
+    cache = types.get("__resource_ctx__")
+    if cache is not None:
+        return cache
+    idx = (types.get(APPROVAL_KEY) or {}).get("externs") or {}
+    externs = list(idx.values())
+    ctx = (resource_taint(externs, types), closing_ops(externs))
+    try:
+        types["__resource_ctx__"] = ctx
+    except Exception:  # pragma: no cover - types is always a plain dict
+        pass
+    return ctx
+
+
+def _owned_handles(env: "Env") -> set:
+    """The activation-scope owned-handle safe-names of the component being
+    lowered (bound by `let x = effect <acquire-class extern>`)."""
+    owned = getattr(env, "_owned_handles", None)
+    if owned is None:
+        owned = set()
+        env._owned_handles = owned
+    return owned
+
+
+def _node_local_name(node) -> str | None:
+    """The bare local name a lowered leaf node references, or None. Covers the
+    `{"kind": "name", "id": ..}` and `{"kind": "var", "name": ..}` shapes."""
+    if not isinstance(node, dict):
+        return None
+    if node.get("kind") in ("name", "var"):
+        return node.get("id") or node.get("name")
+    return None
+
+
+def _node_resource(node, env: "Env", taint: set) -> str | None:
+    """The resource type a lowered expression node carries, or None."""
+    if not isinstance(node, dict):
+        return None
+    t = infer_ir(node, env.type_env, env.types, env.services)
+    return resource_in(t, taint)
+
+
+def _walk_call_nodes(node):
+    """Yield every lowered call node (`kind` fn/call) reachable in `node`."""
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            if cur.get("kind") in ("fn", "call"):
+                yield cur
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+
+
+def _walk_value_nodes(node):
+    """Yield every dict node reachable in a lowered expression tree."""
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            yield cur
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+
+
+def _o1_check(node, env: "Env", filename: str, line: int, *,
+              position: str, exempt_handle: str | None = None) -> None:
+    """O1: refuse a hand-call of a declared inverse (a closing op) on a
+    resource-typed argument anywhere in `node`. `position` names the syntactic
+    slot for the diagnostic (`body` / `undo` / `compensate`). `exempt_handle`
+    is the acquiring binding's own handle safe-name: in that binding's own
+    `undo`, a closer call on that handle IS the bracket being created, not a
+    double-close, and is admitted (the mandatory own-undo exemption)."""
+    taint, closers = _resource_ctx(env.types)
+    if not closers:
+        return
+    for call in _walk_call_nodes(node):
+        name = call.get("name") if call.get("kind") == "fn" else \
+            (call.get("callee") or {}).get("name")
+        if name not in closers:
+            continue
+        for arg in call.get("args") or []:
+            rt = _node_resource(arg, env, taint)
+            if not rt:
+                continue
+            if (exempt_handle is not None
+                    and _node_local_name(arg) == exempt_handle):
+                continue
+            owned = _node_local_name(arg) in _owned_handles(env)
+            mode = "owned" if owned else "borrowed"
+            from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+            raise RevlError(
+                filename, line,
+                f"`{name}(...)` is a declared inverse (a close) of a resource; "
+                f"the {mode} handle `{rt}` is closed exactly once by the "
+                f"acquiring activation's teardown (G7), so hand-calling it here "
+                f"(in {position} position) would double-close (item 308, O1)",
+                hint="let teardown run the inverse; if a resource must end "
+                     "early, that is an explicit-release surface revl does not "
+                     "have yet (only the acquiring binding's own `undo` may name "
+                     "its inverse)",
+                code="G7", category="ownership",
+                navigate=_nav.ownership_navigate(
+                    kind="o1", resource=rt, mode=mode,
+                    binding=_node_local_name(arg),
+                    profile=(_UntrustedMark if env.untrusted else None)),
+            )
+
+
+def _b1_navigate(env: "Env", clause: str, mode: str, rt: str) -> dict:
+    """The B1 borrow-escape family's navigable map (item 274, design §2.5): the
+    author-side reshape that keeps the borrow in scope. All author-enacted,
+    `candidate` (the compiler does not re-synthesize the rewrite to re-run the
+    gate); collapses under the untrusted-author profile."""
+    from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+    return _nav.ownership_navigate(
+        kind="b1", resource=rt, mode=mode, clause=clause,
+        profile=(_UntrustedMark if env.untrusted else None))
+
+
+def _b1_no_resource(node, env: "Env", filename: str, line: int, *,
+                    clause: str, borrows_only: bool = True,
+                    extra_owned: set | None = None) -> None:
+    """B1: refuse a resource-typed value appearing anywhere in `node`. When
+    `borrows_only` is True the owner's own handle is admitted (the owner-carve-
+    out); when False (a `compensate` position, clause 5) an OWNED handle is
+    refused too, because compensations run in teardown Phase 2 after Phase 1
+    closed every bracket — a resource there is use-after-close by phase order.
+    `extra_owned` adds method-scope owned-handle names (an acquire bound inside
+    the current provide method) to the owner set for the own-undo exemption."""
+    taint, _ = _resource_ctx(env.types)
+    if not taint:
+        return
+    owned = _owned_handles(env) | (extra_owned or set())
+
+    def _is_owned(n):
+        return _node_local_name(n) in owned
+
+    for sub in _walk_value_nodes(node):
+        rt = _node_resource(sub, env, taint)
+        if not rt:
+            continue
+        if borrows_only and _is_owned(sub):
+            continue
+        mode = "owned" if _is_owned(sub) else "borrowed"
+        raise RevlError(filename, line, _b1_message(clause, mode, rt),
+                        hint=_b1_hint(clause), code="G7", category="ownership",
+                        navigate=_b1_navigate(env, clause, mode, rt))
+    # a borrowed value with no local name (a bare call result / field read) is
+    # still a resource by type; catch it when the whole node is the resource.
+    rt = _node_resource(node, env, taint)
+    if rt and not (borrows_only and _is_owned(node)):
+        mode = "owned" if _is_owned(node) else "borrowed"
+        raise RevlError(filename, line, _b1_message(clause, mode, rt),
+                        hint=_b1_hint(clause), code="G7", category="ownership",
+                        navigate=_b1_navigate(env, clause, mode, rt))
+
+
+_B1_CLAUSE_TEXT = {
+    "state": "stored into activation-level state",
+    "capture": "captured by a closure",
+    "return": "returned across a signature",
+    "carrier": "placed in an escaping record/collection value",
+    "undo": "placed in an `undo` expression",
+    "witnessed": "passed to a witnessed effect's argument list",
+    "compensate": "placed in a `compensate` expression",
+    "spawn": "seated in a `spawn` config value",
+    "handoff": "carried by a `handoff` type",
+}
+
+
+# container-mutating verbs whose target is an activation-level host local: a
+# resource seated through one of these is stored into activation state (B1
+# clause 1), unlike a plain fn/service call which is legitimate down-passing.
+_MUTATING_VERBS = frozenset({
+    "insert", "put", "set", "push", "add", "append", "store", "enqueue",
+})
+
+
+def _b1_flag_if_borrow(v, env: "Env", taint: set, owned: set, filename: str,
+                       line: int, clause: str) -> None:
+    rt = _node_resource(v, env, taint)
+    if rt and _node_local_name(v) not in owned:
+        raise RevlError(filename, line, _b1_message(clause, "borrowed", rt),
+                        hint=_b1_hint(clause), code="G7", category="ownership",
+                        navigate=_b1_navigate(env, clause, "borrowed", rt))
+
+
+def _b1_body_scan(node, env: "Env", filename: str, line: int) -> None:
+    """B1 clauses 1 (store into activation state) and 4 (escaping carrier):
+    refuse a BORROWED resource value placed in a record/list/map literal, or
+    inserted into an activation-level container (a mutating verb on an
+    activation host local). Both orders are caught — the value is checked
+    wherever it is seated, whether the carrier is then parked or was already
+    parked. The owner's own handle is exempt (these clauses bind borrows only);
+    passing a borrow DOWN a plain call chain stays admitted."""
+    taint, _ = _resource_ctx(env.types)
+    if not taint:
+        return
+    owned = _owned_handles(env)
+    host_locals = getattr(env, "host_locals", {}) or {}
+    for sub in _walk_value_nodes(node):
+        kind = sub.get("kind")
+        if kind == "record":
+            for _, v in sub.get("fields") or []:
+                _b1_flag_if_borrow(v, env, taint, owned, filename, line, "carrier")
+        elif kind == "list":
+            for v in sub.get("items") or []:
+                _b1_flag_if_borrow(v, env, taint, owned, filename, line, "carrier")
+        elif kind == "map":
+            for entry in sub.get("entries") or []:
+                v = entry[1] if isinstance(entry, (list, tuple)) and len(entry) == 2 \
+                    else entry
+                _b1_flag_if_borrow(v, env, taint, owned, filename, line, "carrier")
+        elif kind == "call" and sub.get("method") in _MUTATING_VERBS:
+            if _node_local_name(sub.get("target") or {}) in host_locals:
+                for a in sub.get("args") or []:
+                    _b1_flag_if_borrow(a, env, taint, owned, filename, line, "state")
+
+
+def _ownership_check_expr(node, env: "Env", filename: str, line: int) -> None:
+    """Run the body-position ownership checks over one lowered expression: O1
+    (no hand-call of a declared inverse, no own-undo exemption in a body
+    position) and B1 clauses 1/4 (no borrow stored into activation state or an
+    escaping carrier)."""
+    if node is None:
+        return
+    _o1_check(node, env, filename, line, position="body")
+    _b1_body_scan(node, env, filename, line)
+
+
+def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
+    """Apply the body-position O1/B1 checks over a lowered provide-METHOD body.
+    A handle a service method parameter carries is a BORROW; an acquire bound
+    inside the method is owned by the method (its own `undo` is exempt). Runs
+    O1 (no hand-close) and B1 clauses 1/4/5 across the method's statements —
+    clause 3 (return) and the emit `compensate` half are enforced inline where
+    they are lowered."""
+    method_owned: set = set()
+    taint, _ = _resource_ctx(env.types)
+    for st in steps or []:
+        if not isinstance(st, dict):
+            continue
+        stp = st.get("step")
+        if stp in ("let-effect", "effect"):
+            acq = st.get("acquire")
+            bind = st.get("bind")
+            acq_res = _node_resource(acq, env, taint) if acq is not None else None
+            undo = st.get("undo")
+            if undo is not None:
+                exempt = bind if (acq_res and bind) else None
+                _o1_check(undo, env, filename, line, position="undo",
+                          exempt_handle=exempt)
+                _b1_no_resource(undo, env, filename, line, clause="undo",
+                                borrows_only=True, extra_owned=method_owned)
+            _ownership_check_expr(acq, env, filename, line)
+            _b1_witnessed_check(acq, env, filename, line)
+            if acq_res and bind:
+                method_owned.add(bind)
+        elif stp == "emit":
+            _ownership_check_expr(st.get("expr"), env, filename, line)
+        elif stp in ("let", "assign"):
+            _ownership_check_expr(st.get("value"), env, filename, line)
+        elif stp in ("return", "await"):
+            _ownership_check_expr(st.get("expr"), env, filename, line)
+
+
+def _b1_witnessed_check(acquire, env: "Env", filename: str, line: int) -> None:
+    """B1 clause 5 (witnessed half): a witnessed effect's declared inverse is
+    auto-registered on the same per-activation accumulator as an `undo`, so a
+    resource-typed value in its argument list rides teardown and replays after
+    the owner is gone. Refuse a resource argument to a witnessed acquisition."""
+    if not isinstance(acquire, dict) or acquire.get("kind") != "fn":
+        return
+    if acquire.get("name") not in getattr(env, "witnessed_externs", set()):
+        return
+    taint, _ = _resource_ctx(env.types)
+    if not taint:
+        return
+    owned = _owned_handles(env)
+    for a in acquire.get("args") or []:
+        rt = _node_resource(a, env, taint)
+        if rt:
+            mode = "owned" if _node_local_name(a) in owned else "borrowed"
+            raise RevlError(filename, line, _b1_message("witnessed", mode, rt),
+                            hint=_b1_hint("witnessed"), code="G7",
+                            category="ownership",
+                            navigate=_b1_navigate(env, "witnessed", mode, rt))
+
+
+def _all_free_names(expr, bound: set[str]) -> set[str]:
+    """Every `ExprVar` name referenced in `expr` and not shadowed by a lambda
+    parameter or match binding (all free vars, unlike `_mutable_free_vars`
+    which keeps only mutable ones)."""
+    bound = set(bound or ())
+    if isinstance(expr, ExprVar):
+        return set() if expr.name in bound else {expr.name}
+    if isinstance(expr, ExprArrow):
+        return _all_free_names(expr.body, bound | set(expr.params))
+    if isinstance(expr, ExprMatch):
+        found = _all_free_names(expr.scrutinee, bound)
+        for _, bind, body in expr.arms:
+            arm_bound = set(bound) | ({bind} if bind is not None else set())
+            found |= _all_free_names(body, arm_bound)
+        return found
+    found: set[str] = set()
+    for attr in ("left", "right", "operand", "callee", "target", "index",
+                 "cond", "then", "otherwise", "base"):
+        child = getattr(expr, attr, None)
+        if child is not None and not isinstance(child, (str, int, bool)):
+            found |= _all_free_names(child, bound)
+    for arg in getattr(expr, "args", None) or []:
+        found |= _all_free_names(arg, bound)
+    for _, value in getattr(expr, "fields", None) or []:
+        found |= _all_free_names(value, bound)
+    for _, value in getattr(expr, "updates", None) or []:
+        found |= _all_free_names(value, bound)
+    for item in getattr(expr, "items", None) or []:
+        found |= _all_free_names(item, bound)
+    return found
+
+
+def _b1_capture_check(arrow, type_env: dict, types: dict, filename: str,
+                      line: int) -> None:
+    """item 308, B1 clause 2: refuse capturing ANY resource-typed value in a
+    closure (owner included). A closure value's type (`() -> Int`) erases the
+    capture, so a closure carrying a handle is invisible to the taint fixpoint
+    and launders the handle across a signature (the recommended v1 rule is the
+    outright refusal, strictly smaller than closure-value taint tracking)."""
+    taint, _ = _resource_ctx(types)
+    if not taint:
+        return
+    for name in _all_free_names(arrow.body, set(arrow.params)):
+        t = type_env.get(name)
+        rt = resource_in(t, taint) if t else None
+        if rt:
+            from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+            raise RevlError(
+                filename, line, _b1_message("capture", "borrowed", rt),
+                hint=_b1_hint("capture"), code="G7", category="ownership",
+                # this site has no `Env`; capture reveals only the author's own
+                # closure (no operator topology), so the trusted map is sound.
+                navigate=_nav.ownership_navigate(
+                    kind="b1", resource=rt, mode="borrowed", clause="capture",
+                    profile=None))
+
+
+def _b1_return_admitted(node, env: "Env", taint: set) -> bool:
+    """B1 clause 3: is this resource-typed return a borrow-CREATING move (so it
+    is admitted) rather than a borrow-escape?
+
+      * the owner returning its OWN activation handle (a bare name in the owned
+        set), or
+      * a FRESH MINT: a direct call whose result is the resource and NONE of
+        whose arguments carry a resource — a constructor/factory handing the
+        caller a newly-made handle (the transfer case). A call that threads a
+        resource ARGUMENT into its result is a carrier/laundering and stays
+        refused.
+    """
+    if _node_local_name(node) in _owned_handles(env):
+        return True
+    if isinstance(node, dict) and node.get("kind") in ("fn", "call"):
+        for a in node.get("args") or []:
+            if _node_resource(a, env, taint):
+                return False
+        return True
+    return False
+
+
+def _b1_message(clause: str, mode: str, rt: str) -> str:
+    what = _B1_CLAUSE_TEXT.get(clause, clause)
+    return (f"{mode} resource `{rt}` cannot be {what}; a borrow is confined to "
+            f"the scope that received it and may not outlive its owner's "
+            f"bracket (G7) (item 308, B1)")
+
+
+def _b1_hint(clause: str) -> str:
+    if clause in ("state", "carrier"):
+        return ("restructure so the owner holds the handle and lends it per "
+                "call; a borrow may be passed further down a call chain, but "
+                "not parked in activation state or an escaping carrier")
+    if clause == "capture":
+        return ("v1 refuses capturing any resource handle in a closure (owner "
+                "included): a closure value's type erases the capture, so it "
+                "would launder the handle across a signature")
+    if clause == "return":
+        return ("only the owner may return its OWN handle from a provide "
+                "method; a borrow (or a tainted carrier) may not be returned "
+                "onward")
+    if clause in ("undo", "witnessed", "compensate"):
+        return ("teardown-position captures outlive or outrun the bracket; a "
+                "compensate runs after every bracket closed, so no resource "
+                "value (owned or borrowed) may appear there")
+    if clause == "spawn":
+        return ("spawn config seats the value in the child's activation for its "
+                "whole lifetime; a child acquires its own handle or calls the "
+                "owner's service per use")
+    if clause == "handoff":
+        return ("a handoff re-seats the predecessor's resource vector on the "
+                "successor while the predecessor's teardown closes it; a real "
+                "handle transfer is the deferred `transfer` marker, not handoff "
+                "shape-compat")
+    return "a borrow may not escape its scope"
+
+
+def _poison_failed_binding(stmt, env: "Env") -> None:
+    """Bind a recovered binding-statement's name to the poison sentinel so its
+    later uses stay silent (item 386, Stage 2).
+
+    When a `let`-binding component statement refuses (its initializer was a type
+    error), the name may be UNBOUND — the refusal fired before `bind_local` ran —
+    or bound with a now-stale type. Either way, rebinding it to `POISON` (an
+    absorbing, silent wildcard) is what stops the downstream statements that read
+    it from each fabricating a second diagnostic: without a binding at all, every
+    later reference would raise an undefined-name cascade; with a concrete stale
+    type, a type cascade. A non-binding action (an `effect`/`emit`/`fail` with no
+    handle) introduces no reusable name, so there is nothing to poison and this
+    is a no-op."""
+    bind = getattr(stmt, "bind", None)
+    if not bind:
+        return
+    safe = env.locals.get(bind)
+    if safe is None:
+        try:
+            safe = env.bind_local(bind, getattr(stmt, "line", 0))
+        except RevlError:
+            return  # the name was already bound (e.g. a duplicate-name refusal)
+    env.type_env[safe] = POISON
+
+
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None,
                      emitting_fns: set | None = None,
@@ -4119,8 +7443,15 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      emission_evidence: "_EmissionEvidence | None" = None,
                      spawn_reg: dict | None = None,
                      async_colored: set | None = None,
-                     witnessed_externs: set | None = None) -> dict:
+                     witnessed_externs: set | None = None,
+                     colour_polymorphic: set | None = None,
+                     sync_monomorphs: dict | None = None,
+                     poly_externs: set | None = None,
+                     extern_colour_instances: dict | None = None,
+                     errors: list | None = None,
+                     untrusted: bool = False) -> dict:
     env = Env(comp, services, filename, types)
+    env.untrusted = untrusted
     env.emitting_fns = emitting_fns or set()
     env.emitting_caps = emitting_caps or {}
     env.emission_evidence = emission_evidence
@@ -4133,6 +7464,19 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # alone when the fixed point was not supplied (older callers/tests).
     env.async_callables = set(async_colored) if async_colored is not None \
         else set(env.async_externs)
+    # sync/async arrow polymorphism (item 342): the colour-polymorphic fns
+    # (async solely by their own callback param) and the shared registry the
+    # sync call sites fill with monomorph requests (monomorph-name -> origin).
+    env.colour_polymorphic = set(colour_polymorphic) if colour_polymorphic else set()
+    env.sync_monomorphs = sync_monomorphs if sync_monomorphs is not None else {}
+    # item 388: the poly externs (`fn|async`) and the shared registry each
+    # provide method fills with the call-site colour it requested. `_resolve_poly
+    # _extern_calls` reads `poly_externs` to spot a poly-extern call and records
+    # into `extern_colour_instances`; `_finalize_poly_externs` reads it after the
+    # component loop. Empty unless the program declares a poly extern.
+    env.poly_externs = set(poly_externs) if poly_externs else set()
+    env.extern_colour_instances = (extern_colour_instances
+                                   if extern_colour_instances is not None else {})
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
     # instance-parametric components: the registry of spawn targets, edges,
     # templates and G4 spawn-boundary sites (docs/design-v2-instances.md)
@@ -4164,6 +7508,170 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     routes: dict[str, dict] = {}
     handoff: dict | None = None
     action_seen = False
+    # item 386, Stage 2: set when a statement's type-check refused and was
+    # recovered past (statement-boundary synchronization). A component with any
+    # recovered statement is marked `poisoned` below, exactly like a Stage-1
+    # header-abort stub, so the body-walking post-passes skip its partial body.
+    recovered = False
+
+    def _dispatch_action(stmt, provide_seen_line):
+        """Lower one *action* statement (effect/emit/fail/if/provide/…),
+        appending its step(s) to `body`, and return the (possibly updated)
+        `provide_seen_line`. Factored out of the body loop so the loop can wrap
+        it in the Stage-2 statement-boundary recovery (item 386): a `RevlError`
+        raised here is caught one frame out, recorded, and the walk resumes at
+        the next statement. It closes over the component's lowering state
+        (`env`, `body`, `provides`, `provided_keys`, `filename`, `callables`)."""
+        if isinstance(stmt, (LetEffect, EffectStmt, TimerStmt)) and provide_seen_line is not None:
+            raise RevlError(
+                filename, stmt.line,
+                "acquisition after `provide` — an effect acquired after a provision "
+                "would be reverted while dependents can still call the service",
+                hint="move acquisitions above the `provide` block (linker rule A2). "
+                     "A timer is an acquisition too: its schedule is armed at "
+                     "activation and cancelled on teardown (docs/time-coeffect.md)"
+                     if isinstance(stmt, TimerStmt) else
+                     "move acquisitions above the `provide` block (linker rule A2)",
+            )
+        if isinstance(stmt, EffectStmt) and isinstance(stmt.acquire, SpawnExpr):
+            # a spawn's inverse is the instance's own teardown, which needs a
+            # handle to name — so a spawn must be bound (decision 2)
+            raise RevlError(
+                filename, stmt.line,
+                "`spawn` must be bound to a handle: "
+                f"`let s = effect spawn {stmt.acquire.component} … undo s.dispose()`",
+            )
+        if isinstance(stmt, LetEffect) and isinstance(stmt.acquire, LeaseAcquire):
+            # item 294 Slice 2: a capability lease. The acquire is not a host
+            # call but a class-(c)-gated, ticket-mediated mint of a standing grant
+            # over the capability's cone (session._enforce_lease_gate raises the
+            # ticket before boot; an ungated run refuses). It lowers to a reserved
+            # runtime acquisition returning a lease handle, and the site `undo
+            # l.revoke()` retires that grant on the LIFO teardown. Duration/uses
+            # reuse the grant's expiresAt/remainingUses; nothing here mints — the
+            # grant is minted from the approved ticket, never self-minted.
+            body.append(_lower_lease_step(stmt, env, filename))
+        elif isinstance(stmt, LetEffect):
+            if stmt.setup:
+                saved_locals = dict(env.locals)
+                saved_taken = set(env._taken)
+                saved_type_env = dict(env.type_env)
+                setup_steps: list[dict] = []
+                scope = _component_scope(env)
+                mutables: set[str] = set()
+                for setup_stmt in stmt.setup:
+                    _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
+                                                mutables, setup_steps)
+                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
+                env.locals = saved_locals
+                env._taken = saved_taken
+                # setup-let types are block-scoped; drop them so a recycled safe
+                # name (env._taken is restored above) can't read a stale type
+                env.type_env = saved_type_env
+            else:
+                setup_steps = []
+                acquire = _lower_expr(stmt.acquire, env, mode="setup")
+            safe = env.bind_local(stmt.bind, stmt.line)
+            # host provenance: an effect-acquired HOST object (`Map.new()`)
+            # keeps its verb surface verbatim, exempt from the stdlib table —
+            # see Env.host_locals. Record the acquisition's family (`Map` from
+            # `Map.new`) so later method calls are checked against that family's
+            # verb surface (item 401).
+            if acquire.get("kind") == "host":
+                env.host_locals[safe] = str(acquire["fn"]).partition(".")[0]
+            acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
+            # item 397: a result-declared host verb (a Bool CAS like
+            # `insert_if_absent`) types its bind from the frontier's result
+            # column. `infer_ir` cannot see host-local provenance (it takes no
+            # `host_locals`), so the type is resolved here where it is known.
+            if acquired_type is None:
+                acquired_type = _host_result_type(acquire, env)
+            if acquired_type is not None:
+                env.type_env[safe] = acquired_type
+            step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
+                                      bind=safe, raw_acquire=stmt.acquire)
+            if setup_steps:
+                step["setup"] = setup_steps
+            if getattr(stmt, "verified", False):
+                step["verified"] = True
+            _admit_effect_async(stmt, step, env, filename)
+            # item 308: a `let x = effect <acquire> …` whose acquisition yields a
+            # resource makes `x` the OWNED handle of this activation. O1 admits
+            # this binding's own `undo` naming its own inverse on `x` (the
+            # own-undo exemption); B1 clause 5 still refuses a BORROW smuggled
+            # into that undo.
+            _taint308, _ = _resource_ctx(env.types)
+            if resource_in(acquired_type, _taint308):
+                _owned_handles(env).add(safe)
+            if step.get("undo") is not None:
+                _o1_check(step["undo"], env, filename, stmt.line,
+                          position="undo", exempt_handle=safe)
+                _b1_no_resource(step["undo"], env, filename, stmt.line,
+                                clause="undo", borrows_only=True)
+            _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
+            _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
+            body.append(step)
+        elif isinstance(stmt, EffectStmt):
+            if stmt.setup:
+                saved_locals = dict(env.locals)
+                saved_taken = set(env._taken)
+                saved_type_env = dict(env.type_env)
+                setup_steps = []
+                scope = _component_scope(env)
+                mutables = set()
+                for setup_stmt in stmt.setup:
+                    _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
+                                                mutables, setup_steps)
+                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
+                env.locals = saved_locals
+                env._taken = saved_taken
+                env.type_env = saved_type_env
+            else:
+                setup_steps = []
+                acquire = _lower_expr(stmt.acquire, env, mode="setup")
+            step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
+                                      bind=None, raw_acquire=stmt.acquire)
+            if setup_steps:
+                step["setup"] = setup_steps
+            if getattr(stmt, "verified", False):
+                step["verified"] = True
+            _admit_effect_async(stmt, step, env, filename)
+            # item 308: an unbound effect creates no owned handle, so its `undo`
+            # gets no own-undo exemption (O1) and may carry no resource (B1).
+            if step.get("undo") is not None:
+                _o1_check(step["undo"], env, filename, stmt.line, position="undo")
+                _b1_no_resource(step["undo"], env, filename, stmt.line,
+                                clause="undo", borrows_only=True)
+            _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
+            _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
+            body.append(step)
+        elif isinstance(stmt, FailStmt):
+            body.append({
+                "step": "fail",
+                "message": _lower_component_pure_expr(
+                    stmt.message, env, _component_scope(env), callables or set(),
+                    pure_only=True,
+                ),
+            })
+        elif isinstance(stmt, IfStmt):
+            body.append(_lower_component_if(stmt, env, callables or set()))
+        elif isinstance(stmt, LetApprovalStmt):
+            body.append(_lower_let_approval(stmt, env))
+        elif isinstance(stmt, EmitStmt):
+            emit_step = _lower_emit_step(stmt, env)
+            _admit_emit_async(stmt, emit_step, env, filename)
+            body.append(emit_step)
+        elif isinstance(stmt, TimerStmt):
+            body.append(_lower_timer_step(stmt, env))
+        elif isinstance(stmt, AwaitStmt):
+            body.append({"step": "await", "expr": _lower_expr(stmt.expr, env, mode="setup")})
+        elif isinstance(stmt, ProvideStmt):
+            provide_seen_line = stmt.line
+            body.append(_lower_provide(stmt, provides, provided_keys, env))
+        else:  # pragma: no cover — grammar prevents it
+            raise RevlError(filename, stmt.line, "unexpected statement in component body")
+        return provide_seen_line
+
     for stmt in comp.body:
         if isinstance(stmt, HandoffStmt):
             # `handoff <key>: <Type>` (roadmap item 53): the verified state
@@ -4195,6 +7703,21 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                     hint="thread every piece of live state through the one hand-off type "
                          "(a record or Map), docs/state-handoff.md",
                 )
+            # item 246, invariant 5 (non-persistence): a hand-off crosses the
+            # session boundary, so an `Approval[C]` may not be its shape. The
+            # general type well-formedness rule refuses it (with `Async` etc.).
+            check_type_wellformed(filename, stmt.line, stmt.state_type)
+            # item 308, B1 clause 7: a resource-tainted handoff type re-seats the
+            # predecessor's live handle vector on the successor while the
+            # predecessor's teardown closes it — the successor starts warm with a
+            # dead descriptor. Refuse it at admission from the shared taint set.
+            _taint308, _ = _resource_ctx(env.types)
+            _ho_res = resource_in(stmt.state_type, _taint308)
+            if _ho_res:
+                raise RevlError(
+                    filename, stmt.line,
+                    _b1_message("handoff", "owned", _ho_res),
+                    hint=_b1_hint("handoff"), code="G7", category="ownership")
             handoff = {"key": stmt.key, "type": stmt.state_type}
             continue
         if isinstance(stmt, RouteStmt):
@@ -4304,107 +7827,26 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 intercept[stmt.key] = stmt.metadata
             continue
         action_seen = True
-        if isinstance(stmt, (LetEffect, EffectStmt, TimerStmt)) and provide_seen_line is not None:
-            raise RevlError(
-                filename, stmt.line,
-                "acquisition after `provide` — an effect acquired after a provision "
-                "would be reverted while dependents can still call the service",
-                hint="move acquisitions above the `provide` block (linker rule A2). "
-                     "A timer is an acquisition too: its schedule is armed at "
-                     "activation and cancelled on teardown (docs/time-coeffect.md)"
-                     if isinstance(stmt, TimerStmt) else
-                     "move acquisitions above the `provide` block (linker rule A2)",
-            )
-        if isinstance(stmt, EffectStmt) and isinstance(stmt.acquire, SpawnExpr):
-            # a spawn's inverse is the instance's own teardown, which needs a
-            # handle to name — so a spawn must be bound (decision 2)
-            raise RevlError(
-                filename, stmt.line,
-                "`spawn` must be bound to a handle: "
-                f"`let s = effect spawn {stmt.acquire.component} … undo s.dispose()`",
-            )
-        if isinstance(stmt, LetEffect):
-            if stmt.setup:
-                saved_locals = dict(env.locals)
-                saved_taken = set(env._taken)
-                saved_type_env = dict(env.type_env)
-                setup_steps: list[dict] = []
-                scope = _component_scope(env)
-                mutables: set[str] = set()
-                for setup_stmt in stmt.setup:
-                    _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
-                                                mutables, setup_steps)
-                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
-                env.locals = saved_locals
-                env._taken = saved_taken
-                # setup-let types are block-scoped; drop them so a recycled safe
-                # name (env._taken is restored above) can't read a stale type
-                env.type_env = saved_type_env
-            else:
-                setup_steps = []
-                acquire = _lower_expr(stmt.acquire, env, mode="setup")
-            safe = env.bind_local(stmt.bind, stmt.line)
-            # host provenance: an effect-acquired HOST object (`Map.new()`)
-            # keeps its verb surface verbatim, exempt from the stdlib table —
-            # see Env.host_locals.
-            if acquire.get("kind") == "host":
-                env.host_locals.add(safe)
-            acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
-            if acquired_type is not None:
-                env.type_env[safe] = acquired_type
-            step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
-                                      bind=safe, raw_acquire=stmt.acquire)
-            if setup_steps:
-                step["setup"] = setup_steps
-            if getattr(stmt, "verified", False):
-                step["verified"] = True
-            body.append(step)
-        elif isinstance(stmt, EffectStmt):
-            if stmt.setup:
-                saved_locals = dict(env.locals)
-                saved_taken = set(env._taken)
-                saved_type_env = dict(env.type_env)
-                setup_steps = []
-                scope = _component_scope(env)
-                mutables = set()
-                for setup_stmt in stmt.setup:
-                    _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
-                                                mutables, setup_steps)
-                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
-                env.locals = saved_locals
-                env._taken = saved_taken
-                env.type_env = saved_type_env
-            else:
-                setup_steps = []
-                acquire = _lower_expr(stmt.acquire, env, mode="setup")
-            step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
-                                      bind=None, raw_acquire=stmt.acquire)
-            if setup_steps:
-                step["setup"] = setup_steps
-            if getattr(stmt, "verified", False):
-                step["verified"] = True
-            body.append(step)
-        elif isinstance(stmt, FailStmt):
-            body.append({
-                "step": "fail",
-                "message": _lower_component_pure_expr(
-                    stmt.message, env, _component_scope(env), callables or set(),
-                    pure_only=True,
-                ),
-            })
-        elif isinstance(stmt, IfStmt):
-            body.append(_lower_component_if(stmt, env, callables or set()))
-        elif isinstance(stmt, EmitStmt):
-            body.append(_lower_emit_step(stmt, env))
-        elif isinstance(stmt, TimerStmt):
-            body.append(_lower_timer_step(stmt, env))
-        elif isinstance(stmt, AwaitStmt):
-            body.append({"step": "await", "expr": _lower_expr(stmt.expr, env, mode="setup")})
-        elif isinstance(stmt, ProvideStmt):
-            provide_seen_line = stmt.line
-            body.append(_lower_provide(stmt, provides, provided_keys, env))
-        else:  # pragma: no cover — grammar prevents it
-            raise RevlError(filename, stmt.line, "unexpected statement in component body")
+        try:
+            provide_seen_line = _dispatch_action(stmt, provide_seen_line)
+        except RevlError as stmt_error:
+            # item 386, Stage 2: statement-boundary synchronization. This
+            # statement's type-check (or a per-statement structural rule) refused.
+            # With a collect-all sink, record that ONE diagnostic and resume at
+            # the NEXT statement, so several independent bad statements in one
+            # component are all reported in a single pass. A binding form still
+            # binds its name — to POISON — so the later statements that USE it read
+            # a silent wildcard instead of fabricating a second mismatch at every
+            # use (the sentinel is emitted where poison is BORN, here, never where
+            # it propagates). With no sink (a direct/legacy caller, or a nested
+            # lowering re-entering the spine) the refusal propagates to the
+            # component boundary, byte-identical to Stage 1.
+            if errors is None:
+                raise
+            errors.append(stmt_error)
+            _poison_failed_binding(stmt, env)
+            recovered = True
+            continue
 
     lowered = {
         "name": comp.name,
@@ -4431,6 +7873,17 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # byte-identical to before. `ir_version` stays 3.
     if handoff is not None:
         lowered["handoff"] = handoff
+    # item 386, Stage 2: a component that recovered past a refused statement has
+    # a partial, untrustworthy body. Mark it `poisoned` — exactly like a Stage-1
+    # header-abort stub — so the body-walking post-passes (taint, spawn
+    # bounds/attenuation, holes) skip it while `_link` still sees its complete
+    # header topology (provides/requires) and reports real G2/G3 on its keys.
+    # The compile is already failing (its refusals are in `errors`), so this
+    # partial IR is never emitted; the raise in `check_and_lower` precedes IR
+    # assembly. A clean component never sets `recovered`, so its IR is
+    # byte-identical to before.
+    if recovered:
+        lowered["poisoned"] = True
     return lowered
 
 
@@ -4509,6 +7962,21 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             env.type_env[env.params[surface]] = ptype
         mbody = []
         returned = False
+
+        def _sweep(node, line):
+            # item 404: the provide-method twin of the activation-setup
+            # `_sweep` (`_lower_component_setup_stmt`). A provide-method body is
+            # stratum-3 lowered code that ran `infer_ir` only in its NON-raising
+            # oracle mode, so a definite operator / index / builtin misuse that a
+            # `fn`/`test` body (stratum 1, `infer_ast`) refuses compiled clean
+            # inside a provide method — the same context-scoping gap item 392
+            # closed for the Any-field-read. Run the SAME raising oracle over the
+            # lowered pure value here so the whole refusal class fires uniformly.
+            # Unknown / host operands infer to None and are left alone, exactly
+            # as in the setup sweep. Returns the inferred type (or None).
+            return infer_ir(node, env.type_env, env.types, env.services,
+                            filename, line)
+
         for mstmt in method.body:
             if returned:
                 raise RevlError(filename, mstmt.line, "unreachable statement after `return`")
@@ -4527,20 +7995,51 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                          "down; a provide-method effect runs per request and has no such "
                          "window (docs/verified-effect.md). Drop `verified`, or move the "
                          "effect to the activation body.")
-            if isinstance(mstmt, LetEffect):
+            if isinstance(mstmt, LetEffect) and not isinstance(mstmt.acquire, SpawnExpr):
+                # item 397: the NARROW lift of the phase-1 spawn-only rule. A
+                # let-effect in a provide-method body is additionally admitted
+                # when its acquire is a result-declared host verb (today:
+                # exactly `insert_if_absent`) on an existing host local. The
+                # bind names a checked VALUE (`Bool`), not a request-scoped
+                # instance: there is no handle and no nested teardown scope, so
+                # the effect-and-undo pair joins the activation frame's teardown
+                # accumulator exactly as the unbound method-time `insert` does
+                # today (demo/components/user_cache.rvl) — only the result gains
+                # a (typed) name. The general method-body acquisition stays
+                # deferred (docs/design/397-insert-if-absent.md §The one grammar
+                # extension).
+                acquire = _lower_expr(mstmt.acquire, env, mode="setup")
+                result_type = _host_result_type(acquire, env)
+                if result_type is None:
+                    raise RevlError(
+                        filename, mstmt.line,
+                        "only `spawn` may be acquired inside a provide-method body",
+                        hint="a request-scoped instance gets a nested teardown "
+                             "scope; other acquisitions belong in the activation "
+                             "body (docs/design-v2-instances.md). A result-declared "
+                             "host verb (a Bool compare-and-set like "
+                             "`insert_if_absent`) may be bound here")
+                if mstmt.bind in env.params or mstmt.bind in method_locals:
+                    raise RevlError(filename, mstmt.line,
+                                    f"`{mstmt.bind}` is already bound in `{method.name}`")
+                safe = _safe_name(mstmt.bind,
+                                  set(env.params.values()) | set(method_locals.values()))
+                method_locals[mstmt.bind] = safe
+                env.params[mstmt.bind] = safe  # visible to later statements
+                # a checked Bool value, NOT a host receiver: entered in the
+                # type env so a pure `if`/ternary on it typechecks, and kept
+                # OUT of host_locals (it has no verb surface).
+                env.type_env[safe] = result_type
+                mbody.append(_lower_effect_step(
+                    acquire, mstmt.undo, env, filename, mstmt.line,
+                    bind=safe, raw_acquire=mstmt.acquire))
+            elif isinstance(mstmt, LetEffect):
                 # item zero (docs/design-v2-instances.md): a spawn inside a
                 # provide-method is a request-scoped instance. It gets its own
                 # nested teardown scope (its child fiber), so `s.dispose()`
                 # reclaims it when the instance dies, not when the component
                 # tears down. Only `spawn` may be acquired here in phase 1 —
                 # a general method-body acquisition is a separate feature.
-                if not isinstance(mstmt.acquire, SpawnExpr):
-                    raise RevlError(
-                        filename, mstmt.line,
-                        "only `spawn` may be acquired inside a provide-method body",
-                        hint="a request-scoped instance gets a nested teardown "
-                             "scope; other acquisitions belong in the activation "
-                             "body (docs/design-v2-instances.md)")
                 if mstmt.bind in env.params or mstmt.bind in method_locals:
                     raise RevlError(filename, mstmt.line,
                                     f"`{mstmt.bind}` is already bound in `{method.name}`")
@@ -4602,6 +8101,9 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                                     f"`{mstmt.name}` is already bound in `{method.name}`")
                 safe = _safe_name(mstmt.name, set(env.params.values()) | set(method_locals.values()))
                 value = _lower_expr(mstmt.value, env, mode="setup")
+                # item 404: raise on a definite operator/index/builtin misuse in
+                # the bound value, uniformly with a `fn`/`test` body.
+                swept = _sweep(value, mstmt.line)
                 method_locals[mstmt.name] = safe
                 env.params[mstmt.name] = safe  # visible to later statements
                 if mstmt.type is not None:
@@ -4622,20 +8124,21 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     # `xs.length()` is a List length, not an unpinned call) —
                     # the stdlib-named-method guard (roadmap 75(b)) depends on
                     # provable receiver types.
-                    inferred = infer_ir(value, env.type_env, env.types,
-                                        env.services)
-                    if inferred is not None:
-                        env.type_env[safe] = inferred
+                    if swept is not None:
+                        env.type_env[safe] = swept
                 mbody.append({"step": "let", "name": safe, "value": value,
                               "mutable": bool(mstmt.mutable)})
             elif isinstance(mstmt, AssignStmt):
                 if mstmt.name not in method_locals:
+                    _reject_foreign_name(mstmt.name, filename, mstmt.line)  # item 384
                     raise RevlError(filename, mstmt.line,
                                     f"`{mstmt.name}` is not declared in `{method.name}`",
                                     hint="declare it with `let` (single-assignment) or "
                                          "`var` (mutable)")
+                assigned = _lower_expr(mstmt.value, env, mode="setup")
+                _sweep(assigned, mstmt.line)  # item 404
                 mbody.append({"step": "assign", "name": method_locals[mstmt.name],
-                              "value": _lower_expr(mstmt.value, env, mode="setup")})
+                              "value": assigned})
             elif isinstance(mstmt, ReturnStmt):
                 if mstmt.expr is None:
                     # a void operation: `fn f(x) { return }`
@@ -4653,8 +8156,36 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 pin_hole(mstmt.expr, decl.returns, filename,
                          f"`{method.name}` returns")
                 lowered_return = _lower_expr(mstmt.expr, env, mode="setup")
+                # item 308, B1 clause 3: a resource-tainted return escapes the
+                # activation across a signature. Three shapes are admitted, all
+                # borrow-CREATING moves rather than borrow-escapes:
+                #   * the OWNER returning its OWN activation handle (owner-holds);
+                #   * a FRESH MINT — a direct call to a resource CONSTRUCTOR none
+                #     of whose arguments carry a resource (a factory returning a
+                #     newly-acquired handle; the caller becomes its owner, the
+                #     transfer case whose full teardown-migration surface is
+                #     deferred). This keeps resource-constructor factories, e.g.
+                #     the WIT-import codegen's `fn open(p) = wit_open(p)`,
+                #     compiling — refusing them would be a false-positive wall.
+                # A bare BORROW (a parameter/local handle) or a tainted CARRIER
+                # (`Session` wrapping a `Sock`, `wrap(c)` threading a borrow) is
+                # refused. Keys on the tainted return TYPE, not the bare handle.
+                _taint308, _ = _resource_ctx(env.types)
+                _ret_res = (resource_in(decl.returns, _taint308)
+                            or _node_resource(lowered_return, env, _taint308))
+                if _ret_res and not _b1_return_admitted(lowered_return, env, _taint308):
+                    raise RevlError(
+                        filename, mstmt.line,
+                        _b1_message("return", "borrowed", _ret_res),
+                        hint=_b1_hint("return"), code="G7",
+                        category="ownership",
+                        navigate=_b1_navigate(env, "return", "borrowed",
+                                              _ret_res))
+                # item 404: sweep the returned value with the raising oracle so
+                # an internal operator/index/builtin misuse is refused uniformly
+                # with a `fn`/`test` body, not only the return-type mismatch.
+                actual = _sweep(lowered_return, mstmt.line)
                 if decl.returns:
-                    actual = infer_ir(lowered_return, env.type_env, env.types, env.services)
                     if actual and not compatible(decl.returns, actual):
                         raise mismatch(filename, mstmt.line,
                                        f"`{method.name}` returns", decl.returns, actual)
@@ -4680,6 +8211,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 code="T1", category="type-mismatch",
                 expected=decl.returns, actual=None,
             )
+        # item 308: O1/B1 over the provide-method body — run BEFORE the param
+        # types are restored out of `env.type_env`, so a parameter handle (a
+        # borrow) is typed and detectable. An acquire bound in the method is
+        # method-owned (its own `undo` is exempt).
+        _ownership_walk_method(mbody, env, comp.source or filename, method.line)
         safe_params = [env.params[p] for p in method.params]
         env.params = saved
         env.type_env = saved_tenv
@@ -4759,6 +8295,25 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                                           decl.capabilities, extra),
                     code="G4", category="emission-capability",
                 )
+
+        # sync/async arrow polymorphism (item 342): in a SYNC method, redirect
+        # each call of a colour-polymorphic fn that receives only genuinely-sync
+        # arrows to a sync monomorph, so the call no longer reaches an async
+        # callable. Runs before the A1 admission below, whose `async_callables`
+        # membership it thereby clears for the lifted case. An async method is
+        # left untouched — item 92's coercion (loop stays async) is unchanged.
+        if not decl.async_ and env.colour_polymorphic:
+            _monomorphize_sync_callback_calls(mbody, env)
+
+        # item 388: caller-decided extern colour. Record the colour each
+        # poly-extern (`fn|async`) call site requests, and in a SYNC method
+        # rewrite the call to the extern's `_revl_sync` clone. Runs in BOTH
+        # colours, right beside the item-342 hook and BEFORE the A1 admission
+        # below: the sync rewrite clears the poly extern's async membership so a
+        # sync method calling it is not refused, while an async method's call
+        # stays at the pre-seeded async name and is awaited (admitted here).
+        if env.poly_externs:
+            _resolve_poly_extern_calls(mbody, env, bool(decl.async_))
 
         # async coloring (docs/design/async-extern.md §3): an async call is
         # admitted only inside a provide method whose service operation is
@@ -4887,6 +8442,20 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
 
 # ---------------------------------------------------------------- expressions
 
+def _lower_let_approval(stmt: LetApprovalStmt, env: Env) -> dict:
+    """`let a = await approval[C] { fields }` -> the `approval` body step (item
+    246). Binds `a` at type `Approval[C]` and lowers the field expressions (the
+    human's evidence). The suspension itself is the runtime's job; the checker's
+    is to make `a` an unforgeable `Approval[C]` and to record C and the fields."""
+    request = stmt.request
+    fields = [[name, _lower_expr(fexpr, env, mode="pure")]
+              for name, fexpr in request.fields]
+    safe = env.bind_local(stmt.bind, stmt.line)
+    env.type_env[safe] = f"Approval[{request.capability}]"
+    return {"step": "approval", "bind": safe, "capability": request.capability,
+            "fields": fields}
+
+
 def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
     node = _lower_expr(stmt.expr, env, mode="emit")
     if not _is_emission_call(node, env):
@@ -4898,8 +8467,99 @@ def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
     step = {"step": "emit", "expr": node}
     if stmt.compensate is not None:
         # compensation is teardown-position: emissions are permitted bare (A5)
-        step["compensate"] = _lower_expr(stmt.compensate, env, mode="undo")
+        comp = _lower_expr(stmt.compensate, env, mode="undo")
+        step["compensate"] = comp
+        # item 308, B1 clause 5 (compensate half): a compensation runs in
+        # teardown Phase 2, AFTER Phase 1 closed every bracket, so ANY resource
+        # value there (owned OR borrowed) is use-after-close by phase order.
+        # O1 also refuses a declared inverse smuggled into a compensate.
+        _o1_check(comp, env, env.filename, stmt.line, position="compensate")
+        _b1_no_resource(comp, env, env.filename, stmt.line,
+                        clause="compensate", borrows_only=False)
+    _lower_emit_approval(stmt, node, step, env)
     return step
+
+
+def _approval_scope_of(expr_type: str | None) -> str | None:
+    """The capability scope `C` of a value typed `Approval[C]`, or None when the
+    type is not an approval. `Approval[payment]` -> `"payment"`."""
+    if not isinstance(expr_type, str):
+        return None
+    head, args = parse_type(expr_type)
+    if head == "Approval" and len(args) == 1:
+        return args[0]
+    return None
+
+
+def _lower_emit_approval(stmt: EmitStmt, node: dict, step: dict, env: Env) -> None:
+    """Thread the `with e` edge onto the emit step and enforce the checker
+    obligation (item 246, Decision 3). Two halves:
+
+      * if the emit carries `with e`, `e` must type `Approval[C']`; the edge
+        (`{"capability": C'}`) is recorded so the runtime frame check and the
+        admission walk can read what the crossing was approved for;
+      * every capability this crossing crosses that is DECLARATION-approval-
+        required (an extern that declared `requires approval`) must be covered by
+        that edge, else lowering refuses — the declaration-owned floor that holds
+        with no policy file. Policy-owned requirements are the same shape, checked
+        at admission over the recorded edge (the policy is not known here)."""
+    crossed = _emit_crossed_caps(node, env)
+    edge_scope = None
+    if stmt.approval is not None:
+        appr_node = _lower_expr(stmt.approval, env, mode="pure")
+        appr_type = infer_ir(appr_node, env.type_env, env.types, env.services)
+        edge_scope = _approval_scope_of(appr_type)
+        if edge_scope is None:
+            raise RevlError(
+                env.filename, stmt.line,
+                f"`with` on `emit` expects an `Approval[C]` value, but the "
+                f"expression has type {appr_type or 'unknown'}",
+                hint="thread the value produced by `await approval[C] { ... }` "
+                     "(or an `Approval[C]` parameter) — nothing else produces an "
+                     "approval (item 246)")
+        step["approval"] = {"capability": edge_scope, "expr": appr_node}
+    required = (env.types.get(APPROVAL_KEY) or {}).get("required") or set()
+    for token in crossed:
+        if token not in required:
+            continue
+        if edge_scope is None or not _approval_covers(edge_scope, token):
+            from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+            _prof = _UntrustedMark if env.untrusted else None
+            raise RevlError(
+                env.filename, stmt.line,
+                f"crossing capability `{token}` requires approval, but this "
+                f"`emit` carries no covering `with` edge",
+                hint=f"acquire an approval — `let a = await approval[{token}] "
+                     f"{{ ... }}` — and thread it: `emit … with a` (item 246, "
+                     f"Decision 3, unreachable-without)",
+                code="G4", category="approval",
+                navigate=_nav.approval_navigate(token=token, profile=_prof))
+
+
+def _lower_endorse_approval(expr: "ExprEndorse", env: Env, scope: dict,
+                            callables: set, pure_only: bool) -> dict | None:
+    """Resolve an `endorse[...](...) with <appr>` approval edge (item 249 Slice C,
+    on the item 246 surface). `<appr>` must type `Approval[C]`; the recorded edge
+    `{capability: C}` is what a `capability declassify.<origin> requires approval`
+    policy rule checks coverage against, exactly as an `emit … with a` edge is.
+
+    Returns None when the endorse carries no `with`."""
+    if expr.approval is None:
+        return None
+    from .parser import ExprVar as _EV  # noqa: PLC0415 — lazy, avoids cycle
+    appr_node = _lower_component_pure_expr(_EV(expr.approval, expr.line), env,
+                                           scope, callables, pure_only)
+    appr_type = infer_ir(appr_node, env.type_env, env.types, env.services)
+    edge_scope = _approval_scope_of(appr_type)
+    if edge_scope is None:
+        raise RevlError(
+            env.filename, expr.line,
+            f"`endorse ... with` expects an `Approval[C]` value, but "
+            f"`{expr.approval}` has type {appr_type or 'unknown'}",
+            hint="thread the value produced by `await approval[declassify."
+                 f"{expr.origin}] {{ ... }}` — nothing else produces an approval "
+                 "(item 246/249)")
+    return {"capability": edge_scope, "expr": appr_node}
 
 
 def _lower_timer_step(stmt: TimerStmt, env: Env) -> dict:
@@ -5014,6 +8674,50 @@ def _is_emission_call(node: dict, env: Env) -> bool:
     return decl is not None and decl.emission
 
 
+def _lower_lease_step(stmt: "LetEffect", env: Env, filename: str) -> dict:
+    """Lower `let l = effect lease <cap> [ttl <d>] [uses <n>] undo l.revoke()`
+    (item 294 Slice 2) to a `let-effect` step whose acquire is the reserved
+    runtime lease acquisition and whose undo is the own-handle revoke.
+
+    Two dedicated IR nodes keep the lease off the host-verb surface: `lease-
+    acquire` emits `_revl_frame.acquire_lease(...)` (the gate mints the grant
+    from an approved ticket; the acquire only binds a handle to it), and `lease-
+    revoke` emits `<handle>.revoke()` (retiring the grant by its OWN requestId on
+    the LIFO teardown — the always-safe direction, revoking your own authority).
+    The disposer MUST be exactly `<bind>.revoke()`: the design's scoped exemption
+    is the own-requestId revoke only; any other disposer would name a grant the
+    scope did not mint and belongs on the ordinary 379 gate, which no source form
+    reaches."""
+    acq: LeaseAcquire = stmt.acquire            # type: ignore[assignment]
+    from .parser import ExprCall, ExprField, ExprVar  # noqa: PLC0415
+    undo = stmt.undo
+    ok = (isinstance(undo, ExprCall) and not undo.args
+          and isinstance(undo.callee, ExprField)
+          and undo.callee.name == "revoke"
+          and isinstance(undo.callee.target, ExprVar)
+          and undo.callee.target.name == stmt.bind)
+    if not ok:
+        raise RevlError(
+            filename, acq.line,
+            f"a lease's `undo` must be `{stmt.bind}.revoke()` — its own revoke",
+            hint="a lease is torn down by revoking the grant it acquired; the "
+                 "own-requestId revoke is the only exempt disposer (item 294). "
+                 "A disposer naming another grant goes through the operator "
+                 "revoke gate (item 379), which no source form reaches",
+            code="G4", category="capability")
+    safe = env.bind_local(stmt.bind, stmt.line)
+    step = {
+        "step": "let-effect",
+        "bind": safe,
+        "lease": {"capability": acq.capability,
+                  "ttlMs": acq.ttl_ms, "uses": acq.uses},
+        "acquire": {"kind": "lease-acquire", "capability": acq.capability,
+                    "ttlMs": acq.ttl_ms, "uses": acq.uses, "line": acq.line},
+        "undo": {"kind": "lease-revoke", "handle": safe, "line": acq.line},
+    }
+    return step
+
+
 def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:
     """Lower `spawn <Component> with { ... }` to the frozen spawn IR node
     (docs/design-v2-instances.md).
@@ -5052,7 +8756,24 @@ def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:
                 f"`{field}` is not a config field of {expr.component}",
                 hint="spawn config carries the target's declared `config { }` fields",
             )
+        # item 378: type-check the config VALUE against the (data-only) declared
+        # config type, exactly as `load C with { … }` does. Without this the
+        # producer seam was open: a spawn config value was lowered with no
+        # check_ast, so a wrong-typed (or callable-carrying) value smuggled in.
+        check_ast(vexpr, tconfig[field].type, env.type_env, env.types,
+                  env.filename, f"config field `{field}` of {expr.component}")
         lowered_cfg[field] = _lower_expr(vexpr, env, "setup")
+        # item 308, B1 clause 6: a resource-tainted spawn config value seats the
+        # handle in the child's activation for its whole lifetime (a
+        # per-invocation borrow escalated to an activation-lifetime hold).
+        _taint308, _ = _resource_ctx(env.types)
+        _cfg_res = (resource_in(tconfig[field].type, _taint308)
+                    or _node_resource(lowered_cfg[field], env, _taint308))
+        if _cfg_res:
+            raise RevlError(
+                env.filename, expr.line,
+                _b1_message("spawn", "borrowed", _cfg_res),
+                hint=_b1_hint("spawn"), code="G7", category="ownership")
     for f in target.config:
         if f.default is None and f.name not in expr.config:
             raise RevlError(
@@ -5263,11 +8984,23 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                                    ptype, actual)
             node = {"kind": "call", "target": node, "method": op.name, "args": lowered}
             continue
+        # host provenance (docs/stdlib-2.0.md §Map): a verb call on a local
+        # bound to a host acquisition (`effect store.insert(k, v)` in an
+        # activation or provide-method body) is checked against that family's
+        # surface (item 401). An unknown verb is refused here (HOST-METHOD)
+        # instead of lowering to a call that only crashes at the host runtime,
+        # the item-84 shape. Only the FIRST verb off the host local is checked;
+        # a host verb's RESULT is opaque, so a chained call reads no family.
+        host_args = [_lower_expr(a, env, mode) for a in op.args]
+        if node.get("kind") == "name" and node.get("id") in env.host_locals:
+            _check_host_verb(
+                env.host_locals[node["id"]], op.name, len(host_args),
+                env.filename, op.line)
         node = {
             "kind": "call",
             "target": node,
             "method": op.name,
-            "args": [_lower_expr(a, env, mode) for a in op.args],
+            "args": host_args,
         }
     return node
 
@@ -5293,7 +9026,7 @@ def _node_desc(node: dict) -> str:
 # ---------------------------------------------------------------- linker
 
 def _link(program: Program, components: list[dict], ambient_components: list[dict],
-          templates: set | None = None) -> dict:
+          templates: set | None = None, errors: list | None = None) -> dict:
     """G2/G3 over the union of ambient (running) and new components, and the
     composition manifest (cordisc-compatible schema: components with
     name/file/inject/provides, plus loadOrder).
@@ -5304,9 +9037,29 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
     G2/G3 table and they take no place in `loadOrder`: at runtime each is
     instantiated into its own fresh local realm by `spawn`, disjoint by
     construction (decision 5/6). Non-spawning programs have no templates, so
-    the manifest is byte-identical to before."""
+    the manifest is byte-identical to before.
+
+    `errors` (item 386, Change 2): when a collect-all sink is supplied, every G2
+    provision conflict, multi-realm route gap, and G3 cycle is APPENDED to it
+    instead of raised, so the linker reports all of them in one pass — capped at
+    one reported cycle per strongly-connected set to avoid overlapping-path
+    noise. When `errors is None` (a direct caller), the first refusal is raised,
+    the legacy fail-fast behavior."""
     templates = templates or set()
-    lines = {comp["name"]: decl.line for comp, decl in zip(components, program.components)}
+
+    def _fail(err: RevlError) -> None:
+        """Collect the refusal if a sink was supplied, else raise it (legacy)."""
+        if errors is None:
+            raise err
+        errors.append(err)
+
+    # name-keyed, not positionally zipped: a collected duplicate-component
+    # refusal (item 386) can leave `components` shorter than
+    # `program.components`, which would misalign a `zip`. First declaration of
+    # a name wins its line.
+    lines: dict[str, int] = {}
+    for decl in program.components:
+        lines.setdefault(decl.name, decl.line)
 
     entries: list[dict] = []
     for amb in ambient_components:
@@ -5380,12 +9133,16 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
                         TraceStep(entry["name"], "provider",
                                   *_where(entry["name"]), detail),
                     ])
-                raise RevlError(
+                _fail(RevlError(
                     program.filename, _line(entry["name"]),
                     f"provision conflict: key `{key}`{where} is provided "
                     f"by both {provider_of[(key, realm)]} and {entry['name']} (G2)",
                     why=why,
-                )
+                ))
+                # keep the FIRST provider registered (item 386): the conflict is
+                # reported once, and downstream route/edge resolution still finds
+                # a provider for the key rather than fabricating a "no provider".
+                continue
             provider_of[(key, realm)] = entry["name"]
 
     def _routes(entry: dict) -> dict:
@@ -5412,7 +9169,7 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
                                          *_where(entry["name"]),
                                          f"routes `{key}` across "
                                          f"{len(route['realms'])} realms{strat_where}")])
-                    raise RevlError(
+                    _fail(RevlError(
                         program.filename, _line(entry["name"]),
                         f"multi-realm bind of `{key}` in {entry['name']} names realm "
                         f"`{realm}`, but no component provides `{key}` in realm `{realm}` "
@@ -5422,7 +9179,7 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
                              "to exactly one). Add a provider isolated into realm "
                              f"`{realm}`, or drop `{realm}` from the route",
                         why=why,
-                    )
+                    ))
 
     # edges: provider -> consumer where the consumer's realm for a key
     # matches the provider's — realm separation legitimately breaks cycles
@@ -5455,14 +9212,15 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
             provider = provider_of.get((key, _realm(entry, key)))
             if provider == entry["name"]:
                 name = entry["name"]
-                raise RevlError(
+                _fail(RevlError(
                     program.filename, _line(name),
                     f"component {name} requires a key it provides itself (`{key}`) (G3)",
                     why=WhyTrace(
                         kind="dependency-cycle", subject=name, shape=CHAIN,
                         steps=[TraceStep(name, "component", *_where(name),
                                          f"provides and requires `{key}`")]),
-                )
+                ))
+                continue
             if provider is not None:
                 graph[provider].append(entry["name"])
                 edge_key.setdefault((provider, entry["name"]), key)
@@ -5470,6 +9228,11 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
 
     state: dict[str, int] = {}
     stack: list[str] = []
+    # item 386, Change 2: nodes already named in a reported cycle. A single
+    # strongly-connected set has many overlapping cycles; reporting each is
+    # noise, so once any node of a cycle is reported we suppress further cycles
+    # that touch it — one G3 per SCC.
+    cycled: set = set()
 
     def visit(name: str):
         state[name] = 1
@@ -5485,10 +9248,16 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
                                if i + 1 < len(cycle) else None))
                     for i, node in enumerate(cycle)
                 ]
-                raise RevlError(program.filename, _line(succ),
-                                "dependency cycle: " + " -> ".join(cycle) + " (G3)",
-                                why=WhyTrace(kind="dependency-cycle", subject=succ,
-                                             steps=steps, shape=CHAIN))
+                cyc_err = RevlError(
+                    program.filename, _line(succ),
+                    "dependency cycle: " + " -> ".join(cycle) + " (G3)",
+                    why=WhyTrace(kind="dependency-cycle", subject=succ,
+                                 steps=steps, shape=CHAIN))
+                if errors is None:
+                    raise cyc_err
+                if not any(node in cycled for node in cycle):
+                    cycled.update(cycle)
+                    errors.append(cyc_err)
             if state.get(succ, 0) == 0:
                 visit(succ)
         stack.pop()
@@ -5554,6 +9323,100 @@ def _collect_emit_caps(node, caps: set) -> None:
             _collect_emit_caps(value, caps)
 
 
+def _cap_keyed(key: str, cap_str: str) -> "object":
+    """The key-to-token bridge (item 294): resolve a declared emission token
+    string to a `Cap` keyed by the WIRING KEY, carrying the declared token's
+    VALUATION. The token identity stays the wiring key (exactly today's fold
+    element, so a parameter-free token (`kv_a`) yields `Cap("kv_a", ())` which
+    compares bit-for-bit like the old string) while the parameter map now rides
+    into the fold so a narrowing that lives only in `P` actually changes the
+    verdict. Both `reach` and `held` are built through this one function, so the
+    two sides of `covers` are always structured `(T, P)` valuations."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    return cap_order.Cap(key, cap_order.parse_cap(cap_str).params)
+
+
+def _emit_step_caps_pairs(node: dict, requires_map: dict, services: dict) -> list:
+    """The `Cap`(s) a single lowered `emit` step crosses, resolved through the
+    key-to-token bridge. A req-keyed emission resolves key -> requires-target
+    service -> the method being called -> that method's `emission[...]`
+    valuation(s); a bare or unresolvable method degrades to the bare key
+    (`Cap(key, ())`, today's element); a host emission is the unnameable `*`."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    expr = node.get("expr") or {}
+    target = expr.get("target") or {}
+    if target.get("kind") != "req":
+        return [cap_order.Cap("*", ())]
+    key = target.get("name")
+    svc = services.get(requires_map.get(key)) if requires_map else None
+    decl = svc.methods.get(expr.get("method")) if svc is not None else None
+    cap_strs = getattr(decl, "capabilities", None) if decl is not None else None
+    if not cap_strs:
+        return [cap_order.Cap(key, ())]
+    return [_cap_keyed(key, s) for s in cap_strs]
+
+
+def _collect_emit_caps_pairs(node, caps: set, requires_map: dict,
+                             services: dict) -> None:
+    """`_collect_emit_caps`, resolved to structured `Cap`s through the bridge.
+    Same traversal (emit STEPS only), so a parameter-free body yields the same
+    set of elements as today, spelled as bare `Cap`s."""
+    if isinstance(node, dict):
+        if node.get("step") == "emit":
+            caps.update(_emit_step_caps_pairs(node, requires_map, services))
+        for value in node.values():
+            _collect_emit_caps_pairs(value, caps, requires_map, services)
+    elif isinstance(node, list):
+        for value in node:
+            _collect_emit_caps_pairs(value, caps, requires_map, services)
+
+
+def _spawn_reached_surface_pairs(components: list[dict],
+                                 services: dict) -> dict[str, set]:
+    """Per-component actual capability reach as structured `(T, P)` pairs,
+    resolved through the bridge: the boundaries a component's own code crosses
+    (the key-and-valuation of every `emit` step, `*` for a host emission), so a
+    parameterized crossing survives into the attenuation fold as its valuation
+    rather than degrading to a bare wiring key."""
+    surface: dict[str, set] = {}
+    for comp in components:
+        requires_map = comp.get("requires") or {}
+        caps: set = set()
+        _collect_emit_caps_pairs(comp.get("body") or [], caps, requires_map,
+                                 services)
+        surface[comp["name"]] = caps
+    return surface
+
+
+def _held_capabilities_pairs(comp: dict, base_surface: set,
+                             services: dict) -> set:
+    """What a component holds (the capabilities it may pass down to a child it
+    spawns, item 66, lineage) as structured `(T, P)` pairs. A requires key
+    resolves, through the same bridge, to the declared emission valuation(s) of
+    the service it wires: a bare-token service method contributes the bare key
+    `Cap(key, ())` (today's element, byte-identical), and a parameterized one
+    contributes its narrower cone INSTEAD of the bare key, which is what lets a
+    parent that holds `fs.write(path="/tmp")` refuse a child reaching wider. A
+    plain or unresolvable service keeps the bare key (a child cannot reach a
+    non-emission key, so this only preserves byte-identity)."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    held: set = set(base_surface)
+    for key, svcname in (comp.get("requires") or {}).items():
+        svc = services.get(svcname)
+        emission_methods = ([m for m in svc.methods.values() if m.emission]
+                            if svc is not None else [])
+        if not emission_methods:
+            held.add(cap_order.Cap(key, ()))
+            continue
+        for m in emission_methods:
+            if not m.capabilities:
+                held.add(cap_order.Cap(key, ()))
+            else:
+                for s in m.capabilities:
+                    held.add(_cap_keyed(key, s))
+    return held
+
+
 def _spawn_emission_surface(components: list[dict], services: dict) -> dict[str, set]:
     """Per-component upper bound on what activating an instance of it can emit.
 
@@ -5579,26 +9442,6 @@ def _spawn_emission_surface(components: list[dict], services: dict) -> dict[str,
     return surface
 
 
-def _spawn_reached_surface(components: list[dict]) -> dict[str, set]:
-    """Per-component *actual* capability reach — the boundaries a component's
-    own code crosses, drawn from its lowered body (`_collect_emit_caps`, the
-    G4 capability machinery): the required key of every `emit` step, and `*`
-    for any host emission or first-class dispatch that no key can name.
-
-    This is deliberately more precise than `_spawn_emission_surface`, which
-    over-approximates from a provided service's *declaration* (a bare
-    `emission` provider counts as `*`). Attenuation asks what an instance can
-    actually reach — bounded by the keys it wires through `requires` — so the
-    least-authority claim is exact: a worker that only ever emits through
-    `kv_a` provably does not reach `kv_b`, whatever its service promises."""
-    surface: dict[str, set] = {}
-    for comp in components:
-        caps: set = set()
-        _collect_emit_caps(comp.get("body") or [], caps)
-        surface[comp["name"]] = caps
-    return surface
-
-
 def _spawn_surface_closure(base: dict[str, set], edges: list) -> dict[str, set]:
     """Fold the spawn graph into a per-component base surface: after this, a
     component's set is everything it can emit *plus* everything its transitive
@@ -5618,18 +9461,6 @@ def _spawn_surface_closure(base: dict[str, set], edges: list) -> dict[str, set]:
     return closed
 
 
-def _held_capabilities(comp: dict, base_surface: set) -> set:
-    """What a component *holds* — the capabilities it may pass down to a child
-    it spawns (item 66, lineage). A component holds a boundary when it has
-    wired access to it: every key in its `requires` clause (a `requires db: DB`
-    is the right to reach `db`), together with every boundary its own body
-    already crosses (`base_surface`: its `emit` steps and the emission methods
-    it provides, including the unnameable host `*`). This is the spawner's own
-    authority, *not* its transitive spawn closure — a parent cannot launder a
-    capability it lacks by routing it through one child into another."""
-    return set((comp.get("requires") or {}).keys()) | set(base_surface)
-
-
 def _activation_spawn_sites(comp: dict) -> "list[dict]":
     """The `spawn` nodes in a component's *activation* body — the top-level
     supervision `let s = effect spawn C ...`, excluding spawns nested inside a
@@ -5645,57 +9476,316 @@ def _activation_spawn_sites(comp: dict) -> "list[dict]":
     return sites
 
 
-def _check_spawn_attenuation(components: list[dict],
-                             spawn_reg: dict, filename: str) -> list[dict]:
-    """Capability attenuation on spawn (item 66): a spawned child's capability
-    set must be a **checked subset** of its spawner's — monotone shrinkage, the
-    direction §5 admits for purity. A spawn may narrow (pass down less), never
-    widen (grant a boundary the parent does not hold), so spawning cannot
-    amplify authority and each per-tenant instance gets least-authority for
-    free: an instance whose template reaches only `kv_a` provably cannot reach
-    `kv_b`, even when the spawner holds both.
+def _cap_offending(cap: "object") -> str:
+    """Render an uncovered capability for a refusal message: the unnameable host
+    boundary reads in words, everything else as its canonical `(T, P)` spelling
+    (`fs.write`, `fs.write(path="/etc")`)."""
+    return ("an unnameable host boundary" if cap.token == "*"
+            else f"`{cap.to_str()}`")
 
-    Reuses the G4 capability-bound machinery (`_spawn_emission_surface`): the
-    child's *reachable* set is its emission surface closed over its own spawn
-    subtree, the spawner's *held* set is its requires-wired authority. Where G4
-    bounds a component's declaration, item 33 the composition, and item 55 the
-    operators, this bounds **lineage**.
+
+def _widening_reason(cap: "object", held: set) -> str | None:
+    """Why a child capability is not covered by any held one, when the token IS
+    held but the VALUATION widens it (the item 294 case). Names the parameter
+    and the direction; returns None when the token itself is absent (today's
+    missing-boundary case, whose message is enough)."""
+    same_token = [h for h in held if h.token == cap.token and h.token != "*"]
+    if not same_token:
+        return None
+    child_params = cap.param_map()
+    for h in same_token:
+        for name, _wide in h.params:
+            if name not in child_params:
+                return (f"a capability parameter only narrows; `{cap.to_str()}` "
+                        f"drops `{name}`, which `{h.to_str()}` binds; a dropped "
+                        f"parameter is wider, so the child reaches more than the "
+                        f"parent holds")
+    # the token is held with the parameter bound on both sides but the value
+    # widens (e.g. a path outside the held cone)
+    h = same_token[0]
+    return (f"a capability parameter only narrows; `{cap.to_str()}` is wider "
+            f"than the held `{h.to_str()}` (its value is not within the parent's "
+            f"cone)")
+
+
+def _cap_sorted_strs(caps: set) -> list[str]:
+    """Canonical spellings of a Cap set, sorted (the audit-chain rendering). A
+    bare `Cap(key, ())` renders as `key`, byte-identical to the old string, so a
+    parameter-free chain is unchanged."""
+    return sorted(c.to_str() for c in caps)
+
+
+def _declares_calls_ceiling(services: dict) -> bool:
+    """Whether ANY emission method declares a static `calls`/`requests` budget
+    ceiling. The static budget check (`_check_declared_ceilings`) is gated on
+    this so a budget-free composition runs no cardinality pass and is
+    byte-identical: the whole feature is inert unless a program opts in."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    for svc in services.values():
+        for m in svc.methods.values():
+            for capstr in (m.capabilities or ()):
+                try:
+                    _, ceils = cap_order.split_ceilings(cap_order.parse_cap(capstr))
+                except cap_order.CapError:
+                    continue
+                if "calls" in ceils:
+                    return True
+    return False
+
+
+def _check_declared_ceilings(components: list[dict], services: dict,
+                             fns: list, externs: list, filename: str) -> None:
+    """The STATIC budget check (item 260 §3.2): `budget.requests`/`calls`
+    reconciles onto the SAME quantity the cardinality analysis (§2) proves, so
+    the check is exactly "proved-max <= declared calls".
+
+    For every component capability that declares a `calls` ceiling, refuse when
+    the proved per-activation maximum EXCEEDS it (a G4 count-axis refusal,
+    sharpening G4's set bound, §4), and refuse a declared FINITE ceiling over a
+    body whose count is `unbounded` or only `bounded-symbolic`, an unprovable
+    ceiling (§3.2: "a runaway loop becomes a red compile"). Gated by
+    `_declares_calls_ceiling`, so a budget-free program never reaches here."""
+    if not _declares_calls_ceiling(services):
+        return
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    from .cardinality import cardinality  # noqa: PLC0415 - lazy, avoids a cycle
+
+    # the minimal IR projection `cardinality` reads: components, the services'
+    # emission/capabilities, and the fn/extern reach it folds over.
+    services_ir = {
+        name: {"methods": {
+            m.name: {"emission": m.emission,
+                     **({"capabilities": list(m.capabilities)}
+                        if m.capabilities is not None else {})}
+            for m in svc.methods.values()}}
+        for name, svc in services.items()}
+    card_ir: dict = {"components": components, "services": services_ir}
+    if fns:
+        card_ir["functions"] = fns
+    if externs:
+        card_ir["externs"] = externs
+
+    report = cardinality(card_ir)
+    comp_line = {c["name"]: c.get("line", 1) for c in components}
+    comp_src = {c["name"]: c.get("source") for c in components}
+    for cname in sorted(report):
+        entry = report[cname]
+        for token, cell in entry["per_capability"].items():
+            _, ceils = cap_order.split_ceilings(cap_order.parse_cap(token))
+            declared = ceils.get("calls")
+            if declared is None:
+                continue
+            bare = cap_order.split_ceilings(cap_order.parse_cap(token))[0].to_str()
+            line = comp_line.get(cname, 1)
+            src = comp_src.get(cname) or filename
+            if cell["kind"] == "bounded" and cell["bound"] > declared:
+                raise RevlError(
+                    src, line,
+                    f"`{cname}` may cross `{bare}` up to {cell['bound']} times "
+                    f"per activation but its declaration caps `calls={declared}`",
+                    hint="a `budget.requests`/`calls` ceiling bounds the proved "
+                         "per-activation crossing count (item 260 §3.2); lower "
+                         "the number of crossings, or raise the declared ceiling "
+                         "to at least the proved maximum",
+                    code="G4", category="emission-budget",
+                )
+            if cell["kind"] in ("unbounded", "bounded-symbolic"):
+                why = (cell.get("reason") if cell["kind"] == "unbounded"
+                       else "its ceiling is symbolic until composition pins the "
+                            f"config field `{cell.get('expr')}`")
+                raise RevlError(
+                    src, line,
+                    f"`{cname}` declares a finite budget `calls={declared}` on "
+                    f"`{bare}` but its per-activation crossing count is not "
+                    f"statically provable ({why})",
+                    hint="a declared finite `calls` ceiling requires a proved "
+                         "cardinality bound (item 260 §3.2); make the crossing "
+                         "bounded (a decreasing-fuel iteration, §2.2) or drop "
+                         "the ceiling and rely on the runtime counter",
+                    code="G4", category="emission-budget",
+                )
+
+
+def _strip_ceilings(caps: set) -> set:
+    """The resource-only projection of a Cap set (item 260 §3.3): every ceiling
+    parameter (`calls`, `size`, `time`) removed. A crossing binds no ceiling, so
+    the crossing-coverage fold `covers_set` runs is ceiling-BLIND; budget
+    attenuation is a separate question handled by `_ceiling_attenuation_check`
+    over the UNSTRIPPED pairs. Byte-identical for a budget-free program (no cap
+    carries a ceiling, so nothing is stripped)."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    return {cap_order.split_ceilings(c)[0] for c in caps}
+
+
+def _ceiling_attenuation_check(held: set, child_reach: set) -> "list[dict]":
+    """The DEDICATED budget/ceiling attenuation check (item 260 §3.3, the HIGH
+    correction). `covers_set` deliberately STRIPS ceilings, so it never sees a
+    budget: a child budget WIDER than its parent's would slip past the
+    crossing-coverage fold. This parallel check reads the UNSTRIPPED `(T, P)`
+    pairs and refuses, per ceiling param `p`, any `child_ceiling(p) >
+    parent_ceiling(p)`, and a child that DROPS a ceiling its parent declares,
+    since a missing child ceiling reads as `+inf` (unbounded, hence wider). It
+    reuses the SAME `_param_leq` ceiling order `covers` would have used.
+
+    The parent's held ceiling for a token is its DECLARED ceiling (the §5.3
+    conservative first cut: the parent's own pre-spawn spend is NOT yet
+    subtracted). When a parent holds several caps under one token, its budget for
+    a param is the most generous (`max`) it declares. Returns a list of
+    violations `{cap, param, child, parent}`; empty means the child attenuates."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    # parent budget per (token -> param -> declared ceiling), max over held caps.
+    parent: dict[str, dict[str, int]] = {}
+    for h in held:
+        _, ceils = cap_order.split_ceilings(h)
+        if not ceils:
+            continue
+        row = parent.setdefault(h.token, {})
+        for p, v in ceils.items():
+            row[p] = v if p not in row else max(row[p], v)
+    violations: list[dict] = []
+    for c in child_reach:
+        budget = parent.get(c.token)
+        if not budget:
+            continue                         # parent declares no ceiling here
+        _, child_ceils = cap_order.split_ceilings(c)
+        for p, wide in budget.items():
+            narrow = child_ceils.get(p)      # None == dropped == +inf == wider
+            if narrow is None or not cap_order._param_leq(p, narrow, wide):
+                violations.append({"cap": c, "param": p,
+                                   "child": narrow, "parent": wide})
+    return violations
+
+
+def _check_spawn_attenuation(components: list[dict], services: dict,
+                             spawn_reg: dict, filename: str,
+                             untrusted: bool = False) -> list[dict]:
+    """Capability attenuation on spawn (item 66, extended by item 294): a
+    spawned child's capability set must be a **checked subset** of its
+    spawner's (monotone shrinkage, the direction §5 admits for purity). A spawn
+    may narrow (pass down less), never widen (grant a boundary the parent does
+    not hold), so spawning cannot amplify authority and each per-tenant instance
+    gets least-authority for free: an instance whose template reaches only
+    `kv_a` provably cannot reach `kv_b`, even when the spawner holds both.
+
+    The fold compares structured `(T, P)` capabilities via `cap_order.covers`,
+    resolved through the key-to-token bridge (`_cap_keyed`) on BOTH sides, so a
+    parameterized token is actually compared: a child declaring
+    `fs.write(path="/etc")` under a parent holding `fs.write(path="/tmp")` is
+    refused, and a bare `fs.write` child under that parent is refused too (a
+    dropped parameter widens). A parameter-free program yields bare `Cap`s that
+    compare bit-for-bit like the old wiring-key strings (additive, item 294
+    Slice 1). Where G4 bounds a component's declaration, item 33 the
+    composition, and item 55 the operators, this bounds **lineage**.
 
     Applies to activation-body spawns (see `_activation_spawn_sites`); returns
     the per-instance attenuation chain (spawner → child narrowing) for the G8
-    audit surface. Raises on a widening spawn, naming the chain."""
+    audit surface. Raises on a widening spawn, naming the chain.
+
+    TODO(294-slice2): per-instance `with { }` literal substitution into
+    `config.`-valued parameters; the chain would then show resolved paths."""
     edges = spawn_reg.get("edges") or []
     if not edges:
         return []
-    base = _spawn_reached_surface(components)
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    base = _spawn_reached_surface_pairs(components, services)
     reachable = _spawn_surface_closure(base, edges)
 
     chain: list[dict] = []
     seen: set = set()
     for comp in components:
-        held = _held_capabilities(comp, base.get(comp["name"], set()))
+        held = _held_capabilities_pairs(comp, base.get(comp["name"], set()),
+                                        services)
         for spawn in _activation_spawn_sites(comp):
             child = spawn.get("component")
             child_reach = reachable.get(child, set())
-            extra = sorted(child_reach - held)
             line = spawn.get("line", comp.get("line", 1))
+            # Crossing coverage (item 66/294): does the child reach only
+            # boundaries the parent holds? Ceilings are EXEMPT from this question
+            # (a narrower `calls` must not make one crossing "cover" another), so
+            # the fold runs over the resource-only projection, ceiling-BLIND by
+            # construction (item 260 §3.3). Budget attenuation is the separate
+            # `_ceiling_attenuation_check` below.
+            held_res = _strip_ceilings(held)
+            extra = cap_order.covers_set(held_res, _strip_ceilings(child_reach))
             if extra:
-                held_str = ", ".join(f"`{c}`" for c in sorted(held)) or "no capabilities"
-                offending = ", ".join(
-                    "an unnameable host boundary" if c == "*" else f"`{c}`"
-                    for c in extra)
+                extra = sorted(extra, key=lambda c: c.to_str())
+                held_str = ", ".join(
+                    f"`{s}`" for s in _cap_sorted_strs(held_res)) \
+                    or "no capabilities"
+                offending = ", ".join(_cap_offending(c) for c in extra)
+                # the reason reads the resource-only held set: a ceiling param
+                # is not a resource-widening cause (that is the dedicated
+                # ceiling check below), so it must not surface here as a
+                # spurious "drops `calls`" hint.
+                reasons = [r for r in (_widening_reason(c, held_res)
+                                       for c in extra) if r is not None]
+                extra_hint = ("; " + "; ".join(reasons)) if reasons else ""
+                from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+                _prof = _UntrustedMark if untrusted else None
                 raise RevlError(
                     comp.get("source") or filename, line,
                     f"`{comp['name']}` spawns `{child}`, granting it {offending}, "
                     f"but `{comp['name']}` holds only {held_str} — a spawn may "
                     "narrow a child's capabilities, never widen them",
-                    hint="a spawned child's capability set must be a subset of "
-                         f"its spawner's (attenuation, item 66) — `{comp['name']}` "
-                         f"cannot pass down {offending} it does not hold; add the "
-                         f"matching `requires` to `{comp['name']}` so it holds what "
-                         f"it grants, or drop the capability from `{child}` "
-                         "(monotone shrinkage: narrowing is sound, widening is not)",
+                    hint="a spawned child's capability set must be covered by "
+                         f"its spawner's (attenuation, item 66/294); "
+                         f"`{comp['name']}` cannot pass down {offending} it does "
+                         f"not hold; add the matching `requires` to "
+                         f"`{comp['name']}` so it holds what it grants, or narrow "
+                         f"the capability on `{child}` "
+                         "(monotone shrinkage: narrowing is sound, widening is "
+                         "not)" + extra_hint,
                     code="G4", category="capability-attenuation",
+                    # a resource crossing (path/host) held set is a STATIC fact at
+                    # the refusal site, so narrowing the child to it clears the
+                    # gate; raising the bound is operator-enacted at `comp`.
+                    navigate=_nav.ceiling_navigate(
+                        param=offending, child_value=offending,
+                        parent_bound=held_str, bound_site=f"`{comp['name']}`",
+                        is_budget=False, profile=_prof),
+                )
+            # DEDICATED budget/ceiling attenuation (item 260 §3.3, the HIGH
+            # correction): the crossing-coverage fold above is ceiling-blind, so
+            # a child budget WIDER than the parent's, or a DROPPED budget clause
+            # that silently widens to unbounded, is refused HERE, over the
+            # unstripped pairs, never by `covers_set`.
+            budget_bad = _ceiling_attenuation_check(held, child_reach)
+            if budget_bad:
+                budget_bad.sort(key=lambda v: (v["cap"].to_str(), v["param"]))
+                offending = ", ".join(
+                    (f"`{v['cap'].to_str()}` drops the `{v['param']}` budget "
+                     f"(a missing ceiling is unbounded, hence wider)"
+                     if v["child"] is None else
+                     f"`{v['cap'].to_str()}` widens `{v['param']}` to "
+                     f"{v['child']} over the parent's {v['parent']}")
+                    for v in budget_bad)
+                from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+                _prof = _UntrustedMark if untrusted else None
+                _bad0 = budget_bad[0]
+                raise RevlError(
+                    comp.get("source") or filename, line,
+                    f"`{comp['name']}` spawns `{child}` with a wider resource "
+                    f"budget than it holds: {offending}. A spawned child's "
+                    "budget may only narrow, never widen (attenuation, item "
+                    "66/294/260)",
+                    hint="a budget ceiling (`requests`/`calls`, `bytes`/`size`, "
+                         "`time`) attenuates on delegation: the child's ceiling "
+                         "must be <= the parent's, and a child may not DROP a "
+                         "ceiling the parent declares (that widens it to "
+                         "unbounded); narrow the budget on the child, or widen "
+                         f"`{comp['name']}`'s own declared budget",
+                    code="G4", category="capability-attenuation",
+                    # a budget ceiling is a LIVE `remainingUses`/lease counter
+                    # (item 294/260): the in-bounds number may already be spent at
+                    # the retry (TOCTOU), so the narrowing is `candidate`/`live`,
+                    # never `clears-this-gate` (the HIGH fix / soundness sweep).
+                    navigate=_nav.ceiling_navigate(
+                        param=str(_bad0["param"]),
+                        child_value=("(dropped)" if _bad0["child"] is None
+                                     else str(_bad0["child"])),
+                        parent_bound=str(_bad0["parent"]),
+                        bound_site=f"`{comp['name']}`",
+                        is_budget=True, profile=_prof),
                 )
             edge = (comp["name"], child)
             if edge in seen:
@@ -5707,9 +9797,9 @@ def _check_spawn_attenuation(components: list[dict],
             chain.append({
                 "parent": comp["name"],
                 "child": child,
-                "holds": sorted(held),
-                "granted": sorted(child_reach),
-                "attenuated": sorted(held - child_reach),
+                "holds": _cap_sorted_strs(held),
+                "granted": _cap_sorted_strs(child_reach),
+                "attenuated": _cap_sorted_strs(held - child_reach),
                 "line": line,
             })
     return chain
@@ -5739,7 +9829,6 @@ def _check_spawn_emission_bounds(components: list[dict], services: dict,
             if len(surface[parent]) != before:
                 changed = True
 
-    lines = spawn_reg.get("lines") or {}
     for comp in components:
         for step in comp.get("body") or []:
             if step.get("step") != "provide":

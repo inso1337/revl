@@ -10,7 +10,31 @@ on:
   # changes; this only lets the workflow be `uses:`-called from the tag build.
   workflow_call:
 
+# Go module resolution resilience. The go cross-tier tests download the pinned
+# stc-go module during `go test`, which intermittently fails verifying it against
+# the online checksum database (sum.golang.org stream errors) and reddens CI on a
+# network hiccup, not a defect. `-mod=mod` lets go resolve modules; GOSUMDB=off
+# skips the online checksum-DB round-trip (the module version is pinned in go.mod,
+# and local go.sum verification is unaffected).
+env:
+  GOFLAGS: -mod=mod
+  GOSUMDB: "off"
+
 jobs:
+  # roadmap 110d: lint gate. The repo's `# noqa` discipline is F-level
+  # (Pyflakes: unused imports/locals, undefined names, empty f-strings) but no
+  # job enforced it. Config lives in pyproject [tool.ruff]; ruff is version-
+  # pinned so the finding set is reproducible across runs.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.16.4
+      - run: ruff check
+
   frontend:
     runs-on: ubuntu-latest
     strategy:
@@ -35,6 +59,12 @@ jobs:
       # the other generated-artifact gates. Emit-only + self-host are pure
       # Python, so this needs no backend toolchain and runs here.
       - run: python3 tools/conformance.py --check-readme
+      # roadmap 110c: the playground/site wheel freshness is checked by
+      # `make pre-merge` (run per merge) and at release, NOT on every push. The
+      # wheel vendors the whole of src/revl, so a per-push gate reddened CI on
+      # every source change to a bundled module (an outage class, not a defect);
+      # it is a deploy artifact, so the check belongs at merge/release time.
+      # `python3 tools/check_site_wheel.py --write` rebuilds it.
       # the frontend suite includes the pure-Python halves of all three
       # backends (emitter goldens, IR contract, manifest/admission, audit);
       # runtime-integration tests skip cleanly when their host runtime is
@@ -258,3 +288,28 @@ jobs:
       - run: bash ci/placement_smoke.sh
         env:
           REVL_PY: backends/python/.venv/bin/python
+      # v3.0 release gate, exit test E3: the live-systems demo (swap 23 / why 27
+      # / apply 36) runs end to end from this clean checkout as a scripted gate.
+      # `sh backends/python/setup.sh` above installed the cordis-py runtime the
+      # live stages need, so run the scripted demo under it. REVL_DEMO_REQUIRE=1
+      # turns a runtime-absent skip into a failure, so a silently-missing runtime
+      # cannot let the gate pass green (the same contract as the wasm job).
+      - run: backends/python/.venv/bin/python demo/live_systems/run_demo.py
+        env:
+          REVL_DEMO_REQUIRE: "1"
+
+  # formal/ — the Lean backbone (formal/STATUS.md). lean-action pins the
+  # toolchain via formal/lean-toolchain and runs `lake build`; the second
+  # step is the axioms gate: every theorem must be axiom-free (`#print
+  # axioms` may not report sorryAx or any other dependency), the
+  # machine-checked form of the repo rule "a claim gets a command or it
+  # gets softened". STATUS.md tracks proved/stuck/TODO per guarantee.
+  formal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: formal
+      - name: axioms gate (no sorry, no project axioms) + harness census
+        run: sh formal/scripts/run_gate.sh

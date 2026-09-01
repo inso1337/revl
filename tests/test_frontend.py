@@ -77,6 +77,34 @@ def test_end_to_end_java_golden():
 # ---------------------------------------------------------------- rejections
 
 REJECTIONS = {
+    # item 384: foreign-construct redirect table — a known-foreign idiom that
+    # lexes as an undeclared identifier (or produces a cryptic parse error) is
+    # redirected to its revl spelling instead of the misleading generic G1.
+    "foreign_word_operator_and.rvl": "use `&&`",
+    "foreign_word_operator_or.rvl": "use `||`",
+    "foreign_word_operator_not.rvl": "use the prefix `!`",
+    "foreign_bool_true.rvl": "use `true`, not `True`",
+    "foreign_bool_false.rvl": "use `false`, not `False`",
+    "foreign_const.rvl": "revl has no `const`",
+    "foreign_len_builtin.rvl": "revl has no `len(...)`",
+    "foreign_print_builtin.rvl": "revl has no `print`",
+    "foreign_throw.rvl": "revl has no `throw`",
+    "foreign_increment.rvl": "revl has no `++` increment operator",
+    "foreign_decrement.rvl": "revl has no `--` decrement operator",
+    "foreign_cstyle_for.rvl": "revl has no C-style `for (init; cond; step)` loop",
+    "foreign_for_in.rvl": "not `for (x in xs)`",
+    "foreign_def.rvl": "revl has no `def`",
+    "foreign_elif.rvl": "revl has no `elif`",
+    "foreign_lambda.rvl": "revl has no `lambda`",
+    "foreign_python_ternary.rvl": "revl has no Python-style `a if c else b`",
+    "foreign_tuple.rvl": "revl has no tuples",
+    "foreign_string_dict.rvl": "revl records use identifier keys",
+    "foreign_slice.rvl": "revl has no slice syntax `xs[a:b]`",
+    "foreign_kwargs.rvl": "revl has no keyword arguments",
+    # `#` (item 384) is NOT a corpus rejection fixture: unlike every other
+    # foreign construct it is un-TOKENIZABLE, so the formatter's token-stream
+    # gate (test_fmt) cannot round-trip a `#` file. Its redirect is proven by
+    # test_foreign_hash_comment_redirects below instead.
     "a1_await_in_method.rvl": "`await` is only allowed in a component body",
     # roadmap item 80: a sync provide method that reaches an `async` extern is
     # refused with the twin of the emission-propagation diagnostic (async-
@@ -91,6 +119,20 @@ REJECTIONS = {
     # ternary arm) — the blind spot the name-based reach left open — is refused
     # with the A1 diagnostic, the expression-position complement of item 141.
     "a1_async_op_sync_ternary.rvl": "`Runner.route` is declared sync, but this implementation reaches async operation `model.complete` — a sync method has no in-flight window (A1)",
+    # roadmap item 131: a component ACTIVATION body whose bare `emit` step
+    # reaches a required async op is one of the four admitted-but-silently-
+    # wrong shapes item 131 flips to a compile error (py builds an unawaited
+    # coroutine; ts fires a floating Promise). The fix is `await emit ...`.
+    "a1_async_emit_step_not_awaited.rvl": "`emit` step reaches async operation `model.complete` but the emission is not awaited",
+    # roadmap item 131 refusal sweep (§6 exit test 5): the four
+    # admitted-but-silently-wrong async shapes flipped to compile errors, plus
+    # the exact-pairing (rule 2) and block-effect (fence) refusals.
+    "a1_async_effect_not_awaited.rvl": "component `A` acquires through async operation `p.open` but the effect is not awaited",
+    "a1_async_undo_suspends.rvl": "`undo` reaches async operation `w.heat`, but teardown is synchronous on every tier",
+    "a1_async_compensate_suspends.rvl": "`compensate` reaches async operation `model.record`, but teardown is synchronous on every tier",
+    "a1_await_emit_sync.rvl": "`await emit` on an emission that reaches nothing async — an `await` in an activation body is a real divert window",
+    "a1_effect_await_sync.rvl": "`effect await` on an acquisition that reaches nothing async — an `await` in an activation body is a real divert window",
+    "a1_effect_await_block.rvl": "the block effect form does not take `await`",
     "v2_async_signature_mismatch.rvl": "method `stats` of provision `db` is not async but service Database declares it async",
     "v2_same_realm_conflict.rvl": "provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)",
     "v2_dynamic_realm.rvl": "dynamic realm labels are not supported",
@@ -118,6 +160,30 @@ REJECTIONS = {
     "t21_int32_narrow_implicit.rvl": "this function's return expects `Int32`, got `Int`",
     "t22_int32_width_mix.rvl": "`+` does not mix `Int32` and `Int`",
     "t23_int32_remainder.rvl": "`%` is Int-only; widen the Int32 operands with `.to_int()` first",
+    # Bitwise operators are Int32-only (item 366): Int/Float have no uniform
+    # bitwise meaning across the six tiers, so `& | ^ ~ << >>` are restricted.
+    "t28_bitwise_non_int32.rvl": "`|` requires `Int32` operands, got `Float`",
+    # item 380(2): a field read off a value whose static type is `Any`/`Value`
+    # (the erased-dynamic types) is the 279/299 silent-divergence class — py
+    # raises, ts yields `undefined`. Refused at the frontend so the author is
+    # pushed to a record cast (Opt fields then read TOTAL) or the value.rvl
+    # shape accessors.
+    "t29_field_read_on_any.rvl": "field read `.kind` on a value of type `Any` — an erased value has no known fields",
+    # item 392: the provide-method twin of 380(2). A field read off `Any` fired
+    # the refusal in a bare `fn`/`test`/module-`fn` body (stratum 1, `infer_ast`)
+    # but NOT inside a `provide` method body, which is typed through the lowered
+    # component-body path (stratum 3, `infer_ir`) that never reached the check —
+    # the same context-scoping gap as the earlier `.length`-in-provide-method
+    # bug. The refusal is now applied uniformly in `infer_ir`'s field case.
+    "t30_field_read_on_any_provide_method.rvl": "field read `.kind` on a value of type `Any` — an erased value has no known fields",
+    # item 404: the broader provide-method context-scoping class (sibling of
+    # 392). A definite operator/index/builtin misuse that a `fn`/`test` body
+    # (stratum 1, `infer_ast`) refuses used to compile clean inside a `provide`
+    # method body, which was lowered through a stratum-3 path that ran the type
+    # oracle only in its NON-raising mode. The provide-method body now runs the
+    # SAME raising sweep the activation-setup body uses, so a non-`Int` list
+    # index (like `~n`, `-s`, and the Any-field-read) is refused uniformly.
+    "t31_index_non_int_provide_method.rvl": "index expects `Int`, got `Str`",
     # errata harvest, checker side (docs/v2.0-roadmap.md 75(b)(c)):
     # 75(b) a stdlib-named method on a receiver whose provenance no
     #       constructor pins used to lower as that builtin and misdispatch at
@@ -147,6 +213,14 @@ REJECTIONS = {
     "g4_extern_compensate_result.rvl": "`result` is not bound in the `compensate` slot of extern `send`",
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
     "g4_emission_not_declared.rvl": "`Cache.put` is declared plain, but this implementation reaches `db.execute`",
+    # item 294 Slice 1: a spawn that widens a parameterized capability (a child
+    # reaching a path outside the parent's declared cone) is refused by the same
+    # attenuation fold that refuses a dropped token, now comparing (T, P) via
+    # the key-to-token bridge.
+    "g4_spawn_widens_parameter.rvl":
+        "granting it `fs(path=\"/etc\")`, but `Router` holds only "
+        "`fs(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
+        "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
     "g4_spawn_widens_capability.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
     # item 82: an emission reached through a spawn handle (`w.task.run(...)`,
@@ -155,6 +229,11 @@ REJECTIONS = {
     # `KeyError` in `_is_emission_call`).
     "g4_unmarked_handle_emission.rvl": "call to emission `w.task.run` must be marked `emit` (G4)",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
+    # roadmap item 129: closures capture BY VALUE (syntax-2.0 §3.5). A closure
+    # that ASSIGNS to a captured binding is reference capture, which would break
+    # the value-semantic equality the derived LIFO teardown (G7/A8) rests on, so
+    # it is refused with an explicit diagnostic (docs/closures.md).
+    "g6_closure_mutates_capture.rvl": "a closure cannot assign to `n`: captures are by value, not by reference (G6)",
     "a2_acquire_after_provide.rvl": "acquisition after `provide`",
     "a6_method_not_in_service.rvl": "`db.execute` is not a method of service Database",
     # item 153: a provide block keyed on something the `provides` clause never
@@ -311,6 +390,64 @@ def test_a3_host_colliding_names_are_renamed():
     assert body[0]["undo"]["target"]["id"] == "frame_"
 
 
+def test_ts_emitter_scaffolding_names_are_renamed_cross_tier():
+    """item 406: every name the TS emitter reserves for its scaffolding
+    (`EMITTER_RESERVED` = ctx, config, rawConfig, host, Context) is made
+    host-safe at the tier-agnostic frontend, so a user binding of one compiles
+    UNIFORMLY on every tier instead of type-checking and running on py while
+    dying LATE at TS emit with "collides with emitter scaffolding".
+
+    `ctx`/`config` were always in the frontend's `_HOST_RESERVED`; `rawConfig`/
+    `host`/`Context` were the gap. They are the cross-tier analogue of the py
+    emitter's own reserved bare-names (items 156/160): a name only a backend's
+    scaffolding claims is RENAMED, not refused, because it is an ordinary
+    identifier the author is entitled to use (selfhost/emit_java.rvl itself
+    binds `host`)."""
+    import importlib.util
+    from pathlib import Path
+
+    from revl import compile_source
+
+    root = Path(__file__).resolve().parents[1]
+
+    def emitter(tier):
+        spec = importlib.util.spec_from_file_location(
+            f"revl_{tier}_emit_406", root / "backends" / tier / "emit.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    for name in ("host", "rawConfig", "Context"):
+        ir = compile_source(
+            f"component C {{ let {name} = effect Map.new() undo {name}.drop() }}"
+        )
+        binds = [step["bind"] for step in ir["components"][0]["body"]]
+        assert binds == [f"{name}_"], f"`{name}` must be frontend-renamed (item 406)"
+        # the payoff: the same IR now emits on py AND ts (the tier that used to
+        # fail late). Both fully support the `Map` host root.
+        for tier in ("python", "typescript"):
+            emitter(tier).emit(ir)  # must not raise
+
+    # additivity: a program using none of these names is untouched.
+    ir = compile_source(
+        "component D { let store = effect Map.new() undo store.drop() }")
+    assert [s["bind"] for s in ir["components"][0]["body"]] == ["store"]
+
+
+def test_foreign_hash_comment_redirects():
+    """item 384: `#` (Python/shell line comment) is redirected to `//` at the
+    lexer. It cannot be a corpus rejection fixture because `#` is
+    un-tokenizable, so the formatter's token-stream gate could not round-trip
+    it (test_fmt); proven here directly instead."""
+    from revl import compile_source
+
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("fn f() -> Int {\n  # a comment\n  return 0\n}\n")
+    msg = str(excinfo.value)
+    assert "revl has no `#` comments" in msg
+    assert "// ..." in msg  # the redirect names the revl spelling
+
+
 def test_a4_literal_dollars_are_escaped():
     from revl import compile_source
 
@@ -433,3 +570,176 @@ def test_int_min_has_no_spelling():
         _compile_return("-9223372036854775808")
     assert "Int literal `9223372036854775808` is outside the 64-bit range" \
         in str(excinfo.value)
+
+
+# ---------------------------------------------------------------- item 404
+#
+# The provide-method body context-scoping class (sibling of item 392). A
+# provide-method body is stratum-3 lowered code that used to run `infer_ir`
+# only in its NON-raising oracle mode, so a definite operator / index / unary /
+# builtin misuse that a `fn`/`test` body (stratum 1, `infer_ast`) refuses
+# compiled clean inside a `provide` method. The fix routes the provide-method
+# body through the SAME raising sweep the activation-setup body uses (the
+# `_sweep` mirror in `lower.py`), and brings `infer_ir`'s per-node checks
+# (unary `~`/`-`, non-`Int` index, record-field existence) to parity with
+# `infer_ast`. Test blocks are stratum 1 already, so they were never a gap.
+
+def _fn_body(body: str, extra: str = "") -> str:
+    return f"{extra}\npub fn M(s: Str, n: Int) -> Int {{ {body} }}"
+
+
+def _provide_body(body: str, extra: str = "") -> str:
+    return (
+        f"{extra}\n"
+        "service Reader { fn read(s: Str, n: Int) -> Int }\n"
+        "component Parser provides reader: Reader {\n"
+        "  provide reader {\n"
+        f"    fn read(s, n) {{ {body} }}\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def _test_body(body: str, extra: str = "") -> str:
+    return (
+        f"{extra}\n"
+        'test "t" {\n'
+        '  let s: Str = "x"\n'
+        "  let n: Int = 1\n"
+        f"  {body}\n"
+        "  assert true\n"
+        "}\n"
+    )
+
+
+# Each entry is a stratum-1 refusal that item 404 makes fire uniformly in a
+# provide-method body too. `substr` is the diagnostic that must appear in all
+# three contexts; `extra` supplies any prelude a body needs.
+_UNIFORM_REFUSALS = [
+    ("non-Int list index",
+     "let xs: List[Int] = [1, 2]\n let z = xs[s]\n return n", "",
+     "index expects `Int`, got `Str`"),
+    ("Str has no index operator",
+     "let z = s[n]\n return n", "",
+     "`Str` has no index operator"),
+    ("unary ~ on non-Int32",
+     "let z = ~n\n return n", "",
+     "`~` requires an `Int32` operand"),
+    ("unary - on non-numeric",
+     "let z = -s\n return n", "",
+     "operand of unary `-` expects `Int`"),
+    ("field read on Any (item 392, still fires)",
+     "let v: Any = jp(s)\n let z = v.k\n return n",
+     "pub extern pure fn jp(s: Str) -> Any = @py { return {} } = @ts { return {} }",
+     "an erased value has no known fields"),
+]
+
+
+@pytest.mark.parametrize("name,body,extra,substr", _UNIFORM_REFUSALS,
+                         ids=[c[0] for c in _UNIFORM_REFUSALS])
+def test_404_refusal_fires_uniformly_in_all_three_contexts(name, body, extra, substr):
+    from revl import compile_source
+    for label, wrap in (("fn", _fn_body), ("provide", _provide_body),
+                        ("test", _test_body)):
+        with pytest.raises(RevlError) as excinfo:
+            compile_source(wrap(body, extra))
+        assert substr in str(excinfo.value), \
+            f"{name}: {label} body did not raise the expected diagnostic"
+
+
+def test_404_valid_provide_method_still_compiles():
+    # Additivity: the sweep must not newly refuse a currently-valid provide
+    # method. A method that indexes a list with an Int, reads a declared record
+    # field, and returns the pinned type stays clean.
+    from revl import compile_source
+    compile_source(
+        "type Pt = { x: Int, y: Int }\n"
+        "service Reader { fn read(n: Int) -> Int }\n"
+        "component Parser provides reader: Reader {\n"
+        "  provide reader {\n"
+        "    fn read(n) {\n"
+        "      let xs: List[Int] = [10, 20, 30]\n"
+        "      let p: Pt = { x: 1, y: 2 }\n"
+        "      let a = xs[n]\n"
+        "      let b = p.x\n"
+        "      return a + b\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+# ---------------------------------------------------------------- item 405
+#
+# The residual of the item-404 check-coverage class, found BY the 404 work.
+# After 404 routed provide-method bodies through the fn-body raising sweep, two
+# hazards stayed refused in a `fn`/`test` body (stratum 1, `infer_ast`) but clean
+# in a `provide` method (stratum 3, `infer_ir`) because `infer_ir` had no node
+# case for them: `?.` on a non-optional (no `optfield`/`optcall` case, so it
+# inferred to None) and a structural / anonymous-record field read (no `record`
+# case, so the binding stayed untyped and the read was never field-checked).
+# `infer_ir` now gains those node cases, mirroring `infer_ast` exactly.
+
+_UNIFORM_REFUSALS_405 = [
+    ("`?.` on a non-optional (optfield)",
+     "let z = s?.length\n return n", "",
+     "`?.` needs an optional on the left"),
+    ("`?.` on a non-optional (optcall)",
+     "let z = s?.charAt(n)\n return n", "",
+     "`?.` needs an optional on the left"),
+    ("structural / anonymous-record read of an absent field",
+     'let a = { h: "x" }\n let z = a.missing\n return n',
+     "", "has no field `missing`"),
+]
+
+
+@pytest.mark.parametrize("name,body,extra,substr", _UNIFORM_REFUSALS_405,
+                         ids=[c[0] for c in _UNIFORM_REFUSALS_405])
+def test_405_refusal_fires_uniformly_in_fn_provide_and_test(name, body, extra, substr):
+    # Each is a stratum-1 (`infer_ast`) refusal that item 405 makes fire
+    # uniformly in a provide-method body (stratum 3, `infer_ir`) too — the same
+    # diagnostic in all three contexts.
+    from revl import compile_source
+    for label, wrap in (("fn", _fn_body), ("provide", _provide_body),
+                        ("test", _test_body)):
+        with pytest.raises(RevlError) as excinfo:
+            compile_source(wrap(body, extra))
+        assert substr in str(excinfo.value), \
+            f"{name}: {label} body did not raise the expected diagnostic"
+
+
+def test_405_valid_optchain_and_record_read_still_compile():
+    # Additivity: a `?.` on a genuine `Opt` and a read of a field the anonymous
+    # record does declare must still compile in a provide method — the new node
+    # cases add refusals, they do not narrow the accepted language.
+    from revl import compile_source
+    compile_source(
+        "service Reader { fn read(n: Int) -> Int }\n"
+        "component Parser provides reader: Reader {\n"
+        "  provide reader {\n"
+        "    fn read(n) {\n"
+        "      let o: Opt[Str] = None\n"
+        "      let z = o?.length\n"          # `?.` on a real Opt: fine
+        "      let a = { h: 7 }\n"
+        "      let b = a.h\n"                 # a declared structural field: fine
+        "      return b\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def test_405_record_literal_return_still_compiles():
+    # Additivity guard for the new `record` node case: naming a structural type
+    # for an anonymous literal must not make a valid record-literal return (whose
+    # structural type meets the declared nominal record at the boundary) refuse.
+    from revl import compile_source
+    compile_source(
+        "type Pt = { x: Int, y: Int }\n"
+        "service Maker { fn mk(n: Int) -> Pt }\n"
+        "component C provides maker: Maker {\n"
+        "  provide maker {\n"
+        "    fn mk(n) { return { x: n, y: 2 } }\n"
+        "  }\n"
+        "}\n"
+    )

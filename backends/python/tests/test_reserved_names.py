@@ -85,6 +85,38 @@ def test_aliased_name_emits_and_execs(reference_ir, name):
     load_module(source)                              # execs (imports resolve)
 
 
+# --- item 408: an ordinary leading-underscore binding now WORKS -------------
+
+@pytest.mark.parametrize("name", ["_v", "_x", "_store"])
+def test_leading_underscore_binding_emits_and_execs(reference_ir, name):
+    """A `_`-prefixed name is an ordinary Python identifier and the well-worn
+    "bound but unused" idiom (a match arm that ignores its payload,
+    `Some(_v) => ...`). It does NOT enter the emitter's reserved `_revl*`
+    namespace, so it emits verbatim and runs, exactly as it already did on the
+    module-`fn` path (`_lower_pure_stmt` keeps the name) and on every other tier
+    (a go regression, examples/regressions/fuzz_go_ead437e4.rvl, pins `_v`).
+
+    Before item 408 `_ident` reserved ALL of `_*` and refused it LATE, here,
+    with a raw `EmitError` traceback for a program the checker and the other
+    tiers accept; the guard is now narrowed to the namespace actually reserved."""
+    ir = copy.deepcopy(reference_ir)
+    _rename(ir["components"][1], "store", name)
+    source = emit.emit(ir)  # must not raise ("collides with emitter scaffolding")
+    assert f"{name} = Map.new()" in source           # emitted verbatim
+    load_module(source)                              # execs (imports resolve)
+
+
+@pytest.mark.parametrize("name", ["_revl_ctx", "_revl_config", "_revlx", "__revl_tmp"])
+def test_revl_namespace_stays_reserved(reference_ir, name):
+    """Narrowing the guard did not open the emitter's own scaffolding namespace:
+    a user binding that would enter `_revl*` is still refused early, uniformly
+    with the host roots, instead of silently shadowing an activation local."""
+    bad = copy.deepcopy(reference_ir)
+    bad["components"][1]["body"][0]["bind"] = name
+    with pytest.raises(emit.EmitError, match="collides with emitter scaffolding"):
+        emit.emit(bad)
+
+
 async def test_aliased_fmt_runs_end_to_end(reference_ir, trace):
     """The full R1 LIFO-recovery scenario runs with the migratable-Map local
     named `fmt` — the user `fmt` and the runtime formatter `_revl_fmt` (used by

@@ -380,11 +380,25 @@ def test_an_aborted_transactional_wal_descriptor_replays_on_recover(
     # the abort unwind already replayed the inverse in-process (test 2 above)
     # but never reached `Frame.drain` — no discharge record was ever written
     assert not [r for r in loaded["records"] if r.get("record") == "discharge"]
+    # item 309 §3a option (a), the headline scenario: this inverse is UNDECLARED
+    # (no `undo idempotent`), so the abort's Phase-1 apply fsync-appended a
+    # `replay-fence` for its seq BEFORE running it. That fence is what makes
+    # at-most-once hold across abort-then-crash.
+    assert [r["seq"] for r in loaded["records"]
+            if r.get("record") == "replay-fence"] == [descriptor["seq"]]
 
     report = recover(wal_path)
     assert report["verdict"] == "rolled-back"
-    assert [s["seq"] for s in report["transactionalRolledBack"]] == [descriptor["seq"]]
+    # recover finds the seq undischarged AND fenced: it does NOT re-apply (the
+    # abort already applied it once in-process), and defers the honest fenced
+    # residue to a human. Without the abort-path fence this DOUBLE-applied.
+    assert report["transactionalRolledBack"] == []
+    assert [f["seq"] for f in report["fencedDeferred"]] == [descriptor["seq"]]
     assert report["dischargedSkipped"] == []
+    assert report["residue"]["clean"] is False
+    [res] = [r for r in report["residue"]["outstanding"]
+             if r["kind"] == "fenced-residue"]
+    assert "outcome unknown, will not re-run" in res["error"]["message"]
 
 
 # ---------------------------------------------------------------------------

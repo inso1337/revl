@@ -48,6 +48,14 @@ __all__ = ["emit", "EmitError"]
 
 CRATE = "cordis4j"
 
+# item 322 Slice 2: record mode. When True, a witnessed transactional step also
+# writes a durable discharge-descriptor to the java WAL sink
+# (`revlRecordTransactional`) and the recording preamble (the FileChannel.force
+# fsync sink) is emitted. Default False -> byte-identical output (the java
+# golden oracle + the selfhost mirror both run with record off, so neither
+# shifts). Mirrors backends/go/emit.py's `_RECORD_MODE`.
+_RECORD_MODE = False
+
 TYPE_MAP = {
     "Str": "String",
     "Int": "long",
@@ -402,6 +410,11 @@ _JAVA_V3_BIN_OPS = {
     "<": "<", ">": ">", "<=": "<=", ">=": ">=",
     "+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
     "&&": "&&", "||": "||",
+    # Int32 bitwise operators (item 366, docs/arithmetic.md). All native on a
+    # Java `int` and none trap: `& | ^` are the bit ops; a `<<`/`>>` on `int`
+    # masks the shift count to its low 5 bits (JLS 15.19), which is exactly the
+    # spec's mod-32 rule, and `>>` is the arithmetic (sign-extending) shift.
+    "&": "&", "|": "|", "^": "^", "<<": "<<", ">>": ">>",
 }
 
 _V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
@@ -624,6 +637,11 @@ def _v3_builtin(method: object, target: str, args: list[str],
         return f"revlCharAt(String.valueOf({target}), {args[0]})"
     if method == "charCodeAt":
         return f"revlCharCodeAt(String.valueOf({target}), {args[0]})"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at code-point index i, via the same code-point-indexed
+    # helper as charCodeAt.
+    if method == "codepoint_at":
+        return f"revlCharCodeAt(String.valueOf({target}), {args[0]})"
     if method == "concat":
         return f"revlConcat({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). Java `/` truncates and
@@ -818,7 +836,10 @@ def _emit_stdlib_helpers() -> list[str]:
 
 
 def _uses_stdlib(ir: dict) -> bool:
-    """True when any builtin/len node appears anywhere in the document."""
+    """True when any builtin/len node appears anywhere in the document — or a
+    sized `.length` field (item 104): a component-position property-form
+    `.length` stays a `field` node marked `sized_length` and emits
+    `revlLength(...)`, so that helper must be emitted for it too."""
     found = False
 
     def walk(node) -> None:
@@ -826,7 +847,8 @@ def _uses_stdlib(ir: dict) -> bool:
         if found:
             return
         if isinstance(node, dict):
-            if node.get("kind") in ("builtin", "len"):
+            if node.get("kind") in ("builtin", "len") or (
+                    node.get("kind") == "field" and node.get("sized_length")):
                 found = True
                 return
             for value in node.values():
@@ -1288,6 +1310,10 @@ def _expr(
         operand = _expr(node.get("operand"), ctx, rename, env)
         if node.get("op") == "!":
             return f"(!{operand})"
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): Java's `~` on an `int`. A bit
+            # op, so it never traps.
+            return f"(~{operand})"
         if node.get("op") == "-":
             if node.get("operands") in ("Int", "Int32"):
                 # negating Long.MIN / Integer.MIN_VALUE overflows; Math.negateExact
@@ -1302,6 +1328,12 @@ def _expr(
         target = _expr(target_node, ctx, rename, env)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
+        if node.get("sized_length"):
+            # item 104 (cross-tier): property-form `.length` on a sized value in
+            # a component position — the code-point (Str) / element (List) count
+            # via `_v3_len`, the same as the `len` node, NOT a record member
+            # access (which would not resolve on a `String`).
+            return _v3_len(target)
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":
@@ -1623,6 +1655,23 @@ def _let_keyword(node: dict, ctx: _V3Ctx | None = None) -> str:
     return "var" if node.get("mutable") else "final var"
 
 
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is
+# enforced whole-IR in the frontend; this is the cheap per-emitter guard. It is
+# most load-bearing here: `_emit_setup_stmt` (the activation/setup tier) emits
+# loop steps, so a leak into an activation body would otherwise compile silently.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
@@ -1652,17 +1701,23 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "while":
+        _guard_frame_neutral_loop(node.get("body"))
         out.append(f"{pad}while ({_expr(node['cond'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "for":
+        _guard_frame_neutral_loop(node.get("body"))
         bind = _ident(node.get("bind"), "loop binding")
         ctx.arrows.pop(bind, None)
         out.append(f"{pad}for (var {bind} : {_expr(node['iterable'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
+    elif step == "break":
+        out.append(f"{pad}break;")
+    elif step == "continue":
+        out.append(f"{pad}continue;")
     elif step == "let_pattern":
         value = _expr(node.get("value"), ctx)
         tmp = f"__revl_destructure_{id(node)}"
@@ -1840,8 +1895,90 @@ def _emit_v3_types(types: dict) -> list[str]:
     return lines
 
 
+# item 378 Stage 5: class-level config seam for document-global config externs.
+# Mirrors the py tier's `_REVL_EXTERN_CONFIG` map + fail-loud
+# `_revl_extern_config` helper: a mutable static config map, keyed by extern
+# name, that a composition driver fills at plug time, and a lookup that THROWS,
+# naming the extern, when a required (non-defaulted) field is absent, instead
+# of handing the body a null that fails opaquely later. A defaults-only extern
+# still resolves to its defaults driver-free. Fully-qualified `java.util.*` so
+# the seam adds no import; open-coded joins so it needs no `String.join`.
+# Emitted only when a config extern is present, so a no-config program is
+# byte-identical.
+_JAVA_EXTERN_CONFIG_SCAFFOLD = [
+    "static final java.util.Map<String, java.util.Map<String, Object>> "
+    "_REVL_EXTERN_CONFIG = new java.util.HashMap<>();",
+    "",
+    "static java.util.Map<String, Object> _revlExternConfig(",
+    "        String name, String[] required, "
+    "java.util.Map<String, Object> defaults) {",
+    "    java.util.Map<String, Object> out = new java.util.HashMap<>(defaults);",
+    "    java.util.Map<String, Object> cfg = _REVL_EXTERN_CONFIG.get(name);",
+    "    if (cfg == null) {",
+    "        if (required.length > 0) {",
+    "            String msg = \"\";",
+    "            for (int i = 0; i < required.length; i++) {",
+    "                if (i > 0) msg += \", \";",
+    "                msg += required[i];",
+    "            }",
+    "            throw new RuntimeException(\"config extern `\" + name +",
+    "                \"` called before plug-time configuration was installed "
+    "(required config: \" +",
+    "                msg + \"); configure it through the run driver's config "
+    "seam\");",
+    "        }",
+    "        return out;",
+    "    }",
+    "    String missing = \"\";",
+    "    int n = 0;",
+    "    for (String f : required) {",
+    "        if (!cfg.containsKey(f)) {",
+    "            if (n > 0) missing += \", \";",
+    "            missing += f;",
+    "            n++;",
+    "        }",
+    "    }",
+    "    if (n > 0) {",
+    "        throw new RuntimeException(\"config extern `\" + name +",
+    "            \"` called before plug-time configuration was installed "
+    "(missing required config: \" +",
+    "            missing + \")\");",
+    "    }",
+    "    out.putAll(cfg);",
+    "    return out;",
+    "}",
+    "",
+]
+
+
+def _java_extern_config_bind(ext: dict) -> str:
+    """The `_revl_config = ...` first-body line for a config extern, or None.
+    `_revl_config` is a `java.util.Map<String, Object>`; the verbatim @java body
+    reads a field as `(Cast) _revl_config.get("field")`, exactly as the py body
+    reads the resolved dict."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    name = ext.get("name")
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = {f["name"]: f["default"] for f in schema
+                if f.get("default") is not None}
+    req_lit = "new String[]{%s}" % ", ".join(_string(f) for f in required)
+    if defaults:
+        pairs = ", ".join(f"{_string(k)}, {_lit(v)}" for k, v in defaults.items())
+        def_lit = f"java.util.Map.<String, Object>of({pairs})"
+    else:
+        def_lit = "java.util.Map.<String, Object>of()"
+    return (f"java.util.Map<String, Object> _revl_config = _revlExternConfig("
+            f"{_string(name)}, {req_lit}, {def_lit});")
+
+
 def _emit_v3_externs(externs: list) -> list[str]:
     lines: list[str] = []
+    # item 378 Stage 5: emit the config seam once, before the externs, when any
+    # extern carries a config schema (byte-identical when none do).
+    if any(ext.get("config") for ext in externs):
+        lines.extend(_JAVA_EXTERN_CONFIG_SCAFFOLD)
     for ext in externs:
         name = _fn_name(ext.get("name"))
         params = ", ".join(
@@ -1856,6 +1993,11 @@ def _emit_v3_externs(externs: list) -> list[str]:
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         lines.append(f"public static {ret} {name}({params}) {{")
+        # item 378 Stage 5: a config extern binds `_revl_config` as the first
+        # body line; None for a no-config extern (byte-identical body splice).
+        config_bind = _java_extern_config_bind(ext)
+        if config_bind:
+            lines.append("    " + config_bind)
         body = bodies["java"].strip()
         if body:
             for line in body.splitlines() or [""]:
@@ -1920,6 +2062,11 @@ class _Env:
         self.name = component["name"]
         self.reqs: dict[str, str] = dict(component.get("requires") or {})
         self.provides: dict[str, str] = dict(component.get("provides") or {})
+        # item 173: routed requires (item 162 `routes` IR): key -> {"realms":
+        # [...], "strategy": ...}. A routed key resolves per named realm through
+        # an emitted router class, never a single `ctx.get(...)` handle. Empty
+        # for every routes-less component.
+        self.routes: dict[str, dict] = dict(component.get("routes") or {})
 
 
 def _format_java(template: str, args: list[str]) -> str:
@@ -2021,7 +2168,13 @@ def _emit_map_runtime() -> list[str]:
         "// The value type is generic — each site's `Map.create()` pins `V`",
         "// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).",
         "public static final class Map<V> {",
-        "    private final java.util.HashMap<String, V> values = new java.util.HashMap<>();",
+        "    // item 397: a ConcurrentHashMap, not a bare HashMap. The tier's",
+        "    // placement runner serves each bridge connection on its own thread,",
+        "    // so the former unsynchronized HashMap was not memory-safe under",
+        "    // concurrent put; migrating the backing class makes insert/remove/get",
+        "    // thread-safe AND gives insert_if_absent an atomic putIfAbsent.",
+        "    private final java.util.concurrent.ConcurrentHashMap<String, V> values =",
+        "        new java.util.concurrent.ConcurrentHashMap<>();",
         "    private Map() {}",
         "    // revl `Map.new()` — renamed: `new` is a Java reserved word.",
         "    public static <V> Map<V> create() {",
@@ -2032,6 +2185,15 @@ def _emit_map_runtime() -> list[str]:
         "    }",
         "    public void insert(String key, V value) {",
         "        values.put(key, value);",
+        "    }",
+        "    // The atomic compare-and-set (item 397): ConcurrentHashMap.putIfAbsent",
+        "    // is a single atomic operation over the test AND the insert. It returns",
+        "    // the previous value (null when absent), so a null return means this",
+        "    // call inserted. Under N concurrent callers, exactly one sees null.",
+        "    // (ConcurrentHashMap forbids null values; revl host inserts never pass",
+        "    // null, and `get` already wraps absence in Optional.)",
+        "    public boolean insert_if_absent(String key, V value) {",
+        "        return values.putIfAbsent(key, value) == null;",
         "    }",
         "    public void remove(String key) {",
         "        values.remove(key);",
@@ -2339,7 +2501,8 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
             elem = _map_value_expr_type(args[0], var_types, env, functions, v3_ctx)
             if elem is not None:
                 return f"List[{elem}]"
-        if method in ("length", "charCodeAt", "indexOf", "to_int"):
+        if method in ("length", "charCodeAt", "codepoint_at", "indexOf",
+                      "to_int"):
             return "Int"
         if method in ("charAt", "join", "repeat", "to_str", "slice"):
             return "Str"
@@ -2418,11 +2581,29 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
     return None
 
 
+# Map verbs that write a value at arg[1]; each pins the host Map's value type V.
+# Inferring V from ANY writer (not the literal name "insert") lets a CAS-only
+# writer (`insert_if_absent`, item 397) pin a concrete V instead of the Str
+# default (item 402).
+_MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+# item 397: the compare-and-set host verb whose bound result is a `boolean` and
+# whose site-spelled undo is registered only when the CAS actually inserted.
+_MAP_CAS_VERBS = ("insert_if_absent",)
+
+
+def _is_map_cas(acquire) -> bool:
+    """Whether a lowered acquisition node is a result-guarded map CAS."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
                       functions: list, v3_ctx: _V3Ctx | None,
                       candidates: list[str]) -> None:
-    """Collect candidate value types from `bind.insert(k, v)` anywhere in an
-    expression; recurses into sub-expressions. Handles both the v1 call shape
+    """Collect candidate value types from any map value-writing call
+    (`insert`, `insert_if_absent`, ...) on `bind` anywhere in an expression;
+    recurses into sub-expressions. Handles both the v1 call shape
     (`target`/`method`) and the 2.0 shape (`callee` as a field access)."""
     if not isinstance(node, dict):
         return
@@ -2430,7 +2611,7 @@ def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
         target = node.get("target") or {}
         if (target.get("kind") in ("name", "var")
                 and (target.get("id") or target.get("name")) == bind
-                and node.get("method") == "insert"):
+                and node.get("method") in _MAP_VALUE_WRITERS):
             args = node.get("args") or []
             if len(args) >= 2:
                 t = _map_value_expr_type(args[1], var_types, env, functions, v3_ctx)
@@ -2441,7 +2622,7 @@ def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
             ct = callee.get("target") or {}
             if (ct.get("kind") in ("name", "var")
                     and (ct.get("id") or ct.get("name")) == bind
-                    and callee.get("name") == "insert"):
+                    and callee.get("name") in _MAP_VALUE_WRITERS):
                 args = node.get("args") or []
                 if len(args) >= 2:
                     t = _map_value_expr_type(args[1], var_types, env, functions, v3_ctx)
@@ -2620,6 +2801,12 @@ def _contains_expr(node: object) -> bool:
 def _component_needs_modern(component: dict) -> bool:
     if component.get("isolate") or component.get("intercept"):
         return True
+    # item 173: a routed require needs the modern path — its emitted router
+    # class and the per-realm resolution live there. (A routed component's
+    # provide method already calls the routed service, so it reaches modern via
+    # `_contains_expr` anyway; this makes the routing dependence explicit.)
+    if component.get("routes"):
+        return True
     for step in component.get("body") or []:
         if step.get("setup"):
             return True
@@ -2750,15 +2937,15 @@ def _emit_revl_frame_runtime() -> list[str]:
     caveat then applies on java too (Phase-2 start order is pinned LIFO, but
     two compensations may run concurrently once one has been abandoned).
 
-    Not implemented here: the WAL discharge-descriptor. `revl run --record`/
-    `--wal` only wires a `WriteAheadLog` through the in-process py driver
-    (src/revl/run.py); `run_java.py` spawns a separate JVM subprocess with no
-    such channel, so there is no host-side recording surface for this tier to
-    write into today (py's WAL/recover machinery is the sole owned
-    deliverable per docs/design/teardown-contract.md, 'Owned deliverable').
-    `residue` below is the in-process record shape the contract specifies,
-    kept internal (proven by observable ordering in the scenario harnesses)
-    until a java-side recording channel exists to surface it through."""
+    The durable WAL discharge-descriptor is emitted SEPARATELY, only under
+    `--record` (item 322 Slice 2, `_emit_record_sink`): the recording sink and
+    the per-descriptor `revlRecordTransactional` calls ride alongside this frame
+    but never appear in the default (byte-identical) output, so this loop itself
+    is unchanged whether or not a WAL is being written. `residue` below is the
+    in-process record shape the contract specifies, still surfaced by observable
+    ordering in the scenario harnesses; the WAL is the crash-durable channel that
+    outlives the process (a JVM subprocess writes it to `$REVL_WAL` and fsyncs
+    per record), which `revl recover` reads tier-agnostically."""
     return [
         "// docs/design/teardown-contract.md: the shared bracket/transactional/",
         "// compensation two-phase teardown loop (item 243 Slice 2b, item 247).",
@@ -2981,6 +3168,180 @@ def _emit_revl_frame_runtime() -> list[str]:
     ]
 
 
+# item 322 Slice 2: the durable WAL recording sink emitted into Components when
+# `--record` is set and the document carries a teardown frame. The java mirror of
+# backends/go/emit.py's `_RECORD_PREAMBLE`: one JSON line per record, fsync'd via
+# `FileChannel.force(true)` before the call that wrote it returns, opened from
+# `REVL_WAL` (unset -> every record is a no-op, so a non-record composition that
+# happens to compile this in is inert). The py JSONL schema, field-for-field:
+# `header`, `discharge-descriptor {seq, entry, call:{receiver,method,args},
+# origin, witness, idempotency}`, `discharge`, `activation-complete`. Written by
+# hand (no JSON dependency); the reader (`revl.wal.read_wal`) parses per line, so
+# object field ORDER is irrelevant — only the names/values must match. The three
+# `revlRecord*` methods are `public static` so a driver (the crash producer, and
+# the stub/real runners on a clean unload) can stamp discharge / the terminal
+# marker from outside Components. WAL_GUARANTEE is byte-identical to
+# src/revl/wal.py's constant (a header a py tool reads must agree on it).
+_RECORD_SINK_SOURCE = r'''
+// ---- durable WAL recording sink (item 322 Slice 2, the java host recording channel) ----
+
+private static final String REVL_WAL_GUARANTEE =
+        "the WAL records each committed effect's step identity, boundary "
+        + "classification and inverse DESCRIPTOR (not its closure). On restart, "
+        + "recovery runs the reconstructible boundary inverses newest-first (LIFO); "
+        + "in-process inverses are moot (their captured memory died with the "
+        + "process) and closure-only boundary inverses are reported as residue, "
+        + "never silently claimed to have run.";
+
+private static java.io.FileOutputStream revlWalOut;
+private static java.nio.channels.FileChannel revlWalChannel;
+private static int revlWalSeq = 0;
+private static final java.util.List<Integer> revlWalSeqs = new java.util.ArrayList<>();
+private static final Object revlWalLock = new Object();
+
+static {
+    revlWalOpen();
+}
+
+// Wire the sink to REVL_WAL (unset -> no-op recording) and stamp the header.
+// Runs once at class load. A failed open leaves the sink null (recording is
+// silently off) rather than crashing a composition that only wanted to run.
+private static void revlWalOpen() {
+    String path = System.getenv("REVL_WAL");
+    if (path == null || path.isEmpty()) {
+        return;
+    }
+    try {
+        revlWalOut = new java.io.FileOutputStream(path, true);
+        revlWalChannel = revlWalOut.getChannel();
+    } catch (java.io.IOException open) {
+        revlWalOut = null;
+        revlWalChannel = null;
+        return;
+    }
+    revlWalWrite("{\"record\":\"header\",\"walVersion\":1,\"generation\":1,\"guarantee\":"
+            + revlWalStr(REVL_WAL_GUARANTEE) + "}");
+}
+
+// One durable JSON line: write, flush, and fsync (FileChannel.force(true))
+// before returning — the write-ahead discipline the py tier uses, so a record a
+// caller saw acknowledged is on disk before the effect it describes may matter.
+private static void revlWalWrite(String json) {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        try {
+            revlWalOut.write((json + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            revlWalOut.flush();
+            revlWalChannel.force(true);
+        } catch (java.io.IOException ignored) {
+        }
+    }
+}
+
+// revlRecordTransactional appends the discharge-descriptor for one witnessed
+// transactional inverse: the re-issuable named call {receiver, method, args}
+// recover replays LIFO to undo the mutation, plus the forward `origin` it
+// reverses. Fsync'd before it returns, so a crash after this call still leaves
+// the inverse re-issuable from the log alone.
+public static void revlRecordTransactional(String receiver, String method, String[] args) {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        int seq = revlWalSeq++;
+        revlWalSeqs.add(seq);
+        String call = revlWalCall(receiver, method, args);
+        revlWalWrite("{\"record\":\"discharge-descriptor\",\"seq\":" + seq
+                + ",\"entry\":\"transactional\",\"call\":" + call
+                + ",\"origin\":" + call
+                + ",\"witness\":null,\"idempotency\":null}");
+    }
+}
+
+// revlRecordDischarge writes the commit-path proof that every recorded
+// transactional seq COMMITTED, so recover SKIPS it — a committed transaction is
+// never rolled back. Called on a clean unload, never on a crash.
+public static void revlRecordDischarge() {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        StringBuilder discharged = new StringBuilder("[");
+        for (int i = 0; i < revlWalSeqs.size(); i++) {
+            if (i > 0) {
+                discharged.append(',');
+            }
+            discharged.append(revlWalSeqs.get(i));
+        }
+        discharged.append(']');
+        revlWalWrite("{\"record\":\"discharge\",\"discharged\":" + discharged + "}");
+    }
+}
+
+// revlRecordActivationComplete stamps the terminal marker: its presence is the
+// whole roll-forward decision, its absence (a crash) is roll-back. Written only
+// after a clean unload.
+public static void revlRecordActivationComplete() {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        revlWalWrite("{\"record\":\"activation-complete\",\"generation\":1,\"components\":[]}");
+    }
+}
+
+private static String revlWalCall(String receiver, String method, String[] args) {
+    StringBuilder call = new StringBuilder("{\"receiver\":");
+    call.append(revlWalStr(receiver)).append(",\"method\":").append(revlWalStr(method))
+            .append(",\"args\":[");
+    for (int i = 0; i < args.length; i++) {
+        if (i > 0) {
+            call.append(',');
+        }
+        call.append(revlWalStr(args[i]));
+    }
+    call.append("]}");
+    return call.toString();
+}
+
+// Minimal JSON string escaper (quote/backslash/control chars) — enough for the
+// identifiers and stringified witnesses this schema carries, and it never
+// depends on a JSON library the emitted module would otherwise not need.
+private static String revlWalStr(String value) {
+    StringBuilder out = new StringBuilder("\"");
+    for (int i = 0; i < value.length(); i++) {
+        char c = value.charAt(i);
+        switch (c) {
+            case '"' -> out.append("\\\"");
+            case '\\' -> out.append("\\\\");
+            case '\n' -> out.append("\\n");
+            case '\r' -> out.append("\\r");
+            case '\t' -> out.append("\\t");
+            default -> {
+                if (c < 0x20) {
+                    out.append(String.format("\\u%04x", (int) c));
+                } else {
+                    out.append(c);
+                }
+            }
+        }
+    }
+    out.append('"');
+    return out.toString();
+}
+'''
+
+
+def _emit_record_sink() -> list[str]:
+    """The durable WAL recording sink (item 322 Slice 2), emitted into Components
+    only in record mode (`--record`) when the document carries a teardown frame.
+    Byte-identical default output is preserved by never emitting this otherwise —
+    the golden oracle and the selfhost mirror both run with record off."""
+    return _RECORD_SINK_SOURCE.strip("\n").split("\n")
+
+
 def _body_contains_step(node: object, target: str) -> bool:
     if isinstance(node, dict):
         if node.get("step") == target:
@@ -3083,6 +3444,25 @@ def _method_body_lines(
                 _emit_witnessed_step(
                     lines, "", stmt, wit, v3_ctx, env, bind, frame_expr,
                     rename=rename, frame_method=True)
+            elif _is_map_cas(stmt.get("acquire")):
+                # item 397: a method-body host CAS. Bind the atomic `boolean`
+                # result and register the site-spelled undo guarded on it — a
+                # `false` CAS's inverse is the identity, so teardown never
+                # removes the winner's entry. It rides the same per-activation
+                # accumulator (`fx`/`frame`) as a bare method-body effect.
+                bind = _ident(stmt["bind"], "binding")
+                acquire_expr = _expr(stmt["acquire"], v3_ctx, rename, env)
+                lines.append(f"boolean {bind} = {acquire_expr};")
+                undo_expr = _expr(stmt["undo"], v3_ctx, rename, env)
+                guarded = f"() -> {{ if ({bind}) {{ {undo_expr}; }} }}"
+                if frame_expr is None:
+                    lines.append(f"fx.track(Disposables.of({guarded}));")
+                else:
+                    crossing = _string(_call_label(stmt["acquire"]))
+                    attempted = _string(_call_label(stmt["undo"]))
+                    lines.append(
+                        f"fx.track({frame_expr}.bracket({crossing}, {attempted}, "
+                        f"{guarded}));")
             else:
                 raise EmitError(
                     "a non-witnessed let-effect is not supported inside a method "
@@ -3132,16 +3512,22 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
                 _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
         out.append(f"{pad}}}")
     elif kind == "while":
+        _guard_frame_neutral_loop(step.get("body"))
         out.append(f"{pad}while ({_expr(step['cond'], v3_ctx, None, env)}) {{")
         for child in step.get("body") or []:
             _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
         out.append(f"{pad}}}")
     elif kind == "for":
+        _guard_frame_neutral_loop(step.get("body"))
         bind = _ident(step.get("bind"), "loop binding")
         out.append(f"{pad}for (var {bind} : {_expr(step['iterable'], v3_ctx, None, env)}) {{")
         for child in step.get("body") or []:
             _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
         out.append(f"{pad}}}")
+    elif kind == "break":
+        out.append(f"{pad}break;")
+    elif kind == "continue":
+        out.append(f"{pad}continue;")
     elif kind == "let_pattern":
         value = _expr(step.get("value"), v3_ctx, None, env)
         tmp = f"__revl_destructure_{id(step)}"
@@ -3254,6 +3640,21 @@ def _emit_witnessed_step(
     out.append(f"{pad}var {result_var} = {_expr(step['acquire'], v3_ctx, rename, env)};")
     out.append(f"{pad}if ({result_var} instanceof RevlResult.Ok<?, ?> {ok_var}) {{")
     out.append(f"{pad}    {witness_type} result = ({witness_type}) {ok_var}.value();")
+    if _RECORD_MODE:
+        # item 322 Slice 2: the durable exit. At REGISTRATION (this Ok branch
+        # runs during apply(), when the mutation happened) write the
+        # discharge-descriptor — the re-issuable named call `recover` replays
+        # LIFO to undo the mutation — and fsync it, so a crash BEFORE commit is
+        # still recoverable from the log alone. `receiver` is the witnessed
+        # extern, `method` its declared inverse, and the stringified witness is
+        # the referent argument (the go mirror stringifies `result` the same
+        # way). Byte-identical default output: emitted only under `--record`.
+        receiver = _string(_call_label(step["acquire"]))
+        method = _string(_call_label(ext["undo"]))
+        out.append(
+            f"{pad}    revlRecordTransactional({receiver}, {method}, "
+            f"new String[]{{String.valueOf(result)}});"
+        )
     out.append(
         f"{pad}    fx.track({frame_expr}.{entry}({crossing}, {attempted}, "
         f"() -> {undo_expr}));"
@@ -3284,6 +3685,27 @@ def _emit_component_stmts(
             bind = _ident(step["bind"], "binding") if kind == "let-effect" else None
             if wit is not None:
                 _emit_witnessed_step(out, pad, step, wit, v3_ctx, env, bind, frame_expr)
+                continue
+            if kind == "let-effect" and _is_map_cas(step.get("acquire")):
+                # item 397: a result-declared host CAS binds an atomic
+                # `boolean`; guard the site-spelled undo on it so a `false` CAS
+                # registers the identity inverse and teardown never removes the
+                # winner's entry. Bind `boolean` (not `var`), matching the
+                # method-body path, so a later `if (fresh)` in activation code
+                # compiles.
+                out.append(
+                    f"{pad}boolean {bind} = "
+                    f"{_expr(step['acquire'], v3_ctx, None, env)};")
+                undo_expr = _expr(step["undo"], v3_ctx, None, env)
+                guarded = f"() -> {{ if ({bind}) {{ {undo_expr}; }} }}"
+                if frame_expr is None:
+                    out.append(f"{pad}fx.track(Disposables.of({guarded}));")
+                else:
+                    crossing = _string(_call_label(step["acquire"]))
+                    attempted = _string(_call_label(step["undo"]))
+                    out.append(
+                        f"{pad}fx.track({frame_expr}.bracket({crossing}, "
+                        f"{attempted}, {guarded}));")
                 continue
             if kind == "let-effect":
                 # FR-4: a host Map binding pins its value type at the
@@ -3331,6 +3753,15 @@ def _emit_component_stmts(
             out.append(
                 f"{pad}throw new CordisException(String.valueOf({message}));"
             )
+            # A `fail` lowers to an unconditional `throw`, so every sibling
+            # step after it in THIS block never runs. Unlike go/rust/py —
+            # whose targets tolerate dead code after a return/panic/raise —
+            # javac hard-rejects an unreachable statement, so drop the
+            # post-fail tail rather than emitting it. Nested blocks (an
+            # `if`-branch) recurse through their own call, so this only prunes
+            # the failing block's own tail, never a sibling branch that is
+            # still reachable. (roadmap item 341 / fault-sweep item 125)
+            return
         elif kind == "await":
             out.append(f"{pad}{_await_join(step['expr'], env, v3_ctx)};")
         elif kind == "return":
@@ -3358,6 +3789,79 @@ def _await_join(node: dict, env: _Env, v3_ctx: _V3Ctx | None = None) -> str:
     return rendered
 
 
+def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str,
+                            route: dict, services: dict, render_type, out: list[str]) -> None:
+    """item 173: the emitted realization of a routed require on cordis4j,
+    mirroring src/revl/run.py::_Router and the go/rust backends.
+
+    A per-(component, key) class implementing the required service interface. It
+    holds no worker handle — every method re-resolves the live per-realm handle
+    off the cordis4j fork's strict single-realm liveness-checked read
+    (`ctx.serviceInRealm(<Svc>.class, realm)`, which returns an empty Optional
+    for a realm with no ACTIVE provider and — unlike `ctx.get` — never falls
+    back to a parent realm). So a withdrawn worker realm drops out of the live
+    set and its calls go to the survivors — reactive failover from the emitted
+    body. Wired as the component's handle for the routed key, so a provide
+    method's `<key>.<op>(..)` forwards through it (G2: one provider downstream).
+    """
+    struct = f"RevlRouter{cname}{_camel(key)}"
+    realms = list(route.get("realms") or [])
+    strategy = route.get("strategy") or "round_robin"
+    realm_lits = ", ".join(_string(r) for r in realms)
+    methods = (services.get(service_name, {}) or {}).get("methods", {}) or {}
+
+    out.append(f"public static final class {struct} implements {service_name} {{")
+    out.append("    private final Context ctx;")
+    out.append(f"    private final String[] realms = {{{realm_lits}}};")
+    out.append(f"    private final String strategy = {_string(strategy)};")
+    out.append("    private int cursor = 0;")
+    out.append("    private final java.util.Map<String, Long> served = new java.util.HashMap<>();")
+    out.append(f"    {struct}(Context ctx) {{ this.ctx = ctx; }}")
+    out.append("    private java.util.List<String> revlLive() {")
+    out.append("        java.util.List<String> out = new java.util.ArrayList<>();")
+    out.append("        for (String r : realms) {")
+    out.append(f"            if (ctx.serviceInRealm({service_name}.class, r).isPresent()) out.add(r);")
+    out.append("        }")
+    out.append("        return out;")
+    out.append("    }")
+    out.append(f"    private {service_name} revlSelect() {{")
+    out.append("        java.util.List<String> live = revlLive();")
+    out.append("        if (live.isEmpty()) throw new CordisException("
+               "\"revl: router for " + key + " has no live worker (all realms withdrawn)\");")
+    out.append("        if (strategy.equals(\"least_loaded\")) {")
+    out.append("            String best = live.get(0);")
+    out.append("            for (String l : live) {")
+    out.append("                if (served.getOrDefault(l, 0L) < served.getOrDefault(best, 0L)) best = l;")
+    out.append("            }")
+    out.append("            served.merge(best, 1L, Long::sum);")
+    out.append(f"            return ctx.serviceInRealm({service_name}.class, best).get();")
+    out.append("        }")
+    out.append("        int n = realms.length;")
+    out.append("        for (int off = 0; off < n; off++) {")
+    out.append("            String cand = realms[(cursor + off) % n];")
+    out.append("            if (live.contains(cand)) {")
+    out.append("                cursor = (cursor + off + 1) % n;")
+    out.append("                served.merge(cand, 1L, Long::sum);")
+    out.append(f"                return ctx.serviceInRealm({service_name}.class, cand).get();")
+    out.append("            }")
+    out.append("        }")
+    out.append("        throw new CordisException(\"revl: router selection unreachable\");")
+    out.append("    }")
+    for mname, decl in methods.items():
+        jname = _ident(mname, "method")
+        params_decl = decl.get("params", []) or []
+        params = ", ".join(f"{render_type(p.get('type'))} {_ident(p.get('name'), 'parameter')}"
+                           for p in params_decl)
+        ret = render_type(decl.get("returns")) if decl.get("returns") else "void"
+        args = ", ".join(_ident(p.get("name"), "parameter") for p in params_decl)
+        out.append(f"    public {ret} {jname}({params}) {{")
+        call = f"revlSelect().{jname}({args})"
+        out.append(f"        {'return ' if ret != 'void' else ''}{call};")
+        out.append("    }")
+    out.append("}")
+    out.append("")
+
+
 def _emit_component_modern(
     component: dict,
     services: dict,
@@ -3365,6 +3869,8 @@ def _emit_component_modern(
     functions: list | None = None,
     externs: list | None = None,
     components: list | None = None,
+    *,
+    render_type=_java_type,
 ) -> list[str]:
     env = _Env(component, services)
     v3_ctx = _V3Ctx(types or {}, functions or [], externs or [], components or [])
@@ -3434,11 +3940,24 @@ def _emit_component_modern(
         )
         for method in provide.get("methods") or []:
             mname = _ident(method.get("name"), "method")
+            # Provider-method signatures MUST render with the SAME renderer as
+            # the service interface this class implements (`render_type`:
+            # `_java_type` for IR v1/v2, `_java_v3_type` for v3) — the exact
+            # `f(R)`-implemented-by-`f(Object)` contract `_emit_component`
+            # documents. The modern path used to hardcode `_java_v3_type`, so a
+            # v1/v2 component forced onto this path by a `fail`/`if`/`await`
+            # (e.g. the 125 fault sweep injecting a `fail`) rendered an
+            # undeclared v1 type literally (`List<Row>`) while its interface
+            # erased it to `List<Object>` — a javac "cannot find symbol" (Row)
+            # and a signature mismatch. Threading `render_type` here erases it
+            # consistently. Byte-identical for v3 (`render_type` IS
+            # `_java_v3_type`) and for any v1/v2 program using only declared
+            # types (both renderers agree via TYPE_MAP).
             params = ", ".join(
-                f"{_java_v3_type(_param_type(env, key, mname, p))} {p}"
+                f"{render_type(_param_type(env, key, mname, p))} {p}"
                 for p in method.get("params") or []
             )
-            ret = _java_v3_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
+            ret = render_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
             out.append(f"    public {ret} {mname}({params}) {{")
             for line in _method_body_lines(
                 env, method, v3_ctx, returns_void=ret == "void", frame_expr=frame_expr,
@@ -3476,6 +3995,12 @@ def _emit_component_modern(
         # registration below shares the same commit/abort discriminator.
         out.append("        RevlFrame frame = new RevlFrame();")
     for local, service in env.reqs.items():
+        if local in env.routes:
+            # item 173: a routed require resolves per named realm through the
+            # emitted router, never a single committed-view `ctx.get`.
+            out.append(f"        {service} {local} = "
+                       f"new RevlRouter{cname}{_camel(local)}(ctx);")
+            continue
         out.append(f"        {service} {local} = ctx.get({service}.class);")
     # A8 self-revert: cordis4j's ctx.effect() scope is NOT owned by the
     # fiber until apply returns it, so a failing activation must dispose
@@ -3489,9 +4014,14 @@ def _emit_component_modern(
     )
     out.extend(body_lines)
     body_steps = component.get("body") or []
-    if not (body_steps and body_steps[-1].get("step") == "fail"):
-        # An unconditional trailing `fail` lowers to a throw; Java treats a
-        # statement after it as a hard "unreachable statement" error.
+    if not any(s.get("step") == "fail" for s in body_steps):
+        # An unconditional top-level `fail` lowers to a throw; Java treats any
+        # statement after it (here the commit/return tail) as a hard
+        # "unreachable statement" error. A `fail` anywhere at the top level of
+        # the body — not only as the last step (item 341 / fault-sweep item
+        # 125) — makes this tail unreachable, so skip it whenever one is
+        # present. A `fail` nested inside an `if`-branch is conditional and
+        # does not reach here.
         if needs_frame:
             # Commit path (docs/design/teardown-contract.md): flip the
             # discriminator BEFORE any disposal can occur — activation
@@ -3520,6 +4050,12 @@ def _emit_component_modern(
     out.append("    }")
     out.append("}")
     out.append("")
+
+    # item 173: one router class per routed require, implementing the required
+    # service interface by strict per-realm resolution + strategy + failover.
+    for rkey, route in env.routes.items():
+        _emit_java_router_class(
+            env, cname, rkey, env.reqs[rkey], route, services, render_type, out)
     return out
 
 
@@ -3543,7 +4079,8 @@ def _emit_component(
     """
     if _component_needs_modern(component):
         return _emit_component_modern(
-            component, services, types, functions, externs, components)
+            component, services, types, functions, externs, components,
+            render_type=render_type)
     env = _Env(component, services)
     # FR-4: bind -> revl surface value type for each host Map binding (the
     # legacy path builds its own lightweight v3 context when the document
@@ -3921,6 +4458,11 @@ def _emit_v3(ir: dict, package_name: str) -> str:
                     for line in _emit_spawn_handle(with_get=_uses_instance_get(ir))])
     if _uses_revl_frame(ir):
         out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
+        # item 322 Slice 2: the durable WAL sink rides alongside the teardown
+        # frame, but ONLY under `--record` — off, this whole block is absent and
+        # the output is byte-identical (the golden oracle + selfhost gate).
+        if _RECORD_MODE:
+            out.extend(["    " + line if line else line for line in _emit_record_sink()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(
             component, services, types, functions, externs, components,
@@ -4014,7 +4556,10 @@ def _refuse_deferred_emissions(ir: dict) -> None:
     deferred extern emits cleanly (call-site keyed)."""
     try:
         from revl.errors import RevlError
-        from revl.session_commit import refuse_deferred_on_ownerless_tier
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
     except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
         import pathlib
         import sys as _sys
@@ -4022,50 +4567,120 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         if src.is_dir() and str(src) not in _sys.path:
             _sys.path.insert(0, str(src))
         from revl.errors import RevlError
-        from revl.session_commit import refuse_deferred_on_ownerless_tier
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
     try:
         refuse_deferred_on_ownerless_tier(ir, "java")
+        refuse_approval_on_ownerless_tier(ir, "java")
     except RevlError as exc:
         raise EmitError(exc.message) from None
 
 
-def emit(ir: dict, package_name: str = "revl") -> str:
-    """Emit one Java source file for an IR document (ir_version 1, 2, or 3)."""
+_REVL_SYNC_SUFFIX = "_revl_sync"
+
+
+def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
+    """item 388, stage 6: on a colour-erasing tier (go/rust/java/wasm — suspension
+    is not a function colour) a caller-decided-colour extern's two clones — `X`
+    (async) and `X_revl_sync` (sync) — emit the SAME blocking host function.
+    Collapse them to ONE: drop the sync clone and rewrite its call sites to `X`.
+
+    Detected structurally: a `_revl_sync` extern whose origin twin is present with
+    identical `bodies`. A poly extern instantiated in only one colour has no twin,
+    so it is emitted unchanged under whatever name survived. Non-destructive (the
+    shared IR is also emitted by py/ts, which keep both colours), and a no-op that
+    returns the IR untouched when no such pair exists (every existing golden is
+    byte-identical)."""
+    externs = ir.get("externs") or []
+    by_name = {e.get("name"): e for e in externs}
+    alias: dict = {}
+    kept: list = []
+    for e in externs:
+        name = e.get("name") or ""
+        if name.endswith(_REVL_SYNC_SUFFIX):
+            origin = name[: -len(_REVL_SYNC_SUFFIX)]
+            twin = by_name.get(origin)
+            if twin is not None and twin.get("bodies") == e.get("bodies"):
+                alias[name] = origin
+                continue
+        kept.append(e)
+    if not alias:
+        return ir
+
+    def _rewrite(node):
+        if isinstance(node, dict):
+            return {k: (alias[v] if k == "name" and isinstance(v, str)
+                        and v in alias else _rewrite(v))
+                    for k, v in node.items()}
+        if isinstance(node, list):
+            return [_rewrite(x) for x in node]
+        return node
+
+    ir = dict(ir)
+    ir["externs"] = kept
+    for key in ("components", "functions", "tests", "prop_tests"):
+        if key in ir:
+            ir[key] = _rewrite(ir[key])
+    return ir
+
+
+def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
+    """Emit one Java source file for an IR document (ir_version 1, 2, or 3).
+
+    `record` (item 322 Slice 2) additionally emits the durable WAL recording
+    sink and the per-descriptor `revlRecordTransactional` calls at each witnessed
+    transactional registration. Default False -> byte-identical to the pre-feature
+    output, so the golden oracle and the selfhost mirror (both record off) are
+    unaffected. Mirrors backends/go/emit.py's `--record`."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
+    ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
 
     _refuse_fault_tests(ir)
 
     _refuse_lifecycle_tests(ir.get("tests") or [])
-    version = ir.get("ir_version")
-    if version == 1:
-        return _emit_v1(ir, package_name)
-    if version == 2:
-        return _emit_v2(ir, package_name)
-    if version == 3:
-        return _emit_v3(ir, package_name)
-    raise EmitError(
-        f"unsupported ir_version: {version!r} — the Java backend targets "
-        f"ir_version 1, 2, and 3"
-    )
+    global _RECORD_MODE
+    saved = _RECORD_MODE
+    _RECORD_MODE = record
+    try:
+        version = ir.get("ir_version")
+        if version == 1:
+            return _emit_v1(ir, package_name)
+        if version == 2:
+            return _emit_v2(ir, package_name)
+        if version == 3:
+            return _emit_v3(ir, package_name)
+        raise EmitError(
+            f"unsupported ir_version: {version!r} — the Java backend targets "
+            f"ir_version 1, 2, and 3"
+        )
+    finally:
+        _RECORD_MODE = saved
 
 
 def _main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: python3 emit.py <ir.json|->", file=sys.stderr)
+    # `--record` (item 322 Slice 2) wires the witnessed teardown to a durable
+    # WAL sink; an optional package name follows the IR path (default `revl`).
+    rest = [a for a in argv[1:] if a != "--record"]
+    record = "--record" in argv[1:]
+    if len(rest) not in (1, 2):
+        print("usage: python3 emit.py <ir.json|-> [package] [--record]", file=sys.stderr)
         return 2
     # `-` reads the IR from stdin. Callers used to pass `/dev/stdin`, which
     # works on macOS and fails on a GitHub runner with `OSError: [Errno 6] No
     # such device or address` — the emitted-code tests were red in CI for that
     # reason alone.
-    if argv[1] == "-":
+    if rest[0] == "-":
         ir = json.load(sys.stdin)
     else:
-        with open(argv[1], "r", encoding="utf-8") as handle:
+        with open(rest[0], "r", encoding="utf-8") as handle:
             ir = json.load(handle)
-    sys.stdout.write(emit(ir))
+    package = rest[1] if len(rest) == 2 else "revl"
+    sys.stdout.write(emit(ir, package, record=record))
     return 0
 
 

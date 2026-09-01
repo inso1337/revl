@@ -39,3 +39,15 @@ packages = ["src/revl"]
 [tool.hatch.build.targets.wheel.force-include]
 "backends" = "revl/backends"
 "stdlib" = "revl/stdlib"
+
+# Lint gate (roadmap 110d). The repo already carries a `# noqa` discipline whose
+# codes are overwhelmingly Pyflakes (F): unused imports/locals, undefined names,
+# placeholder-less f-strings. Pin ruff to that same F-level surface, not ruff's
+# broader default set (E4/E7/E9 + F), so the gate enforces the discipline that
+# exists without surfacing hundreds of pre-existing E/PL findings this sweep is
+# not meant to litigate. Widen deliberately (its own change), never by drift.
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F"]

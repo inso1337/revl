@@ -226,7 +226,6 @@ def test_a_candidate_that_does_not_compile_defers_to_the_handler():
 
 
 def test_authority_stamp_records_who_and_injects_a_trace_event():
-    alice = parse_profile(PROFILE).get("alice")
     decision = op.Decision(gated=True, allowed=True, operator="alice",
                            verb="swap", subjects=("TenantACache",))
     payload = {"ok": True, "trace": [{"channel": "lifecycle",

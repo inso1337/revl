@@ -22,14 +22,12 @@ from ..compiler import compile_source
 from ..diagnostics import classify, explain
 from ..errors import RevlError
 from ..parser import (
-    ComponentDecl,
     ExternDecl,
     FnDecl,
     LetPatternStmt,
     LetStmt,
     Parser,
     Program,
-    ServiceDecl,
     TypeDecl,
 )
 from .document import Position, find_symbol_column, word_at
@@ -43,15 +41,16 @@ _SEVERITY = {"error": 1, "warning": 2, "information": 3, "hint": 4}
 def compute_diagnostics(text: str, filename: str = "<lsp>.rvl") -> list[dict]:
     """The document's diagnostics as LSP `Diagnostic` objects.
 
-    The checker stops at its first rejection, so slice 1 publishes at most one
-    diagnostic — the same one `revl compile` would print for this source. On a
-    clean compile the list is empty, which is how the client clears stale
-    squiggles.
+    A multi-refusal compile raises a `RevlErrors` carrier (item 386) whose
+    `.errors` holds every collected refusal, so the editor shows every squiggle
+    at once; a single `RevlError` still yields a one-element list. On a clean
+    compile the list is empty, which is how the client clears stale squiggles.
     """
     try:
         compile_source(text, filename)
     except RevlError as error:
-        return [_diagnostic_from(text, error)]
+        errors = getattr(error, "errors", None) or [error]
+        return [_diagnostic_from(text, one) for one in errors]
     return []
 
 

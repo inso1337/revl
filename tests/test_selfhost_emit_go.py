@@ -41,10 +41,11 @@ Covered subset (what emits byte-identical):
     ``fmt.Sprintf``.
 
 Covered typed-core (item 209, byte-identical): user ``type`` decls
-(``_emit_v3_go_types`` — a record as a Go ``struct`` with unexported
-source-spelled fields, a variant as a sealed interface + case structs), record
-literals and field access, ADT construction (nullary + payload), and ``match``
-over user variants as a Go type-switch IIFE, plus user type names in ``go_type``.
+(``_emit_v3_go_types`` — a record as a Go ``struct`` with EXPORTED,
+``json:"<source>"``-tagged fields (item 390), a variant as a sealed interface +
+case structs), record literals and field access, ADT construction (nullary +
+payload), and ``match`` over user variants as a Go type-switch IIFE, plus user
+type names in ``go_type``.
 
 Deliberately OUT (excluded from the corpus, deferred to Go Path B slice 3+):
 the go LIVE-COMPONENT world (v1/v2 stc-go runtime — a component routes there,
@@ -74,12 +75,18 @@ from revl import compile_files  # noqa: E402
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_go_corpus"
 CORPUS = [
     "arith.rvl",     # trapping int/int32 + - *, / widening, %, comparisons, unary
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # var/let/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls + the call-return type pin on a `let`
     "strings.rvl",   # string `+` as Go `+`, `${..}` interpolation, literals
     "lists.rvl",     # list literal, index, the sync arrow, Map-typed passthru
     "records.rvl",   # user record `type`s -> structs, record literals, field access
     "variants.rvl",  # user variant `type`s -> sealed ifaces, ADT construction, match
+    # item 383 / 391 (self-host port) — the `.reduce` transform desugars to the
+    # `list_reduce` free call; the go tier lowers the `(A, T) -> A` function-value
+    # param and the two-parameter arrow argument (reduce threads an accumulator
+    # with no intermediate list, so its body needs no `.push`)
+    "transforms.rvl",
 ]
 
 

@@ -1,0 +1,12 @@
+// REJECTED — Python's `lambda x: …` is not revl syntax (item 384). An
+// anonymous function is an arrow `x => …`. `lambda` lexes as an identifier
+// juxtaposed with a param name and used to report `expected an expression,
+// found ':'`.
+//
+// expected error:
+//   revl has no `lambda`
+
+fn f() -> Int {
+  let g = lambda x: x
+  return g(1)
+}

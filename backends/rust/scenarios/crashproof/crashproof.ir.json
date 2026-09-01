@@ -1,0 +1,96 @@
+{
+ "ir_version": 3,
+ "types": {},
+ "services": {
+  "Noop": {
+   "methods": {
+    "ping": {
+     "params": [],
+     "returns": "Str",
+     "emission": false
+    }
+   }
+  }
+ },
+ "externs": [
+  {
+   "name": "beginRow",
+   "class": "witnessed",
+   "params": [],
+   "returns": "Result[Str, Str]",
+   "witness": "Str",
+   "entry_kind": "transactional",
+   "revertible": true,
+   "ok_conditional": true,
+   "bodies": {
+    "rs": "\n    Ok(\"row#1\".to_string())\n"
+   },
+   "undo": {
+    "kind": "call",
+    "callee": {
+     "kind": "var",
+     "name": "deleteRow"
+    },
+    "args": [
+     {
+      "kind": "var",
+      "name": "result"
+     }
+    ]
+   }
+  },
+  {
+   "name": "deleteRow",
+   "class": "pure",
+   "params": [
+    {
+     "name": "id",
+     "type": "Str"
+    }
+   ],
+   "returns": "Unit",
+   "bodies": {
+    "rs": "\n    let _ = id;\n"
+   }
+  }
+ ],
+ "components": [
+  {
+   "name": "Crasher",
+   "source": "crashproof.rvl",
+   "config": [],
+   "requires": {},
+   "provides": {},
+   "body": [
+    {
+     "step": "effect",
+     "acquire": {
+      "kind": "fn",
+      "name": "beginRow",
+      "args": []
+     }
+    }
+   ]
+  }
+ ],
+ "tests": [
+  {
+   "name": "crasher lifecycle boots and unloads clean",
+   "lifecycle": true,
+   "body": [
+    {
+     "step": "load",
+     "component": "Crasher",
+     "config": {}
+    },
+    {
+     "step": "unload",
+     "component": "Crasher"
+    },
+    {
+     "step": "assert_no_residue"
+    }
+   ]
+  }
+ ]
+}

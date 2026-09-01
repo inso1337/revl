@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from typing import Optional
 
 
 class EmitError(ValueError):
@@ -141,12 +142,13 @@ _V3_TYPES: dict = {}
 #     interop bridge, one module), and
 #   * emit()'s live stc-go path when the document declares types alongside a
 #     live component (a v3 provide method taking/returning a record — item 139).
-# Record struct fields are emitted EXPORTED + json-tagged (the go mirror of the
-# rust tier's serde derives) so record values also survive the bridge's
-# plain-JSON wire encoding in the placement case; the tags are inert but
-# harmless in the bridge-less live case. The pure typed tier (`_emit_v3_go`,
-# a separate _V3GoCtx renderer) keeps unexported fields byte-for-byte with the
-# frozen fixtures and does not read this flag. v1/v2 documents leave it False.
+# Record struct fields are emitted EXPORTED + json-tagged on EVERY v3 path now
+# (item 390) — see `_v3_field_ident` / `_emit_v3_go_types`. This flag no longer
+# gates the field export/tag (that was the `{}` json_stringify defect: the pure
+# typed tier left fields unexported, so `encoding/json` dropped them). It still
+# gates the component/method-body lowerings below (record literals, field
+# access, ADT construction/match resolve against `_V3_TYPES` only in placement /
+# live-typed mode). v1/v2 documents leave it False.
 _V3_TYPED_COMPONENTS = False
 
 
@@ -379,6 +381,12 @@ def _expr(node, env: _Env, expected=None) -> str:
             right = _expr(node["right"], env, _comp_infer(node.get("right"), env))
             return ("func() %s { _v, _ok := %s; if _ok { return _v }; "
                     "return %s }()" % (gt, left, right))
+        if op in ("<<", ">>"):
+            # Int32 shift: mask the count to 0..31 unsigned (Go neither masks
+            # the count nor accepts a negative signed one), matching the v3
+            # path and wasm/JS (docs/arithmetic.md, item 366).
+            return "(%s %s (uint32(%s) & 31))" % (
+                _expr(node["left"], env), op, _expr(node["right"], env))
         go_op = _V3_GO_BIN_OPS.get(op)
         if go_op is None:
             raise EmitError("unsupported binary operator: %r" % (op,))
@@ -388,6 +396,9 @@ def _expr(node, env: _Env, expected=None) -> str:
         operand = _expr(node.get("operand"), env)
         if node.get("op") == "!":
             return "(!%s)" % operand
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): Go's unary `^`.
+            return "(^%s)" % operand
         if node.get("op") == "-":
             if node.get("operands") == "Int":
                 # `-x` is `0 - x`; negating Int.MIN overflows, so it traps
@@ -489,10 +500,10 @@ def _expr(node, env: _Env, expected=None) -> str:
         # record type for its field set (the v1/v2 tier carries none).
         if not (_V3_MODE and _V3_TYPED_COMPONENTS and _V3_TYPES):
             raise EmitError(
-                f"record is not lowerable in the stc-go component world "
-                f"(ir_version 1/2 documents carry no record/ADT types, and this "
-                f"tier has no record lowering in component bodies) - "
-                f"lift it into a helper fn instead")
+                "record is not lowerable in the stc-go component world "
+                "(ir_version 1/2 documents carry no record/ADT types, and this "
+                "tier has no record lowering in component bodies) - "
+                "lift it into a helper fn instead")
         fields = node.get("fields") or []
         tname = _v3_record_type_for_fields([k for k, _ in fields])
         body = ", ".join(
@@ -512,10 +523,10 @@ def _expr(node, env: _Env, expected=None) -> str:
             # against the tuple convention and work in any v3 component.
             return _go_comp_match(node, env, expected)
         raise EmitError(
-            f"match is not lowerable in the stc-go component world yet "
-            f"(ir_version 1/2 documents carry no record/ADT types, and this "
-            f"tier has no match lowering in component bodies) - "
-            f"lift it into a helper fn instead")
+            "match is not lowerable in the stc-go component world yet "
+            "(ir_version 1/2 documents carry no record/ADT types, and this "
+            "tier has no match lowering in component bodies) - "
+            "lift it into a helper fn instead")
     if kind in ("arrow", "optfield", "optcall"):
         raise EmitError(
             f"{kind} is not lowerable in the stc-go component world yet "
@@ -531,14 +542,17 @@ def _expr(node, env: _Env, expected=None) -> str:
 
 
 def _v3_field_ident(field: str) -> str:
-    """Record struct field name in the current mode. Placement mode exports
-    the field (with a json tag) so the bridge's plain-JSON wire encoding
-    round-trips record values — the go mirror of the rust tier's serde
-    derives; the pure tier keeps the source spelling byte-for-byte with the
-    frozen fixtures."""
-    if _V3_TYPED_COMPONENTS:
-        return _camel(field)
-    return _v3_ident(field, "record field")
+    """Record struct field name in Go: EXPORTED (UpperCamel) on every path
+    (item 390). `encoding/json` only marshals exported fields, so an unexported
+    field made `json_stringify(record)` return `{}` on the go tier while py/ts
+    emitted the real object; exporting the field (paired with a `json:"<revl>"`
+    tag in `_emit_v3_go_types` that preserves the source field name in the wire
+    bytes) makes records byte-identical across tiers. The exported spelling is
+    used at EVERY site — struct declaration, literal construction, and field
+    read/write — so record round-trips stay consistent. Capitalizing also
+    sidesteps the `_v3_ident` reserved-word mangling: no Go keyword is
+    UpperCamel, so `_camel` never collides with one."""
+    return _camel(field)
 
 
 def _v3_record_type_for_fields(fields) -> str:
@@ -948,6 +962,10 @@ _COMP_NEEDS_TEARDOWN = False
 _COMP_NEEDS_METHOD_WITNESSED = False
 # Per-emit counter for unique witnessed-step local names (`_revlWit1`, …).
 _WITNESSED_COUNTER = 0
+# item 322 Slice 1: record mode. When True, a witnessed transactional step also
+# writes a durable discharge-descriptor to the go WAL sink (revlRecordTransactional)
+# and the recording preamble is emitted. Default False -> byte-identical output.
+_RECORD_MODE = False
 
 
 def _comp_builtin(method, recv_surface, target, args):
@@ -977,6 +995,11 @@ def _comp_builtin(method, recv_surface, target, args):
     if method == "charAt":
         return "revlStrCharAt(%s, %s)" % (target, args[0])
     if method == "charCodeAt":
+        return "revlStrCharCodeAt(%s, %s)" % (target, args[0])
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at code-point index i, via the same rune-indexed
+    # helper as charCodeAt.
+    if method == "codepoint_at":
         return "revlStrCharCodeAt(%s, %s)" % (target, args[0])
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
     if method == "startsWith":
@@ -1191,16 +1214,21 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
     svc = services.get(service_name, {})
     svc_methods = svc.get("methods", {})
 
-    # item 318: a provide block whose method registers a witnessed effect holds
-    # the enclosing component's activation frame, so the per-tool-call inverse
-    # can be parked on it (`registerMethodWitnessed`). Only such a block gains
-    # the field, so every other provide impl stays byte-identical.
-    has_method_witnessed = any(_method_body_has_witnessed(m.get("body")) for m in methods)
+    # item 318 / item-247 method-body remainder: a provide block whose method
+    # registers a per-tool-call frame entry — a witnessed effect
+    # (`registerMethodWitnessed`) or an `emit ... compensate ...`
+    # (`registerMethodCompensation`) — holds the enclosing component's activation
+    # frame so that entry can be parked on it. Only such a block gains the field,
+    # so every other provide impl stays byte-identical.
+    has_method_frame = any(
+        _method_body_has_witnessed(m.get("body"))
+        or _method_body_has_compensate(m.get("body"))
+        for m in methods)
 
     # struct fields: ctx + config + every bind + every req (over-capture ok).
     out.append("type %s struct {" % struct)
     out.append("\tctx *stc.Context")
-    if has_method_witnessed:
+    if has_method_frame:
         out.append("\trevlFrame *RevlFrame")
     if has_config:
         out.append("\tcfg %sConfig" % _camel(comp_name))
@@ -1238,6 +1266,111 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
         out.append("")
 
 
+def _emit_go_router_struct(cname, key, service_name, route, services, out):
+    """item 173: the emitted realization of a routed require on cordis-go,
+    mirroring src/revl/run.py::_Router and the rust `_emit_router_struct`.
+
+    A per-(component, key) struct implementing the required service interface.
+    It holds no worker handle — every method re-resolves the live per-realm
+    handle off the strict, single-realm liveness-checked read the stc-go fork
+    adds (`stc.ServiceInRealm[Svc](ctx, key, _revlRealm(realm))`, which returns
+    ok=false for a realm with no ACTIVE provider and — unlike plain resolve —
+    never falls back up the realm chain to the router's own root provision). So
+    a withdrawn worker realm drops out of the live set and its calls go to the
+    survivors — reactive failover from the emitted body. The struct is wired as
+    the component's handle for the routed key, so a provide-method's
+    `<key>.<op>(..)` forwards straight through it (G2: one provider downstream).
+    """
+    struct = "revlRouter%s%s" % (cname, _camel(key))
+    ctor = "newRevlRouter%s%s" % (cname, _camel(key))
+    svc = _camel(service_name)
+    realms = list(route.get("realms") or [])
+    strategy = route.get("strategy") or "round_robin"
+    realm_lits = ", ".join(_go_string(r) for r in realms)
+    realm_fn = _realm_helper_name()
+    methods = (services.get(service_name, {}) or {}).get("methods", {}) or {}
+
+    out.append("type %s struct {" % struct)
+    out.append("\tctx      *stc.Context")
+    out.append("\tkey      stc.Key")
+    out.append("\trealms   []string")
+    out.append("\tstrategy string")
+    out.append("\tmu       sync.Mutex")
+    out.append("\tcursor   int")
+    out.append("\tserved   map[string]uint64")
+    out.append("}")
+    out.append("")
+    out.append("func %s(ctx *stc.Context) *%s {" % (ctor, struct))
+    out.append("\treturn &%s{" % struct)
+    out.append("\t\tctx:      ctx,")
+    out.append("\t\tkey:      %s," % _key_var(key))
+    out.append("\t\trealms:   []string{%s}," % realm_lits)
+    out.append("\t\tstrategy: %s," % _go_string(strategy))
+    out.append("\t\tserved:   map[string]uint64{},")
+    out.append("\t}")
+    out.append("}")
+    out.append("")
+    # live: strict per-realm resolution; a withdrawn realm is simply absent.
+    out.append(f"func (r *{struct}) _revlLive() ([]string, map[string]{svc}) {{")
+    out.append("\tlabels := []string{}")
+    out.append(f"\thandles := map[string]{svc}{{}}")
+    out.append("\tfor _, realm := range r.realms {")
+    out.append(f"\t\tif h, ok := stc.ServiceInRealm[{svc}](r.ctx, r.key, {realm_fn}(realm)); ok {{")
+    out.append("\t\t\tlabels = append(labels, realm)")
+    out.append("\t\t\thandles[realm] = h")
+    out.append("\t\t}")
+    out.append("\t}")
+    out.append("\treturn labels, handles")
+    out.append("}")
+    out.append("")
+    # select: strategy over the live set, re-checked every call (failover).
+    out.append(f"func (r *{struct}) _revlSelect() {svc} {{")
+    out.append("\tlabels, handles := r._revlLive()")
+    out.append("\tif len(labels) == 0 {")
+    out.append("\t\tpanic(fmt.Sprintf(\"revl: router for %s has no live worker "
+               "(realms %v all withdrawn)\", r.key, r.realms))")
+    out.append("\t}")
+    out.append("\tr.mu.Lock()")
+    out.append("\tdefer r.mu.Unlock()")
+    out.append("\tif r.strategy == \"least_loaded\" {")
+    out.append("\t\tbest := labels[0]")
+    out.append("\t\tfor _, l := range labels[1:] {")
+    out.append("\t\t\tif r.served[l] < r.served[best] {")
+    out.append("\t\t\t\tbest = l")
+    out.append("\t\t\t}")
+    out.append("\t\t}")
+    out.append("\t\tr.served[best]++")
+    out.append("\t\treturn handles[best]")
+    out.append("\t}")
+    out.append("\tn := len(r.realms)")
+    out.append("\tfor off := 0; off < n; off++ {")
+    out.append("\t\tcand := r.realms[(r.cursor+off)%n]")
+    out.append("\t\tif h, ok := handles[cand]; ok {")
+    out.append("\t\t\tr.cursor = (r.cursor + off + 1) % n")
+    out.append("\t\t\tr.served[cand]++")
+    out.append("\t\t\treturn h")
+    out.append("\t\t}")
+    out.append("\t}")
+    out.append("\tpanic(\"revl: router selection unreachable\")")
+    out.append("}")
+    out.append("")
+    # the service interface, forwarding each op through a fresh selection.
+    for mname, decl in methods.items():
+        params_decl = decl.get("params", []) or []
+        ret = _go_return(decl.get("returns"))
+        go_params = ", ".join("%s %s" % (_safe_local(p["name"]), _go_type(p["type"]))
+                              for p in params_decl)
+        sig = "func (r *%s) %s(%s)" % (struct, _camel(mname), go_params)
+        if ret:
+            sig += " " + ret
+        out.append(sig + " {")
+        args = ", ".join(_safe_local(p["name"]) for p in params_decl)
+        call = "r._revlSelect().%s(%s)" % (_camel(mname), args)
+        out.append(("\treturn %s" if ret else "\t%s") % call)
+        out.append("}")
+        out.append("")
+
+
 def _config_fields_flag(has_config):
     # placeholder: config field membership isn't needed for ref detection,
     # config refs are explicit ('config' kind). Return empty set.
@@ -1271,9 +1404,54 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             else:
                 _emit_effect_step(step, env, out, indent)
         elif s == "emit":
+            # item-247 method-body remainder: a method-body `emit ... compensate
+            # ...` is a first-class COMPENSATION on the component's activation
+            # frame, NOT a plain call that drops the offset (the silent-wrong
+            # placeholder this fixes) and NOT a `ctx.Effect` bracket (which stc-go
+            # disposes at the wrong time — the disposal-ordering hazard the
+            # method-witnessed seam avoids). Fire the emission inline, then park
+            # the offset via `registerMethodCompensation`: discharged on a clean
+            # commit (the emission was the deliverable), enqueued for Phase 2 on
+            # abort (fired after every proof inverse, guarded, residue-collected).
+            # The frame is reached the same way as the witnessed seam
+            # (`receiver.revlFrame`, wired at provide construction).
+            comp_node = step.get("compensate")
             out.append("%s%s" % (pad, _expr(step["expr"], env)))
+            if comp_node is not None:
+                compensate_call = _expr(comp_node, env)
+                key, method = _call_descriptor(comp_node)
+                frame = "%s.revlFrame" % env.receiver
+                out.append("%s%s.registerMethodCompensation(%s, %s, func() error { %s; return nil })" %
+                           (pad, frame, _go_string(key), _go_string(method), compensate_call))
+                global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
+                _COMP_NEEDS_TEARDOWN = True
+                # the EXT frame (deferred slice, Abort, the registerMethod* seam)
+                # is what a method-registered entry parks onto — the same
+                # apparatus the method-witnessed path needs.
+                _COMP_NEEDS_METHOD_WITNESSED = True
         elif s == "let-effect":
-            raise EmitError("let-effect not allowed inside a provide method")
+            # item 397: the ONLY let-effect admitted in a provide-method body is
+            # a result-declared host CAS (`insert_if_absent`). The bind is a
+            # local `bool`; the site-spelled undo is registered on the same
+            # per-activation accumulator as the bare method-body effect
+            # (`r.ctx.Effect`), guarded on the result so a `false` CAS's inverse
+            # is the identity.
+            if not _is_map_cas(step.get("acquire")):
+                raise EmitError("let-effect not allowed inside a provide method")
+            bind = _safe_local(step["bind"])
+            acquire = _expr(step["acquire"], env)
+            undo = step.get("undo")
+            ctx = env.ctx_ref()
+            out.append("%svar %s bool" % (pad, bind))
+            out.append("%s%s.Effect(func() stc.Inverse {" % (pad, ctx))
+            out.append("%s\t%s = %s" % (pad, bind, acquire))
+            if undo is not None:
+                out.append("%s\treturn func() error { if %s { %s }; return nil }"
+                           % (pad, bind, _expr(undo, env)))
+            else:
+                out.append("%s\treturn nil" % pad)
+            out.append("%s})" % pad)
+            out.append("%s_ = %s" % (pad, bind))
         else:
             raise EmitError("unsupported method step: %r" % (s,))
 
@@ -1422,13 +1600,37 @@ def _acquire_value_go_type(acquire, services, requires) -> str:
 # — the surface type of the value argument, then mapped to a Go type. No site
 # pinning a concrete type falls back to `string` (the historical surface, and
 # what a write-free / read-only Map keeps).
+#
+# The value type is learned from ANY map value-writing verb, not the literal
+# name "insert": a CAS-only writer (`insert_if_absent`, item 397) must pin `V`
+# just as `insert` does, or the Map would emit with the string default and
+# mistype (item 402). Every value-writer takes the value as arg[1].
 # --------------------------------------------------------------------------
 
+# Map verbs that write a value at arg[1]; each pins the host Map's value type V.
+_MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+# item 397: the compare-and-set host verb whose bound result is a `bool` and
+# whose site-spelled `undo` must be RESULT-GUARDED (registered only when the CAS
+# actually inserted — a `false` CAS's inverse is the identity, so teardown never
+# removes the winning claimant's entry).
+_MAP_CAS_VERBS = ("insert_if_absent",)
+
+
+def _is_map_cas(acquire) -> bool:
+    """Whether a lowered acquisition node is a result-guarded map CAS."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
+
+
 def _map_insert_value_types(node, bind, env, out):
-    """Collect the surface types of the value argument at every
-    `bind.insert(k, v)` call inside an expression node (recurses)."""
+    """Collect the surface types of the value argument at every map
+    value-writing call (`insert`, `insert_if_absent`, ...) on `bind` inside an
+    expression node (recurses). The value type `V` is inferred structurally
+    from the value argument of ANY writer, never by matching a single verb
+    name, so a CAS-only writer still pins a concrete `V` (item 402)."""
     if isinstance(node, dict):
-        if node.get("kind") == "call" and node.get("method") == "insert":
+        if node.get("kind") == "call" and node.get("method") in _MAP_VALUE_WRITERS:
             target = node.get("target")
             if (isinstance(target, dict)
                     and (target.get("id") or target.get("name")) == bind):
@@ -1568,7 +1770,11 @@ def _emit_component(comp, services, out):
             # not compile when the acquisition returns a value type (e.g.
             # `let lock = effect db.query(..)` where `query` returns
             # `List[Row]`: `var lock *any` cannot hold `[]Row`).
-            if akind in ("host", "spawn"):
+            if _is_map_cas(acquire):
+                # item 397: a CAS binds a checked `bool`, not a host pointer.
+                host = "bool"
+                _BIND_IS_PTR[bind] = False
+            elif akind in ("host", "spawn"):
                 host = _host_type_of_acquire(acquire)
                 # item 113 (FR-4): the host Map is generic over its value type.
                 # Pin `V` from the component's `insert` sites so every reference
@@ -1585,6 +1791,12 @@ def _emit_component(comp, services, out):
 
     binds = [s["bind"] for s in body if s.get("step") == "let-effect"]
     reqs = list(requires.keys())
+    # item 173: a routed require (item 162 `routes` IR) has no single-realm
+    # provider — it resolves per named realm through the emitted router struct,
+    # never a `stc.Service`/`Inject` single handle. Empty for every routes-less
+    # component, so such a component emits byte-identically to before.
+    routes = comp.get("routes") or {}
+    reqs_gated = [r for r in reqs if r not in routes]
     has_config = bool(comp.get("config"))
 
     # config struct
@@ -1597,8 +1809,8 @@ def _emit_component(comp, services, out):
         out.append("func %s() stc.Component {" % cname)
     out.append("\treturn stc.Component{")
     out.append("\t\tName: %s," % _go_string(name))
-    if reqs:
-        out.append("\t\tInject: []stc.Key{%s}," % ", ".join(_key_var(r) for r in reqs))
+    if reqs_gated:
+        out.append("\t\tInject: []stc.Key{%s}," % ", ".join(_key_var(r) for r in reqs_gated))
     if provides:
         out.append("\t\tProvide: []stc.Key{%s}," % ", ".join(_key_var(p) for p in provides))
     out.append("\t\tApply: func(ctx *stc.Context) (stc.Inverse, error) {")
@@ -1626,8 +1838,14 @@ def _emit_component(comp, services, out):
 
     env = _Env(binds, reqs, set(), receiver="")
 
-    # requires -> Service resolution
+    # requires -> Service resolution. A routed key gets a router value (its
+    # emitted body re-resolves live per-realm handles per call) instead of a
+    # single `stc.Service` handle.
     for rname, svc in requires.items():
+        if rname in routes:
+            out.append("\t\t\t%s := newRevlRouter%s%s(ctx)" %
+                        (_req_field(rname), cname, _camel(rname)))
+            continue
         out.append("\t\t\t%s, err := stc.Service[%s](ctx, %s)" %
                     (_req_field(rname), _camel(svc), _key_var(rname)))
         out.append("\t\t\tif err != nil {")
@@ -1672,6 +1890,11 @@ def _emit_component(comp, services, out):
             svc = step["service"]
             _emit_provide_impl(cname, step["name"], svc, step.get("methods", []),
                                services, binds, reqs, has_config, out)
+
+    # item 173: one router struct per routed require, implementing the required
+    # service interface by strict per-realm resolution + strategy + failover.
+    for rkey, route in routes.items():
+        _emit_go_router_struct(cname, rkey, requires[rkey], route, services, out)
 
 
 def _collect_host_calls(node, acc):
@@ -1741,11 +1964,28 @@ def _method_body_has_witnessed(body) -> bool:
     return False
 
 
-def _provide_has_method_witnessed(provide_step) -> bool:
-    """True iff any method of a `provide` step registers a witnessed effect
-    (item 318): the provide block whose impl struct needs a `revlFrame` field
-    and whose method bodies register into the component's activation frame."""
+def _method_body_has_compensate(body) -> bool:
+    """True iff a provide-METHOD body carries an `emit ... compensate ...` step
+    (the item-247 method-body compensate remainder). Its compensation is parked
+    on the component's activation frame (`registerMethodCompensation`), so the
+    provide impl needs the `revlFrame` field exactly like a method-witnessed one.
+    Unlike the activation-body site, a method-body compensation must NOT be a
+    plain `ctx.Effect` disposer (it would fire on a clean unload — the item-247
+    soundness bug this closes on go); the frame seam is what makes it abort-only,
+    Phase-2, and discharged on commit."""
+    for step in body or []:
+        if step.get("step") == "emit" and step.get("compensate") is not None:
+            return True
+    return False
+
+
+def _provide_has_method_frame(provide_step) -> bool:
+    """True iff any method of a `provide` step registers a per-tool-call entry
+    onto the component activation frame — a witnessed effect (item 318) or an
+    `emit ... compensate ...` (item-247 method-body remainder). Either makes the
+    provide impl struct need a `revlFrame` field and the frame be handed to it."""
     return any(_method_body_has_witnessed(m.get("body"))
+               or _method_body_has_compensate(m.get("body"))
                for m in provide_step.get("methods", []) or [])
 
 
@@ -1761,7 +2001,7 @@ def _body_needs_frame(steps) -> bool:
             return True
         if kind == "emit" and step.get("compensate") is not None:
             return True
-        if kind == "provide" and _provide_has_method_witnessed(step):
+        if kind == "provide" and _provide_has_method_frame(step):
             return True
         if kind == "if":
             if _body_needs_frame(step.get("then")) or _body_needs_frame(step.get("else")):
@@ -1855,6 +2095,14 @@ def _emit_witnessed_step(out, pad, step, ext, env, bind: Optional[str]) -> None:
                (inner, ok_var, isok_var, result_var, ok_t_full, isok_var))
     out.append("%sresult := %s.Value" % (inner2, ok_var))
     out.append("%s_ = result" % inner2)
+    if _RECORD_MODE:
+        # item 322 Slice 1: the durable exit. At REGISTRATION (this closure runs
+        # during Apply, when the mutation happens) write the discharge-descriptor
+        # — the re-issuable named call recover replays LIFO to undo the mutation
+        # — and fsync it, so a crash BEFORE commit is still recoverable from the
+        # log alone. The witness is stringified as the referent argument.
+        out.append('%srevlRecordTransactional(%s, %s, []string{fmt.Sprintf("%%v", result)})'
+                   % (inner2, _go_string(ext_name), _go_string(undo_name)))
     out.append("%sreturn func() (_revlErr error) {" % inner2)
     out.append("%sif _revlFrame.committed {" % inner3)
     out.append("%s\t// item 243 a5a: discharge — the mutation is the" % inner3)
@@ -2012,7 +2260,12 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             for setup_step in step.get("setup") or []:
                 _emit_method_body([setup_step], env, out, indent + 1)
             out.append("%s%s = %s" % (inner, _bind_field(bind), acquire))
-            if undo is not None:
+            if undo is not None and _is_map_cas(step["acquire"]):
+                # item 397: result-guarded undo — identity inverse on a `false`
+                # CAS, so teardown never removes the winner's entry.
+                out.append("%sreturn func() error { if %s { %s }; return nil }"
+                           % (inner, _bind_field(bind), _expr(undo, env)))
+            elif undo is not None:
                 out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
             else:
                 out.append("%sreturn nil" % inner)
@@ -2131,7 +2384,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # item 318: hand the frame to a provide block whose method registers a
         # witnessed effect (the `_revlFrame` local exists — a method-witnessed
         # component always needs the frame, see `_body_needs_frame`).
-        if _provide_has_method_witnessed(step):
+        if _provide_has_method_frame(step):
             fields.append("revlFrame: _revlFrame")
         if comp.get("config"):
             fields.append("cfg: cfg")
@@ -2169,8 +2422,9 @@ def _emit_keys(ir, out):
 
 
 def _emit_realm_helper(ir, out):
-    # emit only if any component isolates a key
-    if not any(c.get("isolate") for c in ir.get("components", [])):
+    # emit only if any component isolates a key or routes one (item 173: a
+    # router resolves its worker realms by label through this same interner).
+    if not any(c.get("isolate") or c.get("routes") for c in ir.get("components", [])):
         return
     out.append("var (")
     out.append("\t_revlRealmMu sync.Mutex")
@@ -2200,8 +2454,6 @@ def _emit_load_helpers(ir, out):
         isolate = comp.get("isolate") or {}
         intercept = comp.get("intercept") or {}
         has_config = bool(comp.get("config"))
-        sig_arg = "target *stc.Context"
-        call_arg = "cfg"
         if has_config:
             out.append("// Load%s isolates the load-target per the component's realm"
                        " placement, then loads it." % cname)
@@ -2771,6 +3023,22 @@ func (m *Map[V]) Insert(k string, v V) {
 	m.m[k] = v
 	m.mu.Unlock()
 }
+
+// InsertIfAbsent is the atomic compare-and-set (item 397). The per-op mutex is
+// held across BOTH the membership test AND the insert, so the whole CAS is one
+// critical section: no concurrent caller can witness the probe and the write as
+// separable steps. Returns whether it inserted; a false (key already present)
+// leaves the existing value untouched. Under N concurrent callers on one map,
+// exactly one receives true.
+func (m *Map[V]) InsertIfAbsent(k string, v V) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.m[k]; ok {
+		return false
+	}
+	m.m[k] = v
+	return true
+}
 func (m *Map[V]) Remove(k string) {
 	m.mu.Lock()
 	delete(m.m, k)
@@ -3025,7 +3293,7 @@ _GO_DIV_ZERO_MSG = "revl: division by zero"
 
 
 def _v3_builtin_ret_type(method, recv_type):
-    if method in ("length", "indexOf", "charCodeAt",
+    if method in ("length", "indexOf", "charCodeAt", "codepoint_at",
                   "div_trunc", "div_floor", "div_euclid", "mod"):
         return "Int"
     # `to_int` is BOTH the Int32 widen and the Str parse (FR-9): the result
@@ -3140,6 +3408,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
             return "Bool"
         if node.get("operands") == "Int32" and op in ("+", "-", "*"):
             return "Int32"  # Int32 arithmetic stays Int32 (docs/arithmetic.md)
+        if op in ("&", "|", "^", "<<", ">>"):
+            return "Int32"  # bitwise ops are Int32-only (docs/arithmetic.md)
         if op == "+":
             lt = _go_v3_infer_type(node.get("left"), ctx)
             rt = _go_v3_infer_type(node.get("right"), ctx)
@@ -3154,6 +3424,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
     if kind == "un":
         if node.get("op") == "!":
             return "Bool"
+        if node.get("op") == "~":
+            return "Int32"  # bitwise complement is Int32-only (docs/arithmetic.md)
         return _go_v3_infer_type(node.get("operand"), ctx)
     if kind == "if":
         return (_go_v3_infer_type(node.get("then"), ctx)
@@ -3188,6 +3460,12 @@ _V3_GO_BIN_OPS = {
     "==": "==", "===": "==", "!=": "!=", "!==": "!=",
     "<": "<", ">": ">", "<=": "<=", ">=": ">=",
     "+": "+", "-": "-", "*": "*", "/": "/", "%": "%", "&&": "&&", "||": "||",
+    # Int32 bitwise operators (item 366, docs/arithmetic.md). `& | ^` are native
+    # on int32. The shifts are rendered specially (`_go_v3_expr`): Go does NOT
+    # mask the shift count (`1 << 32` is 0, not 1) and panics on a negative
+    # signed count, so the count is taken as `uint32(n) & 31` to match the
+    # spec's mod-32 rule and wasm/JS.
+    "&": "&", "|": "|", "^": "^", "<<": "<<", ">>": ">>",
 }
 
 _V3_GO_ATOMIC = {"var", "name", "lit", "call", "field", "index", "builtin"}
@@ -3417,12 +3695,22 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             if node.get("operands") in ("Int", "Int32"):
                 return f"revlDiv(float64({left}), float64({right}))"
             return f"revlDiv({left}, {right})"
+        if op in ("<<", ">>"):
+            # Int32 shift: mask the count to 0..31 as an unsigned value, because
+            # Go neither masks the count nor accepts a negative signed one. `<<`
+            # drops the high bits (int32 two's complement); `>>` on the signed
+            # int32 is arithmetic (docs/arithmetic.md, item 366).
+            return f"({left} {op} (uint32({right}) & 31))"
         return f"({left} {go_op} {right})"
 
     if kind == "un":
         operand = _go_v3_expr(node.get("operand"), ctx)
         if node.get("op") == "!":
             return f"(!{operand})"
+        if node.get("op") == "~":
+            # Int32 bitwise complement (item 366): Go spells bitwise NOT as the
+            # unary `^`. A bit op, so it never traps.
+            return f"(^{operand})"
         if node.get("op") == "-":
             if node.get("operands") == "Int":
                 ctx.needs_overflow = True
@@ -3651,6 +3939,11 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"revlStrCharAt({target}, {args[0]})"
     if method == "charCodeAt":
         return f"revlStrCharCodeAt({target}, {args[0]})"
+    # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+    # the Unicode scalar at code-point index i, via the same rune-indexed
+    # helper as charCodeAt.
+    if method == "codepoint_at":
+        return f"revlStrCharCodeAt({target}, {args[0]})"
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
     # HasPrefix/HasSuffix compare bytes, and a code-point prefix of a UTF-8
     # string is exactly a byte prefix.
@@ -3721,8 +4014,8 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
                     "checked_div_euclid": "revlDivEuclid(_a, _b)",
                     "checked_mod": "revlMod(_a, _b)"}[method]
         overflow_err = "" if method == "checked_mod" else (
-            f'if _a == (-9223372036854775807 - 1) && _b == -1 {{ '
-            f'return RevlErr[int64, string]{{Value: "revl: Int overflow"}} }}; ')
+            'if _a == (-9223372036854775807 - 1) && _b == -1 { '
+            'return RevlErr[int64, string]{Value: "revl: Int overflow"} }; ')
         return (f'func(_a, _b int64) RevlResult[int64, string] {{ '
                 f'if _b == 0 {{ return RevlErr[int64, string]'
                 f'{{Value: "{_GO_DIV_ZERO_MSG}"}} }}; '
@@ -3896,6 +4189,21 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     return "\n".join(lines)
 
 
+# item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is
+# enforced whole-IR in the frontend; this is the cheap per-emitter guard.
+_LOOP_REGISTERING_STEPS = frozenset({
+    "effect", "let-effect", "emit", "timer", "approval", "spawn",
+})
+
+
+def _guard_frame_neutral_loop(body) -> None:
+    for child in body or []:
+        if isinstance(child, dict) and child.get("step") in _LOOP_REGISTERING_STEPS:
+            raise EmitError(
+                f"frame-neutral loop invariant: a `{child['step']}` step inside a "
+                "while/for body (docs/design/379-break-continue.md)")
+
+
 def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=None) -> None:
     pad = "\t" * indent
     step = node.get("step")
@@ -3940,11 +4248,13 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
                 _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
         out.append(f"{pad}}}")
     elif step == "while":
+        _guard_frame_neutral_loop(node.get("body"))
         out.append(f"{pad}for {_go_v3_expr(node['cond'], ctx)} {{")
         for child in node.get("body") or []:
             _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
         out.append(f"{pad}}}")
     elif step == "for":
+        _guard_frame_neutral_loop(node.get("body"))
         bind = _v3_ident(node.get("bind"), "loop binding")
         it_node = node.get("iterable")
         it_t = _go_v3_infer_type(it_node, ctx)
@@ -3955,6 +4265,10 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         for child in node.get("body") or []:
             _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
         out.append(f"{pad}}}")
+    elif step == "break":
+        out.append(f"{pad}break")
+    elif step == "continue":
+        out.append(f"{pad}continue")
     elif step == "expr":
         out.append(f"{pad}_ = {_go_v3_expr(node['expr'], ctx)}")
     elif step == "assert":
@@ -3990,15 +4304,25 @@ def _emit_v3_go_types(types: dict) -> list[str]:
         gname = _v3_ident(name, "type name")
         if spec.get("kind") == "record":
             out.append(f"type {gname} struct {{")
+            # Exported + json-tagged on EVERY path (item 390): `encoding/json`
+            # ignores unexported fields, so a record must expose exported Go
+            # fields to marshal at all, and the `json:"<revl-name>"` tag pins the
+            # wire key to the source field name so json_stringify(record) is
+            # byte-identical to py/ts. (Formerly only the placement/bridge path
+            # tagged these; the pure tier left them unexported, which is the `{}`
+            # defect this fixes.) Guard against two source fields colliding onto
+            # one exported Go identifier — that would silently drop a field.
+            seen: dict[str, str] = {}
             for field, ftype in (spec.get("fields") or {}).items():
-                if _V3_TYPED_COMPONENTS:
-                    # Exported + json-tagged: the go mirror of the rust tier's
-                    # serde derives — the bridge's plain-JSON wire encoding
-                    # round-trips record values (proxy/stub args and replies).
-                    out.append(f"\t{_v3_field_ident(field)} {_go_v3_type(ftype, types)}"
-                               f" `json:\"{field}\"`")
-                else:
-                    out.append(f"\t{_v3_field_ident(field)} {_go_v3_type(ftype, types)}")
+                gfield = _v3_field_ident(field)
+                if gfield in seen:
+                    raise EmitError(
+                        f"record {name!r}: fields {seen[gfield]!r} and {field!r} "
+                        f"both lower to the exported Go field {gfield!r}; rename "
+                        "one so record fields stay distinct on the go tier")
+                seen[gfield] = field
+                out.append(f"\t{gfield} {_go_v3_type(ftype, types)}"
+                           f" `json:\"{field}\"`")
             out.append("}")
             out.append("")
         elif spec.get("kind") == "variant":
@@ -4020,8 +4344,89 @@ def _emit_v3_go_types(types: dict) -> list[str]:
     return out
 
 
+# item 378 Stage 5: package-level config seam for document-global config
+# externs. Mirrors the py tier's `_REVL_EXTERN_CONFIG` map + fail-loud
+# `_revl_extern_config` helper: a mutable package-global config map, keyed by
+# extern name, that a composition driver fills at plug time, and a lookup that
+# PANICS, naming the extern, when a required (non-defaulted) field is absent,
+# instead of handing the body a zero value that fails opaquely later. A
+# defaults-only extern still resolves to its defaults driver-free. The string
+# joins are open-coded so the seam needs no `strings` import (the extern body's
+# own imports are hoisted separately). Emitted only when a config extern is
+# present, so a no-config program is byte-identical.
+_GO_EXTERN_CONFIG_SCAFFOLD = [
+    "var _REVL_EXTERN_CONFIG = map[string]map[string]any{}",
+    "",
+    "func _revlExternConfig(name string, required []string, "
+    "defaults map[string]any) map[string]any {",
+    "\tout := map[string]any{}",
+    "\tfor k, v := range defaults {",
+    "\t\tout[k] = v",
+    "\t}",
+    "\tcfg, ok := _REVL_EXTERN_CONFIG[name]",
+    "\tif !ok {",
+    "\t\tif len(required) > 0 {",
+    "\t\t\tmsg := \"\"",
+    "\t\t\tfor i, f := range required {",
+    "\t\t\t\tif i > 0 {",
+    "\t\t\t\t\tmsg += \", \"",
+    "\t\t\t\t}",
+    "\t\t\t\tmsg += f",
+    "\t\t\t}",
+    "\t\t\tpanic(\"config extern `\" + name + \"` called before plug-time \" +",
+    "\t\t\t\t\"configuration was installed (required config: \" + msg + \"); \" +",
+    "\t\t\t\t\"configure it through the run driver's config seam\")",
+    "\t\t}",
+    "\t\treturn out",
+    "\t}",
+    "\tmissing := \"\"",
+    "\tn := 0",
+    "\tfor _, f := range required {",
+    "\t\tif _, present := cfg[f]; !present {",
+    "\t\t\tif n > 0 {",
+    "\t\t\t\tmissing += \", \"",
+    "\t\t\t}",
+    "\t\t\tmissing += f",
+    "\t\t\tn++",
+    "\t\t}",
+    "\t}",
+    "\tif n > 0 {",
+    "\t\tpanic(\"config extern `\" + name + \"` called before plug-time \" +",
+    "\t\t\t\"configuration was installed (missing required config: \" + "
+    "missing + \")\")",
+    "\t}",
+    "\tfor k, v := range cfg {",
+    "\t\tout[k] = v",
+    "\t}",
+    "\treturn out",
+    "}",
+    "",
+]
+
+
+def _go_extern_config_bind(ext: dict) -> str:
+    """The `_revl_config := ...` first-body line for a config extern, or None.
+    `_revl_config` is a `map[string]any`; the verbatim @go body reads a field as
+    `_revl_config["field"]` and asserts its type, exactly as the py body reads
+    the resolved dict."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    name = ext.get("name")
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = {f["name"]: f["default"] for f in schema
+                if f.get("default") is not None}
+    req_lit = "[]string{%s}" % ", ".join(_go_string(f) for f in required)
+    return (f"_revl_config := _revlExternConfig("
+            f"{_go_string(name)}, {req_lit}, {_go_literal(defaults)})")
+
+
 def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx) -> list[str]:
     out: list[str] = []
+    # item 378 Stage 5: emit the config seam once, before the externs, when any
+    # extern carries a config schema (byte-identical when none do).
+    if any(ext.get("config") for ext in externs):
+        out.extend(_GO_EXTERN_CONFIG_SCAFFOLD)
     for ext in externs:
         name = _v3_ident(ext.get("name"), "extern name")
         params = ", ".join(
@@ -4042,6 +4447,11 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx) -> list[str]:
             )
         body = bodies["go"].strip()
         out.append(f"func {name}({params}){sig_ret} {{")
+        # item 378 Stage 5: a config extern binds `_revl_config` as the first
+        # body line; None for a no-config extern (byte-identical body splice).
+        config_bind = _go_extern_config_bind(ext)
+        if config_bind:
+            out.append("\t" + config_bind)
         body_lines = _hoist_go_imports(body, ctx) if body else []
         if body_lines:
             for line in body_lines:
@@ -4405,12 +4815,23 @@ _METHOD_WITNESSED_COMMIT_EXT = '''func (f *RevlFrame) commit() {
 	// stc-go disposers, so this is their sole disposal — no double-free with the
 	// fiber's own unwind. commit() is the LAST-registered inverse, hence stc-go
 	// runs it FIRST on unwind, so this is ordered before any body inverse runs.
+	//
+	// item 369: replay in reverse INVOCATION order (LIFO), NOT registration
+	// order. `deferred` is appended newest-last as each provide-method fires
+	// (registerMethodWitnessed), so it must be drained newest-FIRST — exactly
+	// like the activation-body path, where stc-go unwinds its disposer stack
+	// LIFO. On a COMMIT order is immaterial (every entry no-op discharges); on
+	// an ABORT two inverses whose paths OVERLAP must undo newest-first or a FIFO
+	// replay leaves residue or DESTROYS pre-session data (every stdlib/fs.rvl
+	// inverse is idempotent-and-total, so the oldest inverse runs first, no-ops,
+	// and the newer one undoes into the hole — G7, 243 §2). Mirrors the py/ts
+	// runtimes.
 	f.mu.Lock()
 	deferred := f.deferred
 	f.deferred = nil
 	f.mu.Unlock()
-	for _, d := range deferred {
-		_ = d()
+	for i := len(deferred) - 1; i >= 0; i-- {
+		_ = deferred[i]()
 	}
 }'''
 
@@ -4470,7 +4891,154 @@ func (f *RevlFrame) registerMethodWitnessed(run func() error) {
 	f.mu.Lock()
 	f.deferred = append(f.deferred, run)
 	f.mu.Unlock()
+}
+
+// registerMethodCompensation parks one provide-method `emit ... compensate ...`
+// offset (the item-247 method-body remainder): the compensation analog of
+// registerMethodWitnessed, and the method-body analog of the activation-body
+// `emit ... compensate ...` (item 247). A method body runs AFTER activation, so
+// the offset must outlive the method call and is owed ONLY on an abort, never on
+// a clean commit (the emission it offsets was the deliverable). It is NOT a
+// stc-go disposer (see commit() for the disposal-ordering hazard); commit()
+// disposes the parked closure once the commit-vs-abort bit is settled. On a
+// COMMIT the closure discharges (never runs). On an ABORT it hands the offset to
+// `enqueue`, so runCompensationPhase (registered first, hence run LAST on the
+// unwind) fires it in Phase 2 — after every bracket/transactional/method-
+// witnessed inverse in this activation has completed, guarded and residue-
+// collected. `key`/`method` are the offsetting call's descriptor for the WAL and
+// residue, captured here at registration (the "no data hazard" rule).
+func (f *RevlFrame) registerMethodCompensation(key, method string, run func() error) {
+	f.mu.Lock()
+	f.deferred = append(f.deferred, func() error {
+		if f.committed {
+			return nil // discharge — the emission was the deliverable
+		}
+		f.enqueue(key, method, run) // abort: defer to Phase 2
+		return nil
+	})
+	f.mu.Unlock()
 }'''
+
+
+# item 322 Slice 1: the go host recording channel. A durable, fsync'd JSON-Lines
+# WAL sink whose records the tier-agnostic recovery core (src/revl/wal.py +
+# src/revl/recovery.py) reads back to roll a crashed session back. Self-contained
+# (os + encoding/json + sync, all already or additionally imported in record
+# mode); emitted only when `record=True`, so a non-recording program never
+# carries it and stays byte-identical. Opened from the REVL_WAL env var at
+# process start; if that is unset the sink is nil and every record call is a
+# no-op, so a record-mode binary run without REVL_WAL behaves exactly as a
+# non-recording one. The record shapes match the py writer (backends/python/
+# replay.py) field-for-field: `discharge-descriptor` (the re-issuable named call
+# for one transactional inverse), `discharge` (the commit-path proof recover
+# skips), and the terminal `activation-complete` marker.
+_RECORD_PREAMBLE = '''// ---- durable WAL recording sink (item 322 Slice 1, the go host recording channel) ----
+
+const revlWALGuarantee = "the WAL records each committed effect's step identity, boundary " +
+	"classification and inverse DESCRIPTOR (not its closure). On restart, " +
+	"recovery runs the reconstructible boundary inverses newest-first (LIFO); " +
+	"in-process inverses are moot (their captured memory died with the " +
+	"process) and closure-only boundary inverses are reported as residue, " +
+	"never silently claimed to have run."
+
+// revlWAL is the process's durable append-only log. One line per record, JSON,
+// flushed + fsync'd before the call that wrote it returns — the write-ahead
+// discipline the py tier uses, so a record a caller saw acknowledged is on disk
+// before the effect it describes is allowed to matter.
+type revlWAL struct {
+	mu   sync.Mutex
+	f    *os.File
+	seq  int
+	seqs []int
+}
+
+var revlWALSink *revlWAL
+
+// revlWALOpen wires the sink to REVL_WAL (unset -> no-op recording) and stamps
+// the header. Called once from this package's init.
+func revlWALOpen() {
+	path := os.Getenv("REVL_WAL")
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	revlWALSink = &revlWAL{f: f}
+	revlWALSink.write(map[string]any{
+		"record": "header", "walVersion": 1, "generation": 1,
+		"guarantee": revlWALGuarantee,
+	})
+}
+
+func init() { revlWALOpen() }
+
+func (w *revlWAL) write(rec map[string]any) {
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	_, _ = w.f.Write(append(line, '\\n'))
+	_ = w.f.Sync()
+}
+
+// revlRecordTransactional appends the discharge-descriptor for one witnessed
+// transactional inverse: the re-issuable named call {receiver, method, args}
+// recover replays LIFO to undo the mutation, plus the forward `origin` it
+// reverses. Fsync'd before it returns, so a crash after this call still leaves
+// the inverse re-issuable from the log alone.
+func revlRecordTransactional(receiver, method string, args []string) {
+	if revlWALSink == nil {
+		return
+	}
+	w := revlWALSink
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	seq := w.seq
+	w.seq++
+	w.seqs = append(w.seqs, seq)
+	ia := make([]any, len(args))
+	for i, a := range args {
+		ia[i] = a
+	}
+	call := map[string]any{"receiver": receiver, "method": method, "args": ia}
+	w.write(map[string]any{
+		"record": "discharge-descriptor", "seq": seq, "entry": "transactional",
+		"call": call, "origin": call, "witness": nil, "idempotency": nil,
+	})
+}
+
+// revlRecordDischarge writes the commit-path proof that every recorded
+// transactional seq COMMITTED, so recover SKIPS it — a committed transaction is
+// never rolled back. Called on a clean unload, never on a crash.
+func revlRecordDischarge() {
+	if revlWALSink == nil {
+		return
+	}
+	w := revlWALSink
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	ia := make([]any, len(w.seqs))
+	for i, s := range w.seqs {
+		ia[i] = s
+	}
+	w.write(map[string]any{"record": "discharge", "discharged": ia})
+}
+
+// revlRecordActivationComplete stamps the terminal marker: its presence is the
+// whole roll-forward decision, its absence (a crash) is roll-back. Written only
+// after a clean unload.
+func revlRecordActivationComplete() {
+	if revlWALSink == nil {
+		return
+	}
+	w := revlWALSink
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.write(map[string]any{"record": "activation-complete", "generation": 1, "components": []any{}})
+}
+'''
 
 
 def _teardown_preamble(method_witnessed: bool) -> str:
@@ -5232,7 +5800,10 @@ def _refuse_deferred_emissions(ir: dict) -> None:
     deferred extern emits cleanly (call-site keyed)."""
     try:
         from revl.errors import RevlError
-        from revl.session_commit import refuse_deferred_on_ownerless_tier
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
     except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
         import pathlib
         import sys as _sys
@@ -5240,18 +5811,80 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         if src.is_dir() and str(src) not in _sys.path:
             _sys.path.insert(0, str(src))
         from revl.errors import RevlError
-        from revl.session_commit import refuse_deferred_on_ownerless_tier
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
     try:
         refuse_deferred_on_ownerless_tier(ir, "go")
+        refuse_approval_on_ownerless_tier(ir, "go")
     except RevlError as exc:
         raise EmitError(exc.message) from None
 
 
-def emit(ir: dict, package: str = "emitted", package_name: str | None = None) -> str:
+_REVL_SYNC_SUFFIX = "_revl_sync"
+
+
+def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
+    """item 388, stage 6: on a colour-erasing tier (go/rust/java/wasm — suspension
+    is not a function colour) a caller-decided-colour extern's two clones — `X`
+    (async) and `X_revl_sync` (sync) — emit the SAME blocking host function.
+    Collapse them to ONE: drop the sync clone and rewrite its call sites to `X`.
+
+    Detected structurally: a `_revl_sync` extern whose origin twin is present with
+    identical `bodies`. A poly extern instantiated in only one colour has no twin,
+    so it is emitted unchanged under whatever name survived. Non-destructive (the
+    shared IR is also emitted by py/ts, which keep both colours), and a no-op that
+    returns the IR untouched when no such pair exists (every existing golden is
+    byte-identical)."""
+    externs = ir.get("externs") or []
+    by_name = {e.get("name"): e for e in externs}
+    alias: dict = {}
+    kept: list = []
+    for e in externs:
+        name = e.get("name") or ""
+        if name.endswith(_REVL_SYNC_SUFFIX):
+            origin = name[: -len(_REVL_SYNC_SUFFIX)]
+            twin = by_name.get(origin)
+            if twin is not None and twin.get("bodies") == e.get("bodies"):
+                alias[name] = origin
+                continue
+        kept.append(e)
+    if not alias:
+        return ir
+
+    def _rewrite(node):
+        if isinstance(node, dict):
+            return {k: (alias[v] if k == "name" and isinstance(v, str)
+                        and v in alias else _rewrite(v))
+                    for k, v in node.items()}
+        if isinstance(node, list):
+            return [_rewrite(x) for x in node]
+        return node
+
+    ir = dict(ir)
+    ir["externs"] = kept
+    for key in ("components", "functions", "tests", "prop_tests"):
+        if key in ir:
+            ir[key] = _rewrite(ir[key])
+    return ir
+
+
+def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
+         record: bool = False) -> str:
     # `package_name` is the conformance harness's per-case naming kwarg (the
     # same one the java tier takes); accept it as an alias for `package`.
     if package_name is not None:
         package = package_name
+    ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
+    # item 322 Slice 1: `record=True` wires the witnessed teardown to a durable
+    # WAL sink (the go host recording channel) so a crash BEFORE commit is
+    # recoverable by `revl recover`. It is OFF by default and gated everywhere
+    # it touches emission, so a non-recording program (every existing golden)
+    # emits byte-identically; only a program emitted in record mode carries the
+    # recording preamble and the per-descriptor `revlRecordTransactional` calls.
+    global _RECORD_MODE
+    _RECORD_MODE = record
     ver = ir.get("ir_version")
     if ver not in (1, 2, 3):
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
@@ -5415,6 +6048,10 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
             out.append('\t"time"')
         out.append('\t"os"')
         out.append('\t"strconv"')
+    if _RECORD_MODE and _COMP_NEEDS_TEARDOWN:
+        # item 322 Slice 1: the durable WAL sink marshals records with
+        # encoding/json ("os" is already pulled in by the teardown block above).
+        out.append('\t"encoding/json"')
     out.append("")
     out.append('\tstc "github.com/0xdenny218/stc-go"')
     out.append(")")
@@ -5436,6 +6073,8 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         out.append(_V3_RESULT_PREAMBLE)
     if _COMP_NEEDS_TEARDOWN:
         out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
+        if _RECORD_MODE:
+            out.append(_RECORD_PREAMBLE)
     if _COMP_NEEDS_TIMER:
         out.append(_TIMER_PREAMBLE)
 
@@ -6169,6 +6808,7 @@ def emit_placement(ir: dict, package: str = "emitted") -> str:
     takes the combined path: the typed-core tier and the live stc-go
     components in one module, plus the bridge — records and ADTs cross the
     seam (records as json-tagged structs, variants as {"$kind","$value"})."""
+    ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
     if ir.get("ir_version") == 3:
@@ -6212,13 +6852,18 @@ def emit_placement(ir: dict, package: str = "emitted") -> str:
 
 
 def main(argv):
-    if len(argv) < 2:
-        print("usage: emit.py <ir.json> [package]", file=sys.stderr)
+    # `--record` (item 322 Slice 1) wires the witnessed teardown to a durable
+    # WAL sink for crash recovery; off by default so ordinary emission is
+    # byte-identical.
+    args = [a for a in argv[1:] if a != "--record"]
+    record = "--record" in argv[1:]
+    if not args:
+        print("usage: emit.py <ir.json> [package] [--record]", file=sys.stderr)
         return 2
-    package = argv[2] if len(argv) > 2 else "emitted"
-    with open(argv[1], encoding="utf-8") as f:
+    package = args[1] if len(args) > 1 else "emitted"
+    with open(args[0], encoding="utf-8") as f:
         ir = json.load(f)
-    sys.stdout.write(emit(ir, package))
+    sys.stdout.write(emit(ir, package, record=record))
     return 0
 
 

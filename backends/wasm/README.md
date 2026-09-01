@@ -128,6 +128,30 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   refused. Consistent with the contract's `activation-registered-only` wasm
   preemption row: the accumulator is component-instance state torn down with
   the instance, never a per-call epoch. See `test_provide_method_witnessed.py`.
+- **durable WAL / crash recovery (item 322 Slice 2)** — the wasm tier is the
+  SPECIAL case: it has no direct filesystem, so where the go tier's emitted code
+  opens `REVL_WAL` and fsyncs a discharge-descriptor itself, a wasm module
+  cannot. Instead, in RECORD mode (`emit(ir, record=True)`, wired by
+  `revl.run_wasm` whenever `REVL_WAL` is set) each witnessed TRANSACTIONAL
+  registration FRAMES its descriptor's runtime values — `(seq, receiver, method,
+  witness)` — out through a `coeffect:revl:wal.record` host import. The host half
+  (`run_harness.py`, or `scenarios/crashproof/crash_producer.py`) reads the three
+  Str pointers back from the module's memory and RELAYS one `[wal] {…}` frame per
+  registration; `revl.run_wasm` DRAINS those frames and writes+fsyncs them into
+  the durable host WAL in the tier-agnostic py JSONL schema (`revl.wal`), so
+  `revl recover` reads a wasm-produced WAL with no wasm runtime on the path. A
+  crash after a descriptor is drained+fsynced but before the terminal
+  `activation-complete` marker is the roll-back case; a clean unload stamps
+  `discharge` + `activation-complete` and rolls forward. ADDITIVE and gated: a
+  module emitted without `--record`, and any module with no witnessed
+  transactional effect, carries none of it and is BYTE-IDENTICAL (the
+  `test_v3_emit.py` / `test_canonical_abi.py` golden oracle guards this). The
+  proof is `tests/test_wasm_crash_recovery.py` over `scenarios/crashproof`; the
+  witness marshals as a Str (a non-Str witness is refused in record mode rather
+  than silently narrowed). This is the durable channel the `revl:teardown`
+  static section (a compile-time index of seq/kind/dispatch) always pointed at
+  but deliberately did not itself carry: "a host wanting to build a real WAL on
+  this tier" is exactly `run_wasm`'s drain.
 
 ## Widths: `Int` is i64, addresses are i32
 

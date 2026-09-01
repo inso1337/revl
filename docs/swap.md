@@ -77,13 +77,61 @@ part of this pass.
 - The swapped component must be **alone in its process** (its process is the
   provider being replaced). A component sharing a process with others is
   refused with a diagnostic; split it into its own placement process first.
-- The swap is driven as an **interactive command inside the running
-  `revl run --placement` session** (a `swap>` prompt), not a separate
-  `revl swap` OS process. Re-pointing a live proxy mutates in-memory client
-  state inside the already-running consumer process; the conductor already owns
-  every child's control channel (its stdin), so the operation lives where that
-  ownership lives. A fresh CLI process would have no handle on the running
-  seam and would need a whole separate control plane to reach it.
+- The swap is driven as a **command inside the running `revl run --placement`
+  session** (a `swap>` prompt interactively, or a script on stdin — see
+  "Scripted swaps" below), not a separate `revl swap` OS process. Re-pointing a
+  live proxy mutates in-memory client state inside the already-running consumer
+  process; the conductor already owns every child's control channel (its stdin),
+  so the operation lives where that ownership lives. A fresh CLI process would
+  have no handle on the running seam and would need a whole separate control
+  plane to reach it.
+
+## Scripted (non-interactive) swaps
+
+The `swap>` prompt is for a human at a terminal. The same commands can be driven
+from a **script**: when `revl run --placement` finds its stdin is not a tty, it
+reads the swap script from stdin — one `swap <component> --to <backend>`,
+`:keys`, or `:q` per line — through the same dispatch the prompt uses, and EOF
+(a closed pipe, `< /dev/null`, or the last line) tears the placement down. That
+is the same stdin-closed contract single-process `revl run` already follows, and
+it is what lets the live migration run as a repeatable exit test rather than only
+a hand-driven demo. Nothing about the swap itself changes: admission, re-point,
+drain, and the no-residue proof are identical to the interactive path.
+
+    printf 'swap MemCache --to py\n:q\n' \
+      | revl run demo/live_systems/app.rvl --placement demo/live_systems/split.toml
+
+## Running the live-systems demo (v3.0 gate E3)
+
+The live-systems story — cross-tier live migration (`swap`), the runtime causal
+oracle (`revl why`, [why-runtime.md](why-runtime.md)), and plan/apply with a
+derived rollback (`revl apply`, [apply.md](apply.md)) — runs end to end from a
+clean checkout as one scripted command:
+
+    # once, to install the cordis-py runtime the live stages need:
+    sh backends/python/setup.sh
+
+    # the demo (also available as `make demo`):
+    backends/python/.venv/bin/python demo/live_systems/run_demo.py
+
+It shells out to the real `revl` CLI for each stage and asserts the observable
+outcome: the swap boots a successor on the target tier, re-points every consumer,
+and drains the old provider with a no-residue proof; `revl why` names the
+migration in the cause chain and its oracle reports the runtime tore the
+composition down in exactly the compiler's predicted set and LIFO order; and
+`revl apply` lands a planned change, then rolls a forced mid-plan failure back by
+derived LIFO inverses with no residue. All run artifacts go to a throwaway temp
+dir, so the demo depends on no developer-machine state and passes on a second
+run as cleanly as the first. The composition it operates on lives beside the
+runner in `demo/live_systems/` (`app.rvl`, `split.toml`, `candidate.rvl`). CI
+runs the same gate in the conformance job; `pytest tests/test_e3_demo.py` runs
+it wherever the cordis-py runtime is present and skips loudly where it is not.
+
+This demo uses a **py-to-py** swap: both processes are py, so the whole live
+migration exercises the boot / admit / re-point / drain / no-residue mechanism on
+the cordis-py runtime alone (roadmap item 23 runs on py). Swapping to a different
+tier (`--to node|rust|java|go`) is the same operation over the same seam; it
+additionally needs that tier's toolchain, which the placement smoke covers.
 
 ## Deferred: shadow verification
 

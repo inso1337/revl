@@ -91,7 +91,7 @@ def test_pure_async_extern_refused():
 def test_acquire_async_extern_refused():
     with pytest.raises(RevlError) as exc:
         compile_source(
-            'extern acquire async fn f(x: Str) -> Str undo drop(x) '
+            'extern acquire async fn f(x: Str) -> H undo drop(x) '
             '= @ts { return x }', 't.rvl')
     assert "cannot be `async`" in str(exc.value)
 

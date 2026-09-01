@@ -73,15 +73,15 @@ only a ``spawn`` acquire there, whose ``cexpr`` lands in slice 5. ``let_pattern`
 exclusion: item 179 made the reference's destructure temp deterministic (a
 per-``_Lines`` counter, not ``id(node)``), so a future slice can port it.
 
-Also OUT as of item 247 (docs/design/teardown-contract.md): ``services_body.rvl``
-exercised the ACTIVATION-BODY ``emit ... compensate ...`` saga, but the py
-runtime flip (``backends/python/emit.py``'s ``_body_step``) now emits
+Restored by item 317 (was OUT as of item 247, docs/design/teardown-contract.md):
+``services_body.rvl`` exercises the ACTIVATION-BODY ``emit ... compensate ...``
+saga. The py runtime flip (``backends/python/emit.py``'s ``_body_step``) emits
 ``yield _revl_frame.compensation(lambda: ...)`` — a first-class COMPENSATION
 entry on ``Frame``'s shared LIFO stack, two-phase-abort aware — instead of the
-old bare ``yield lambda: ...`` disposer that ``selfhost/emit_py.rvl`` still
-hand-mirrors. The two byte-diverge on this one fixture until a companion
-selfhost slice ports the same change; dropped from the corpus rather than
-silently xfail'd. ``services_method_effects.rvl`` is unaffected and stays IN:
+old bare ``yield lambda: ...`` disposer. Item 317 ported the SAME change into
+``selfhost/emit_py.rvl``'s ``body_step`` (the compensated-``emit`` branch), so
+the two are byte-identical again and the fixture is back in the corpus.
+``services_method_effects.rvl`` is unaffected and stays IN:
 its PROVIDE-METHOD ``emit ... compensate ...`` (``_method_step``) is a
 different, request-scoped feature (registered post-commit, governed by
 ``backends/python/replay.py``'s ``:back`` stepping) that this slice does not
@@ -105,6 +105,7 @@ CORPUS = [
     # function-only documents (slice 1); still byte-exact after the value_*
     # navigation rewrite (slice 2, item 185) — the refactor's own proof
     "arith.rvl",       # bounded int/int32, division/modulo, comparisons, unary
+    "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow
     "records.rvl",     # record literal, functional record update, list literal
@@ -114,8 +115,7 @@ CORPUS = [
     "services_basic.rvl",    # SERVICES table, req/provide, effect accumulator, a provide method
     "services_timers.rvl",   # every/after timers -> schedule_* import + cancel inverses
     "services_methods.rvl",  # provide methods: params, un-specialized bin, builtin, ternary
-    # "services_body.rvl" (let-effect, if-guard + fail, saga emit ... compensate)
-    # is OUT as of item 247 — see "Also OUT as of item 247" above.
+    "services_body.rvl",     # let-effect, if-guard + fail, activation-body saga `emit ... compensate` (Frame.compensation, item 317)
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record @dataclass + variant classes, forward-ref quoting, `_py_type` (incl fn types)
     "result.rvl",      # built-in Result (Ok/Err) classes, gated by a match on Ok/Err
@@ -125,6 +125,10 @@ CORPUS = [
     "externs.rvl",              # `_emit_externs`: verbatim `@py` body via stdlib/str.rvl::dedent (item 193) + splitlines
     "services_config.rvl",      # component `config`/`ConfigSchema`: schema block, ConfigSchema-first import, `Config` key, `config.<field>` read
     "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
+    # item 383 / 391 (self-host port) — the `.map`/`.filter`/`.reduce` transforms
+    # desugar (frontend) to `list_map`/`list_filter`/`list_reduce` free calls; the
+    # py tier lowers the function-value params, arrow args, and `f(x)` calls.
+    "transforms.rvl",
 ]
 
 
