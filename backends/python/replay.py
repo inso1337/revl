@@ -1658,13 +1658,25 @@ class WriteAheadLog:
         return record
 
     def record_boundary(self, component: str, label: str, *, resource: str,
-                        inverse_op: dict, kind: str = KIND_EFFECT) -> dict:
+                        inverse_op: dict, kind: str = KIND_EFFECT,
+                        undo_idempotent: bool = False,
+                        register: Optional[str] = None) -> dict:
         """Append a boundary effect with an EXPLICIT, reconstructible inverse.
 
         For a durable resource (a file, a row) whose inverse is a known named
         call with captured arguments — the reconstructible path.  ``inverse_op``
         is ``{"receiver","method","args"}``; recovery re-issues it against the
         world in a fresh process.
+
+        ``undo_idempotent`` is item 309's idempotency register entry for this
+        family, the same declaration :meth:`record_discharge_descriptor` carries
+        for the transactional family. Absent-by-default (``False``) keeps every
+        pre-309 caller's record byte-identical; when the author declares the
+        inverse idempotent, `recover` replays it freely on every run. Left
+        undeclared, `recover` fences it (item 309 §3a): at most one unfenced
+        attempt runs across abort and any number of recovery runs, and every
+        run after that reports fenced-before-attempt residue instead of
+        double-applying it.
         """
         referent = _referent_of_resource(resource)
         record = {
@@ -1676,7 +1688,9 @@ class WriteAheadLog:
             "inverse": {"reconstructible": True, "op": inverse_op,
                         "why": "explicit boundary descriptor: a named call with "
                                "captured arguments, re-issuable in a fresh "
-                               "process"},
+                               "process",
+                        **({"undo_idempotent": True} if undo_idempotent else {}),
+                        **({"register": register} if register else {})},
         }
         self._seq += 1
         self._write(record)
