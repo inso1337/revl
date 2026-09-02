@@ -1,0 +1,31 @@
+// REJECTED — a type name written in an arrow annotation is NOT a fresh type
+// parameter (roadmap item 75(a) rule G, guarding the item-75(c) hygiene hole).
+//
+// An arrow is an expression, not a signature, so it never quantifies. A name in
+// its parameter or return annotation resolves to a type parameter of the
+// ENCLOSING `fn`, else to a declared type, else to an ordinary opaque nominal
+// type that unifies with nothing. Never to a new type parameter — if `Q` here
+// were quantified, this arrow would wildcard at every call site, a one-letter
+// typo would silently type-check again, and unlike a `fn` there is no `[T]`
+// list anywhere for an author to turn the heuristic off with
+// (docs/generics.md, "An explicit list turns the implicit heuristic OFF").
+//
+// So `Q` is opaque: `f` is a `(Q) -> Q`, and `Int` does not flow into `Q`.
+// rust reports E0308 and javac "incompatible types".
+//
+// Legal spellings:
+//   * mean a concrete type:  `let f = (x: Int): Int => x`
+//   * mean the enclosing fn's type parameter:
+//       `fn id[T](x: T) -> T { let f = (v: T): T => v  return f(x) }`
+//
+// expected error:
+//   argument 1 of `f` expects `Q`, got `Int`
+
+fn takes_str(s: Str) -> Str {
+  return s
+}
+
+fn demo() -> Str {
+  let f = (x: Q): Q => x
+  return takes_str(f(1))
+}

@@ -180,9 +180,10 @@ def test_an_annotated_arrow_is_typed_without_any_expected_type():
     assert _fn_body(ir, "demo")[0]["value"]["param_types"] == ["Int"]
 
 
-def test_an_unannotated_arrow_with_no_expected_type_stays_untyped():
-    """The one arrow shape still on the frontier — and it must *stay* silent
-    rather than acquire a guessed type."""
+def test_an_unannotated_arrow_with_no_expected_type_carries_no_ir_signature():
+    """Since item 75(a) this arrow *does* have a checker type, `(Any) -> Any`,
+    so its arity is checked — but no component of it is known, so the IR must
+    still carry neither key rather than a guess. The tiers do not move."""
     ir = compile_source("fn demo(n: Int) -> Int { let g = v => v + 1  return g(n) }")
     arrow = _fn_body(ir, "demo")[0]["value"]
     assert arrow["kind"] == "arrow"
@@ -505,4 +506,268 @@ fn apply(p: Str, ms: List[Str], f: (List[Str]) -> Str) -> Str {
 }
 '''
     ir = compile_source(src)
+    assert ir["ir_version"] == 3
+
+
+# --------------------------------------------------------------------------
+# item 75(a) slice 1 — return annotations, total arrow typing, and the IR held
+# still (docs/design/75a-arrow-parameter-annotations.md)
+# --------------------------------------------------------------------------
+
+def _arrow_type(binding: str) -> str:
+    """The function type the checker gave an arrow, read back off the arity
+    diagnostic — which renders it verbatim and is the only place a *value*'s
+    type is printed."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("fn demo() -> Int { let f = %s  f(1, 2, 3, 4)  return 1 }"
+                       % binding)
+    message = str(excinfo.value)
+    assert "takes" in message, message
+    return message.split("is a `", 1)[1].split("`", 1)[0]
+
+
+# -- R1: the new spellings parse, type, and reach the IR ---------------------
+
+@pytest.mark.parametrize("binding,expected", [
+    ("(x: Int): Int => x + 1", "(Int) -> Int"),
+    ("(): Int => 0", "() -> Int"),
+    ('(u): Str => "s"', "(Any) -> Str"),
+    ('(x: Int): Str? => "s"', "(Int) -> Opt[Str]"),        # `?` binds to the return
+    ("(g: (Int) -> Int): Int => g(1)", "((Int) -> Int) -> Int"),
+])
+def test_a_return_annotation_types_the_arrow(binding, expected):
+    assert _arrow_type(binding) == expected
+
+
+def test_a_fully_annotated_arrow_reaches_the_ir():
+    ir = compile_source(
+        "fn demo(n: Int) -> Int { let f = (x: Int): Int => x + 1  return f(n) }")
+    arrow = _fn_body(ir, "demo")[0]["value"]
+    assert arrow["param_types"] == ["Int"] and arrow["returns"] == "Int"
+    assert _run_python(
+        "fn demo(n: Int) -> Int { let f = (x: Int): Int => x + 1  return f(n) }"
+    ).demo(41) == 42
+
+
+def test_a_zero_parameter_arrow_can_annotate_its_return():
+    """`() => host_call()` has no annotation site at all without this — the
+    parameter list is empty, so there is nowhere else to write a type."""
+    ir = compile_source("fn demo() -> Int { let z = (): Int => 0  return z() }")
+    arrow = _fn_body(ir, "demo")[0]["value"]
+    assert arrow["param_types"] == [] and arrow["returns"] == "Int"
+
+
+def test_an_arrow_annotation_means_the_enclosing_type_parameter():
+    """Rule G, the admitting half: a name in an arrow annotation resolves to
+    the enclosing signature's type parameter. The arrow never quantifies, so
+    `T` here is the `fn`'s `T` and nothing new is introduced."""
+    ir = compile_source(
+        "fn id[T](x: T) -> T { let f = (v: T): T => v  return f(x) }\n"
+        "fn demo() -> Int { return id(1) }")
+    assert ir["ir_version"] == 3
+
+
+def test_the_return_annotation_is_checked_against_the_body():
+    with pytest.raises(RevlError, match="expects `Str`, got `Int`"):
+        compile_source("fn demo() -> Str { let f = (x: Int): Str => x + 1  "
+                       "return f(1) }")
+
+
+def test_the_return_annotation_is_checked_against_the_position():
+    with pytest.raises(RevlError, match="the return type of this arrow"):
+        compile_source('fn f(g: (Int) -> Int) -> Int { return g(1) }\n'
+                       'fn d() -> Int { return f((v: Int): Str => "s") }')
+
+
+@pytest.mark.parametrize("source", [
+    # `->` is NOT the spelling: `) -> T` is already the tail of a function
+    # type, and admitting it here would put two readings of the same three
+    # tokens in the grammar at nearly the same place (§2.2).
+    "fn d() -> Int { let f = (x: Int) -> Int => x + 1  return f(1) }",
+    # the bare single-parameter form takes no annotation of either kind
+    "fn d() -> Int { let f = v: Int => v + 1  return f(1) }",
+])
+def test_the_refused_arrow_spellings_are_parse_errors(source):
+    with pytest.raises(RevlError):
+        compile_source(source)
+
+
+def test_a_parenthesised_ternary_arm_is_not_read_as_an_arrow():
+    """The `)` `:` lookahead must bound itself: `c ? (x) : (y)` is `)` `:` too,
+    and a later `=>` in the same body must not drag it into the arrow
+    production."""
+    ir = compile_source("fn demo(c: Bool, x: Int, y: Int) -> Int {\n"
+                        "  let a = c ? (x) : (y)\n"
+                        "  let g = z => z + 1\n"
+                        "  return a + g(1)\n"
+                        "}")
+    assert ir["ir_version"] == 3
+
+
+# -- R2: every arrow has a type, so arity is always checked ------------------
+
+def test_an_unannotated_arrow_still_has_an_arity():
+    """The errata's second reproducer. One bare parameter used to throw the
+    whole signature away, including the arity — which is purely syntactic."""
+    assert _arrow_type('(x) => "s"') == "(Any) -> Str"
+
+
+def test_a_bottom_parameter_accepts_every_argument_type():
+    """§3.3/§6: a ⊥ parameter renders `Any`, and `Any` is compatible in both
+    directions, so no *argument* position gets stricter."""
+    for arg in ("1", "1.5", '"s"'):
+        assert compile_source(
+            "fn demo() -> Int { let f = (x) => x + 1  f(%s)  return 1 }" % arg
+        )["ir_version"] == 3
+
+
+@pytest.mark.parametrize("body", ["[x]", "{ a: x }", "x + 1", "x"])
+def test_a_body_mentioning_a_bottom_parameter_names_no_result(body):
+    """§3.2, bottom-parameter-independence. `[x]` infers `List[Never]` and
+    `{ a: x }` infers `{a: Any}` with `x` unknown — half-solved types that look
+    known and are not. None of them may become the arrow's declared result."""
+    assert _arrow_type("(x) => %s" % body).endswith("-> Any")
+
+
+def test_a_known_parameter_never_blocks_body_inference():
+    assert _arrow_type("(x: Int) => x + 1") == "(Int) -> Int"
+
+
+# -- R3: the IR does not move ------------------------------------------------
+
+def test_a_partially_annotated_arrow_carries_neither_ir_key():
+    """The R3 fix. This arrow used to lower `"param_types": ["Int", null]` and
+    `"returns": null`, a shape docs/backend-ir-v3.md's "absent together"
+    contract never admitted and no emitter is written against."""
+    ir = compile_source(
+        "fn demo() -> Int { let f = (x: Int, y) => x + 1  return f(1, 2) }")
+    arrow = _fn_body(ir, "demo")[0]["value"]
+    assert arrow["kind"] == "arrow"
+    assert "param_types" not in arrow and "returns" not in arrow
+
+
+def test_an_arrow_typed_only_by_its_position_is_unchanged_in_the_ir():
+    ir = compile_source("fn demo(n: Int) -> Int {\n"
+                        "  let f: (Int) -> Int = v => v * 2\n"
+                        "  return f(n)\n"
+                        "}")
+    arrow = _fn_body(ir, "demo")[0]["value"]
+    assert arrow["param_types"] == ["Int"] and arrow["returns"] == "Int"
+
+
+# -- C1/C2/C3: colour is positional, never self-declared ---------------------
+
+_SELF_COLOURED = (
+    "extern emission async fn suspending_op(v: Str) -> Str = @py { return v }\n"
+    "fn leak(x: Str) -> Str {\n"
+    "  let g = (v: Str): Async[Str] => suspending_op(v)\n"
+    "  return g(x)\n"
+    "}\n"
+)
+
+
+def test_an_arrow_may_not_declare_its_own_async_colour():
+    """The CRITICAL. `"async": true` is a certificate that a *declaration*
+    promised to await the arrow: the leak check skips a flagged arrow and
+    callee collection stops descending at one. A written `Async[...]` return
+    would forge it with no consumer behind it, laundering every async callable
+    nested inside the arrow out of the enclosing scope's reach set."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_SELF_COLOURED)
+    assert "an arrow may not declare its own async colour" in str(excinfo.value)
+    assert excinfo.value.code == "A1"
+
+
+def test_the_same_arrow_without_the_forged_colour_is_refused_as_a_leak():
+    """The proof that C1 is load-bearing rather than decorative: strip the
+    annotation and the item-92 leak check catches this program. The annotation
+    is exactly what would have suppressed that refusal."""
+    with pytest.raises(RevlError, match="carries no async color"):
+        compile_source(_SELF_COLOURED.replace("(v: Str): Async[Str]", "(v: Str)"))
+
+
+def test_the_positional_spelling_of_colour_still_works():
+    """C1 costs nothing an author wants: colour stays obtainable from a
+    position that also carries the obligation to await — here the declared
+    parameter, which is the v1-supported async function-type site."""
+    ir = compile_source(
+        "extern emission async fn suspending_op(v: Str) -> Str = @py { return v }\n"
+        "fn run(g: (Str) -> Async[Str], x: Str) -> Str { return g(x) }\n"
+        'fn d() -> Str { return run(v => suspending_op(v), "a") }\n')
+    assert ir["ir_version"] == 3
+
+
+_COERCED = '''service Model {{ emission async fn complete(msgs: Str) -> Str }}
+service Runner {{ emission async fn run(p: Str) -> Str }}
+fn agent(cur: Str, c: (Str) -> Async[Str]) -> Str {{ let r = c(cur)  return r }}
+component Agent requires model: Model provides runner: Runner {{
+  provide runner {{ async fn run(prompt) = agent(prompt, {arrow}) }}
+}}
+'''
+
+
+@pytest.mark.parametrize("arrow", [
+    "msgs => emit model.complete(msgs)",              # unchanged (item 186)
+    "(msgs: Str) => emit model.complete(msgs)",       # parameter annotated
+    "(msgs: Str): Str => emit model.complete(msgs)",  # rule C3: the SYNC inner
+])
+def test_a_coerced_async_argument_still_admits(arrow):
+    """Rule C3 — `_coerce_async_args` stamps an arrow argument async when it
+    lands in an `Async[T]` slot. That is the legitimate way an arrow acquires
+    colour without a `let` annotation, and an annotation on such an arrow names
+    the sync inner type `T`."""
+    assert compile_source(_COERCED.format(arrow=arrow))["ir_version"] == 3
+
+
+def test_an_async_annotation_on_a_coerced_argument_is_still_refused():
+    with pytest.raises(RevlError, match="may not declare its own async colour"):
+        compile_source(_COERCED.format(
+            arrow="(msgs: Str): Async[Str] => emit model.complete(msgs)"))
+
+
+def test_item_342_dual_call_fixture_still_monomorphises(): 
+    """Rule C4 — sync/async arrow polymorphism decides colour at the call site
+    from the callee's declared parameter type. An arrow cannot self-declare a
+    colour, so this item introduces no new colour source and 342's keying is
+    untouched; annotating both arrows must not change that."""
+    src = (
+        "extern emission async fn async_op(x: Str) -> Str = @py { return x }\n"
+        "extern emission fn sync_op(x: Str) -> Str = @py { return x }\n"
+        "service Model { emission async fn ask(x: Str) -> Str }\n"
+        "service Tool  { emission fn call(x: Str) -> Str }\n"
+        "service ARun  { emission async fn go(x: Str) -> Str }\n"
+        "service SRun  { emission fn go(x: Str) -> Str }\n"
+        "fn loop(c: (Str) -> Async[Str], x: Str) -> Str { let r = c(x)  return r }\n"
+        "component AsyncAgent requires model: Model provides arun: ARun {\n"
+        "  provide arun { async fn go(x) = loop((y: Str): Str => emit model.ask(y), x) }\n"
+        "}\n"
+        "component SyncAgent requires tool: Tool provides srun: SRun {\n"
+        "  provide srun { fn go(x) = loop((y: Str): Str => emit tool.call(y), x) }\n"
+        "}\n")
+    fns = {f["name"]: f for f in compile_source(src, "repro.rvl")["functions"]}
+    assert fns["loop"].get("async") is True
+    assert "loop_revl_sync" in fns
+    assert not fns["loop_revl_sync"].get("async")
+
+
+# -- stratum 3: slice 1 must not regress the provide-method path -------------
+
+def test_an_annotated_arrow_in_a_provide_method_body_compiles():
+    """§5.3: there is one parser, so the grammar lands everywhere at once. The
+    provide-method path does not *check* an arrow until slice 3, but it must
+    parse and lower one."""
+    ir = compile_source('''service Model { emission fn complete(h: List[Str]) -> Str }
+service Loop { emission fn run(p: Str) -> Str }
+component App requires model: Model provides loop: Loop {
+  provide loop {
+    fn run(prompt) {
+      let msgs = ["hi"]
+      return apply(prompt, msgs, (msgs2: List[Str]): Str => emit model.complete(msgs2))
+    }
+  }
+}
+fn apply(p: Str, ms: List[Str], f: (List[Str]) -> Str) -> Str {
+  return f(ms)
+}
+''')
     assert ir["ir_version"] == 3

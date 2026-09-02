@@ -839,12 +839,22 @@ class ExprArrow:
     params: list[str]
     body: object
     line: int
-    # `(v: Int) => ...` — the author's parameter annotations, parallel to
-    # `params` (None where written bare). The checker *overwrites* this with
-    # the types it resolved (from an annotation or from the expected type) and
-    # fills `returns`, so lowering can put a real signature in the IR; both
-    # stay None/empty exactly when the arrow is still untyped.
-    param_types: list = field(default_factory=list)
+    # item 75(a) §2.4 — the WRITTEN annotations and the RESOLVED types are
+    # separate fields. They used to be one pair: the parser wrote the author's
+    # annotations into `param_types` and the checker *overwrote* them with what
+    # it resolved. That conflation is what left the IR emit condition unable to
+    # tell a complete signature from a partial one, and it makes the async
+    # colour rules (C1/C2) inexpressible, because nothing downstream could tell
+    # an author-written return from a checker-derived one.
+    #
+    # written by the parser, never by the checker:
+    written_param_types: list = field(default_factory=list)  # `(v: Int) => …`
+    written_returns: str | None = None                       # `(v): Int => …`
+    # written by the checker (`typecheck.py::_resolve_arrow`), never by the
+    # parser. `None` (not `[]`) means the checker never resolved this arrow;
+    # a `None` *entry* means that parameter is still unknown. Lowering reads
+    # only these two, and only emits a signature when every entry is known.
+    param_types: list | None = None
     returns: str | None = None
 
 
@@ -4382,8 +4392,20 @@ class Parser:
                     if self.at(","):
                         self.next()
                 self.expect(")")
+                # item 75(a): `(v: Int): Int => …` — an optional return
+                # annotation. `:` and not `->`, because `) -> T` is already the
+                # tail of a function *type* and would put two readings of the
+                # same tokens next to each other, while `:` already means "the
+                # type of this named thing" at every other revl annotation site
+                # (docs/function-types.md §2(c)). It is a full type, so `?`
+                # binds to it: `(v: Int): Str? => …` returns `Opt[Str]`.
+                returns = None
+                if self.at(":"):
+                    self.next()
+                    returns = self.type_()
                 self.expect("=>")
-                return ExprArrow(params, self._arrow_body(), tok.line, param_types)
+                return ExprArrow(params, self._arrow_body(), tok.line,
+                                 param_types, returns)
             self.next()
             node = self.pure_expr()
             # item 384: `(a, b)` is a Python/JS tuple — revl has no tuple type.
@@ -4564,7 +4586,15 @@ class Parser:
         rather than by token shape; what settles it is the `=>` after the
         closing paren, which can follow nothing else. The first two tokens are
         still shape-checked so that a malformed `(a + b) => c` reports as a bad
-        expression rather than as a bad parameter list."""
+        expression rather than as a bad parameter list.
+
+        item 75(a): a return annotation may sit between the two, so `)` `:`
+        `<type>` `=>` settles it as well. The type is read with the real
+        `type_()` on a saved-and-restored position rather than scanned by token
+        shape — a hand-rolled scan cannot bound itself (a ternary's
+        `c ? (x) : (y)` is `)` `:` too, and any later `=>` in the statement
+        would fool it), and `type_()` is greedy and cannot consume `=>`, so the
+        lookahead terminates exactly where the annotation does."""
         i = self.pos
         if self.toks[i].kind != "(":
             return False
@@ -4581,11 +4611,32 @@ class Parser:
             elif kind in (")", "]"):
                 depth -= 1
                 if depth == 0:
-                    return self.toks[i + 1].kind == "=>"
+                    if self.toks[i + 1].kind == "=>":
+                        return True
+                    if self.toks[i + 1].kind != ":":
+                        return False
+                    return self._return_annotation_ahead(i + 2)
             elif kind == "eof":
                 return False
             i += 1
         return False
+
+    def _return_annotation_ahead(self, start: int) -> bool:
+        """Does a complete type followed by `=>` start at token `start`?
+
+        Speculative: the position is saved and restored, and a parse error in
+        the candidate type means "not an arrow" rather than a diagnostic — the
+        caller falls back to the parenthesised-expression reading, which
+        reports its own."""
+        saved = self.pos
+        try:
+            self.pos = start
+            self.type_()
+            return self.at("=>")
+        except RevlError:
+            return False
+        finally:
+            self.pos = saved
 
     def provide(self) -> ProvideStmt:
         line = self.expect("kw", "provide").line

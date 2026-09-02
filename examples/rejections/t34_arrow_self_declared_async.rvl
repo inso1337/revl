@@ -1,0 +1,31 @@
+// REJECTED — an arrow declaring its own async colour (roadmap item 75(a),
+// rule C1). Colour is POSITIONAL: `"async": true` on a lowered arrow is not a
+// label, it is a certificate that some *declaration* promised to await the
+// arrow, and two analyses read it as one — the item-92 leak check skips a
+// flagged arrow, and callee collection stops descending at one, removing every
+// async callable nested inside it from the enclosing scope's reach set.
+//
+// A written `Async[...]` return annotation would forge that certificate with no
+// consumer behind it. The arrow below is bound to a plain `let` and called
+// synchronously from a sync `fn`: with the annotation admitted, the arrow
+// carries the flag, the leak check skips it, `suspending_op` disappears from
+// `leak`'s reach set, and one annotation launders an arbitrary amount of async
+// reach out of the whole enclosing scope. python then emits an unawaited
+// coroutine while TypeScript refuses at emit ("async callable called outside an
+// async context, the frontend async-coloring check should have refused this
+// (A1)") — precisely the py/ts split item 387 was filed to eliminate.
+//
+// Legal spellings — both shorter than the refused one, and both give the arrow
+// a consumer that is obliged to await it:
+//   * annotate the binding:  `let g: (Str) -> Async[Str] = v => suspending_op(v)`
+//   * declare the parameter: `fn run(g: (Str) -> Async[Str]) -> Str { … }`
+//
+// expected error:
+//   an arrow may not declare its own async colour
+
+extern emission async fn suspending_op(v: Str) -> Str = @py { return v }
+
+fn leak(x: Str) -> Str {
+  let g = (v: Str): Async[Str] => suspending_op(v)
+  return g(x)
+}

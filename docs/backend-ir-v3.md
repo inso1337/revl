@@ -116,11 +116,22 @@ carries `param_types` (parallel to `params`) and `returns`:
   "captures": [], "body": { ... } }
 ```
 
-Both keys are **absent together** exactly when the arrow is still untyped
-(`let g = v => v + 1`, with no expected type and no `(v: Int)` annotation).
+Both keys are **absent together** exactly when the arrow has no complete
+parameter signature — they are written iff *every* parameter type is known,
+whether from an annotation or from a checking position. So `let g = v => v + 1`
+carries neither (nothing is known), and so does a partially annotated
+`(x: Int, y) => …`: a `param_types` containing JSON `null` is not a shape this
+contract ever admitted, and no emitter is written against one. `returns` may
+still be the string `"Any"` when the result is unknown but every parameter is
+not.
+
 That is the distinction a backend needs: "typed as `Any`" and "no type at
 all" are not the same, and only the second justifies emitting an admission
-such as TypeScript's explicit `any`. A declared function type is spelled
+such as TypeScript's explicit `any`. The checker knows more than this — since
+roadmap 75(a) every arrow has a type, with unknown components rendered `Any` —
+and that richer partial knowledge stays in the frontend on purpose: carrying it
+into the IR would need a decision per tier, and two tiers (java, wasm) have no
+representation for `Any` at all. A declared function type is spelled
 `(Int, Str) -> Bool` wherever a type appears — see docs/function-types.md,
 which also records which tiers refuse values of function type and why.
 
