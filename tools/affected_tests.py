@@ -61,7 +61,7 @@ BACKEND_TIERS = ("python", "go", "rust", "wasm", "java", "typescript")
 # is still covered by the folded goldens in tests/test_goldens.py + the frontend
 # ts-referencing tests, which is exactly what the FULL gate does for ts too.
 BACKEND_STEP_TIERS = ("python", "go", "rust", "wasm", "java")
-GATES_ALL = ("conformance", "site-wheel", "ruff", "formal")
+GATES_ALL = ("conformance", "site-wheel", "ruff", "formal", "docs")
 
 # The documented hard core (the top-level import closure of compile_source): a
 # change to any of these is unambiguously a full-gate trigger. `compile_reachable`
@@ -336,6 +336,10 @@ def select(changed, root) -> dict:
             gates.add("site-wheel")
             reasons.append("tools/check_site_wheel.py")
             continue
+        if f == "tools/docgen.py":
+            gates.add("docs")
+            reasons.append("tools/docgen.py")
+            continue
         if f.startswith("tools/") and f.endswith(".py"):
             stem = Path(f).stem
             hits = {
@@ -363,15 +367,22 @@ def select(changed, root) -> dict:
         # --- tests/test_*.py (modified — add/delete handled by caller) ------ #
         if f.startswith("tests/") and Path(f).name.startswith("test_") and f.endswith(".py"):
             pytest_nodes.add(f)
+            # docs/guide-humans.md states this module's test count, generated
+            # from its AST, so editing it can stale a doc block (issue #255).
+            if f == "tests/test_mcp.py":
+                gates.add("docs")
             reasons.append(f"{f} (self)")
             continue
 
         # --- generated docs / matrix --------------------------------------- #
         if f.startswith("docs/") or f.endswith(".md"):
-            # The only pre-merge step a doc can break is the generated matrix
-            # (conformance --check-readme). Nothing else is affected.
+            # Two pre-merge steps a doc can break: the generated conformance
+            # matrix (conformance --check-readme) and the source-derived doc
+            # blocks (docgen --check, issue #255). DOC-STATUS's inventory is a
+            # function of every docs/*.md, so ANY doc edit can stale it.
             gates.add("conformance")
-            reasons.append(f"{f} (generated-matrix check)")
+            gates.add("docs")
+            reasons.append(f"{f} (generated-matrix + docgen check)")
             continue
 
         # --- anything else: fail safe -------------------------------------- #

@@ -220,16 +220,19 @@ component's entire boundary surface.
 
 ## 4. Checked guarantees (the point of the language)
 
+<!-- docgen:guarantees-design begin -->
 | # | Guarantee | Checked | Paper anchor |
 |---|---|---|---|
-| G1 | Every requirement is declared; undeclared access cannot be written | compile | Def. 25 |
-| G2 | Provision disjointness in a composition | compile (link) | Def. 43 |
-| G3 | Dependency cycles rejected | compile (link) | §6.5 |
-| G4 | Every mutation carries an inverse or an `emit` marker | compile | Def. 8, §6.1 |
-| G5 | Teardown cannot register effects | by construction | DS mod 6 / PR #39 |
-| G6 | Code outside effect forms is pure (confinement) | compile | Def. 48 |
-| G7 | Derived teardown is LIFO-complete over accumulated effects | by lowering | Thm. 16 |
-| G8 | Boundary surface (externs, emissions) is enumerable | compile | §6.1 |
+| G1 | declared access: a component reads only what it requires | compile | Def. 25 |
+| G2 | provision disjointness: one provider per key (per realm) | compile (link) | Def. 43 |
+| G3 | acyclic dependencies: a cycle can never activate | compile (link) | §6.5 |
+| G4 | every mutation carries an inverse, or admits irreversibility with `emit` | compile | Def. 8, §6.1 |
+| G5 | teardown cannot register effects | by construction | DS mod 6 / PR #39 |
+| G6 | purity outside effect forms | compile | Def. 48 |
+| G7 | derived LIFO teardown | by lowering | Thm. 16 |
+| G8 | the boundary surface is enumerable | compile | §6.1 |
+| G9 | untrusted data cannot create authority without a declared declassification | compile (taint flow) | no paper anchor; roadmap 249 |
+<!-- docgen:guarantees-design end -->
 
 "Compile (link)" means checked when a *composition* (a set of components) is
 assembled — the language has a linker phase precisely so G2/G3 are static even
