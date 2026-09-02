@@ -732,3 +732,198 @@ async def test_a_fan_in_fault_traverses_the_combinator_chain():
     a.close()
     b.close()
     assert runtime_mod.Stream.pending() == 0
+
+
+# ===========================================================================
+# Slice 4 — `every <x> in <sub> { … }`, the async-iteration form (§1, §4.7)
+# ===========================================================================
+#
+# The iteration form adds no runtime primitive: it is the Slice 1 protocol
+# (`next` raced against the cancel token, `close` tripping it synchronously)
+# driven in a loop. So these tests are not a re-proof of the protocol — they are
+# the proof that the LOOP does not weaken it. Three things could, and each has a
+# test: a loop that ran its body on a terminal would invent an item; a loop that
+# swallowed a `Faulted` would turn a provider abort into a clean end of stream
+# (and leave the subscription active through a handler failure, the exact
+# obligation §6 lists); and a loop that did not resolve on withdrawal would park
+# the owner forever behind a provider that never emits — the CRITICAL of §9.
+
+_ITER = """
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+"""
+
+
+class _Sink:
+    """The consumer's boundary: records every item the iteration body emitted."""
+
+    def __init__(self) -> None:
+        self.written: list = []
+
+    def write(self, v):
+        self.written.append(v)
+        return None
+
+
+def _sink_root() -> tuple:
+    root = Context()
+    sink = _Sink()
+    root.provide("sink", sink)
+    return root, sink
+
+
+@pytest.mark.asyncio
+async def test_every_in_delivers_each_item_to_the_body_and_ends_on_the_terminal(trace):
+    """Exit test §10.1 in the iteration form: N items reach the body in order,
+    an orderly provider close ENDS the loop (the terminal is not an item), and
+    the bracket inverse still closes the subscription before its source."""
+    module = _module(_ITER, "stream_every")
+    root, sink = _sink_root()
+    c = root.plugin(module.C)
+    await _flush()
+    assert c.state is FiberState.ACTIVE
+
+    src = runtime_mod.Stream.last_source()
+    src.emit("a")
+    src.emit("b")
+    await _flush()
+    assert sink.written == ["a", "b"], "each delivered item ran the body once"
+
+    src.close()                     # orderly provider terminal
+    await _flush()
+    assert sink.written == ["a", "b"], "the `Closed` terminal is NOT an item"
+
+    c.dispose()
+    await _flush()
+    assert c.state is FiberState.DISPOSED
+    assert runtime_mod.Stream.pending() == 0, "no dangling listener (no residue)"
+
+
+@pytest.mark.asyncio
+async def test_unloading_the_owner_ends_the_iteration_and_closes_the_stream(trace):
+    """The core guarantee (§0) through the loop: withdraw the owner while the
+    consumer is parked in the iteration's `next` on a provider that never emits.
+    The park resolves as `Closed` (§9 Part A), the loop exits, `close` runs, and
+    teardown does not deadlock behind the parked `next`."""
+    module = _module(_ITER, "stream_every_unload")
+    root, sink = _sink_root()
+    c = root.plugin(module.C)
+    await _flush()
+    assert c.state is FiberState.ACTIVE
+    assert runtime_mod.Stream.pending() == 2, "parked: source open + subscription live"
+
+    c.dispose()
+    await _flush()
+    assert c.state is FiberState.DISPOSED, "teardown completed (no deadlock)"
+    ops = [e for e in _ops(trace) if e.startswith("stream")]
+    assert ops.index("stream.close") < ops.index("stream.source close"), \
+        "the subscription closes before its source (LIFO)"
+    assert sink.written == [], "no item was invented for the terminal"
+    assert runtime_mod.Stream.pending() == 0, "no residue"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_fault_aborts_the_iteration_and_closes_the_subscription(trace):
+    """§9 Part B through the loop, and the §6 events obligation: a `Faulted`
+    terminal RAISES out of `next` rather than reading as an end of stream, so
+    the activation fails, the prefix reverts LIFO, and the subscription is
+    CLOSED — never left active behind a failure."""
+    module = _module(_ITER, "stream_every_fault")
+    root, sink = _sink_root()
+    c = root.plugin(module.C)
+    await _flush()
+    assert c.state is FiberState.ACTIVE
+
+    src = runtime_mod.Stream.last_source()
+    src.emit("a")
+    await _flush()
+    assert sink.written == ["a"]
+
+    src.fault("boom")
+    await _flush()
+    assert c.state is FiberState.FAILED, "the fault aborted the iteration (A8)"
+    assert sink.written == ["a"], "the terminal never ran the body"
+    ops = [e for e in _ops(trace) if e.startswith("stream")]
+    assert "stream.close" in ops, "the bracket closed in the prefix reversal"
+    assert runtime_mod.Stream.pending() == 0, "no residue after a provider terminal"
+
+
+_ITER_FAIL = """
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+    fail "handler refused the item"
+  }
+}
+"""
+
+
+@pytest.mark.asyncio
+async def test_handler_failure_closes_the_subscription(trace):
+    """Exit test §10.6 (the typed-events obligation, §6): an `every … in` body
+    that `fail`s aborts the iteration, and because the subscription bracket is
+    on the reverted prefix the failure CLOSES it. Delivered by A8 with no
+    events-specific machinery."""
+    module = _module(_ITER_FAIL, "stream_every_fail")
+    root, sink = _sink_root()
+    c = root.plugin(module.C)
+    await _flush()
+    assert c.state is FiberState.ACTIVE
+
+    src = runtime_mod.Stream.last_source()
+    src.emit("a")
+    await _flush()
+
+    assert sink.written == ["a"], "the body ran on the item, then failed"
+    assert c.state is FiberState.FAILED, "the handler failure aborted the activation"
+    ops = [e for e in _ops(trace) if e.startswith("stream")]
+    assert "stream.close" in ops, \
+        "a failed handler does NOT leave the subscription active (§6)"
+    assert runtime_mod.Stream.pending() == 0, "no residue"
+
+
+_ITER_CHAIN = """
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src.filter(x => x != "skip").take(2) undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+"""
+
+
+@pytest.mark.asyncio
+async def test_the_iteration_composes_with_the_combinator_chain(trace):
+    """Slice 2 + Slice 4: the loop pulls a DERIVED stream, so a filtered item
+    never reaches the body and a spent `take(n)` synthesises the `Closed`
+    terminal the loop ends on — with the whole chain still riding the ONE
+    bracket the `subscribe` registered."""
+    module = _module(_ITER_CHAIN, "stream_every_chain")
+    root, sink = _sink_root()
+    c = root.plugin(module.C)
+    await _flush()
+
+    src = runtime_mod.Stream.last_source()
+    src.emit("skip")
+    src.emit("one")
+    src.emit("two")
+    src.emit("three")          # past take(2): never delivered
+    await _flush()
+
+    assert sink.written == ["one", "two"], \
+        "filtered items never reach the body; `take` bounds it"
+    c.dispose()
+    await _flush()
+    assert c.state is FiberState.DISPOSED
+    assert runtime_mod.Stream.pending() == 0, "the whole chain unwound (no residue)"

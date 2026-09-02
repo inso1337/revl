@@ -4623,6 +4623,19 @@ class Stream:
         return StreamSource()
 
     @classmethod
+    def is_closed(cls, value: Any) -> bool:
+        """True for the `Closed` terminal a `next` returned (item 130 Slice 4).
+
+        The consumer-side terminal test the `every … in` iteration form ends on:
+        an orderly provider close, the owner's own `close` tripping the cancel
+        token, or a spent `take(n)` all resolve `next` to `STREAM_CLOSED`, and
+        the loop exits. `Faulted` is deliberately NOT a value here — it RAISES
+        out of `next`, so a fault aborts the iteration and the activation rather
+        than reading as an ordinary end of stream (§4.3, A8). Mirrors the go
+        tier's `IsStreamClosed` so the two tiers spell one predicate."""
+        return value is STREAM_CLOSED
+
+    @classmethod
     def merge(cls, a: StreamSource, b: StreamSource) -> StreamSource:
         """The fan-in behind `subscribe merge(a, b)` — one derived stream from
         two (item 130 Slice 3, design §1).

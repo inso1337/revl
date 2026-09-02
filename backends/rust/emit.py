@@ -4050,6 +4050,19 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         )
         out.append(f"{pad}let {key}_box: Box<dyn {service}> = Box::new({struct} {{ {fields} }});")
         out.append(f"{pad}ctx.provide({_string(key)}, {key}_box)?;")
+    elif kind == "stream-iter":
+        # item 130 Slice 4: `every <x> in <sub> { … }`. This tier lowers the
+        # Slice 1/3 protocol (subscribe / next / close and the `merge` fan-in) on
+        # the blocking cancel-select, but not the ITERATION form, whose per-item
+        # bind and effectful body per item this emitter's activation-body walk
+        # has no scope for. Refuse by name rather than emit a subscription whose
+        # body silently never runs — the same call
+        # `_refuse_unlowered_stream_surface` makes for the Slice 2 surface.
+        raise EmitError(
+            "the `every … in` stream iteration form is not lowered on the rust "
+            "tier; this tier lowers subscribe / next / close and `merge` "
+            "(item 130 Slices 1 and 3) while the iteration form runs on the py "
+            "reference tier (Slice 4) — try `--backend py`")
     else:
         raise EmitError(f"unsupported component step in Rust backend: {kind!r}")
 

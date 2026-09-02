@@ -1639,6 +1639,8 @@ class _ComponentEmitter:
             # skips every later step instead of running to the next yield
             out.add(indent, f"await {self._expr(step.get('expr'), where)}")
             out.add(indent, "yield None  # iteration boundary (A1)")
+        elif kind == "stream-iter":
+            self._stream_iter(out, indent, step, where)
         elif kind == "timer":
             self._timer(out, indent, step, where)
         elif kind == "provide":
@@ -1863,6 +1865,57 @@ class _ComponentEmitter:
                 f"_revl_frame.transactional_method((lambda result: {undo}), {tmp}.value)")
         if bind is not None:
             out.add(indent, f"{bind} = {tmp}")
+
+    def _stream_iter(self, out: _Lines, indent: int, step: dict,
+                     where: str) -> None:
+        """A `stream-iter` body step (item 130 Slice 4): `every <x> in <sub>
+        { … }`, the async-iteration form.
+
+        The whole form is defined by the three operations Slice 1 shipped, so it
+        adds no runtime primitive and no new teardown accounting:
+
+            while True:
+                <x> = await <sub>.next()
+                yield None            # iteration boundary (A1)
+                if Stream.is_closed(<x>):
+                    break
+                <body>
+
+        Three properties are load-bearing and each is a line above:
+
+        * the `yield` sits immediately after the await, exactly as the plain
+          `await` step emits it — the await LANDS (inertia, paper §4.3.3) and the
+          yield closes the iteration, so a divert while the consumer is parked
+          abandons the loop instead of running one more body turn. This is what
+          keeps the bracket inverse reachable off the teardown path: `close`
+          (or owner withdrawal) trips the cancel token, the parked `next`
+          resolves as `Closed`, and teardown never waits on the provider (§9
+          Part A);
+        * a `Closed` terminal ENDS the loop rather than entering the body — the
+          terminal is not an item, and running the effectful callback on it would
+          be the silent-data invention the design forbids;
+        * a `Faulted` terminal is NOT tested for, because `next` RAISES it
+          (`StreamFaulted`). The exception propagates out of the loop and out of
+          the body generator, the activation fails, and the accumulated prefix —
+          subscription bracket included — reverts LIFO, which CLOSES the
+          subscription (A8, §4.7). That is the "a failed handler does not leave a
+          subscription active" obligation, and it is delivered by not catching
+          anything here.
+
+        A `fail` in the body raises the same way, for the same reason."""
+        self.uses.add("Stream")
+        item = _mangle(_ident(step.get("bind"), f"{where}: stream item"))
+        subject = self._expr(step.get("subject"), where)
+        out.add(indent, "while True:")
+        out.add(indent + 1, f"{item} = await {subject}.next()")
+        out.add(indent + 1, "yield None  # iteration boundary (A1)")
+        out.add(indent + 1, f"if Stream.is_closed({item}):")
+        out.add(indent + 2, "break")
+        body = step.get("body") or []
+        if not body:  # pragma: no cover — the parser rejects an empty body
+            raise EmitError(f"{where}: an `every … in` body is empty")
+        for inner in body:
+            self._body_step(out, indent + 1, inner, where)
 
     def _timer(self, out: _Lines, indent: int, step: dict, where: str) -> None:
         """A `timer` body step (item 57): a revertible schedule.
@@ -2144,8 +2197,11 @@ class _ComponentEmitter:
         # forces the `async def` generator. Timer steps are excluded: a timer's
         # `async` flag (item 170) colors its OWN runtime-awaited firing, not the
         # activation body generator, so it must not flip the body to async here.
+        # item 130 Slice 4: a `stream-iter` step awaits `<sub>.next()` once per
+        # delivered item, so it is a suspension in the body exactly as an
+        # `await` step is, and it forces the `async def` generator the same way.
         is_async = any(
-            step.get("step") == "await"
+            step.get("step") in ("await", "stream-iter")
             or (step.get("step") in ("effect", "let-effect", "emit")
                 and step.get("async"))
             for step in self.ir.get("body") or [])
