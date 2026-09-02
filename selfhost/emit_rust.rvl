@@ -134,10 +134,14 @@ extern pure fn string_lit(v: Any) -> Str = @py {
 extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
 // A real newline — the line SEPARATOR (`"\n".join(out)` in the reference).
 extern pure fn newline() -> Str = @py { return chr(10) }
-// `_mangle` verbatim: append `_` until the name is not a Rust reserved word, so a
-// valid revl identifier that is a Rust keyword emits and RUNS. A tuple, not a
-// set, keeps the host body free of `{}` (the @py raw-brace balancer counts
-// structural braces; a set literal would unbalance the block).
+// `_mangle` verbatim: rename a Rust reserved word so a valid revl identifier
+// that is a Rust keyword emits and RUNS. INJECTIVE: escape a name iff the name
+// or any name reachable from it by dropping trailing `_` is reserved, by
+// exactly one `_`, so the whole `kw`/`kw_`/`kw__` ladder shifts up a rung
+// (`match` -> `match_`, `match_` -> `match__`) instead of collapsing two
+// distinct revl identifiers onto one Rust identifier. A tuple, not a set, keeps
+// the host body free of `{}` (the @py raw-brace balancer counts structural
+// braces; a set literal would unbalance the block).
 extern pure fn mangle(name: Str) -> Str = @py {
     reserved = ("as", "break", "const", "continue", "crate", "else", "enum",
                 "extern", "false", "fn", "for", "if", "impl", "in", "let",
@@ -145,8 +149,13 @@ extern pure fn mangle(name: Str) -> Str = @py {
                 "self", "Self", "static", "struct", "super", "trait", "true",
                 "type", "unsafe", "use", "where", "while", "async", "await",
                 "dyn")
-    while name in reserved:
-        name = name + "_"
+    root = name
+    while root:
+        if root in reserved:
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
     return name
 }
 // `_snake` verbatim: the component/service name -> the snake-case plugin-fn /
@@ -170,7 +179,17 @@ extern pure fn camel(name: Str) -> Str = @py {
 
 // `_mname`: the one method rename this tier carries — `drop` collides with
 // Rust's `Drop::drop` destructor (`_METHOD_RENAMES = {"drop": "drop_"}`).
-fn mname(n: Str) -> Str { if (n == "drop") { return "drop_" } return n }
+// INJECTIVE like `mangle`: a method actually named `drop_` must not land on the
+// renamed `drop`, so the `drop`/`drop_`/`drop__` ladder shifts up a rung.
+fn mname(n: Str) -> Str {
+  var root = n
+  while (root.length() > 0) {
+    if (root == "drop") { return n.concat("_") }
+    if (root.charAt(root.length() - 1) != "_") { return n }
+    root = root.slice(0, root.length() - 1)
+  }
+  return n
+}
 
 // ---------------------------------------------------------------- small utils
 fn ind(n: Int) -> Str { return "    ".repeat(n) }
@@ -2049,6 +2068,22 @@ test "rust indentation is four spaces per level" {
   assert ind(0) == ""
   assert ind(2) == "        "
   assert line(1, "x") == "    x"
+}
+
+test "the Rust rename is injective" {
+  assert mangle("match") == "match_"
+  assert mangle("impl") == "impl_"
+  assert mangle("value") == "value"
+  // `match` and the equally legal revl identifier `match_` must not both land
+  // on `match_`: the ladder shifts up a rung instead of collapsing.
+  assert mangle("match_") == "match__"
+  assert mangle("match__") == "match___"
+  // the same for the one method rename this tier carries
+  assert mname("drop") == "drop_"
+  assert mname("drop_") == "drop__"
+  assert mname("run") == "run"
+  // a name with no reserved root is verbatim, trailing underscores and all
+  assert mangle("value_") == "value_"
 }
 
 test "sorted_key sorts field names by code point" {

@@ -158,11 +158,20 @@ fn node_op(n: Any) -> Str { return value_str(value_field(n, "op")) }
 fn node_operands(n: Any) -> Str { return value_str(value_field(n, "operands")) }
 fn node_step(n: Any) -> Str { return value_str(value_field(n, "step")) }
 
-// `_v3_ident`: append `_` to a Go reserved word so a valid revl identifier that
-// is a Go keyword still emits (mirrors `_v3_ident`; the fixtures use `use_add`,
-// itself not reserved, so this is exercised only defensively).
+// `_v3_ident`: rename a Go reserved word so a valid revl identifier that is a
+// Go keyword still emits (mirrors `_v3_ident`; the fixtures use `use_add`,
+// itself not reserved, so this is exercised only defensively). The rename is
+// INJECTIVE: escape a name iff the name or any name reachable from it by
+// dropping trailing `_` is reserved, by exactly one `_`, so the whole
+// `kw`/`kw_`/`kw__` ladder shifts up a rung (`func` -> `func_`, `func_` ->
+// `func__`) instead of collapsing two distinct revl identifiers onto one.
 fn v3_ident(name: Str) -> Str {
-  if (is_go_reserved(name)) { return name.concat("_") }
+  var root = name
+  while (root.length() > 0) {
+    if (is_go_reserved(root)) { return name.concat("_") }
+    if (root.charAt(root.length() - 1) != "_") { return name }
+    root = root.slice(0, root.length() - 1)
+  }
   return name
 }
 
@@ -1217,6 +1226,12 @@ test "indentation is one tab per level" {
   assert line(0, "x") == "x"
   assert is_go_reserved("type")
   assert v3_ident("type") == "type_"
+  // injective: `type` and the equally legal revl identifier `type_` must not
+  // both land on `type_`, so the ladder shifts up a rung
+  assert v3_ident("type_") == "type__"
+  assert v3_ident("type__") == "type___"
+  assert v3_ident("use_add") == "use_add"
+  assert v3_ident("total_") == "total_"
 }
 
 test "sorted_key canonicalises a record's field set by code point" {

@@ -122,13 +122,23 @@ extern pure fn py_repr(v: Any) -> Str = @py { return repr(v) }
 // backslash-n, which is exactly what the emitted `assert` message wants), so the
 // line SEPARATOR is sourced here — the one place a genuine U+000A is needed.
 extern pure fn newline() -> Str = @py { return chr(10) }
-// The A3 append-`_` rename (mirrors backends/python/emit.py::_mangle): a valid
-// revl identifier that is a Python keyword emits and RUNS instead of crashing.
-// A pure function of the name — declaration and use sites agree without a table.
+// The A3 rename (mirrors backends/python/emit.py::_mangle): a valid revl
+// identifier that is a Python keyword emits and RUNS instead of crashing.
+// A pure function of the name — declaration and use sites agree without a table
+// — and INJECTIVE, so two distinct revl identifiers never land on one Python
+// identifier. Escape a name iff the name or any name reachable from it by
+// dropping trailing `_` is a keyword, by exactly one `_`: that shifts the whole
+// `kw`/`kw_`/`kw__` ladder up a rung (`lambda` -> `lambda_`, `lambda_` ->
+// `lambda__`) and leaves every other name verbatim, so nothing collapses.
 extern pure fn mangle(name: Str) -> Str = @py {
     import keyword
-    while keyword.iskeyword(name) or keyword.issoftkeyword(name):
-        name = name + "_"
+    root = name
+    while root:
+        if keyword.iskeyword(root) or keyword.issoftkeyword(root):
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
     return name
 }
 // `_snake` / `_pascal` verbatim (backends/python/emit.py): the component's apply
@@ -1704,6 +1714,22 @@ test "operator table maps longest revl ops" {
   assert py_bin_op("!==") == "!="
   assert py_bin_op("&&") == "and"
   assert py_bin_op("||") == "or"
+}
+
+test "the Python-keyword mangle is injective" {
+  assert mangle("lambda") == "lambda_"
+  assert mangle("class") == "class_"
+  assert mangle("value") == "value"
+  // `lambda` and the equally legal revl identifier `lambda_` must not both land
+  // on `lambda_`: the ladder shifts up a rung instead of collapsing.
+  assert mangle("lambda_") == "lambda__"
+  assert mangle("lambda__") == "lambda___"
+  // `_` is a soft keyword, so the all-underscore ladder shifts too
+  assert mangle("_") == "__"
+  assert mangle("__") == "___"
+  // a name with no keyword root is verbatim, trailing underscores and all
+  assert mangle("value_") == "value_"
+  assert mangle("classic") == "classic"
 }
 
 test "py indentation is four spaces per level" {

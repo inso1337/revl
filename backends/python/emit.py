@@ -267,16 +267,42 @@ def _mangle(name: str) -> str:
     at emit (roadmap item 165).
 
     The scheme is the A3 append-`_` rename `src/revl/lower.py::_safe_name` (and
-    `backends/java/emit.py::_fn_name`) already use for revl-keyword bindings:
-    append `_` until the name is no longer a keyword. It is a pure function of
-    the name, so the declaration site and every use site agree without
-    threading a table around — the single property the mangling must preserve.
-    A non-keyword name is returned byte-for-byte unchanged, so no existing
-    program (none of which can currently name a Python keyword — those crash
-    today) changes its emitted output. This is TARGET keywords only; the host
-    roots (`Map`/`Pool`/`Job`) are not keywords and stay guarded in `_ident`."""
-    while keyword.iskeyword(name) or keyword.issoftkeyword(name):
-        name += "_"
+    `backends/java/emit.py::_fn_name`) already use for revl-keyword bindings.
+    It is a pure function of the name, so the declaration site and every use
+    site agree without threading a table around, and it must ALSO be INJECTIVE:
+    two distinct revl identifiers may never land on one Python identifier.
+
+    The naive "append `_` while the name is a keyword" loop is a pure function
+    but NOT injective: it maps `lambda` to `lambda_` and leaves the equally
+    legal revl identifier `lambda_` alone, so both reach `lambda_` and the
+    second binding silently CAPTURES the first (a local rebinding, a `def` that
+    overwrites a `def`, a dataclass annotation that overwrites an annotation) —
+    a wrong-value bug, not a compile error.
+
+    The injective rule: escape a name iff the name OR any name reachable from
+    it by dropping trailing `_` is a keyword, and escape it by exactly ONE `_`.
+    That splits the identifier space in two halves that cannot meet. Names
+    whose underscore-stripped root is a keyword shift up one rung of the
+    `kw`/`kw_`/`kw__` ladder (`lambda`->`lambda_`, `lambda_`->`lambda__`),
+    which is injective because the shift is; every other name is returned
+    byte-for-byte unchanged, and can never equal a shifted name because a
+    shifted name's root is a keyword and an unchanged name's root is not.
+    The output is never itself a keyword: no Python keyword ends in `_` except
+    the soft `_`, and `_` is only produced from the empty name, which is not an
+    identifier. `_` itself has keyword root `_` and so escapes to `__`, exactly
+    as the old loop did.
+
+    Only a name whose root is a keyword can change, so no existing program that
+    does not name a keyword changes its emitted output. This is TARGET keywords
+    only; the host roots (`Map`/`Pool`/`Job`) are not keywords and stay guarded
+    in `_ident`."""
+    root = name
+    while root:
+        if keyword.iskeyword(root) or keyword.issoftkeyword(root):
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
     return name
 
 

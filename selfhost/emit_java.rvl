@@ -156,20 +156,32 @@ fn java_reserved() -> List[Str] {
 // `_EMITTER_RESERVED`: `_fn_name` also renames a callable colliding with these.
 fn emitter_reserved() -> List[Str] { return ["ctx", "config", "root"] }
 
-// `_mangle` (== `_ident`'s rename for a binding/param/name/type).
+// `_mangle` (== `_ident`'s rename for a binding/param/name/type). INJECTIVE:
+// escape a name iff the name or any name reachable from it by dropping trailing
+// `_` is reserved, by exactly one `_`, so the whole `kw`/`kw_`/`kw__` ladder
+// shifts up a rung (`double` -> `double_`, `double_` -> `double__`) instead of
+// collapsing two distinct revl identifiers onto one Java identifier.
 fn mangle(name: Str) -> Str {
-  var n = name
-  while (list_contains(java_reserved(), n)) { n = n.concat("_") }
-  return n
+  var root = name
+  while (root.length() > 0) {
+    if (list_contains(java_reserved(), root)) { return name.concat("_") }
+    if (root.charAt(root.length() - 1) != "_") { return name }
+    root = root.slice(0, root.length() - 1)
+  }
+  return name
 }
 // `_fn_name`: a top-level callable colliding with a Java keyword OR the emitter's
-// scaffolding names is renamed the same way.
+// scaffolding names is renamed the same way, by the same injective ladder shift.
 fn fn_name(name: Str) -> Str {
-  var n = name
-  while (list_contains(java_reserved(), n) || list_contains(emitter_reserved(), n)) {
-    n = n.concat("_")
+  var root = name
+  while (root.length() > 0) {
+    if (list_contains(java_reserved(), root) || list_contains(emitter_reserved(), root)) {
+      return name.concat("_")
+    }
+    if (root.charAt(root.length() - 1) != "_") { return name }
+    root = root.slice(0, root.length() - 1)
   }
-  return n
+  return name
 }
 
 // The postfix-safe primaries (`_V3_POSTFIX_SAFE_KINDS`): a `.method()` suffix
@@ -2761,6 +2773,18 @@ test "keyword-colliding identifiers are renamed by appending underscore" {
   assert fn_name("double") == "double_"
   assert fn_name("config") == "config_"
   assert fn_name("add") == "add"
+}
+
+test "the Java rename is injective" {
+  // `double` and the equally legal revl identifier `double_` must not both
+  // land on `double_`: the ladder shifts up a rung instead of collapsing.
+  assert mangle("class_") == "class__"
+  assert mangle("class__") == "class___"
+  assert fn_name("double_") == "double__"
+  assert fn_name("config_") == "config__"
+  // a name with no reserved root is verbatim, trailing underscores and all
+  assert mangle("value_") == "value_"
+  assert fn_name("add_") == "add_"
 }
 
 test "the field-set key canonicalises regardless of order" {
