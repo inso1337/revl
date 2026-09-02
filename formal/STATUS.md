@@ -34,6 +34,15 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.Semantics.teardown_length` | G7 — length form | **proved** | `propext` | one replay per witnessed effect |
 | `RevL.G8.boundary_enumerates_emissions` | G8 — boundary enumerable (§6.1) | **proved** | `propext, Quot.sound` | completeness: every emission is on the audited surface |
 | `RevL.G8.boundary_only_declared` | G8 | **proved** | `propext, Quot.sound` | soundness: on a typed body the surface is exactly the emissions |
+| `RevL.CapCeilings.cap_order_partial` | item 294 — the `(T,P)` capability order | **stuck** | — | refl/trans/antisym of `covers` |
+| `RevL.CapCeilings.attenuation_monotone` | items 66/294 — attenuation is downward | **stuck** | — | a lineage never exceeds the root's declared ceiling |
+| `RevL.CapCeilings.lineage_ceiling_le` | item 260 — budgets only shrink | **stuck** | — | a dropped ceiling reads as `+∞` |
+| `RevL.CapCeilings.spend_within_budget` | item 260 — the runtime counter | **stuck** | — | `remainingUses` is not overdrawn |
+| `RevL.CapCeilings.budget_never_exceeds_root_ceiling` | item 260 — end to end | **stuck** | — | static shrink ∘ dynamic counter |
+| `RevL.CapCeilings.confinement_within_ceiling` | items 294 + G6 | **stuck** | — | ceilings compose with the reach structure |
+| `RevL.CapCeilings.no_star_amplification` | item 66 — the host boundary | **stuck** | — | `*` is covered only by `*` |
+| `RevL.CapCeilings.parameter_widening_refused` | item 294 — non-vacuity | **stuck** | — | tracks `g4_spawn_widens_parameter.rvl` |
+| `RevL.CapCeilings.ceiling_check_not_subsumed` | item 260 — non-vacuity | **stuck** | — | the resource fold is ceiling-blind |
 | `RevL.CrossTier.cross_tier_agreement` | item 133 — cross-tier agreement | **proved** | `propext` | conformant runtimes agree on a well-annotated IR |
 | `RevL.CrossTier.six_tier_agreement` | item 133 | **proved** | `propext` | the six-runtime corollary over `Tier` |
 | `RevL.CrossTier.annotation_necessary` | item 133 | **proved** | none | annotation is necessary: python/ts disagree on a bare literal |
@@ -115,7 +124,10 @@ not yet express.
    the five `missed-G4` files. Needs a reachability model for
    arrow/spawn bodies in the export, not a checker change.
 2. **Capability ceilings/budgets** (2.0 features): parameterized
-   capabilities over the `Ctx` model.
+   capabilities over the `Ctx` model. *In progress* — the theorems are
+   stated in `RevL.Theorems.CapCeilings` over the `(T,P)` algebra in
+   `RevL.Lemmas.CapLemmas`, and are currently `sorry`'d (the gate is red
+   on them by design until they are filled).
 3. **L3, deliberately deferred**: `Trusted[T]`/`Secret[T]`
    non-interference and WAL commit/abort discharge. Both extend L0 (taint
    is a checker feature, not part of the current core; commit/abort is a
