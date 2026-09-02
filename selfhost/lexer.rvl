@@ -66,6 +66,7 @@ fn keywords() -> List[Str] {
     "handoff",
     "spawn",
     "every", "after",
+    "subscribe",
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "break", "continue",
     "match", "test", "assert", "async", "as", "fail",

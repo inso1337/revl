@@ -52,6 +52,7 @@ __all__ = [
     "JobHandle", "LeaseHandle", "LeaseRefused", "Map", "Pool", "PoolError",
     "SessionCommitError", "SessionOwner",
     "SpawnHandle", "StateIncompatible",
+    "Stream", "StreamFaulted", "StreamSource", "Subscription", "STREAM_CLOSED",
     "TimerHandle", "TransientError", "add_trace", "arm_fault_probe", "clear_session_owner",
     "disarm_fault_probe",
     "fmt", "live_instances", "plug", "realm_label", "remove_trace", "resolved_config",
@@ -3124,6 +3125,246 @@ class Job:
         cls._handles.clear()
         cls.runs.clear()
         cls._serial = 0
+
+
+# ---------------------------------------------------------------------------
+# Stream[T] reactive types (roadmap item 130, docs/design/130-stream-reactive-types.md)
+# ---------------------------------------------------------------------------
+#
+# This is the REFERENCE definition of the subscribe / next / close protocol
+# (design §4.6). A `Stream[T]` is a capability to acquire a single-consumer
+# subscription; the subscription is an acquire/undo BRACKET whose inverse
+# `close` runs on the owner's teardown, so unloading the owner CLOSES the
+# stream before the owner disappears (the core guarantee, §0). Two review-
+# critical properties live here and nowhere else:
+#
+#   * cancellation-first `next` (§9 Part A). `next` parks on a fresh future
+#     woken by an item, a terminal, OR `close`; the loop checks the tripped
+#     cancel flag BEFORE a buffered item, so `close` during a parked `next`
+#     resolves it as terminal `Closed` and the bracket inverse is reachable off
+#     the teardown path — an outstanding `next` on a dead provider can neither
+#     deadlock nor leak.
+#   * provider death is a terminal, never silence (§9 Part B). A source's
+#     `close()`/`fault()` delivers `Closed`/`Faulted` to every live
+#     subscription's outstanding `next`, so a `next` is always terminated by
+#     exactly one of owner-teardown or a provider terminal.
+#
+# Slice 1 backpressure is `error` only: a full bounded buffer faults the
+# subscription with `Faulted(overflow)` and closes it — no silent loss.
+
+
+class StreamFaulted(RuntimeError):
+    """A subscription's `next` observed a terminal `Faulted(reason)` — a
+    provider abort (§4.3) or a bounded-buffer overflow under the `error` policy
+    (§4.4). Carries the reason so a consumer/teardown can attribute it."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _StreamClosed:
+    """The terminal value a `next` returns on an orderly close — the `Closed`
+    event (design §4.3). A singleton so a consumer can identity-test it."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover — debugging aid
+        return "<stream Closed>"
+
+
+STREAM_CLOSED = _StreamClosed()
+
+
+class StreamSource:
+    """The provider side of a `Stream[T]` (design §1). A test provider `emit`s
+    items explicitly; `close()` is the terminal-delivering inverse the
+    subscription's core guarantee rests on (§0), and `fault(reason)` models a
+    provider abort. Registered on `Stream._sources` so a harness can drive it,
+    exactly as `Job._handles` exposes in-flight jobs."""
+
+    DEFAULT_CAPACITY = 8
+
+    def __init__(self) -> None:
+        self._subs: list = []
+        self._state = "open"          # open | closed | faulted
+        Stream._sources.append(self)
+        _record("stream.source open")
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def emit(self, item: Any) -> bool:
+        """Deliver one item to the single consumer. A no-op once terminal."""
+        if self._state != "open":
+            return False
+        for sub in list(self._subs):
+            sub._deliver(item)
+        _record(f"stream.emit {item}")
+        return True
+
+    def close(self) -> bool:
+        """Orderly provider teardown: deliver `Closed` to every subscription and
+        release. The terminal that rule 3.6 requires (§9 Part B)."""
+        if self._state != "open":
+            return False
+        self._state = "closed"
+        for sub in list(self._subs):
+            sub._terminate("closed", None)
+        _record("stream.source close")
+        return True
+
+    def fault(self, reason: str = "provider fault") -> bool:
+        """Provider abort: deliver `Faulted(reason)` to every subscription's
+        outstanding `next` (never a silent pending, §4.3)."""
+        if self._state != "open":
+            return False
+        self._state = "faulted"
+        for sub in list(self._subs):
+            sub._terminate("faulted", reason)
+        _record(f"stream.source fault {reason}")
+        return True
+
+    def _detach(self, sub: "Subscription") -> None:
+        if sub in self._subs:
+            self._subs.remove(sub)
+
+
+def _fiber_withdrawn(ctx: Any) -> bool:
+    """True once the owning activation is no longer live (its fiber left the
+    ACTIVE/LOADING states — UNLOADING / FAILED / DISPOSED / PENDING).
+
+    This is the cancellation-first signal §9 Part A needs on the event-loop
+    tier. cordis disposal AWAITS the body's in-flight `await` before it runs the
+    collected inverses (the divert-inertia contract, item 131: an in-flight
+    acquisition LANDS, it is never cancelled), so a `next` parked forever would
+    DEADLOCK teardown behind an await that never lands. The fiber's state flips
+    to UNLOADING *synchronously* when withdrawal begins — before that await — so
+    a `next` that observes it resolves as terminal `Closed`, the body lands, and
+    the bracket inverse `close` is reachable off the teardown path. Duck-typed so
+    the runtime keeps no hard import of the cordis `FiberState` enum."""
+    if ctx is None:
+        return False
+    try:
+        state = ctx.fiber.state
+    except Exception:  # pragma: no cover — a non-cordis owner never withdraws
+        return False
+    name = getattr(state, "name", str(state))
+    return name not in ("ACTIVE", "LOADING")
+
+
+class Subscription:
+    """A single-consumer subscription (design §1, §4.6). `next()` awaits the
+    next item raced against the cancel token; `close()` trips that token
+    synchronously and releases the listener (the bracket inverse).
+
+    `next` is a COOPERATIVE poll (like `JobHandle._drive`): each turn it checks,
+    cancellation-first, the cancel token, then owner withdrawal, then a buffered
+    item, then a provider terminal — so `close`, a withdrawn owner, or a provider
+    `close`/`fault` all resolve a parked `next` at the next scheduler turn,
+    without ever waiting for the provider. Determinism, not wall-clock."""
+
+    def __init__(self, source: StreamSource, policy: str = "error",
+                 ctx: Any = None,
+                 capacity: int = StreamSource.DEFAULT_CAPACITY) -> None:
+        self._source = source
+        self._policy = policy            # Slice 1: "error" only
+        self._capacity = capacity
+        self._ctx = ctx                  # the owning activation's context, or None
+        self._buffer: list = []
+        self._terminal: Optional[tuple] = None   # ("closed", None) | ("faulted", reason)
+        self._closed = False             # the cancel token, tripped by close()
+        source._subs.append(self)
+        Stream._subs.append(self)
+        _record("stream.subscribe")
+
+    # provider -> subscription -------------------------------------------------
+    def _deliver(self, item: Any) -> None:
+        if self._closed or self._terminal is not None:
+            return
+        if len(self._buffer) >= self._capacity:
+            # backpressure `error` (default, §4.4): a full buffer is a terminal
+            # `Faulted(overflow)` — deterministic, no silent loss.
+            self._terminal = ("faulted", "overflow")
+            _record("stream.overflow")
+            return
+        self._buffer.append(item)
+
+    def _terminate(self, kind: str, reason: Optional[str]) -> None:
+        if self._closed or self._terminal is not None:
+            return
+        self._terminal = (kind, reason)
+
+    async def next(self) -> Any:
+        """Await the next item or a terminal event — a suspension point raced
+        against the cancel token. Returns the item, returns `STREAM_CLOSED` on a
+        `Closed` terminal (orderly close or owner withdrawal), or raises
+        `StreamFaulted` on a `Faulted` terminal (provider abort / overflow)."""
+        while True:
+            # cancellation-first (§9 Part A): the tripped token — or a withdrawn
+            # owner — wins over a buffered item, so `close`/withdrawal resolves a
+            # parked `next` as `Closed` and the bracket inverse stays reachable.
+            if self._closed or _fiber_withdrawn(self._ctx):
+                return STREAM_CLOSED
+            if self._buffer:
+                return self._buffer.pop(0)
+            if self._terminal is not None:
+                kind, reason = self._terminal
+                if kind == "faulted":
+                    raise StreamFaulted(reason or "faulted")
+                return STREAM_CLOSED
+            await asyncio.sleep(0)
+
+    def close(self) -> bool:
+        """The bracket inverse: trip the cancel token synchronously, release the
+        host listener, and resolve any parked `next` as `Closed`. Infallible and
+        idempotent (a no-op once closed) — teardown never suspends (G5)."""
+        if self._closed:
+            return False
+        self._closed = True
+        self._source._detach(self)
+        _record("stream.close")
+        return True
+
+
+class Stream:
+    """Host builtin (item 130): `Stream.source()` opens a provider; `subscribe`
+    lowers to `Stream.subscribe(source, policy)`. `pending()` is the residue
+    probe — open sources plus un-closed subscriptions — so a test can assert the
+    core guarantee left no listener behind (mirrors `Job.pending`)."""
+
+    _sources: list = []
+    _subs: list = []
+
+    @classmethod
+    def source(cls) -> StreamSource:
+        return StreamSource()
+
+    @classmethod
+    def subscribe(cls, source: StreamSource, policy: str = "error",
+                  ctx: Any = None) -> Subscription:
+        return Subscription(source, policy, ctx)
+
+    @classmethod
+    def pending(cls) -> int:
+        """Residue: open sources + live (un-closed) subscriptions. Zero after a
+        clean unload proves the bracket inverse ran (no dangling listener)."""
+        return (sum(1 for s in cls._sources if s._state == "open")
+                + sum(1 for s in cls._subs if not s._closed))
+
+    @classmethod
+    def sources(cls) -> list:
+        return list(cls._sources)
+
+    @classmethod
+    def last_source(cls) -> Optional[StreamSource]:
+        return cls._sources[-1] if cls._sources else None
+
+    @classmethod
+    def reset(cls) -> None:
+        cls._sources.clear()
+        cls._subs.clear()
 
 
 # ---------------------------------------------------------------------------
