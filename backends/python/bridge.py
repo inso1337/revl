@@ -130,6 +130,7 @@ class TlsConfig:
     def server_context(self) -> ssl.SSLContext:
         """The provider side: present our cert, and **demand** the peer's (mTLS)."""
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2   # floor it, don't inherit
         ctx.load_cert_chain(self.certfile, self.keyfile)
         ctx.load_verify_locations(self.cafile)
         ctx.verify_mode = ssl.CERT_REQUIRED  # mutual: a client with no cert is refused
@@ -139,6 +140,7 @@ class TlsConfig:
         """The consumer side: present our cert, and verify the provider's against
         the CA (hostname-checked)."""
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2   # floor it, don't inherit
         ctx.load_cert_chain(self.certfile, self.keyfile)
         ctx.load_verify_locations(self.cafile)
         ctx.verify_mode = ssl.CERT_REQUIRED
