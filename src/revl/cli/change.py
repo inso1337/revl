@@ -1,4 +1,4 @@
-"""Per-command CLI handlers: plan / apply / rollback / recovery / quarantine.
+"""Per-command CLI handlers: plan / apply / rollback / recovery / estop / quarantine.
 
 Pure move — per-command CLI handlers, byte-identical behavior; see revl.__main__ for dispatch.
 """
@@ -6,7 +6,9 @@ Pure move — per-command CLI handlers, byte-identical behavior; see revl.__main
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 from .._paths import backends_root
@@ -285,6 +287,217 @@ def _print_undo(result: dict, args) -> None:
         print("  (none — the interim generations crossed no boundary)")
 
 
+def _estop_latch_path(args) -> str | None:
+    """The latch file `revl estop` acts on: `--latch`, else `<wal>.estop`.
+
+    Deriving it from the WAL is not a convenience: the WAL is the durable
+    rendezvous the reconciliation path already uses (`revl recover --wal`), so
+    a halt and its reconciliation name the same session with one argument."""
+    if getattr(args, "latch", None):
+        return args.latch
+    if getattr(args, "wal", None):
+        return f"{args.wal}.estop"
+    return None
+
+
+def _run_estop(args) -> int:
+    """`revl estop` — the operator's emergency halt (item 443,
+    docs/design/443-estop.md).
+
+    Every other stop revl has is cooperative: teardown replays inverses LIFO,
+    faults route through residue records, withdrawal propagates to dependents.
+    That is right for a composition fault and wrong for an operator emergency.
+    This verb arms a latch that a running composition's crossing seams watch,
+    so the halt costs one latch check rather than a whole two-phase unwind.
+
+    What it does NOT do, and must not: run an inverse, run a compensation,
+    flush a deferred emission, or write a discharge record. The stranded
+    entries stay owed and their WAL descriptors stay on disk, which is exactly
+    what lets `revl recover --wal FILE` reconcile afterwards — an E-Stop is
+    deliberately shaped to look like a CRASH to the recovery path.
+
+    Exit status follows the residue, as `revl recover` does: 0 when there is
+    nothing outstanding, 1 when a halt is engaged and entries are owed. An
+    E-Stop is never clean."""
+    path = _estop_latch_path(args)
+    if path is None:
+        print("error: `revl estop` needs --latch FILE (or --wal FILE, which "
+              "derives FILE.estop)", file=sys.stderr)
+        return 2
+
+    if getattr(args, "clear", False):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            existed = False
+        except OSError as error:
+            print(f"error: cannot clear latch {path}: {error}", file=sys.stderr)
+            return 1
+        else:
+            existed = True
+        report = {"cleared": existed, "latch": path, "resumed": False,
+                  "note": "the latch is gone so a FRESH process may boot; the "
+                          "halted instance stays dead and its stranded entries "
+                          "stay owed (item 443)"}
+        print(json.dumps(report, indent=2) if args.json
+              else _render_estop_clear(report))
+        return 0
+
+    record = _read_estop_latch(path)
+
+    if getattr(args, "report", False):
+        if record is None:
+            report = {"halted": False, "latch": path, "clean": True}
+            print(json.dumps(report, indent=2) if args.json
+                  else f"no E-Stop latch at {path} — nothing is halted")
+            return 0
+        outstanding = _estop_outstanding(record.get("wal")
+                                         or getattr(args, "wal", None))
+        report = {"halted": True, "latch": path, "clean": False, **record,
+                  "outstanding": outstanding}
+        print(json.dumps(report, indent=2) if args.json
+              else _render_estop(report))
+        return 1
+
+    if record is not None:
+        # Idempotent, like `runtime.estop`: hitting the button twice is not two
+        # halts, and the SECOND press must not overwrite the first one's reason.
+        report = {"halted": True, "latch": path, "clean": False,
+                  "alreadyHalted": True, **record}
+        print(json.dumps(report, indent=2) if args.json else _render_estop(report))
+        return 1
+
+    record = {
+        "halted": True,
+        "verdict": "halted",
+        "reason": args.reason or "operator halt",
+        "operator": args.operator or "unknown",
+        "at": time.time(),
+        "wal": getattr(args, "wal", None),
+        "resumable": False,
+        "reconcile": (f"revl recover --wal {args.wal}" if getattr(args, "wal", None)
+                      else "revl recover --wal <file>"),
+    }
+    try:
+        directory = os.path.dirname(os.path.abspath(path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, indent=2)
+            handle.write("\n")
+    except OSError as error:
+        print(f"error: cannot arm latch {path}: {error}", file=sys.stderr)
+        return 1
+
+    report = {**record, "latch": path, "clean": False,
+              "outstanding": _estop_outstanding(getattr(args, "wal", None))}
+    print(json.dumps(report, indent=2) if args.json else _render_estop(report))
+    return 1
+
+
+def _read_estop_latch(path: str) -> dict | None:
+    """The halt an operator armed at `path`, or None when the latch is absent.
+
+    A latch that exists but does not parse still reads as HALTED. Failing open
+    on a malformed emergency stop is the one failure mode this feature exists
+    to prevent, and it is the same rule the runtime seam applies."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    except (ValueError, TypeError):
+        return {"halted": True, "reason": "operator halt (unreadable latch)",
+                "operator": "unknown"}
+    return record if isinstance(record, dict) else {
+        "halted": True, "reason": "operator halt (unreadable latch)",
+        "operator": "unknown"}
+
+
+def _estop_outstanding(wal_path: str | None) -> dict:
+    """What the halted session still OWES, read off its WAL.
+
+    Every `transactional` inverse and every `compensation` was WAL-logged as a
+    named-call discharge descriptor at REGISTRATION (docs/design/teardown-
+    contract.md, "WAL descriptor"), and a clean commit writes a `discharge`
+    record naming the seqs it settled. An E-Stop writes neither — it strands —
+    so the descriptors with no discharge behind them are exactly the entries
+    still owed, and exactly what `revl recover` would replay. Counting them
+    here re-derives the inventory from the durable log rather than trusting the
+    dead process's memory."""
+    if not wal_path:
+        return {"known": False,
+                "note": "no WAL was named, so the outstanding entries cannot be "
+                        "read off disk — pass --wal FILE, or run `revl recover "
+                        "--wal FILE` against the session's log"}
+    from ..wal import WALIntegrityError, read_wal  # noqa: PLC0415
+    try:
+        wal = read_wal(wal_path)
+    except (OSError, WALIntegrityError) as error:
+        return {"known": False, "note": f"cannot read WAL {wal_path}: {error}"}
+    discharged: set = set()
+    descriptors: list[dict] = []
+    for record in wal.get("records") or []:
+        kind = record.get("record")
+        if kind == "discharge":
+            discharged.update(record.get("discharged") or [])
+        elif kind == "discharge-descriptor":
+            descriptors.append(record)
+    owed = [d for d in descriptors if d.get("seq") not in discharged]
+    return {
+        "known": True,
+        "wal": wal_path,
+        "entries": [{"seq": d.get("seq"), "entry": d.get("entry"),
+                     "receiver": (d.get("call") or {}).get("receiver"),
+                     "method": (d.get("call") or {}).get("method"),
+                     "idempotency": d.get("idempotency")}
+                    for d in owed],
+        "count": len(owed),
+    }
+
+
+def _render_estop(report: dict) -> str:
+    lines = ["E-STOP ENGAGED" + ("  (already armed)" if report.get("alreadyHalted")
+                                 else "")]
+    lines.append(f"  latch     {report.get('latch')}")
+    lines.append(f"  reason    {report.get('reason')}")
+    lines.append(f"  operator  {report.get('operator')}")
+    lines.append("")
+    lines.append("  What this guarantees: no NEW boundary crossing is dispatched.")
+    lines.append("  What it does NOT: nothing was unwound. No inverse ran, no")
+    lines.append("  compensation ran, nothing was discharged. Every registered")
+    lines.append("  entry is STRANDED — still owed — and every acquired handle")
+    lines.append("  is still held. That is the trade the button makes.")
+    outstanding = report.get("outstanding") or {}
+    lines.append("")
+    if outstanding.get("known"):
+        lines.append(f"  outstanding ({outstanding['count']}):")
+        for entry in outstanding["entries"] or []:
+            key = entry.get("idempotency")
+            lines.append(
+                f"    seq {entry.get('seq')}  {entry.get('entry')}  "
+                f"{entry.get('receiver')}.{entry.get('method')}"
+                + (f"  [idempotency {key}]" if key else ""))
+        if not outstanding["entries"]:
+            lines.append("    (none on the WAL — nothing durable was registered)")
+    else:
+        lines.append(f"  outstanding: {outstanding.get('note', 'unknown')}")
+    lines.append("")
+    lines.append("  The instance is DEAD; there is no resume (item 443).")
+    lines.append(f"  Reconcile with: {report.get('reconcile', 'revl recover --wal <file>')}")
+    return "\n".join(lines)
+
+
+def _render_estop_clear(report: dict) -> str:
+    head = ("latch cleared" if report.get("cleared")
+            else "no latch was armed")
+    return (f"{head}: {report.get('latch')}\n"
+            "  This is NOT a resume. The halted instance stays dead and its\n"
+            "  stranded entries stay owed until `revl recover` reconciles them.")
+
+
 def _run_recover(args) -> int:
     """`revl recover --wal FILE` — crash recovery over a write-ahead log
     (docs/crash-recovery.md). Reads the WAL, decides roll-forward vs roll-back,
@@ -303,6 +516,21 @@ def _run_recover(args) -> int:
         sys.path.insert(0, str(backend_dir))
 
     from ..recovery import recover, render, RecoveryError  # noqa: PLC0415
+
+    # item 440 §(b): the re-issue seam's operator knob rides the SAME `--policy`
+    # file the roll-forward path already re-establishes, and is read whether or
+    # not `--restore` was given (the seam acts on the owed-emission report, which
+    # has nothing to do with resuming a snapshot). No policy → `None` → the seam
+    # is off and recover auto-fires nothing, exactly as before this item.
+    reissue = None
+    if getattr(args, "policy", None):
+        from ..policy import PolicyError, load_policy  # noqa: PLC0415
+        try:
+            reissue = load_policy(args.policy).reissue_strength()
+        except (OSError, PolicyError) as error:
+            print(f"error: cannot load policy {args.policy}: {error}",
+                  file=sys.stderr)
+            return 1
 
     session = snapshot = None
     if getattr(args, "restore", None):
@@ -332,7 +560,8 @@ def _run_recover(args) -> int:
             session.approval_policy = args.approval_policy
 
     try:
-        report = recover(args.wal, session=session, snapshot=snapshot)
+        report = recover(args.wal, session=session, snapshot=snapshot,
+                         reissue=reissue)
     except RecoveryError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -342,6 +571,75 @@ def _run_recover(args) -> int:
     else:
         print(render(report))
     return 0 if report.get("residue", {}).get("clean") else 1
+
+
+def _run_branch(args) -> int:
+    """`revl branch --wal FILE [--wal FILE...] [--at SEQ]` — session branch
+    lineage over durable WALs (item 250, Slice 2).
+
+    With one WAL it says what that session IS (a branch of another, a parent
+    frozen at its fork point, or neither) and what a branch inherited. With
+    several it reconstructs the branch tree, naming the edges it could not close
+    rather than dropping them. With `--at` it enumerates the fork partition of the
+    recorded tail instead.
+
+    Needs no backend: it reads through the tier-agnostic WAL core, so a branch
+    written by any tier's runtime reads the same. Nothing is run and nothing is
+    rewound — an offline reader has no workspace to rewind. Exit status follows
+    the residue: 0 when the branch stands on a clean fork point, 1 when honest
+    residue (a crossed emission, an unfired crossing inverse, an unclosed lineage
+    edge) remains.
+    """
+    from ..branch import (BranchError, lineage, partition,  # noqa: PLC0415
+                          render, topology)
+
+    wals = list(args.wal)
+    try:
+        if args.at is not None:
+            if len(wals) != 1:
+                print("error: --at enumerates the tail of ONE session; pass a "
+                      "single --wal", file=sys.stderr)
+                return 1
+            doc = partition(wals[0], args.at)
+        elif len(wals) == 1:
+            doc = lineage(wals[0])
+        else:
+            doc = topology(wals)
+    except BranchError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(doc, indent=2))
+    else:
+        print(render(doc))
+
+    if doc["kind"] == "revl.branch-topology":
+        return 1 if (doc["orphans"] or doc["dangling"]) else 0
+    residue = doc.get("residue") or doc.get("inheritedResidue")
+    return 0 if residue is None or residue.get("clean") else 1
+
+
+def _run_compare(args) -> int:
+    """`revl compare LEFT.wal RIGHT.wal` — compare two recorded session histories
+    that share a fork point (item 250, Slice 2).
+
+    Two WALs with no recorded lineage relation are NOT compared against an
+    invented common point; the comparison says so and exits nonzero, because a
+    per-side tail only means something relative to a divergence point.
+    """
+    from ..branch import BranchError, compare, render  # noqa: PLC0415
+
+    try:
+        doc = compare(args.left, args.right)
+    except BranchError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(doc, indent=2))
+    else:
+        print(render(doc))
+    return 0 if doc["comparable"] else 1
 
 
 def _run_repair(args) -> int:

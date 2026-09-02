@@ -215,8 +215,8 @@ compile unprofiled, the way an embedder's own sources do.
 | `--provider MODULE.rvl` | operator-written host code the untrusted agent may compose the SERVICES of — item 334's granted-providers map. Reaching its externs directly is still refused |
 | `--grant SERVICE` | turn on the item-329 reach allowlist. With no grants the allowlist is off: there is no honest default for which of a running system's services an agent may reach |
 | `--root DIR` | a directory the agent's path arguments may name. Defaults to the directory the server was started in |
-| `--approval-record-values bound` (default) | an approved crossing's caller-supplied resource target (`host=`, `path=`, `table=`) is recorded in the durable approval log, so a distilled rule can name the destination (item 251 N1) |
-| `--approval-record-values withheld` | it is recorded as UNRECORDED instead, keeping caller values out of the cross-session log. The cost is that such approvals no longer fold into a distilled rule; author-written literal targets are recorded either way |
+| `--approval-record-values withheld` (default) | an approved crossing's caller-supplied resource target (`host=`, `path=`, `table=`) is recorded as UNRECORDED, so caller values stay out of the durable cross-session approval log. The cost is that such approvals no longer fold into a distilled rule; author-written literal targets are recorded either way |
+| `--approval-record-values bound` | it is recorded verbatim instead, so a distilled rule can name the destination (item 251 N1). Opt in when you want the fold and the targets are not sensitive |
 
 The path jail is the other half. Unjailed, `files` accepted absolute paths and
 `../` traversal, which made every path on the machine an oracle (does it exist,

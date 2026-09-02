@@ -21,15 +21,19 @@ present). A permissive True at a bridged position would prove nothing, so those
 positions refuse (`non-total-conversion`).
 
 TODO(296-slice2): IR-level synthesis + the alias-token-carry gate change land
-alongside this module (see emission_analysis / lower). TODO(296-slice3):
-registry ranking below direct-compatible, chain depth, evidence discount,
-federation pin, `revl diff`. TODO(296-slice4): the 414 matrix rows and the
-generative dichotomy test.
+alongside this module (see emission_analysis / lower). Slice 3 landed the
+resolver surface (`registry.resolve` reports `compatible-with-adapter` below
+direct-compatible, with chain depth and the outcome-merge evidence discount) on
+the `adapter_marking` header this module renders. TODO(296-slice3, remaining):
+`revl adapt --check` chain FLATTENING, `revl diff`, the federation pin.
+TODO(296-slice4): the 414 matrix rows and the generative dichotomy test.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 from dataclasses import dataclass
 
 from .typecheck import parse_type, structural_fields
@@ -727,13 +731,24 @@ def render_adapter(component_name: str, required, provided,
                    opt_ins: dict | None = None, *,
                    provide_key: str, require_key: str = "backing",
                    carried_tokens: tuple[str, ...] = (),
-                   prov_types: dict | None = None) -> str:
+                   prov_types: dict | None = None,
+                   derivation: str | None = None,
+                   chain_depth: int = 1) -> str:
     """Render the synthesized adapter as ordinary `.rvl` source (section 4, the
     artifact + `revl adapt --emit`). The component requires the candidate under
     a fresh alias, provides the consumer-facing key, and wraps each method with
     the bridge derived from the plan. It rides the existing require seam and
     passes the same admission gate as hand-written code (carrying(...) supplies
     the alias token carry-over).
+
+    `derivation` (the `derivation_hash` of this synthesis) stamps the
+    MACHINE-READABLE marking of section 4 onto the rendered source, together
+    with the catalogue version and the adapter's `chain_depth` (1 for a bridge
+    onto ordinary code, n+1 for one onto an adapter of depth n). `resolve`
+    reads that marking back with `adapter_marking` to report chain depth and
+    rank a chain below a fresh single bridge (section 6.4); a rendering with no
+    `derivation` carries no marking, and a later resolve reads it as depth 0 -
+    ordinary code - which is the honest reading of an unmarked component.
 
     Slice 1 renders the flagship-class bodies (emission/plain passthrough, B1
     trailing defaults, B4 identity, B4 `Result[V,E] -> Opt[V]` merge - total
@@ -746,6 +761,12 @@ def render_adapter(component_name: str, required, provided,
         carry = f" carrying({', '.join(carried_tokens)})"
     lines = [
         f"// generated: revl adapt {provide_key} from {require_key}",
+    ]
+    if derivation:
+        lines.append(
+            f"{ADAPTER_MARK_PREFIX} sha256:{derivation} "
+            f"{CATALOGUE_VERSION} depth={int(chain_depth)}")
+    lines += [
         f"component {component_name} requires {require_key}: {provided.name}"
         f"{carry} provides {provide_key}: {required.name} {{",
         f"  provide {provide_key} {{",
@@ -810,6 +831,31 @@ def _render_method(mname, rm, pm, opt: dict, require_key: str,
     return [f"fn {mname}({params}) = {call}"]
 
 
+def service_surface(decl) -> str:
+    """The canonical byte spelling of a `ServiceDecl` for a derivation hash.
+
+    Derived from the DECLARATION, not from whichever IR document it arrived in,
+    so `revl adapt` and `registry.resolve` compute the SAME adapter identity for
+    the same pair. The hash is the adapter's identity for evidence and for
+    staleness (section 4); two surfaces disagreeing about it would defeat both.
+    """
+    return json.dumps({
+        "service": {"commutative": bool(getattr(decl, "commutative", False))},
+        "methods": {
+            name: {
+                "params": [[pn, pt] for pn, pt in m.params],
+                "returns": m.returns,
+                "emission": bool(m.emission),
+                "async": bool(getattr(m, "async_", False)),
+                "commutative": bool(getattr(m, "commutative", False)),
+                "capabilities": (list(m.capabilities)
+                                 if m.capabilities is not None else None),
+            }
+            for name, m in decl.methods.items()
+        },
+    }, sort_keys=True)
+
+
 def derivation_hash(required_surface: str, provided_surface: str,
                     provided_sha: str, adapt_decl: str) -> str:
     """The adapter's identity (section 4): sha256 over consumer surface,
@@ -822,3 +868,57 @@ def derivation_hash(required_surface: str, provided_surface: str,
         h.update(part.encode("utf-8"))
         h.update(b"\x00")
     return h.hexdigest()
+
+
+# ------------------------------------------------- the synthesized-adapter mark
+#
+# Section 4's derivation header, in the one spelling a machine reads:
+#
+#   // derivation: sha256:<hex> catalogue-v1 depth=1
+#
+# It is the ONLY thing that distinguishes a committed adapter from any other
+# component, and it is deliberately a comment: nothing in the gate, the type
+# system, or the wiring learns what an adapter is (design section 3). `resolve`
+# reads it to report chain depth and to rank a chain below a fresh single bridge
+# (section 6.4). An unmarked component reads as depth 0 - ordinary code - which
+# is the honest reading: the marking is a claim the synthesizer makes about
+# itself, so it can only ever rank a candidate DOWN, never up. A component that
+# forged one would be asking to be ranked below where it otherwise sits.
+ADAPTER_MARK_PREFIX = "// derivation:"
+_ADAPTER_MARK_RE = re.compile(
+    r"^//\s*derivation:\s*sha256:(?P<hash>[0-9a-f]{64})"
+    r"(?:\s+(?P<catalogue>\S+))?"
+    r"(?:\s+depth=(?P<depth>\d+))?\s*$")
+
+
+def adapter_marking(source: str) -> dict | None:
+    """Read the section-4 derivation marking off a component's source.
+
+    Returns ``{"derivation": hex, "catalogue": str, "depth": int}`` for a
+    synthesized adapter, or None for ordinary code. Every `//` line is scanned,
+    not just the file head: a committed adapter carries its own `type` and
+    `service` declarations above the generated component, so the marking is not
+    always the first thing in the file. Scanning wide is safe precisely because
+    the marking only ever ranks a candidate DOWN - a forged one asks to be
+    ranked below where it would otherwise sit.
+    """
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("//"):
+            continue
+        match = _ADAPTER_MARK_RE.match(stripped)
+        if match:
+            return {
+                "derivation": match.group("hash"),
+                "catalogue": match.group("catalogue") or "",
+                "depth": int(match.group("depth") or 1),
+            }
+    return None
+
+
+def chain_depth_for(candidate_source: str) -> int:
+    """The chain depth a fresh bridge onto `candidate_source` would have: 1 onto
+    ordinary code, n+1 onto a committed adapter that marks itself depth n
+    (section 6.4, "depth only ever ranks down")."""
+    mark = adapter_marking(candidate_source)
+    return 1 + (mark["depth"] if mark else 0)

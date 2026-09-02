@@ -10,8 +10,14 @@ into that default suite.
 Snapshot policy (docs/conformance.md, "Golden policy"): the invariant is
 "emitter output never changes *unreviewed*". A failing test here means the
 emitter changed without the golden being regenerated and reviewed — the fix is
-to regenerate (`python3 backends/typescript/scripts/regen-golden.py` and
-siblings) and commit the reviewed diff, not to freeze the emitter.
+to regenerate and commit the reviewed diff, not to freeze the emitter. One
+command regenerates any tier:
+
+    python3 tools/regen_goldens.py --check          # which goldens drifted
+    python3 tools/regen_goldens.py <tier>           # regenerate that tier
+
+`tools/regen_goldens.py` is the registry of every checked-in golden and how it
+is produced; each assertion below names the target that regenerates it.
 
 Every emitter is pure Python, so none of this needs a toolchain.
 """
@@ -29,6 +35,13 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_source  # noqa: E402
 
 REFERENCE_IR = ROOT / "examples" / "user_cache.ir.json"
+
+# What a red here means, and the exact command that resolves it. A golden is a
+# review prompt, never a wall — see the module docstring and the golden policy.
+_STALE = ("{f} no longer matches what the emitter produces. If the emitter change is "
+          "intended: `python3 tools/regen_goldens.py {t}`, review the diff, and commit "
+          "it in the same change. Do NOT bend the emitter back to the old bytes "
+          "(docs/conformance.md, \"Golden policy: snapshot, not freeze\").")
 
 
 def _load_emitter(name: str, backend: str):
@@ -60,34 +73,21 @@ def test_user_cache_golden_from_reference_ir(tier):
     ir = json.loads(REFERENCE_IR.read_text(encoding="utf-8"))
     src = emitter.emit(ir, **kwargs)
     golden = (ROOT / golden_rel).read_text(encoding="utf-8")
-    assert src == golden
+    assert src == golden, _STALE.format(f=golden_rel, t=tier)
 
 
 def test_wasm_functions_golden_from_v3_source():
     """The one wasm golden not checked from the default suite: `functions.wat`
     lives in backends/wasm/test_v3_emit.py, a separate CI job. Emit the same
-    v3 source here so a stale functions.wat fails `pytest tests/` too."""
+    v3 source here so a stale functions.wat fails `pytest tests/` too. The
+    source is committed beside the golden (`functions.revl`) rather than inlined
+    in two tests, so the emit recipe has one owner."""
     emitter = _load_emitter("revl_golden_wasm_emit", "wasm")
-    ir = compile_source(
-        """
-        type Row = { id: Int, name: Str }
-        type Outcome = Ok(Row) | NotFound | Invalid(Str)
-
-        fn add(a: Int, b: Int) -> Int { return a + b }
-        fn negate(b: Bool) -> Bool { return !b }
-        fn name(row: Row) -> Str { return row.name }
-        fn first(xs: List[Int]) -> Int { return xs[0] }
-        fn greet() -> Str { return "hi" }
-        fn make_row(id: Int, name: Str) -> Row { return { id: id, name: name } }
-        fn classify(n: Int) -> Str {
-          if (n < 0) return "neg"
-          return "pos"
-        }
-        """
-    )
+    source = ROOT / "backends" / "wasm" / "golden" / "functions.revl"
+    ir = compile_source(source.read_text(encoding="utf-8"))
     wat = emitter.emit(ir)["functions"]
     golden = (ROOT / "backends" / "wasm" / "golden" / "functions.wat").read_text()
-    assert wat == golden
+    assert wat == golden, _STALE.format(f="backends/wasm/golden/functions.wat", t="wasm")
 
 
 def test_the_frontend_still_mints_ir_version_1():

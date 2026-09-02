@@ -61,16 +61,9 @@ def _emit_temporal_module():
 
 # A mappable saga: two remote-resource crossings, each with an independent-key
 # compensation. Nothing host-pinned, nothing outside the Slice-1 allowlist.
-_BOOKTRIP = """
-service Flights { emission fn reserve(itinerary: Str) -> Str
-                  emission fn cancel(key: Str) -> Str }
-service Payments { emission fn charge(card: Str, total: Int) -> Str
-                   emission fn refund(card: Str, total: Int) -> Str }
-component BookTrip requires flights: Flights, payments: Payments {
-  emit flights.reserve("ABC") compensate flights.cancel("ABC")
-  emit payments.charge("visa", 100) compensate payments.refund("visa", 100)
-}
-"""
+# Committed beside the other emitter fixtures so `tools/regen_goldens.py` emits
+# the golden from the same bytes this test does.
+_BOOKTRIP = (_HERE / "tests" / "fixtures" / "booktrip.revl").read_text(encoding="utf-8")
 
 
 def _booktrip_ir():
@@ -85,8 +78,8 @@ def test_mappable_component_emits_temporal_workflow_golden():
     got = EMIT.emit(_booktrip_ir(), target="temporal")
     golden = (_HERE / "golden" / "temporal_booktrip.ts").read_text(encoding="utf-8")
     assert got == golden, (
-        "the emitted Temporal workflow drifted from the golden; regenerate "
-        "backends/typescript/golden/temporal_booktrip.ts if the change is intended")
+        "the emitted Temporal workflow drifted from the golden. If the change is "
+        "intended: python3 tools/regen_goldens.py typescript, then review the diff.")
     # spot the load-bearing shape the golden encodes:
     assert "import { proxyActivities" in got
     assert "export async function BookTrip(): Promise<void>" in got
