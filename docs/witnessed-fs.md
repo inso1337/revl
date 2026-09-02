@@ -141,7 +141,9 @@ revl moves; revl-harness hit that three times.
 So the door is a revl one. The consumer asks revl for the decision and does its
 own reading with the plain host filesystem module:
 
-```revl
+```revl sketch
+// Elided host bodies, so this block is a sketch. The same consumer, whole and
+// compiled, runs on both tiers in tests/test_fs_observation.py (`_CONSUMER`).
 use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }
 
 extern pure fn read_confined(real: Str) -> Str
