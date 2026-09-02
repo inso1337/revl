@@ -174,6 +174,35 @@ def test_the_crate_ships_no_admission_at_all():
         "a native gate abort must become OutsideFrontier, never a verdict"
 
 
+def test_the_navigation_surface_issues_no_verdict_and_is_versioned_apart():
+    """`revl_gate::symbols` (item 336 slice 2) answers WHERE a declaration is,
+    never WHETHER a program may run.
+
+    Two things are pinned here because both are load-bearing. It ships no
+    verdict type, so no caller can read a populated table as a green light; and
+    it carries its own semver, because `GATE_API_VERSION` is held in lockstep
+    with `revl.gate` on py (`test_the_gate_api_semver_is_one_surface_across_
+    wheel_and_crate`) and `revl.gate` has no navigation surface to keep in step
+    with."""
+    symbols_rs = (CRATE / "src" / "symbols.rs").read_text(encoding="utf-8")
+    code = "\n".join(line for line in symbols_rs.splitlines()
+                     if not line.lstrip().startswith(("//!", "///", "//")))
+    assert "pub fn symbols(source: &str) -> Symbols" in code
+    assert "Verdict" not in code, (
+        "the navigation surface must not deal in verdicts: it says where a "
+        "declaration is, not whether the program may run")
+    assert "Undecided { reason: String }" in code, \
+        "a document this surface will not answer for must say so explicitly"
+    assert "catch_unwind" in code, \
+        "a native front-end abort must become Undecided, never an answer"
+    lib_rs = (CRATE / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert "pub mod symbols;" in lib_rs
+    assert (f'pub const SYMBOLS_API_VERSION: &str = "{GEN.SYMBOLS_API_VERSION}";'
+            in lib_rs)
+    meta = json.loads((CRATE / "GENERATED.json").read_text(encoding="utf-8"))
+    assert meta["symbols_api_version"] == GEN.SYMBOLS_API_VERSION
+
+
 def test_the_covered_layer_is_stated_identically_everywhere():
     """`COVERED_LAYER` is the one sentence saying what this gate decides. It is
     stamped into the rust source, the README and the provenance from a single
@@ -193,7 +222,8 @@ def test_the_covered_layer_is_stated_identically_everywhere():
 @pytest.mark.parametrize("relpath", [
     "Cargo.toml", "GENERATED.json", "README.md",
     "src/lib.rs", "src/frontier.rs", "src/selfhost.rs", "src/session.rs",
-    "tests/admit.rs",
+    "src/symbols.rs",
+    "tests/admit.rs", "tests/symbols.rs",
 ])
 def test_every_generated_file_is_committed(relpath):
     assert (CRATE / relpath).is_file(), f"crates/revl-gate/{relpath} is missing"

@@ -11,7 +11,7 @@
     "src/revl/typecheck.py",
     "tools/build_gate_crate.py"
   ],
-  "frontier": "selfhost-admit:2fe35e7c47e0f50b",
+  "frontier": "selfhost-admit:8aaabdb0e9b55721",
   "frontier_excluded_builtins": [
     "codepoint_at",
     "field",
@@ -29,6 +29,7 @@
   "language_version": "2.0.0",
   "layer": "1 (verdict surface), admit-only",
   "max_source_bytes": 262144,
+  "navigation_surface": "revl_gate::symbols \u2014 declarations and their lines; issues no verdicts",
   "note": "Regenerate with `python3 tools/build_gate_crate.py`. The source_digest is a pure function of digest_inputs, not a git sha, so `--check` can verify the committed crate against the tree it was generated from. `issues_admissions` is false by construction: this gate decides the composition/guarantee layer, not the reference type layer, so its non-refusing arm is `no_objection` and never an admission.",
   "selfhost_closure": [
     "selfhost/lexer.rvl",
@@ -36,7 +37,8 @@
     "selfhost/lower.rvl"
   ],
   "selfhost_root": "selfhost/lower.rvl",
-  "source_digest": "2fe35e7c47e0f50b5f6b4624d64525a8195967a57a896aa2d9e242b1cc835688",
+  "source_digest": "8aaabdb0e9b55721fcab6d2e7ddce81814fe058e50669b34ef305d2e54eb0714",
+  "symbols_api_version": "0.1.0",
   "verdict_arms": [
     "refused",
     "no_objection",

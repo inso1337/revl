@@ -8,6 +8,9 @@ edition = "2021"
 # order it went in, byte for byte (see `pyjson`). Without it serde_json sorts
 # object keys and the wire bytes stop matching `python -m revl.lsp`.
 [dependencies]
+# item 336 slice 2: the native navigation engine. The gate crate is committed
+# generated source, so this dependency adds no build-time Python.
+revl-gate = { path = "../revl-gate" }
 serde = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 
