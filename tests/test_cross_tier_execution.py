@@ -28,7 +28,21 @@ java fails, and java never ran them. Until the switch is on, the STATIC guards
 here are the ones actually holding the line, so add one alongside every probe
 that matters. Turning the switch on is worth doing in the `conformance` job,
 which is the one place every toolchain exists at once, and it needs the java
-record `equals` gap closed first (see item 433's rider section).
+record `equals` gap closed first (see item 433's rider section). That gap is
+now closed, so nothing blocks the switch.
+
+FINDING A JDK ON macOS, because two agents in a row concluded there was none.
+`/usr/bin/java` and `/usr/bin/javac` always exist and are STUBS: they satisfy
+`shutil.which("java")` and then error with "Unable to locate a Java Runtime".
+A Homebrew openjdk is keg-only and therefore NOT on PATH. Look in
+`/opt/homebrew/opt/openjdk/bin` (and ask `/usr/libexec/java_home -V`) before
+recording "no JDK". Locally:
+
+    PATH=/opt/homebrew/opt/openjdk/bin:$PATH JAVA_HOME=/opt/homebrew/opt/openjdk \
+    REVL_CROSS_TIER_SLOW=1 pytest tests/test_cross_tier_execution.py
+
+runs the java column for real. Every java claim in this file has been executed
+that way on openjdk 26.0.2.
 """
 
 import importlib.util
@@ -505,10 +519,16 @@ def test_java_declared_value_types_carry_a_structural_equals():
     fallback dispatched straight into it. `{ id: 1 } == { id: 1 }` was `false`
     here and `true` on python, TypeScript, rust and go.
 
-    This is the guard that runs with no toolchain, which is the only kind that
-    was ever going to fire: the executed probe above sits behind
-    REVL_CROSS_TIER_SLOW, which this repository sets nowhere, and behind a JDK
-    the `frontend` job does not have."""
+    That is not an argument from the emitted source. With
+    REVL_CROSS_TIER_SLOW=1 and a JDK on PATH, the pre-fix emitter fails the
+    probe above on a real JVM (`java.lang.AssertionError` at
+    `testRecordsCompareByValue`, openjdk 26.0.2) and the fixed one passes it.
+
+    This static guard exists because that run is the one CI never does: the
+    executed probe sits behind REVL_CROSS_TIER_SLOW, which this repository
+    sets nowhere, and behind a JDK the `frontend` job does not install. A
+    guard that needs no toolchain is the only kind that was ever going to fire
+    here."""
     emitted = _emit("java", PROBES["declared value types compare structurally"])
     classes = _java_value_classes(emitted)
     for name in ("Point", "Seg", "Weight", "Circle", "Dot"):
@@ -563,8 +583,8 @@ def test_java_nullary_variant_cases_are_not_all_one_value():
 
     The parameter is `__revl_o`: a record may declare a field named `o`, and
     the canonical spelling would shadow it. Nothing here reads a field
-    unqualified today, so `o` would still compile; with no javac in the
-    default test run, the safe name is the one that cannot start failing."""
+    unqualified today, so `o` would still compile; the `frontend` job has no
+    javac, so the safe name is the one that cannot start failing there."""
     emitted = _emit("java", PROBES["declared value types compare structurally"])
     classes = _java_value_classes(emitted)
     assert "return __revl_o instanceof Dot;" in classes["Dot"]
