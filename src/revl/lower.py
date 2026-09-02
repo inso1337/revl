@@ -6948,6 +6948,86 @@ def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
             _refuse_leaky_pure_arrow(value, async_colored, decl, filename)
 
 
+# item 130 rule 3.5 — the IR kinds a `map`/`filter` transform may NOT contain.
+# `f`/`p` type in PURE mode (G6): a combinator chain is a pure derivation whose
+# only effects are the source's bracket and the consumer's body, so an effectful
+# transform is refused with the hint to move the effect into the consumer body
+# where it is capability- and lifecycle-checked (§4.7). `call` is the host-object
+# method call (`sub.next()`, `pool.query(…)`); a value-method call lowers as
+# `builtin` and stays admitted.
+_IMPURE_STAGE_KINDS = frozenset({
+    "host", "req", "call", "spawn", "subscribe", "lease-acquire", "lease-revoke",
+})
+
+
+def _first_impure_in_stage(node) -> str | None:
+    """The first effectful IR node a stream combinator's transform reaches, named
+    for a diagnostic, or None (item 130 rule 3.5)."""
+    if isinstance(node, dict):
+        kind = node.get("kind")
+        if kind in _IMPURE_STAGE_KINDS:
+            if kind == "call":
+                target = node.get("target") or {}
+                head = target.get("id") if isinstance(target, dict) else None
+                return f"{head}.{node.get('method')}" if head else str(node.get("method"))
+            if kind == "host":
+                return str(node.get("fn"))
+            if kind == "req":
+                return f"{node.get('req')}.{node.get('method')}"
+            return kind
+        for value in node.values():
+            hit = _first_impure_in_stage(value)
+            if hit is not None:
+                return hit
+    elif isinstance(node, list):
+        for value in node:
+            hit = _first_impure_in_stage(value)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _lower_stream_stages(sub_expr: "SubscribeExpr", env: "Env",
+                         filename: str) -> list:
+    """Lower the derived-stream combinator chain of a `subscribe` (item 130
+    Slice 2, §1) and enforce rule 3.5 (the transforms are pure).
+
+    Each stage is `{"stage": "map"|"filter"|"take", "fn"|"count": …}`. A stage is
+    a DERIVED stream: its `close` closes its upstream link, so the whole chain
+    rides the one bracket the `subscribe` registers and cancellation reaches the
+    provider end to end."""
+    stages: list = []
+    for stage in sub_expr.stages or []:
+        if stage.kind == "take":
+            stages.append({"stage": "take", "count": stage.arg.value})
+            continue
+        fn_ir = _lower_expr(stage.arg, env, mode="setup")
+        if fn_ir.get("kind") != "arrow":
+            raise RevlError(
+                filename, stage.line,
+                f"`{stage.kind}` needs a pure transform written as an arrow "
+                f"(rule 3.5)",
+                hint=f"write `{stage.kind}(x => …)` — the combinators are a pure "
+                     "derivation; effects belong in the consumer body, where they "
+                     "are capability- and lifecycle-checked (item 130 §3.5, §4.7)",
+                code="lifecycle", category="lifecycle")
+        impure = _first_impure_in_stage(fn_ir.get("body"))
+        if impure is None:
+            impure = _first_suspension(fn_ir.get("body"), env)
+        if impure is not None:
+            raise RevlError(
+                filename, stage.line,
+                f"`{stage.kind}`'s transform reaches `{impure}`, but a stream "
+                f"combinator is pure (rule 3.5)",
+                hint="move the effect into the consumer body, where it is "
+                     "capability-checked against the component's row and joins "
+                     "the OWNER's teardown accumulator; a combinator chain stays "
+                     "a pure derivation (item 130 §3.5, §4.7)",
+                code="lifecycle", category="lifecycle")
+        stages.append({"stage": stage.kind, "fn": fn_ir})
+    return stages
+
+
 def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
     """Build the `let-effect` IR step for a `subscribe <stream> undo sub.close()`
     bracket (item 130, docs/design/130-stream-reactive-types.md §5).
@@ -6963,7 +7043,8 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
       (the no-silent-vanish rule the core guarantee rests on, §9 Part B);
     * rule 3.1 — a source is subscribed at most once (single-consumer);
     * rule 3.4 — the `undo` (`close`) must not itself suspend (`close` is the
-      synchronous, non-suspending bracket inverse; a `next` in it is refused)."""
+      synchronous, non-suspending bracket inverse; a `next` in it is refused);
+    * rule 3.5 — a `map`/`filter` transform is pure (Slice 2, §3.5)."""
     sub_expr: SubscribeExpr = stmt.acquire
     stream_ir = _lower_expr(sub_expr.stream, env, mode="setup")
     # The stream must resolve to a host-local stream source (family `Stream`).
@@ -7013,6 +7094,21 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
         "undo": undo,
         "bind": safe,
     }
+    # Slice 2, all ADDITIVE and all omitted at their defaults, so a Slice 1
+    # program still lowers byte-identically (§5: the step carries the
+    # `policy`/`buffer`/`replay` triple; `replay` is §4.5, a later slice).
+    stages = _lower_stream_stages(sub_expr, env, filename)
+    if stages:
+        acquire["stages"] = stages
+    if sub_expr.buffer is not None:
+        acquire["buffer"] = sub_expr.buffer
+        step["buffer"] = sub_expr.buffer
+    if sub_expr.drain_ms is not None:
+        # §8: the `block`-policy drain window is the one time-windowed piece of
+        # stream behavior, and it fires on the deterministic test clock's
+        # `advance` — never wall-clock.
+        acquire["drain"] = sub_expr.drain_ms
+        step["drain"] = sub_expr.drain_ms
     undo_reach = _first_suspension(step["undo"], env)
     if undo_reach is not None:
         raise RevlError(
