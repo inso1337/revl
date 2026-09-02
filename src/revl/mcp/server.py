@@ -1575,6 +1575,17 @@ def _tool_resolve(arguments: dict) -> dict:
                                 "set `registry` or $REVL_REGISTRY"]}
     verify_required = bool(arguments.get("verifyRequired"))
     trusted_publishers = tuple(arguments.get("trustedPublishers") or ())
+    # item 296: probe the candidates the §5 filter refused for a SAFE adapter.
+    # On by default and reported, never wired - the proposal is source the
+    # author commits, and the answer says so.
+    adapt = arguments.get("adapt")
+    adapt = True if adapt is None else bool(adapt)
+    adapt_opt_ins = arguments.get("adaptOptIns") or None
+    if adapt_opt_ins is not None and not isinstance(adapt_opt_ins, dict):
+        return _session_error(
+            "`adaptOptIns` is the author's `adapt` opt-in map `D`, keyed by "
+            "method name (the same JSON `revl adapt --adapt` takes), e.g. "
+            '{"get": {"return": {"merge": "total"}}}')
     from ..attest import resolve_key  # noqa: PLC0415
 
     key = None
@@ -1603,7 +1614,8 @@ def _tool_resolve(arguments: dict) -> dict:
                                 manifest=arguments.get("manifest"),
                                 limit=int(arguments.get("limit", 5)),
                                 verify_required=verify_required, key=key,
-                                trusted_publishers=trusted_publishers)
+                                trusted_publishers=trusted_publishers,
+                                adapt=adapt, adapt_opt_ins=adapt_opt_ins)
     except RevlError as error:
         return report(error)
 
@@ -2204,7 +2216,14 @@ TOOLS = [
                        "queue, FREEZES the parent (retired at k, non-callable), "
                        "snapshots the step-k state, and mints the branch (fresh "
                        "session id + WAL, no approval carry). The branch is then "
-                       "the only live continuation over the shared workspace.",
+                       "the only live continuation over the shared workspace. The "
+                       "result carries `lineage`: what the branch inherited "
+                       "(composition, generation, IR and source digests, "
+                       "capability surface, WAL position) and, listed explicitly, "
+                       "what it did NOT (provider versions, seeds and clock, model "
+                       "decisions). The same lineage is written durably into the "
+                       "branch's own WAL, so `revl branch` / `revl compare` read "
+                       "the branch tree back after the process is gone.",
         "inputSchema": {
             "type": "object",
             "properties": {"hash": {"type": "string",
@@ -2693,7 +2712,18 @@ TOOLS.append({
                    "evidence file is `unavailable` (ranked below present-and-valid), "
                    "never read as valid. Set `verifyRequired` (with a signer key in "
                    "$REVL_ATTEST_KEY/$REVL_ATTEST_KEY_FILE) to filter any candidate "
-                   "lacking a cryptographically valid attestation.",
+                   "lacking a cryptographically valid attestation. A candidate the "
+                   "compatibility filter REFUSED is additionally probed for a safe "
+                   "ADAPTER (item 296): when one exists it comes back "
+                   "`compatible-with-adapter`, carrying the bridge plan, the "
+                   "generated `adapt` source to commit, the chain depth, and the "
+                   "wiring rename — PROPOSED, never wired, and ranked below every "
+                   "directly compatible candidate at equal authority. Pass "
+                   "`adaptOptIns` for the transformations that need an author's "
+                   "opt-in (an outcome merge, a non-canonical default); without it "
+                   "those pairs come back under `nearMisses` naming the exact "
+                   "position and clause. Set `adapt: false` for the direct-only "
+                   "answer.",
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -2714,6 +2744,18 @@ TOOLS.append({
             "trustedPublishers": {"type": "array", "items": {"type": "string"},
                                   "description": "publisher ids whose provenance "
                                                  "lifts a candidate in the ranking"},
+            "adapt": {"type": "boolean",
+                      "description": "probe candidates the §5 filter refused for a "
+                                     "SAFE adapter (default true); set false for "
+                                     "the direct-only answer"},
+            "adaptOptIns": {"type": "object",
+                            "description": "the author's `adapt` opt-in map `D`, "
+                                           "keyed by method name — the same JSON "
+                                           "`revl adapt --adapt` takes, e.g. "
+                                           "{\"get\": {\"return\": {\"merge\": "
+                                           "\"total\"}}}. Transformations that "
+                                           "need an opt-in refuse without it, and "
+                                           "the refusal rides out in `nearMisses`"},
         },
         "required": ["need"],
     },

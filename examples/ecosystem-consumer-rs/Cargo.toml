@@ -1,0 +1,27 @@
+# agent-prefilter — a THIRD-PARTY consumer of the `revl-gate` crate.
+#
+# This project is not part of revl. It is what a CI system, an MCP server, or
+# an agent framework looks like once it pulls revl's native admission gate in
+# as a rust LIBRARY instead of shelling out to the `revl` CLI (roadmap item
+# 338, docs/design/338-revl-as-dependency.md).
+[package]
+name = "agent-prefilter"
+version = "0.1.0"
+edition = "2021"
+description = "A python-free pre-filter for agent-authored revl components, built as a third-party consumer of the revl-gate crate (roadmap item 338)."
+publish = false
+
+# An explicit empty workspace table: this project is standalone on purpose, so
+# a Cargo.toml above it in a checkout cannot adopt it and change what is built.
+[workspace]
+
+[dependencies]
+# The ONLY dependency this project takes. `revl-gate` is not on crates.io yet
+# (roadmap item 338's publish step rides the release path), so an out-of-tree
+# consumer vendors or checks out `crates/revl-gate` and points a path
+# dependency at it, exactly as below; once it is published the line becomes
+# `cargo add revl-gate` and nothing else about this project changes.
+#
+# Nothing else is pulled in: no serde, no revl source, no Python. The JSON this
+# project prints is hand-rolled in `src/main.rs` to keep that literally true.
+revl-gate = { path = "../../crates/revl-gate" }
