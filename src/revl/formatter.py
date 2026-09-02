@@ -260,7 +260,8 @@ def _scan_number(source: str, start: int) -> int:
 _INDENT = "  "  # two spaces per nesting level
 
 
-def _space_between(prev: _Piece, cur: _Piece) -> bool:
+def _space_between(prev: _Piece, cur: _Piece,
+                   nxt: _Piece | None = None) -> bool:
     """Whether a single space is emitted between two same-line pieces.
 
     Only word/word adjacency is significant to the lexer; every other choice
@@ -270,7 +271,13 @@ def _space_between(prev: _Piece, cur: _Piece) -> bool:
     p, pk = prev.text, prev.kind
     c, ck = cur.text, cur.kind
 
-    # dot access binds tight on both sides
+    # dot access binds tight on both sides -- but a `.` that leads an origin
+    # qualifier (`.::@db`, item 426 S2: the project's own origin is spelled
+    # `.`) is not dot access, and it keeps the space in front of it. The `::`
+    # after it is what tells them apart, and it is the only place a `.` is
+    # followed by a `:` in the grammar.
+    if c == "." and nxt is not None and nxt.text == ":":
+        return p not in ("(", "[")
     if c in (".", "?.") or p in (".", "?."):
         return False
     # a duration literal keeps its unit tight: `30s`, `5m`, `250ms` (item 57).
@@ -283,6 +290,14 @@ def _space_between(prev: _Piece, cur: _Piece) -> bool:
     # `@` piece exists only here — an `@backend { ... }` host body is scanned as
     # one verbatim span — so this rule cannot reach any other construct.
     if p == "@":
+        return False
+    # a fully qualified row label binds tight through its `::` separator:
+    # `acme_pg::@db`, never `acme_pg: : @db` (item 426 S2). `::` reaches the
+    # formatter as two `:` pieces because the lexer has no `::` token, which is
+    # deliberate — an operator token would have to be mirrored in the
+    # self-hosted lexer, and this needs no lexer change at all. A `:` is
+    # followed by another `:` or by a bare `@` nowhere else in the grammar.
+    if p == ":" and c in (":", "@"):
         return False
     # never a space before a closing structural token or a separator
     if c in (",", ":", ";", ")", "]"):
@@ -318,7 +333,9 @@ def _render_line(pieces: list[_Piece], indent_level: int) -> str:
         return ""
     out = [_INDENT * max(indent_level, 0)]
     for idx, piece in enumerate(pieces):
-        if idx > 0 and _space_between(pieces[idx - 1], piece):
+        if idx > 0 and _space_between(
+                pieces[idx - 1], piece,
+                pieces[idx + 1] if idx + 1 < len(pieces) else None):
             out.append(" ")
         out.append(piece.text)
     return "".join(out).rstrip()

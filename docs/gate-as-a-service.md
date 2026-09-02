@@ -93,15 +93,27 @@ module would not build — the consumer could not boot.
 
 The consumer never needs that body: it reaches the gate through the proxy, which
 speaks the *interface* over the seam. So `placement.ts_safe_ir(ir)` narrows the
-IR for the ts module to the tier-emittable slice — it drops every extern with no
-`@ts` body and every component (or top-level fn) whose body reaches one, keeping
-services, types and ts-safe components verbatim. The py `GateProvider` is
-dropped from the node module (it still runs, on its own py process; the node
-process consumes it as a proxy); `GateUser` and `service Gate` remain. A
-composition with no py-only extern is returned unchanged, so existing node
-placements are byte-for-byte unaffected. This extends the existing proxy path
-(`_process_runner.py` / `placement_runner.ts` already load own-components +
+IR for the ts module to the tier-emittable slice — it drops every extern the ts
+emitter cannot spell and every component (or top-level fn) whose body reaches
+one, keeping services, types and ts-safe components verbatim. The py
+`GateProvider` is dropped from the node module (it still runs, on its own py
+process; the node process consumes it as a proxy); `GateUser` and `service Gate`
+remain. A composition with no such extern is returned unchanged, so existing
+node placements are byte-for-byte unaffected. This extends the existing proxy
+path (`_process_runner.py` / `placement_runner.ts` already load own-components +
 proxies) from run time back to *build* time.
+
+**"Cannot spell" is the emitter's test, not a body-presence test.** The
+predicate lives once, in `placement._ts_unemittable_externs`, and mirrors the
+two arms of `_emit_ts_externs`: a `@ts` body emits verbatim, a `= @ts ref`
+emits a lazy import thunk (item 396 option B), and only an extern with
+*neither* is un-emittable. Testing `bodies` alone — which this did until item
+225 — misclassified a `= @ts ref` extern, whose `bodies` are empty and whose
+`refs` carry the ts spelling. The cost was not portability but a silently
+disarmed guard: `ts_safe_ir` deleted every component reaching such an extern,
+`tier_capability_gate` refused it the node tier, and so a node process spec's
+`refs` pin list was empty in every composition that could boot — leaving the
+runner's item 396(B)/410 host-module hash check with nothing to verify.
 
 ## The trade-off
 

@@ -1,6 +1,7 @@
 import RevL.Manifest
 import RevL.Lemmas.CapLemmas
 import RevL.Theorems.CapCeilings
+import RevL.Theorems.G7_LifoComplete
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -77,6 +78,13 @@ Fact rows in (tab-separated, one fact per line):
   T <file> <comp> <kind>                     statement class (census)
   X <file> <code>                            revl refused the file at parse
   N <file>                                   parsed, no component
+  E <scen> <ord> <kind> <seam>               one teardown-stack entry (G7),
+                                             in registration order; `kind` is
+                                             the model's `EntryKind` and
+                                             `seam` is the reference's
+                                             registration site, ignored here
+  J <scen> <verdict>                         the verdict that teardown ran
+                                             under (commit|abort|halted)
 
 Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 — the checker's own parser. Nothing here re-reads the capability grammar.
@@ -87,6 +95,19 @@ Verdict rows out:
   P <file> <comp> <key> <svc> <meth> <bound=ok|fail>
   W <file> <comp> <child> <atten=ok|fail>          spawn attenuation
   X <file> <refused=CODE>                          refusal of record
+  D <scen> <replayed=csv> <discharged=csv> <stranded=csv>   G7 disposition
+
+### The one row whose reference side RUNS rather than reads
+
+`D` is not like the rows above. `V`/`G`/`P`/`W` decide a judgment about a
+manifest, and both sides compute it. A teardown disposition is a property
+of a RUN, so the `D` row's reference half executes
+`backends/python/runtime.py` over the scenario's stack and reports what
+actually happened (`diff_corpus.teardown_observation`), while this file
+computes what `RevL.Semantics` says should happen. Nothing below restates
+the rule: the three columns are the model's own `replayed` / `discharged`
+/ `stranded`, and the only local content is reading each entry's label
+back out of the `inverse` slot the corpus put it in.
 -/
 
 namespace RevLOracle
@@ -94,9 +115,15 @@ namespace RevLOracle
 open RevL.Manifest
 open RevL.Lemmas
 open RevL.CapCeilings (ResourceOK CeilingOK Attenuates)
+open RevL.Syntax (Expr)
+open RevL.Semantics (EntryKind Verdict LogEntry teardown discharged stranded)
 
 def splitKeys (s : String) : List String :=
   if s == "" then [] else (s.splitOn ",").filter (fun k => k != "")
+
+/-- A verdict column: the labels, comma-joined, empty for an empty column
+(`splitKeys` reads it back). -/
+def csv (xs : List String) : String := String.intercalate "," xs
 
 def union (x y : List String) : List String := (x ++ y).eraseDups
 
@@ -395,6 +422,135 @@ theorem attenuatesB_iff (held reach : List Cap) :
   simp only [attenuatesB, Bool.and_eq_true, Attenuates]
   exact and_congr (resourceOKB_iff held reach) (ceilingOKB_iff held reach)
 
+/-! ## Deciding the teardown disposition (G7)
+
+The rows above are STATIC: they read a manifest and decide a judgment about
+it. This one is not. `RevL.Semantics.replayed` / `discharged` / `stranded`
+are about what a teardown DOES — which entries of the per-activation LIFO
+stack run their inverse, which are dropped, and which are left owed — so
+the fact rows it consumes are the shape of one activation's stack and the
+verdict it tore down under, and the reference side does not recompute
+them: it RUNS `backends/python/runtime.py` over that stack and reports what
+actually happened (see `diff_corpus.teardown_observation`).
+
+So the diff here is the model's predicted disposition against the
+reference runtime's observed one. Nothing below restates the rule: the
+three columns are the model's own three functions, and the only local
+content is reading the entry's label back out of the `inverse` slot the
+corpus put it in. -/
+
+section G7Disposition
+
+open RevL.Semantics
+
+/-- The corpus carries each stack entry's LABEL in the model's own
+`inverse` slot, as a literal. `teardown` maps `LogEntry.inverse` over the
+replay list, so a label put here is transported by the model's own
+function and read back unchanged — which is why the printed column is the
+model's answer and not a parallel bookkeeping list. -/
+def labelOf : Expr → String
+  | .lit s => s
+  | .call f _ => f
+
+def parseKind : String → Option EntryKind
+  | "bracket" => some .bracket
+  | "transactional" => some .transactional
+  | "compensation" => some .compensation
+  | _ => none
+
+def parseVerdict : String → Option Verdict
+  | "commit" => some .commit
+  | "abort" => some .abort
+  | "halted" => some .halted
+  | _ => none
+
+/-- The entries whose inverse RUNS, in the order they run: the model's
+`teardown`, labelled. Order is load-bearing — this column is where G7's
+LIFO claim and the Phase-1-before-Phase-2 split are checked against the
+reference. -/
+def replayedLabels (v : Verdict) (log : List LogEntry) : List String :=
+  (teardown v log).map labelOf
+
+/-- The entries DROPPED without running (`RevL.Semantics.discharged`). -/
+def dischargedLabels (v : Verdict) (log : List LogEntry) : List String :=
+  (discharged v log).map (fun e => labelOf e.inverse)
+
+/-- The entries left OWED (`RevL.Semantics.stranded`, item 443). Empty
+under every settling verdict; the whole stack under the E-Stop. -/
+def strandedLabels (v : Verdict) (log : List LogEntry) : List String :=
+  (stranded v log).map (fun e => labelOf e.inverse)
+
+private theorem mem_labels_filter (p : LogEntry → Bool) (log : List LogEntry)
+    (s : String) :
+    s ∈ (log.filter p).map (fun e => labelOf e.inverse)
+      ↔ ∃ e ∈ log, p e = true ∧ labelOf e.inverse = s := by
+  simp only [List.mem_map, List.mem_filter]
+  constructor
+  · rintro ⟨e, ⟨he, hp⟩, hs⟩; exact ⟨e, he, hp, hs⟩
+  · rintro ⟨e, he, hp, hs⟩; exact ⟨e, ⟨he, hp⟩, hs⟩
+
+/-- **The replayed column is the model's replay set.** Left to right it is
+G7 soundness (`replayed_sound`): a label the oracle prints belongs to a
+registered entry this verdict really replays. Right to left it is G7
+completeness (`replayed_complete`): every such entry's label is printed.
+So a runtime that drops an inverse, or runs one it should have discharged,
+disagrees with this column. -/
+theorem mem_replayedLabels_iff (v : Verdict) (log : List LogEntry) (s : String) :
+    s ∈ replayedLabels v log
+      ↔ ∃ e ∈ log, e.kind.replaysUnder v = true ∧ labelOf e.inverse = s := by
+  simp only [replayedLabels, RevL.Semantics.teardown, List.map_map,
+    Function.comp_def, List.mem_map]
+  constructor
+  · rintro ⟨e, he, hs⟩
+    exact ⟨e, (RevL.G7.replayed_sound v log e he).1,
+      (RevL.G7.replayed_sound v log e he).2, hs⟩
+  · rintro ⟨e, he, hr, hs⟩
+    exact ⟨e, RevL.G7.replayed_complete v log e he hr, hs⟩
+
+/-- **The discharged column is the model's discharge set** — the entries
+`EntryKind.dischargedUnder` drops without running. -/
+theorem mem_dischargedLabels_iff (v : Verdict) (log : List LogEntry) (s : String) :
+    s ∈ dischargedLabels v log
+      ↔ ∃ e ∈ log, e.kind.dischargedUnder v = true ∧ labelOf e.inverse = s :=
+  mem_labels_filter _ log s
+
+/-- **The stranded column is the model's stranded inventory** (item 443) —
+neither replayed nor discharged, still owed to whoever reconciles. -/
+theorem mem_strandedLabels_iff (v : Verdict) (log : List LogEntry) (s : String) :
+    s ∈ strandedLabels v log
+      ↔ ∃ e ∈ log, e.kind.strandedUnder v = true ∧ labelOf e.inverse = s :=
+  mem_labels_filter _ log s
+
+/-- **The row accounts for the whole stack.** Replayed + discharged +
+stranded is exactly the number of entries registered, under every verdict
+(`RevL.Semantics.book_lengths_add`). An entry cannot fall off this row by
+appearing in no column, so a `D` row that agrees column-by-column has
+agreed about every entry — the vacuity a partial row would allow is closed
+here rather than assumed. -/
+theorem row_is_total (v : Verdict) (log : List LogEntry) :
+    (replayedLabels v log).length + (dischargedLabels v log).length
+      + (strandedLabels v log).length = log.length := by
+  simp only [replayedLabels, dischargedLabels, strandedLabels,
+    RevL.Semantics.teardown, List.length_map]
+  exact RevL.Semantics.book_lengths_add v log
+
+/-- **The printed order is the two-phase walk.** The replayed column is
+the whole Phase-1 proof pass, LIFO over registration order, and only then
+the Phase-2 compensation drain, LIFO within itself. This is what makes the
+column's ORDER checkable: a reference that ran a compensation inline
+during Phase 1, or unwound a phase FIFO, produces a different list. -/
+theorem replayedLabels_phase_order (v : Verdict) (log : List LogEntry) :
+    replayedLabels v log =
+      ((log.filter (fun e => e.kind.inPhase1 && e.kind.replaysUnder v)).reverse.map
+        (fun e => labelOf e.inverse))
+      ++ ((log.filter (fun e => e.kind.inPhase2 && e.kind.replaysUnder v)).reverse.map
+        (fun e => labelOf e.inverse)) := by
+  simp only [replayedLabels, RevL.Semantics.teardown, RevL.Semantics.replayed,
+    RevL.Semantics.phase1, RevL.Semantics.phase2, List.map_append, List.map_map,
+    Function.comp_def]
+
+end G7Disposition
+
 -- ---------------------------------------------------------------- rows
 
 structure MRow where
@@ -505,6 +661,38 @@ def parseS (f : List String) : Option SRow :=
 def parseX (f : List String) : Option XRow :=
   match f with
   | ["X", path, code] => some ⟨path, code⟩
+  | _ => none
+
+/-- One entry of a teardown scenario's LIFO stack, in registration order
+(G7). `ord` is the corpus's label for the entry, carried through the
+model's `inverse` slot; `kind` is one of the three the model names.
+
+The row's fifth field is the registration SEAM the reference used
+(`body` / `method`) and is deliberately DROPPED here: the model has one
+per-activation stack and no seam distinction, so the seam is the
+reference's business alone. That the two sides still agree is the claim —
+`runtime.py` registers a method-body entry on `_deferred_transactional`
+and unwinds it inside `drain` rather than through cordis, and the model
+says the resulting disposition is the same as if it had been on the
+stack. -/
+structure ERow where
+  scen : String
+  ord : String
+  kind : String
+
+/-- The verdict one teardown scenario was torn down under (G7). -/
+structure JRow where
+  scen : String
+  verdict : String
+
+def parseE (f : List String) : Option ERow :=
+  match f with
+  | ["E", scen, ord, kind, _seam] => some ⟨scen, ord, kind⟩
+  | _ => none
+
+def parseJ (f : List String) : Option JRow :=
+  match f with
+  | ["J", scen, verdict] => some ⟨scen, verdict⟩
   | _ => none
 
 /-- `Z <cap> <token>`. -/
@@ -638,6 +826,8 @@ def main (args : List String) : IO UInt32 := do
     let krows := fields.filterMap parseK
     let srows := fields.filterMap parseS
     let xrows := fields.filterMap parseX
+    let erows := fields.filterMap parseE
+    let jrows := fields.filterMap parseJ
     let capTable := buildCapTable (fields.filterMap parseZ) (fields.filterMap parseY)
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
@@ -651,6 +841,28 @@ def main (args : List String) : IO UInt32 := do
     let mut out := ""
     for x in xrows do
       out := out ++ s!"X\t{x.path}\trefused={x.code}\n"
+    -- D rows (G7 teardown disposition), one per scenario. The stack is the
+    -- scenario's `E` rows IN FILE ORDER, which is registration order; the
+    -- label rides in the model's own `inverse` slot so `teardown` transports
+    -- it. An unknown kind or verdict is a hard error, never a silently empty
+    -- stack.
+    for j in jrows do
+      match parseVerdict j.verdict with
+      | none =>
+          IO.eprintln s!"oracle: unknown teardown verdict {j.verdict} for {j.scen}"
+          return 1
+      | some v =>
+        let mine := erows.filter (fun r => r.scen == j.scen)
+        let kinds := mine.map (fun r => parseKind r.kind)
+        if kinds.any (·.isNone) then
+          IO.eprintln s!"oracle: unknown entry kind in scenario {j.scen}"
+          return 1
+        let log : List LogEntry :=
+          mine.filterMap fun r =>
+            (parseKind r.kind).map fun k => { kind := k, inverse := .lit r.ord }
+        out := out ++ s!"D\t{j.scen}\treplayed={csv (replayedLabels v log)}\t" ++
+          s!"discharged={csv (dischargedLabels v log)}\t" ++
+          s!"stranded={csv (strandedLabels v log)}\n"
     for p in paths do
       let fm := mrows.filter (fun r => r.path == p)
       let ub := brows.filter (fun r => r.path == p)
@@ -736,3 +948,8 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.resourceOKB_iff
 #print axioms RevLOracle.ceilingOKB_iff
 #print axioms RevLOracle.attenuatesB_iff
+#print axioms RevLOracle.mem_replayedLabels_iff
+#print axioms RevLOracle.mem_dischargedLabels_iff
+#print axioms RevLOracle.mem_strandedLabels_iff
+#print axioms RevLOracle.row_is_total
+#print axioms RevLOracle.replayedLabels_phase_order

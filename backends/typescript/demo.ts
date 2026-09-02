@@ -5,7 +5,10 @@
 // instance, then unloads everything.  Prints an event log showing R2/R3
 // ordering and asserts R1 (LIFO) + R4 (no residue).
 //
-// Run: node demo.ts   (Node >= 23.6; erasable-syntax TypeScript)
+// Run: node demo.ts   (erasable-syntax TypeScript; needs unflagged type
+// stripping, so Node >= 23.6 or the >= 22.18 LTS backport. CI's
+// `backend-typescript` job pins node-version 22, which resolves to the
+// latest 22.x and clears that floor.)
 
 import { Context, FiberState } from 'cordis'
 import { PgDatabase, UserCache } from './golden/user_cache.ts'
@@ -81,7 +84,15 @@ await cache.await()
 
 check('R2', cache.state === FiberState.ACTIVE,
   'UserCache reactivated against the replacement provider')
-check('R2', ctx.cache.get('alice') === null,
+// `Opt[Str]` is bare `value | undefined` on this tier (runtime.ts `MapHandle.get`,
+// emit.py: "Map.get answers undefined when absent: exactly the Opt None case"),
+// so the absent key reads as `undefined`. This assertion said `=== null`, which was
+// correct until cabbd931 dropped the runtime's `?? null` — nothing ran the demo, so
+// it rotted from that day. Deliberately `=== undefined` and not `== null`: on this
+// tier `null` is NOT None (a `null` answer makes `None == None` false through
+// revlEq, which is what cabbd931 fixed), so the loose form would wave that
+// regression through instead of catching it.
+check('R2', ctx.cache.get('alice') === undefined,
   'reactivated cache runs its effects afresh (new store)')
 
 note('demo  | cache.put(bob, 7) against the replica-backed cache')

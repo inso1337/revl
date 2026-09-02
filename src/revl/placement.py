@@ -1365,28 +1365,37 @@ def ts_safe_ir(ir: dict) -> dict:
     speaks the service interface over the seam. So the node module needs the
     *interface*, not the remote `@py` implementation.
 
-    This drops exactly the un-emittable part: every extern with no `@ts` body,
-    and every component (or top-level fn) whose body reaches one. Services,
-    types and ts-safe components are kept verbatim — a composition with no
-    py-only extern is returned byte-identical, so existing node placements are
+    This drops exactly the un-emittable part: every extern the ts emitter
+    refuses (`_ts_unemittable_externs` — no `@ts` body AND no `@ts ref`), and
+    every component (or top-level fn) whose body reaches one. Services, types
+    and ts-safe components are kept verbatim — a composition with no such
+    extern is returned byte-identical, so existing node placements are
     unaffected. The dropped provider still runs, on its own (py) process; the
     node process consumes it as a proxy.
+
+    The `@ts ref` half of that predicate is item 225. Classifying by `bodies`
+    alone counted a `= @ts ref` extern — empty `bodies`, populated `refs` — as
+    un-emittable, when it is precisely an extern the ts tier CAN spell: the
+    emitter turns it into a lazy import thunk (backends/typescript/emit.py,
+    item 396 option B). So this deleted, and `tier_capability_gate` refused,
+    every component reaching one, which is why no node placement ever carried a
+    `spec.refs` entry and the runner's deploy-contract hash check had nothing
+    to verify.
     """
     externs = ir.get("externs") or []
-    py_only = {e.get("name") for e in externs
-               if "ts" not in (e.get("bodies") or {}) and e.get("name")}
-    if not py_only:
+    unemittable = _ts_unemittable_externs(ir)
+    if not unemittable:
         return ir
 
-    def reaches_py_only(carrier) -> bool:
-        return bool(_names_in(carrier, set()) & py_only)
+    def reaches_unemittable(carrier) -> bool:
+        return bool(_names_in(carrier, set()) & unemittable)
 
     out = dict(ir)
-    out["externs"] = [e for e in externs if e.get("name") not in py_only]
+    out["externs"] = [e for e in externs if e.get("name") not in unemittable]
     out["components"] = [c for c in ir.get("components") or []
-                         if not reaches_py_only(c)]
+                         if not reaches_unemittable(c)]
     out["functions"] = [f for f in ir.get("functions") or []
-                        if not reaches_py_only(f)]
+                        if not reaches_unemittable(f)]
     return out
 
 
@@ -1440,6 +1449,48 @@ def placement_slice(ir: dict, kept) -> dict:
     return out
 
 
+def host_ref_pins(ir: dict, own, files) -> dict:
+    """The three host-module pin keys a placement spec carries for a process
+    hosting the components `own` (item 396 option B / 410).
+
+    * `refRoot` — the user root compile tree a non-stdlib `@ts ref` resolves
+      and hash-checks against;
+    * `stdlibRefRoot` — the install tree a stdlib-origin ref resolves against
+      (the runner self-derives this one, but the spec states it);
+    * `refs` — the per-ref hash-check list the node runner walks BEFORE it
+      imports the emitted module, so a host module that changed since compile
+      refuses the boot instead of running host code.
+
+    Built for the components the process actually hosts, not for the whole
+    composition: a process must not hash-check the refs of an extern its slice
+    never reaches (F4).  Harmless for non-node backends, which ignore the keys.
+
+    ONE function, called by the boot path AND by `do_swap`'s successor. A swap
+    re-hosts a component in a NEW process, and a spec key that carries a
+    security property must survive that or the guarantee only reads "held until
+    the first swap". The pins are read off the SAME running `ir` the tier
+    artifact is emitted from (`ensure_backend` slices this very document), so
+    they always describe the bytes the process is about to load — never a
+    re-hash of whatever is on disk at swap time, which would bless a host
+    module that changed since the composition was compiled.
+    """
+    own_externs = {e.get("name")
+                   for e in placement_slice(ir, set(own)).get("externs") or []}
+    return {
+        "refRoot": (os.path.dirname(os.path.abspath(str(files[0])))
+                    if files else ""),
+        "stdlibRefRoot": str(stdlib_root().parent),
+        "refs": [
+            {"extern": e.get("name"), "path": r["path"],
+             "sha256": r["sha256"],
+             **({"root": r["root"]} if r.get("root") else {})}
+            for e in ir.get("externs") or []
+            if e.get("name") in own_externs
+            for r in [(e.get("refs") or {}).get("ts")] if r is not None
+        ],
+    }
+
+
 # per-backend emitter modules, imported lazily for the plan-time capability
 # dry-run. Every emitter is pure-python codegen (stdlib only), so the gate
 # needs no tier toolchain — a fn-typed component placed on java is refused at
@@ -1464,11 +1515,28 @@ def _emit_gate_module(backend: str):
     return _EMIT_GATE_MODULES[backend]
 
 
-def _py_only_externs(ir: dict) -> set[str]:
-    """Externs with no `@ts` body — the ones `ts_safe_ir` deletes (and every
-    component reaching one with them)."""
+def _ts_unemittable_externs(ir: dict) -> set[str]:
+    """Externs the ts emitter cannot spell — the ones `ts_safe_ir` deletes (and
+    every component reaching one with them).
+
+    THE predicate, in one place, mirroring the emitter's own two-arm decision in
+    `backends/typescript/emit.py::_emit_ts_externs`:
+
+      * `"ts" in refs and "ts" not in bodies` -> a lazy import thunk (item 396
+        option B). EMITTABLE.
+      * `"ts" in bodies`                      -> the verbatim body. EMITTABLE.
+      * neither                               -> `EmitError`. Un-emittable.
+
+    Item 225: this used to test `bodies` alone, so a `= @ts ref` extern (empty
+    `bodies`, populated `refs`) fell in the un-emittable arm and every component
+    reaching one was refused the node tier at plan time — the reason the item
+    396(B) / 410 host-module pin check in `placement_runner.ts` had never once
+    run with a pin to verify. Keep this function the single definition: a second
+    copy of the test is exactly how the two drifted from the emitter.
+    """
     return {e.get("name") for e in ir.get("externs") or []
-            if "ts" not in (e.get("bodies") or {}) and e.get("name")}
+            if "ts" not in (e.get("bodies") or {})
+            and "ts" not in (e.get("refs") or {}) and e.get("name")}
 
 
 def _dryrun_emit(backend: str, sliced: dict) -> None:
@@ -1489,11 +1557,14 @@ def _dryrun_emit(backend: str, sliced: dict) -> None:
       gate said yes — the exact failure stage-3 exists to eliminate (F2). rust,
       node and java already agree with their builds via `emit`.
     * **node** — the build (and this dry-run) narrows through `ts_safe_ir`,
-      which DELETES any component reaching a py-only extern rather than refusing
-      it, so a node-placed dirty component would be silently omitted from the
-      artifact while the spec still lists it (a boot crash, F3). Diff the placed
-      component set against `ts_safe_ir`'s output and REFUSE at plan time,
-      naming the component + the py-only extern it reaches."""
+      which DELETES any component reaching a ts-unemittable extern rather than
+      refusing it, so a node-placed dirty component would be silently omitted
+      from the artifact while the spec still lists it (a boot crash, F3). Diff
+      the placed component set against `ts_safe_ir`'s output and REFUSE at plan
+      time, naming the component + the extern it reaches. An extern with a
+      `@ts ref` is NOT such an extern (item 225): it emits as a lazy import
+      thunk, so a component reaching one is admitted here and the node runner
+      hash-checks the ref against its compile-time pin before importing it."""
     module = _emit_gate_module(backend)
     if backend == "node":
         placed_comps = {c.get("name") for c in sliced.get("components") or []}
@@ -1501,19 +1572,22 @@ def _dryrun_emit(backend: str, sliced: dict) -> None:
         kept_comps = {c.get("name") for c in safe.get("components") or []}
         dropped = placed_comps - kept_comps
         if dropped:
-            py_only = _py_only_externs(sliced)
+            unemittable = _ts_unemittable_externs(sliced)
             by_name = {c.get("name"): c for c in sliced.get("components") or []}
             details = []
             for cname in sorted(n for n in dropped if n is not None):
-                reached = sorted(_names_in(by_name.get(cname) or {}, set()) & py_only)
+                reached = sorted(_names_in(by_name.get(cname) or {}, set())
+                                 & unemittable)
                 reach_str = ", ".join(reached) or "a py-only extern"
                 details.append(f"{cname} (reaches {reach_str})")
             raise RuntimeError(
                 "a node-placed component reaches a `@py`-only extern (no `@ts` "
-                "body), which the ts tier cannot emit: " + "; ".join(details)
+                "body and no `@ts ref`), which the ts tier cannot emit: "
+                + "; ".join(details)
                 + " — a py-only provider must stay on the py tier and be reached "
-                "across the seam as a bridge proxy (place it on `py`, or give the "
-                "extern a `@ts` body)")
+                "across the seam as a bridge proxy (place it on `py`, give the "
+                "extern a `@ts` body, or point it at a host module with "
+                "`= @ts ref sym from \"...\"`)")
         module.emit(safe)
     elif backend == "go":
         module.emit_placement(sliced, "emitted")
@@ -2004,9 +2078,59 @@ def _build_java_real(ir: dict, tmp: Path, jdk_bin: str, cordis_classes: str) -> 
 # --------------------------------------------------------------------------
 
 
-def _stop_all(children: dict) -> None:
-    """children: name -> (proc, stop_mode). rust holds on stdin (close it to
-    stop gracefully); py/node/java tear down on SIGTERM."""
+# The hang BACKSTOP, in seconds: how long the conductor keeps waiting after a
+# child has been asked to stop and has still not said `DOWN`. It is not a
+# teardown budget -- the wait below is on the child's own DOWN line -- so it is
+# only ever reached by a child that is genuinely wedged. Operators with a
+# legitimately long unwind raise it with `REVL_TEARDOWN_GRACE=<seconds>`.
+_TEARDOWN_GRACE = 30.0
+# Once a child HAS said DOWN its unwind is complete and proven; all that is
+# outstanding is its own exit (a flush, a socket close), which is bounded.
+_TEARDOWN_EXIT_GRACE = 5.0
+
+
+def _teardown_grace() -> float:
+    raw = os.environ.get("REVL_TEARDOWN_GRACE")
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return _TEARDOWN_GRACE
+        if value > 0:
+            return value
+    return _TEARDOWN_GRACE
+
+
+def _stop_all(children: dict, is_down=None, grace: float | None = None) -> list[str]:
+    """Stop every child and wait for it to finish unwinding.
+
+    children: name -> (proc, stop_mode). rust holds on stdin (close it to
+    stop gracefully); py/node/java tear down on SIGTERM.
+
+    THE WAIT IS ON THE CHILD'S OWN `DOWN` LINE (issue 239), not on a wall
+    clock. `[<name>] DOWN` is the runner's own statement that its LIFO unwind
+    ran over every registered entry (G7) and its no-residue proof printed (R4),
+    and every tier's runner prints it (py, ts, rust, go, java). A wall-clock
+    budget is a proxy for that event, and a bad one: it scales with the machine
+    rather than with the teardown, which is how a consumer with a map inverse
+    and a residue proof to run lost a five-second race on a slow CI runner
+    while the provider next to it, with strictly less to do, finished.
+
+    `grace` survives as a HANG BACKSTOP so a wedged child can never hang the
+    conductor forever -- the kill exists for a reason. Because it is no longer
+    racing an ordinary teardown it is generous, and, the half that matters,
+    tripping it is REPORTED: this returns the name of every child that had to
+    be SIGKILLed before it said DOWN. Such a child is `halted` in item 443's
+    sense -- its entries are stranded (registered, not run, not dropped) and
+    its residue is UNKNOWN -- and the caller must say so. A kill is never a
+    clean exit.
+    """
+    if grace is None:
+        grace = _teardown_grace()
+
+    def said_down(name: str) -> bool:
+        return is_down is not None and bool(is_down(name))
+
     for proc, stop_mode in children.values():
         if proc.poll() is not None:
             continue
@@ -2017,11 +2141,56 @@ def _stop_all(children: dict) -> None:
                 proc.terminate()
         except OSError:
             pass
-    for proc, _ in children.values():
+    # ONE shared deadline for the group: the children were asked to stop
+    # concurrently and unwind concurrently, so n children must not buy n * grace
+    # of conductor hang.
+    deadline = time.monotonic() + grace
+    stranded: list[str] = []
+    for name, (proc, _stop_mode) in children.items():
+        exit_by: float | None = None
+        while proc.poll() is None:
+            now = time.monotonic()
+            if exit_by is None and said_down(name):
+                exit_by = now + _TEARDOWN_EXIT_GRACE
+            if now >= (deadline if exit_by is None else exit_by):
+                break
+            time.sleep(0.02)
+        if proc.poll() is not None:
+            continue
+        proc.kill()
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=_TEARDOWN_EXIT_GRACE)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            pass
+        if not said_down(name):
+            # Killed before it could say DOWN: what it had already unwound, and
+            # what it still owes, are both unknown from here.
+            stranded.append(name)
+    return stranded
+
+
+def _stranded_teardown_report(names: list[str]) -> str:
+    """What the conductor says about a child it had to SIGKILL mid-teardown.
+
+    Deliberately the E-Stop verdict's vocabulary (`_render_estop` in
+    `cli/change.py`), because it is the same epistemic position: the unwind
+    stopped part-way, so entries are STRANDED and residue is UNKNOWN. Nothing
+    here is a new word for an old state.
+    """
+    listed = ", ".join(names)
+    plural = "es" if len(names) > 1 else ""
+    return (
+        f"error: teardown HALTED -- {len(names)} process{plural} had to be "
+        f"SIGKILLed before saying DOWN: {listed}\n"
+        "  The unwind was cut mid-flight. The LIFO walk did not reach every\n"
+        "  registered entry (G7) and no no-residue proof printed (R4), so every\n"
+        "  entry those processes still held is STRANDED -- registered, not run,\n"
+        "  not dropped -- and their residue is UNKNOWN. This run did NOT tear\n"
+        "  down cleanly, whatever the trace above got as far as printing.\n"
+        "  Reconcile a durable run with `revl recover --wal <file>`. If the\n"
+        "  teardown is legitimately slow rather than wedged, give it room with\n"
+        f"  REVL_TEARDOWN_GRACE=<seconds> (currently {_teardown_grace():g})."
+    )
 
 
 def run_placement(files, placement_path: str, once: bool = False) -> int:
@@ -2558,8 +2727,6 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         # does not host). A process hosting every component gets the full slice
         # back, so a single-process placement is byte-identical.
         own_config = {c: config[c] for c in own if c in config}
-        own_externs = {e.get("name")
-                       for e in placement_slice(ir, set(own)).get("externs") or []}
         spec = {
             "name": pname,
             "backend": backend,
@@ -2583,20 +2750,9 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             # joins a `@ts ref` against, plus the per-ref hash-check list. 396(B)
             # set NEITHER under placement (a pre-existing gap for user refs); 410
             # fixes it for the stdlib kind (self-derived by the runner too) and in
-            # passing for the user kind. `refRoot` is the user root compile tree;
-            # `stdlibRefRoot` the install tree. Harmless for non-node backends,
-            # which ignore the keys.
-            "refRoot": (os.path.dirname(os.path.abspath(str(files[0])))
-                        if files else ""),
-            "stdlibRefRoot": str(stdlib_root().parent),
-            "refs": [
-                {"extern": e.get("name"), "path": r["path"],
-                 "sha256": r["sha256"],
-                 **({"root": r["root"]} if r.get("root") else {})}
-                for e in ir.get("externs") or []
-                if e.get("name") in own_externs
-                for r in [(e.get("refs") or {}).get("ts")] if r is not None
-            ],
+            # passing for the user kind. Built by `host_ref_pins`, which the swap
+            # path calls too so the pins survive a re-host (see `do_swap`).
+            **host_ref_pins(ir, own, files),
         }
         if serve_keys:
             # `methods` is the stub's allowlist: the operations the *service
@@ -2900,6 +3056,12 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     up: set[str] = set()
     repointed: set[tuple[str, str]] = set()
     down: set[str] = set()
+    # issue 239: children SIGKILLed before they said DOWN. Their unwind was cut
+    # mid-flight, so their residue is UNKNOWN; the conductor must never report
+    # that as a clean exit. Accumulated across EVERY teardown this run performs
+    # (a refused swap successor, a swapped-out provider, the final teardown),
+    # because any one of them can be the one that was cut.
+    stranded: list[str] = []
     threads: list[threading.Thread] = []
     _re_repoint = re.compile(r"^\[(?P<p>[^\]]+)\] REPOINTED (?P<k>\S+) ->")
 
@@ -2942,6 +3104,13 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 return True
             time.sleep(0.05)
         return pred()
+
+    def stop_all(group: dict) -> None:
+        """`_stop_all` with this conductor's DOWN tracker wired in, recording
+        any child that had to be killed before it finished unwinding."""
+        for name in _stop_all(group, is_down=lambda n: n in down):
+            if name not in stranded:
+                stranded.append(name)
 
     swap_seq = [0]
 
@@ -3070,17 +3239,69 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         new_sock = str(tmp / f"{succ}.sock")
         old_serve = specs[old].get("serve") or {}
         serve_keys = old_serve.get("keys") or [k for k in provides[old]]
+        # INVARIANT for anyone adding a key to the per-process spec above: a key
+        # that carries a security property must either be CARRIED onto the
+        # successor here, or the swap must REFUSE. A swap is ordinary use, not
+        # an edge case, so a property that only holds until the first swap is
+        # not a property. Two keys have already been through this — the
+        # correlation guard (carried, 421 F8) and the host-ref pins (carried,
+        # below) — and both were silently absent for a while first. A key that
+        # CANNOT be carried correctly makes the swap refuse instead, the way a
+        # sandboxed component is refused above (item 411).
+        # `tests/test_swap_ref_pins.py::test_successor_spec_carries_every_boot_spec_key`
+        # is the guard: it reads both dict literals out of this file and fails
+        # when a key exists in one and not the other, so the NEXT key cannot be
+        # forgotten the way these were. Add the key to both, or record it in
+        # that test's exception table with a reason.
         succ_spec = {
             "name": succ,
             "backend": to_backend,
             "files": [str(f) for f in files],
             "components": [component],  # the swapped component, alone (v1 scope)
+            # §46: the successor's intra-process dependency edges, COMPUTED for
+            # the component set it hosts rather than assumed empty. Today it is
+            # `{component: []}`, because the v1 scope rule above refuses swapping
+            # a component that shares its process — but that is a fact about the
+            # scope rule, not about §46, and nothing tied the two together. When
+            # the scope rule relaxes to a multi-component successor this line
+            # already produces the right edges instead of silently serializing
+            # (or mis-parallelizing) the successor's activation.
+            "depends": local_prereqs(manifest_entries, subset=[component]),
             # F4: the successor hosts `component` alone, so it gets only that
             # component's config — never the whole [config] table.
             "config": {c: config[c] for c in [component] if c in config},
             "provides": list(provides[old]),
             "proxies": {k: dict(v) for k, v in (specs[old].get("proxies") or {}).items()},
+            # `probe` is EMPTY BY THE SAME RULE THE BOOT PATH APPLIES, not
+            # dropped: a process runs the probes its own `[processes.<name>]`
+            # entry declares (`pconf.get("probe") or []`), and the successor is
+            # a synthesized process (`<component>__t<n>`) that the placement
+            # file does not name. A boot of a process with no placement entry
+            # would produce `[]` here too. Probes are one-shot boot smoke calls
+            # that invoke real service methods; re-firing the predecessor's on a
+            # cutover would perform operator-authored side effects at a moment
+            # no operator asked for, and the swap has its own verification
+            # (admission gate, repoint acknowledgement, drain + no-residue).
             "probe": [],
+            # item 396 option B / 410: the successor's host-module pins. Built
+            # by the SAME `host_ref_pins` the boot path uses — this is the whole
+            # point of it being one function. Two things about the CONTENT:
+            #   * scoped to `[component]`, the successor's own slice, not copied
+            #     from the predecessor's spec (whose list is its PROCESS's
+            #     slice; the two coincide only because of the v1 scope rule);
+            #   * read off the running `ir`, which is exactly the document
+            #     `ensure_backend` slices to emit the successor's tier artifact
+            #     — so the pins describe the bytes this process is about to
+            #     load. Re-deriving them from `swap_admission`'s freshly
+            #     compiled `candidate` would instead re-hash whatever is on disk
+            #     at swap time and quietly bless a host module that changed
+            #     since the running composition was compiled.
+            # Without this the successor booted with no refs and no `refRoot`,
+            # so the node runner's deploy-contract hash check (which walks
+            # `spec.refs`, `placement_runner.ts`) had nothing to walk: host
+            # module integrity was verified at boot and unverified from the
+            # first `revl swap` on, silently, while the swap reported success.
+            **host_ref_pins(ir, [component], files),
             # The successor always serves on a LOCAL socket: a network
             # provider is refused above, so `old` is a UDS provider by
             # construction here and no network-only serve key (`endpoint`, and
@@ -3117,7 +3338,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                   f"back down; running composition untouched.", flush=True)
             sproc, smode = children.pop(succ, (None, None))
             if sproc is not None:
-                _stop_all({succ: (sproc, smode)})
+                stop_all({succ: (sproc, smode)})
             return
 
         # --- re-point every consumer of these keys onto the successor socket.
@@ -3152,8 +3373,13 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         # --- drain + tear the old provider down (LIFO inside its process), and
         # let it prove no residue, then adopt the successor into placement state
         oldproc, oldmode = children.pop(old)
-        _stop_all({old: (oldproc, oldmode)})
-        _wait_for(lambda: old in down, 10)
+        stop_all({old: (oldproc, oldmode)})
+        # `stop_all` already waited on the DOWN line, so this only settles the
+        # pump thread's last read. A provider that had to be killed will never
+        # say it, and waiting the full ten seconds for a line that cannot come
+        # is just a stall.
+        if old not in stranded:
+            _wait_for(lambda: old in down, 10)
         for key in serve_keys:
             owner[key] = succ
         placed[component] = succ
@@ -3162,8 +3388,15 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         backends[succ] = to_backend
         specs[succ] = succ_spec
         specs.pop(old, None)
-        print(f"swap: {component} now on {to_backend} ({succ}); the old provider "
-              f"unwound with a no-residue proof above.", flush=True)
+        if old in stranded:
+            # issue 239: the drain was cut short, so the sentence below would be
+            # a lie. Say what is actually known instead.
+            print(f"swap: {component} now on {to_backend} ({succ}), but the old "
+                  f"provider {old} was SIGKILLed before it said DOWN: its unwind "
+                  f"is INCOMPLETE and its residue is UNKNOWN.", flush=True)
+        else:
+            print(f"swap: {component} now on {to_backend} ({succ}); the old provider "
+                  f"unwound with a no-residue proof above.", flush=True)
 
     def swap_repl() -> None:
         print("(placement up — `swap <component> --to <backend>`, `:keys`, "
@@ -3203,7 +3436,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 rc = 1
             elif net_seams:
                 report_network_latency()
-            _stop_all(children)
+            stop_all(children)
         elif _interactive():
             if net_seams and _wait_for(lambda: len(up) == len(children), 60):
                 report_network_latency()
@@ -3225,7 +3458,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        _stop_all(children)
+        stop_all(children)
         # item 411 Slice 2: `--rm` already fires on a clean exit; this is the
         # belt, so a torn-down placement never leaves a confined process (or a
         # container holding its granted mounts) behind it.
@@ -3239,4 +3472,10 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         # the placement dir holds only sockets and spec files, both dead once
         # the children are; leaving it behind leaked a 0700 tmpdir per run.
         shutil.rmtree(tmp, ignore_errors=True)
+    if stranded:
+        # issue 239: this is the half that turns a visible failure into a silent
+        # one. A child killed mid-teardown used to be indistinguishable from a
+        # clean exit here, so a partial teardown passed as success.
+        print(_stranded_teardown_report(stranded), file=sys.stderr)
+        rc = rc or 1
     return rc
