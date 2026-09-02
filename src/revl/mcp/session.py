@@ -492,6 +492,7 @@ class Session:
                 f"{summarize_holes(open_holes)}. A hole has a type and no "
                 f"implementation, so it may never enter a running composition; "
                 f"`revl_check` lists them (docs/holes.md)")
+        self._enforce_environment_contract(ir, config)
         self._enforce_sandbox(ir)
         self._enforce_evidence(ir)
         # item 246, Slice 2: the policy-owned `requires approval` gate. A component
@@ -776,6 +777,37 @@ class Session:
         error = first_error(approval_admission(self.sandbox, ir))
         if error is not None:
             raise SessionError(str(error).split("\n")[0])
+
+    def _enforce_environment_contract(self, ir: dict, config: dict | None) -> None:
+        """Item 350: the `boot` component's environment contract, checked at the
+        MCP load seam the same way `revl run --env` checks it at the CLI seam.
+
+        `revl_load` has a SINGLE config channel, so unlike the CLI there is no
+        `--env`/`--config` split to enforce here: a boot component's entry in the
+        supplied config map IS the environment injection. What is enforced is
+        everything that is a property of the value rather than of the channel —
+        an undeclared key, a value of the wrong declared type, and a value
+        outside its declared `under`/`in` bound. Without this the MCP surface
+        would be a way to inject past the bounds the CLI enforces, which is
+        exactly the silent widening the contract exists to remove.
+
+        Inert for a composition with no boot component, so an ordinary load is
+        byte-identical. The refusal names the field and the author-written bound
+        and NEVER the value: a contract field may be a credential, and a session
+        refusal travels back over the wire."""
+        from ..run import _boot_component, _contract_violations  # noqa: PLC0415
+
+        boot = _boot_component(ir)
+        if boot is None:
+            return
+        supplied = (config or {}).get(boot["name"]) or {}
+        problems = _contract_violations(boot, supplied)
+        if problems:
+            rendered = "; ".join(problems)
+            raise SessionError(
+                f"cannot load: {rendered}. `boot component {boot['name']}` is "
+                "this composition's environment contract — the exhaustive, typed "
+                "list of what the host must inject (item 350)")
 
     def _enforce_sandbox(self, ir: dict) -> None:
         """The agent-sandbox invariant (roadmap item 33). When a `sandbox`

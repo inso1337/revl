@@ -829,6 +829,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--config", default=None,
                        help="TOML/JSON file of `component-name = { ... }` config "
                             "tables — supplied to each component at boot")
+    serve.add_argument("--env", default=None,
+                       help="TOML/JSON file of flat `name = value` environment values, injected into the composition's `boot` component — its `config {}` block is the environment contract, and an undeclared key, a missing required field or a value outside a declared `under`/`in` bound refuses the boot (item 350)")
     serve.add_argument("--composition", default="revl",
                        help="tool-name prefix (tools are `<prefix>.<key>.<op>`)")
 
@@ -842,6 +844,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "runtime is a skip with a reason and a nonzero exit")
     run.add_argument("--config", default=None,
                      help="TOML/JSON file of `component-name = { ... }` config tables")
+    run.add_argument("--env", default=None,
+                     help="TOML/JSON file of flat `name = value` environment values, injected into the composition's `boot` component — its `config {}` block is the environment contract, and an undeclared key, a missing required field or a value outside a declared `under`/`in` bound refuses the boot (item 350)")
     run.add_argument("--policy", default=None, metavar="POLICY",
                      help="boundary policy file (item 33). With --backend wasm it "
                           "enforces the item-289 least-authority chain (host "

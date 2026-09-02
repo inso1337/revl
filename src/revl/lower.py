@@ -424,7 +424,12 @@ def _ir_config_field(field) -> dict:
     of the `<name>.config` trace line, which `revl run` prints and the MCP
     session captures. Absent unless declared, so existing IR is byte-identical."""
     return {"name": field.name, "type": field.type, "default": field.default,
-            **({"secret": True} if getattr(field, "secret", False) else {})}
+            **({"secret": True} if getattr(field, "secret", False) else {}),
+            # item 350: the declared admission bound on a boot component's
+            # environment-contract field. Absent unless declared, so every
+            # existing config field's IR entry is byte-identical.
+            **({"bound": getattr(field, "bound", None)}
+               if getattr(field, "bound", None) else {})}
 
 # ── IR expression-kind schema (roadmap item 76a) ─────────────────────────────
 # The complete set of expression kinds this frontend can lower, split by the
@@ -9218,6 +9223,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         "provides": provides,
         "body": body,
     }
+    # item 350: the boot marking, additive and conditionally present — an
+    # ordinary component carries no `boot` key, so a composition that declares
+    # no boot component is byte-identical through the IR and every emitter.
+    if getattr(comp, "boot", False):
+        lowered["boot"] = True
     # v2 fields appear only when used, so v1 documents stay byte-identical
     if isolate:
         lowered["isolate"] = isolate
@@ -10233,6 +10243,21 @@ def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:
                 env.filename, expr.line,
                 _b1_message("spawn", "borrowed", _cfg_res),
                 hint=_b1_hint("spawn"), code="G7", category="ownership")
+    # item 350: a `boot` component is the composition's environment-contract
+    # arrival point, not a runtime template. Spawning one would mint instances
+    # whose config comes from an author-written `with { … }` that no admission
+    # check bounds, so the contract's declared bounds would apply to the
+    # host-injected instance and not to the spawned ones — exactly the silent
+    # widening the contract exists to remove. Refused.
+    if getattr(target, "boot", False):
+        raise RevlError(
+            env.filename, expr.line,
+            f"`{expr.component}` is a `boot` component and cannot be spawned",
+            hint="a boot component declares the ENVIRONMENT CONTRACT and is composed "
+                 "once, at admission, from the values the host injects; a spawn would "
+                 "mint instances whose config bypasses that check. Move the spawnable "
+                 "work into an ordinary component (item 350)",
+        )
     for f in target.config:
         if f.default is None and f.name not in expr.config:
             raise RevlError(
@@ -10553,10 +10578,37 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
             entry["intercept"] = dict(comp["intercept"])
         if comp.get("routes"):
             entry["routes"] = {k: dict(v) for k, v in comp["routes"].items()}
+        # item 350: the boot marking travels into the composition manifest, so a
+        # consumer reading the manifest alone (the linker, `revl audit`, a
+        # deploy conductor) can find the environment contract's arrival point
+        # without re-reading source. Conditional, so a boot-free composition's
+        # manifest is byte-identical.
+        if comp.get("boot"):
+            entry["boot"] = True
         entries.append(entry)
 
     def _line(name: str) -> int:
         return lines.get(name, 1)
+
+    # item 350: AT MOST ONE boot component per composition. The boot component is
+    # the composition's single declared arrival point for host-injected
+    # environment values; two of them would mean two contracts, and an admission
+    # check against "the" contract would silently check only one of them — a
+    # fail-open the check exists to remove. Ambient (running) components are in
+    # `entries` too, so a swap that would introduce a second boot component is
+    # caught at link, before the generation is admitted.
+    boot_names = [entry["name"] for entry in entries if entry.get("boot")]
+    if len(boot_names) > 1:
+        first, *rest = boot_names
+        _fail(RevlError(
+            program.filename, _line(rest[0]),
+            "a composition declares at most one `boot` component, found "
+            + ", ".join(boot_names),
+            hint="the boot component IS the environment contract — the exhaustive, "
+                 "typed list of what the host must inject. Two contracts cannot both "
+                 "be the exhaustive one, so merge the fields into "
+                 f"`boot component {first}` and drop `boot` from the rest (item 350)",
+        ))
 
     # why-trace locations: a locally compiled component knows its own file and
     # declaration line; an *ambient* entry (read back from a running manifest)
