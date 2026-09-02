@@ -771,3 +771,53 @@ fn apply(p: Str, ms: List[Str], f: (List[Str]) -> Str) -> Str {
 }
 ''')
     assert ir["ir_version"] == 3
+
+
+# -- arrows in a GENERIC position: the expected type is a type VARIABLE ------
+
+_GENERIC_MAP = "fn map_[A, B](xs: List[A], f: (A) -> B) -> List[B] { return xs }\n"
+
+
+def test_an_arrow_in_a_generic_position_unifies_rather_than_compares():
+    """Regression. A `return`/`let`/argument is checked and then *inferred*,
+    the same arrow node twice, and the second pass hands the arrow's type to
+    `unify`. The node's `param_types`/`returns` are the IR's spelling, with the
+    implicit-type-parameter marker stripped, so rebuilding the arrow's type
+    from them offered unification the opaque nominal `B` where the unsolved
+    variable `?B` belonged — and unification bound `?B := B`, after which the
+    arrow's body was checked against `B` and an `Int` was refused. The checker
+    keeps its own marked `resolved_type` for exactly this."""
+    ir = compile_source(
+        _GENERIC_MAP + "fn g() -> List[Int] { return map_([1, 2], (n) => n + 1) }")
+    assert ir["ir_version"] == 3
+
+
+@pytest.mark.parametrize("arrow", [
+    '(n: Int): Str => "s"',   # both halves written
+    '(n): Str => "s"',        # return only, parameter from the position
+])
+def test_a_written_return_binds_the_expected_type_variable(arrow):
+    """A written `Str` against an expected `B` must BIND `B := Str`, not be
+    compared to it and refused. The binding is observable in the call's result
+    type: `map_` then returns `List[Str]`."""
+    assert compile_source(
+        _GENERIC_MAP + "fn g() -> List[Str] { return map_([1, 2], %s) }" % arrow
+    )["ir_version"] == 3
+    with pytest.raises(RevlError, match=r"expects `List\[Int\]`, got `List\[Str\]`"):
+        compile_source(
+            _GENERIC_MAP + "fn g() -> List[Int] { return map_([1, 2], %s) }" % arrow)
+
+
+def test_a_written_return_in_a_generic_position_is_still_checked_against_the_body():
+    with pytest.raises(RevlError, match="expects `Str`, got `Int`"):
+        compile_source(
+            _GENERIC_MAP +
+            'fn g() -> List[Str] { return map_([1, 2], (n: Int): Str => n + 1) }')
+
+
+def test_a_generic_parameter_position_still_unifies_positionally():
+    """The parameter half of the same property: `A` is learned from `xs` and
+    reaches the arrow's parameter, so the body sees `n: Int`."""
+    with pytest.raises(RevlError, match="operand of `!`"):
+        compile_source(
+            _GENERIC_MAP + "fn g() -> List[Int] { return map_([1, 2], (n) => !n) }")
