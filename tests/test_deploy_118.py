@@ -385,6 +385,114 @@ def test_conformance_cert_binding_is_rehashed(staged):
     assert receipt["link"] == deploy.LINK_EVIDENCE
 
 
+# ------------------------------------------- the gauntlet VERDICT (428 F8)
+#
+# The facet was hashed and never read, so `admit` accepted a bundle carrying
+# its own evidence that it should not have been built, and accepted a genuine
+# `admissible` dossier graded over a DIFFERENT composition, because the
+# dossier named no composition at all.
+
+
+def _restage(bundle, dossier):
+    """Write `dossier` as the staged gauntlet evidence and re-sign the chain
+    over it, so nothing in these tests is a forgery: the attestation is honest
+    about exactly the bytes on disk."""
+    (bundle / "gauntlet.json").write_text(
+        json.dumps(dossier, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return deploy.make_deploy_attestation(bundle, SIGNER_KEY, signer="ci")
+
+
+def _dossier(bundle):
+    return json.loads((bundle / "gauntlet.json").read_text(encoding="utf-8"))
+
+
+def test_the_staged_gauntlet_dossier_names_the_composition_it_graded(staged):
+    bundle, att = staged
+    dossier = _dossier(bundle)
+    assert dossier["verdict"] == deploy.GAUNTLET_ADMISSIBLE
+    assert dossier[deploy.GAUNTLET_IDENTITY] == att["composition_hash"]
+
+
+@pytest.mark.parametrize("verdict", ["rejected", "", None, "ADMISSIBLE"])
+def test_a_dossier_whose_verdict_is_not_admissible_is_refused(staged, verdict):
+    bundle, _att = staged
+    dossier = _dossier(bundle)
+    dossier["verdict"] = verdict
+    receipt = deploy.admit(bundle, trust=_trust(),
+                           attestation=_restage(bundle, dossier))
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.FACET_GAUNTLET
+    assert "not 'admissible'" in receipt["reason"]
+
+
+def test_an_admissible_dossier_graded_over_another_composition_is_refused(
+        staged, tmp_path):
+    """The second half of F8: the record is genuine, `admissible`, and hashes
+    correctly into the chain. It is simply not evidence about THIS artifact."""
+    from revl.bundle import build_bundle
+
+    other_src = tmp_path / "other.rvl"
+    other_src.write_text(
+        "service Log { emission[pr] fn w(m: Str) }\n"
+        "extern emission fn pr(m: Str) = @py { pass }\n"
+        "component L provides log: Log { provide log { fn w(m) = emit pr(m) } }\n"
+        "component U requires log: Log { emit log.w(\"x\") }\n",
+        encoding="utf-8")
+    other = tmp_path / "other.revlbundle"
+    build_bundle([str(other_src)], str(other), backends=("python",), env={})
+    foreign = _dossier(other)
+    assert foreign["verdict"] == deploy.GAUNTLET_ADMISSIBLE
+
+    bundle, _att = staged
+    receipt = deploy.admit(bundle, trust=_trust(),
+                           attestation=_restage(bundle, foreign))
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.FACET_GAUNTLET
+    assert "graded over composition" in receipt["reason"]
+
+
+def test_a_dossier_naming_no_composition_is_refused_not_assumed(staged):
+    """Fail closed: an unidentified dossier is not evidence about this
+    composition, so it is refused rather than taken to be about it."""
+    bundle, _att = staged
+    dossier = _dossier(bundle)
+    del dossier[deploy.GAUNTLET_IDENTITY]
+    receipt = deploy.admit(bundle, trust=_trust(),
+                           attestation=_restage(bundle, dossier))
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.FACET_GAUNTLET
+    assert "names no composition" in receipt["reason"]
+
+
+def test_an_unreadable_dossier_is_refused_not_read_as_a_pass(staged):
+    """Fail closed on the input itself, item 428 F11's shape: bytes the
+    receiver cannot parse are a refusal, never an absent facet."""
+    bundle, _att = staged
+    (bundle / "gauntlet.json").write_text("{not json at all", encoding="utf-8")
+    att = deploy.make_deploy_attestation(bundle, SIGNER_KEY, signer="ci")
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.FACET_GAUNTLET
+    assert "cannot be read as JSON" in receipt["reason"]
+
+
+def test_a_receiver_may_require_gauntlet_evidence_to_exist(staged):
+    """Deleting the dossier and re-signing removes the facet, so the verdict
+    check has nothing to bite on. A receiver that demands the evidence refuses
+    the chain that carries none."""
+    bundle, _att = staged
+    (bundle / "gauntlet.json").unlink()
+    att = deploy.make_deploy_attestation(bundle, SIGNER_KEY, signer="ci")
+    assert deploy.FACET_GAUNTLET not in att["evidence_bindings"]
+    # off by default, an honestly degraded build still admits
+    assert deploy.admit(bundle, trust=_trust(),
+                        attestation=att)["verdict"] == deploy.ACCEPT
+    receipt = deploy.admit(bundle, trust=_trust(require_gauntlet=True),
+                           attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.FACET_GAUNTLET
+
+
 # ---------------------------------------------------------------------------
 # 2. the correlation envelope, authenticated against the peer identity
 # ---------------------------------------------------------------------------
