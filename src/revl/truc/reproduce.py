@@ -22,10 +22,16 @@ the recomputed hashes tier by tier against the recorded ones:
     capabilities) read off the rebuilt manifest against the recorded surface.
   * **backend version**, the interchange `schema_version` the recorded manifest
     was stamped with against the current compiler's `INTERCHANGE_VERSION`.
-  * **attestation**, when the entry carries an `attestation.json`, verified
-    through `revl.attest.verify_attestation` (item 127) against the rebuilt IR:
-    the signature proves the record is authentic, the hash proves the IR did not
-    change since it was signed.
+  * **independent pin**, the project's own `truc.lock` pin (and the bytes
+    vendored under `trucs/<name>/`) against the registry's source. Every other
+    tier compares the registry with itself and therefore cannot see a
+    substitution the registry made and then re-indexed; this one can.
+  * **attestation**, when the entry carries an
+    `evidence/attestation.json`, verified through
+    `revl.attest.verify_attestation` (item 127) against the rebuilt IR: the
+    signature proves the record is authentic, the hash proves the IR did not
+    change since it was signed, and the signed per-facet bindings prove the
+    evidence dossiers beside it are the ones that were signed.
   * **emitted artifact**, when the entry records artifact hashes
     (`artifacts.json`), each backend's emitter is re-run over the rebuilt IR and
     the emitted source is re-hashed against the recorded hash.
@@ -40,6 +46,11 @@ Every tier reports one of three outcomes, honestly:
     absent. This is honest degradation, not a pass and not a crash: a tier with
     no recorded evidence cannot be a mismatch, and it never silently reads as OK.
 
+An unverifiable tier is not a pass either. A rebuild with no MISMATCH but with
+tiers that checked nothing is reported as *partially* reproduced, and
+`--strict` exits non-zero on it: "nothing diverged" is a much weaker claim than
+"everything agreed", and the two must never be printed the same way.
+
 Nothing here invents a hash scheme. The source/manifest hashes are exactly
 `registry._sha256` over exactly the bytes `registry.build_index` records; the IR
 document is exactly `registry._audit_document`; the attestation check is exactly
@@ -50,7 +61,6 @@ it never mutates truc state, the registry, or the lock.
 from __future__ import annotations
 
 import argparse
-import copy
 import importlib
 import json
 import os
@@ -67,6 +77,7 @@ UNVERIFIED = "cannot verify"
 # The tiers, in the order item 297 names them, so the report reads the same
 # every run.
 TIER_SOURCE = "source"
+TIER_ANCHOR = "independent pin"
 TIER_LOCK = "dependency lock"
 TIER_IR = "IR"
 TIER_POLICY = "policy surface"
@@ -118,6 +129,22 @@ class ReproduceReport:
         recorded, or an absent toolchain) do not by themselves fail the rebuild -
         they are reported as such, but any MISMATCH does."""
         return not self.mismatches
+
+    @property
+    def fully_verified(self) -> bool:
+        """Every tier actually ran and agreed. `ok` alone is NOT proof of
+        reproduction: a tier that could not verify anything contributes no
+        MISMATCH, so a report with unverifiable tiers passes `ok` while having
+        checked less than it claims. The verdict and the exit code under
+        `--strict` read this, so a dead tier can never quietly count as a pass.
+        """
+        return not self.mismatches and not self.unverified
+
+    @property
+    def verdict(self) -> str:
+        if self.mismatches:
+            return "not reproduced"
+        return "reproduced" if self.fully_verified else "partially reproduced"
 
 
 # --------------------------------------------------------------- resolution
@@ -202,10 +229,10 @@ def _lock_row(project_dir: str, name: str) -> dict | None:
 
 # --------------------------------------------------------------- tier checks
 
-def _check_source(source: str, row: dict, lock: dict | None) -> Check:
+def _check_source(source: str, row: dict) -> Check:
     """Rebuild the source hash from the recorded `component.rvl` bytes and
-    compare against the recorded `sourceHash` (index, cross-checked against the
-    lock pin when present)."""
+    compare against the `sourceHash` the registry index recorded. This is a
+    registry-internal check; the independent one is `_check_anchor`."""
     from ..registry import _sha256  # noqa: PLC0415, the exact recorded scheme
 
     rebuilt = _sha256(source)
@@ -216,12 +243,67 @@ def _check_source(source: str, row: dict, lock: dict | None) -> Check:
         return Check(TIER_SOURCE, MISMATCH,
                      "recorded source hash and rebuilt source hash differ",
                      recorded, rebuilt)
-    # cross-check the lock pin, if this component is a locked truc.
-    if lock is not None and lock.get("sourceHash") and lock["sourceHash"] != recorded:
-        return Check(TIER_SOURCE, MISMATCH,
-                     "truc.lock source pin disagrees with the registry",
-                     lock["sourceHash"], recorded)
+    # The truc.lock cross-check is NOT part of this tier: every check here
+    # compares the registry against itself, so it agrees by construction with a
+    # registry that regenerated its own index over substituted source. The
+    # independent anchor gets its own tier (`_check_anchor`) so its absence is
+    # visible instead of implied.
     return Check(TIER_SOURCE, OK, f"sha256 {_short(rebuilt)}", recorded, rebuilt)
+
+
+def _check_anchor(project_dir: str, name: str, source: str,
+                  lock: dict | None) -> Check:
+    """Cross-check the registry's source against something the REGISTRY DID NOT
+    WRITE: the project's own `truc.lock` pin, and the bytes vendored under
+    `trucs/<name>/`.
+
+    Every other tier compares the registry against itself. Regenerate the index
+    over substituted source and all of them reproduce green - which is exactly
+    the shape of a supply-chain substitution where the registry is the adversary.
+    The lock pin was recorded when the component was added, from a registry the
+    project trusted at that moment, so it is the one value here that a later
+    registry cannot mint for itself.
+
+    A vendored truc with no pin, or a pin left blank, is a MISMATCH and not a
+    shrug: an unpinned dependency is precisely the state a substitution needs.
+    A component that is not a truc of this project has no anchor at all, and that
+    is reported `cannot verify` - honest about what was and was not checked.
+    """
+    from ..registry import _sha256  # noqa: PLC0415
+
+    rebuilt = _sha256(source)
+    pin = (lock or {}).get("sourceHash") or ""
+    vendor_path = Path(project_dir, "trucs", name, "component.rvl")
+    vendored = (vendor_path.read_text(encoding="utf-8")
+                if vendor_path.exists() else None)
+
+    if lock is None and vendored is None:
+        return Check(TIER_ANCHOR, UNVERIFIED,
+                     f"'{name}' is not a truc of this project: there is no "
+                     "truc.lock pin to check the registry against, so every "
+                     "other tier compared the registry only with itself")
+    if lock is None:
+        return Check(TIER_ANCHOR, MISMATCH,
+                     f"trucs/{name}/ is vendored but carries no truc.lock row: "
+                     "nothing independent pins these bytes")
+    if not pin:
+        return Check(TIER_ANCHOR, MISMATCH,
+                     f"the truc.lock row for '{name}' carries a blank "
+                     "sourceHash: nothing independent pins these bytes")
+    if pin != rebuilt:
+        return Check(TIER_ANCHOR, MISMATCH,
+                     "the truc.lock pin disagrees with the registry's source: "
+                     "the published component is not the one this project "
+                     "locked (a substituted dependency)",
+                     pin, rebuilt)
+    if vendored is not None and _sha256(vendored) != pin:
+        return Check(TIER_ANCHOR, MISMATCH,
+                     f"the bytes vendored at trucs/{name}/component.rvl do not "
+                     "match the truc.lock pin",
+                     pin, _sha256(vendored))
+    where = "pin matches the registry source and the vendored copy" \
+        if vendored is not None else "pin matches the registry source"
+    return Check(TIER_ANCHOR, OK, f"truc.lock {where}", pin, rebuilt)
 
 
 def _surface(ir: dict) -> tuple[dict, dict]:
@@ -337,30 +419,61 @@ def _check_backend_version(entry_dir: Path) -> Check:
 
 
 def _normalized_ir(ir: dict) -> dict:
-    """A deep copy of the compiled IR with each component's `file` reduced to its
-    basename, the same path-normalization `registry._audit_document` applies so
-    a document is byte-reproducible wherever the compiler runs. Attestation
-    hashing binds this canonical form, so `truc reproduce` matches an attestation
-    regardless of the absolute path the entry was compiled from, and the raw IR
-    the caller holds is left untouched."""
-    out = copy.deepcopy(ir)
-    for comp in (out.get("manifest") or {}).get("components") or []:
-        if comp.get("file"):
-            comp["file"] = os.path.basename(comp["file"])
-    return out
+    """The canonical (path-normalized) spelling of a compiled IR that an
+    attestation binds — a deep copy with every cwd-dependent path reduced to its
+    basename, so the composition hash is a pure function of the source and not
+    of where the entry was compiled.
+
+    This is `registry._normalize_ir_for_attest` itself, called rather than
+    re-implemented. It used to be a near-copy that normalized only
+    `manifest.components[].file` and missed `components[].source`, so a
+    reproduce could never match an attestation `registry.build_evidence` had
+    signed. Nothing caught it because the attestation tier was reading a path
+    the publisher never writes: a dead check cannot fail, and it cannot notice
+    two definitions drifting apart either. One definition, one hash.
+    """
+    from ..registry import _normalize_ir_for_attest  # noqa: PLC0415
+
+    return _normalize_ir_for_attest(ir)
+
+
+def _attestation_path(entry_dir: Path) -> Path | None:
+    """Where the entry's attestation actually lives, or None.
+
+    `registry.build_evidence` publishes it at `<entry>/evidence/attestation.json`
+    - the item-293 bundle path. This tier used to read `<entry>/attestation.json`,
+    a path nothing writes, so for every entry the publish path produces the tier
+    was structurally DEAD: it could only ever report "no recorded attestation",
+    and an unverifiable tier used to read as a pass. The bundle path is checked
+    first; the bare root path is still honoured as the legacy spelling for
+    entries published before item 293.
+    """
+    from ..registry import EVIDENCE_ATTESTATION, EVIDENCE_DIRNAME  # noqa: PLC0415
+
+    for candidate in (entry_dir / EVIDENCE_DIRNAME / EVIDENCE_ATTESTATION,
+                      entry_dir / EVIDENCE_ATTESTATION):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _check_attestation(entry_dir: Path, ir: dict, env) -> Check:
-    """When the entry carries an `attestation.json`, verify it with `revl.attest`
+    """When the entry carries an attestation, verify it with `revl.attest`
     against the rebuilt IR: the signature proves the record is authentic and
     untampered, the IR-hash proves the composition did not change since it was
-    signed. No attestation, or no signing key available, is `cannot verify` -
-    honest, not a pass."""
+    signed, and the signed per-facet bindings (item 290, §6.2) prove the evidence
+    dossiers riding alongside it are the ones that were signed. No attestation,
+    or no signing key available, is `cannot verify` - honest, not a pass."""
     from .. import attest  # noqa: PLC0415, item 127, the exact attest scheme
+    from ..registry import (EVIDENCE_ATTESTATION,  # noqa: PLC0415
+                            EVIDENCE_DIRNAME, binding_mismatch,
+                            load_evidence_bundle)
 
-    att_path = entry_dir / "attestation.json"
-    if not att_path.exists():
-        return Check(TIER_ATTESTATION, UNVERIFIED, "no recorded attestation")
+    att_path = _attestation_path(entry_dir)
+    if att_path is None:
+        return Check(TIER_ATTESTATION, UNVERIFIED,
+                     "no recorded attestation at "
+                     f"{EVIDENCE_DIRNAME}/{EVIDENCE_ATTESTATION}")
     try:
         att = attest.load_attestation(str(att_path))
     except RevlError as error:
@@ -375,6 +488,12 @@ def _check_attestation(entry_dir: Path, ir: dict, env) -> Check:
     ok, reason = attest.verify_attestation(att, key, ir)
     if not ok:
         return Check(TIER_ATTESTATION, MISMATCH, reason,
+                     att.get("composition_hash", ""), attest.canonical_hash(ir))
+    facet = binding_mismatch(att, load_evidence_bundle(entry_dir))
+    if facet is not None:
+        return Check(TIER_ATTESTATION, MISMATCH,
+                     f"the signature is authentic, but the '{facet}' dossier it "
+                     "binds is missing or no longer hashes to the signed value",
                      att.get("composition_hash", ""), attest.canonical_hash(ir))
     return Check(TIER_ATTESTATION, OK, "authentic; IR matches the signed hash",
                  att.get("composition_hash", ""), attest.canonical_hash(ir))
@@ -514,8 +633,10 @@ def reproduce(spec: str, *, project_dir: str = ".", registry: str | None = None,
     source = source_path.read_text(encoding="utf-8")
     lock = _lock_row(project_dir, name)
 
-    # source tier, hash the recorded bytes.
-    report.checks.append(_check_source(source, row, lock))
+    # source tier, hash the recorded bytes; then the one check the registry
+    # cannot satisfy on its own - the project's independent truc.lock pin.
+    report.checks.append(_check_source(source, row))
+    report.checks.append(_check_anchor(project_dir, name, source, lock))
 
     # rebuild the IR + manifest through the normal pipeline (frontend-only, no
     # runtime needed, the same path registry.build_index runs).
@@ -568,10 +689,19 @@ def render(report: ReproduceReport) -> str:
     n_ok = sum(1 for c in report.checks if c.status == OK)
     n_mismatch = len(report.mismatches)
     n_unver = len(report.unverified)
-    if report.ok:
+    if report.fully_verified:
         lines.append(
             f"reproduced: {report.name} rebuilds bit-for-bit to what was "
             f"published ({n_ok} OK, {n_unver} unverifiable, {n_mismatch} mismatch)")
+    elif report.ok:
+        # No tier diverged, but not every tier ran. Say that plainly: a check
+        # that verified nothing is not a check that passed.
+        blind = ", ".join(c.tier for c in report.unverified)
+        lines.append(
+            f"partially reproduced: {report.name} matched every tier that could "
+            f"be checked, but {n_unver} could not be verified at all ({blind}) "
+            f"- this is not proof of reproduction "
+            f"({n_ok} OK, {n_unver} unverifiable, {n_mismatch} mismatch)")
     else:
         diverged = ", ".join(c.tier for c in report.mismatches)
         lines.append(
@@ -583,7 +713,8 @@ def render(report: ReproduceReport) -> str:
 def run(argv: list[str]) -> int:
     """`truc reproduce <component@version>` entry point. Returns 0 when the
     component reproduces (no tier diverged), 1 on any MISMATCH, 2 on a usage or
-    resolution error."""
+    resolution error. With `--strict`, a tier that could verify nothing is not a
+    pass either: the exit code is 1 unless every tier actually ran and agreed."""
     parser = argparse.ArgumentParser(
         prog="truc reproduce",
         description="rebuild a published component and verify it is bit-for-bit "
@@ -595,6 +726,9 @@ def run(argv: list[str]) -> int:
                              "of the one declared in truc.toml")
     parser.add_argument("--json", action="store_true",
                         help="print the tier-by-tier report as JSON")
+    parser.add_argument("--strict", action="store_true",
+                        help="exit non-zero unless EVERY tier verified: a tier "
+                             "that could check nothing is not a pass")
     args = parser.parse_args(argv)
 
     if not args.component:
@@ -614,6 +748,9 @@ def run(argv: list[str]) -> int:
             "name": report.name,
             "version": report.version,
             "reproduced": report.ok,
+            "verdict": report.verdict,
+            "fullyVerified": report.fully_verified,
+            "unverified": [c.tier for c in report.unverified],
             "checks": [
                 {"tier": c.tier, "status": c.status, "detail": c.detail,
                  "recorded": c.recorded, "rebuilt": c.rebuilt}
@@ -622,4 +759,6 @@ def run(argv: list[str]) -> int:
         }, indent=2))
     else:
         print(render(report))
+    if args.strict:
+        return 0 if report.fully_verified else 1
     return 0 if report.ok else 1
