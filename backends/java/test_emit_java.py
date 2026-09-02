@@ -26,6 +26,12 @@ _spec = importlib.util.spec_from_file_location("revl_java_emit", Path(__file__).
 emit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(emit)
 from revl import compile_files, compile_source  # noqa: E402
+# A red golden is a REVIEW prompt, not a wall: the goldens are snapshot tests
+# (docs/conformance.md, "Golden policy: snapshot, not freeze"), so regenerating
+# and reviewing the diff is always an acceptable resolution. Every golden
+# assertion says which command regenerates it.
+_TAIL = ("If the change is intended: python3 tools/regen_goldens.py {t}, then review "
+         "the diff. Goldens are snapshots, not a freeze (docs/conformance.md).")
 
 HERE = Path(__file__).resolve().parent
 STUB_SOURCES = sorted((HERE / "stubs").rglob("*.java"))
@@ -88,7 +94,7 @@ def test_user_cache_emits_java_structure():
     assert 'UnsupportedOperationException("effectful method body")' not in src
 
 
-def test_format_emits_string_format():
+def test_format_emits_a_concatenation_chain():
     ir = {
         "ir_version": 1,
         "services": {"Bus": {"methods": {"send": {
@@ -101,7 +107,15 @@ def test_format_emits_string_format():
         }],
     }
     src = emit.emit(ir)
-    assert 'String.format("hi %s", x)' in src
+    # item 433 F1: a `format` node is a concatenation chain, not String.format.
+    # The only conversion this emitter ever produced was `%s`, which is
+    # `String.valueOf` for every non-Formattable argument (and no revl value is
+    # Formattable), so the two are output-identical while the concatenation
+    # compiles to one `invokedynamic makeConcatWithConstants` instead of
+    # allocating a varargs array, a Formatter and a re-parsed specifier list on
+    # every call.
+    assert '"hi " + x' in src
+    assert "String.format(" not in src
 
 
 def test_rejects_unknown_ir_version():
@@ -263,7 +277,9 @@ def test_version_gate_accepts_ir_1_2_3():
 def test_user_cache_golden_byte_equality():
     src = emit.emit(_ir("user_cache"))
     golden = (Path(__file__).resolve().parent / "golden" / "user_cache.java").read_text()
-    assert src == golden
+    assert src == golden, (
+        "backends/java/golden/user_cache.java drifted from the emitter. "
+        + _TAIL.format(t="java"))
 
 
 def test_host_objects_are_real_java_runtime_classes():
@@ -410,9 +426,12 @@ def test_v3_extern_requires_java_body():
         emit.emit(missing)
 
 
-def test_percent_in_template_is_escaped_for_string_format():
-    """Review finding: a literal `%` reached String.format unescaped and
-    threw UnknownFormatConversionException at runtime (SQL LIKE patterns)."""
+def test_percent_in_template_needs_no_escaping():
+    """A literal `%` used to reach String.format unescaped and throw
+    UnknownFormatConversionException at runtime (SQL LIKE patterns), so the
+    emitter doubled it. item 433 F1 renders a `format` node as a concatenation
+    chain, which has no conversion syntax at all, so the `%` is carried
+    verbatim and the whole hazard is gone."""
     ir = compile_source(
         """
         service Db { emission fn ex(s: Str) -> Int }
@@ -423,7 +442,8 @@ def test_percent_in_template_is_escaped_for_string_format():
         """
     )
     src = emit.emit(ir)
-    assert 'String.format("SELECT 100%% of %s", m)' in src
+    assert '"SELECT 100% of " + m' in src
+    assert "100%%" not in src
 
 
 def test_stdlib_builtins_use_typed_overloads():
@@ -1419,8 +1439,11 @@ def test_map_value_type_lowers_to_persistent_hashmaps():
     assert "revlMapHas(m, k)" in src
     # the copying helper itself is emitted exactly once per file
     assert src.count("private static <V> java.util.Map<String, V> revlMapSet(") == 1
-    # the empty map is a diamond-inferred HashMap
-    assert "return new java.util.HashMap<>();" in src
+    # item 433 F8: the empty map is the preallocated immutable singleton, not
+    # a fresh mutable HashMap — every writer above copies before it mutates, so
+    # nothing ever writes through it (48 B per escaping evaluation, against 0).
+    assert "return java.util.Map.of();" in src
+    assert "new java.util.HashMap<>()" not in src
 
 
 @pytest.mark.skipif(JAVAC is None, reason="no working javac")
