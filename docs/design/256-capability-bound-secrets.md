@@ -681,7 +681,9 @@ tickets) covers a value that arrives at load time. None of it applies to a
 literal the author typed into the source:
 
 ```revl
-config { api_key: Secret[Str] = "sk-live-..." }
+component Payments {
+  config { api_key: Secret[Str] = "sk-live-..." }
+}
 ```
 
 That default is source. It lowers into the IR's config entry
@@ -704,7 +706,13 @@ names the form that has no value to leak, which is 1a's bound secret:
 
 ```revl
 secret api_key for payments.charge
+
+extern emission[payments.charge] fn charge(amount: Int) -> Str = @py { return "ch_1" }
 ```
+
+The `extern` is there because the binding is capability-keyed: a secret whose
+capability no emission serves is refused outright, so the smallest program
+that shows the form has to name the emission it feeds (§1a).
 
 `parser.SecretDecl` carries `name`, `capability` and `line` and has no value
 field at all (§1b), so nothing about the value exists in the AST or the IR to
