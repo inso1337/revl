@@ -1,6 +1,6 @@
 // The functional trio (roadmap item 383). `xs.map(f)` desugars to
 // stdlib/list.rvl's `list_map`, which is itself a push loop.
-use "stdlib/list.rvl" { list_map, list_filter, list_reduce }
+use "stdlib/list.rvl" { list_map, list_filter, list_reduce, list_dedup }
 
 fn doubled(xs: List[Int]) -> List[Int] {
   return xs.map((v: Int) => v * 2)
@@ -16,4 +16,13 @@ fn total_reduce(xs: List[Int]) -> Int {
 
 fn pipeline(xs: List[Int]) -> Int {
   return xs.map((v: Int) => v + 1).filter((v: Int) => v > 2).reduce(0, (a: Int, v: Int) => a + v)
+}
+
+// roadmap item 445 (b): `list_dedup` hands its accumulator to a CALL one
+// statement before writing it — `if (!list_contains(out, x)) { out = out.push(x) }`
+// — so an intraprocedural rule has to assume the call kept it and the push
+// stays a whole-list copy. `list_contains` walks the list and answers a Bool;
+// the whole-program retention summary is what sees that.
+fn deduped(xs: List[Str]) -> List[Str] {
+  return list_dedup(xs)
 }
