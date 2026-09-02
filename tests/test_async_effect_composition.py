@@ -114,9 +114,14 @@ def test_typescript_emits_boundary_atomic_awaits():
     assert 'const la = ctx.db.query("ACQ A")' in code, \
         "the sync acquisition is byte-identical (no await)"
     assert 'const lb = (await ctx.db.slow_open("ACQ B"))' in code
-    assert 'yield () => ctx.db.query("UNDO B")' in code
+    # the inverse registers through `Frame.bracket` (Phase-1 continue-and-
+    # record, docs/design/teardown-contract.md): the undo ARROW is unchanged,
+    # it is now the third argument instead of the bare yielded value.
+    assert ('yield $revl_frame.bracket({ key: "lb", method: "slow_open", '
+            'args: [], site: "Consumer.body:lb" }, "query", '
+            '() => ctx.db.query("UNDO B"))') in code
     # the awaited emission is keyword-led, so ASI cannot glue it to the prior
-    # `yield () => <undo>` arrow
+    # `yield …` statement
     assert 'await ctx.db.record("FIRE")' in code
     assert '(await ctx.db.record("FIRE"))' not in code, \
         "the emission statement must not begin with `(` (ASI hazard)"
