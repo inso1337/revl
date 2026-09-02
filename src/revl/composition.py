@@ -40,7 +40,8 @@ import os
 
 from .errors import RevlError
 from .lower import _config_default_type
-from .parser import CompositionDecl, IsolateStmt, Program, RowDecl, parse_file
+from .parser import (Address, CompositionDecl, IsolateStmt, LayerDecl, Program,
+                     RowDecl, parse_file)
 from .typecheck import compatible
 
 # The project's own origin. Reserved and unmintable by anyone else: a third
@@ -130,10 +131,11 @@ class Row:
     """One resolved row of the row table."""
 
     __slots__ = ("label", "origin", "source", "component", "claims",
-                 "extra_claims", "requires", "config", "granted", "line")
+                 "extra_claims", "requires", "config", "granted", "line",
+                 "provenance")
 
     def __init__(self, label, origin, source, component, claims, extra_claims,
-                 requires, config, granted, line):
+                 requires, config, granted, line, provenance=None):
         self.label = label
         self.origin = origin
         self.source = source
@@ -145,6 +147,9 @@ class Row:
         self.config = config              # field -> value
         self.granted = granted            # None == clause not written
         self.line = line
+        # 426 §3.3 step 5: the ordered record of every (level, layer, op) that
+        # touched this row. A row nobody patched carries one entry, the base.
+        self.provenance = list(provenance or [])
 
     @property
     def qualified(self) -> str:
@@ -169,6 +174,11 @@ class Row:
             out["config"] = dict(self.config)
         if self.granted is not None:
             out["granted"] = list(self.granted)
+        if any(level for level, _, _ in self.provenance):
+            # Only recorded once a layer actually touched the row, so a
+            # composition with no layers produces the S1 document byte for byte.
+            out["provenance"] = [{"level": level, "layer": layer, "op": op}
+                                 for level, layer, op in self.provenance]
         return out
 
 
@@ -347,65 +357,67 @@ def _check_granted(row: RowDecl, header: _Header, doc: str) -> list[str] | None:
     return allowed
 
 
-def resolve(decl: CompositionDecl, doc_path: str,
-            root: str | None = None) -> RowTable:
-    """Resolve one composition declaration into its row table.
+def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
+                 root: str) -> tuple[Row, _Header]:
+    """One `row` declaration into one resolved `Row`, header-only.
 
-    Header-only: every row's source is parsed and its component header read, and
-    no body is lowered. Every failure is a REFUSAL naming the row (426 §2.4:
-    an address that resolves to nothing is a refusal, never a no-op).
+    Pure with respect to the rest of the table: nothing here looks at another
+    row, which is what lets the fold (S2) introduce and withdraw rows in any
+    order and still reach one answer (426 §3.3). The cross-row check is
+    `_check_disjoint`, and it runs ONCE, over the folded result.
     """
-    # Provenance and origin are recorded relative to the PROJECT root (the
-    # invocation cwd by default), the same rule `parse_file` follows, so an IR
-    # document stays machine-independent.
-    root = os.path.abspath(root or os.getcwd())
-    doc = decl.source or doc_path
-    origin = origin_of(doc_path, root)
-    base = os.path.dirname(os.path.abspath(doc_path))
+    source = os.path.join(base, row.path)
+    if not os.path.isfile(source):
+        raise RevlError(
+            doc, row.line,
+            f"row `@{row.label}` reads `{row.path}`, which does not exist",
+            hint=f"resolved against `{_relative(base, root)}`")
+    rel = _relative(source, root)
+    header = _pick_component(row, _headers(source), doc, rel)
+    claims, extra = _check_claims(row, header, doc, rel)
+    return Row(
+        label=row.label,
+        origin=origin,
+        source=rel,
+        component=header.name,
+        claims=claims,
+        extra_claims=extra,
+        requires=sorted(header.requires),
+        config=_check_config(row, header, doc, rel),
+        granted=_check_granted(row, header, doc),
+        line=row.line,
+    ), header
 
-    rows: list[Row] = []
+
+def _check_disjoint(rows: list[Row], name: str, doc: str) -> None:
+    """The G2 pre-check (provision disjointness) at the row level, so the
+    refusal names ROWS rather than the two component names the operator may not
+    have written (426 §3.4).
+
+    `_link` still runs G2 unchanged over the compiled result — this only
+    produces a better message, which is what keeps the resolver off the trusted
+    path (§3.3). Under the fold it runs exactly once, over the FINAL table:
+    running it per operation is the determinism trap §3.3 exists to kill, where
+    `remove`-then-`add` succeeds and `add`-then-`remove` refuses.
+    """
     claimed: dict = {}
-    for row in decl.rows:
-        source = os.path.join(base, row.path)
-        if not os.path.isfile(source):
-            raise RevlError(
-                doc, row.line,
-                f"row `@{row.label}` reads `{row.path}`, which does not exist",
-                hint=f"resolved against `{_relative(base, root)}`")
-        rel = _relative(source, root)
-        header = _pick_component(row, _headers(source), doc, rel)
-        claims, extra = _check_claims(row, header, doc, rel)
-        resolved = Row(
-            label=row.label,
-            origin=origin,
-            source=rel,
-            component=header.name,
-            claims=claims,
-            extra_claims=extra,
-            requires=sorted(header.requires),
-            config=_check_config(row, header, doc, rel),
-            granted=_check_granted(row, header, doc),
-            line=row.line,
-        )
-        # A pre-check of G2 (provision disjointness) at the row level, so the
-        # refusal names ROWS rather than the two component names the operator
-        # may not have written (426 §3.4). `_link` still runs G2 unchanged over
-        # the compiled result — this only produces a better message, which is
-        # what keeps the resolver off the trusted path (§3.3).
+    for resolved in rows:
         for claim in [*resolved.claims, *resolved.extra_claims]:
             other = claimed.get(claim)
             if other is not None:
                 raise RevlError(
-                    doc, row.line,
+                    doc, resolved.line,
                     f"{claim_str(claim)} is claimed by both row "
                     f"`{other.qualified}` (component `{other.component}`) and "
                     f"row `{resolved.qualified}` (component "
-                    f"`{resolved.component}`) in composition {decl.name}",
+                    f"`{resolved.component}`) in composition {name}",
                     hint="at most one row may claim a `(key, realm)` pair; this "
                          "is G2, provision disjointness, seen at the row level")
             claimed[claim] = resolved
-        rows.append(resolved)
 
+
+def _resolve_uses(decl: CompositionDecl, doc: str, base: str,
+                  root: str) -> list[str]:
     uses = []
     for path, line in decl.uses:
         target = os.path.join(base, path)
@@ -415,7 +427,638 @@ def resolve(decl: CompositionDecl, doc_path: str,
                 f"composition {decl.name} uses `{path}`, which does not exist",
                 hint=f"resolved against `{_relative(base, root)}`")
         uses.append(_relative(target, root))
-    return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses)
+    return uses
+
+
+def resolve(decl: CompositionDecl, doc_path: str,
+            root: str | None = None) -> RowTable:
+    """Resolve one composition declaration into its row table.
+
+    Header-only: every row's source is parsed and its component header read, and
+    no body is lowered. Every failure is a REFUSAL naming the row (426 §2.4:
+    an address that resolves to nothing is a refusal, never a no-op).
+
+    This is the BASE table (level 0). `fold` (S2) starts from it and applies the
+    layers the document declares; a document declaring none folds to itself.
+    """
+    # Provenance and origin are recorded relative to the PROJECT root (the
+    # invocation cwd by default), the same rule `parse_file` follows, so an IR
+    # document stays machine-independent.
+    root = os.path.abspath(root or os.getcwd())
+    doc = decl.source or doc_path
+    origin = origin_of(doc_path, root)
+    base = os.path.dirname(os.path.abspath(doc_path))
+
+    rows = [_resolve_row(row, origin, doc, base, root)[0] for row in decl.rows]
+    _check_disjoint(rows, decl.name, doc)
+    return RowTable(decl.name, origin, _relative(doc_path, root), rows,
+                    _resolve_uses(decl, doc, base, root))
+
+
+# ------------------------------------------------------------------- the fold
+#
+# 426 S2. Resolution is a PURE FOLD and the gate is never inside it (§3.3), for
+# two independent reasons and both are load-bearing:
+#
+# - CORRECTNESS. Per-operation admission opens a determinism trap: `remove
+#   key("logger")` then `add @logger` succeeds while the reverse order refuses
+#   on G2 at an intermediate state, so the verdict depends on the order the ops
+#   happened to be listed in. Folding first means no intermediate state exists —
+#   `_check_disjoint` runs ONCE, over the final table.
+# - SOUNDNESS. `_link` still runs G2 and G3 unchanged over the assembled
+#   composition. The fold is a pre-check whose only privilege is a better
+#   message, so a bug here cannot admit something `_link` would refuse; it can
+#   only over-refuse, which is a usability bug and not a soundness one.
+#
+# Every input is an ordered list in a file. Nothing here depends on filesystem
+# iteration order, directory listing order, or wall-clock time.
+
+BASE_LAYER = "<base>"
+
+_LEVEL_NAME = {0: "base", 1: "stack", 2: "site", 3: "invocation"}
+
+
+class _Slot:
+    """One row in flight, with the header it resolved against (so a later
+    `configure` re-checks its fields) and the layer that introduced it."""
+
+    __slots__ = ("row", "header", "layer", "level")
+
+    def __init__(self, row: Row, header: _Header, layer: str, level: int):
+        self.row = row
+        self.header = header
+        self.layer = layer
+        self.level = level
+
+
+def _layer_error(layer: LayerDecl, line: int, message: str,
+                 hint: str | None = None) -> RevlError:
+    return RevlError(layer.source or "<layer>", line, message, hint=hint)
+
+
+def _load_layer(path: str, target: CompositionDecl, doc: str, line: int,
+                base: str, root: str) -> tuple[LayerDecl, str, str]:
+    """Parse a layer document and check it is one.
+
+    426 §6.1: **a layer document may contain ONLY layer operations.** No
+    `component`, no `service`, no `extern`, no top-level `fn`. Without this rule
+    a layer is a component-authoring surface, which is exactly the surface §4
+    exists to profile, and the profile would then have to run over the layer
+    document itself.
+    """
+    resolved = os.path.join(base, path)
+    if not os.path.isfile(resolved):
+        raise RevlError(
+            doc, line,
+            f"composition {target.name} declares the layer `{path}`, which does "
+            "not exist",
+            hint=f"resolved against `{_relative(base, root)}`. A missing layer is "
+                 "a refusal, never a silently skipped one (426 §2.4)")
+    program = parse_file(resolved)
+    rel = _relative(resolved, root)
+    foreign = [
+        (kind, len(items))
+        for kind, items in (("component", program.components),
+                            ("service", program.services),
+                            ("extern", program.externs),
+                            ("fn", program.fn_decls),
+                            ("composition", program.compositions))
+        if items
+    ]
+    if foreign:
+        listed = ", ".join(f"{count} `{kind}`" for kind, count in foreign)
+        raise RevlError(
+            rel, 1,
+            f"`{rel}` is declared as a layer of {target.name} but also declares "
+            f"{listed}",
+            hint="a layer document contains ONLY layer operations (426 §6.1). A "
+                 "layer that may author components is a component-authoring "
+                 "surface, and the confinement profile would then have to run "
+                 "over the layer document itself")
+    if len(program.layers) != 1:
+        raise RevlError(
+            rel, program.layers[1].line if len(program.layers) > 1 else 1,
+            f"`{rel}` declares {len(program.layers)} layers",
+            hint="one layer per document: the document is the layer's origin "
+                 "scope, the same rule a composition follows (426 §1.2)")
+    layer = program.layers[0]
+    if layer.target != target.name:
+        raise RevlError(
+            rel, layer.line,
+            f"layer `{layer.name}` patches composition `{layer.target}`, but it "
+            f"is declared in the stack of `{target.name}`",
+            hint="a layer names the composition it patches, and the name is "
+                 "checked rather than assumed")
+    return layer, rel, origin_of(resolved, root)
+
+
+def _address_token(address: Address, own_origin: str) -> tuple:
+    """The address as a hashable identity, so two spellings of one target group
+    together and two layers writing the same address are seen as one."""
+    if address.kind == "key":
+        return ("key", address.key, address.realm)
+    return ("label", address.origin or own_origin, address.label)
+
+
+def _resolve_address(address: Address, own_origin: str, slots: dict,
+                     layer: LayerDecl, name: str) -> str:
+    """An address to the qualified label of the row it names.
+
+    **426 §2.4: an address that resolves to nothing is a REFUSAL, never a
+    no-op.** This is the sharpest single difference from a patch system where a
+    vanished target does nothing and the operator learns at runtime. The refusal
+    names the address, the layer that wrote it, and what is there instead.
+    """
+    if address.kind == "label":
+        want = qualified(address.origin or own_origin, address.label)
+        if want in slots:
+            return want
+        near = [q for q in slots if q.endswith(f"::@{address.label}")]
+        hint = (f"row `{near[0]}` has that label in another origin — address it "
+                "fully qualified" if near else
+                "rows in the folded composition: "
+                + (", ".join(f"`{q}`" for q in slots) or "<none>"))
+        raise _layer_error(
+            layer, address.line,
+            f"layer `{layer.name}` addresses row `{address.spelling()}`, which "
+            f"no row is in composition {name}",
+            hint=hint)
+    claim = (address.key, address.realm)
+    for qual, slot in slots.items():
+        if claim in slot.row.claims or claim in slot.row.extra_claims:
+            return qual
+    served = []
+    for qual, slot in slots.items():
+        for other in [*slot.row.claims, *slot.row.extra_claims]:
+            if other[0] == address.key:
+                served.append(f"row `{qual}` claims {claim_str(other)}")
+    hint = "; ".join(sorted(served)) if served else (
+        "keys claimed in the folded composition: "
+        + (", ".join(sorted({claim_str(c) for slot in slots.values()
+                             for c in [*slot.row.claims, *slot.row.extra_claims]}))
+           or "<none>"))
+    raise _layer_error(
+        layer, address.line,
+        f"layer `{layer.name}` addresses {address.spelling()}, which no row "
+        f"claims in composition {name}",
+        hint=hint + ". Address the row directly by its label if you mean that "
+             "exact row, or repin the source that dropped the key (426 §2.4)")
+
+
+def _refuse_peers(sides: list[tuple[LayerDecl, int]], what: str, subject: str,
+                  remedy: str, extra: str = "") -> RevlError:
+    """A peer conflict. **Neither layer is preferred** (426 decision 4): the
+    conflict refuses and only the operator's site layer resolves it.
+
+    Both the message and its position are derived from the layer names SORTED,
+    never from the order the stack listed them, so permuting the stack changes
+    nothing at all — not the verdict, not the text, and not the file and line it
+    is reported at (426 exit test 6).
+    """
+    ordered = sorted(sides, key=lambda side: side[0].name)
+    (at, line), other = ordered[0], ordered[1]
+    return RevlError(
+        at.source or "<layer>", line,
+        f"layer conflict on {subject}: stack layers `{at.name}` and "
+        f"`{other[0].name}` both {what}",
+        hint=f"neither layer is preferred (426 §3.4){extra}. Only the operator's "
+             f"site layer decides, and it decides by naming what it means:\n"
+             f"  {remedy}\n"
+             "(this is G2, provision disjointness, seen at the layer level)")
+
+
+def fold(decl: CompositionDecl, doc_path: str, root: str | None = None,
+         overlay: dict | None = None) -> RowTable:
+    """The base row table with its declared layers folded in (426 §3.3).
+
+    1. Start from the base row table.
+    2. Apply level 1 stack layers. Peer conflicts refuse, so the result is
+       independent of the order in which stack layers are listed.
+    3. Apply the site layer, which may resolve a level-1 refusal by naming both
+       sides.
+    4. Apply the invocation overlay, values only, never structure.
+    5. Record, per row, the ordered provenance.
+
+    Header-only throughout: `--admit` is still what compiles anything.
+    """
+    root = os.path.abspath(root or os.getcwd())
+    doc = decl.source or doc_path
+    origin = origin_of(doc_path, root)
+    base = os.path.dirname(os.path.abspath(doc_path))
+
+    slots: dict[str, _Slot] = {}
+    for rowdecl in decl.rows:
+        row, header = _resolve_row(rowdecl, origin, doc, base, root)
+        row.provenance = [(0, BASE_LAYER, "row")]
+        slots[row.qualified] = _Slot(row, header, BASE_LAYER, 0)
+
+    stack: list[tuple[LayerDecl, str, str]] = [
+        _load_layer(path, decl, doc, line, base, root) for path, line in decl.stack]
+    site = _load_layer(decl.site[0], decl, doc, decl.site[1], base, root) \
+        if decl.site is not None else None
+
+    # The site layer's `resolve` directives are read BEFORE the peer rules run,
+    # because resolving a peer conflict is precisely what they are for: a
+    # conflict the operator has already decided must not refuse (426 §3.4).
+    resolutions: dict[tuple, tuple[str, str, LayerDecl, int]] = {}
+    if site is not None:
+        site_layer, _, site_origin = site
+        for op in site_layer.ops:
+            if op.op != "resolve":
+                continue
+            token = _address_token(op.address, site_origin)
+            winner = qualified(op.winner.origin or site_origin, op.winner.label)
+            loser = qualified(op.loser.origin or site_origin, op.loser.label)
+            if winner == loser:
+                raise _layer_error(
+                    site_layer, op.line,
+                    f"`resolve {op.address.spelling()}` names `{winner}` on both "
+                    "sides",
+                    hint="a resolution names two DIFFERENT rows; naming one twice "
+                         "decides nothing")
+            resolutions[token] = (winner, loser, site_layer, op.line)
+
+    _apply_stack(stack, slots, decl, doc, resolutions, root)
+    if site is not None:
+        _apply_site(site, slots, decl, doc, root)
+    _apply_overlay(overlay or {}, slots, decl, doc)
+    rows = [slot.row for slot in slots.values()]
+
+    _check_disjoint(rows, decl.name, doc)
+    return RowTable(decl.name, origin, _relative(doc_path, root), rows,
+                    _resolve_uses(decl, doc, base, root))
+
+
+def _reject_granted(layer: LayerDecl, rowdecl: RowDecl) -> None:
+    """424 R2's third rule, the one 426 S1 could not build because it needs
+    layers: `granted` is writable in the base composition and the site layer,
+    **never in a stack layer**. No layer may raise its own authority."""
+    if layer.site or rowdecl.granted is None:
+        return
+    raise _layer_error(
+        layer, rowdecl.line,
+        f"stack layer `{layer.name}` writes a `granted` clause on row "
+        f"`@{rowdecl.label}`",
+        hint="`granted` is the reach allowlist a CONFINED row may compose "
+             "against, so a stack layer granting itself keys is a layer raising "
+             "its own authority. It is writable in the base composition and in "
+             "the site layer only (424 R2, 426 §9.3 Part 2)")
+
+
+def _apply_stack(stack, slots, decl, doc, resolutions, root) -> None:
+    """Level 1, in the one order that makes the fold order-free.
+
+    Every operation in every stack layer is collected and grouped by its TARGET
+    before anything is applied, so permuting the stack cannot change which group
+    an operation lands in and therefore cannot change the verdict (§3.3, exit
+    test 6).
+
+    WITHDRAWALS ARE APPLIED BEFORE ADMISSIONS, which is what makes
+    `remove key("logger")` + `add @logger` and the reverse produce the same
+    answer (exit test 8). Admitting per operation is the determinism trap §3.3
+    exists to kill; admitting the whole delta at once means the intermediate
+    state where both rows claim `logger` never exists.
+    """
+    if not stack:
+        return
+
+    # (1) every addition, resolved. A row's header is read here; nothing
+    #     cross-row is decided yet.
+    added: dict[str, tuple[LayerDecl, RowDecl, Row, _Header]] = {}
+    for layer, rel, layer_origin in stack:
+        base_dir = os.path.dirname(os.path.join(root, rel))
+        for op in layer.ops:
+            if op.op in ("add", "replace"):
+                _reject_granted(layer, op.row)
+            if op.op != "add":
+                continue
+            row, header = _resolve_row(op.row, layer_origin, rel, base_dir, root)
+            if row.qualified in slots:
+                raise _layer_error(
+                    layer, op.row.line,
+                    f"layer `{layer.name}` adds row `{row.qualified}`, which "
+                    f"composition {decl.name} already declares",
+                    hint="`add` introduces a row; to change the one that is "
+                         "there, address it with `replace` or `configure`")
+            other = added.get(row.qualified)
+            if other is not None:
+                raise _refuse_peers(
+                    [(other[0], other[1].line), (layer, op.row.line)],
+                    "add it", f"row `{row.qualified}`",
+                    f"replace {row.qualified} with the row you want")
+            added[row.qualified] = (layer, op.row, row, header)
+
+    # (2) the address universe: the base table PLUS every stack addition. A
+    #     layer may address a row a peer added, and the answer does not depend
+    #     on which layer was listed first.
+    universe = dict(slots)
+    for qual, (layer, _decl, row, header) in added.items():
+        universe[qual] = _Slot(row, header, layer.name, 1)
+
+    # (3) every other operation, grouped by target, then the §3.4 table.
+    groups: dict[str, list] = {}
+    for layer, rel, layer_origin in stack:
+        _check_touches(layer, layer_origin, universe, decl, doc)
+        for op in layer.ops:
+            if op.op == "add":
+                continue
+            target = _resolve_address(op.address, layer_origin, universe, layer,
+                                      decl.name)
+            groups.setdefault(target, []).append((layer, layer_origin, op, rel))
+    for target, ops in groups.items():
+        _peer_rules(target, ops)
+
+    # (4) withdrawals first, so an addition never has to see the row it
+    #     supersedes.
+    for target, ops in groups.items():
+        if any(op.op == "remove" for _l, _o, op, _r in ops):
+            slots.pop(target, None)
+            added.pop(target, None)
+
+    # (5) admissions, checked against the POST-withdrawal table.
+    _apply_adds(added, slots, decl, resolutions)
+
+    # (6) the patches.
+    for target, ops in groups.items():
+        for layer, layer_origin, op, rel in ops:
+            if op.op == "remove":
+                continue
+            _apply_op(target, layer, layer_origin, op, rel, slots, decl,
+                      doc, 1, root)
+
+
+def _apply_adds(added, slots, decl, resolutions) -> None:
+    """A stack addition enters the table only if its claims do not intersect a
+    row already there or a peer's addition. That intersection is the one
+    conflict the operator can pre-decide, with `resolve <address> to <winner>
+    over <loser>` in the site layer (426 §3.4)."""
+    dropped: set[str] = set()
+    for winner, loser, _site, _line in resolutions.values():
+        if loser in added and (winner in added or winner in slots):
+            dropped.add(loser)
+            if winner in added:
+                added[winner][2].provenance = [
+                    (1, added[winner][0].name, "add"), (2, _site.name, "resolve")]
+        elif loser in slots and winner in added:
+            slots.pop(loser)
+            added[winner][2].provenance = [
+                (1, added[winner][0].name, "add"), (2, _site.name, "resolve")]
+
+    for qual, (layer, rowdecl, row, header) in added.items():
+        if qual in dropped:
+            continue                       # the operator decided against it
+        for claim in [*row.claims, *row.extra_claims]:
+            for other_qual, (other_layer, other_decl, other_row, _h) in added.items():
+                if other_qual in (qual, *dropped):
+                    continue
+                if claim in other_row.claims or claim in other_row.extra_claims:
+                    raise _refuse_peers(
+                        [(other_layer, other_decl.line), (layer, rowdecl.line)],
+                        f"add a row claiming {claim_str(claim)}",
+                        claim_str(claim),
+                        f"resolve {claim_str(claim)} to {other_qual} over {qual}",
+                        extra=" — precedence never chooses a provider "
+                              "(decision 4)")
+            for slot in slots.values():
+                if claim in slot.row.claims or claim in slot.row.extra_claims:
+                    raise _layer_error(
+                        layer, rowdecl.line,
+                        f"layer `{layer.name}` adds row `{qual}`, whose "
+                        f"{claim_str(claim)} row `{slot.row.qualified}` already "
+                        f"claims in composition {decl.name}",
+                        hint="a layer that means to take a claim over writes "
+                             "`replace`, which is claim-preserving and loud in "
+                             "the diff, or `remove` plus `add`, which the fold "
+                             "applies as one delta (426 §3.2)")
+        if not row.provenance:
+            row.provenance = [(1, layer.name, "add")]
+        slots[qual] = _Slot(row, header, layer.name, 1)
+
+
+def _peer_rules(target: str, ops) -> None:
+    """426 §3.4, the whole table.
+
+    | two stack layers `replace` the same row            | REFUSED   |
+    | two `configure` the same row and field, differently| REFUSED   |
+    | two `configure` the same row, disjoint fields      | merged    |
+    | two `remove` the same row                          | idempotent|
+    | one `remove`s, another `replace`s or `configure`s  | REFUSED   |
+    """
+    replaces = [(layer, op) for layer, _o, op, _r in ops if op.op == "replace"]
+    removes = [(layer, op) for layer, _o, op, _r in ops if op.op == "remove"]
+    configures = [(layer, op) for layer, _o, op, _r in ops if op.op == "configure"]
+    label = f"row `{target}`"
+
+    if len(replaces) > 1:
+        raise _refuse_peers(
+            [(layer, op.line) for layer, op in replaces[:2]], "replace it",
+            label, f"replace {target} with the row you want")
+    if removes and (replaces or configures):
+        other = (replaces or configures)[0]
+        raise _refuse_peers(
+            [(removes[0][0], removes[0][1].line), (other[0], other[1].line)],
+            f"withdraw and {other[1].op} it", label,
+            f"remove {target}, or {other[1].op} it — the site layer wins over "
+            "any stack layer",
+            extra=" — a withdrawal and a patch of the same row are not "
+                  "reconcilable at any order")
+    fields: dict[str, tuple[LayerDecl, int, object]] = {}
+    for layer, op in configures:
+        for name, value, _line in op.config:
+            prior = fields.get(name)
+            if prior is not None and prior[2] != value:
+                raise _refuse_peers(
+                    [(prior[0], prior[1]), (layer, op.line)],
+                    f"set config field `{name}` of {label}, to "
+                    f"{prior[2]!r} and {value!r}", label,
+                    f"configure {target} with {{ {name}: ... }}")
+            fields[name] = (layer, op.line, value)
+
+
+def _apply_op(target, layer, layer_origin, op, rel, slots, decl, doc,
+              level, root) -> None:
+    slot = slots.get(target)
+    if slot is None:
+        return                                   # already withdrawn, idempotent
+    if op.op == "remove":
+        slots.pop(target)
+        return
+    if op.op == "resolve":
+        return                                   # handled before the peer rules
+    if op.op == "replace":
+        base_dir = os.path.dirname(os.path.join(root, rel))
+        row, header = _resolve_row(op.row, slot.row.origin, rel, base_dir, root)
+        # 426 §3.2: **`replace` is claim-preserving.** A replacement claiming
+        # exactly what it replaced can never create or destroy a G2 conflict,
+        # which is the second determinism lever. Changing what a row claims is
+        # expressible, but only as `remove` plus `add`, which is loud.
+        was = {*slot.row.claims, *slot.row.extra_claims}
+        now = {*row.claims, *row.extra_claims}
+        if was != now:
+            lost = ", ".join(sorted(claim_str(c) for c in was - now)) or "nothing"
+            gained = ", ".join(sorted(claim_str(c) for c in now - was)) or "nothing"
+            raise _layer_error(
+                layer, op.row.line,
+                f"layer `{layer.name}` replaces row `{target}` with a component "
+                f"claiming a different set (drops {lost}, adds {gained})",
+                hint="`replace` preserves the claim set, so it can never create "
+                     "or destroy a G2 conflict. Changing what a row claims is "
+                     "`remove` plus `add`, which is loud in the diff (426 §3.2)")
+        # The LABEL is preserved: it is the row's identity and the replacement
+        # is a new implementation of the same row, not a new row.
+        row.label, row.origin = slot.row.label, slot.row.origin
+        row.provenance = [*slot.row.provenance, (level, layer.name, "replace")]
+        slots[target] = _Slot(row, header, layer.name, level)
+        return
+    if op.op == "configure":
+        _configure(target, layer, op, slot, decl, doc, level)
+
+
+def _configure(target, layer, op, slot, decl, doc, level) -> None:
+    """`configure @id with { field: value }` merges fields into a row's config.
+
+    426 §3.2's two rules, both kept:
+
+    - `configure` against a NON-CONFIG row is a refusal, not a best-effort
+      patch. A patch system that happily writes a key nothing reads is how a
+      layered composition breaks silently.
+    - a value that does not fit the declared return type **does not admit**, and
+      the refusal names the field and the declared type. This is the most common
+      way a layered composition breaks in practice, turned into a refusal before
+      anything runs (exit test 9).
+
+    §3.2 frames this as desugaring to a `replace` with a SYNTHESIZED config
+    component, on the premise that revl has no config fields. That premise is
+    stale: `config { field: Type = default }` is a declared part of a component
+    header and S1 already checks a row's `config` block against it. So
+    `configure` merges into that block and re-runs the same check, which is the
+    same guarantee with no synthesis machinery. Synthesis remains the answer for
+    configuration that is a SERVICE (a component whose provide-methods are
+    constants), which is a different shape and not what an address names.
+    """
+    if not slot.header.config:
+        raise _layer_error(
+            layer, op.line,
+            f"layer `{layer.name}` configures row `{target}`, whose component "
+            f"`{slot.row.component}` declares no config",
+            hint="`configure` against a non-config row is a refusal, never a "
+                 "best-effort patch: the fields would be written and nothing "
+                 "would read them (426 §3.2)")
+    merged = RowDecl(
+        label=slot.row.label, path="", claims=[], line=op.line,
+        component=slot.row.component,
+        config=[(name, value, op.line)
+                for name, value in {**slot.row.config,
+                                    **{n: v for n, v, _ in op.config}}.items()],
+    )
+    slot.row.config = _check_config(merged, slot.header, layer.source or doc,
+                                    slot.row.source)
+    slot.row.provenance = [*slot.row.provenance, (level, layer.name, "configure")]
+
+
+def _check_touches(layer: LayerDecl, layer_origin: str, slots, decl,
+                   doc) -> None:
+    """A layer whose ops address something outside its own `touches` is refused
+    (426 §3.4).
+
+    This is a CONVENIENCE made checkable, not a security property: an author who
+    wants to touch a row simply lists it. What it buys is that a layer's reach
+    can be read off its head without resolving it.
+    """
+    if layer.touches is None:
+        return
+    allowed = {_resolve_address(a, layer_origin, slots, layer, decl.name)
+               for a in layer.touches}
+    for op in layer.ops:
+        if op.op == "add":
+            reached = qualified(layer_origin, op.row.label)
+        elif op.op == "resolve":
+            continue
+        else:
+            reached = _resolve_address(op.address, layer_origin, slots, layer,
+                                       decl.name)
+        if reached not in allowed:
+            listed = ", ".join(f"`{a}`" for a in sorted(allowed)) or "<none>"
+            raise _layer_error(
+                layer, op.line,
+                f"layer `{layer.name}` {op.op}s row `{reached}`, which its own "
+                "`touches` clause does not list",
+                hint=f"declared touches: {listed}. Add it, or drop the operation "
+                     "(426 §3.4)")
+
+
+def _apply_site(site, slots, decl, doc, root) -> None:
+    """Level 2. Exactly one, written by the operator, and it never refuses
+    against a stack layer: the operator is not a peer of the layers, the
+    operator is the person the refusal is shown to (426 §3.4)."""
+    layer, rel, layer_origin = site
+    base_dir = os.path.dirname(os.path.join(root, rel))
+    for op in layer.ops:
+        if op.op != "add":
+            continue
+        row, header = _resolve_row(op.row, layer_origin, rel, base_dir, root)
+        if row.qualified in slots:
+            raise _layer_error(
+                layer, op.row.line,
+                f"site layer `{layer.name}` adds row `{row.qualified}`, which "
+                "is already in the composition",
+                hint="`add` introduces a row; `replace` changes the one there")
+        row.provenance = [(2, layer.name, "add")]
+        slots[row.qualified] = _Slot(row, header, layer.name, 2)
+    _check_touches(layer, layer_origin, slots, decl, doc)
+    for op in layer.ops:
+        if op.op == "add":
+            continue
+        if op.op == "resolve":
+            # Already consumed: a `resolve` that decided nothing is still a
+            # refusal, because an operator who wrote it believed there was a
+            # conflict and there was not.
+            target = _resolve_address(op.address, layer_origin, slots, layer,
+                                      decl.name)
+            winner = qualified(op.winner.origin or layer_origin, op.winner.label)
+            if target != winner:
+                raise _layer_error(
+                    layer, op.line,
+                    f"`resolve {op.address.spelling()} to {op.winner.spelling()}` "
+                    f"did not decide anything: that address resolves to row "
+                    f"`{target}`",
+                    hint="a resolution that changes nothing hides the conflict it "
+                         "was written for — check the losing row is still in the "
+                         "stack (426 §2.4)")
+            continue
+        target = _resolve_address(op.address, layer_origin, slots, layer,
+                                  decl.name)
+        if op.op in ("add", "replace"):
+            _reject_granted(layer, op.row)
+        _apply_op(target, layer, layer_origin, op, rel, slots, decl, doc,
+                  2, root)
+
+
+def _apply_overlay(overlay: dict, slots, decl, doc) -> None:
+    """Level 3, the invocation overlay: **values only, never structure**
+    (426 §3.1). `--set @db.pool=16` reaches a field of a row that already
+    exists; it cannot add, remove or replace one, and it is typed exactly like
+    every other config value."""
+    for (label, field_name), value in overlay.items():
+        matches = [q for q in slots if q.endswith(f"::@{label}")] \
+            if "::" not in label else [label]
+        matches = [q for q in matches if q in slots]
+        if len(matches) != 1:
+            raise RevlError(
+                doc, 1,
+                f"`--set @{label}.{field_name}` names row `@{label}`, which "
+                + ("is not in the composition" if not matches
+                   else f"is ambiguous ({', '.join(matches)})"),
+                hint="the invocation overlay carries VALUES only — it reaches a "
+                     "field of a row that already exists (426 §3.1)")
+        slot = slots[matches[0]]
+        merged = RowDecl(label=slot.row.label, path="", claims=[], line=1,
+                         component=slot.row.component,
+                         config=[(n, v, 1) for n, v in
+                                 {**slot.row.config, field_name: value}.items()])
+        slot.row.config = _check_config(merged, slot.header, doc, slot.row.source)
+        slot.row.provenance = [*slot.row.provenance,
+                               (3, "<invocation>", "configure")]
 
 
 def sole_composition(program: Program, path: str) -> CompositionDecl:
@@ -431,15 +1074,36 @@ def sole_composition(program: Program, path: str) -> CompositionDecl:
                         f"compositions ({names})",
                         hint="one composition per document: the document IS the "
                              "composition's origin scope (426 §1.2)")
+    if program.layers:
+        raise RevlError(
+            path, program.layers[0].line,
+            f"`{os.path.basename(path)}` declares composition "
+            f"`{program.compositions[0].name}` and also layer "
+            f"`{program.layers[0].name}`",
+            hint="a layer lives in its own document and is named in the "
+                 "composition's `stack` (or `site`) list. A layer beside the "
+                 "composition would be silently unapplied, and 426 §2.4 has no "
+                 "silent no-ops")
     return program.compositions[0]
 
 
-def resolve_file(path: str, root: str | None = None) -> RowTable:
-    """Parse a composition document and resolve its row table."""
-    return resolve(sole_composition(parse_file(path), path), path, root)
+def resolve_file(path: str, root: str | None = None,
+                 overlay: dict | None = None) -> RowTable:
+    """Parse a composition document and resolve its row table, folding in the
+    layers it declares.
+
+    A document that declares no `stack` and no `site` folds to itself and
+    produces the S1 table byte for byte, which is why this is the one entry
+    point rather than two.
+    """
+    decl = sole_composition(parse_file(path), path)
+    if not decl.stack and decl.site is None and not overlay:
+        return resolve(decl, path, root)
+    return fold(decl, path, root, overlay)
 
 
-def compile_composition(path: str, root: str | None = None, **kwargs) -> dict:
+def compile_composition(path: str, root: str | None = None,
+                        overlay: dict | None = None, **kwargs) -> dict:
     """Compile a composition document: resolve the row table, compile the rows
     it names, and carry the table into the IR and the manifest.
 
@@ -450,7 +1114,7 @@ def compile_composition(path: str, root: str | None = None, **kwargs) -> dict:
     from .compiler import compile_files  # noqa: PLC0415 (cycle: compiler -> parser -> here)
 
     root = os.path.abspath(root or os.getcwd())
-    table = resolve_file(path, root)
+    table = resolve_file(path, root, overlay)
     document = compile_files([os.path.join(root, p) for p in table.paths()], **kwargs)
     document["rows"] = table.to_ir()
     if isinstance(document.get("manifest"), dict):

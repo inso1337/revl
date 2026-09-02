@@ -108,8 +108,9 @@ Three glyphs carry the same distinction this document draws by hand:
 
 - `ok`: the emitter produced code.
 - `lim`: a **deliberate** tier limit. The emitter raised its own `EmitError`,
-  a named refusal (the wasm i32 boundary, java's lack of anonymous function
-  types) rather than a silent fall-through.
+  a named refusal (the wasm tier's `Float`/`Map`/function-type refusal,
+  java's lack of anonymous function types) rather than a silent
+  fall-through.
 - **GAP**: a **real** gap, meaning any other exception, i.e. the emitter crashed
   on a construct it should express. The split is keyed on *how* the refusal was
   raised, so it is automatable rather than curated. Every tier is gap-free
@@ -178,11 +179,15 @@ and wasm is a deliberate tier limit.**
 | typescript | 0 | 0 | — |
 | rust | 3 | 0 | 3 externs with no `@rs` body |
 | java | 3 | 0 | 3 externs with no `@java` body |
-| wasm | 19 | 0 | i32-only signatures (10), no config channel (2), no host builtins (3), Opt/Str at the boundary (2), externs (2) |
+| wasm | 10 | 0 | `Float` signatures (3), a `Map` signature (1), a function-typed signature (1), no config channel (2), no host builtins (3) |
 
 A refusal is only a *gap* when the tier could reasonably express the
-construct. An extern with no body for that backend, or a `Str` on the
-i32-only wasm tier, is the toolchain working as designed.
+construct. An extern with no body for that backend, or a `Float` on the
+wasm tier, is the toolchain working as designed. The wasm row is a value
+surface, not a value width: `Int` is an i64 there, and `Str`, `Bytes`,
+lists, records, variants, `Opt` and `Result` cross the service boundary
+as canonical-ABI pointers (`backends/wasm/emit.py`,
+`_V3Emitter._check_type`).
 
 ### Extern `config` coeffect (item 378)
 
@@ -415,8 +420,9 @@ where the java and rust host stubs take a name (`String`), and
 TypeScript accept both because their hosts are untyped.
 
 Fixing it is a language decision, not a codegen one, and the tiers disagree
-today: `docs/backend-ir-v1.md` specifies `Job.run(name)`, while the wasm tier
-is i32-only and `examples/pulse.rvl` calls `Job.run(1)`. Typing the host
+today: `docs/backend-ir-v1.md` specifies `Job.run(name)`, while the wasm tier's
+`Job.run` host op takes an interned i32 job id and `examples/pulse.rvl`
+calls `Job.run(1)`. Typing the host
 boundary — and rejecting a mismatch, the way service declarations already
 bound their providers — would settle it, at the cost of breaking whichever
 spelling loses. That is the open question, and it belongs on the G8 boundary

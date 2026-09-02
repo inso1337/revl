@@ -185,6 +185,25 @@ table: (a) proceeds and counts, (b) enqueues, which is already
 activation-safe under 245 (the enqueue is the only mid-session effect).
 Exit test 12 pins the bypass shut.
 
+**The gate walk is all-or-nothing (item 204).** A generation has many
+activation bodies and the gate decides for all of them before any of them
+fires, so the one-shot decide-spend-fire the per-call chokepoint uses does
+not fit here: any body may refuse, and a spend made for an attempt that
+then refuses has been charged to a boot that never happened. The walk
+therefore RESERVES what covers each body (in memory, which makes the
+record invisible to every later finder in the walk exactly as a real spend
+would) and commits the whole set durably only once every body is covered,
+still strictly before the generation is plugged. A walk that refuses
+releases every reservation and writes nothing, so the ledger it leaves is
+the ledger it found. Consuming as it went cost the operator 2**N - 1
+prompts for N gated bodies, because each un-booted attempt ate the answers
+already given and the retry re-asked them; the count is now exactly N,
+over N + 1 load attempts. The reservation cannot leak authority: the walk
+is straight-line synchronous code running before boot, so no crossing can
+fire against a reserved token, and a released token is one that was never
+spent, still spendable exactly once, at one crossing. Exit test 12b pins
+the count and 12c pins the all-or-nothing.
+
 **Where the gate runs: inside `Session.call`, not on a tool name.**
 `operator.decide` answers *who may drive this verb* and stays at the
 `server.handle` dispatch point, operator first: an operator who may not
