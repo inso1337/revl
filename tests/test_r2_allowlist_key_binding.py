@@ -303,6 +303,7 @@ def test_decoy_turn_cannot_reach_the_admit_decider(gate_factory):
     assert "nested" not in live and "turn" not in live
 
 
+@needs_cordis
 def test_forbidden_grant_still_refuses_a_named_decider(gate_factory):
     """The item-334 rule is untouched: naming the decider in `granted` is still
     refused before any compile."""

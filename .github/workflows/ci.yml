@@ -97,6 +97,41 @@ jobs:
       # exists only to catch the cross-root collision.
       - run: cd backends/python && .venv/bin/pytest ../wasm/ tests/ -q
 
+  # The root `tests/` suite, WITH the cordis-py runtime.
+  #
+  # `pytest tests/ -q` ran in exactly one job (`frontend`), which installs only
+  # `pip install -e ".[test]"` and therefore has no cordis-py. Every test in the
+  # root suite carrying a `find_spec("cordis") is None` guard therefore skipped
+  # in CI and executed NOWHERE: `backend-python` above runs with cwd
+  # `backends/python`, so its `tests/` is `backends/python/tests/`, not this
+  # suite; `backend-rust` runs one file from here and `conformance` another.
+  # Roughly 48 files in tests/ carry that guard.
+  #
+  # Keep the `frontend` job exactly as it is. It proves a separate and real
+  # property: the suite must stay green on a checkout with no runtime at all.
+  # This job proves the other half, that the guarded tests actually pass when
+  # the runtime IS there.
+  frontend-cordis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v4
+      # the same one-command setup `backend-python` uses: it clones cordis-py at
+      # the pinned revision and installs revl editable beside it, so this venv's
+      # interpreter can import both.
+      - run: sh backends/python/setup.sh
+      # Run from the repo root so `tests/` is THIS suite, and under the venv's
+      # python so `import cordis` resolves. The WHOLE suite runs: there is no
+      # deselect list and no file narrowing, because the first full run of it
+      # under the runtime was already green (398 tests that had never executed
+      # anywhere in CI, across 81 modules). Roadmap item 430 records that. If a
+      # future failure needs excluding, enumerate it here with a reason and add
+      # it to 430 rather than narrowing the path above.
+      - run: backends/python/.venv/bin/python -m pytest tests/ -q
+
   backend-typescript:
     runs-on: ubuntu-latest
     steps:
