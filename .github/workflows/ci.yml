@@ -61,8 +61,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff==0.16.4
+      - run: pip install ruff==0.16.4 pyyaml==6.0.2
       - run: ruff check
+      # issue #191: every job's EFFECTIVE GITHUB_TOKEN permissions must support
+      # the actions that job invokes. A job-level `permissions` block REPLACES
+      # the workflow-level one rather than merging into it, and that is how the
+      # publish job came to declare `id-token: write` alone -- leaving
+      # `contents: none`, so `actions/checkout` could not have read the tag it
+      # publishes. The release path never runs on a PR or on main, so a green
+      # CI said nothing about it. This reads the workflows instead of running
+      # them, which is the only way that job gets checked before a tag exists.
+      #
+      # The self-test runs FIRST and reintroduces that exact bug into a
+      # synthetic workflow, so the gate's own logic is exercised on every PR. A
+      # checker that has never been shown to catch anything is the same shape
+      # of gap as the one it closes.
+      #
+      # `--strict` also fails a job with no `permissions` block at any level:
+      # its effective set is then the repository default, which this tool
+      # cannot see. Every workflow declares a floor as of this branch, so the
+      # strict setting is the honest one -- a new job that forgets is a red
+      # rather than a note nobody reads.
+      - run: python3 tools/check_workflow_permissions.py --self-test
+      - run: python3 tools/check_workflow_permissions.py --strict
       # The roadmap's in-progress markers, checked against git: a marker naming
       # a branch that already landed, a branch gone from origin, or a sha not
       # reachable from main is a lie the next reader pays for. Needs no

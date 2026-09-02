@@ -1,0 +1,167 @@
+# Everything the release does, except the part that cannot be undone.
+#
+# WHY (issue #191). `publish.yml` runs on a `v*` tag and nowhere else, so until
+# a maintainer pushes a tag, nothing in the release path has ever executed. The
+# first time it ran would be the first time anyone learned whether it worked,
+# under time pressure, with the tag already public and a version number burned.
+# One latent break had already accumulated there (the publish job's permissions,
+# fixed in PR #190 and now gated statically by
+# `tools/check_workflow_permissions.py`).
+#
+# This job takes the other half: it BUILDS the distribution the way the publish
+# job builds it, checks it the way the publish job checks it, and then installs
+# the wheel and uses it -- and stops. There is no upload step here, not even a
+# skipped one and not one pointed at TestPyPI: `pypa/gh-action-pypi-publish` has
+# no dry-run mode, and a publish step that is merely `if:`-guarded is one edited
+# condition away from being a release nobody meant to cut.
+#
+# WHAT IT CATCHES that the rest of CI does not. CI tests the checkout tree. The
+# wheel is a different artifact: `pyproject.toml` force-includes `backends/` and
+# `stdlib/` into it, and every backend-touching command breaks once installed if
+# that stops working, because the checkout paths do not exist under
+# site-packages. Nothing else in this repository installs the built wheel and
+# runs it. A drift there is invisible to a green `ci` and would surface as a
+# broken release on PyPI.
+#
+# WHAT IT DOES NOT COVER. Not the publish job's own environment: its OIDC token,
+# its `pypi` environment and its permission set only exist on a tag build. The
+# permission half of that is checked statically in the `lint` job; the Trusted
+# Publishing handshake genuinely cannot be rehearsed without publishing, and the
+# first release is where it gets tested. Say so out loud rather than implying
+# this job covers it.
+name: release dry run
+
+on:
+  # A maintainer runs this by hand before pushing a tag. That is the intended
+  # use: `gh workflow run "release dry run"`, read it green, then tag.
+  workflow_dispatch:
+  # And on a schedule so packaging rot is found by the calendar rather than by a
+  # release. Weekly, off-hours, one job -- runner concurrency is this project's
+  # throughput limit, so this deliberately does NOT run on every PR.
+  schedule:
+    - cron: "20 6 * * 1"
+  # The exception to that: a PR that edits packaging or the release path itself
+  # gets the dry run, because those are the changes that can break it. The paths
+  # filter keeps this off the other 99% of PRs. This is not a required check.
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - ".github/workflows/publish.yml"
+      - ".github/workflows/release-dryrun.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dryrun-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The next three steps are the publish job's build steps, verbatim in
+      # intent. If they stop working, they stop working here rather than on a
+      # tag.
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Check the built artifacts
+        run: |
+          python -m pip install --upgrade twine
+          twine check dist/*
+
+      # `check-version` in publish.yml compares the TAG against pyproject. There
+      # is no tag here, so this compares what the build actually produced
+      # against pyproject instead -- which is the half of that assertion a
+      # dry run can make, and it catches a build backend that is reading a
+      # version from somewhere else.
+      - name: Built version matches pyproject
+        run: |
+          proj=$(python3 - <<'PY'
+          import re, pathlib
+          text = pathlib.Path("pyproject.toml").read_text()
+          m = re.search(r'^\s*version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+          print(m.group(1) if m else "")
+          PY
+          )
+          if [ -z "$proj" ]; then
+            echo "::error::could not read version from pyproject.toml"; exit 1
+          fi
+          echo "pyproject version: $proj"
+          ls -1 dist/
+          test -f "dist/revl-$proj-py3-none-any.whl" || {
+            echo "::error::no dist/revl-$proj-py3-none-any.whl in the build output"; exit 1; }
+          test -f "dist/revl-$proj.tar.gz" || {
+            echo "::error::no dist/revl-$proj.tar.gz in the build output"; exit 1; }
+          echo "REVL_VERSION=$proj" >> "$GITHUB_ENV"
+
+      # The part no other job does: install the WHEEL, in a clean environment,
+      # and use it. `pyproject.toml` force-includes `backends/` and `stdlib/`
+      # into the wheel because `revl._backends_root()` and
+      # `revl._paths.stdlib_root()` fall back to the packaged copies once the
+      # checkout paths are gone. A green checkout suite cannot see that break.
+      - name: Install the wheel and smoke it
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/relsmoke
+          /tmp/relsmoke/bin/pip install --quiet --upgrade pip
+          /tmp/relsmoke/bin/pip install --quiet dist/*.whl
+          # Compile a real example with the INSTALLED compiler, from a working
+          # directory that is not the checkout, so nothing resolves through the
+          # source tree by accident. Copy the example out for the same reason.
+          cp examples/counter_pair.rvl /tmp/relsmoke_example.rvl
+          cd /tmp
+          /tmp/relsmoke/bin/revl --help > /dev/null
+          /tmp/relsmoke/bin/revl compile /tmp/relsmoke_example.rvl > /dev/null
+          /tmp/relsmoke/bin/python - <<'PY'
+          import os
+          import pathlib
+
+          import revl
+          import revl.gate
+          from revl import _paths
+
+          # `pyproject.toml` force-includes `backends/` and `stdlib/` into the
+          # wheel because `revl._backends_root()` and `_paths.stdlib_root()`
+          # fall back to the packaged copies once the checkout is gone. Assert
+          # they resolve INSIDE site-packages, not merely that some path came
+          # back -- a fallback that silently found the source tree would pass a
+          # weaker check and still ship a broken wheel.
+          # .resolve() on both sides: the roots come back symlink-resolved and
+          # `revl.__file__` does not, which differs on any runner whose temp
+          # directory is a symlink.
+          root = pathlib.Path(revl.__file__).parent.resolve()
+          for label, resolved in (
+              ("backends", pathlib.Path(revl._backends_root()).resolve()),
+              ("stdlib", pathlib.Path(_paths.stdlib_root()).resolve()),
+          ):
+              if resolved != root / label:
+                  raise SystemExit(
+                      f"the installed wheel resolves {label} to {resolved}, not to the "
+                      f"packaged {root / label}: pyproject's force-include no longer "
+                      "ships it, and every backend-touching command breaks once installed"
+                  )
+
+          # The version the wheel reports about itself, against the version the
+          # build was asked for. These drifting apart is a release that lies.
+          want = os.environ["REVL_VERSION"]
+          got = revl.gate.gate_version()["language"]
+          if got != want:
+              raise SystemExit(f"installed revl.gate reports language {got}, expected {want}")
+
+          print("gate api:", revl.gate.gate_version()["api"])
+          print("installed wheel smoke: ok")
+          PY
+
+      - name: This job does not publish
+        run: |
+          echo "Built, checked and smoke-tested the distribution. Nothing was uploaded."
+          echo "The real release is publish.yml, on a v* tag only."

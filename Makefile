@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check demo pre-merge pre-merge-affected formal roadmap-check
+.PHONY: matrix matrix-check demo pre-merge pre-merge-affected formal roadmap-check workflow-permissions
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -41,6 +41,16 @@ roadmap-check:
 # Run it before writing a roadmap item and after closing one.
 roadmap-check-all:
 	python3 tools/check_roadmap_markers.py --check-all
+
+# issue #191: the workflow permission gate. A job-level `permissions` block
+# REPLACES the workflow-level one rather than merging into it, and the release
+# path is the one place where getting that wrong is invisible until a tag is
+# already pushed. `--self-test` reintroduces the original bug into a synthetic
+# workflow and asserts the gate catches it; `--strict` also fails a job with no
+# block at any level. Both run in the `lint` job and in tools/pre_pr.sh.
+workflow-permissions:
+	uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --self-test
+	uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --strict
 
 # Regenerate the docs/conformance.md conformance + performance matrix in place.
 matrix:

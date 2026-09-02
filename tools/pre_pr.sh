@@ -32,6 +32,16 @@ if bad:
 print("py3.11 clean")
 PY
 
+# issue #191: every job's EFFECTIVE GITHUB_TOKEN permissions must support the
+# actions it invokes. A job-level `permissions` block REPLACES the workflow-level
+# one, which is how the publish job ended up unable to check out the tag it
+# publishes. The release path never runs on a PR, so this is the only pre-merge
+# signal it gets. Needs PyYAML, which the repo does not otherwise depend on, so
+# it runs through uv the way ruff above does.
+echo "== workflow permissions =="
+uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --self-test || fail=1
+uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --strict || fail=1
+
 echo "== roadmap markers =="
 python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan || fail=1
 
