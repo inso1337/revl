@@ -715,6 +715,37 @@ _BOUND_CACHE_RVL = _CACHE_RVL.replace(
 ).replace("    async fn get(k) = m.get(k)\n", "    fn get(k) = k\n", 1)
 
 
+_REMOTE_ONLY_RVL = """
+service Cache {
+  async fn get(k: Str) -> Opt[Str]
+  async fn put(k: Str, v: Str)
+}
+service ApiSvc { async fn hit() -> Opt[Str] }
+
+component Api requires cache: Cache provides api: ApiSvc {
+  provide api { async fn hit() = cache.get("k") }
+}
+"""
+
+
+def _seam_dir(tmp_path, spec=None, name="consumer"):
+    """A realistic placement directory and the seam anchor a process booted out
+    of it holds (item 337).
+
+    The conductor makes one 0700 `mkdtemp` directory per placement, writes each
+    process's spec into it as `<name>.spec.json`, and binds EVERY seam socket in
+    it as `<name>.sock` — including a swap successor's (`placement.py`
+    1751-1754, 2316, 2427). A process therefore learns the directory from its
+    own argv, not from the spec JSON, which is what makes it an address anchor
+    the receiver holds independently of anything the wire says.
+    """
+    directory = tmp_path / "revl_placement"
+    directory.mkdir(exist_ok=True)
+    spec_file = directory / f"{name}.spec.json"
+    spec_file.write_text(json.dumps(spec or {}), encoding="utf-8")
+    return directory, _pr._seam_anchor(spec or {}, str(spec_file))
+
+
 def test_repoint_refused_at_seam_when_successor_fails_admission(tmp_path):
     """A repoint whose named successor FAILS admission against the running
     manifest is refused AT THE SEAM: the proxy is never re-pointed, so it keeps
@@ -722,21 +753,25 @@ def test_repoint_refused_at_seam_when_successor_fails_admission(tmp_path):
     re-admission the socket would have been accepted outright."""
     src = _write(tmp_path, "bound.rvl", _BOUND_CACHE_RVL)
     running = compile_files([src])
-    stub = _StubClient(target="orig.sock")
+    plc, anchor = _seam_dir(tmp_path)
+    stub = _StubClient(target=str(plc / "orig.sock"))
     # MemCache's `cache` service is sync (address-space-bound) — swapping it to
-    # the rust tier cannot cross the seam, so admission refuses it.
-    cmd = {"op": "repoint", "key": "cache", "socket": "attacker.sock",
+    # the rust tier cannot cross the seam, so admission refuses it. Everything
+    # else about the command is honest (MemCache really does provide `cache`,
+    # and the successor socket really is in this process's placement dir), so
+    # the refusal can only come from admission itself.
+    cmd = {"op": "repoint", "key": "cache", "socket": str(plc / "successor.sock"),
            "component": "MemCache", "backend": "rust"}
 
-    ok, reason = _pr._repoint_decision([src], running, cmd)
+    ok, reason = _pr._repoint_decision([src], running, cmd, anchor)
     assert ok is False
     assert reason and ("address-space-bound" in reason or "transport" in reason)
 
     # and the refusal actually BLOCKS the substitution at the seam:
-    accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running)
+    accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running, anchor=anchor)
     assert accepted is False
-    assert stub.repoints == []            # the client was never re-pointed
-    assert stub.target == "orig.sock"     # still serving the original provider
+    assert stub.repoints == []                        # never re-pointed
+    assert stub.target == str(plc / "orig.sock")      # still the original provider
 
 
 def test_repoint_fail_closed_when_no_admissible_reference(tmp_path):
@@ -744,14 +779,15 @@ def test_repoint_fail_closed_when_no_admissible_reference(tmp_path):
     so it is refused fail-closed — never silently accepted."""
     src = _write(tmp_path, "app.rvl", _CACHE_RVL)
     running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
     stub = _StubClient(target="orig.sock")
-    cmd = {"op": "repoint", "key": "cache", "socket": "attacker.sock"}
+    cmd = {"op": "repoint", "key": "cache", "socket": str(plc / "attacker.sock")}
 
-    ok, reason = _pr._repoint_decision([src], running, cmd)
+    ok, reason = _pr._repoint_decision([src], running, cmd, anchor)
     assert ok is False
     assert reason and "fail-closed" in reason
 
-    accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running)
+    accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running, anchor=anchor)
     assert accepted is False
     assert stub.repoints == []
     assert stub.target == "orig.sock"
@@ -759,20 +795,105 @@ def test_repoint_fail_closed_when_no_admissible_reference(tmp_path):
 
 def test_legit_repoint_still_admitted_and_repoints(tmp_path):
     """A faithful tier swap (successor passes admission against the running
-    manifest) is admitted and the proxy re-points onto the successor socket."""
+    manifest, is named as the real provider of the key, and serves on a socket
+    in this process's own placement directory) is admitted and the proxy
+    re-points onto the successor socket."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
+    successor = str(plc / "cache-succ.sock")
+    stub = _StubClient(target=str(plc / "orig.sock"))
+    cmd = {"op": "repoint", "key": "cache", "socket": successor,
+           "component": "MemCache", "backend": "rust"}
+
+    ok, reason = _pr._repoint_decision([src], running, cmd, anchor)
+    assert ok is True and reason is None
+
+    accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running, anchor=anchor)
+    assert accepted is True
+    assert stub.repoints == [successor]
+    assert stub.target == successor
+
+
+# ---------------------------------------------------------------------------
+# item 337, the unjudged-address hole (adversarial audit, HIGH). The seams above
+# admitted a SELECTOR and then applied an address nothing had judged: nothing
+# bound `component` to the `key` whose proxy moved, and neither the socket nor
+# the endpoint was ever an input to the decision. So any admissible
+# (component, backend) pair in the composition was a pass token for re-pointing
+# ANY key at ANY address. Mesh property 1 ("the gate inputs are
+# receiver-controlled, not wire-controlled", docs/design/337-...md:94) requires
+# both the binding and the address to be receiver-derived, so both are tested
+# here as refusals that BLOCK the effect, not as diagnostics.
+# ---------------------------------------------------------------------------
+
+
+def test_repoint_with_an_unrelated_component_as_pass_token_is_refused(tmp_path):
+    """`Api` is a perfectly admissible component of this composition — and it
+    does not provide `cache`. Using it as the selector for a repoint of the
+    `cache` proxy is refused by the receiver's OWN manifest, which names
+    MemCache as that key's provider. Admission of some other component is not
+    an admission token for this key."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
+    stub = _StubClient(target=str(plc / "orig.sock"))
+    # the pass token really does pass admission on its own — that is the point:
+    assert swap_admission([src], running, "Api", "py")[1] is None
+    cmd = {"op": "repoint", "key": "cache", "socket": str(plc / "attacker.sock"),
+           "component": "Api", "backend": "py"}
+
+    ok, reason = _pr._repoint_decision([src], running, cmd, anchor)
+    assert ok is False
+    assert reason and "does not provide key 'cache'" in reason
+
+    accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running, anchor=anchor)
+    assert accepted is False
+    assert stub.repoints == []
+    assert stub.target == str(plc / "orig.sock")
+
+
+def test_repoint_to_an_unsanctioned_address_is_refused(tmp_path):
+    """The selector is entirely honest — MemCache really is `cache`'s provider
+    and really is admissible on the rust tier — but the socket is not one this
+    receiver sanctions: it is outside the placement directory the conductor
+    handed this process its own spec in, so no seam of this composition was
+    ever bound there. The address is the whole effect of a repoint, so it is
+    judged, and the cutover is blocked."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
+    stub = _StubClient(target=str(plc / "orig.sock"))
+    cmd = {"op": "repoint", "key": "cache", "socket": "/tmp/attacker-controlled.sock",
+           "component": "MemCache", "backend": "rust"}
+
+    ok, reason = _pr._repoint_decision([src], running, cmd, anchor)
+    assert ok is False
+    assert reason and "placement directory" in reason
+
+    accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running, anchor=anchor)
+    assert accepted is False
+    assert stub.repoints == []
+    assert stub.target == str(plc / "orig.sock")
+
+
+def test_repoint_fail_closed_when_the_receiver_has_no_address_anchor(tmp_path):
+    """A process that cannot locate its own placement directory cannot sanction
+    any socket, and indeterminate is a REFUSAL: it does not fall back to
+    trusting the wire's address."""
     src = _write(tmp_path, "app.rvl", _CACHE_RVL)
     running = compile_files([src])
     stub = _StubClient(target="orig.sock")
     cmd = {"op": "repoint", "key": "cache", "socket": "successor.sock",
            "component": "MemCache", "backend": "rust"}
 
-    ok, reason = _pr._repoint_decision([src], running, cmd)
-    assert ok is True and reason is None
+    ok, reason = _pr._repoint_decision([src], running, cmd, _pr._seam_anchor({}, None))
+    assert ok is False
+    assert reason and "no placement directory" in reason
 
     accepted = _pr._apply_repoint(cmd, {"cache": stub}, [src], running)
-    assert accepted is True
-    assert stub.repoints == ["successor.sock"]
-    assert stub.target == "successor.sock"
+    assert accepted is False
+    assert stub.repoints == []
 
 
 # ---------------------------------------------------------------------------
@@ -780,10 +901,11 @@ def test_legit_repoint_still_admitted_and_repoints(tmp_path):
 # event earlier: before a consumer process wires its INITIAL proxy to a
 # provider served by another process, it re-admits that provider against its
 # own running manifest (`_boot_wiring_decision` / `_apply_boot_wiring`),
-# exactly the `swap_admission` call the repoint seam runs at cutover.
-# placement.py stamps the provider's admissible identity (`component`,
-# `backend`) onto every same-composition proxy entry so the selector is
-# already in the spec the consumer already trusts — no new transport.
+# exactly the `swap_admission` call the repoint seam runs at cutover, with the
+# same key-binding and address sanction around it. placement.py stamps the
+# provider's admissible identity (`component`, `backend`) onto every
+# same-composition proxy entry so the selector is already in the spec the
+# consumer already trusts — no new transport.
 # ---------------------------------------------------------------------------
 
 
@@ -797,21 +919,23 @@ def test_boot_wiring_refused_at_seam_when_provider_fails_admission(tmp_path):
     proxy is never wired at all — not merely that admission complains."""
     src = _write(tmp_path, "bound.rvl", _BOUND_CACHE_RVL)
     running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
     # MemCache's `cache` service is sync (address-space-bound) — the consumer
     # re-admitting it onto the `rust` tier it is actually served from fails,
     # exactly like the repoint seam's refusal above.
-    info = {"socket": "provider.sock", "methods": ["get"], "service": "Cache",
-           "component": "MemCache", "backend": "rust"}
+    info = {"socket": str(plc / "provider.sock"), "methods": ["get"], "service": "Cache",
+            "component": "MemCache", "backend": "rust"}
     wired = []
 
     async def wire():
         wired.append(info["socket"])
 
-    ok, reason = _pr._boot_wiring_decision([src], running, info)
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", info, anchor)
     assert ok is False
     assert reason and ("address-space-bound" in reason or "transport" in reason)
 
-    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire))
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire,
+                                           anchor=anchor))
     assert accepted is False
     assert wired == []   # the wire callback was never invoked -- never wired
 
@@ -822,55 +946,184 @@ def test_boot_wiring_fail_closed_when_no_admissible_reference(tmp_path):
     never silently wired -- mirroring the repoint seam's legacy-command case."""
     src = _write(tmp_path, "app.rvl", _CACHE_RVL)
     running = compile_files([src])
-    info = {"socket": "provider.sock", "methods": ["get"], "service": "Cache"}
+    plc, anchor = _seam_dir(tmp_path)
+    info = {"socket": str(plc / "provider.sock"), "methods": ["get"], "service": "Cache"}
     wired = []
 
     async def wire():
         wired.append(info["socket"])
 
-    ok, reason = _pr._boot_wiring_decision([src], running, info)
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", info, anchor)
     assert ok is False
     assert reason and "fail-closed" in reason
 
-    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire))
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire,
+                                           anchor=anchor))
     assert accepted is False
     assert wired == []
 
 
 def test_legit_boot_wiring_still_admitted_and_wires(tmp_path):
     """A faithful boot-time proxy (provider passes admission against the
-    running manifest) is admitted and actually wired."""
+    running manifest, is the key's real provider, and serves on a socket in
+    this process's own placement directory) is admitted and actually wired."""
     src = _write(tmp_path, "app.rvl", _CACHE_RVL)
     running = compile_files([src])
-    info = {"socket": "provider.sock", "methods": ["get", "put"], "service": "Cache",
-           "component": "MemCache", "backend": "rust"}
+    plc, anchor = _seam_dir(tmp_path)
+    info = {"socket": str(plc / "provider.sock"), "methods": ["get", "put"],
+            "service": "Cache", "component": "MemCache", "backend": "rust"}
     wired = []
 
     async def wire():
         wired.append(info["socket"])
 
-    ok, reason = _pr._boot_wiring_decision([src], running, info)
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", info, anchor)
     assert ok is True and reason is None
 
-    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire))
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire,
+                                           anchor=anchor))
     assert accepted is True
-    assert wired == ["provider.sock"]
+    assert wired == [str(plc / "provider.sock")]
 
 
-def test_remote_boot_proxy_is_not_seam2_gated(tmp_path):
-    """A remote seam (item 151: a separate composition, no component/backend
-    at all) is out of Seam 2's scope and always wires -- gating it would
-    refuse every legitimate remote proxy, since the remote component is not a
-    member of this composition's running manifest at all."""
+def test_boot_wiring_with_the_address_swapped_under_an_honest_selector_is_refused(tmp_path):
+    """The injected wiring this seam exists to catch: the entry keeps the
+    selector placement.py stamped (`MemCache`/`rust`, which admits) and only the
+    ADDRESS is swapped. Judging the selector while wiring the address judged the
+    wrong thing; the address is now judged against the receiver's own placement
+    directory, and the proxy is never wired."""
     src = _write(tmp_path, "app.rvl", _CACHE_RVL)
     running = compile_files([src])
+    _plc, anchor = _seam_dir(tmp_path)
+    info = {"socket": "/tmp/attacker.sock", "methods": ["get", "put"],
+            "service": "Cache", "component": "MemCache", "backend": "rust"}
+    wired = []
+
+    async def wire():
+        wired.append(info["socket"])
+
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", info, anchor)
+    assert ok is False
+    assert reason and "placement directory" in reason
+
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire,
+                                           anchor=anchor))
+    assert accepted is False
+    assert wired == []
+
+
+def test_boot_wiring_with_an_unrelated_component_as_pass_token_is_refused(tmp_path):
+    """`Api` admits on its own, and provides `api`, not `cache`. Naming it in
+    the `cache` proxy entry is refused by the consumer's own manifest before
+    admission is even consulted: a selector for another component is not an
+    admission token for this key."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
+    assert swap_admission([src], running, "Api", "py")[1] is None
+    info = {"socket": str(plc / "provider.sock"), "methods": ["get", "put"],
+            "service": "Cache", "component": "Api", "backend": "py"}
+    wired = []
+
+    async def wire():
+        wired.append(info["socket"])
+
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", info, anchor)
+    assert ok is False
+    assert reason and "does not provide key 'cache'" in reason
+
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire,
+                                           anchor=anchor))
+    assert accepted is False
+    assert wired == []
+
+
+def test_remote_flag_does_not_skip_seam2_on_a_same_composition_key(tmp_path):
+    """`remote` is wire state, so it cannot decide whether the gate runs. This
+    key IS provided by a component of the consumer's own running manifest
+    (MemCache provides `cache`), so it is a same-composition seam and is gated
+    however the entry labels itself: one flag must not turn an unjudged
+    attacker endpoint into an admitted wiring.
+
+    This replaces the landed `test_remote_boot_proxy_is_not_seam2_gated`, whose
+    premise was wrong: it asserted the ungated wiring using a key
+    (`cache`) that this very composition provides, which is precisely the
+    exploit. The genuine Seam 3 case it meant to protect is the test below.
+    """
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    _plc, anchor = _seam_dir(tmp_path)
+    info = {"endpoint": {"host": "attacker.example", "port": 9999},
+            "methods": ["get"], "service": "Cache", "remote": True}
+    wired = []
+
+    async def wire():
+        wired.append(info["endpoint"])
+
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire,
+                                           anchor=anchor))
+    assert accepted is False
+    assert wired == []
+
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", info, anchor)
+    assert ok is False
+    # no selector at all on this entry, so it fails closed at the first gate
+    assert reason and "fail-closed" in reason
+
+
+def test_genuine_cross_composition_remote_is_out_of_seam2_scope(tmp_path):
+    """A genuine remote seam (item 151) is one whose key NO component of this
+    composition provides — the receiver decides that from its own manifest, not
+    from the entry's flag. Such a key is Seam 3, a different and deferred seam,
+    so it wires ungated; gating it would refuse every legitimate remote proxy,
+    since its provider is not a member of this manifest at all."""
+    src = _write(tmp_path, "remote_only.rvl", _REMOTE_ONLY_RVL)
+    running = compile_files([src])
+    _plc, anchor = _seam_dir(tmp_path)
+    assert _pr._providers_of(running, "cache") == set()   # provided by nobody here
     info = {"endpoint": {"host": "10.0.0.9", "port": 4000}, "methods": ["get"],
-           "service": "Cache", "remote": True}
+            "service": "Cache", "remote": True}
     wired = []
 
     async def wire():
         wired.append("remote")
 
-    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire))
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire,
+                                           anchor=anchor))
     assert accepted is True
     assert wired == ["remote"]
+
+
+def test_network_seam_is_sanctioned_by_the_receivers_own_mtls_identity(tmp_path):
+    """A same-composition NETWORK seam cannot be sanctioned by address — the
+    machines live in the placement manifest, which the receiver does not hold —
+    so it is sanctioned by the one trust anchor the receiver was itself issued:
+    placement stamps the same `certs[pname]` material on this process's serve
+    endpoint and on every network proxy it holds. An endpoint anchored on that
+    material is wired; the same endpoint with foreign material is refused."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    mine = {"cert": str(tmp_path / "me.crt"), "key": str(tmp_path / "me.key"),
+            "ca": str(tmp_path / "seam_ca.crt"), "identity": "consumer"}
+    theirs = {**mine, "ca": str(tmp_path / "other_ca.crt")}
+    spec = {"serve": {"endpoint": {"host": "10.0.0.4", "port": 4100, "tls": mine}}}
+    _plc, anchor = _seam_dir(tmp_path, spec)
+
+    def entry(tls):
+        return {"endpoint": {"host": "10.0.0.9", "port": 4000,
+                             "tls": {**tls, "server_hostname": "localhost"}},
+                "methods": ["get", "put"], "service": "Cache",
+                "component": "MemCache", "backend": "py"}
+
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", entry(mine), anchor)
+    assert ok is True and reason is None
+
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", entry(theirs), anchor)
+    assert ok is False
+    assert reason and "own mTLS identity" in reason
+
+    stripped = entry(mine)
+    stripped["endpoint"].pop("tls")
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", stripped, anchor)
+    assert ok is False
+    assert reason and "no complete mTLS material" in reason
