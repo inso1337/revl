@@ -33,12 +33,17 @@ Four suites, one per piece of the slice, each pinning the property the design
 from __future__ import annotations
 
 import asyncio
+import builtins
 import importlib.util
 import json
 import os
+import queue
+import re
+import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -49,6 +54,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from revl import attest, deploy  # noqa: E402
+from revl import placement as _placement  # noqa: E402
 
 
 def _bridge():
@@ -482,6 +488,127 @@ def test_a_seam_with_no_guard_is_byte_identical_to_the_pre_118_wire(sockdir):
     finally:
         client.close()
         running.stop()
+
+
+# ---------------------------------------------------------------------------
+# 2b. the ordinary `revl run --placement` path wires a LIVE guard (roadmap
+#     421 F8: the guard above was tested but never wired, since bridge.serve()
+#     ran with no `correlation=` and every call site with one was hand-built
+#     in THIS file). This reproduces the gap the hand-built `seam` fixture
+#     above could never catch: it drives a real two-process placement through
+#     `revl.placement.run_placement` exactly as the CLI would, then attacks
+#     the socket it published from OUTSIDE that placement, with no help from
+#     `_process_runner.py` or `placement.py` at all.
+# ---------------------------------------------------------------------------
+
+_GUARD_APP = """\
+service Cache { fn get(key: Str) -> Str }
+
+component MemCache provides cache: Cache {
+  provide cache { fn get(key) = "v:" + key }
+}
+
+component Consumer requires cache: Cache {}
+"""
+
+_GUARD_PLACEMENT = """\
+[processes.provider]
+components = ["MemCache"]
+
+[processes.consumer]
+components = ["Consumer"]
+probe = ["cache.get('alice')"]
+"""
+
+
+def _write(tmp_path, name, text):
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def test_the_ordinary_run_placement_path_leaves_a_live_correlation_guard(
+        tmp_path, monkeypatch, capfd):
+    """Boot a real two-process composition through the SAME `run_placement`
+    the `revl run --placement` CLI calls; nothing in this test constructs a
+    `CorrelationGuard`, a `Correlation`, or a `bridge.serve(correlation=...)`
+    call by hand. Then dial the provider's published socket directly, as a
+    stranger who never received the shared secret would, and prove the
+    dispatch is refused rather than answered: the exact shape roadmap 421 F8
+    found missing (`_process_runner.py` called `bridge.serve` with no
+    `correlation=` at all, so any caller reached the service)."""
+    if not _placement._cordis_py_installed():
+        pytest.skip("cordis-py runtime not installed (sh backends/python/setup.sh)")
+
+    app = _write(tmp_path, "app.rvl", _GUARD_APP)
+    toml = _write(tmp_path, "app.toml", _GUARD_PLACEMENT)
+
+    # Drive the swap REPL's `input()` from a queue instead of a real tty, so
+    # the placement stays up (real subprocesses, real sockets) until this test
+    # is done with it. `run_placement(once=True)` tears everything down the
+    # instant boot finishes, before an outside dialer could ever connect.
+    commands: queue.Queue = queue.Queue()
+
+    def fake_input(prompt=""):
+        item = commands.get()
+        if item is None:
+            raise EOFError
+        return item
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+
+    result: dict = {}
+
+    def run():
+        result["rc"] = _placement.run_placement([app], toml, once=False)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        # Poll the conductor's own interleaved log (real subprocess stdout,
+        # pumped through by placement.py) for the provider's serve line. It
+        # only prints "(correlation-guarded)" once `bridge.serve` was actually
+        # called with a guard, which is the fact under test.
+        deadline = time.time() + 30
+        out = ""
+        sock_path = None
+        while time.time() < deadline:
+            out += capfd.readouterr().out
+            m = re.search(r"\[provider] serve\s*\|.*-> (\S+) \(correlation-guarded\)", out)
+            if m:
+                sock_path = m.group(1)
+                break
+            if not thread.is_alive():
+                break
+            time.sleep(0.1)
+        assert sock_path, f"provider never reported a correlation-guarded seam:\n{out}"
+
+        # The legitimate consumer, wired by placement.py/_process_runner.py
+        # with the real secret, still gets through: its probe result is in
+        # the log the moment it ran.
+        while time.time() < deadline and "cache.get" not in out:
+            out += capfd.readouterr().out
+            time.sleep(0.1)
+        assert "'v:alice'" in out or "v:alice" in out, out
+
+        # The attack: a bare stranger dials the SAME socket with the exact
+        # pre-118 wire shape (no `correlation` member at all) and is refused,
+        # never dispatched, proving the guard installed by the ordinary run
+        # path is live, not merely constructed.
+        raw = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        raw.settimeout(10)
+        raw.connect(sock_path)
+        raw.sendall((json.dumps({"key": "Cache", "method": "get", "args": ["alice"]})
+                     + "\n").encode())
+        reply = json.loads(raw.makefile("rb").readline())
+        raw.close()
+        assert reply["ok"] is False, reply
+        assert reply.get("correlation_refused") == deploy.REJECT_MALFORMED, reply
+    finally:
+        commands.put(":q")
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "run_placement did not tear down"
+    assert result.get("rc") == 0
 
 
 # ---------------------------------------------------------------------------

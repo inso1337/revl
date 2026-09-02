@@ -53,6 +53,7 @@ import signal
 import sys
 import threading
 import types
+import uuid
 from pathlib import Path
 
 from ._paths import backends_root
@@ -541,10 +542,35 @@ async def run(spec: dict, spec_path=None) -> None:
         # item 151, Seam 3, out of scope here, and wires ungated.
         async def _wire(key=key, info=info) -> None:
             target = info.get("endpoint") or info["socket"]
+            # item 118 S1 / roadmap 421 F8: placement.py hands every local (UDS)
+            # proxy entry a `correlation` block, namely this consumer's own
+            # peer identity and secret, plus the composition it is scoped to.
+            # Seal a fresh envelope per call (a fresh idempotency key each
+            # time, so a captured-and-replayed request collides with the one
+            # already admitted and is refused) rather than one static envelope
+            # reused across calls. Absent (a network or item-151 seam, or a
+            # spec from before this wiring existed), the wire is byte-identical
+            # to before.
+            corr = info.get("correlation")
+            correlation = None
+            if corr:
+                from revl.deploy import Correlation, seal  # noqa: PLC0415
+                secret = bytes.fromhex(corr["secret"])
+                composition_id = corr["composition_id"]
+                peer_identity = corr["peer_identity"]
+
+                def correlation(k, method, _secret=secret, _cid=composition_id,
+                                _peer=peer_identity):
+                    return seal(Correlation(composition_id=_cid, generation=0,
+                                            peer_identity=_peer,
+                                            effect_id=f"{k}.{method}",
+                                            idempotency_key=uuid.uuid4().hex),
+                               _secret)
             proxy = bridge.proxy_component(key, info["methods"], target, module,
                                            deadline=info.get("deadline"),
                                            deadlines=info.get("deadlines"),
-                                           async_methods=info.get("async_methods"))
+                                           async_methods=info.get("async_methods"),
+                                           correlation=correlation)
             clients[key] = proxy["_client"]
             fiber = root.plugin(proxy)
             await fiber
@@ -606,10 +632,23 @@ async def run(spec: dict, spec_path=None) -> None:
         # served endpoint is a UDS (`socket`) or a network TCP+mTLS seam
         # (`endpoint`); over TCP the provider demands the consumer's cert (mTLS).
         serve_target = serve.get("endpoint") or serve["socket"]
+        # item 118 S1 / roadmap 421 F8: a local (UDS) `serve` block carries the
+        # secret table placement.py built for it, one entry per consumer of
+        # these keys within THIS composition, so this seam runs the same
+        # `CorrelationGuard` `tests/test_deploy_118.py` exercises instead of
+        # leaving it unwired. Absent (a network provider, or a spec predating
+        # this wiring) `correlation` stays None and the wire is unchanged.
+        guard = None
+        corr = serve.get("correlation")
+        if corr:
+            from revl.deploy import CorrelationGuard  # noqa: PLC0415
+            guard = CorrelationGuard({identity: bytes.fromhex(secret_hex)
+                                      for identity, secret_hex in corr["peers"].items()})
         server = await bridge.serve(root, serve.get("methods") or serve["keys"], serve_target,
-                                    module=module)
+                                    module=module, correlation=guard)
         log("serve", ", ".join(serve["keys"]),
-            f"-> {bridge.Endpoint.from_spec(serve_target).describe()}")
+            f"-> {bridge.Endpoint.from_spec(serve_target).describe()}"
+            + (" (correlation-guarded)" if guard is not None else ""))
 
     # 4. probes: call provided services (may cross a seam), print results
     namespace = {key: root.get(key) for key in (spec.get("provides") or [])}
