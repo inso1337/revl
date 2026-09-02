@@ -400,3 +400,79 @@ def test_register_partial_order():
     assert not _register_satisfies("declared", "shape-proven")
     # no claim never satisfies a floor.
     assert not _register_satisfies(None, "declared")
+
+
+# ------------------------------------------------- slice 4: shape-proven is a
+# ------------------------------------------------- tier NOTHING produces
+
+def test_shape_proven_is_a_tier_no_declaration_can_reach_today():
+    """The tripwire for 309 slice 4 (`lower.py::_idempotent_register`).
+
+    `shape-proven` is in the partial order and in `REDISPATCH_FREE`, so the
+    lattice ACCEPTS it — but the check that would produce it is a syntactic rule
+    over a restore-to-recorded-value inverse BODY, and revl has no body to read:
+    `parser.py::_extern` requires every extern to carry a `@backend` host body,
+    so an inverse is G8-opaque by construction. Until an extern can carry a
+    revl-expressed body, every native `undo idempotent` must lower to `declared`
+    — the fail-closed direction.
+
+    This test fails the day a declaration produces `shape-proven`. That is the
+    point: it is the reminder that the promise now has to be kept for real
+    (`REDISPATCH_FREE` lets recovery re-dispatch it with no fence), not a claim
+    that the tier should stay empty forever.
+    """
+    from revl.lower import REDISPATCH_FREE, _REGISTER_RANK
+
+    # the tier exists in the type ...
+    assert "shape-proven" in _REGISTER_RANK
+    assert "shape-proven" in REDISPATCH_FREE
+
+    # ... and in the world, nothing reaches it. Every declaration surface that
+    # produces a register at all, over the shapes 309 admits.
+    surfaces = [
+        # a native `undo idempotent` over a host body — the slice-4 candidate.
+        _PRE + ("extern witnessed[fs] fn rm(path: Str) -> Result[W, E]\n"
+                "    undo idempotent restore(result)\n"
+                "    = @py { pass }\n"),
+        # the same on an `acquire` extern (item 308 R0: an acquire returns an
+        # opaque nominal handle, so the inverse takes THAT).
+        ("type Handle = { fd: Int }\n"
+         "extern pure fn shut(h: Handle) -> Unit = @py { pass }\n"
+         "extern acquire fn open(path: Str) -> Handle\n"
+         "    undo idempotent shut(result)\n"
+         "    = @py { pass }\n"),
+        # the read tier (item 440) — stronger than shape-proven, still not it.
+        _PRE + ("extern witnessed[fs] fn probe(path: Str) -> Result[W, E]\n"
+                "    undo pure restore(result)\n"
+                "    = @py { pass }\n"),
+        # the two emission surfaces.
+        "extern emission[inv] idempotent(key: k) fn release(k: Str) -> Unit "
+        "= @py { pass }\n",
+        "extern emission[http] idempotent fn put(k: Str) -> Unit = @py { pass }\n",
+    ]
+    produced = set()
+    for src in surfaces:
+        for ext in _lower(src)["externs"]:
+            if "register" in ext:
+                produced.add(ext["register"])
+    assert produced == {"declared", "read", "keyed"}
+    assert "shape-proven" not in produced
+
+
+def test_a_pure_classified_inverse_does_not_earn_shape_proven():
+    """The unsoundness slice 4 must not take, stated as a test.
+
+    `pure` is checked for SHAPE only — `stdlib/fs.rvl`'s `restore`, `unrm` and
+    `rmdir_if_empty` are all `extern pure fn` and all unlink or rename real
+    files. So "the inverse is classified pure" cannot be read as "the inverse
+    restores a recorded value": deriving the tier from the classification would
+    promote mutating inverses into the free-replay tier, which is unsound in the
+    UNSAFE direction (item 440 found the same trap for the `read` tier and
+    anchored it to an explicit `undo pure` word instead).
+    """
+    ir = _lower(_PRE + (
+        "extern witnessed[fs] fn rm(path: Str) -> Result[W, E]\n"
+        "    undo idempotent restore(result)\n"   # `restore` IS `extern pure`
+        "    = @py { pass }\n"))
+    [rm] = [e for e in ir["externs"] if e["name"] == "rm"]
+    assert rm["register"] == "declared"

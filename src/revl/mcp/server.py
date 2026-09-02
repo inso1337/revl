@@ -1632,6 +1632,21 @@ def _tool_resolve(arguments: dict) -> dict:
             key = resolve_key(None)
         except RevlError:
             key = None
+    # item 290 §5: an optional boundary policy turns on the `wouldBeRefused`
+    # marker. It is a PREDICTION for the agent's benefit and gates nothing here —
+    # but a policy that fails to LOAD stops the call, because resolving with the
+    # prediction silently switched off is the same false clearance the marker
+    # exists to prevent.
+    policy = None
+    policy_path = arguments.get("policy")
+    if policy_path:
+        from ..policy import load_policy  # noqa: PLC0415
+        try:
+            policy = load_policy(policy_path)
+        except RevlError as error:
+            return report(error)
+        except OSError as error:
+            return _session_error(f"`policy` could not be read: {error}")
     try:
         registry = Registry.from_dir(registry_dir)
         return registry_resolve(registry, need,
@@ -1639,7 +1654,8 @@ def _tool_resolve(arguments: dict) -> dict:
                                 limit=int(arguments.get("limit", 5)),
                                 verify_required=verify_required, key=key,
                                 trusted_publishers=trusted_publishers,
-                                adapt=adapt, adapt_opt_ins=adapt_opt_ins)
+                                adapt=adapt, adapt_opt_ins=adapt_opt_ins,
+                                policy=policy)
     except RevlError as error:
         return report(error)
 
@@ -2783,7 +2799,13 @@ TOOLS.append({
                    "opt-in (an outcome merge, a non-canonical default); without it "
                    "those pairs come back under `nearMisses` naming the exact "
                    "position and clause. Set `adapt: false` for the direct-only "
-                   "answer.",
+                   "answer. Pass `policy` (a boundary policy path) to have each "
+                   "candidate the policy's component-scoped EVIDENCE rules "
+                   "already refuse come back marked `wouldBeRefused`, so you do "
+                   "not pick a top-ranked candidate the gate then bounces — a "
+                   "prediction that filters nothing and whose ABSENCE is not an "
+                   "admission (`policyPreview.unpredicted` names the rules only "
+                   "the gate can decide).",
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -2816,6 +2838,15 @@ TOOLS.append({
                                            "\"total\"}}}. Transformations that "
                                            "need an opt-in refuse without it, and "
                                            "the refusal rides out in `nearMisses`"},
+            "policy": {"type": "string",
+                       "description": "path to a boundary policy: each candidate "
+                                      "its component-scoped evidence rules "
+                                      "ALREADY refuse comes back carrying "
+                                      "`wouldBeRefused` (item 290). A PREDICTION "
+                                      "only - it filters nothing and reorders "
+                                      "nothing, and its ABSENCE is not an "
+                                      "admission; `policyPreview.unpredicted` "
+                                      "names the rules only the gate can decide"},
         },
         "required": ["need"],
     },

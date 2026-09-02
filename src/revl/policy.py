@@ -1666,6 +1666,128 @@ def _inert_evidence_selectors(policy: Policy, reports: dict) -> list:
     return inert
 
 
+# ------------------------------- item 290 slice 2: the resolve-side prediction
+
+#: The rule families whose SELECTION is a property of the assembled composition
+#: rather than of a candidate standing alone, so `predict_refusals` cannot
+#: evaluate them and says so instead of reporting them as "not selected"
+#: (§5, "the marker is a courtesy prediction computed by the same evaluator").
+#:
+#: * `realm` — a realm placement is written by the composition that isolates the
+#:   component; a candidate in a registry sits in no realm.
+#: * `capability` — an evidence or register rule scoped by capability selects on
+#:   the G8 REACH of the linked graph. A registry entry carries only its
+#:   publisher's `index.json` claim about its capabilities, and §5's own
+#:   assumption list says that claim is not cross-checked unless the registry was
+#:   verified. Predicting reach from a claim would be predicting from the one
+#:   input the gate refuses to trust.
+#: * `mcp` — whether a component is MCP-admitted is a property of the session
+#:   that admits it, decided after resolve returns.
+_UNPREDICTABLE_SCOPES = frozenset({"realm", "capability", "mcp"})
+
+
+def unpredicted_rules(policy: Policy) -> list[str]:
+    """Every rule in `policy` that `predict_refusals` cannot evaluate about a
+    candidate standing alone, rendered as written (item 290 §5).
+
+    This list is what keeps an empty `wouldBeRefused` from reading as an
+    approval: these rules refuse on their own, at the gate, on inputs a resolve
+    does not have. It is a property of the POLICY, not of any candidate, so it is
+    reported once per resolve rather than per candidate."""
+    # `_rule_line` renders a rule off a REPORT, so an unevaluated rule is given
+    # its own `require` clauses verbatim (`passed` is never read by the renderer)
+    # — the line reads exactly as written in the policy file, facets included.
+    out = [_rule_line(RuleReport(
+               rule.scope, rule.selector, rule.origin, rule.self_attested, False,
+               tuple(ClauseVerdict(f, t, "", False, "") for f, t in rule.require)))
+           for rule in policy.evidence_rules
+           if rule.scope in _UNPREDICTABLE_SCOPES]
+    out += [f"capability {rule.capability} requires register {rule.at_least}"
+            for rule in policy.register_rules]
+    out += [f"requires idempotent-teardown(strength: {rule.strength})"
+            for rule in policy.teardown_rules]
+    return out
+
+
+def predict_refusals(policy: Policy, name: str, *,
+                     evidence_bundle=None, evidence_ir: dict | None = None,
+                     key=None, trusted_publishers=frozenset()) -> dict:
+    """Predict which of `policy`'s evidence rules ALREADY refuse `name` on the
+    evidence it publishes today — item 290 §5's resolve-side `wouldBeRefused`
+    marker, so an agent does not pick a top-ranked candidate the gate bounces.
+
+    Two properties this function exists to hold, and how it holds them:
+
+    **It never refuses.** It returns data and nothing else: no exception on a
+    failing clause, no filtering, no reordering. `resolve` attaches the result to
+    a candidate it has already ranked, and the ranking is computed before this
+    runs and is not read back. The only path from here to a refusal is the gate
+    itself, re-evaluating the assembled composition through `evaluate`.
+
+    **Its silence is never an approval.** A prediction is ONE-SIDED: a
+    `wouldBeRefused` entry says the gate refuses this candidate on facts that are
+    already recorded, and an EMPTY list says only that no component-scoped
+    evidence rule refuses it *on those facts*. It cannot say the gate will admit,
+    for three separate reasons, all of them reported rather than assumed:
+
+    1. `unpredicted` names every rule this call could not evaluate — the
+       `_UNPREDICTABLE_SCOPES` families plus the register and idempotent-teardown
+       floors, which read the audit graph's per-token registers and recovery
+       surface. Those rules refuse on their own and are not covered here.
+    2. The gate evaluates the ASSEMBLED composition. Realms, reach, G2 key
+       collisions and the operator's own key/trust set are inputs resolve does
+       not have, and every one of them can turn an admit into a refusal.
+    3. The evidence graded here is the candidate's PUBLISHED bundle. §4's
+       `--recompute` re-derives facets locally, and a recomputed fact may be
+       worse than the published one.
+
+    Returns ``{"wouldBeRefused": [...], "unpredicted": [...]}``. Each
+    `wouldBeRefused` entry is one FAILING clause: the rule line as written, the
+    facet, its threshold, the recorded fact, the clause's standing, and any
+    detail (a hash mismatch, a cannot-verify). The verdicts come from
+    `_rule_reports`, the same single comparison site the gate and
+    `revl policy evaluate` read, so a prediction can never disagree with the
+    gate on a fact both of them can see.
+    """
+    from . import registry as reg  # noqa: PLC0415 — lazy, pulls the compiler
+
+    unpredicted = unpredicted_rules(policy)
+    predictable = [r for r in policy.evidence_rules
+                   if r.scope not in _UNPREDICTABLE_SCOPES]
+    if not predictable:
+        return {"wouldBeRefused": [], "unpredicted": unpredicted}
+
+    # The candidate stands alone: one component, admitted from a registry (which
+    # is what an origin-scoped `component registry:*` rule selects on), no realm
+    # placement and no reach — the three inputs `_UNPREDICTABLE_SCOPES` withholds
+    # from the rules that would read them. `capability_registers` is left absent
+    # for the same reason, and no register rule is evaluated below.
+    stub = Policy(evidence_rules=tuple(predictable))
+    audit = {"boundary": {name: {}}, "manifest": {}, "origins": {name: "registry"}}
+    reports = _rule_reports(
+        stub, audit, frozenset(),
+        evidence={name: evidence_bundle if evidence_bundle is not None
+                  else reg.EvidenceBundle()},
+        origins={name: "registry"},
+        trusted_publishers=frozenset(trusted_publishers or ()),
+        key=key, evidence_ir={name: evidence_ir} if evidence_ir else {})
+
+    refused = []
+    for report in reports[name]["evidence"]:
+        if not report.selected:
+            continue
+        for clause in report.failed():
+            refused.append({
+                "rule": _rule_line(report),
+                "facet": clause.facet,
+                "threshold": clause.threshold,
+                "fact": clause.fact,
+                "standing": clause.standing,
+                **({"detail": clause.detail} if clause.detail else {}),
+            })
+    return {"wouldBeRefused": refused, "unpredicted": unpredicted}
+
+
 def evaluate(policy: Policy, audit: dict,
              mcp_components: frozenset[str] | set[str] | None = None,
              *, evidence: dict | None = None,

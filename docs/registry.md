@@ -180,6 +180,40 @@ read as valid; a tampered attestation grades `invalid` (bottom), and a
 attestation. The chosen candidate's `why` names the evidence it won on
 (`fault sweep 12/12, attestation valid, gauntlet admissible`).
 
+**`wouldBeRefused` (item 290 §5).** Pass a boundary policy (`policy` on
+`revl_resolve`, `policy=` on `registry.resolve`) and every ranked candidate the
+policy's **component-scoped evidence rules already refuse** comes back carrying
+`wouldBeRefused`: one entry per failing clause, naming the rule as written, the
+facet, its threshold and the recorded fact. It exists so an agent does not pick a
+top-ranked candidate the gate then bounces.
+
+It is a **prediction**, and it is kept from becoming anything else in both
+directions:
+
+* *it never refuses.* The verdicts are attached after ranking and are never read
+  back — nothing is filtered, withheld or reordered by them. Only
+  `revl audit --policy` refuses.
+* *its absence is never an approval.* The prediction is one-sided. A resolve sees
+  a candidate standing alone with its PUBLISHED evidence, so it can decide only
+  the rules whose selection is a property of that candidate. Everything else is
+  listed in `policyPreview.unpredicted` instead of being reported as passing:
+  realm-scoped rules (a realm placement belongs to the composition), capability
+  scoped rules and the `requires register` floors (they read the G8 reach and the
+  audit graph's registers; a registry entry carries only its publisher's
+  `index.json` claim, which §5 does not cross-check), `mcp` rules (decided by the
+  session that admits), and the `requires idempotent-teardown` floor (it reads the
+  recovery surface). The gate additionally holds the operator's key and trust set
+  and may recompute facets locally, any of which can turn an admit into a refusal.
+
+The clause verdicts come from `policy._rule_reports`, the same single comparison
+site the gate and `revl policy evaluate` read, so the prediction cannot disagree
+with the gate about a fact both of them can see. That agreement extends to the
+SUBJECT a glob is matched against: an evidence rule selects on the **component**
+name from the candidate's own compiled IR (`PgDatabase`), not on the registry
+entry name the result lists it under (`pg_database`) — the same name
+`revl policy evaluate --registry --candidate` resolves. A rule written against
+the entry name selects nothing, in the preview and at the gate alike.
+
 Popularity is deliberately **not** a rank input in phase 0: with one
 author and agent traffic, download counts measure prompt fashion, not
 quality. Evidence ranks; counters don't.
