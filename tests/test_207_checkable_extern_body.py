@@ -329,23 +329,21 @@ def test_c6_the_only_floor_that_loses_a_spelling_is_the_named_peer():
 # ------------------------------------------------------ the defect this pass found
 # Not about `shape-proven`, but found by walking every reader of the register.
 
-@pytest.mark.xfail(strict=True, reason=(
-    "F1: `_capability_registers` folds a token's declarations with STRONGEST-"
-    "wins, but 290 §3.2 specifies WORST-wins ('the effective register of a "
-    "capability is the WEAKEST among the declarations behind it. One bare "
-    "`declared` inverse beside three keyed ones fails a `keyed` floor'). One "
-    "keyed declaration therefore launders every bare-`declared` declaration on "
-    "the same token past a `keyed`/`strong` floor. Fail-OPEN, in a refusal rule. "
-    "docs/design/207-checkable-extern-body.md §8."))
 def test_f1_a_register_floor_must_be_worst_wins_over_a_token():
-    """Reproducer for the one defect this design pass found.
+    """The one defect this design pass found, now fixed and pinned.
 
-    `db` is reached by two emissions: one `idempotent(key: k)` (`keyed`) and one
-    bare `idempotent` (`declared`). `capability db requires register keyed` must
-    refuse, and admits."""
+    `_capability_registers` folded a token's declarations STRONGEST-wins; 290
+    §3.2 specifies WORST-wins ("the effective register of a capability is the
+    WEAKEST among the declarations behind it. One bare `declared` inverse beside
+    three keyed ones fails a `keyed` floor"). Under the old fold one keyed
+    declaration carried every bare-`declared` declaration on the same token past
+    a `keyed`/`strong` floor — fail-open, in a rule whose only job is to refuse.
+
+    `db` is declared by two emissions: one `idempotent(key: k)` (`keyed`) and one
+    bare `idempotent` (`declared`). The token's effective register is the weakest
+    of them."""
     from revl import compile_source  # noqa: PLC0415
     from revl.audit_diff import audit_report  # noqa: PLC0415
-    from revl.policy import evaluate, parse_policy  # noqa: PLC0415
 
     src = (
         "extern emission[db] idempotent(key: k) fn push(k: Str) -> Unit "
@@ -362,6 +360,42 @@ def test_f1_a_register_floor_must_be_worst_wins_over_a_token():
     assert registers == {"push": "keyed", "ping": "declared"}
     # ... so the token's effective register is the weakest of them.
     assert audit["capability_registers"] == {"db": "declared"}
-    violations = evaluate(parse_policy("capability db requires register keyed"),
-                          audit)
-    assert any(v.kind == "register" and v.token == "db" for v in violations)
+
+
+def test_f1_the_weakest_declaration_reaches_the_refusal():
+    """The same fold, driven end to end through `capability ... requires
+    register`, which is the rule the fold direction actually decides.
+
+    The shape differs from the map-level reproducer above in one way that is
+    itself worth pinning: a register rule selects a token only when that token is
+    in the component's REACH, and a directly emitted extern contributes its own
+    NAME as a host reach, not its capability token. A service-method emission is
+    what puts `db` itself in the reach set. So `db` here carries two
+    declarations, a `keyed` extern and a bare-`idempotent` service method, and is
+    reached.
+
+    Before the fix the token folded to `keyed` and both the `keyed` and `strong`
+    floors ADMITTED. Worst-wins folds it to `declared`, and the floor refuses."""
+    from revl.compiler import compile_source  # noqa: PLC0415
+    from revl.audit_diff import audit_report  # noqa: PLC0415
+    from revl.policy import evaluate, parse_policy  # noqa: PLC0415
+
+    src = (
+        "extern emission[db] idempotent(key: k) fn push(k: Str) -> Unit "
+        "= @py { pass }\n"
+        "service Store { emission[db] idempotent fn ping(key: Str) }\n"
+        "component CsvReader requires store: Store {\n"
+        "  emit store.ping(\"c\")\n"
+        "  emit push(\"a\")\n"
+        "}\n")
+    audit = audit_report(compile_source(src, "c.rvl"))
+    assert audit["capability_registers"] == {"db": "declared"}
+    for floor in ("keyed", "strong"):
+        violations = evaluate(
+            parse_policy(f"capability db requires register {floor}"), audit)
+        assert any(v.kind == "register" and v.token == "db"
+                   for v in violations), floor
+    # the floor the weakest declaration does meet still admits, so the fix is a
+    # direction change and not a blanket refusal.
+    assert evaluate(parse_policy("capability db requires register declared"),
+                    audit) == []
