@@ -493,6 +493,72 @@ def test_a_receiver_may_require_gauntlet_evidence_to_exist(staged):
     assert receipt["link"] == deploy.FACET_GAUNTLET
 
 
+# ------------------------------- a crash is not a refusal (428 F10)
+#
+# `json.loads` builds a lone surrogate out of a `"\ud800"` escape and
+# `str.encode("utf-8")` then refuses it, so a peer-supplied record made the
+# canonical spelling raise `UnicodeEncodeError` straight through contracts
+# whose whole point is to answer `(ok, reason)`. A crash escapes past every
+# caller written to read a verdict.
+
+LONE_SURROGATE = "\ud800"
+
+
+def test_a_lone_surrogate_is_refused_not_raised_by_verify_attestation():
+    key = b"k"
+    att = {"kind": "revl.attestation", "version": "2.0",
+           "signer": LONE_SURROGATE, "composition_hash": "0" * 64,
+           "verdict": "admitted", "key_id": attest.key_id(key),
+           "signature": "00"}
+    ok, reason = attest.verify_attestation(att, key)
+    assert ok is False
+    assert "no canonical byte spelling" in reason
+
+
+def test_a_lone_surrogate_in_the_signer_refuses_admission(staged, tmp_path):
+    bundle, att = staged
+    att = dict(att)
+    att["signer"] = LONE_SURROGATE
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_SIGNATURE
+
+
+def test_a_staged_ir_that_cannot_be_canonicalized_refuses(staged):
+    """The receiver's OWN input, one step later: `ir/ir.json` is read with
+    `json.loads`, so a `\\ud800` escape in it survives to `canonical_hash`.
+    An unmeasurable composition refuses rather than crashing."""
+    bundle, att = staged
+    ir = json.loads((bundle / "ir" / "ir.json").read_text(encoding="utf-8"))
+    ir["signerNote"] = LONE_SURROGATE
+    (bundle / "ir" / "ir.json").write_text(
+        json.dumps(ir, ensure_ascii=True), encoding="utf-8")
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_COMPOSITION
+    assert "cannot be canonically hashed" in receipt["reason"]
+
+
+def test_a_lone_surrogate_in_a_peer_envelope_is_malformed_not_a_crash():
+    """`_envelope_bytes` had the identical shape and is reachable from
+    `CorrelationGuard.admit` on ANY peer-supplied envelope, which makes the
+    crash a denial of service on the seam rather than only a verifier bug."""
+    guard = deploy.CorrelationGuard({"peer": b"s"})
+    wire = deploy.seal(_envelope("peer"), b"s")
+    wire["realm"] = LONE_SURROGATE
+    ok, reason = guard.admit(wire)
+    assert ok is False
+    assert reason == deploy.REJECT_MALFORMED
+
+
+def test_a_receipt_that_cannot_be_canonicalized_is_refused_not_raised():
+    receipt = {"kind": deploy.RECEIPT_KIND, "version": deploy.RECEIPT_VERSION,
+               "verdict": deploy.ACCEPT, "nonce": object(), "signature": "00"}
+    ok, reason = deploy.verify_receipt(receipt, b"host")
+    assert ok is False
+    assert "cannot be verified" in reason
+
+
 # ---------------------------------------------------------------------------
 # 2. the correlation envelope, authenticated against the peer identity
 # ---------------------------------------------------------------------------
