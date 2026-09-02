@@ -327,6 +327,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      # issue #183: this job ran node and nothing else, so the SIX python test
+      # files under backends/typescript/ (async externs, dynamic reserved keys,
+      # fr3 emit, reserved-word idents, service signature types, temporal
+      # target) executed in no CI job at all. They are pure-python emitter
+      # tests, but one of them (test_temporal_target.py) probes for `node` on
+      # PATH and skips without it — so they belong HERE, where node exists,
+      # rather than only in the toolchain-free backend-roots job below.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
       - run: cd backends/typescript && npm ci
       - run: cd backends/typescript && npx vitest run
       # issue #198: `tsc --noEmit` below covers `runtime.ts`, `demo.ts` and
@@ -342,6 +353,9 @@ jobs:
       # and reporting success.
       - run: cd backends/typescript && node scripts/typecheck-generated.mjs
       - run: cd backends/typescript && npx tsc --noEmit
+      # the ROOT, not a named file — naming files is what let the six above rot
+      # unseen. Measured at ~2s for 42 tests, 0 skips with node present.
+      - run: pytest backends/typescript/ -q
 
   backend-wasm:
     runs-on: ubuntu-latest
@@ -360,13 +374,40 @@ jobs:
           mkdir -p /tmp/wasmtime
           tar -C /tmp/wasmtime -xJf /tmp/wasmtime.tar.xz
           echo "/tmp/wasmtime/wasmtime-v47.0.3-x86_64-linux" >> "$GITHUB_PATH"
+      # issue #183: widening this job from `backends/wasm/test_v3_emit.py` to
+      # the whole root brings in twelve more files, and three of them
+      # (test_canonical_abi, test_heap_growth_432e, test_heap_reclaim_432e)
+      # build a component with `wasm-tools` before running it. Under
+      # REVL_REQUIRE_WASMTIME=1 their toolchain probe FAILS rather than skips,
+      # so the widening reds this job without this install (verified: 11
+      # failures). Pinned like the wasmtime tarball above, same reason.
+      - name: Install wasm-tools (pinned)
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasm-tools/releases/download/v1.257.1/wasm-tools-1.257.1-x86_64-linux.tar.gz -o /tmp/wasm-tools.tar.gz
+          mkdir -p /tmp/wasm-tools
+          tar -C /tmp/wasm-tools -xzf /tmp/wasm-tools.tar.gz
+          # locate the binary rather than hard-coding the archive's internal
+          # directory name: `wasm-tools --version` below is the proof it worked,
+          # so a layout change surfaces as a named failure, not a silent skip.
+          dirname "$(find /tmp/wasm-tools -type f -name wasm-tools | head -1)" >> "$GITHUB_PATH"
+      # the other half of the widening: six of the newly-included files drive
+      # the component IN PROCESS through the `wasmtime` PYTHON package, which
+      # is a different artifact from the CLI tarball above and is not in
+      # `.[test]`. Without it those 29 tests skip — and the no-skip guard below
+      # then reds the job, correctly. Pin it to the same 47.x series as the CLI.
+      - run: pip install "wasmtime==47.0.1"
       # installing the runtime is only half of it: if the download ever
       # breaks, the tests would go back to skipping and the job would still
-      # be green. Prove the binary is there, then make its absence fatal.
+      # be green. Prove the binaries are there, then make their absence fatal.
       - run: wasmtime --version
-      # the tier's runtime tests live partly in tests/test_wasm_backend.py
-      # (the frontend half of the wasm backend) — run both files here.
-      - run: pytest backends/wasm/test_v3_emit.py tests/test_wasm_backend.py -q --junitxml=/tmp/wasm-junit.xml
+      - run: wasm-tools --version
+      # THE ROOT, not one named file (issue #183). `test_v3_emit.py` was the
+      # only wasm file CI ran; the other twelve — canonical ABI, heap growth
+      # and reclaim, lifecycle driver, router/spawn/accessor execution,
+      # witnessed teardown, provide-method witnessing, reserved-word idents,
+      # str-literal length — had never executed here. The tier's frontend half
+      # lives in tests/test_wasm_backend.py, so it stays named alongside.
+      - run: pytest backends/wasm/ tests/test_wasm_backend.py -q --junitxml=/tmp/wasm-junit.xml
         env:
           # turns "wasmtime not installed" from a silent skip into a failure;
           # unset locally, so offline dev still skips cleanly
@@ -421,7 +462,11 @@ jobs:
       # the case on a fresh runner, so CI still fetches cordis-rs exactly as
       # before. The offline-first attempt is what lets an offline dev machine
       # with a warm ~/.cargo run these for real instead of skipping them.
-      - run: pytest backends/rust/test_emit_rust.py -q
+      # issue #183: the ROOT, not `test_emit_rust.py` alone — that naming left
+      # backends/rust/test_reserved_word_idents_rust.py (10 tests) running in no
+      # CI job at all. The added files are pure-python emitter checks, ~0.1s
+      # against the ~5min of cargo this job already pays.
+      - run: pytest backends/rust/ -q
       # item 332 stage 3: the revl-gate crate's corpus gate needs cargo, so it
       # rides this job. The drift gate needs no toolchain and already runs in
       # the frontend job's plain `pytest tests/ -q`.
@@ -470,10 +515,12 @@ jobs:
       # THE ROOT, not one named file. This job used to run test_emit_java.py
       # alone, so backends/java/test_router_emit.py — the file asserting on the
       # very scenario whose emitted unit did not compile — had never executed in
-      # CI (issue #183). Every file here now compiles what it emits through
-      # backends/java/javac_gate.py, which is a no-op without the JDK installed
-      # above; tests/test_java_javac_gate_runs_in_ci.py fails if either half of
-      # that (the JDK, or this target) goes away.
+      # CI (issue #183), and neither had
+      # backends/java/test_reserved_word_idents_java.py. Every file here now
+      # compiles what it emits through backends/java/javac_gate.py, which is a
+      # no-op without the JDK installed above;
+      # tests/test_java_javac_gate_runs_in_ci.py fails if either half of that
+      # (the JDK, or this target) goes away.
       - run: pytest backends/java/ -q
         env:
           REVL_CORDIS4J_CLASSES: /tmp/cordis4j-classes
@@ -492,9 +539,46 @@ jobs:
       # emitted Go is compiled and executed against the pinned stc-go runtime
       # (fetched from the module proxy on a fresh runner), mirroring how the
       # rust tier gates against cordis-rs and java against cordis4j.
-      - run: pytest backends/go/test_emit_go.py -q
+      # issue #183, same shape as the tiers the issue enumerates: naming one
+      # file left five (opt gaps 280, reserved-word idents, result ctor 302,
+      # router exec, stream exec 130) unrun. The root is ~6s.
+      - run: pytest backends/go/ -q
       - run: cd backends/go/scenarios && go test ./...
       - run: cd backends/go/v3 && go test ./...
+
+  # Issue #183, second half: the per-backend jobs above each run ONE root in
+  # ONE process, so a state leak BETWEEN two backend roots is invisible to all
+  # of them. `backend-python` already carries the one instance of this gate we
+  # had (roadmap item 419a: `pytest ../wasm/ tests/` in a single process, which
+  # catches the sys.modules['emit'] poisoning between backends/wasm/emit.py and
+  # backends/python/tests' same-named module). This job generalises it to the
+  # three roots that need no toolchain at all.
+  #
+  # It is deliberately NOT a superset of the jobs above: no wasmtime, no
+  # wasm-tools, no JDK, no node — so the runtime-gated tests here skip, and
+  # that is fine. What this job proves is co-importability, not runtime
+  # coverage; the jobs above own that. Measured at ~4s for 229 tests.
+  #
+  # backends/rust is deliberately absent: its root pulls 5-8 minutes of cargo
+  # that `backend-rust` already pays for, and no cross-suite failure involving
+  # it has been reproduced. Add it when one is, not before.
+  # backends/go and backends/python are absent for the same throughput reason
+  # (go's root needs the go toolchain to be meaningful; python's is already
+  # combined with wasm in `backend-python`).
+  #
+  # tests/test_backend_suite_roots_combine.py is the STRUCTURAL half of this
+  # (no two collectable backend test files share a basename, no root grows an
+  # __init__.py). It is a filesystem check and by construction cannot see a
+  # runtime state leak, which is what this job is for.
+  backend-roots-combined:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
+      - run: pytest backends/typescript backends/java backends/wasm -q
 
   # The conformance matrix's second half: emitted code must survive its own
   # toolchain, not merely leave the emitter without raising. That gate
