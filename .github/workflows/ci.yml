@@ -58,12 +58,18 @@ jobs:
       # pass closed the seven landed-branch markers, and the three that survived
       # it (items 392 and 406 naming deleted branches, item 425 F3 citing a sha
       # only on an unmerged branch) were reworded in this same commit.
-      # --check-contradiction is on because it is GREEN on main today. The
-      # other three new checks are RED on main as of 2026-09-02 and every
-      # finding is a real unowned finding, so they stay off in THIS line only:
-      # turn each on here as its findings are dispatched. Never add `|| true`.
+      # --check-orphan joins it as of 2026-09-02: every open or delegated
+      # finding in the file now names a branch, an issue, a fix sha or an
+      # owner, so a new unowned finding is a new red rather than one more line
+      # in a backlog. --check-delegation and --check-tier-parity are still RED
+      # on main and every finding is a real one, so they stay off in THIS line
+      # only: turn each on here as its findings are dispatched. Never add
+      # `|| true`, and never narrow a check to make this line pass.
       # `make roadmap-check-all` runs all four locally.
-      - run: python3 tools/check_roadmap_markers.py --check-contradiction
+      - run: |
+          python3 tools/check_roadmap_markers.py \
+            --check-contradiction \
+            --check-orphan
 
   frontend:
     runs-on: ubuntu-latest
