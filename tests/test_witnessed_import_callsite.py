@@ -142,7 +142,13 @@ def test_plain_imported_extern_missing_undo_is_still_refused():
     )
     with pytest.raises(RevlError) as ei:
         _compile_with_plainmod(src)
-    assert "effect has no `undo` and `open_conn` is not pure" in str(ei.value)
+    # item 420(d): the refusal stands, and the deferral is still not a global
+    # weakening of G4. Only the REASON changed. `open_conn` DECLARES `undo
+    # close_conn(result)`, so the old wording ("effect has no `undo`") denied
+    # a declaration the author can open the imported module and read; the
+    # truth is that an `acquire` extern's declared inverse is never replayed.
+    assert "declares `undo close_conn(...)`" in str(ei.value)
+    assert "an `acquire` extern's declared inverse is never replayed" in str(ei.value)
 
 
 def test_plain_imported_extern_with_site_undo_compiles():
