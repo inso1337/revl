@@ -9,13 +9,19 @@ Before the fix the emitter declared one 64 KiB page, `$alloc` only bumped
 `$__hp`, and `grep -c memory.grow` over `emit.py` plus `canonical.py` was 0.
 Two things followed, both re-run here as tests rather than argued:
 
-  1. A single canonical call carrying a `Str` bigger than the page trapped
-     with `memory fault at wasm address 0x10000 in linear memory of size
-     0x10000` — the HOST's own write of the argument was already out of
-     bounds, before any revl code ran.
-  2. Even with every argument well inside the page, 63 calls with a 1 KiB
-     string exhausted an instance, because a bump allocator that never grows
-     has a fixed lifetime budget.
+  1. A single canonical call carrying a `Str` bigger than the page failed:
+     the HOST's own placement of the argument was already out of bounds,
+     before any revl code ran.
+  2. Even with every argument well inside the page, a few dozen calls with a
+     1 KiB string exhausted an instance, because a bump allocator that never
+     grows has a fixed lifetime budget.
+
+Item 432(a)/(c)/(f) landed first and moved both numbers without removing
+either cliff, so the thresholds asserted below were re-bisected on that base
+rather than taken from the audit text: 65520 bytes was the largest argument
+one call could carry and 65521 failed (`realloc return: beyond end of
+memory`), and 64 calls worked where 65 trapped at `memory fault at wasm
+address 0x1020c`.
 
 The probes those came from are `bench/codegen/wasm/probe_heap.py`; these
 tests are the same two facts, plus the two refusal paths the growth fix
@@ -44,18 +50,22 @@ _REQUIRE = os.environ.get("REVL_REQUIRE_WASMTIME", "").strip().lower() not in (
 _SRC = (GOLDEN / "canonical_echoer.revl").read_text(encoding="utf-8")
 _SERVICE = "Echoer"
 
-#: Replays exactly what one canonical `Str` call does to the heap (the shape
-#: `bench/codegen/wasm/probe_heap.py` drives): lift the argument into a fresh
-#: internal string, then bump an 8-byte return area. Measured on the CORE
+#: Replays what one canonical `Str` call does to the heap as the emitter
+#: writes it today, kept in step with `bench/codegen/wasm/probe_heap.py`:
+#: `cabi_realloc` takes one buffer with item 432(a)'s header headroom and the
+#: lift copies nothing into a second one, and item 432(f) made the return area
+#: static, so exactly one allocation per call is left. Measured on the CORE
 #: module because the component CLI re-instantiates per `--invoke`, which
 #: would hide a per-instance leak entirely.
 _DRIVER = """  (func (export "drive") (param $n i32) (param $len i32) (result i32)
-    (local $i i32)
+    (local $i i32) (local $p i32)
     (block $done
       (loop $go
         (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-        (drop (call $__canon_lift_str (i32.const 0) (local.get $len)))
-        (drop (call $alloc (i32.const 8)))
+        (local.set $p (i32.add
+          (call $alloc (i32.add (local.get $len) (i32.const 8)))
+          (i32.const 8)))
+        (drop (call $__canon_lift_str (local.get $p) (local.get $len)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $go)))
     (global.get $__hp))
@@ -126,9 +136,11 @@ def test_the_emitted_allocator_can_grow_the_memory():
     assert "(func $__heap_grow (param $end i32)" in core
     # every path into the heap goes through $alloc, so the guard belongs there
     assert "(call $__heap_grow (local.get $end))" in core
-    # ... and cabi_realloc, the host's own allocator, is backed by it
+    # ... and cabi_realloc, the host's own allocator, is backed by $alloc
+    # (item 432(a) added the header headroom to the request; the point here is
+    # only that the host's placement goes through the growing allocator).
     assert '(func (export "cabi_realloc")' in core
-    assert "(call $alloc (local.get $new_size))" in core
+    assert "(call $alloc (i32.add (local.get $new_size)" in core
 
 
 def test_growth_failure_has_a_named_refusal_site():
@@ -153,30 +165,33 @@ def test_the_memory_declaration_leaves_room_to_grow():
 # --------------------------------------------------------------------------- #
 
 def test_a_string_argument_larger_than_one_page_round_trips(tmp_path):
-    """Proof 1. 40000 bytes trapped before the fix; 65536 is a whole page and
-    is the first size the host cannot place in the initial memory at all."""
+    """Proof 1, re-bisected on the (a)/(c)/(f) base: 65520 was the largest
+    argument that worked and 65521 was refused by wasmtime's own canonical
+    check. 200000 and 1000000 are far past any single-page story, so they can
+    only pass by the memory actually growing."""
     canonical = _canonical()
     _toolchain_or_skip(canonical)
     res = _emit()
     component = canonical.build_component(
         res["core_wat"], res["wit"], tmp_path, res["world"], name="echoer")
-    for size in (16384, 32760, 40000, 65536, 200000):
+    for size in (16384, 40000, 65520, 65521, 65536, 200000, 1000000):
         arg = "a" * size
         assert canonical.run_component_str(component, "echo", arg) == arg
 
 
 def test_sustained_calls_do_not_exhaust_an_instance(tmp_path):
-    """Proof 2. 63 calls with a 1 KiB string used to exhaust the instance.
-    Run two orders of magnitude past that on ONE instance, and require the
-    heap to be past the old fixed ceiling so the test cannot pass by the
-    allocations having quietly shrunk."""
+    """Proof 2. 64 calls with a 1 KiB string worked and 65 trapped. Step over
+    that boundary and then run two orders of magnitude past it on ONE
+    instance, and require the heap to have ended far past the old fixed
+    ceiling so the test cannot pass by the allocations having quietly
+    shrunk instead."""
     canonical = _canonical()
     _toolchain_or_skip(canonical)
     module = _core_module(canonical, _emit()["core_wat"], tmp_path / "core")
-    for calls in (32, 64, 128, 4096):
+    for calls in (32, 64, 65, 128, 4096):
         res = _run_core(canonical, module, "drive", calls, 1024)
         assert res.returncode == 0, (res.stderr + res.stdout)
-    assert int(res.stdout.strip()) > 65536
+    assert int(res.stdout.strip()) > 4_000_000
 
 
 def test_a_host_that_caps_the_memory_gets_a_named_refusal(tmp_path):
