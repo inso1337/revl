@@ -72,5 +72,8 @@ python3 scripts/axioms_gate.py \
   RevL.G9.taint_surface_within_declared_context \
   RevL.G9.no_untrusted_without_a_declared_source \
   RevL.G9.g9_not_vacuous \
-  RevL.G9.secret_rules_not_vacuous < .axioms.out
+  RevL.G9.secret_rules_not_vacuous \
+  RevL.G9.authority_refusal_is_not_universal \
+  RevL.G9.sink_rules_are_distinct \
+  RevL.G9.secret_refusal_is_load_bearing < .axioms.out
 python3 harness/diff_corpus.py

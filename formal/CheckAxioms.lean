@@ -102,3 +102,10 @@ import RevL
 #print axioms RevL.G9.no_untrusted_without_a_declared_source
 #print axioms RevL.G9.g9_not_vacuous
 #print axioms RevL.G9.secret_rules_not_vacuous
+
+-- G9 anti-tautology guards (roadmap item 418): the refusal is not
+-- universal, the four sink rules are four different rules, and the two
+-- `secret` refusals are load-bearing rather than structural.
+#print axioms RevL.G9.authority_refusal_is_not_universal
+#print axioms RevL.G9.sink_rules_are_distinct
+#print axioms RevL.G9.secret_refusal_is_load_bearing

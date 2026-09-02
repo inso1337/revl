@@ -69,6 +69,10 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.G9.no_untrusted_without_a_declared_source` | G9 + G6 | **proved** | `propext, Classical.choice, Quot.sound` | with no untrusted-scoped requirement, untrusted data is unwritable |
 | `RevL.G9.g9_not_vacuous` | G9 — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | admits the endorsed path, refuses the bare one and the foreign-origin endorse |
 | `RevL.G9.secret_rules_not_vacuous` | item 256 — non-vacuity | **proved** | `propext` | `confidential` downgrades, `secret` never does, self-minted flips to refused |
+| `RevL.G9.authority_refusal_is_not_universal` | G9 — anti-tautology (item 418) | **proved** | `propext` | one flow, admitted at a disclosure sink and refused at an authority sink |
+| `RevL.G9.sink_rules_are_distinct` | G9 — anti-tautology (item 418) | **proved** | `propext` | the four `Admits` rules separated pairwise; not one predicate four times |
+| `RevL.G9.secret_refusal_is_load_bearing` | item 256 — anti-tautology (418) | **proved** | `propext` | the algebra CAN clear a `secret`; `taint.py`'s two refusals are what stop it |
+| **G9 — path coverage** | G9 — the attested `G1..G9` set | **UNPROVED, unstatable** | — | see *G9* below: the checker must WALK every path; not expressible against the current L0 |
 
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
@@ -139,15 +143,58 @@ the same path without it, and refuses it again when the endorse names a
 every path, and flips the same declared `endorse[web]` from admitted to
 refused purely because the untrusted author minted it itself.
 
-Deliberately out of scope, documented rather than smuggled as axioms:
-the runtime tag (Slice B, item 243) — nothing here claims a runtime
-property; the interprocedural fixed point (`_Signature`,
-`_infer_signatures`) that discovers *which* paths exist, the model
-proving what follows once a path is exhibited; and that the checker
-labels the right positions as sinks, which is extraction, not theorem.
-The origin half of that labelling **is** proved:
-`taint_surface_within_declared_context` composes with G6 to show every
-origin a statement can mint is one its declared context already declares.
+### Non-vacuity, against item 418's bar
+
+Item 418's adversarial review found G4/G5/G6/G8 to be tautologies over a
+chosen inductive (the identical statements hold of a typing relation
+admitting nothing) and only 3 of 25 theorems to carry non-vacuity
+evidence. G9 carries four guards, each a registered theorem:
+`g9_not_vacuous` and `secret_rules_not_vacuous` exhibit **inhabited**
+flows; `authority_refusal_is_not_universal` exhibits ONE declassifier-free
+flow that a disclosure sink admits and an authority sink refuses, so the
+conclusion turns on the sink rule rather than refusing everything;
+`sink_rules_are_distinct` separates all four `Admits` rules pairwise (the
+antidote to "G1 and G6 are literally the same theorem"); and
+`secret_refusal_is_load_bearing` shows the algebra **can** clear a
+`secret` — the same declassifier forms clear every other origin — so
+`secret_persists` holds because of `taint.py`'s two explicit refusals,
+not because the datatype lacks a constructor. Delete either refusal from
+`kindOK` and the theorem becomes false.
+
+### What G9 does NOT cover — the open obligation
+
+**Path coverage is not proved, and it is where the real bugs are.**
+`Flow` starts from a path that is *given*. That the checker *walks* every
+path a program contains is a separate obligation, and it is the one that
+actually broke: `taint._walk_component_methods` descends only into
+`provide` steps, so a component's **activation body was never
+taint-checked at all**, and a `Secret[T]` parameter was stripped inside
+its own receiver body (both fixed on
+`fix/taint-activation-body-and-secret-receiver`). Nothing in this file
+would have caught either.
+
+That obligation cannot be *stated* against the current L0, let alone
+proved: L0 has no component bodies, no `provide`/activation distinction,
+and no typed parameters — the exact structure both bugs live in. It is
+therefore carried as the **UNPROVED, unstatable** row in the table above
+rather than as a `sorry` on a statement that does not typecheck, and it
+is why `attest.py:117-118`'s `G1..G9` claim is only partly backed for G9:
+the flow *rule* is proved, the *coverage* of the walk is not. Closing it
+needs L0 to grow component bodies with the provide/activation
+distinction and typed parameters — item 418's ordered exit puts G9 at
+step 9, after an operational semantics exists, and this is exactly why.
+
+Also out of scope, documented rather than smuggled as axioms: the runtime
+tag (Slice B, item 243) — nothing here claims a runtime property; the
+interprocedural fixed point (`_Signature`, `_infer_signatures`) that
+discovers *which* paths exist, the model proving what follows once a path
+is exhibited; and that the checker labels the right positions as sinks,
+which is extraction, not theorem. The origin half of that labelling **is**
+proved: `taint_surface_within_declared_context` composes with G6 to show
+every origin a statement can mint is one its declared context already
+declares. No differential-oracle row references any of these definitions
+— the oracle carries no taint verdicts, so item 418's C4 applies here
+too: G9 is not covered by that gate.
 
 ## Differential oracle (wired)
 
@@ -303,7 +350,10 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    into the new L2 file `RevL.Theorems.G9_NoAuthorityFromUntrusted`,
    exactly as items 294/66/260 went into `CapLemmas` + `CapCeilings`.
    **L0 is untouched and every pre-existing theorem's axiom set is
-   unchanged.**
+   unchanged.** What is proved is the flow *rule*; what remains open is
+   the *coverage* of the checker's walk, which needs the L0 growth item
+   418's ordered exit schedules ahead of it — see the G9 section for the
+   named obligation and why it is not statable today.
 
 ## Conventions for worker sessions
 
