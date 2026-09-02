@@ -37,12 +37,11 @@ jobs:
       # The roadmap's in-progress markers, checked against git: a marker naming
       # a branch that already landed, a branch gone from origin, or a sha not
       # reachable from main is a lie the next reader pays for. Needs no
-      # toolchain, so it lives here. `|| true` is TEMPORARY: the
-      # docs/reconcile-finding-markers pass closed the seven landed-branch
-      # markers, and three findings survive it (items 392 and 406 still say
-      # "Being fixed on branch <deleted>", and item 425 F3 cites a sha that is
-      # not on main). TODO: delete `|| true` once those three are reworded.
-      - run: python3 tools/check_roadmap_markers.py || true
+      # toolchain, so it lives here. Fatal from the start: the reconciliation
+      # pass closed the seven landed-branch markers, and the three that survived
+      # it (items 392 and 406 naming deleted branches, item 425 F3 citing a sha
+      # only on an unmerged branch) were reworded in this same commit.
+      - run: python3 tools/check_roadmap_markers.py
 
   frontend:
     runs-on: ubuntu-latest
