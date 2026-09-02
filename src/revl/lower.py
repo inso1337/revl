@@ -18,7 +18,7 @@ import keyword
 import os
 import re
 
-from . import holes
+from . import holes, ownership
 from .errors import RevlError, RevlErrors
 from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
@@ -2579,7 +2579,19 @@ def _check_witnessed_inverse(decl, extern_class: dict, emitting_fns: set,
 # policies read this order.
 # `strong` is a policy FLOOR level only (never an actual IR register): it means
 # "any strong register", so it ranks with the two strong peers at 1.
-_REGISTER_RANK = {"declared": 0, "keyed": 1, "shape-proven": 1, "strong": 1}
+# item 440 adds the third tier, `read`, at the TOP of the order: a call that
+# changes nothing is re-dispatchable with no key, no fence and no reconciliation,
+# which is strictly stronger than dedup-by-key. Only `undo pure` produces it, so
+# no existing program's register or policy verdict moves.
+_REGISTER_RANK = {"declared": 0, "keyed": 1, "shape-proven": 1, "strong": 1,
+                  "read": 2}
+
+#: item 440: the registers a fresh-process `recover` may RE-DISPATCH without
+#: spending a fence and without escalating to an operator. `read` because the
+#: call changes nothing (there is no outcome to be ambiguous about); `keyed` /
+#: `shape-proven` because a second issue is dedup-safe by construction. Every
+#: other register — and, crucially, NO register at all — stays fenced.
+REDISPATCH_FREE = frozenset({"read", "keyed", "shape-proven"})
 
 
 def _idempotent_register(decl) -> str:
@@ -2590,7 +2602,14 @@ def _idempotent_register(decl) -> str:
     244's revl-expressed bodies — TODO(309-slice4): detect the shape and upgrade
     an `undo idempotent` native body to `shape-proven`. Every other claim (a bare
     `idempotent` emission, an `undo idempotent` over a host body) is the author's
-    `declared` claim, machine-checked only for shape."""
+    `declared` claim, machine-checked only for shape.
+
+    item 440: `undo pure <inverse>(result)` is the READ tier — the author states
+    the inverse OBSERVES and does not mutate, so re-issuing it is observationally
+    free. It outranks `keyed`: a keyed call still crosses (and leans on a remote's
+    dedup contract), a read crosses nothing at all."""
+    if decl.undo_read:
+        return "read"
     if decl.idempotency_key is not None:
         return "keyed"
     return "declared"
@@ -2606,6 +2625,21 @@ def _register_satisfies(actual: str | None, floor: str) -> bool:
     if actual is None:
         return False
     return _REGISTER_RANK.get(actual, -1) >= _REGISTER_RANK.get(floor, 0)
+
+
+def _undo_callee_name(expr) -> str | None:
+    """The name an extern `undo`/`compensate` slot's top-level call names, or
+    None when the slot is not a plain call to a bare name (item 440).
+
+    Only used to hold an `undo pure` claim to a `pure`-classified callee; every
+    other shape falls through to the refusal, which is the fail-closed direction
+    (an unresolvable inverse never earns the read tier)."""
+    from .parser import ExprCall, ExprVar
+    if isinstance(expr, ExprCall) and isinstance(expr.callee, ExprVar):
+        return expr.callee.name
+    if isinstance(expr, ExprVar):
+        return expr.name
+    return None
 
 
 def _witnessed_extern_names(program: Program) -> set[str]:
@@ -2934,6 +2968,53 @@ def _lower_externs(program: Program, filename: str, types: dict,
                 f"emission extern `{decl.name}` cannot declare `undo`",
                 hint="emissions are one-way boundary crossings; use `compensate` for a best-effort cleanup",
             )
+        # item 440: `undo pure <inverse>(result)` — the READ tier of 309's
+        # re-dispatch register. Two rules, checked here next to the sibling
+        # teardown-slot rules:
+        #   (1) `undo idempotent pure` is refused. They are DIFFERENT claims
+        #       about one inverse ("running it twice leaves the world where once
+        #       left it" vs "running it changes nothing at all"), and recovery
+        #       must know which one it is trusting; silently preferring one would
+        #       make the residue proof lie about its evidence.
+        #   (2) the named inverse must itself be a `pure`-CLASSIFIED extern. This
+        #       is what anchors the read claim to the classification revl already
+        #       has, WITHOUT deriving the tier from it: `pure` is checked for
+        #       shape only ("no observable effect" is the declaration's wording,
+        #       never a proof), and shipped examples classify a mutating host
+        #       body `pure` (`extern pure fn close_ledger(h)`, docs/guide-ai-
+        #       agents.md), so a derived read tier would be unsound in the UNSAFE
+        #       direction. Requiring both the classification and the explicit
+        #       word keeps the claim reviewable in the diff.
+        if decl.undo_read and decl.undo_idempotent:
+            raise RevlError(
+                filename, decl.line,
+                f"extern `{decl.name}` declares both `undo idempotent` and "
+                f"`undo pure` — pick one",
+                hint="`undo idempotent` claims a SECOND run leaves the world "
+                     "where the first left it; `undo pure` claims the inverse "
+                     "changes nothing at all (the read tier). Recovery reports "
+                     "which claim it replayed under, so it must be one claim "
+                     "(item 440, docs/design/309-idempotent-inverse.md §3d)",
+                code="G4", category="idempotent")
+        if decl.undo_read:
+            callee = _undo_callee_name(decl.undo)
+            callee_class = extern_class.get(callee) if callee else None
+            if callee_class != "pure":
+                what = (f"`{callee}`, which is "
+                        + (f"classified `{callee_class}`" if callee_class
+                           else "not a declared `pure` extern")
+                        if callee else "an expression that is not a plain call")
+                raise RevlError(
+                    filename, decl.line,
+                    f"extern `{decl.name}` declares `undo pure`, but the inverse "
+                    f"is {what}",
+                    hint="the read tier says the inverse OBSERVES and does not "
+                         "mutate, so recovery may re-dispatch it with no key, no "
+                         "fence and no operator. The claim is anchored to the "
+                         "`pure` classification: declare the inverse as `extern "
+                         "pure fn ...`, or drop `pure` from the undo slot and "
+                         "take the fenced tier (item 440)",
+                    code="G4", category="idempotent")
         # item 246: `requires approval` gates a boundary CROSSING, and only an
         # `emission` extern crosses irreversibly. A witnessed extern is already
         # reversible (class a, auto-approved), a pure/acquire one crosses nothing,
@@ -3381,11 +3462,16 @@ def _lower_externs(program: Program, filename: str, types: dict,
             **({"secret_return": True} if getattr(decl, "secret_return", False)
                else {}),
             **({"undo_idempotent": True} if decl.undo_idempotent else {}),
+            # item 440: `undo pure` — the READ tier of the re-dispatch register.
+            # Absent unless the author wrote it, so every existing extern's IR is
+            # byte-identical.
+            **({"undo_read": True} if decl.undo_read else {}),
             **({"idempotent": True} if decl.idempotent else {}),
             **({"idempotency_key": decl.idempotency_key}
                if decl.idempotency_key is not None else {}),
             **({"register": _idempotent_register(decl)}
-               if (decl.idempotent or decl.undo_idempotent) else {}),
+               if (decl.idempotent or decl.undo_idempotent or decl.undo_read)
+               else {}),
             # item 379: the typed config schema, in the SAME shape a component
             # carries it (lower.py:4956 `[{"name","type","default"}]`), so the
             # emitter and driver reuse the component config path verbatim. Absent
@@ -5886,6 +5972,16 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     # fully-assembled IR (after every body is lowered and any declassifier
     # splice has run).
     _validate_no_loop_scoped_registration(result, program.filename)
+    # item 445: the unique-ownership fact behind in-place accumulation, proved
+    # ONCE here and stamped on the IR (`unique` on a self-rebinding `assign`,
+    # `unique_birth` on the `let` that would need the defensive copy) instead of
+    # re-derived per emitter — the go and python tiers had written the same
+    # aliasing rule twice, and ts/rust/java/wasm would have written it four more
+    # times. Runs last, over the fully-assembled IR, so the declassifier splice
+    # above cannot invalidate an answer. Additive and absent on every node that
+    # does not qualify, so an IR document for a program with no in-place
+    # accumulation is byte-identical to before. See src/revl/ownership.py.
+    ownership.annotate_ir(result)
     return result
 
 

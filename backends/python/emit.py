@@ -166,7 +166,6 @@ _PY_ASYNC_SVC_OPS: set = set()      # {(service_name, method_name)} async operat
 _PY_AWAIT_LOCALS: set = set()       # async-typed parameter names of the body being rendered
 _PY_IN_ASYNC: bool = False          # is the body being rendered an `async def`
 _PY_IN_ARROW: bool = False          # is the body being rendered inside an arrow (item 141/264)
-_PY_INPLACE_LOCALS: dict = {}       # locals a persistent write may update in place (item 436)
 _PY_USES_AS_ASYNC: bool = False     # did any body need the `_revl_as_async` wrapper
 
 
@@ -261,6 +260,31 @@ def _transactional_register_kwargs(ext: dict) -> str:
     if ext.get("idempotency_key"):
         parts.append(f"idempotency={ext['idempotency_key']!r}")
     return (", " + ", ".join(parts)) if parts else ""
+
+
+def _deferred_register_kwargs(ext: dict, args: list) -> str:
+    """item 440 §(b): the extra `.enqueue_deferred(...)` kwargs that put a
+    deferred emission's idempotency register — and the key's VALUE at this call
+    site — onto the WAL descriptor, or `""` when the extern declares none.
+
+    Emitted ONLY when the author declared `idempotent`/`idempotent(key: p)`, so a
+    pre-440 deferred emission's emitted code is byte-identical. The KEY VALUE (not
+    the parameter name) is what rides the log: a fresh-process re-issue must send
+    the remote the same key it saw the first time, which is the argument at the
+    key parameter's position, read off the descriptor. Without these, recover has
+    no evidence about the emission and leaves it human-finish."""
+    register = ext.get("register")
+    if not register:
+        return ""
+    parts = [f"register={register!r}"]
+    key = ext.get("idempotency_key")
+    if key:
+        names = [p.get("name") for p in ext.get("params") or []]
+        if key in names:
+            index = names.index(key)
+            if index < len(args):
+                parts.append(f"idempotency={args[index]}")
+    return ", " + ", ".join(parts)
 
 
 def _mangle(name: str) -> str:
@@ -1610,7 +1634,8 @@ class _ComponentEmitter:
         fire = self._expr(expr, where)
         out.add(indent,
                 f"_revl_frame.enqueue_deferred({method!r}, {method!r}, "
-                f"[{', '.join(args)}], lambda: {fire})")
+                f"[{', '.join(args)}], lambda: {fire}"
+                f"{_deferred_register_kwargs(ext, args)})")
 
     def _witnessed_extern(self, acquire: Any) -> Optional[dict]:
         """The witnessed extern descriptor a step's acquisition calls, or None.
@@ -2593,7 +2618,7 @@ def _guard_frame_neutral_loop(body) -> None:
 
 
 # ---------------------------------------------------------------------------
-# In-place accumulation (item 436 F1)
+# In-place accumulation (item 436 F1, on item 445's frontend marker)
 # ---------------------------------------------------------------------------
 # `List.push`, `Map.set`, `Map.remove` and a functional record update are
 # PERSISTENT: each renders a whole copy of its receiver with one entry changed
@@ -2607,189 +2632,56 @@ def _guard_frame_neutral_loop(body) -> None:
 # `list_filter` and `list_dedup` as push loops, so `xs.map(f)` carries it.
 #
 # The rewrite is `out.append(v)`; all of its difficulty is proving the copy
-# unobservable. That proof is a UNIQUE-OWNERSHIP analysis over one fn body, and
-# NOT a per-builtin special case: a local may be written in place exactly when
-# the object it names is reachable through no other name, so no reader can hold
-# the pre-image. The rule is stated over the IR and holds on every tier: the go
-# backend's `_v3_self_rebind_locals` (item 434) is the same analysis written
-# again for that emitter, which is the argument for eventually lifting it to a
-# frontend `unique` marker instead of a seventh copy.
+# unobservable, and THAT PROOF NO LONGER LIVES HERE. It is an aliasing question
+# about the source — is the object this binding names reachable through any
+# other name — and item 436 answered it in this file while item 434 had already
+# answered the same question, independently, in `backends/go/emit.py`. Item 445
+# lifted the single answer into the frontend (`src/revl/ownership.py`), where it
+# is also FLOW-SENSITIVE, so a name that escapes at one point and is reborn from
+# a fresh literal before the next write is owned at that write — which is what
+# takes `stdlib/list.rvl`'s `list_sort` off its emitted cubic.
 #
-# Two clauses carry the whole proof:
+# What arrives here are two markers on the IR, and they state a FACT rather than
+# an instruction: this tier still decides what to do with them.
 #
-#   BIRTH. The name must be introduced by a `let` whose value allocates here
-#   (a list/map/record literal), or by a `let` off another name, which is then
-#   materialised as a DEFENSIVE COPY (`out = dict(m)`), one copy where the
-#   persistent form made one per step. A parameter is never a birth: it is the
-#   caller's object, and writing through it would destructively update a
-#   binding this function does not own.
+#   `assign` step, `"unique": True`
+#       the binding owns its object outright at this write, so `out.append(v)`
+#       is the faithful lowering of `out = out.push(v)`.
 #
-#   NO ESCAPE. Every other occurrence of the name must be a read that cannot
-#   retain the object: a receiver, an index, a field, a comparison operand.
-#   A call argument, a list or record element, an arrow capture, a `for`
-#   iterable or a plain alias (`let a = out`) all leave a second holder, and
-#   any of them disqualifies the name for the whole body.
-
-# What a solely-owned container is born from.
-_PY_FRESH_KINDS = frozenset({"list", "maplit", "record"})
-
-# The persistent methods with an in-place equivalent, and their arity. `concat`
-# is deliberately absent: it is defined on both Str and List and the receiver
-# type is not known at this node, and a python `str` cannot be mutated at all
+#   `assign` step, `"unique": "copy"`, with `"unique_birth": "List"|"Map"` on
+#   the `let` that introduced the name
+#       the local is born off ANOTHER name (`var out = m`), and is owned only
+#       because this tier materialises a defensive copy at that birth: ONE copy,
+#       where the persistent form made one per write. A parameter is the
+#       CALLER's object, so the copy is what makes writing through the local
+#       legitimate at all.
+#
+# Absent means "not proven", which is always the persistent form. `concat` is
+# deliberately never marked: it is defined on both Str and List, the receiver
+# type is not known at that node, and a python `str` cannot be mutated at all
 # (the same split the go tier hit, item 434).
-_PY_INPLACE_METHODS = {"push": 1, "set": 2, "remove": 1}
 
-# Slots in which a bare `var` is READ but not RETAINED: the value is consumed
-# on the spot (a length, an index, a field, a comparison, an interpolation) or
-# handed to a persistent builtin, every one of which returns a NEW container
-# rather than keeping its receiver. Every other position may leave a second
-# name holding the object.
-_PY_NON_RETAINING_SLOTS = {
-    "builtin": ("target",),
-    "index": ("target", "index"),
-    "len": ("target",),
-    "field": ("target",),
-    "optfield": ("target",),
-    "optcall": ("target",),
-    "bin": ("left", "right"),
-    "un": ("operand",),
-    "interp": ("parts",),
-    # `{**base, ..}` spreads the base's ENTRIES into a fresh dict; the base
-    # object itself is not kept, exactly as `(xs + [v])` does not keep `xs`
-    "record_update": ("base",),
-}
+# The container each `unique_birth` shape materialises as.
+_PY_BIRTH_CONTAINER = {"List": "list", "Map": "dict"}
 
 
-def _py_self_rebind(name: str, value: Any) -> bool:
-    """Is `value` a persistent copy of `name` with one entry changed, the
-    `out = out.push(v)` shape whose result rebinds its own receiver?"""
+def _py_inplace_write(node: dict) -> dict | None:
+    """The `out = out.push(v)` value this tier may render destructively, else
+    None. `"copy"` is honoured because `_fn_stmt` implements the birth copy the
+    marker is conditional on."""
+    if node.get("step") != "assign" or not node.get("unique"):
+        return None
+    value = node.get("value")
     if not isinstance(value, dict):
-        return False
-    if value.get("kind") == "builtin":
-        arity = _PY_INPLACE_METHODS.get(value.get("method"))
-        target = value.get("target")
-        return (arity is not None
-                and len(value.get("args") or []) == arity
-                and isinstance(target, dict)
-                and target.get("kind") == "var"
-                and target.get("name") == name)
+        return None
     if value.get("kind") == "record_update":
-        base = value.get("base")
-        return (isinstance(base, dict) and base.get("kind") == "var"
-                and base.get("name") == name and bool(value.get("updates")))
-    return False
+        return value
+    return value if value.get("method") in _PY_INPLACE_METHODS else None
 
 
-def _py_escaped_names(body: Any) -> set[str]:
-    """Every name whose object could outlive the expression that reads it, and
-    every name a nested binder shadows (an arrow parameter, a match arm's
-    payload bind), which is the same disqualification for a different reason."""
-    found: set[str] = set()
-
-    def walk(node: Any, escapes: bool) -> None:
-        if isinstance(node, list):
-            for item in node:
-                walk(item, escapes)
-            return
-        if not isinstance(node, dict):
-            return
-        if node.get("step") == "return":
-            # a `return` ENDS the function: whatever it hands out cannot be
-            # observed changing afterwards, because nothing here runs again
-            return
-        kind = node.get("kind")
-        if kind == "var":
-            name = node.get("name")
-            if escapes and isinstance(name, str):
-                found.add(name)
-            return
-        if kind == "arrow":
-            # a lambda captures by default-argument, which snapshots the
-            # OBJECT: a later in-place write would be visible through it
-            for name in node.get("captures") or []:
-                if isinstance(name, str):
-                    found.add(name)
-            for name in node.get("params") or []:
-                if isinstance(name, str):
-                    found.add(name)
-        elif kind == "match":
-            for arm in node.get("arms") or []:
-                bind = arm.get("bind") if isinstance(arm, dict) else None
-                if isinstance(bind, str):
-                    found.add(bind)
-        safe: tuple = _PY_NON_RETAINING_SLOTS.get(kind, ())
-        if kind == "bin" and node.get("op") == "??":
-            safe = ()  # `a ?? b` YIELDS `a`, so the operand IS retained
-        for key, child in node.items():
-            walk(child, key not in safe)
-
-    walk(body, True)
-    return found
-
-
-def _py_inplace_locals(fn: dict) -> dict:
-    """`{name: birth}` for the locals a persistent write may update in place.
-
-    `birth` is None when the name is born from a fresh literal (its `let` emits
-    unchanged), and `(source_node, "list"|"dict")` when it is born off another
-    name and needs the defensive copy. The container is named by the methods
-    that rebind the local (`push` is List-only, `set`/`remove` and a record
-    update are dict-shaped), so no receiver type has to be recovered.
-    """
-    body = fn.get("body") or []
-    spoiled: set[str] = {p.get("name") for p in fn.get("params") or []}
-    born: dict[str, Any] = {}
-    accum: set[str] = set()
-    pushes: set[str] = set()
-
-    def scan(steps: Any) -> None:
-        for node in steps or []:
-            if not isinstance(node, dict):
-                continue
-            step = node.get("step")
-            name = node.get("name")
-            if step == "let" and isinstance(name, str):
-                value = node.get("value")
-                kind = value.get("kind") if isinstance(value, dict) else None
-                if name in born or name in spoiled:
-                    spoiled.add(name)  # one python scope per fn: a second
-                    born.pop(name, None)  # declaration is a rebind
-                elif kind in _PY_FRESH_KINDS:
-                    born[name] = None
-                elif kind == "var":
-                    born[name] = value
-                else:
-                    spoiled.add(name)
-            elif step == "assign" and isinstance(name, str):
-                value = node.get("value")
-                if _py_self_rebind(name, value):
-                    accum.add(name)
-                    if value.get("method") == "push":
-                        pushes.add(name)
-                else:
-                    spoiled.add(name)
-            elif step == "let_pattern":
-                for bind in list(node.get("names") or []) + [node.get("rest")]:
-                    if isinstance(bind, str):
-                        spoiled.add(bind)
-            elif step == "for":
-                if isinstance(node.get("bind"), str):
-                    spoiled.add(node["bind"])
-                scan(node.get("body"))
-            elif step == "while":
-                scan(node.get("body"))
-            elif step == "if":
-                scan(node.get("then"))
-                scan(node.get("else"))
-
-    scan(body)
-    escaped = _py_escaped_names(body)
-    return {
-        name: (None if source is None
-               else (source, "list" if name in pushes else "dict"))
-        for name, source in born.items()
-        if name in accum and name not in spoiled and name not in escaped
-    }
+# The persistent methods with an in-place equivalent, and their arity, kept
+# here because `_py_inplace_stmts` renders one statement per method.
+_PY_INPLACE_METHODS = {"push": 1, "set": 2, "remove": 1}
 
 
 def _py_inplace_stmts(name: str, value: dict) -> list[str]:
@@ -2824,19 +2716,18 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
     step = node["step"]
     if step in ("let", "assign"):
         name = node["name"]
-        if name in _PY_INPLACE_LOCALS:
-            if step == "assign" and _py_self_rebind(name, node["value"]):
-                for line in _py_inplace_stmts(name, node["value"]):
-                    out.add(indent, line)
-                return
-            birth = _PY_INPLACE_LOCALS[name]
-            if step == "let" and birth is not None:
-                # born off another name: ONE copy here, where the persistent
-                # form made one per write
-                source, container = birth
-                out.add(indent,
-                        f"{_mangle(name)} = {container}({_expr(source)})")
-                return
+        write = _py_inplace_write(node)
+        if write is not None:
+            for line in _py_inplace_stmts(name, write):
+                out.add(indent, line)
+            return
+        container = _PY_BIRTH_CONTAINER.get(node.get("unique_birth"))
+        if step == "let" and container is not None:
+            # born off another name: ONE copy here, where the persistent form
+            # made one per write, and what makes writing through the local
+            # legitimate when the source is the caller's object
+            out.add(indent, f"{_mangle(name)} = {container}({_expr(node['value'])})")
+            return
         out.add(indent, f"{_mangle(node['name'])} = {_expr(node['value'])}")
     elif step == "let_pattern":
         _let_pattern_stmt(node, out, indent)
@@ -2913,7 +2804,7 @@ def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
 
 
 def _emit_functions(functions: list) -> "_Lines":
-    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW, _PY_INPLACE_LOCALS
+    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
     out = _Lines()
     for fn in functions:
         name = _ident(fn["name"], "function name")
@@ -2929,9 +2820,6 @@ def _emit_functions(functions: list) -> "_Lines":
         _PY_IN_ARROW = False
         _PY_AWAIT_LOCALS = {p["name"] for p in fn["params"]
                             if _is_async_fn_type(p.get("type"))}
-        # item 436 F1: the accumulation locals whose persistent copies are
-        # provably unobservable, computed once over the whole body
-        _PY_INPLACE_LOCALS = _py_inplace_locals(fn)
         out.add(0, f"{'async def' if is_async else 'def'} {name}({params}):")
         if not fn.get("body"):
             out.add(1, "pass")
@@ -2941,7 +2829,6 @@ def _emit_functions(functions: list) -> "_Lines":
     _PY_IN_ASYNC = False
     _PY_IN_ARROW = False
     _PY_AWAIT_LOCALS = set()
-    _PY_INPLACE_LOCALS = {}
     return out
 
 
@@ -3144,7 +3031,6 @@ def _emit_externs(externs: list) -> "_Lines":
 
 
 def _emit_tests(tests: list) -> "_Lines":
-    global _PY_INPLACE_LOCALS
     out = _Lines()
     out.add(0, "REVL_TESTS = []")
     out.add(0)
@@ -3160,12 +3046,8 @@ def _emit_tests(tests: list) -> "_Lines":
         out.add(0, f"def {fn_name}():")
         if not test.get("body"):
             out.add(1, "pass")
-        # a test body is a fn body with no parameters, so item 436's
-        # in-place accumulation applies to it on the same terms
-        _PY_INPLACE_LOCALS = _py_inplace_locals(test)
         for stmt in test.get("body") or []:
             _fn_stmt(stmt, out, 1)
-        _PY_INPLACE_LOCALS = {}
         out.add(0)
         out.add(0, f"REVL_TESTS.append(({test['name']!r}, {fn_name}))")
         out.add(0)
