@@ -1,0 +1,54 @@
+// item 189 (self-host port, item 391): the Value dot-accessors. A `Value`
+// receiver's `.field(k)` / `.str()` / `.list()` / `.keys()` is receiver-first
+// SUGAR for stdlib/value.rvl's `value_*` free function, redirected at lower
+// time (lower.py's `_VALUE_ACCESSORS`) to the SAME call IR the nested free-
+// function form produces. The emitted bytes are therefore identical on every
+// tier and no backend gains a branch — which is exactly why the emit oracle
+// could not see the gap: `selfhost/lower.rvl` had no redirect, so it lowered
+// `node.field("k")` as a `builtin`/`call` on a method name no `value_*`
+// function has, and only the IR oracle can tell the two apart.
+//
+// The `value_*` functions are declared here as local externs rather than
+// `use`d, because the corpus is compiled document-by-document.
+extern pure fn value_field(v: Value, k: Str) -> Value
+= @py {
+      return v.get(k) if isinstance(v, dict) else None
+    }
+
+extern pure fn value_str(v: Value) -> Str
+= @py {
+      return v if isinstance(v, str) else ""
+    }
+
+extern pure fn value_list(v: Value) -> List[Value]
+= @py {
+      return v if isinstance(v, list) else []
+    }
+
+extern pure fn value_keys(v: Value) -> List[Str]
+= @py {
+      return sorted(v) if isinstance(v, dict) else []
+    }
+
+fn node_kind(n: Value) -> Str { return n.field("kind").str() }
+fn node_children(n: Value) -> List[Value] { return n.field("body").list() }
+fn node_keys(n: Value) -> List[Str] { return n.keys() }
+
+// The nested form the sugar must be byte-identical to, spelled out, plus a
+// chain deep enough that the receiver of the outer accessor is itself a
+// redirected call.
+fn nested_kind(n: Value) -> Str { return value_str(value_field(n, "kind")) }
+fn deep(n: Value) -> Str { return n.field("target").field("name").str() }
+
+// A redirected accessor as the iterable of a `for`, and another as the
+// receiver of a stdlib builtin — the two positions where the redirect has to
+// produce a call the surrounding lowering can still read.
+fn count_kind(root: Value, want: Str) -> Int {
+  var hits = 0
+  for (c of root.field("body").list()) {
+    if (c.field("kind").str() == want) { hits += 1 }
+  }
+  return hits
+}
+
+fn key_count(root: Value) -> Int { return root.keys().length() }

@@ -142,6 +142,15 @@ def reference_emit() -> dict:
 PY_FUNCTION_DOCS = [
     "arith.rvl", "control.rvl", "strings.rvl", "records.rvl", "result.rvl",
     "optionals.rvl", "floats.rvl", "mixed.rvl", "hostroots.rvl", "types.rvl",
+    # item 391: the two builtin families the self-host could not compile at all
+    # — the ASCII classification set + `codepoint_at`, and the total division
+    # forms. Both halves (native lowering AND native emission) are in the chain
+    # here, so this is the statement that a program using them compiles with no
+    # reference in the loop.
+    "classify.rvl", "checked_div.rvl",
+    # item 391: tagged ADT construction, native end to end (the case table is
+    # built by `lower.rvl` and the constructor call rendered by `emit_py.rvl`).
+    "adt.rvl",
 ]
 RUST_FUNCTION_DOCS = [
     "arith.rvl", "control.rvl", "lists.rvl", "strings.rvl", "variants.rvl",
@@ -155,6 +164,7 @@ RUST_FUNCTION_DOCS = [
 TS_FUNCTION_DOCS = [
     "arith.rvl", "bitwise.rvl", "control.rvl", "strings.rvl", "records.rvl",
     "optionals.rvl", "mixed.rvl", "transforms.rvl",
+    "classify.rvl",  # item 391: the classification builtins + `codepoint_at`
 ]
 
 NATIVE_CORPUS = (

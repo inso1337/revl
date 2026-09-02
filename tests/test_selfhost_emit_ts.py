@@ -184,6 +184,11 @@ CORPUS = [
     # persistent `new Map(…)` IIFE. Without it three of the four in-place shapes
     # would be invisible to the oracle (item 429's trap).
     "unique_writes.rvl",
+    # item 233 / 276 (self-host port, item 391): the ASCII classification
+    # builtins + `codepoint_at`, the ts tier's arrow-IIFE (`_rc`) forms and the
+    # astral-aware `revlCharCodeAt` redirect. Added red, exactly as on the py
+    # tier: no ts corpus document called any of them.
+    "classify.rvl",
 ]
 
 def _load_reference_emit():
