@@ -179,18 +179,57 @@ def test_must2_inverse_path_is_guarded(workspace, tmp_path):
     assert not os.path.exists(outside)
 
 
+def test_must2_covers_the_inverse_source_endpoint_not_only_the_target(
+        workspace, tmp_path):
+    """The assertion above exercised only the TARGET endpoint of each inverse,
+    which is why it stayed green while `restore`/`unrm` handed an UNCHECKED
+    source straight to `os.replace` — a rename, so an outside source was stolen
+    from where it lived and planted inside the workspace. Both endpoints are
+    confined now, and the source additionally has to be a sidecar this
+    workspace produced (`resolve_sidecar`), because the inverses are
+    capability-free `pure` externs. The executed escapes live in
+    tests/test_fs_confinement_escapes.py; this pins the must #2 claim itself."""
+    mod = _fs_module()
+    donor = tmp_path / "donor.txt"
+    donor.write_text("outside the root", encoding="utf-8")
+    inside_target = str(workspace / "planted.txt")
+
+    for undo, witness in (
+        (mod.restore,
+         {"path": inside_target, "preimage": str(donor), "created": False}),
+        (mod.unrm, {"path": inside_target, "garbage": str(donor)}),
+    ):
+        with pytest.raises(ws.ConfinementError) as ei:
+            undo(witness)
+        assert ei.value.code == "EOUTSIDE"
+
+    assert donor.exists(), "the inverse's SOURCE endpoint was renamed away"
+    assert donor.read_text() == "outside the root"
+    assert not os.path.exists(inside_target)
+
+
 def test_must3_garbage_and_preimage_live_inside_the_root(workspace):
+    # A string prefix on the RETURNED path proves nothing by itself: the old
+    # helpers built the path with `os.path.join` and never resolved it, so a
+    # symlink named `.revl-fs-garbage` inside the root yielded a path that
+    # passed `startswith` while every syscall through it landed outside. Assert
+    # on the RESOLVED path and on the directory's own type instead.
     root = os.path.realpath(str(workspace))
-    assert ws.garbage_dir().startswith(root + os.sep)
-    assert ws.preimage_dir().startswith(root + os.sep)
+    for got, name in ((ws.garbage_dir(), ws.GARBAGE_DIRNAME),
+                      (ws.preimage_dir(), ws.PREIMAGE_DIRNAME)):
+        assert got == os.path.realpath(got), "sidecar directory returned unresolved"
+        assert got == os.path.join(root, name)
+        assert os.path.isdir(got) and not os.path.islink(got)
 
     # and an actual rm parks the file inside the root (not in /tmp, not beside
     # it): reversal never has to reach outside the workspace.
     mod = _fs_module()
     result = mod.rm("stale.txt")
     assert isinstance(result, mod.Ok)
-    assert result.value["garbage"].startswith(root + os.sep)
-    assert os.path.exists(result.value["garbage"])
+    parked = result.value["garbage"]
+    assert parked == os.path.realpath(parked)
+    assert os.path.dirname(parked) == os.path.join(root, ws.GARBAGE_DIRNAME)
+    assert os.path.exists(parked)
 
 
 def test_missing_root_is_refused_not_silently_allowed(tmp_path, monkeypatch):
