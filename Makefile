@@ -63,7 +63,9 @@ demo:
 # always run), then lake build, then the axioms gate (no theorem may
 # depend on sorryAx, an unfinished proof, or on any project-defined axiom;
 # the machine-checked form of "a claim gets a command or it gets
-# softened"), then the harness census. The non-vacuity gate is roadmap
+# softened") over both CheckAxioms.lean and harness/Oracle.lean's own
+# print block — the oracle file is outside the RevL library root, so it
+# needs its own pass — then the harness census. The non-vacuity gate is roadmap
 # item 418 step 8: `#print axioms` is as clean on a theorem whose
 # hypotheses cannot all hold as on a load-bearing one, so every registered
 # theorem carries a row in formal/scripts/nonvacuity.tsv naming its

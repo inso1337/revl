@@ -143,15 +143,20 @@ theorem abort_replays_every_transactional (log : List LogEntry) (w : LogEntry)
 /-- A bracket replays under every SETTLING verdict: releasing an acquired
 handle is always right when the activation actually settles.
 
-Roadmap item 443 added the hypothesis. Pre-443 this quantified over every
+Roadmap item 443 added the hypothesis, and the name says so. Pre-443 this
+was called `bracket_replays_under_every_verdict` and quantified over every
 verdict, because every verdict settled; the E-Stop is the verdict at which
-it does not, and `estop_strands_the_bracket` below proves the E-Stop
-counter-instance rather than leaving the weakening unexplained. The
-settling case is untouched, and this is NOT a weakening of G7's
-completeness theorem (`teardown_replays_all`), which was already stated
-relative to `replaysUnder v` and needs no hypothesis at all. -/
-theorem bracket_replays_under_every_verdict (v : Verdict) (log : List LogEntry)
-    (w : LogEntry) (hw : w ∈ log) (hk : w.kind = .bracket)
+it does not. Two things keep the added hypothesis from being a place to
+park a broken proof, and both are theorems rather than prose:
+`bracket_replays_exactly_when_settling` below computes the bracket row as
+an EQUATION with no hypothesis at all (so this corollary is strictly
+weaker than something proved, not weaker than something claimed), and
+`bracket_is_replayed_or_stranded` states the total form over every
+verdict. This is also NOT a weakening of G7's completeness theorem
+(`teardown_replays_all`), which was already stated relative to
+`replaysUnder v` and needs no hypothesis at all. -/
+theorem bracket_replays_under_every_settling_verdict (v : Verdict)
+    (log : List LogEntry) (w : LogEntry) (hw : w ∈ log) (hk : w.kind = .bracket)
     (hv : v.settles = true) :
     w ∈ replayed v log :=
   replayed_complete v log w hw (by
@@ -260,13 +265,88 @@ theorem estop_strands_everything (log : List LogEntry) :
   intro w _
   cases w.kind <;> rfl
 
-/-- The E-Stop counter-instance for `bracket_replays_under_every_verdict`:
+/-- The E-Stop counter-instance for
+`bracket_replays_under_every_settling_verdict`:
 the bracket row really does change in the third column, so the settling
 hypothesis that theorem now carries is load-bearing and not decoration. -/
 theorem estop_strands_the_bracket :
     EntryKind.bracket.replaysUnder .halted = false ∧
     EntryKind.bracket.strandedUnder .halted = true ∧
     Verdict.halted.settles = false := by decide
+
+/-! #### What the `settles` hypothesis is worth
+
+Item 443 added `hv : v.settles = true` to two statements that used to
+quantify over every verdict (`Semantics.replays_or_discharges` and
+`bracket_replays_under_every_settling_verdict`). A hypothesis added to
+rescue a proof is the standard way a formal layer stops meaning what its
+name says, so the four theorems below pin what this one costs. It excludes
+exactly one verdict; it excludes it for a reason that is itself a theorem;
+the excluded verdict is covered by a statement of its own; and the row it
+was added to is, hypothesis-free, an EQUATION.
+-/
+
+/-- The hypothesis excludes exactly the E-Stop and nothing else. So a
+theorem carrying it is a theorem about `commit` and `abort`, and the gap
+it leaves is the single case `.halted` — which the `estop_*` theorems
+above cover in full, rather than merely excluding. -/
+theorem settles_iff_not_halted (v : Verdict) :
+    v.settles = true ↔ v ≠ .halted := by
+  cases v <;> simp [Verdict.settles]
+
+/-- And it excludes it for the right reason: a verdict settles precisely
+when it strands nothing. `Verdict.settles` is therefore not a side
+condition chosen to make a proof go through — it is the property the
+replay/discharge dichotomy needs, spelled as a predicate. -/
+theorem settles_iff_strands_nothing (v : Verdict) :
+    v.settles = true ↔ ∀ k : EntryKind, k.strandedUnder v = false := by
+  cases v
+  · simp [Verdict.settles]; intro k; cases k <;> rfl
+  · simp [Verdict.settles]; intro k; cases k <;> rfl
+  · simp only [Verdict.settles, Bool.false_eq_true, false_iff]
+    intro h
+    exact absurd (h .bracket) (by decide)
+
+/-- A settling verdict OWES NOTHING: its stranded inventory is empty, for
+every stack. Together with `estop_strands_everything` (the halt owes
+everything) this is the whole of `stranded`: it is empty under `commit`
+and `abort`, and the whole stack under `.halted`. -/
+theorem settling_strands_nothing (v : Verdict) (log : List LogEntry)
+    (hv : v.settles = true) : stranded v log = [] := by
+  rw [stranded, List.filter_eq_nil_iff]
+  intro w _
+  cases v <;> cases hk : w.kind <;>
+    simp_all [Verdict.settles, EntryKind.strandedUnder, EntryKind.replaysUnder,
+      EntryKind.dischargedUnder]
+
+/-- **Stronger than the corollary that carries the hypothesis.** The
+bracket row is not merely *true* under the settling verdicts: it is EQUAL
+to `settles`, with no hypothesis at all. So
+`bracket_replays_under_every_settling_verdict` is a corollary of an
+equation the model computes, and the hypothesis it carries is the exact
+condition under which its conclusion holds — it cannot be loosened, and
+nothing was lost by adding it. -/
+theorem bracket_replays_exactly_when_settling (v : Verdict) :
+    EntryKind.bracket.replaysUnder v = v.settles := by
+  cases v <;> rfl
+
+/-- **The total replacement**, quantified over every verdict with no
+hypothesis: a registered bracket is either replayed, or the verdict is the
+E-Stop and the bracket is on the halt's inventory. No verdict falls
+between the two, so item 443 restricted a statement whose excluded case is
+proved here rather than dropped. -/
+theorem bracket_is_replayed_or_stranded (v : Verdict) (log : List LogEntry)
+    (w : LogEntry) (hw : w ∈ log) (hk : w.kind = .bracket) :
+    w ∈ replayed v log ∨ (v = .halted ∧ w ∈ stranded v log) := by
+  cases v with
+  | commit =>
+    exact Or.inl (bracket_replays_under_every_settling_verdict _ log w hw hk rfl)
+  | abort =>
+    exact Or.inl (bracket_replays_under_every_settling_verdict _ log w hw hk rfl)
+  | halted =>
+    refine Or.inr ⟨rfl, ?_⟩
+    rw [stranded, List.mem_filter]
+    exact ⟨hw, by rw [hk]; decide⟩
 
 /-! #### The halt cut: what was in flight
 
@@ -372,11 +452,15 @@ theorem quantifies over, and it is still absent from the commit replay and
 present in the abort replay. -/
 theorem commit_discharge_is_not_vacuous :
     mutateEntry ∈ stack ∧ mutateEntry ∉ replayed .commit stack ∧
-    mutateEntry ∈ replayed .abort stack := by
-  refine ⟨by simp [stack], ?_, ?_⟩
+    mutateEntry ∈ replayed .abort stack ∧
+    mutateEntry ∈ discharged .commit stack ∧
+    (discharged .commit stack).length = 2 := by
+  refine ⟨by simp [stack], ?_, ?_, ?_, rfl⟩
   · intro h
     exact commit_discharges_transactional stack mutateEntry h rfl
   · exact abort_replays_every_transactional stack mutateEntry (by simp [stack]) rfl
+  · rw [discharged, List.mem_filter]
+    exact ⟨by simp [stack], rfl⟩
 
 
 /-! ### Item 443 non-vacuity: the halt is load-bearing on a real stack -/

@@ -62,7 +62,7 @@ import RevL
 #print axioms RevL.G7.commit_discharges_compensation
 #print axioms RevL.G7.commit_replays_only_brackets
 #print axioms RevL.G7.abort_replays_every_transactional
-#print axioms RevL.G7.bracket_replays_under_every_verdict
+#print axioms RevL.G7.bracket_replays_under_every_settling_verdict
 #print axioms RevL.G7.teardown_eq_reversed_inverses
 #print axioms RevL.G7.compensations_drain_after_the_proof_pass
 #print axioms RevL.G7.phase1_is_lifo
@@ -87,6 +87,21 @@ import RevL
 #print axioms RevL.G7.halt_books_are_total
 #print axioms RevL.G7.estop_is_load_bearing
 #print axioms RevL.G7.mid_abort_halt_cut_is_not_vacuous
+
+-- item 443, audit: what the `v.settles` hypothesis costs. It excludes
+-- exactly `.halted`, it excludes it because that is the verdict that
+-- strands, the bracket row is an equation with no hypothesis, and the
+-- total form over every verdict is proved rather than dropped.
+#print axioms RevL.G7.settles_iff_not_halted
+#print axioms RevL.G7.settles_iff_strands_nothing
+#print axioms RevL.G7.settling_strands_nothing
+#print axioms RevL.G7.bracket_replays_exactly_when_settling
+#print axioms RevL.G7.bracket_is_replayed_or_stranded
+
+-- The bridge theorems the differential oracle's verdicts rest on live in
+-- harness/Oracle.lean, which is outside this library's root import. They
+-- are axiom-checked by their own `#print axioms` block at the foot of
+-- that file, run as a second pass in scripts/run_gate.sh.
 
 -- G8: the boundary surface is enumerable (completeness + soundness).
 #print axioms RevL.G8.boundary_enumerates_emissions
