@@ -510,7 +510,7 @@ def peer_identity(writer) -> str | None:
     return None
 
 
-async def serve(ctx, exports, endpoint, module=None, correlation=None):
+async def serve(ctx, exports, endpoint, module=None, correlation=None, peers=None):
     """Listen on `endpoint` and answer calls against `ctx` for the exported
     surface.
 
@@ -539,6 +539,17 @@ async def serve(ctx, exports, endpoint, module=None, correlation=None):
     answered with an error and NEVER dispatched. Absent (the default) nothing
     changes: the wire and the dispatch are byte-identical to the pre-118 seam.
 
+    `peers` (item 118 §1.4b, roadmap 421 F8) is an optional
+    `revl.deploy.PeerAllowlist` — the closed set of mTLS peer identities this
+    provider may answer. It is the NETWORK counterpart of `correlation`, and a
+    strictly weaker property: mTLS already proved *who* is calling, so this only
+    decides whether that one may, and it cannot detect a replay. It is checked
+    ONCE PER CONNECTION, at the handshake's identity, before a single request is
+    read — a refused peer gets one error line and the connection is closed.
+    Absent (the default) any identity the shared CA signed is answered, which is
+    the pre-existing behaviour and the one `placement.py` reports as
+    `unverified`. `correlation` and `peers` compose; neither implies the other.
+
     Returns the asyncio server; the caller keeps it (and the process) alive."""
     ep = _as_endpoint(endpoint)
     table = _export_table(exports)
@@ -547,8 +558,23 @@ async def serve(ctx, exports, endpoint, module=None, correlation=None):
         # Resolved once per connection: the transport-level identity does not
         # change mid-session, and re-reading the peer cert per request would
         # invite a check that drifts from the session it is supposed to bind.
-        identity = peer_identity(writer) if correlation is not None else None
+        identity = (peer_identity(writer)
+                    if (correlation is not None or peers is not None) else None)
         try:
+            if peers is not None:
+                # item 118 §1.4b: the peer plane a network seam CAN carry. The
+                # verdict is per CONNECTION, not per request, because the
+                # identity it judges is the handshake's and cannot change
+                # mid-session; refusing here also means an unlisted peer never
+                # reaches the request loop at all.
+                ok, reason = peers.admit(identity)
+                if not ok:
+                    writer.write((json.dumps({
+                        "ok": False,
+                        "error": f"peer refused: {reason}",
+                        "peer_refused": reason}) + "\n").encode())
+                    await writer.drain()
+                    return
             while True:
                 line = await reader.readline()
                 if not line:  # monitor connections never send: this is EOF
