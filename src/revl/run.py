@@ -134,8 +134,15 @@ def _load_config(path: str | None) -> dict:
 
         data = tomllib.loads(text)
     if not isinstance(data, dict) or any(not isinstance(v, dict) for v in data.values()):
+        # `RevlError` is a diagnostic, not a bare message: its signature is
+        # (filename, line, message) and it renders `<file>:<line>: <message>`.
+        # Handing it a single string raises `TypeError` instead — and this
+        # branch only runs once the config is ALREADY malformed, so the bug
+        # surfaced as a traceback that the `except RevlError` in
+        # `run_command` could never catch.
         raise RevlError(
-            f"config {path}: expected a table of `component-name = {{ ... }}` entries"
+            path, 0,
+            "expected a table of `component-name = { ... }` entries",
         )
     return data
 
@@ -1257,8 +1264,13 @@ class _Driver:
             problem = _required_config_problem(ir, self.config)
             if problem is not None:
                 # a new/changed requirement the host's config cannot meet is
-                # an edit the running composition refuses, not a boot failure
-                raise RevlError(problem)
+                # an edit the running composition refuses, not a boot failure.
+                # (filename, line, message) — a one-argument `RevlError` is a
+                # `TypeError` the `except RevlError` below would not catch,
+                # which would kill the watch loop on a bad edit instead of
+                # rejecting it.
+                raise RevlError(files[0] if files else "<composition>", 0,
+                                problem)
         except RevlError as exc:
             for i, text in enumerate(str(exc).splitlines()):
                 self._log("reject", "REJECTED" if i == 0 else "", text)
