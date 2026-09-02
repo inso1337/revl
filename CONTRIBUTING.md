@@ -372,6 +372,18 @@ in the `lint` CI job) now fails when a marker contradicts git. Four rules:
      and left live everywhere else. No gate can decide semantic parity;
      naming the other tier is the whole discipline, and it is also the escape
      hatch that silences the check honestly.
+   - **A marker must not say work is IN FLIGHT on the branch the PR is from.**
+     ``FIXING on `fix/277-rust-vec-char` `` is green while that PR is open,
+     because the branch exists; the merge deletes it, so the marker the PR
+     introduced is stale on landing. `lint` runs on branch tips, so that reds
+     main *and* every open PR whose merge-ref carries the new text, each of
+     which then has to be retriggered by hand. Four occurrences on 2026-09-02.
+     Cite the PR instead (`PR #175`), or once it has landed, the merge sha.
+     `--head-branch` checks this — CI passes `github.head_ref`, which is empty
+     on a push to main, and `tools/pre_pr.sh` passes your current branch
+     before the PR is even opened. Naming your own branch in the PAST tense is
+     fine and does not trip it: ``LANDED SO FAR (`fix/391-selfhost-parity`)``
+     stays true after the branch is gone, and that is the whole difference.
 
 4. **Security findings go to private GitHub Security Advisories, never public
    issues.** See [SECURITY.md](SECURITY.md). This repository is public and the

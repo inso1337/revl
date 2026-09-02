@@ -72,12 +72,27 @@ jobs:
       #
       # Never add `|| true`, and never narrow a check to make this line pass.
       # `make roadmap-check-all` runs all five locally.
-      - run: |
+      #
+      # --head-branch is `github.head_ref`: the PR's own branch on a
+      # pull_request, and EMPTY on a push to main, which turns that check off.
+      # It refuses a marker saying work is IN FLIGHT on the branch the PR is
+      # from, because merging deletes that branch and the marker is stale the
+      # moment it lands — reddening main and, since this job runs on branch
+      # tips, every open PR whose merge-ref carries the new text. Past-tense
+      # self-naming ("LANDED SO FAR (`fix/x`)") is legitimate and passes.
+      # It goes through `env:` rather than being interpolated into the script:
+      # a branch name is attacker-controllable text, and `${{ }}` inside a
+      # `run:` block is textual substitution that a name containing backticks
+      # or `$(...)` would turn into shell.
+      - env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
           python3 tools/check_roadmap_markers.py \
             --check-contradiction \
             --check-delegation \
             --check-duplicate-headers \
-            --check-orphan
+            --check-orphan \
+            --head-branch "$HEAD_BRANCH"
 
   frontend:
     runs-on: ubuntu-latest
