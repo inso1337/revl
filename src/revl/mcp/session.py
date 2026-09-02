@@ -412,6 +412,11 @@ class Session:
         # hash-bound rewound span here, and `fork_confirm` re-derives the hash and
         # refuses on any drift, exactly as the 245 commit binds its manifest hash.
         self._fork_pending: dict | None = None
+        # item 443 (E-Stop): once an operator halts this session it is DEAD, not
+        # paused. Every state-changing verb refuses (`_refuse_if_halted`);
+        # `unload` and `estop_report` still work, and the way back is
+        # `revl recover`, never a resume.
+        self._halted = False
 
     # -- plumbing ----------------------------------------------------------
 
@@ -442,6 +447,7 @@ class Session:
 
     def load(self, ir: dict, config: dict | None = None,
              record: bool = False, origin: dict | None = None) -> dict:
+        self._refuse_if_halted("load")   # item 443
         if self._driver is not None:
             raise SessionError("a composition is already loaded — swap or unload it")
         # booting is admission: a draft with open obligations is checkable but
@@ -838,6 +844,7 @@ class Session:
         Composition-level (static) state is unaffected either way; this only
         reconciles the dynamic instance layer the static swap never saw."""
         driver = self._require()
+        self._refuse_if_halted("swap")   # item 443
         self._enforce_sandbox(ir)
         self._enforce_evidence(ir)
         # item 246: classify the candidate and gate its activation reach BEFORE
@@ -1747,6 +1754,7 @@ class Session:
         the confirm is REFUSED with a fresh manifest — what fires is exactly what
         was approved, never a superset."""
         driver = self._require()
+        self._refuse_if_halted("commit_confirm")   # item 443
         owner = self._owner
         if owner is None:
             raise SessionError("no session owner is registered — nothing to commit")
@@ -1776,6 +1784,7 @@ class Session:
         A session that only ever used classes (a) and (b) aborts to a provably
         clean world."""
         driver = self._require()
+        self._refuse_if_halted("abort")   # item 443
         owner = self._owner
         if owner is None:
             raise SessionError("no session owner is registered — nothing to abort")
@@ -1791,6 +1800,65 @@ class Session:
         return {"aborted": True, "replayed": result["replayed"],
                 "droppedDeferred": dropped, "prompts": prompts,
                 "compensationResidue": residue, **report}
+
+    def estop(self, reason: str = "operator halt",
+              operator: str | None = None) -> dict:
+        """E-STOP the session (item 443, docs/design/443-estop.md).
+
+        This is NOT `abort` with a shorter name. `abort` is a verdict on the
+        work: it drops the queue, replays every witnessed inverse LIFO in two
+        phases, and proves a clean world — a cooperative unwind whose cost is
+        the whole teardown. `estop` is the operator's emergency: it stops
+        dispatching NEW crossings immediately, runs NOTHING, and reports what
+        was in flight.
+
+        Its cost is a latch flip plus a walk of the live frames. It does not
+        unwind, so it does not wait for two hundred brackets, a hung
+        compensation or a Phase-2 budget. The price is stated rather than
+        hidden: every registered entry is left STRANDED (owed, not discharged)
+        and every acquired handle stays held until the process exits or
+        `revl recover` runs. That trade is what the button is for.
+
+        The session is dead afterwards. `call`, `swap`, `commit`,
+        `commit_confirm`, `abort` and `load` refuse; `unload` still works and
+        strands rather than unwinds (the process still has to drop its
+        fibers); `estop_report` reads the inventory back."""
+        driver = self._require()
+        halt = driver.runtime.estop(reason, operator=operator or "unknown")
+        self._halted = True
+        return {"halted": True, **halt}
+
+    def estop_report(self) -> dict:
+        """The halt inventory, without touching the world (item 443).
+
+        Two halves, both real: what the halt could NAME at the instant it
+        engaged (witnessed mutations, compensations, acquired resources), and
+        what the unwind has stranded since (an emitted bracket inverse is a
+        bare closure in the disposer list, reachable only as it is handed
+        over). Read it before deciding how to reconcile."""
+        driver = self._require()
+        halt = driver.runtime.estop_state()
+        if halt is None:
+            return {"halted": False, "residue": [], "clean": True}
+        residue = driver.runtime.estop_residue()
+        return {"halted": True, **halt, "residue": residue,
+                # an E-Stop is NEVER clean. R4 is a property of the abort path;
+                # the halt violates it by design and says so.
+                "clean": False}
+
+    def _refuse_if_halted(self, verb: str) -> None:
+        """Every state-changing verb after an E-Stop refuses (item 443, open
+        question 3: the instance is dead and recovery is the only path back).
+
+        Resuming would re-enter a body that was cut mid-step, whose in-flight
+        crossing may or may not have landed — exactly the "pretend it did not
+        happen" the honest semantics forbids."""
+        if getattr(self, "_halted", False):
+            raise SessionError(
+                f"`{verb}` is refused: this session was E-STOPPED and the "
+                "instance is dead (item 443). There is no resume — reconcile "
+                "with `revl recover --wal <file>`, or `unload` (which strands "
+                "rather than unwinds) and start a fresh session")
 
     # -- session branching (roadmap item 250) ------------------------------
 
@@ -2260,6 +2328,11 @@ class Session:
         self._frozen = False
         self._fork_at = None
         self._fork_pending = None
+        # item 443: the halt is dropped with the session it killed, so a REUSED
+        # Session object starts callable again. The runtime latch is NOT cleared
+        # here — a halt is process-global and only an operator (or a fresh
+        # process) lifts it, which is why `unload` under a halt still strands.
+        self._halted = False
 
     # -- the per-turn admit+run crossing (roadmap item 330) ----------------
 
@@ -2464,6 +2537,7 @@ class Session:
         """Invoke a provided service operation on the running composition —
         how an agent actually *tests* what it just loaded."""
         driver = self._require()
+        self._refuse_if_halted("call")   # item 443
         namespace = driver._namespace()
         if key not in namespace:
             raise SessionError(f"no provided key {key!r} "
