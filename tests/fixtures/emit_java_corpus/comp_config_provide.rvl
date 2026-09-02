@@ -1,0 +1,22 @@
+// Item 433 rider R3: a component whose PROVIDE METHOD reads `config.<f>`.
+// The body is otherwise the simple legacy shape (one `provide`, one `return`),
+// so `_component_needs_modern` used to leave it on the legacy path, where the
+// provider class carries no config field and the emitted `return prefix;`
+// named nothing (javac "cannot find symbol"). A config read in a provide
+// method now forces the modern path, and the modern provider takes the field
+// through its constructor. The trivial `fn` forces ir_version 3.
+fn seed() -> Int {
+  return 1
+}
+
+service Greeter {
+  fn greet() -> Str
+}
+
+component Hello provides g: Greeter {
+  config { prefix: Str = "p", level: Int = 3 }
+
+  provide g {
+    fn greet() = config.prefix
+  }
+}
