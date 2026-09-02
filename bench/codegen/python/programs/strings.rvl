@@ -1,0 +1,22 @@
+// Str builtins whose lowering allocates a lambda per call, plus `${}`.
+fn scan(hay: Str, needle: Str, n: Int) -> Int {
+  var acc = 0
+  var i = 0
+  while (i < n) {
+    acc += hay.indexOf(needle)
+    i += 1
+  }
+  return acc
+}
+
+fn split_join(csv: Str, n: Int) -> Int {
+  var acc = 0
+  var i = 0
+  while (i < n) {
+    acc += csv.split(",").length()
+    i += 1
+  }
+  return acc
+}
+
+fn render(a: Int, b: Str) -> Str { return `a=${a} b=${b}` }

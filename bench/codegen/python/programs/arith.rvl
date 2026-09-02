@@ -1,0 +1,10 @@
+// A tight bounded-Int loop: the `_revl_i64` trap on every + - *.
+fn sum_squares(n: Int) -> Int {
+  var total = 0
+  var i = 0
+  while (i < n) {
+    total += i * i - i
+    i += 1
+  }
+  return total
+}
