@@ -1503,3 +1503,73 @@ arguments and keys emission off feature presence (never off an `ir_version`
 branch), a whole reference DISPATCH arm was covered for free. The reference's
 `emit()` needs an explicit `if version in (1, 2)` fork; the port did not, and was
 byte-identical anyway. (Do NOT change the reference — the fork is its right shape.)
+
+## compile.rvl gains the ts tier (item 146 gap 2) — plus a `Secret[T]` hole in every tier
+
+`selfhost/compile.rvl` composed lower.rvl + emit_py.rvl + emit_rust.rvl and
+dispatched two tiers. It now composes emit_ts.rvl too and dispatches three.
+
+### The cost of admitting a tier is one rename
+`emit_ts.rvl`'s entrypoint was a bare `emit_src`, the name emit_go/emit_java/
+emit_wasm still carry. The merge that composes `use`d modules flattens public
+decls by bare name, so a second `emit_src` is a duplicate and the composition
+does not compile — this is the whole reason item 230 renamed py and rust. Renaming
+to `emit_ts_src` (and the one call in its own component wrapper, and three lines in
+`tests/test_selfhost_emit_ts.py`) was the entire mechanical cost; the four-way
+composition then co-compiled first try. The same one-line rename is the gate the
+other three tiers are still behind.
+
+### The oracle's 34-for-34 is not 34-for-34 through the native chain
+`tests/test_selfhost_emit_ts.py` proves `emit_ts_src` byte-exact on every corpus
+document — feeding it the REFERENCE IR. Driven by the native `lower_to_ir`
+instead, 15 of 32 reproduce byte-exact and 17 do not, and NONE of the 17 is an
+emitter defect. Measured, by category:
+
+  * **async is not carried at all** (6 documents). `export function load(url:
+    string): string` where the reference says `export async function
+    load(url: string): Promise<string>`. The native lowering drops the `async`
+    stamp from externs and from phase-2-coloured fns.
+  * **the runtime-import gates** (4 documents): `import { host }` where the
+    reference imports `{ host, Frame }`, `{ host, Frame, record }`,
+    `{ host, Frame, spawn }`. The native IR lacks the compensate/witness/spawn
+    evidence those gates read.
+  * **realm placements and `intercept` metadata** (5 documents): `inject: ["db"]`
+    where the reference emits the dict form `inject: {"db": {…}}`, and an
+    `isolate` document loses its `provide` steps.
+
+That is the useful measurement in this slice: the emit-oracle corpus and the
+native-compile corpus are DIFFERENT sets, the gap between them is 53% of the ts
+corpus, and all of it is upstream in lower.rvl. Anyone reading "the ts self-host
+emitter is byte-exact on 34 documents" as "revl compiles 34 documents to ts by
+itself" is reading it wrong.
+
+### `Secret[T]` is missing from the native compile on EVERY tier, py included
+Checked per item 429's rule, on the source rather than through an oracle. Two
+separate holes, one nested inside the other:
+
+1. **The ts EMITTER did not port the redaction.** `grep -ci secret
+   selfhost/emit_ts.rvl` was 0 while `backends/typescript/emit.py` emits
+   `host.secretResult` (the extern-return origin), `host.markSecret` (the
+   provide-method receiver) and `, secret: true` (the config field). Same shape as
+   the 429(d) finding on emit_py.rvl, and the ts oracle was green over it because
+   no ts corpus document spelled `Secret[` at all. Ported here, all three sites,
+   with `tests/fixtures/emit_ts_corpus/secrets.rvl` to hold it — and the fixture
+   was checked to FAIL against the pre-port emitter, which is the only way to know
+   a fixture is doing anything.
+
+2. **The self-host FRONTEND has no taint pass, so the native compile drops the
+   marking anyway.** `grep -ci secret selfhost/{lexer,parser,checker,lower}.rvl`
+   is 0 in all four. `src/revl/taint.py` is what strips the `Secret[...]`
+   qualifier and sets the three stamps every backend redacts from; nothing mirrors
+   it. So `compile_to(src, "ts")` emits `Secret<unknown>` as a TYPE and none of the
+   markings — and `compile_to(src, "py")`, wired since item 230, has had exactly
+   the same hole the whole time. Both native emitters are byte-exact on their own
+   `secrets.rvl` when fed the reference IR; both produce an unredacting module
+   when driven natively. Pinned as a strict xfail in
+   `tests/test_selfhost_compile.py` over both tiers, so closing it fails the build
+   until the headers are corrected.
+
+The second one is the more interesting failure: a per-stage oracle can be green on
+every stage while their COMPOSITION drops a security property, because no stage's
+corpus is the composition's corpus. Fixing the emitter (1) does not fix the
+program; only the frontend port does.

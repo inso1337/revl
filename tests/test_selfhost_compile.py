@@ -92,7 +92,7 @@ def _exec_selfhost(rvl_relpath: str) -> dict:
 def _load_reference_emit(tier: str):
     """The reference emitter for a tier, loaded by path — the exact file the
     self-host emitter mirrors, and the ground truth for ``compile to <tier>``."""
-    subdir = {"py": "python", "rust": "rust"}[tier]
+    subdir = {"py": "python", "rust": "rust", "ts": "typescript"}[tier]
     spec = importlib.util.spec_from_file_location(
         "ref_emit_" + tier, ROOT / "backends" / subdir / "emit.py")
     module = importlib.util.module_from_spec(spec)
@@ -124,7 +124,9 @@ def admit(compile_rvl):
 
 @pytest.fixture(scope="module")
 def reference_emit() -> dict:
-    return {"py": _load_reference_emit("py"), "rust": _load_reference_emit("rust")}
+    return {"py": _load_reference_emit("py"),
+            "rust": _load_reference_emit("rust"),
+            "ts": _load_reference_emit("ts")}
 
 
 # ---------------------------------------------------------------- corpus
@@ -144,10 +146,21 @@ PY_FUNCTION_DOCS = [
 RUST_FUNCTION_DOCS = [
     "arith.rvl", "control.rvl", "lists.rvl", "strings.rvl", "variants.rvl",
 ]
+# ts (roadmap item 146, gap 2): the function-only slice of the emit_ts corpus that
+# the NATIVE chain reproduces byte-exact. The ts emitter is byte-exact on all 34
+# corpus documents in tests/test_selfhost_emit_ts.py — but that oracle feeds it the
+# REFERENCE IR. Driven by the NATIVE `lower_to_ir` instead, the async documents drop
+# out (see the deliberately-out list below), which is exactly the difference this
+# corpus is here to pin.
+TS_FUNCTION_DOCS = [
+    "arith.rvl", "bitwise.rvl", "control.rvl", "strings.rvl", "records.rvl",
+    "optionals.rvl", "mixed.rvl", "transforms.rvl",
+]
 
 NATIVE_CORPUS = (
     [("py", "emit_py_corpus", n) for n in PY_FUNCTION_DOCS]
     + [("rust", "emit_rust_corpus", n) for n in RUST_FUNCTION_DOCS]
+    + [("ts", "emit_ts_corpus", n) for n in TS_FUNCTION_DOCS]
 )
 
 # The FULLY-NATIVE, byte-exact COMPONENT + extern surface (roadmap item 262, the
@@ -179,10 +192,19 @@ RUST_COMPONENT_DOCS = [
     "service.rvl", "services_multi.rvl", "requires.rvl", "effect_emit.rvl",
     "effect_undo.rvl", "config.rvl", "config_effect.rvl",
 ]
+# ts: the component/service documents the native chain reproduces byte-exact,
+# including `v1_component_body.rvl` — the ir_version-1 dispatch, which the native
+# `emit_ts_src` handles version-agnostically (item 240).
+TS_COMPONENT_DOCS = [
+    "services_methods.rvl", "services_body.rvl", "services_config.rvl",
+    "services_method_block.rvl", "services_composite_provide.rvl",
+    "components_mixed.rvl", "v1_component_body.rvl",
+]
 
 COMPONENT_CORPUS = (
     [("py", "emit_py_corpus", n) for n in PY_COMPONENT_DOCS]
     + [("rust", "emit_rust_corpus", n) for n in RUST_COMPONENT_DOCS]
+    + [("ts", "emit_ts_corpus", n) for n in TS_COMPONENT_DOCS]
 )
 
 
@@ -268,7 +290,7 @@ def test_native_gate_admits_the_whole_emit_surface(admit):
     admits, the native gate admits (``""``). The component documents are now also
     compiled byte-exact end to end (item 262); this checks the gate itself over the
     full admitted surface, including documents outside the byte-exact emit slice."""
-    for subdir in ("emit_py_corpus", "emit_rust_corpus"):
+    for subdir in ("emit_py_corpus", "emit_rust_corpus", "emit_ts_corpus"):
         for path in sorted((ROOT / "tests" / "fixtures" / subdir).glob("*.rvl")):
             compile_files([str(path)])  # the reference admits it
             verdict = admit(path.read_text(encoding="utf-8"))
@@ -314,7 +336,7 @@ def _reference_tag(src: str) -> str:
 
 
 @pytest.mark.parametrize("case", _REJECTED, ids=[n for n, _, _ in _REJECTED])
-@pytest.mark.parametrize("tier", ["py", "rust"])
+@pytest.mark.parametrize("tier", ["py", "rust", "ts"])
 def test_refused_program_never_reaches_an_emitter(compile_to, tier, case):
     """A program the reference rejects is refused by the composed native driver
     with the SAME guarantee tag, for every tier — the ``REFUSED|`` verdict means
@@ -333,6 +355,51 @@ def test_unknown_tier_is_reported(compile_to):
     the pipeline covered it."""
     assert compile_to("fn id(x: Int) -> Int { return x }", "go") == "UNKNOWN_TIER|go"
     assert compile_to("fn id(x: Int) -> Int { return x }", "java") == "UNKNOWN_TIER|java"
+    assert compile_to("fn id(x: Int) -> Int { return x }", "wasm") == "UNKNOWN_TIER|wasm"
+
+
+# ------------------------------------------- the frontend's `Secret[T]` hole
+
+# Found while wiring the ts tier (roadmap item 146, gap 2), by checking the
+# self-host SOURCE rather than an oracle (item 429's standing rule).
+#
+# `src/revl/taint.py` is the reference pass that strips the `Secret[...]`
+# qualifier and leaves the three stamps every backend redacts from
+# (`externs[i].secret_return`, a service `params[i].secret`, a config
+# `fields[i].secret`). There is NO counterpart anywhere in the self-host frontend:
+# `grep -ci secret selfhost/{lexer,parser,checker,lower}.rvl` is 0 in all four.
+#
+# So the native `lower_to_ir` produces an IR with the qualifier still on the type
+# and none of the stamps set, and `compile_to` emits a module with the whole
+# declared-`Secret[T]` marking MISSING — no `_revl_secret_result` / `mark_secret`
+# on py, no `host.secretResult` / `host.markSecret` / `secret: true` on ts — while
+# `revl compile --backend <tier>` emits all of it. This is NOT an emitter gap: both
+# native emitters were ported (py by item 429(d), ts here) and are byte-exact on
+# their own `secrets.rvl` corpus document when fed the REFERENCE IR.
+#
+# It predates this slice and is not ts-specific — py has been wired since item 230
+# with the same hole. No oracle saw it because no compile-corpus document declared
+# a `Secret[T]`; this test is that document. STRICT xfail: when the self-host
+# frontend gains the taint pass this test XPASSes, which FAILS, forcing whoever
+# closes the gap to delete the marker and update the file headers.
+_SECRET_DOCS = [("py", "emit_py_corpus"), ("ts", "emit_ts_corpus")]
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "the self-host frontend has no taint pass: lower_to_ir never strips "
+    "`Secret[T]` nor sets secret_return / params[i].secret / fields[i].secret, "
+    "so the fully-native compile drops the entire declared-Secret marking"))
+@pytest.mark.parametrize("tier,subdir", _SECRET_DOCS, ids=[t for t, _ in _SECRET_DOCS])
+def test_native_compile_carries_the_declared_secret_marking(
+        compile_to, reference_emit, tier, subdir):
+    """A program declaring `Secret[T]` must compile natively to the same bytes the
+    reference compile produces — markings included. It does not today."""
+    path = _fixture_path(subdir, "secrets.rvl")
+    source = path.read_text(encoding="utf-8")
+    got = compile_to(source, tier)
+    assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), got[:80]
+    want = reference_emit[tier](compile_files([str(path)]))
+    assert got == want
 
 
 def test_compile_rvl_in_file_tests_pass(compile_rvl):
