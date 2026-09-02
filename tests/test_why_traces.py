@@ -275,9 +275,19 @@ component C provides s: S {
 
 
 def test_mcp_check_passes_the_trace_to_agents():
+    """`MULTI_HOP_G4` declares a `@py` host body, so the server's default
+    (closed) authoring trust refuses it at admission before the G4 check runs.
+    The subject here is the why-trace plumbing, not the trust level, so the
+    fixture states the trusted author it always assumed."""
+    from revl.mcp import server as server_mod
     from revl.mcp.server import _tool_check
 
-    result = _tool_check({"source": MULTI_HOP_G4})
+    before = server_mod.AUTHORING
+    server_mod.set_authoring_trust(host_code=True)
+    try:
+        result = _tool_check({"source": MULTI_HOP_G4})
+    finally:
+        server_mod.AUTHORING = before
     assert result["ok"] is False
     assert result["diagnostics"][0]["why"]["path"][-1] == "audit_write"
 
