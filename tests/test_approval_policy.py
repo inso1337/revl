@@ -446,17 +446,22 @@ def test_activation_body_emission_cannot_dodge_the_prompt(sink):
 
 
 # ---------------------------------------------------------------------------
-# 12b. a MULTI-COMPONENT gated load converges — driven end to end, the way an
-# operator drives it.
+# 12b. a MULTI-COMPONENT gated load converges in N prompts — driven end to end,
+# the way an operator drives it.
 #
-# The gate walks every activation body in load order and consumes each standing
-# approval as it goes, so a load that raises on the SECOND class-(c) activation
-# has already spent the FIRST one on an attempt that never booted. The retry
-# therefore re-raises the first component's ticket, verbatim. That is the whole
-# operator loop for any real composition — raise, approve, re-issue, until it
-# boots — and it is exactly what a single-component test cannot see: with one
-# gated component the loop is prompt/approve/boot and never asks the same
-# question twice.
+# The gate walks every activation body in load order. It used to CONSUME each
+# standing approval as it went, so a load that raised on the SECOND class-(c)
+# activation had already spent the FIRST one on an attempt that never booted,
+# and the retry re-raised the first component's ticket verbatim. Re-asking is
+# self-similar, so the cost is not linear in N: the ask sequence is the ruler
+# sequence and a clean N-body load cost 2**N - 1 prompts (measured: 1, 3, 7, 15
+# for N = 1..4) where N would do. Item 204.
+#
+# The gate now reserves what covers each body and commits the whole set only
+# once every body is covered, so an attempt that cannot boot spends nothing and
+# each question is asked exactly ONCE. The counts asserted below are the
+# regression test: they fail on the pre-fix behaviour, and they are what a
+# downstream consumer asserting on exact prompt counts must be updated to.
 #
 # The revl suite had no test that drove a composition with more than one gated
 # activation body through `load` to a boot, which is why a hash-scoped
@@ -491,8 +496,10 @@ def test_a_multi_component_gated_load_converges(sink):
     session = _session()
 
     asked = []
+    attempts = 0
     for _attempt in range(12):            # bounded: the bug made this unbounded
         try:
+            attempts += 1
             session.load(ir, record=True)
             break
         except ApprovalRequired as exc:
@@ -504,12 +511,64 @@ def test_a_multi_component_gated_load_converges(sink):
     assert session.loaded
     # every gated activation body ran, exactly once each
     assert sorted(_lines(sink)) == ["announce:first", "announce:second"]
-    # and the operator was asked about the first component twice: once for the
-    # attempt that did not boot, once for the one that did. Re-asking is correct
-    # (its first yes was spent on the abandoned attempt); never being able to
-    # ANSWER the second asking is the regression.
-    assert asked.count("First") == 2
-    assert asked.count("Second") == 1
+    # THE COUNT (item 204). N gated activation bodies cost exactly N prompts and
+    # N + 1 `load` calls: each question is asked once, in walk order, and the
+    # last attempt is the one that boots. Pre-fix this was `["First", "Second",
+    # "First"]` over 4 attempts — 2**N - 1 prompts, because the attempt that
+    # raised on `Second` had already eaten the yes given for `First`.
+    assert asked == ["First", "Second"]
+    assert len(asked) == 2                 # N, not 2**N - 1
+    assert attempts == 3                   # N + 1
+
+
+@needs_cordis
+def test_a_gated_load_that_does_not_boot_spends_nothing(sink):
+    """An activation-gate walk that refuses is all-or-nothing (item 204).
+
+    The counts in 12b are a consequence of this: an attempt that cannot boot
+    leaves every approval it matched UNSPENT, so the operator is never asked
+    again for a question already answered. The complement — that a released
+    reservation is not a leak — is asserted at the end: each yes is still spent
+    exactly once, at the one crossing it authorized, and nothing survives the
+    boot."""
+    from revl.mcp.approval import ApprovalRequired
+    ir = compile_source(_two_gated_activations(sink), "two_activations.rvl")
+    session = _session()
+
+    def consumed():
+        return [e for e in session._ledger if e["consumed"]]
+
+    # attempt 1 raises on `First`; nothing was covered, nothing was spent.
+    with pytest.raises(ApprovalRequired) as first:
+        session.load(ir, record=True)
+    assert first.value.ticket["component"] == "First"
+    assert consumed() == []
+    session.approve_ticket(first.value.ticket["hash"])
+    assert len(session._ledger) == 1
+
+    # attempt 2 covers `First` from that yes and then refuses on `Second`. The
+    # walk RESERVED First's approval and released it when the walk could not
+    # clear, so it is still standing — this is the whole fix.
+    with pytest.raises(ApprovalRequired) as second:
+        session.load(ir, record=True)
+    assert second.value.ticket["component"] == "Second"
+    assert consumed() == [], "an attempt that never booted spent an approval"
+    assert _lines(sink) == [], "nothing booted, so no activation body ran"
+    session.approve_ticket(second.value.ticket["hash"])
+
+    # attempt 3 covers both and boots, and NOW both are spent — once each. A
+    # released reservation is un-spent, never double-spendable: two yeses, two
+    # ledger entries, two consumptions, two crossings.
+    session.load(ir, record=True)
+    assert session.loaded
+    assert sorted(_lines(sink)) == ["announce:first", "announce:second"]
+    assert len(session._ledger) == 2
+    assert len(consumed()) == 2
+
+    # and nothing outlives the boot: re-running the same gate over the same
+    # generation finds no standing authority and prompts again.
+    with pytest.raises(ApprovalRequired):
+        session._enforce_activation_gate(ir)
 
 
 # ---------------------------------------------------------------------------
