@@ -62,7 +62,7 @@ meaning (effects, inverses, provisions, boundaries) -> distinct revl syntax.
 program   := use* decl*
 use       := 'use' STRING ( '{' IDENT (',' IDENT)* '}' | 'as' IDENT )
 decl      := ['pub'] (typedecl | fndecl | service | component | extern
-                       | test | 'fault' test)
+                       | test | 'fault' test) | composition
 
 --- types (own syntax; capitalized names; [] generics) ---
 typedecl  := 'type' IDENT ['[' IDENT (',' IDENT)* ']'] '=' (record | variant)
@@ -120,6 +120,16 @@ intercept := 'intercept' IDENT 'with' record_literal
 provide   := 'provide' IDENT '{' ('fn' IDENT '(' IDENT* ')' ('=' expr | block))* '}'
 -- a plain `let x = expr` (no `effect`) is legal only inside a provide method.
 -- an activation body never takes a plain binding (G6: nothing there to revert).
+
+--- compositions (a composition is a set of ROWS; docs/composition-rows.md) ---
+composition := 'composition' IDENT '{' (use | row)* '}'   -- contextual keyword
+row       := 'row' '@' IDENT 'from' STRING 'provides' ('nothing' | IDENT (',' IDENT)*)
+             ['component' IDENT]            -- disambiguator; provenance, not identity
+             ['config' '{' (IDENT ':' literal)* '}']  -- checked against the header
+             ['granted' '{' IDENT (',' IDENT)* '}']   -- reach allowlist, empty default
+-- `@label` is the row's IDENTITY, scoped to its origin (`.::@db`, `acme_pg::@db`).
+-- `provides` is an ASSERTION checked against the component header; a lost key
+-- refuses, a gained one is reported. Resolve with `revl composition FILE`.
 
 --- host blocks (extern; typed boundary, opaque verbatim body) ---
 extern    := 'extern' ('pure'|'acquire'|'emission') 'fn' IDENT '(' (IDENT ':' type)* ')'

@@ -119,6 +119,24 @@ def build_parser() -> argparse.ArgumentParser:
                           help="print the skeleton, its obligations, and each hole's fill spec "
                                "as one JSON document")
 
+    # item 426 S1: the row table of a declared composition.
+    composition = sub.add_parser(
+        "composition",
+        help="resolve a composition document's ROW TABLE (labels, claims, "
+             "config), header-only")
+    composition.add_argument("file", help="the .rvl document declaring the composition")
+    composition.add_argument(
+        "--json", action="store_true",
+        help="print the row table as JSON instead of the ROWS/WIRING panels")
+    composition.add_argument(
+        "--admit", action="store_true",
+        help="also COMPILE the rows the table names and print the resulting "
+             "load order (resolution alone lowers no component body)")
+    composition.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="the project root row provenance and origins are recorded "
+             "against (default: the working directory)")
+
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
@@ -680,24 +698,39 @@ def build_parser() -> argparse.ArgumentParser:
              "Repeatable")
     imp_api.add_argument(
         "--compensate", action="append", default=[], metavar="OP",
-        help="item 254 (Slice 1): promote a `PUT` to a COMPENSATE-grade network "
-             "effect — attach a best-effort, audit-surface reversal (PUT the GET "
-             "preimage back on abort) to its emission. Honoured on `PUT` only "
-             "(hard error on POST/PATCH). Pair with `--preimage OP=GETOP`. "
-             "Repeatable")
+        help="item 254: promote a write to a COMPENSATE-grade network effect — "
+             "attach a best-effort, audit-surface reversal to its emission. The "
+             "verb picks the route: `PUT` restores the GET preimage, `DELETE` "
+             "recreates from it, `POST` deletes what it created. Hard error on "
+             "`PATCH`. Pair with `--preimage`/`--undo`/`--undo-key`. Repeatable")
     imp_api.add_argument(
         "--preimage", action="append", default=[], metavar="OP=GETOP",
-        help="item 254: name the safe `GET` operation a compensate-grade `PUT` "
-             "reads its preimage from. Repeatable")
+        help="item 254: name the safe `GET` operation a compensate-grade `PUT` or "
+             "`DELETE` reads its preimage from. Repeatable")
     imp_api.add_argument(
-        "--undo", action="append", default=[], metavar="OP=PUTOP",
-        help="item 254: name the operation that writes the preimage back "
-             "(defaults to the `PUT` itself). Repeatable")
+        "--undo", action="append", default=[], metavar="OP=UNDOOP",
+        help="item 254: name the operation the reversal issues — the `PUT` that "
+             "writes the preimage back (the default for a `PUT`), the create a "
+             "`DELETE` recreates through, or the delete that removes what a "
+             "`POST` created. Repeatable")
+    imp_api.add_argument(
+        "--undo-key", action="append", default=[], metavar="OP=FIELD",
+        dest="undo_key",
+        help="item 254: for a compensate-grade `POST`, the REQUIRED response "
+             "field naming the resource it created, which the reversal delete is "
+             "addressed by. Without it the compensation is unkeyed and refused. "
+             "Repeatable")
     imp_api.add_argument(
         "--if-match", action="append", default=[], metavar="OP", dest="if_match",
         help="item 254: assert a compensate-grade endpoint exposes a version/ETag "
-             "token, so the reversal PUTs with `If-Match` and fails loudly on a "
-             "racing writer (else it is best-effort-may-clobber). Repeatable")
+             "token, so the reversal issues under `If-Match` (`If-None-Match: *` "
+             "for a recreate) and fails loudly on a racing writer (else it is "
+             "best-effort-may-clobber). Repeatable")
+    imp_api.add_argument(
+        "--require-if-match", action="store_true", dest="require_if_match",
+        help="item 254: refuse a compensate-grade promotion on any endpoint that "
+             "claims no version/ETag token, instead of emitting a "
+             "best-effort-may-clobber reversal for it")
     imp_api.add_argument("-o", "--output", default=None,
                          help="output path (default: stdout)")
     imp_api.add_argument("--json-diagnostics", action="store_true",
@@ -844,9 +877,11 @@ def build_parser() -> argparse.ArgumentParser:
                               "of firing unprompted. Required when the snapshot "
                               "records an approval policy")
     recover.add_argument("--policy", default=None, metavar="POLICY",
-                         help="on --restore, re-bind the boundary-policy file (item "
-                              "33) the snapshot was taken under, so its `requires "
-                              "approval` gate re-arms on recovery")
+                         help="the boundary-policy file (item 33). On --restore it "
+                              "re-binds the posture the snapshot was taken under so "
+                              "the `requires approval` gate re-arms; a `recovery may "
+                              "re-issue owed emissions` rule additionally turns on "
+                              "the item-440 re-issue seam (off by default)")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
 
     why = sub.add_parser(

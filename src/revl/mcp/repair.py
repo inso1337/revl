@@ -626,7 +626,14 @@ def _reuse_check(arguments: dict, running_ir: dict | None) -> dict:
                     "reason": f"no registry index at {registry_dir}"}
         result = registry_resolve(
             Registry.from_dir(registry_dir), arguments["need"],
-            manifest=running_ir, limit=int(arguments.get("limit", 5)))
+            manifest=running_ir, limit=int(arguments.get("limit", 5)),
+            # DIRECT reuse only. This check answers "does an admissible
+            # provider already exist?", and it hands `chosen` straight to the
+            # repair loop - a candidate that needs an adapter does NOT already
+            # exist as a provider, it needs an author's `adapt` decision first
+            # (item 296, proposed-not-silent). Offering one here would make the
+            # loop assert reuse for a component nobody has written.
+            adapt=False)
     except Exception as exc:  # noqa: BLE001 — reuse never crashes the loop
         return {"ran": False, "reason": f"{type(exc).__name__}: {exc}"}
     candidates = result.get("candidates") or []
