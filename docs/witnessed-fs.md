@@ -66,16 +66,41 @@ The guard has three properties that make it real rather than decorative:
 1. **Realpath before the check.** `resolve_within` realpaths the target, which
    resolves every symlink in the path, and only then tests root membership. A
    symlink placed inside the root that points outside is caught, not followed.
-2. **The inverse path is guarded too.** `restore`, `unrm`, `unmove`, and
-   `rmdir_if_empty` re-run the same check on the path they are about to write.
-   A witness that (through tampering or a moved root) now points outside cannot
-   make the reversal escape; a confinement failure on an inverse raises and is
-   recorded as `restore-residue` rather than silently writing outside.
+2. **The inverse path is guarded too, at BOTH endpoints.** `restore`, `unrm`,
+   `unmove`, and `rmdir_if_empty` re-run the same check on the path they are
+   about to write. A witness that (through tampering or a moved root) now
+   points outside cannot make the reversal escape; a confinement failure on an
+   inverse raises and is recorded as `restore-residue` rather than silently
+   writing outside. This covers the SOURCE endpoint as much as the target:
+   `restore`'s `preimage` and `unrm`'s `garbage` are the source of a rename,
+   and a rename REMOVES what it names, so an unchecked source is not a weaker
+   overwrite hole but a steal-and-destroy primitive for any file the process
+   can reach. Those sources go through `resolve_sidecar`, which confines them
+   and additionally requires them to be a sidecar this workspace itself
+   produced. The inverses are `pure` externs, so they carry no capability and
+   are callable from any pure position (and are reconstructed from WAL data by
+   `revl recover` with no revl source involved at all) — shrinking their
+   authority to "a sidecar we made, moved back inside the root we own" is what
+   makes that classification safe, since item 243 rule 3 leaves no
+   capability-scoped spelling for an inverse.
 3. **The reversal machinery lives inside the root.** The session garbage dir
    (`.revl-fs-garbage`) and the preimage snapshots (`.revl-fs-preimage`) are
    subdirectories of the workspace root, so an `rm` parks its target inside the
    boundary and a `write` snapshots inside the boundary. Reversal reads only
-   from inside the root.
+   from inside the root. The directories themselves are resolved and
+   type-checked, not merely joined onto the root: a symlink planted under
+   either name is refused, because `mkdir -p` semantics succeed on a
+   pre-existing link and would otherwise redirect the whole reversal machinery
+   outside the boundary.
+
+Those are three of the FOUR path families the guard enumerates (`PATH_FAMILIES`
+in `backends/python/revl_fs_workspace.py`). The fourth is the syscall itself: a
+resolved path is a checked path, not yet a safe syscall, so every mutation runs
+through a directory fd walked down from the root one component at a time with
+`O_NOFOLLOW`, and a write goes through the verified fd rather than the name.
+`tests/test_fs_confinement_families.py` scans the `@py` bodies of
+`stdlib/fs.rvl` and fails if any path reaches a mutation by another route, so
+the enumeration cannot quietly grow a fifth member.
 
 ## Honest caveats
 
@@ -85,14 +110,25 @@ oversold:
 * **Reversal does not undo observation.** A concurrent process that read the
   intermediate state already saw it; restoring the bytes cannot unsee that.
   This is fine for a private workspace and weaker on a shared tree.
-* **Concurrent-writer races are TOCTOU-bounded, not eliminated.** The realpath
-  check narrows, but does not close, the window between the check and the
-  syscall. A writer racing the same path can still interleave; the confinement
-  guard applies to the same bound (property 1 above notes the residual window).
+* **A hardlinked target is refused, not written.** `realpath` cannot see
+  through a hardlink: an inside name and an outside name can be two directory
+  entries for one inode, and every path check passes while the write lands
+  outside the root. Writing through the fd does not help, because the fd names
+  the same shared inode, so `write` `fstat`s the file it opened and returns
+  `EMULTILINK` when the link count exceeds one. The cost is that a legitimately
+  hardlinked file inside the workspace cannot be witnessed-written.
+* **A `write` needs read access to its target.** The preimage is snapshotted
+  out of the same fd the write uses, so a target the process may write but not
+  read is refused. Without a preimage the write would not be reversible, so
+  refusing is the honest outcome.
 * **Confinement here is a runtime refusal, not physical containment.** A
   process that cannot even name a path outside the root is a wasm-tier property
   eventually. On this tier the guard holds only for ops that go through these
   bodies; it is not a sandbox around the whole process.
+* **The ts tier has not had this pass.** `backends/typescript/revl_fs_ts.ts`
+  still mirrors the pre-fix py shape (unchecked inverse sources, joined-not-
+  resolved sidecar directories, path-based syscalls). It is a peer of the py
+  slice, not a second enforcement point, and it needs the same treatment.
 
 ## How it runs, and the one surface that is deferred
 
