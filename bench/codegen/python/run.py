@@ -197,6 +197,9 @@ def cases(em, hw):
     keys = [f"k{i:04d}" for i in range(400)]
     big_keys = [f"k{i:04d}" for i in range(2000)]
     words = [f"w{(i * 7919) % 997:04d}" for i in range(200)]
+    # half duplicates, so `list_dedup`'s membership scan actually rejects
+    dupes = [f"w{i % 100:04d}" for i in range(200)]
+    big_dupes = [f"w{i % 400:04d}" for i in range(800)]
     hay = "abcdefghij" * 40
     opts = [i if i % 3 else None for i in range(400)]
     big_opts = [i if i % 3 else None for i in range(4000)]
@@ -228,6 +231,8 @@ def cases(em, hw):
             ("pipeline", (ints,), (big_ints,), "map -> filter -> reduce"),
             ("list_sort", (words,), (words,),
              "stdlib list_sort (quadratic by design)"),
+            ("deduped", (dupes,), (big_dupes,),
+             "stdlib list_dedup (accumulator handed to a call)"),
         ]),
         "arith": only([
             ("sum_squares", (2000,), (60000,),
@@ -309,6 +314,10 @@ def scale_probes(em, hw):
     def words(n):
         return [f"w{(i * 7919) % 99991:06d}" for i in range(n)]
 
+    def dupes(n):
+        # half duplicates, so the membership scan actually rejects
+        return [f"w{i % (n // 2 or 1):06d}" for i in range(n)]
+
     return [
         ("list_build.build", 2000,
          lambda n: (lambda: em["list_build"].build(n)),
@@ -319,6 +328,9 @@ def scale_probes(em, hw):
         ("transforms.list_sort", 200,
          lambda n: (lambda xs=words(n): em["transforms"].list_sort(xs)),
          lambda n: (lambda xs=words(n): hw.list_sort(xs))),
+        ("transforms.deduped", 400,
+         lambda n: (lambda xs=dupes(n): em["transforms"].deduped(xs)),
+         lambda n: (lambda xs=dupes(n): hw.deduped(xs))),
         ("maps.fill", 1000,
          lambda n: (lambda ks=keys(n): em["maps"].fill(ks)),
          lambda n: (lambda ks=keys(n): hw.fill(ks))),
@@ -372,6 +384,8 @@ COPY_PROBES = [
      lambda n: (list(range(n)),)),
     ("transforms.list_sort", "list_sort", 100,
      lambda n: ([f"w{(i * 7919) % 99991:06d}" for i in range(n)],)),
+    ("transforms.deduped", "deduped", 200,
+     lambda n: ([f"w{i % (n // 2 or 1):06d}" for i in range(n)],)),
     ("maps.fill", "fill", 500,
      lambda n: ([f"k{i:06d}" for i in range(n)],)),
     ("maps.drop_keys", "drop_keys", 500,
@@ -384,6 +398,7 @@ COPY_PROGRAM = {
     "list_build.build": "list_build",
     "transforms.doubled": "transforms",
     "transforms.list_sort": "transforms",
+    "transforms.deduped": "transforms",
     "maps.fill": "maps",
     "maps.drop_keys": "maps",
     "records.shift_all": "records",

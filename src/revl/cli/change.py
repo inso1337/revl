@@ -360,6 +360,75 @@ def _run_recover(args) -> int:
     return 0 if report.get("residue", {}).get("clean") else 1
 
 
+def _run_branch(args) -> int:
+    """`revl branch --wal FILE [--wal FILE...] [--at SEQ]` — session branch
+    lineage over durable WALs (item 250, Slice 2).
+
+    With one WAL it says what that session IS (a branch of another, a parent
+    frozen at its fork point, or neither) and what a branch inherited. With
+    several it reconstructs the branch tree, naming the edges it could not close
+    rather than dropping them. With `--at` it enumerates the fork partition of the
+    recorded tail instead.
+
+    Needs no backend: it reads through the tier-agnostic WAL core, so a branch
+    written by any tier's runtime reads the same. Nothing is run and nothing is
+    rewound — an offline reader has no workspace to rewind. Exit status follows
+    the residue: 0 when the branch stands on a clean fork point, 1 when honest
+    residue (a crossed emission, an unfired crossing inverse, an unclosed lineage
+    edge) remains.
+    """
+    from ..branch import (BranchError, lineage, partition,  # noqa: PLC0415
+                          render, topology)
+
+    wals = list(args.wal)
+    try:
+        if args.at is not None:
+            if len(wals) != 1:
+                print("error: --at enumerates the tail of ONE session; pass a "
+                      "single --wal", file=sys.stderr)
+                return 1
+            doc = partition(wals[0], args.at)
+        elif len(wals) == 1:
+            doc = lineage(wals[0])
+        else:
+            doc = topology(wals)
+    except BranchError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(doc, indent=2))
+    else:
+        print(render(doc))
+
+    if doc["kind"] == "revl.branch-topology":
+        return 1 if (doc["orphans"] or doc["dangling"]) else 0
+    residue = doc.get("residue") or doc.get("inheritedResidue")
+    return 0 if residue is None or residue.get("clean") else 1
+
+
+def _run_compare(args) -> int:
+    """`revl compare LEFT.wal RIGHT.wal` — compare two recorded session histories
+    that share a fork point (item 250, Slice 2).
+
+    Two WALs with no recorded lineage relation are NOT compared against an
+    invented common point; the comparison says so and exits nonzero, because a
+    per-side tail only means something relative to a divergence point.
+    """
+    from ..branch import BranchError, compare, render  # noqa: PLC0415
+
+    try:
+        doc = compare(args.left, args.right)
+    except BranchError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(doc, indent=2))
+    else:
+        print(render(doc))
+    return 0 if doc["comparable"] else 1
+
+
 def _run_repair(args) -> int:
     """`revl repair <files> --component NAME ...` — the repair loop (item 62).
 
