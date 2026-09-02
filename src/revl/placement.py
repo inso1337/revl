@@ -68,6 +68,9 @@ from pathlib import Path
 from ._paths import backends_root, stdlib_root
 from .activation import local_prereqs
 from .attest import canonical_hash
+from .deploy import (ADMISSION_PEER_PINNED, ADMISSION_SEALED,
+                     ADMISSION_UNVERIFIED, SeamAdmission,
+                     render_seam_admissions)
 from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
@@ -2127,12 +2130,23 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     addresses: dict[str, tuple[str, int, float | None]] = {}
     identities: dict[str, str] = {}
     explicit_tls: dict[str, dict] = {}
+    # item 118 §1.4b: the identities a NETWORK provider declares may call it.
+    # `None` means "not declared", which is a different thing from `[]`
+    # ("only this placement's own consumers") — see the validation below.
+    declared_peers: dict[str, list[str]] = {}
     for pname, pconf in processes.items():
         addr = pconf.get("address")
         if addr:
             if addr.get("host") is None or addr.get("port") is None:
                 return abort(f"process {pname!r} `address` needs both host and port")
             addresses[pname] = (str(addr["host"]), int(addr["port"]), addr.get("rtt_ms"))
+        praw = pconf.get("peers")
+        if praw is not None:
+            if not isinstance(praw, list) or any(not isinstance(x, str) for x in praw):
+                return abort(f"process {pname!r} `peers` must be a list of identity "
+                             "strings (the mTLS identities allowed to call this "
+                             "network seam)")
+            declared_peers[pname] = [str(x) for x in praw]
         tconf = pconf.get("tls") or {}
         if tconf.get("identity"):
             identities[pname] = str(tconf["identity"])
@@ -2224,6 +2238,11 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
 
     # which processes take part in a network seam (as provider or consumer)?
     network_processes: set[str] = set(addresses)  # a provider serves remotely
+    # network provider -> the consumers of its keys that live in THIS placement.
+    # These are the only callers a network provider can enumerate: an item-151
+    # cross-composition consumer holds only an address and never appears here,
+    # which is exactly why the peer set has to be DECLARED and cannot be derived.
+    net_consumers: dict[str, set[str]] = {}
     for pname in processes:
         for key in requires[pname]:
             if key in provides[pname]:
@@ -2231,6 +2250,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             if owner.get(key) in addresses:
                 network_processes.add(pname)          # this consumer crosses TCP
                 network_processes.add(owner[key])     # to that provider
+                net_consumers.setdefault(owner[key], set()).add(pname)
             elif key in remote_specs:
                 network_processes.add(pname)          # this consumer dials a remote
 
@@ -2287,6 +2307,53 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 "the local `socket` form, so put the consumer on py or node/ts, "
                 "or give it a local UDS seam")
 
+    # --- item 118 §1.4b: the peer plane a TCP+mTLS seam CAN carry.
+    #
+    # `CorrelationGuard` (the UDS seam's guard) authenticates a caller by a
+    # per-boot secret this conductor minted and handed to its own children. A
+    # network provider may also be dialled by an item-151 cross-composition
+    # consumer running under a DIFFERENT conductor, which can never hold that
+    # secret, so demanding a sealed envelope over the network refuses the
+    # legitimate caller rather than the stranger. What mTLS does prove — with a
+    # CA-signed key, per session — is WHO is calling; what was missing is a
+    # closed set to check that against, because `CERT_REQUIRED` against a shared
+    # CA answers every identity that CA ever signed. `peers` is that set.
+    #
+    # It is DECLARED, never derived: this placement cannot enumerate the
+    # consumers that live in other compositions, and a set derived from the ones
+    # it can see would lock them out. The declared list is unioned with this
+    # placement's own network consumers of the provider so an operator naming an
+    # external peer does not have to restate the local ones (and cannot lock
+    # them out by forgetting). An explicit empty list is therefore meaningful:
+    # "only this composition's own consumers".
+    peer_allowlist: dict[str, tuple[str, ...]] = {}
+    for pname in sorted(declared_peers):
+        if pname not in addresses:
+            return abort(
+                f"process {pname!r} declares `peers` but no `address` — a peer "
+                "allowlist is the admission check on a network (TCP+mTLS) seam's "
+                "mTLS peer identity; a local UDS seam is admitted by the item-118 "
+                "correlation guard instead, whose peer set is derived, not declared")
+        if allowed_identities is not None:
+            for ident in declared_peers[pname]:
+                if ident not in allowed_identities:
+                    return abort(
+                        f"process {pname!r} allows peer identity {ident!r}, which is "
+                        f"not a declared operator in {profile_path!r} (identity per "
+                        "process is issued by the operator model, item 55)")
+    for pname in sorted(addresses):
+        if pname not in declared_peers:
+            continue
+        admissible = set(declared_peers[pname])
+        admissible |= {identities[q] for q in net_consumers.get(pname, set())}
+        if not admissible:
+            return abort(
+                f"process {pname!r} declares `peers = []` and no process in this "
+                "placement consumes its keys over the network, so no caller could "
+                "ever be admitted — name the identities that may call it, or drop "
+                "`peers` and accept the reported UNVERIFIED admission level")
+        peer_allowlist[pname] = tuple(sorted(admissible))
+
     # certificate material for every network identity: minted loopback *test*
     # certs when `generate_test_certs`, else the explicit paths each [tls] gave.
     certs: dict[str, dict] = {}
@@ -2337,6 +2404,10 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
 
     # (consumer, key, host, port, configured_rtt) for the latency report below
     net_seams: list[tuple[str, str, str, int, float | None]] = []
+    # item 118 §1.4b: the peer-admission level each serving process ACHIEVED,
+    # reported by the conductor below. Built in the spec loop so it can only say
+    # what was actually wired into a spec.
+    seam_admissions: list[SeamAdmission] = []
 
     # base specs (backend-neutral)
     specs: dict[str, dict] = {}
@@ -2499,6 +2570,29 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             }
             if pname in addresses:
                 serve_spec["endpoint"] = _serve_endpoint(pname)
+                # item 118 §1.4b: the closed peer set, when the placement
+                # declared one. Names only — no secret crosses a composition
+                # boundary, which is what lets this hold where the correlation
+                # guard cannot.
+                allow = peer_allowlist.get(pname)
+                if allow:
+                    serve_spec["peers"] = list(allow)
+                    seam_admissions.append(SeamAdmission(
+                        provider=pname, transport="tcp+mtls",
+                        level=ADMISSION_PEER_PINNED,
+                        detail="mTLS peer identity checked against the declared "
+                               "`peers` allowlist; NOT replay-checked (an "
+                               "off-placement peer cannot hold this boot's "
+                               "correlation secret, so no envelope to dedup)",
+                        peers=allow))
+                else:
+                    seam_admissions.append(SeamAdmission(
+                        provider=pname, transport="tcp+mtls",
+                        level=ADMISSION_UNVERIFIED,
+                        detail="mTLS proves WHICH identity is calling but this "
+                               "placement declares no `peers`, so every identity "
+                               "the shared CA signed is answered — add "
+                               f"[processes.{pname}] peers = [...] to close it"))
             else:
                 serve_spec["socket"] = sockets[pname]
                 # item 118 S1 / roadmap 421 F8: the secret table this provider
@@ -2526,6 +2620,22 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                         "peers": {correlation_identity[q]: correlation_secret[q].hex()
                                  for q in sorted(peers)},
                     }
+                    seam_admissions.append(SeamAdmission(
+                        provider=pname, transport="uds",
+                        level=ADMISSION_SEALED,
+                        detail="every caller authenticated by its own per-process "
+                               "secret and replay-checked",
+                        peers=tuple(sorted(correlation_identity[q] for q in peers))))
+                elif peers:
+                    unsealing = sorted({str(backends.get(q)) for q in peers}
+                                       - set(_CORRELATION_SEALING_TIERS))
+                    seam_admissions.append(SeamAdmission(
+                        provider=pname, transport="uds",
+                        level=ADMISSION_UNVERIFIED,
+                        detail="a consumer runs on a tier whose bridge cannot seal "
+                               f"a correlation envelope ({', '.join(unsealing)}), so "
+                               "no guard is installed and any caller that reaches "
+                               "the socket is answered"))
             spec["serve"] = serve_spec
         specs[pname] = spec
 
@@ -2679,6 +2789,14 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         print(f"  java runtime: {note}", flush=True)
     if net_seams:
         print(f"  network seams (item 56): {len(net_seams)} over TCP+mTLS", flush=True)
+    # item 118 §1.4b: the peer-admission level every cross-process seam actually
+    # ACHIEVED — `sealed` where the caller is authenticated by its own secret and
+    # replay-checked, `peer-pinned` where mTLS proved the identity and a declared
+    # allowlist closed the set, and UNVERIFIED where neither holds. A seam that
+    # cannot prove who may call it says so here rather than staying quiet, which
+    # is `bundle.verify`'s rule applied to this plane.
+    for line in render_seam_admissions(seam_admissions):
+        print(line, flush=True)
 
     def report_network_latency() -> None:
         """Print the real per-seam latency for each network seam (item 56): the
