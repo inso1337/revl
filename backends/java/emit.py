@@ -56,6 +56,20 @@ CRATE = "cordis4j"
 # shifts). Mirrors backends/go/emit.py's `_RECORD_MODE`.
 _RECORD_MODE = False
 
+# item 178(b): lifecycle mode. Set by `emit()` for an ir_version 3 document that
+# carries `lifecycle test` blocks (docs/syntax-2.0.md §7.1). Those tests prove
+# R1 (every acquired host resource was released) as well as R4 (no provision
+# still resolves), so the host runtimes carry a live-resource counter while it
+# is on. Default False -> the host runtimes are byte-identical to what they were
+# before the driver existed, which is what keeps every java golden (none of
+# which carries a lifecycle test) unchanged.
+_LIFECYCLE_MODE = False
+
+# The document's declared type names (ir_version 3), so `_java_v3_type` can tell
+# a user's `type Row = { .. }` from the host Pool's undeclared query-result row.
+# Set by `emit()`; empty for the v1/v2 dialects, which do not use that renderer.
+_V3_DECLARED_TYPES: frozenset[str] = frozenset()
+
 TYPE_MAP = {
     "Str": "String",
     "Int": "long",
@@ -559,6 +573,15 @@ def _java_v3_type(name: object, *, boxed: bool = False) -> str:
                 f"{_java_v3_type(args[1], boxed=True)}>"
             )
         return base + "<" + ", ".join("Object" for _ in args) + ">"
+    if name == "Row" and name not in _V3_DECLARED_TYPES:
+        # The host Pool's query-result row: undeclared by the document, handed
+        # back by the runtime. `Pool.query` here returns `java.util.List<Object>`,
+        # so `List[Row]` has to be exactly that or the emitted interface and its
+        # implementation disagree and javac rejects the file. go names the row
+        # (`type Row = map[string]string`), rust widens it to `Value`, and this
+        # tier's own v1 renderer already widens it to `Object`; v3 was the one
+        # renderer that emitted the bare name and produced uncompilable Java.
+        return "Object"
     return _ident(name, "type name")
 
 
@@ -2425,7 +2448,15 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
     return lines
 
 
-def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> list[str]:
+def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
+                   extra_runners: list[str] | None = None) -> list[str]:
+    """The document's pure `test` blocks as static methods, plus the
+    `REVL_TESTS` roster the JVM runner walks.
+
+    *extra_runners* are already-emitted method names (the lifecycle tests, see
+    `_emit_v3_lifecycle_tests`) that join the same roster: one list, so a
+    document's lifecycle tests run through exactly the channel its plain tests
+    run through and neither can be silently dropped."""
     ctx = _V3Ctx(types, functions, externs)
     lines: list[str] = []
     used: set[str] = set()
@@ -2439,6 +2470,7 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> 
             _v3_stmt(stmt, ctx, lines, 1, test_mode=True)
         lines.append("}")
         lines.append("")
+    test_names.extend(extra_runners or [])
     if test_names:
         runners = ", ".join(f"Components::{name}" for name in test_names)
         lines.append(
@@ -2447,6 +2479,225 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> 
         )
         lines.append("")
     return lines
+
+
+def _java_lifecycle_method_name(name: object, used: set[str]) -> str:
+    """A distinct Java method name for a lifecycle test.
+
+    The `lifecycle` prefix is what keeps it out of `_java_test_method_name`'s
+    `test`-prefixed namespace, so a plain `test "x"` and a `lifecycle test "x"`
+    in one document never collide.
+    """
+    raw = name if isinstance(name, str) else str(name)
+    base = "lifecycle"
+    for part in re.split(r"[^A-Za-z0-9_]+", raw):
+        if part:
+            base += part[:1].upper() + part[1:]
+    candidate, index = base, 1
+    while candidate in used:
+        candidate = f"{base}_{index}"
+        index += 1
+    used.add(candidate)
+    return candidate
+
+
+def _emit_lifecycle_no_residue_helper(provisions: str) -> list[str]:
+    """The R4 + R1 proof a lifecycle `assert no_residue` runs.
+
+    R4 is read through the *public* Context API, exactly as
+    backends/java/placement/RunOnce.java reads it after its LIFO teardown: a
+    provided key resolves with `ctx.get(iface)` while its provider is up, and
+    once every provide-disposable has run the same `get` must fail. Reading it
+    that way (rather than reaching into runtime internals) is what makes the
+    check mean the same thing against the in-repo cordis4j stubs and against a
+    compiled cordis4j-core (`REVL_CORDIS4J_CLASSES`).
+
+    R1 is the host-resource counter: `undo` that is not the inverse of its
+    acquisition (a Pool opened and never closed) leaves it above the baseline
+    this test started from. The baseline is per-test, so one test's leak is
+    reported against that test and does not smear onto the next one.
+    """
+    return [
+        "// R4 (no provision still resolves) + R1 (every acquired host resource",
+        "// was released) — the proof behind a lifecycle `assert no_residue`",
+        "// (docs/syntax-2.0.md §7.1, docs/backend-ir.md §Required semantics).",
+        "static void revlLifecycleNoResidue(String where, Context root,",
+        "        java.util.Map<String, Disposable> loaded, long r1Base,",
+        "        Class<?>... provisions) {",
+        "    if (!loaded.isEmpty()) {",
+        "        throw new AssertionError(where + \": residue — still loaded: \"",
+        "            + loaded.keySet() + \" (R4)\");",
+        "    }",
+        "    for (Class<?> iface : provisions) {",
+        "        boolean live;",
+        "        try {",
+        "            root.get(iface);",
+        "            live = true;",
+        "        } catch (RuntimeException withdrawn) {",
+        "            live = false; // good: nothing answers for this key any more",
+        "        }",
+        "        if (live) {",
+        "            throw new AssertionError(where + \": residue — \"",
+        "                + iface.getSimpleName() + \" still resolves after teardown (R4)\");",
+        "        }",
+        "    }",
+        "    long leaked = REVL_LIVE_HOST_RESOURCES.get() - r1Base;",
+        "    if (leaked != 0L) {",
+        "        throw new AssertionError(where + \": residue — \" + leaked",
+        "            + \" host resource(s) never released (R1)\");",
+        "    }",
+        "}",
+        "",
+        "// R1 live-resource counter: every host object acquired must be released",
+        "// by its `undo`, or the lifecycle `assert no_residue` above fails.",
+        "public static final java.util.concurrent.atomic.AtomicLong",
+        "    REVL_LIVE_HOST_RESOURCES = new java.util.concurrent.atomic.AtomicLong();",
+        "",
+        "// Every service this document provides: the keys `assert no_residue`",
+        "// requires nothing to answer for once the composition is torn down.",
+        "static final Class<?>[] REVL_LIFECYCLE_PROVISIONS =",
+        f"    new Class<?>[] {{{provisions}}};",
+        "",
+    ]
+
+
+def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
+                             externs: list, services: dict,
+                             components: list) -> tuple[list[str], list[str]]:
+    """`lifecycle test` blocks (syntax-2.0 §7.1) as static methods driving a
+    live cordis4j composition (item 178(b); FR-5's java half).
+
+    A lifecycle test is not a pure test unit: it loads components into a live
+    context, calls through provision keys, unloads them, and asserts
+    residue-freedom by reading the host runtime back. That is exactly the
+    round-trip `revl run --backend java --once` already drives
+    (backends/java/placement/RunOnce.java); this lowers the same round-trip
+    into the tier's own test idiom, so `revl test --backend java` runs it
+    beside the document's plain tests.
+
+    Load is `root.plugin(new <Comp>Plugin(<config>))` and unload is the
+    Disposable it returns — the real cordis4j load/unload pair the java
+    scenarios drive (backends/java/scenarios/RunRealScenarios.java) — and the
+    root comes from `Contexts.create()`, so one emitted source runs on the
+    in-repo stubs and on a compiled cordis4j-core alike.
+
+    Returns ``(lines, method names)``; the names join `REVL_TESTS`.
+    """
+    if not services:
+        raise EmitError(
+            "a lifecycle test loads components and calls through provision "
+            "keys, so it needs at least one service in the document to drive; "
+            "this document declares none"
+        )
+    provided: dict[str, str] = {}
+    for component in components:
+        for key, service in (component.get("provides") or {}).items():
+            provided[key] = service
+    method_tables = {sname: (svc.get("methods") or {})
+                     for sname, svc in services.items()}
+    templates = {comp.get("name"): comp for comp in components}
+    provisions = ", ".join(
+        f"{_ident(sname, 'service')}.class" for sname in sorted(set(provided.values())))
+
+    ctx = _V3Ctx(types, functions, externs, components)
+    out = _emit_lifecycle_no_residue_helper(provisions)
+    names: list[str] = []
+    used: set[str] = set()
+    for test in tests:
+        mname = _java_lifecycle_method_name(test.get("name"), used)
+        names.append(mname)
+        ctx.arrows = {}  # arrow bindings are local to one body
+        # RAW (not run through `_string`): every use below feeds it into its own
+        # single `_string(...)` call, the one place allowed to escape it.
+        where = f'lifecycle test "{test.get("name")}"'
+        out.append(f"public static void {mname}() {{")
+        out.append("    // drives the composition on a live cordis4j context and")
+        out.append("    // proves no residue after LIFO teardown (FR-5 / §7.1).")
+        out.append("    final Context _revlRoot = Contexts.create();")
+        out.append("    final java.util.Map<String, Disposable> _revlLoaded =")
+        out.append("        new java.util.LinkedHashMap<>();")
+        out.append("    final long _revlR1Base = REVL_LIVE_HOST_RESOURCES.get();")
+        for step in test.get("body") or []:
+            out.extend(_v3_lifecycle_step(
+                step, ctx, where, provided, method_tables, templates))
+        out.append("}")
+        out.append("")
+    return out, names
+
+
+def _v3_lifecycle_step(step: dict, ctx: _V3Ctx, where: str,
+                       provided: dict, method_tables: dict,
+                       templates: dict) -> list[str]:
+    """One lowered lifecycle step. A step this tier cannot express is refused
+    with the tier's standing "not lowerable" wording, which `revl test` reads
+    back as a skip-with-reason rather than a tier failure — never a false pass.
+    """
+    kind = step.get("step")
+    if kind == "load":
+        name = step["component"]
+        template = templates.get(name)
+        if template is None:  # pragma: no cover — the lowerer rejects it
+            raise EmitError(f"{where}: no component named {name!r}")
+        cname = _ident(name, "component")
+        supplied = step.get("config") or {}
+        # Config values in the component's DECLARED order — the order its
+        # plugin constructor takes them (`_emit_plugin_ctors`); an omitted
+        # field (only possible when it has a default) takes that default.
+        args = []
+        for field in template.get("config") or []:
+            fname = field.get("name")
+            if fname in supplied:
+                args.append(_expr(supplied[fname], ctx))
+            else:
+                args.append(_config_default_lit(field, _java_v3_type))
+        return [f"    _revlLoaded.put({_string(name)}, _revlRoot.plugin("
+                f"new {cname}Plugin({', '.join(args)})));"]
+    if kind == "unload":
+        name = step["component"]
+        return [
+            "    {",
+            f"        Disposable _revlFiber = _revlLoaded.remove({_string(name)});",
+            "        if (_revlFiber != null) {",
+            "            _revlFiber.dispose();",
+            "        }",
+            "    }",
+        ]
+    if kind == "call":
+        key = step["key"]
+        service = provided.get(key)
+        if service is None:  # pragma: no cover — the lowerer rejects it
+            raise EmitError(f"{where}: no provider for key {key!r}")
+        method = (method_tables.get(service) or {}).get(step["method"])
+        if method is None:  # pragma: no cover — the lowerer rejects it
+            raise EmitError(f"{where}: unknown method {step['method']!r}")
+        args = ", ".join(_expr(arg, ctx) for arg in step.get("args") or [])
+        # `get` throws when the key is not ACTIVE (R2) — the resolution IS the
+        # liveness check, the same read RunOnce's UP proof performs.
+        call = (f"_revlRoot.get({_ident(service, 'service')}.class)"
+                f".{_ident(step['method'], 'method')}({args})")
+        bind = step.get("bind")
+        if bind is None:
+            return [f"    {call};"]
+        return [f"    final var {_ident(bind, 'lifecycle binding')} = {call};"]
+    if kind == "assert":
+        return [f"    if (!({_expr(step['expr'], ctx)})) {{",
+                f"        throw new AssertionError({_string(where + ': assertion failed')});",
+                "    }"]
+    if kind == "assert_no_residue":
+        return [f"    revlLifecycleNoResidue({_string(where)}, _revlRoot, _revlLoaded,",
+                "        _revlR1Base, REVL_LIFECYCLE_PROVISIONS);"]
+    if kind == "advance":
+        # timers (`every`/`after`, item 57) are not lowerable on this tier, so
+        # neither is driving the clock coeffect forward
+        # (docs/time-coeffect.md) — the same follow-on `revl test`'s timer gate
+        # reports for a component that arms one.
+        raise EmitError(
+            f"{where}: an `advance` step is not lowerable on the {CRATE} tier: "
+            f"it drives the clock coeffect, and timers (`every`/`after`) do not "
+            f"lower here yet — run it with `revl test --backend py` "
+            f"(docs/time-coeffect.md)")
+    raise EmitError(  # pragma: no cover — the lowerer emits nothing else
+        f"{where}: unknown lifecycle step {kind!r}")
 
 
 class _Env:
@@ -2550,6 +2801,16 @@ def _emit_host_stubs(ir: dict) -> list[str]:
     return out
 
 
+def _r1_lines(lines: list[str]) -> list[str]:
+    """*lines* when the document carries lifecycle tests, nothing otherwise.
+
+    The R1 live-resource accounting exists to answer `assert no_residue`; a
+    document without a lifecycle test never reads the counter, so keeping the
+    hooks out of its emission leaves every existing golden byte-identical.
+    """
+    return list(lines) if _LIFECYCLE_MODE else []
+
+
 def _emit_map_runtime() -> list[str]:
     # FR-4 (FEATURE-REQUESTS.md FR-4 / docs/v2.0-roadmap.md item 77(c)): the
     # host Map is generic over its value type, `V` learned per site from the
@@ -2570,12 +2831,27 @@ def _emit_map_runtime() -> list[str]:
         "    private final java.util.concurrent.ConcurrentHashMap<String, V> values =",
         "        new java.util.concurrent.ConcurrentHashMap<>();",
         "    private Map() {}",
+    ] + _r1_lines([
+        "    // R1 (item 178(b)): a Map is a live host resource until its `undo`",
+        "    // drops it. `dropped` makes the release idempotent, so a double",
+        "    // teardown cannot drive the counter negative and hide a real leak.",
+        "    private boolean dropped = false;",
+    ]) + [
         "    // revl `Map.new()` — renamed: `new` is a Java reserved word.",
         "    public static <V> Map<V> create() {",
+    ] + _r1_lines([
+        "        REVL_LIVE_HOST_RESOURCES.incrementAndGet();",
+    ]) + [
         "        return new Map<>();",
         "    }",
         "    public void drop() {",
         "        values.clear();",
+    ] + _r1_lines([
+        "        if (!dropped) {",
+        "            dropped = true;",
+        "            REVL_LIVE_HOST_RESOURCES.decrementAndGet();",
+        "        }",
+    ]) + [
         "    }",
         "    public void insert(String key, V value) {",
         "        values.put(key, value);",
@@ -2655,6 +2931,13 @@ def _emit_pool_runtime() -> list[str]:
         "            throw new IllegalStateException(",
         "                \"pool size must be an integer >= 1 (got \" + poolSize + \")\");",
         "        }",
+    ] + _r1_lines([
+        "        // R1 (item 178(b)): an open Pool is a live host resource until",
+        "        // `close` returns it. A `undo` that is not the inverse of the",
+        "        // acquisition leaves this counter above zero, which is exactly",
+        "        // what a lifecycle `assert no_residue` catches.",
+        "        REVL_LIVE_HOST_RESOURCES.incrementAndGet();",
+    ]) + [
         "        return new Pool(url, poolSize);",
         "    }",
         "    public String url() {",
@@ -2715,6 +2998,9 @@ def _emit_pool_runtime() -> list[str]:
         "        checkedOut.clear();",
         "        idle.clear();",
         "        closed = true;",
+    ] + _r1_lines([
+        "        REVL_LIVE_HOST_RESOURCES.decrementAndGet();",
+    ]) + [
         "    }",
         "    public java.util.List<Object> query(String sql) {",
         "        long conn = borrow(\"query\");",
@@ -3806,6 +4092,9 @@ def _ir_uses_component_step(ir: dict, target: str) -> bool:
 
 def _core_imports(ir: dict) -> list[str]:
     names = {"Context", "Disposable", "Disposables", "Plugin", "ServiceKey"}
+    if any(t.get("lifecycle") for t in (ir.get("tests") or [])):
+        # the lifecycle-test driver mints its own root (item 178(b))
+        names.add("Contexts")
     if _ir_uses_component_step(ir, "await"):
         names.add("AsyncPlugin")
     if _ir_uses_component_step(ir, "fail"):
@@ -4931,7 +5220,19 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     if functions:
         out.extend(["    " + line if line else line for line in _emit_v3_functions(functions, types, externs)])
     if tests:
-        out.extend(["    " + line if line else line for line in _emit_v3_tests(tests, types, functions, externs)])
+        # item 178(b): a `lifecycle test` lowers to the live-composition driver,
+        # a plain `test` to a static method; both land on the one `REVL_TESTS`
+        # roster so the JVM runner cannot run one kind and miss the other.
+        lifecycle = [t for t in tests if t.get("lifecycle")]
+        pure = [t for t in tests if not t.get("lifecycle")]
+        lifecycle_runners: list[str] = []
+        if lifecycle:
+            lifecycle_lines, lifecycle_runners = _emit_v3_lifecycle_tests(
+                lifecycle, types, functions, externs, services, components)
+            out.extend(["    " + line if line else line for line in lifecycle_lines])
+        out.extend(["    " + line if line else line
+                    for line in _emit_v3_tests(pure, types, functions, externs,
+                                               extra_runners=lifecycle_runners)])
     if _uses_spawn(ir):
         out.extend(["    " + line if line else line
                     for line in _emit_spawn_handle(with_get=_uses_instance_get(ir))])
@@ -5005,23 +5306,25 @@ def _refuse_fault_tests(ir) -> None:
     )
 
 def _refuse_lifecycle_tests(tests: list) -> None:
-    """`lifecycle test` blocks (syntax-2.0 §7.1) are reference-tier only.
+    """`lifecycle test` blocks (syntax-2.0 §7.1) on the pre-v3 dialects.
 
     A lifecycle test is not a pure test unit: it loads components into a live
     context, calls through provision keys, unloads them, and asserts
-    residue-freedom by reading the *host runtime's* introspection (R1/R4,
-    docs/backend-ir.md). That driver exists only in the cordis-py emitter.
-    Refuse by name — a construct that is silently dropped by one renderer and
-    present in another is this project's recurring bug class.
+    residue-freedom by reading the host runtime back (R1/R4,
+    docs/backend-ir.md). This tier drives that round-trip on ir_version 3
+    (`_emit_v3_lifecycle_tests`, item 178(b)); ir_version 1 and 2 have no test
+    machinery at all here, so a lifecycle test in one is refused BY NAME rather
+    than dropped — a construct silently dropped by one renderer and present in
+    another is this project's recurring bug class.
     """
     for test in tests or []:
         if test.get("lifecycle"):
             raise EmitError(
-                f"lifecycle test {test.get('name')!r} is not lowerable on the {'cordis4j'} tier: "
-                "it drives a live composition (load/call/unload) and asserts R4 "
-                "residue-freedom through the host runtime's introspection, which only the "
-                "reference tier implements — run it with `revl test --backend py` "
-                "(docs/syntax-2.0.md §7.1)"
+                f"lifecycle test {test.get('name')!r} is not lowerable on the {CRATE} tier "
+                f"below ir_version 3: it drives a live composition "
+                "(load/call/unload) and asserts R4 residue-freedom by reading the "
+                "host runtime back, which this tier does only for ir_version 3 — "
+                "run it with `revl test --backend py` (docs/syntax-2.0.md §7.1)"
             )
 
 
@@ -5121,15 +5424,20 @@ def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
 
     _refuse_fault_tests(ir)
 
-    _refuse_lifecycle_tests(ir.get("tests") or [])
-    global _RECORD_MODE
+    global _RECORD_MODE, _LIFECYCLE_MODE, _V3_DECLARED_TYPES
     saved = _RECORD_MODE
+    saved_lifecycle = _LIFECYCLE_MODE
+    saved_types = _V3_DECLARED_TYPES
     _RECORD_MODE = record
+    _LIFECYCLE_MODE = any(t.get("lifecycle") for t in (ir.get("tests") or []))
+    _V3_DECLARED_TYPES = frozenset(ir.get("types") or {})
     try:
         version = ir.get("ir_version")
         if version == 1:
+            _refuse_lifecycle_tests(ir.get("tests") or [])
             return _emit_v1(ir, package_name)
         if version == 2:
+            _refuse_lifecycle_tests(ir.get("tests") or [])
             return _emit_v2(ir, package_name)
         if version == 3:
             return _emit_v3(ir, package_name)
@@ -5139,6 +5447,8 @@ def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
         )
     finally:
         _RECORD_MODE = saved
+        _LIFECYCLE_MODE = saved_lifecycle
+        _V3_DECLARED_TYPES = saved_types
 
 
 def _main(argv: list[str]) -> int:

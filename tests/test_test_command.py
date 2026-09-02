@@ -167,9 +167,11 @@ def test_all_mixed_verdicts_summarize_skips_separately(monkeypatch, capsys):
 
 
 def test_lifecycle_refusals_on_followup_tiers_are_skips(monkeypatch, capsys):
-    """FR-5: java and wasm still refuse `lifecycle test` by name (documented
-    follow-ups), and in `--all` that refusal is a skip-with-reason — the
-    verdict column's whole point — never a tier failure."""
+    """A tier that cannot express a `lifecycle test` refuses it by name, and in
+    `--all` that refusal is a skip-with-reason — the verdict column's whole
+    point — never a tier failure. Both runners here are stand-ins for that
+    conversion: what still refuses is wasm's scalar substrate and, on java,
+    the pre-ir_version-3 dialects and an `advance` step (item 178(b))."""
     ir = compile_source('lifecycle test "live" { }')
 
     def _refusing_java(_ir):

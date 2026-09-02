@@ -75,6 +75,19 @@ public class Context {
         return () -> store.remove(key.type(), impl);
     }
 
+    /**
+     * Load a plugin into this context and return the Disposable that unloads
+     * it — the real runtime's `plugin(..)`, which the emitted lifecycle-test
+     * driver drives as `load` / `unload` (docs/syntax-2.0.md §7.1). The stub
+     * activates it directly: a plugin's `apply` IS its activation and the
+     * Disposable it returns IS its teardown (G7 LIFO), so the stub keeps no
+     * registry of its own — residue is read back through `get`, exactly as
+     * backends/java/placement/RunOnce.java reads it.
+     */
+    public Disposable plugin(Plugin plugin) {
+        return plugin.apply(this);
+    }
+
     /** Effect scope: tracked disposables run in reverse order (LIFO, G7). */
     public EffectScope effect() {
         return new EffectScope();
