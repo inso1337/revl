@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 
 from .errors import RevlError
@@ -230,6 +231,105 @@ def _match_brace(source: str, open_idx: int, tv: _Trivia) -> int | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Identifier alphabet.
+#
+# revl identifiers are ASCII: `[A-Za-z_][A-Za-z0-9_]*`. This is a FRONTEND rule
+# (enforced here, in the lexer) rather than a per-emitter one, because the
+# alternative is a soundness hole rather than a style question.
+#
+# `str.isalpha()`/`str.isalnum()` are the full Unicode classes, so a permissive
+# lexer admits names that the checker sees as DISTINCT but a host tier sees as
+# the SAME name. CPython NFKC-normalizes identifiers at parse time (PEP 3131),
+# so `ｓend` (U+FF53 FULLWIDTH LATIN SMALL LETTER S) and `send` are one Python
+# function: a plain `fn ｓend` would capture an `extern emission fn send`'s
+# binding and smuggle an irreversible host call past the emission checker, which
+# had already accepted the program because to IT the two names differ. The same
+# merge happens for the ligature `ﬁlter`/`filter` and for a superscript
+# continuation (`x²` normalizes to `x2`). The tiers also already DISAGREE about
+# admission: the rust and java emitters match `^[A-Za-z_][A-Za-z0-9_]*$` and the
+# typescript emitter `^[A-Za-z_$][A-Za-z0-9_$]*$`, so the very names python
+# silently merges are hard errors there.
+#
+# ASCII restores the invariant by construction, on two counts:
+#   * every ASCII identifier is an NFKC fixed point, so two identifiers that are
+#     distinct to the checker stay distinct on the python tier — there is no
+#     normalized-uniqueness check to keep in sync, because normalization is the
+#     identity on the admitted set; and
+#   * `[A-Za-z_][A-Za-z0-9_]*` is a subset of what EVERY emitter accepts, so an
+#     identifier admitted by the frontend renders on every tier.
+#
+# The cost is real: a non-English identifier (`café`, `größe`, `имя`) is refused,
+# even though it is NFKC-stable and would round-trip through python fine. That
+# cost is already being paid today — the rust and java emitters reject those
+# names outright, so such a program is not portable now; this makes the existing
+# restriction honest and uniform instead of a per-tier surprise. Widening later
+# to a UAX-31 profile (XID_Start/XID_Continue plus an NFKC-stability check,
+# which is what keeps `ｓend`/`ﬁlter`/`x²` out) is a compatible extension once
+# the ASCII-only emitters gain a mangling scheme for non-ASCII names.
+#
+# Nothing else narrows: string literals, templates, comments and `@host` bodies
+# stay full Unicode. Only NAMES are constrained.
+
+
+_IDENT_START = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
+_IDENT_CONT = frozenset(_IDENT_START | set("0123456789"))
+_ASCII_DIGIT = frozenset("0123456789")
+
+
+def _ident_char(c: str) -> bool:
+    """True for any character a Unicode-permissive lexer would take as
+    identifier text: a letter or digit in any script, `_`, or a combining /
+    connector mark that would attach to one."""
+    return c.isalnum() or c == "_" or unicodedata.category(c) in ("Mn", "Mc", "Pc")
+
+
+def _reject_non_ascii_ident(source: str, i: int, line: int, filename: str):
+    """Refuse the identifier-shaped run of text containing `source[i]`.
+
+    Reached when a non-ASCII identifier character is seen, either leading a word
+    or glued to an ASCII run (`x²`). The whole run is reported, not the single
+    offending character, so the diagnostic names what the author wrote.
+    """
+    n = len(source)
+    start = i
+    while start > 0 and _ident_char(source[start - 1]):
+        start -= 1
+    end = i
+    while end < n and _ident_char(source[end]):
+        end += 1
+    word = source[start:end]
+    bad = next(c for c in word if not c.isascii())
+    try:
+        named = unicodedata.name(bad)
+    except ValueError:                                    # pragma: no cover
+        named = "unnamed"
+    where = f"U+{ord(bad):04X} {named}"
+    normalized = unicodedata.normalize("NFKC", word)
+    if normalized != word:
+        hint = (
+            f"revl identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`. `{word}` is "
+            f"not a distinct name on every tier: python normalizes identifiers "
+            f"to NFKC (PEP 3131), so it is the SAME function as `{normalized}` "
+            f"there, while the rust, java and typescript emitters refuse it. "
+            f"Write `{normalized}` if that is the name you meant, or pick "
+            f"another ASCII name; non-ASCII text belongs in a string literal."
+        )
+    else:
+        hint = (
+            "revl identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*` — the rust, "
+            "java and typescript emitters reject non-ASCII names, so such a "
+            "program would not render on every tier. Transliterate the name; "
+            "non-ASCII text belongs in a string literal."
+        )
+    raise RevlError(
+        filename, line,
+        f"non-ASCII character in identifier `{word}` ({where})",
+        hint=hint,
+    )
+
+
 @dataclass
 class Token:
     kind: str          # 'ident' | 'kw' | 'int' | 'float' | 'string' | 'template' | 'arrow' | symbol | 'eof'
@@ -282,38 +382,49 @@ def lex(source: str, filename: str) -> list[Token]:
                 # accepted program lex identically; only the error path reads it.
                 tok.stray_backtick = suspect
             tokens.append(tok)
-        elif c.isalpha() or c == "_":
+        elif c in _IDENT_START:
             j = i
-            while j < n and (source[j].isalnum() or source[j] == "_"):
+            while j < n and source[j] in _IDENT_CONT:
                 j += 1
+            if j < n and _ident_char(source[j]):
+                # A non-ASCII identifier character glued to an ASCII run — the
+                # `x²` case, which NFKC-normalizes to `x2` on the python tier.
+                # Refuse the whole word rather than lex a truncated `x` and let
+                # the tail surface as some unrelated syntax error.
+                _reject_non_ascii_ident(source, j, line, filename)
             word = source[i:j]
             # Item 380: a leading `f"..."` (a Python f-string by muscle memory)
             # is not revl syntax — `f` lexes as an identifier and `"..."` as a
             # separate string, so `return f"hi {name}"` silently parses as
             # `return f` (the identifier) plus a dead string statement, and
             # with an `f` in scope it type-checks unchecked. The `f`/`F` glued
-            # directly to a `"` (no space) is unambiguous — revl has no
+            # directly to a quote (no space) is unambiguous — revl has no
             # construct where an identifier abuts a string literal — so redirect
             # to a backtick template rather than let it miscompile.
-            if word in ("f", "F") and j < n and source[j] == '"':
+            #
+            # Item 382 made `'...'` a second, equal spelling of `Str`, so `f'…'`
+            # reaches the identical silent mis-parse; both quotes are covered
+            # here, and the diagnostic quotes back the spelling that was written.
+            if word in ("f", "F") and j < n and source[j] in "\"'":
+                q = source[j]
                 raise RevlError(
                     filename, line,
-                    f"`{word}\"...\"` is not a revl string — revl has no "
+                    f"`{word}{q}...{q}` is not a revl string — revl has no "
                     "f-string prefix",
                     hint="interpolation needs a backtick template: write "
                          "`` `hi ${name}` `` (docs/strings.md)",
                 )
             tokens.append(Token("kw" if word in KEYWORDS else "ident", word, line))
             i = j
-        elif c.isdigit():
+        elif c in _ASCII_DIGIT:
             i, tok = _lex_number(source, i, line, filename)
             tokens.append(tok)
-        elif c == "@" and i + 1 < n and (source[i + 1].isalpha() or source[i + 1] == "_"):
+        elif c == "@" and i + 1 < n and source[i + 1] in _IDENT_START:
             # Host block: `@backend { <verbatim, brace-balanced> }`.
             # The body is host text, not revl, so it is consumed here by
             # scanning balanced braces rather than tokenizing the contents.
             j = i + 1
-            while j < n and (source[j].isalnum() or source[j] == "_"):
+            while j < n and source[j] in _IDENT_CONT:
                 j += 1
             backend = source[i + 1:j]
             k = j
@@ -345,6 +456,11 @@ def lex(source: str, filename: str) -> list[Token]:
                 "revl has no `#` comments",
                 hint="a line comment is `// ...` (syntax-2.0 §3.2)",
             )
+        elif _ident_char(c):
+            # Non-ASCII, but identifier-shaped: a name a Unicode-permissive
+            # lexer would have accepted. Refused here, in the frontend, so no
+            # tier can admit what another rejects (see the alphabet note above).
+            _reject_non_ascii_ident(source, i, line, filename)
         else:
             raise RevlError(filename, line, f"unexpected character {c!r}")
     tokens.append(Token("eof", None, line))
@@ -417,7 +533,11 @@ def _lex_number(source: str, i: int, line: int, filename: str):
     i, int_digits = _scan_grouped_digits(source, i, line, filename, "0123456789", "number")
     num = int_digits
     is_float = False
-    if i < n and source[i] == "." and i + 1 < n and source[i + 1].isdigit():
+    # `.isdigit()`/`.isascii()` together: the digit tests below are ASCII-only
+    # to match `_scan_grouped_digits`, whose alphabet is `0123456789`. Without
+    # the `.isascii()` guard a non-ASCII digit (`²`, `١`) opens a fraction or an
+    # exponent that then has no valid digit to scan.
+    if i < n and source[i] == "." and i + 1 < n and source[i + 1] in _ASCII_DIGIT:
         i, frac = _scan_grouped_digits(source, i + 1, line, filename, "0123456789", "number")
         num += "." + frac
         is_float = True
@@ -427,7 +547,7 @@ def _lex_number(source: str, i: int, line: int, filename: str):
         if k < n and source[k] in "+-":
             sign = source[k]
             k += 1
-        if k < n and source[k].isdigit():
+        if k < n and source[k] in _ASCII_DIGIT:
             i, exp = _scan_grouped_digits(source, k, line, filename, "0123456789", "number")
             num += "e" + sign + exp
             is_float = True
@@ -471,8 +591,13 @@ def _lex_string(source: str, i: int, line: int, filename: str, quote: str = '"')
             continue
         if c == quote:
             text = "".join(buf)
-            if quote == '"':
-                _reject_dollar_interpolation(text, line, filename)
+            # Both plain spellings, not just `"`: item 382 made `'...'` an equal
+            # spelling of `Str`, so `'hi ${name}'` reaches the same silent-wrong
+            # literal-`${name}` outcome the guard exists to catch. The
+            # triple-quoted form is deliberately left out — it is the verbatim
+            # spelling used to carry template and shell source as DATA, which is
+            # the same false positive the backtick carve-out below covers.
+            _reject_dollar_interpolation(text, line, filename)
             return i + 1, text
         if c == "\n":
             raise RevlError(filename, line, "unterminated string literal")
@@ -482,7 +607,7 @@ def _lex_string(source: str, i: int, line: int, filename: str, quote: str = '"')
 
 
 def _reject_dollar_interpolation(text: str, line: int, filename: str) -> None:
-    """Item 380: a `${...}` inside a plain `"..."` string is a silent-wrong
+    """Item 380: a `${...}` inside a plain `"..."`/`'...'` string is a silent-wrong
     interpolation — 2.0 interpolation lives ONLY in backtick templates, so the
     `${...}` is emitted as LITERAL text (`"hi ${name}"` compiled clean and
     produced the literal `${name}`). Redirect to a backtick template instead of
