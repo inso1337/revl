@@ -388,6 +388,302 @@ _BORROW_ARG_BUILTINS = _STR_READONLY_ARG_BUILTINS | frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# item 277: the interprocedural `&[char]` view for positional string scanning.
+#
+# `charAt(i)`/`charCodeAt(i)`/`codepoint_at(i)` lower to `str::chars().nth(i)`,
+# which re-walks the string from the front on every access — a Rust `String`
+# has no O(1) code-point index — so a positional scan over an n-char string is
+# O(n^2). The scoped fix (materialise a `Vec<char>` shadow per FUNCTION) was
+# measured and REGRESSES: a scanner threads its buffer down a call chain, so a
+# per-function shadow becomes a per-CALL `chars().collect()`, i.e. O(calls*n) of
+# allocation replacing O(calls*i) of iteration. The collect has to be hoisted to
+# the buffer's OWNER and the view threaded down, which is what this pass does.
+#
+# A non-`pub` free fn whose `Str` parameter is positionally indexed — or which
+# passes that parameter to another fn's viewed slot — grows a synthetic
+# companion parameter `<name>_revl_cs: &[char]`, and every call site in the
+# document supplies it. Demand propagates UP the call graph to a `pub` entry,
+# whose signature is the module's external contract and therefore never changes:
+# it materialises `let <name>_revl_cs: Vec<char> = <name>.chars().collect();`
+# once at the top of its body and lends `&<name>_revl_cs` down. The collect is
+# then paid once per entry call instead of once per access.
+#
+# The pass only keeps a view it can thread for free. A call site that would have
+# to materialise a fresh `Vec<char>` (the argument is not a parameter this
+# function already holds a view for) BANS that callee slot, and the fixpoint is
+# recomputed without it, so no in-module call site ever gains a collect. That
+# retraction is the whole difference from the scoped shape that regressed.
+_STR_INDEX_BUILTINS = frozenset({"charAt", "charCodeAt", "codepoint_at"})
+_CHAR_VIEW_SUFFIX = "_revl_cs"
+
+
+def _var_ident(node: object) -> "str | None":
+    """The identifier a bare variable reference names, else None."""
+    if isinstance(node, dict) and node.get("kind") in ("var", "name", "req"):
+        return node.get("id") or node.get("name")
+    return None
+
+
+def _str_params_indexed(body: object, params: "set[str]") -> "set[str]":
+    """The subset of `params` positionally indexed (`charAt`/`charCodeAt`/
+    `codepoint_at`) through a BARE reference — the accesses a `&[char]` view
+    can serve. An index on a computed receiver keeps the `chars().nth` walk."""
+    found: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if (node.get("kind") == "builtin"
+                    and node.get("method") in _STR_INDEX_BUILTINS):
+                ident = _var_ident(node.get("target"))
+                if ident in params:
+                    found.add(ident)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(body)
+    return found
+
+
+def _free_fn_calls(body: object,
+                   function_names: "frozenset[str] | set") -> list:
+    """Every `(callee_name, arg_nodes, repeated)` call to a first-party free
+    function in `body`, nested calls included. `repeated` is True when the call
+    sits inside a `while`/`for` body or a closure body — the positions where a
+    per-call `chars().collect()` would be paid more than once per entry."""
+    calls: list = []
+
+    def walk(node: object, repeated: bool) -> None:
+        if isinstance(node, dict):
+            cname, arg_nodes = _free_fn_call(node, function_names)
+            if cname is not None:
+                calls.append((cname, arg_nodes, repeated))
+            loops = (node.get("step") in ("while", "for")
+                     or node.get("kind") == "arrow")
+            for key, value in node.items():
+                walk(value, repeated or (loops and key == "body"))
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, repeated)
+
+    walk(body, False)
+    return calls
+
+
+def _bound_names(fn: dict) -> "set[str]":
+    """Every name `fn` binds locally: its parameters, `let`/`var` bindings
+    (destructuring included), loop bindings and closure parameters. A bare
+    reference to one of these names is a local read, not a reference to a
+    same-named free function."""
+    bound = {p.get("name") for p in (fn.get("params") or [])}
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("step") == "let":
+                bound.add(node.get("name"))
+                for nm in node.get("names") or []:
+                    bound.add(nm)
+            elif node.get("step") == "for":
+                bound.add(node.get("bind"))
+            elif node.get("kind") == "arrow":
+                for nm in node.get("params") or []:
+                    bound.add(nm)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(fn.get("body") or [])
+    bound.discard(None)
+    return bound
+
+
+def _fn_value_refs(functions: list,
+                   function_names: "frozenset[str] | set") -> "set[str]":
+    """Function names referenced as a VALUE (not in callee position). Growing a
+    synthetic parameter would change such a function's type, so those are
+    excluded from the view entirely. A name the enclosing function binds locally
+    (`let step = ..` next to a free `fn step`) is a local read and does not
+    count — otherwise one shadowing local would disable the pass module-wide."""
+    used: set[str] = set()
+
+    def walk(node: object, bound: "set[str]") -> None:
+        if isinstance(node, dict):
+            callee = node.get("callee")
+            if (node.get("kind") == "call" and isinstance(callee, dict)
+                    and _var_ident(callee) in function_names):
+                for key, value in node.items():
+                    if key != "callee":
+                        walk(value, bound)
+                return
+            ident = _var_ident(node)
+            if ident is not None:
+                if ident in function_names and ident not in bound:
+                    used.add(ident)
+                return
+            for value in node.values():
+                walk(value, bound)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, bound)
+
+    for fn in functions:
+        walk(fn.get("body") or [], _bound_names(fn))
+    return used
+
+
+def _compute_char_views(functions: list) -> tuple:
+    """`(view, local)`: the parameter INDICES that carry a `&[char]` view (item
+    277), split by mechanism. `view` maps a non-`pub` function to the indices
+    that grow a synthetic `<name>_revl_cs: &[char]` parameter (every call site
+    appends it); `local` maps a `pub` function — whose signature is the module's
+    external contract and never changes — to the indices it materialises as a
+    `Vec<char>` local at the top of its body.
+
+    Least fixpoint, then retraction:
+
+      * seed — a `Str` parameter this function positionally indexes directly;
+      * grow — a `Str` parameter passed by a BARE reference into another
+        NON-`pub` function's viewed slot (the scan helpers thread one buffer, so
+        the demand walks up to whoever owns it; a `pub` callee collects its own
+        view and so demands nothing of its callers);
+      * retract — a viewed slot whose argument at some in-module call site is
+        NOT such a bare parameter would need a fresh `chars().collect()` there,
+        which is exactly the per-call collect that regressed; that slot is
+        banned and the fixpoint recomputed. A `pub` callee cannot grow the
+        companion at all, so it collects internally; once per entry call that
+        is amortised against the scan the entry performs over the same buffer,
+        and it is banned where the call sits inside a loop or closure body.
+
+    Gated like item 282's borrow pass on the module using the stdlib, so a
+    stdlib-free module (the self-hosted `emit_rust.rvl` port) emits
+    byte-identically. Disabled outright if any identifier already carries the
+    `_revl_cs` suffix, so the synthetic name can never capture a user name.
+    """
+    if not functions or not _functions_use_stdlib(functions):
+        return {}, {}
+    if _CHAR_VIEW_SUFFIX in repr(functions):
+        return {}, {}
+    by_name = {fn.get("name"): fn for fn in functions if fn.get("name")}
+    function_names = frozenset(by_name)
+    params_of = {
+        name: [p.get("name") for p in (fn.get("params") or [])]
+        for name, fn in by_name.items()
+    }
+    types_of = {
+        name: [p.get("type") for p in (fn.get("params") or [])]
+        for name, fn in by_name.items()
+    }
+    direct: dict = {}
+    calls: dict = {}
+    for name, fn in by_name.items():
+        str_params = {
+            p.get("name") for p in (fn.get("params") or [])
+            if p.get("type") == "Str"
+        }
+        indexed = _str_params_indexed(fn.get("body") or [], str_params)
+        direct[name] = {
+            idx for idx, pname in enumerate(params_of[name])
+            if pname in indexed
+        }
+        calls[name] = _free_fn_calls(fn.get("body") or [], function_names)
+    value_refs = _fn_value_refs(functions, function_names)
+    banned: set = set()
+    for name in value_refs:
+        banned |= {(name, i) for i in range(len(params_of[name]))}
+
+    def threaded_index(caller: str, arg_node: object) -> "int | None":
+        ident = _var_ident(arg_node)
+        if ident is not None and ident in params_of[caller]:
+            return params_of[caller].index(ident)
+        return None
+
+    while True:
+        demand: dict = {name: set() for name in by_name}
+        changed = True
+        while changed:
+            changed = False
+            for name in by_name:
+                want = set(direct[name])
+                for callee, arg_nodes, _rep in calls[name]:
+                    if by_name[callee].get("public"):
+                        # A `pub` callee keeps its signature and collects its
+                        # own view, so it demands nothing of its caller. Without
+                        # this the caller would collect a view nobody reads.
+                        continue
+                    for idx in demand.get(callee, ()):
+                        if idx < len(arg_nodes):
+                            up = threaded_index(name, arg_nodes[idx])
+                            if up is not None:
+                                want.add(up)
+                want = {
+                    idx for idx in want
+                    if (name, idx) not in banned
+                    and types_of[name][idx] == "Str"
+                }
+                if want - demand[name]:
+                    demand[name] |= want
+                    changed = True
+        bad: set = set()
+        for name in by_name:
+            for callee, arg_nodes, repeated in calls[name]:
+                if by_name[callee].get("public"):
+                    # A `pub` entry keeps its signature and collects internally.
+                    # Once per entry call that is amortised against the scan the
+                    # entry is about to do over the same buffer; inside a loop or
+                    # a closure body it would not be, so that bans the slot.
+                    if repeated:
+                        bad |= {(callee, idx)
+                                for idx in demand.get(callee, ())}
+                    continue
+                for idx in demand.get(callee, ()):
+                    up = (threaded_index(name, arg_nodes[idx])
+                          if idx < len(arg_nodes) else None)
+                    if up is None or up not in demand[name]:
+                        bad.add((callee, idx))
+        bad -= banned
+        if not bad:
+            break
+        banned |= bad
+    view = {
+        name: tuple(sorted(idxs)) for name, idxs in demand.items()
+        if idxs and not by_name[name].get("public")
+    }
+    local = {
+        name: tuple(sorted(idxs)) for name, idxs in demand.items()
+        if idxs and by_name[name].get("public")
+    }
+    return view, local
+
+
+def _char_view_args(callee_name: "str | None", arg_nodes: list,
+                    arg_exprs: list, ctx: "_V3Ctx") -> list:
+    """The synthetic `&[char]` arguments a call to `callee_name` appends (item
+    277). A viewed slot fed by a parameter this scope already holds a view for
+    lends that view (free); anywhere else — a test body, a component body, a
+    computed argument — the view is materialised at the call, which is always
+    correct and is why those call sites were banned from the hot path."""
+    view = ctx.fn_char_view.get(callee_name) if callee_name else None
+    if not view:
+        return []
+    out: list = []
+    for idx in view:
+        if idx >= len(arg_nodes):
+            raise EmitError(
+                f"char-view arg {idx} missing at call to {callee_name!r}")
+        ident = _var_ident(arg_nodes[idx])
+        if ident is not None and ident in ctx.char_view_vars:
+            out.append(ctx.char_view_vars[ident][1])
+        else:
+            out.append(f"&({arg_exprs[idx]})"
+                       ".chars().collect::<std::vec::Vec<char>>()")
+    return out
+
+
 def _free_fn_call(node: object, function_names: "frozenset[str] | set") -> tuple:
     """`(callee_name, arg_nodes)` when `node` is a call to a first-party free
     function, else `(None, None)`.
@@ -4116,6 +4412,19 @@ class _V3Ctx:
         # `_emit_v3_functions`, empty in every other emit context, so a read of a
         # borrowed param renders as the `&str` it already is.
         self.borrowed_params: set[str] = set()
+        # Free function name -> parameter INDICES carrying a synthetic
+        # `&[char]` view (item 277), so a call site knows the extra arguments
+        # to append. Computed once from the whole function list, like
+        # `fn_borrow`, so every body that can call one agrees on the shape.
+        # `fn_char_local` names the `pub` entries that collect once into a
+        # local instead (their signature never changes, so no call site moves).
+        self.fn_char_view, self.fn_char_local = _compute_char_views(
+            functions or [])
+        # Bindings of the function CURRENTLY being emitted that hold a char
+        # view: revl name -> (index expression, argument expression). Set per
+        # fn by `_emit_v3_functions`; empty in every other emit context, where
+        # a viewed call materialises its view at the call site instead.
+        self.char_view_vars: dict[str, tuple] = {}
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple[str, ...], str | None] = {}
@@ -4393,12 +4702,17 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # component dialect: a free-function call `name(..)`.
         name = _ident(node.get("name"), "function")
         borrow = ctx.fn_borrow.get(node.get("name"), frozenset())
-        args = ", ".join(
-            _borrow_str_arg(a, _render_expr(a, ctx, rename), ctx) if idx in borrow
-            else _by_value_arg(a, _render_expr(a, ctx, rename), ctx)
-            for idx, a in enumerate(node.get("args") or [])
-        )
-        return f"{name}({args})"
+        fn_arg_nodes = node.get("args") or []
+        fn_arg_exprs = [_render_expr(a, ctx, rename) for a in fn_arg_nodes]
+        rendered = [
+            _borrow_str_arg(a, r, ctx) if idx in borrow
+            else _by_value_arg(a, r, ctx)
+            for idx, (a, r) in enumerate(zip(fn_arg_nodes, fn_arg_exprs))
+        ]
+        # item 277: a viewed callee takes its `&[char]` companions last.
+        rendered += _char_view_args(
+            node.get("name"), fn_arg_nodes, fn_arg_exprs, ctx)
+        return f"{name}({', '.join(rendered)})"
 
     if kind == "adt":
         # tagged ADT construction: user variants -> `Enum::Case(..)`, built-in
@@ -4540,12 +4854,14 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # `Str` param the callee lowered to `&str` takes a borrow instead of
             # a clone (item 282), so its whole string is never copied at the call.
             borrow = ctx.fn_borrow.get(callee_name, frozenset())
-            bv_args = ", ".join(
+            bv_args = [
                 _borrow_str_arg(a, r, ctx) if idx in borrow
                 else _by_value_arg(a, r, ctx)
                 for idx, (a, r) in enumerate(zip(node.get("args") or [], arg_exprs))
-            )
-            return f"{callee}({bv_args})"
+            ]
+            # item 277: a viewed callee takes its `&[char]` companions last.
+            bv_args += _char_view_args(callee_name, arg_nodes, arg_exprs, ctx)
+            return f"{callee}({', '.join(bv_args)})"
         # component form: `target.method(args)`.
         target = node.get("target") or {}
         method = _ident(_mname(node.get("method")), "method")
@@ -4702,6 +5018,14 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
                     and isinstance(a0, dict) and a0.get("kind") in ("var", "name", "req")
                     and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
                 args[0] = f"{args[0]}.to_string()"
+        view_ident = _var_ident(target_node)
+        if (method in _STR_INDEX_BUILTINS and view_ident in ctx.char_view_vars):
+            # item 277: O(1) code-point index through the threaded view instead
+            # of `chars().nth(i)`'s front walk. Both panic out of bounds.
+            elem = f"{ctx.char_view_vars[view_ident][0]}[({args[0]}) as usize]"
+            if method == "charAt":
+                return f"{{ {elem}.to_string() }}"
+            return f"{{ {elem} as u32 as i64 }}"
         borrowed_lits = _v3_borrowed_lit_args(method, target_node, arg_nodes, args, ctx)
         return _v3_builtin(method, target, args, node.get("recv"), borrowed_lits)
 
@@ -5639,14 +5963,35 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         ctx.borrowed_params = {
             param_list[idx].get("name") for idx in borrow
         }
-        params = ", ".join(
+        rendered_params = [
             f"{_ident(p.get('name'), 'parameter name')}: "
             f"{_render_param_type(idx in borrow, p.get('type'), types)}"
             for idx, p in enumerate(param_list)
-        )
+        ]
+        # item 277: the `&[char]` view. A non-`pub` fn takes it as a synthetic
+        # trailing parameter (the caller lends the one collect); a `pub` fn owns
+        # the buffer, keeps its signature and collects once into a local.
+        is_public = bool(fn.get("public"))
+        ctx.char_view_vars = {}
+        view_prologue: list[str] = []
+        view_source = (ctx.fn_char_local if is_public else ctx.fn_char_view)
+        for idx in view_source.get(fn.get("name")) or ():
+            pname = param_list[idx].get("name")
+            ident = _ident(pname, "parameter name")
+            view_id = f"{ident}{_CHAR_VIEW_SUFFIX}"
+            if is_public:
+                ctx.char_view_vars[pname] = (view_id, f"&{view_id}")
+                view_prologue.append(
+                    f"    let {view_id}: std::vec::Vec<char> = "
+                    f"{ident}.chars().collect();")
+            else:
+                ctx.char_view_vars[pname] = (view_id, view_id)
+                rendered_params.append(f"{view_id}: &[char]")
+        params = ", ".join(rendered_params)
         returns = _rust_type(fn.get("returns"), types, position="return")
-        visibility = "pub " if fn.get("public") else ""
+        visibility = "pub " if is_public else ""
         out.append(f"{visibility}fn {name}({params}) -> {returns} {{")
+        out.extend(view_prologue)
         if not fn.get("body"):
             out.append("    todo!()")
         else:

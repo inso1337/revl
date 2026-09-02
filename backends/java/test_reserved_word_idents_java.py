@@ -35,7 +35,8 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import javac_gate  # noqa: E402
 
-JAVA, JAVAC, STUB_SOURCES = javac_gate.JAVA, javac_gate.JAVAC, javac_gate.STUB_SOURCES
+JAVA, JAVAC = javac_gate.JAVA, javac_gate.JAVAC
+NO_JDK, STUB_SOURCES = javac_gate.NO_JDK, javac_gate.STUB_SOURCES
 
 _spec = importlib.util.spec_from_file_location("revl_java_emit_rw", HERE / "emit.py")
 emit = importlib.util.module_from_spec(_spec)
@@ -83,7 +84,7 @@ def test_keyword_decls_and_uses_are_consistent():
         assert bad not in out
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_runs_keyword_named_function(tmp_path):
     """Compile the emitted class against the stubs and EXECUTE `go` — proving
     the keyword renames are consistent on the JVM."""
