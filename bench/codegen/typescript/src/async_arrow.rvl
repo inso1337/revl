@@ -1,0 +1,15 @@
+// Benchmark: passing a service operation as a function value. The emitter
+// wraps the call in an `async` arrow, which adds promise ticks the direct
+// method reference would not.
+service Model { async fn complete(msgs: Str) -> Str }
+service Loop { emission async fn run(p: Str) -> Str }
+
+pub fn agent_loop(current: Str, complete: (Str) -> Async[Str]) -> Str {
+  return complete(current)
+}
+
+component Agent requires model: Model provides agent: Loop {
+  provide agent {
+    async fn run(prompt) = agent_loop(prompt, (msgs) => model.complete(msgs))
+  }
+}

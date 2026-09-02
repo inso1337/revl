@@ -5,7 +5,7 @@
 //	cd bench/codegen/go && go test ./ab/ -bench . -benchmem -benchtime=100x -run XXX
 //
 // READ allocs/op AND B/op ONLY. They are exact, reproducible and independent
-// of machine load, and every finding in roadmap item 433 is written against
+// of machine load, and every finding in roadmap item 434 is written against
 // them. ns/op from this suite is NOT evidence and was deliberately not
 // reported: the audit ran on a machine with a dozen concurrent agents, where
 // even an interleaved A/B ratio samples two different load conditions.

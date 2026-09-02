@@ -1,0 +1,13 @@
+// Benchmark: building a list in a loop. revl's `push` is a value-semantics
+// operation, so the emitter renders it as a whole-array spread copy. When the
+// old value is dead (a `var` rebound to its own push) the copy is not
+// observable, and a competent TS developer writes `xs.push(x)`.
+pub fn build(n: Int) -> List[Int] {
+  var xs = []
+  var i = 0
+  while (i < n) {
+    xs = xs.push(i)
+    i = i + 1
+  }
+  return xs
+}
