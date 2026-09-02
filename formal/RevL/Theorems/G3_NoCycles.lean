@@ -154,4 +154,35 @@ theorem layering_exists_for_admitted :
   refine LinkOK.cons _ _ (by decide) (by decide) (by decide) ?_
   exact LinkOK.cons _ _ (by decide) (by decide) (by decide) LinkOK.nil
 
+
+/-- **Non-vacuity for the two G3 hypothesis families** (roadmap item 418,
+step 8).
+
+`depPath_rank_lt` assumes a layering AND a dependency path; both hold at
+once on the admitted composition, and the rank really does drop across
+the edge. `no_dependency_cycles` and `linkOK_no_cycles` assume a layering
+(resp. a link) AND a self-path; those two are jointly unsatisfiable by
+design, which is the theorem, so the evidence they are not vacuous is
+that each hypothesis is satisfiable ON ITS OWN: the layering here, and a
+genuine self-path on the cyclic composition below. -/
+theorem g3_not_vacuous :
+    LinkOK [alpha, betaRoot] ∧
+    LayeredBy [alpha, betaRoot] (rankOf [alpha, betaRoot]) ∧
+    DepPath [alpha, betaRoot] ("a", sharedRealm) ("b", sharedRealm) ∧
+    rankOf [alpha, betaRoot] ("b", sharedRealm) <
+      rankOf [alpha, betaRoot] ("a", sharedRealm) ∧
+    DepPath [alpha, beta] ("a", sharedRealm) ("a", sharedRealm) := by
+  have hlink : LinkOK [alpha, betaRoot] := by
+    refine LinkOK.cons _ _ (by decide) (by decide) (by decide) ?_
+    exact LinkOK.cons _ _ (by decide) (by decide) (by decide) LinkOK.nil
+  have hdep : DependsOn [alpha, betaRoot] ("a", sharedRealm) ("b", sharedRealm) :=
+    ⟨alpha, by simp, by decide, by decide⟩
+  have hab : DependsOn [alpha, beta] ("a", sharedRealm) ("b", sharedRealm) :=
+    ⟨alpha, by simp, by decide, by decide⟩
+  have hba : DependsOn [alpha, beta] ("b", sharedRealm) ("a", sharedRealm) :=
+    ⟨beta, by simp, by decide, by decide⟩
+  refine ⟨hlink, linkOK_layeredBy_rankOf _ hlink, DepPath.step _ _ hdep, ?_,
+    DepPath.trans _ _ _ (DepPath.step _ _ hab) hba⟩
+  exact depPath_rank_lt _ (linkOK_layeredBy_rankOf _ hlink) (DepPath.step _ _ hdep)
+
 end RevL.G3

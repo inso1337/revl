@@ -95,6 +95,35 @@
           }
         }
       ]
+    },
+    {
+      "name": "assert temp does not collide with a user r binding (item 110/143)",
+      "body": [
+        {
+          "step": "let",
+          "name": "r",
+          "value": {
+            "kind": "lit",
+            "value": "hello from revl"
+          },
+          "mutable": false
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "r"
+            },
+            "right": {
+              "kind": "lit",
+              "value": "hello from revl"
+            }
+          }
+        }
+      ]
     }
   ]
 }

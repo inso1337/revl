@@ -1,0 +1,19 @@
+// `a ?? b` and `a?.f()`: the emitter renders the left operand TWICE, so a call
+// on the left is EVALUATED twice. The extern counts its own invocations, which
+// turns the duplication into a deterministic number.
+extern pure fn lookup(k: Int) -> Opt[Int]
+= @py {
+      global CALLS
+      CALLS = CALLS + 1
+      return None if k % 2 else k
+    }
+
+fn resolve(k: Int) -> Int {
+  return lookup(k) ?? 0
+}
+
+fn resolve_many(ks: List[Int]) -> Int {
+  var acc = 0
+  for (k of ks) { acc += lookup(k) ?? 0 }
+  return acc
+}
