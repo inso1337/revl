@@ -54,9 +54,11 @@ through**, drawn from a single flat namespace of wiring names:
 |---------------------------------------------------------------|------------|
 | a service operation declared `emission`, called through required key `db` | `db` |
 | an `extern emission fn send`, directly or through a chain of `fn`s | `send` |
+| an `extern emission[db] fn pg_write`, likewise                  | `db` |
+| an `extern witnessed[fs] fn stash` (items 243/343)              | `fs` |
 | a boundary with no reachable name (defensive; unreachable today) | `*` |
 
-Two deliberate choices:
+Three deliberate choices:
 
 **Requirement keys, not service names.** A key is composition-wide — G2
 refuses two components providing the same key, so `db` denotes exactly one
@@ -69,6 +71,19 @@ the boundary — the host code lives there. A `fn blast(...)` that calls `send`
 is not a boundary, it is a path to one, so it contributes `send`, not
 `blast`. A capability set therefore stays stable when a body is refactored
 into helpers, which is what makes the transitive rule usable.
+
+**A scope replaces the name; it does not join it.** An extern names itself only
+when it declares no scope. `extern emission[db] fn pg_write` contributes `db`
+and nothing else, because the author has said which boundary the host code goes
+to and that is the boundary an operator reasons about (item 343). One extern
+therefore yields exactly one spelling to every authority surface — the G4
+subset check, the G8 audit reach, `secret K for db`, the item-246 approval gate
+and the `capability <glob>` policy rules — rather than a name for some and a
+token for others. Item 247 finished that: `__main__._boundary` was the last
+surface still keying a directly-emitted extern by name, so an operator's
+`capability db requires register keyed` selected nothing on a composition whose
+only `db` crossing was a direct emission. See "Which spelling a rule selects" in
+docs/boundary-policy.md for the full table.
 
 **Names are not resolved at the declaration.** A `service` is routinely
 written before any provider exists, so `emission[db]` does not require a `db`
@@ -185,6 +200,37 @@ In `--json`:
 }
 ```
 
+### Host code carries its scope too
+
+A crossing that goes straight into an extern has no emission label, so it is on
+the `host code:` line instead. A scoped extern renders its declared token there
+the same way a scoped emission does:
+
+```
+component Writer
+  boundary: host code: pg_write [db] (emission, py), send_mail (emission, py)
+```
+
+`pg_write` crosses `db`; `send_mail` declares no scope, so it names itself. The
+`externs` list stays keyed by extern NAME — it is the host-code table (class,
+backends, ref provenance), and a reader needs the name to find the declaration —
+with the scope beside it:
+
+```json
+"Writer": {
+  "externs": [
+    {"name": "pg_write", "class": "emission", "backends": ["py"],
+     "capabilities": ["db"]},
+    {"name": "send_mail", "class": "emission", "backends": ["py"]}
+  ]
+}
+```
+
+`capabilities` is absent for an unscoped extern, whose token is its own name, so
+every pre-item-247 audit document is byte-identical. `policy.component_reach`
+reads the token off this entry (`capabilities or (name,)`), which is what puts a
+directly-emitted crossing under a `capability <glob>` rule.
+
 ## 6. MCP
 
 `revl mcp schema` derives its annotations from the checker rather than from
@@ -209,5 +255,6 @@ emission.
 | syntax | `src/revl/parser.py` — `_capability_list`, `MethodDecl.capabilities` |
 | analysis | `src/revl/lower.py` — `_emitting_capabilities`, `_method_emissions`, the G4 check in `_lower_provide` |
 | audit | `src/revl/__main__.py` — `_boundary` |
+| policy reach | `src/revl/policy.py` — `component_reach` (the `capabilities or (name,)` rule) |
 | MCP | `src/revl/mcp/schema.py` — `_tool`, `_method_effects` |
-| tests | `tests/test_capabilities.py`, `examples/rejections/g4_capability_not_declared.rvl` |
+| tests | `tests/test_capabilities.py`, `tests/test_247_capability_reach_spellings.py`, `examples/rejections/g4_capability_not_declared.rvl` |

@@ -1213,7 +1213,7 @@ def load_policy(path: str) -> Policy:
 class Reach:
     """One boundary a component reaches, with its provenance for the trace."""
     token: str                 # the capability token or extern name (or `*`)
-    via: str                   # the emission label / "host code" it came through
+    via: str                   # the emission label / extern it came through
     kind: str                  # "emission" | "host"
 
 
@@ -1224,6 +1224,20 @@ def component_reach(audit: dict, name: str) -> list[Reach]:
       * emission capabilities — the scope each emission call site may cross;
       * reached host externs — host code the component's body reaches.
     A `*` on either side is the unnameable boundary, carried through verbatim.
+
+    A reached extern contributes its DECLARED capability scope when it has one
+    (`extern emission[db] fn pg_write` contributes `db`) and its own NAME when
+    it does not (`extern emission fn send` contributes `send`) — the
+    `capabilities or (name,)` rule the rest of the system already keys scoped
+    crossings by: `lower._extern_emission_caps`, `emission_analysis`'s
+    witnessed seed, `audit_diff._capability_registers`, and item 343's approval
+    `ClassMap`. Before item 247 this surface used the name unconditionally, so a
+    directly-emitted `emission[db]` extern put `pg_write` in reach while
+    `capability_registers` and the approval fold both said `db` — and a rule
+    written `capability db requires register keyed` selected nothing, giving an
+    operator less floor than they asked for with no diagnostic. The audit's
+    `externs` enumeration is unchanged and still keyed by NAME: it is the
+    host-code table (class, backends, ref provenance), not the token namespace.
     """
     stats = (audit.get("boundary") or {}).get(name) or {}
     out: list[Reach] = []
@@ -1239,7 +1253,8 @@ def component_reach(audit: dict, name: str) -> list[Reach]:
         for cap in caps:
             add(cap, label, "emission")
     for ext in stats.get("externs") or []:
-        add(ext.get("name"), "host code", "host")
+        for token in ext.get("capabilities") or (ext.get("name"),):
+            add(token, ext.get("name"), "host")
     return out
 
 
@@ -1302,9 +1317,15 @@ def _location(manifest: dict, name: str) -> tuple[str | None, int | None]:
 def _reach_step(manifest: dict, name: str, reach: Reach) -> list[TraceStep]:
     """component -> the boundary it reaches, as a two-hop chain."""
     file, _ = _location(manifest, name)
-    detail = (f"reaches `{reach.token}` via emission `{reach.via}`"
-              if reach.kind == "emission"
-              else f"reaches host code `{reach.token}`")
+    if reach.kind == "emission":
+        detail = f"reaches `{reach.token}` via emission `{reach.via}`"
+    elif reach.via and reach.via != reach.token:
+        # item 247: a scoped extern's token is not its name, so the trace has
+        # to name the host code the token was declared on — otherwise the
+        # refusal says `db` and the reader cannot find `db` in the source.
+        detail = f"reaches `{reach.token}` via host code `{reach.via}`"
+    else:
+        detail = f"reaches host code `{reach.token}`"
     tail = (reach.token if reach.token != UNBOUNDED
             else "* (an unnameable boundary)")
     return [
