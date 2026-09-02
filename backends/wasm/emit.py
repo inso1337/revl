@@ -64,6 +64,14 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: a slot always holds the same 8 bytes whichever way it is read.
 _SLOT = 8
 
+# The placeholder a confidential witness is framed as instead of the value, when
+# the author declared the witness position `Secret[T]`. Must equal
+# `revl.taint.REDACTED_SECRET` / `confidential.REDACTED`: it is part of the WAL's
+# on-disk contract, and `revl recover` reads it back to refuse a replay it cannot
+# honestly perform (src/revl/recovery.py `_has_redacted_arg`) rather than
+# addressing the wrong referent and reporting the miss as a clean rollback.
+_REDACTED_SECRET = "<redacted:secret>"
+
 # The total, value-returning division forms (docs/arithmetic.md): same
 # rounding as the faulting operations, Err(reason) at a zero divisor.
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
@@ -1206,6 +1214,11 @@ class _ComponentEmitter:
                     if self.record:
                         record_strings.append(_ident(wit.get("name"), "record receiver"))
                         record_strings.append(self._wal_undo_name(wit))
+                        # ...and, when the author declared the witness position
+                        # confidential, the placeholder that stands in for it,
+                        # so `_str_ptr` can name it at the framing call below.
+                        if wit.get("secret_witness"):
+                            record_strings.append(_REDACTED_SECRET)
             elif step.get("step") == "provide":
                 # item 324: a witnessed effect inside a PROVIDE-METHOD body
                 # (the per-tool-call H1 position) contributes its declared
@@ -1455,9 +1468,19 @@ class _ComponentEmitter:
             self._needs_record_import = True
             receiver_ptr = self.v3._str_ptr(_ident(ext.get("name"), "record receiver"))
             method_ptr = self.v3._str_ptr(self._wal_undo_name(ext))
+            # The referent the host drain writes into the durable WAL. Ordinarily
+            # the witness itself; when the author declared the witness position
+            # confidential (`Result[Secret[W], E]`) the module frames a pointer
+            # to the placeholder instead, so the confidential bytes never leave
+            # the sandbox at all. The stamp is the compiler's
+            # (`secret_witness`), so the decision is made once, here, at the
+            # point that frames the record — never at each reader of the log.
+            referent = (self.v3._str_ptr(_REDACTED_SECRET)
+                        if ext.get("secret_witness")
+                        else f"(global.get {wit_val_glob})")
             record_call = (
                 f"\n      (call $revl_wal_record (i32.const {seq}) "
-                f"{receiver_ptr} {method_ptr} (global.get {wit_val_glob}))")
+                f"{receiver_ptr} {method_ptr} {referent})")
         lines.append(
             f"(if (i32.eq (i32.load (local.get ${tmp})) (i32.const {ok_tag}))\n"
             f"      (then\n"
