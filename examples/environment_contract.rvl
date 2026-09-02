@@ -1,0 +1,54 @@
+// The environment contract (docs/environment-binding.md, roadmap item 350).
+//
+// The port, the auth token, the data dir and the model provider are read
+// BEFORE the composition exists: the host has to know them to stand it up.
+// They used to arrive through an undeclared host-authored `--config` map that
+// could rewrite any field of any component. A `boot` component declares them
+// instead: its `config {}` block is the exhaustive, typed list of what the
+// host must inject, and `revl run --env FILE` is its one door.
+//
+//   revl audit examples/environment_contract.rvl
+//   revl run   examples/environment_contract.rvl --env <file> --plan
+//
+// The `under` / `in` bounds are the authority rule. An environment value adds
+// no capability, but a data dir is the filesystem path a component actually
+// reaches, and a provider identity is the network destination an emission
+// actually posts to, so an unbounded one widens the real reach while the
+// declared capability set is unchanged and nothing in the audit moves.
+
+service Env {
+  fn data_root() -> Str
+  fn port() -> Int
+  fn model() -> Str
+}
+
+service Sessions {
+  fn log_path() -> Str
+}
+
+boot component AppBoot provides env: Env {
+  config {
+    // confined: an injected path must normalize to somewhere inside the
+    // workspace data directory. `..`, an absolute path, and a sibling that
+    // merely shares the prefix as a string are all refused at admission
+    data_dir: Str under "./.app-data",
+    // enumerated: "which provider" chooses a network destination, so the
+    // admissible set is declared rather than left to whatever is injected
+    model: Str in ["mock", "real"] = "mock",
+    port: Int = 8099,
+  }
+
+  provide env {
+    fn data_root() = config.data_dir
+    fn port()      = config.port
+    fn model()     = config.model
+  }
+}
+
+// Everything downstream reads the environment through the contract, so there is
+// exactly one place to look for where a path or a provider came from.
+component SessionStore requires env: Env provides sessions: Sessions {
+  provide sessions {
+    fn log_path() = `${env.data_root()}/sessions.log`
+  }
+}

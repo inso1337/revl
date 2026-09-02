@@ -87,6 +87,12 @@ CORPUS = [
     # param and the two-parameter arrow argument (reduce threads an accumulator
     # with no intermediate list, so its body needs no `.push`)
     "transforms.rvl",
+    # item 421 F6 / item 429(d) — an extern whose declared return was
+    # `Secret[T]`: the `revlSecretResult(revlSecret_<name>(..))` wrapper around
+    # the verbatim body, and the extern surface that carries it. No other
+    # document in this corpus declares a `Secret[T]` (or an extern), so without
+    # this one the byte-agreement gate never reaches the redaction.
+    "secrets.rvl",
 ]
 
 
