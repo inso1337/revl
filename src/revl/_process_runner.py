@@ -3,7 +3,10 @@
 Reads a spec (argv[1] -> JSON) describing this process's slice of the
 composition, and brings it up on a cordis-py Context:
 
-  * load the keys it must consume from other processes as bridge proxies;
+  * load the keys it must consume from other processes as bridge proxies —
+    each same-composition proxy is first RE-ADMITTED against this process's
+    own running manifest (item 337 Seam 2, `_boot_wiring_decision`) before it
+    is wired; a proxy that fails admission is refused and never wired;
   * load its own components (in IR load order);
   * serve the keys it provides that other processes need;
   * run any probe expressions against its provided services;
@@ -126,6 +129,75 @@ def _repoint_decision(spec_files: list, running_ir: dict, cmd: dict) -> tuple[bo
     return True, None
 
 
+def _boot_wiring_decision(spec_files: list, running_ir: dict, info: dict) -> tuple[bool, str | None]:
+    """Decide whether a boot-time bridge proxy may be wired to its provider,
+    item 337 Seam 2 (`docs/design/337-polyglot-admission-mesh.md`).
+
+    This is the landed repoint seam (`_repoint_decision`, above) moved one
+    event earlier: instead of re-admitting a successor at a live cutover, the
+    CONSUMER re-admits its provider before the INITIAL proxy wiring at boot.
+    `info` is this process's own `spec["proxies"][key]` entry; placement.py
+    already stamps the provider's admissible identity (`component`, `backend`)
+    onto every same-composition proxy entry, so the selector is already in
+    hand — no new transport. The gate is the same `swap_admission` call, run
+    against `running_ir = compile_files(spec["files"])`, exactly the manifest
+    this process already computes at boot.
+
+    Fail-closed, same three properties as `_repoint_decision`: a proxy entry
+    carrying no admissible reference (component/backend) is REFUSED, never
+    silently wired; any failure to reach a verdict fails closed; and a refused
+    proxy is simply never wired, so the honest boot proceeds unchanged around
+    it. A cross-composition remote seam (item 151) never carries a
+    component/backend at all — that is Seam 3, a different, deferred seam —
+    so it is a caller's job to only invoke this for same-composition entries;
+    it still fails closed here rather than assume-admit if one arrives without
+    a selector.
+
+    The honest limit (named in the design, not smuggled past it): at boot the
+    consumer holds the SAME centrally-sliced source the conductor already
+    compiled from, so this catches a race or an injected wiring (a proxy
+    pointed somewhere the manifest does not sanction) and a tier-seam
+    violation — it cannot catch a provider whose actual running bytes differ
+    from the source this consumer holds.
+    """
+    component, backend = info.get("component"), info.get("backend")
+    if not component or not backend:
+        return False, ("boot proxy carries no admissible provider reference "
+                       "(component/backend); refused fail-closed (item 337)")
+    from revl.placement import swap_admission  # noqa: PLC0415
+    try:
+        _candidate, error = swap_admission(list(spec_files), running_ir, component, backend)
+    except Exception as exc:  # noqa: BLE001  any admission failure fails closed
+        return False, f"admission raised {type(exc).__name__}: {exc}"
+    if error is not None:
+        return False, error.splitlines()[0]
+    return True, None
+
+
+async def _apply_boot_wiring(key: str, info: dict, spec_files: list, running_ir: dict,
+                             wire, log=None) -> bool:
+    """Decide, then (only if admitted) perform one boot-time proxy wiring —
+    item 337 Seam 2. `wire` is the actual proxy setup (async: builds the bridge
+    proxy and awaits its fiber, in `run()` below); it is invoked ONLY when the
+    named provider passes `_boot_wiring_decision`. Returns True when the proxy
+    was wired, False when it was REFUSED — in which case `wire` is never
+    called at all, so the refusal actually blocks the wiring rather than
+    merely producing a diagnostic. A remote seam (item 151: a genuinely
+    separate composition, carrying no component/backend at all) is Seam 3, out
+    of this seam's scope, and always wires. Split out of `run()`'s boot loop so
+    the admission seam is unit-testable without a live Context, mirroring
+    `_apply_repoint`.
+    """
+    if not info.get("remote"):
+        ok, reason = _boot_wiring_decision(spec_files, running_ir, info)
+        if not ok:
+            if log:
+                log("proxy", key, f"REFUSED (admission): {reason}")
+            return False
+    await wire()
+    return True
+
+
 def _apply_repoint(cmd: dict, clients: dict, spec_files: list, running_ir: dict,
                    log=None) -> bool:
     """Apply one `repoint` command: re-admit the successor against the running
@@ -197,17 +269,27 @@ async def run(spec: dict) -> None:
     # normalizes both to an `Endpoint`. The deadline/withdrawal/canonical machinery
     # applies unchanged over either transport (docs/network-placement.md).
     for key, info in (spec.get("proxies") or {}).items():
-        target = info.get("endpoint") or info["socket"]
-        proxy = bridge.proxy_component(key, info["methods"], target, module,
-                                       deadline=info.get("deadline"),
-                                       deadlines=info.get("deadlines"),
-                                       async_methods=info.get("async_methods"))
-        clients[key] = proxy["_client"]
-        fiber = root.plugin(proxy)
-        await fiber
-        await _flush()
-        fibers.append((f"{key}-proxy", fiber))
-        log("proxy", key, f"-> {bridge.Endpoint.from_spec(target).describe()}")
+        # item 337 Seam 2: before wiring a same-composition proxy, re-admit its
+        # provider against OUR OWN running manifest (`_apply_boot_wiring` ->
+        # `_boot_wiring_decision`, the landed repoint seam's `swap_admission`
+        # call moved one event earlier). A refused provider is skipped
+        # entirely — `_wire` never runs — so the rest of boot proceeds
+        # unchanged around it (no blip). A remote seam (item 151, a genuinely
+        # separate composition) is Seam 3, out of scope here, and always wires.
+        async def _wire(key=key, info=info) -> None:
+            target = info.get("endpoint") or info["socket"]
+            proxy = bridge.proxy_component(key, info["methods"], target, module,
+                                           deadline=info.get("deadline"),
+                                           deadlines=info.get("deadlines"),
+                                           async_methods=info.get("async_methods"))
+            clients[key] = proxy["_client"]
+            fiber = root.plugin(proxy)
+            await fiber
+            await _flush()
+            fibers.append((f"{key}-proxy", fiber))
+            log("proxy", key, f"-> {bridge.Endpoint.from_spec(target).describe()}")
+
+        await _apply_boot_wiring(key, info, spec["files"], running_ir, _wire, log=log)
 
     # 2. this process's own components. G3 proves the dependency graph is a
     # checked DAG, so independent branches are provably independent and boot
