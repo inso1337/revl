@@ -54,6 +54,9 @@ def test_v1_documents_stay_at_version_1():
 def test_services_20_async_and_commutative_lower_and_emit():
     ir, ns = _compile_emit(
         """
+        type Row = { id: Int }
+        type Stats = { hits: Int }
+
         commutative service Database {
           commutative fn query(sql: Str) -> List[Row]
           async fn stats() -> Stats
