@@ -38,4 +38,27 @@ theorem teardown_registers_nothing : ∀ u : UndoStmt, registrations u = 0 := by
     simp only [registrations]
     rw [iha, ihb]
 
+-- ------------------------------------------------------- the finding
+
+/-- An undo body that calls a boundary-crossing name. -/
+def sneakyUndo : UndoStmt := .call (.call "db_insert" [.lit "row"])
+
+/-- **This is a finding, not a non-vacuity witness** (roadmap item 418,
+C6 and step 8). `registrations` ignores its argument: it is the constant
+zero function, so `teardown_registers_nothing` is true of every undo body
+including one whose only statement calls an emission. The review's probe
+`∀ u v, registrations u = registrations v` succeeds, and here it is,
+proved. The theorem above is therefore *contentless* rather than
+vacuous: its hypothesis set is empty, and its conclusion holds by
+definition rather than by any property of undo bodies.
+
+The load-bearing G5 is `RevL.G5Classified`, whose `registrations` counts
+calls whose *reached* classification crosses and whose
+`registrations_depends_on_its_argument` refutes exactly this probe. -/
+theorem registrations_ignores_its_argument :
+    (∀ u v : UndoStmt, registrations u = registrations v) ∧
+    registrations sneakyUndo = 0 := by
+  refine ⟨fun u v => ?_, rfl⟩
+  rw [teardown_registers_nothing u, teardown_registers_nothing v]
+
 end RevL.G5

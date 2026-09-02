@@ -264,4 +264,31 @@ theorem annotation_necessary :
   refine ⟨.atom (.num none 0), ?_⟩
   decide
 
+
+/-- A well-annotated map IR: one annotated numeric literal and one
+string, keyed out of canonical order. -/
+def annotatedIR : IR :=
+  .map [([104, 105], .num (some true) 7), ([97], .str [98, 99])]
+
+/-- **Non-vacuity** (roadmap item 418, step 8). `cross_tier_agreement`'s
+three hypotheses are jointly satisfiable, and not only on a degenerate
+IR: two real tiers are conformant, `annotatedIR` is well annotated, and
+the shared value both observe is a re-ordered, non-empty map, so the
+agreement claim is about a value the model actually computes.
+`annotation_necessary` above supplies the other half, that the
+annotation hypothesis cannot be dropped. -/
+theorem conformance_hypotheses_are_inhabited :
+    Conformant (profileOf .python) ∧ Conformant (profileOf .typescript) ∧
+    WellAnnotated annotatedIR ∧
+    eval (profileOf .python) annotatedIR =
+      .map [([97], .str [98, 99]), ([104, 105], .num true 7)] ∧
+    eval (profileOf .python) annotatedIR =
+      eval (profileOf .typescript) annotatedIR := by
+  have hwf : WellAnnotated annotatedIR := by
+    intro e he
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at he
+    rcases he with rfl | rfl <;> trivial
+  refine ⟨profileOf_conformant _, profileOf_conformant _, hwf, rfl,
+    six_tier_agreement _ _ _ hwf⟩
+
 end RevL.CrossTier

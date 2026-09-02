@@ -1027,4 +1027,95 @@ theorem derived_ceiling_check_not_subsumed :
     obtain ⟨m, hm, _⟩ := hC ⟨"model", []⟩ List.mem_cons_self "calls" 3 rfl
     exact absurd hm (by simp [ceilingOf, lookupV, ceilingVal])
 
+
+/-- **Non-vacuity for the remaining hypothesis families** (roadmap item
+418, step 8). `Lineage` is reflexive, so `Lineage H H` would be a witness
+that proves nothing; the one below is built by `derived_lineage` from a
+real spawn edge of `wProgGood`, and the child's reach is the `/tmp/job-42`
+cone rather than the router's own `/tmp`. `Spends` likewise takes a real
+run and refuses an overdraw, so `spend_within_budget` is not a statement
+about the empty run. `Resolves` and `NameableEmission` are exhibited at
+the same component. -/
+theorem capceilings_hypotheses_are_inhabited :
+    SpawnsAdmitted witIface wProgGood 1 ∧
+    Lineage (heldCaps witIface (wRouter "Job"))
+      (reachIn witIface wProgGood 1 "Job") ∧
+    wFs ["tmp", "job-42"] ∈ reachIn witIface wProgGood 1 "Job" ∧
+    Descends wProgGood "Job" "Job" 0 ∧
+    Resolves wProgGood (wChild "Job" "FsJob") ∧
+    (∀ s ∈ (wChild "Job" "FsJob").body,
+      NameableEmission (wChild "Job" "FsJob") s) ∧
+    Spends 3 [2, 1] ∧ total [2, 1] = 3 ∧ ¬ Spends 3 [2, 2] := by
+  have hA : SpawnsAdmitted witIface wProgGood 1 := derivation_non_vacuous.2.2.1
+  have hp : wRouter "Job" ∈ wProgGood := by simp [wProgGood]
+  have hch : "Job" ∈ (wRouter "Job").spawns := by simp [wRouter]
+  have hreach : wFs ["tmp", "job-42"] ∈ reachIn witIface wProgGood 1 "Job" := by
+    apply ownReach_sub_reachIn
+    show wFs ["tmp", "job-42"] ∈ ownReach witIface wProgGood "Job"
+    simp [ownReach, compOf, wProgGood, wRouter, wChild, bodyReach, stmtCaps,
+      emitTarget, targetCaps, svcOf, lookupSvc, svcCaps, capsOfDecls, witIface, wFs]
+  have hnam : ∀ s ∈ (wChild "Job" "FsJob").body,
+      NameableEmission (wChild "Job" "FsJob") s := by
+    intro s hs
+    simp only [wChild, List.mem_cons, List.not_mem_nil, or_false] at hs
+    subst hs
+    exact ⟨"fs", "FsJob", rfl, rfl⟩
+  have hspend : Spends 3 [2, 1] :=
+    .step 3 2 [1] (by omega) (.step 1 1 [] (by omega) (.done 0))
+  have hover : ¬ Spends 3 [2, 2] := by
+    intro h
+    cases h with
+    | step _ _ _ _ h' =>
+      cases h' with
+      | step _ _ _ hc _ => omega
+  exact ⟨hA, derived_lineage hA hp hch, hreach, .refl _, rfl, hnam, hspend, rfl,
+    hover⟩
+
+
+/-- **Non-vacuity for the ceiling half** (roadmap item 418, step 8). The
+lineage above carries no ceiling, because the `fs` cone declares none, so on its
+own it leaves `lineage_ceiling_le` and
+`budget_never_exceeds_root_ceiling` conditioned on a pair of hypotheses
+never shown to hold together. Here they do: a `model.complete(calls=3)`
+root, a spawn edge that narrows the ceiling to 2, and a counter run
+against it. The lineage is built with `Lineage.spawn`, not `Lineage.root`,
+so it is a real edge and not the reflexive case. -/
+theorem ceiling_lineage_is_inhabited :
+    Attenuates [callsCap 3] [callsCap 2] ∧
+    Lineage [callsCap 3] [callsCap 2] ∧
+    (∀ h ∈ [callsCap 3], ∃ m, ceilingOf h "calls" = some m ∧ m ≤ 3) ∧
+    ceilingOf (callsCap 2) "calls" = some 2 ∧
+    Spends 2 [1, 1] := by
+  have hres : ResourceOK [callsCap 3] [callsCap 2] := by
+    intro c hc
+    have hcc : c = callsCap 2 := by simpa using hc
+    subst hcc
+    refine ⟨callsCap 3, by simp, ?_⟩
+    exact (show stripCeilings (callsCap 3) = stripCeilings (callsCap 2) from rfl) ▸
+      covers_refl _
+  have hceil : CeilingOK [callsCap 3] [callsCap 2] := by
+    intro c hc k n hn
+    have hcc : c = callsCap 2 := by simpa using hc
+    subst hcc
+    obtain ⟨q, hq, _, hqc⟩ := budgetOf_attained hn
+    have hq3 : q = callsCap 3 := by simpa using hq
+    subst hq3
+    by_cases hk : "calls" = k
+    · subst hk
+      rw [show ceilingOf (callsCap 3) "calls" = some 3 from rfl] at hqc
+      injection hqc with e
+      exact ⟨2, rfl, by omega⟩
+    · exfalso
+      have hnone : ceilingOf (callsCap 3) k = none := by
+        simp only [ceilingOf, callsCap, lookupV, if_neg hk]
+        rfl
+      rw [hnone] at hqc
+      exact absurd hqc (by simp)
+  refine ⟨⟨hres, hceil⟩, .spawn .root ⟨hres, hceil⟩, ?_, rfl, ?_⟩
+  · intro h hh
+    have : h = callsCap 3 := by simpa using hh
+    subst this
+    exact ⟨3, rfl, by omega⟩
+  · exact .step 2 1 [1] (by omega) (.step 1 1 [] (by omega) (.done 0))
+
 end RevL.CapCeilings
