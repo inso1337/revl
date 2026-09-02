@@ -57,6 +57,24 @@ import os
 import sys
 from typing import Any, Callable, Optional
 
+# The confidentiality choke point (item 256 Slice 3): `confidential.py`, the
+# sibling module this recorder and the runtime both read, so a `Secret[T]` value
+# is redacted in ONE place rather than at each printer. The fallback covers this
+# module being loaded BY PATH with its own directory off `sys.path`. Continuing
+# without it would mean continuing to leak, so this raises rather than degrades.
+try:
+    import confidential
+except ModuleNotFoundError:  # pragma: no cover — path-loaded copy of this module
+    import importlib.util as _importlib_util
+
+    _confidential_spec = _importlib_util.spec_from_file_location(
+        "confidential",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "confidential.py"))
+    confidential = _importlib_util.module_from_spec(_confidential_spec)
+    _confidential_spec.loader.exec_module(confidential)
+    sys.modules.setdefault("confidential", confidential)
+
 __all__ = [
     "GUARANTEE", "IrreversibleStep", "KINDS", "Recorder", "ReplayError",
     "Step", "Timeline",
@@ -308,9 +326,15 @@ class Step:
 class Timeline:
     """The recorded activation of one component, and the operations over it."""
 
-    def __init__(self, component: str, sources: Optional[Sources] = None) -> None:
+    def __init__(self, component: str, sources: Optional[Sources] = None,
+                 secrets: Optional["confidential.SecretIndex"] = None) -> None:
         self.component = component
         self.sources = sources or Sources()
+        # Which argument positions of a crossing this composition declared
+        # `Secret[T]` (item 256 Slice 3, §7b). The recorder owns one index per
+        # session and hands it to every timeline; a timeline built without one
+        # (a hand-written test) declares nothing secret and records verbatim.
+        self.secrets = secrets or confidential.SecretIndex()
         self.steps: list = []
         self.origin: dict = {"phase": "activation"}
         # id(disposer returned by ctx.provide) -> provision key
@@ -351,12 +375,22 @@ class Timeline:
 
     def record_emission(self, key: str, method: str, args: tuple,
                         service: Optional[str], site: tuple) -> Step:
+        """Record one boundary crossing.
+
+        A `Secret[T]` receiver position is redacted HERE, at capture, not at each
+        printer: what the caller declared it may disclose to the receiver it does
+        not thereby authorise the recorder to keep. The raw value never enters
+        the `Step`, so it is not in the WAL, not in `revl_timeline`, not in
+        `revl_fork`'s report and not on `:bisect`'s stdout — every one of those
+        renders this same already-redacted record (item 256 Slice 3, §7b)."""
         file, lineno = site
+        secret = self.secrets.crossing(service=service, method=method, key=key,
+                                       component=self.component)
         step = self._add(
             KIND_EMISSION, f"{key}.{method}", None,
             file=file, lineno=lineno, source=self.sources.line(file, lineno),
             detail={"key": key, "method": method, "service": service,
-                    "args": [_describe(a) for a in args]},
+                    "args": confidential.redact_args(args, secret, _describe)},
             note="an emission is a one-way boundary crossing: it has no inverse",
         )
         if file is not None:
@@ -1009,6 +1043,16 @@ def _once(step: Step, fn: Callable) -> Callable:
 
 
 def _describe(value: Any) -> Any:
+    """Render one value for a record — the single funnel every recorded payload
+    passes through.
+
+    A value a declared `Secret[T]` marking already identified as confidential is
+    replaced by the placeholder wherever it turns up, nested containers included
+    (item 256 Slice 3, §7b). That is an exact-value match against what a marking
+    redacted earlier in this process, not a heuristic: an ordinary argument is
+    still described verbatim."""
+    if confidential.is_secret_value(value):
+        return confidential.REDACTED
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, (list, tuple)):
@@ -1255,6 +1299,10 @@ class Recorder:
         self._ir = ir or {}
         self._origin: dict = {"phase": "activation"}
         self.wal: Optional[WriteAheadLog] = None  # crash-recovery WAL (item 47)
+        # item 256 Slice 3: the declared `Secret[T]` surface of this composition,
+        # read off the IR's lowering-time marking. Rebuilt whenever the IR is
+        # replaced (a swap re-instruments against a new generation).
+        self.secrets = confidential.SecretIndex(self._ir)
 
     # -- setup -------------------------------------------------------------
 
@@ -1269,6 +1317,7 @@ class Recorder:
         """
         if ir is not None:
             self._ir = ir
+            self.secrets = confidential.SecretIndex(self._ir)
         services = self._ir.get("services") or {}
         names = []
         for comp in self._ir.get("components") or []:
@@ -1288,7 +1337,7 @@ class Recorder:
         recorder = self
 
         def recording_apply(ctx, config):
-            timeline = Timeline(name, recorder.sources)
+            timeline = Timeline(name, recorder.sources, recorder.secrets)
             timeline.origin = dict(recorder._origin)
             if recorder.wal is not None:
                 timeline.attach_wal(recorder.wal, recorder._ir)
@@ -1315,7 +1364,18 @@ class Recorder:
         The session sets this around a provided-service call, which is what
         makes forward replay expressible: a call is a re-invocable unit, an
         activation-body step is not.
+
+        The origin rides into the WAL on every step it tags and is rendered as
+        `whoRan` by `:bisect`, so a `Secret[T]` argument of the CALLED operation
+        is redacted here, at capture, on the same footing as an emission's
+        (item 256 Slice 3, §7b).
         """
+        origin = dict(origin)
+        args = origin.get("args")
+        if isinstance(args, (list, tuple)):
+            secret = self.secrets.crossing(method=origin.get("method"),
+                                           key=origin.get("key"))
+            origin["args"] = confidential.redact_args(args, secret, _describe)
         self._origin = dict(origin)
         for timeline in self.timelines.values():
             timeline.origin = dict(origin)
@@ -1608,6 +1668,11 @@ class WriteAheadLog:
         self._generation = generation
         self._seq = 0
         self._handle = None
+        # item 256 Slice 3: the log is plaintext at rest for the life of the run
+        # and is created 0644, so a `Secret[T]` argument is redacted before it
+        # reaches `_write`, not after. Built from the same IR marking the
+        # recorder reads.
+        self.secrets = confidential.SecretIndex(ir or {})
 
     # -- writing -----------------------------------------------------------
 
@@ -1711,14 +1776,22 @@ class WriteAheadLog:
             raise ReplayError(
                 f"discharge descriptor entry must be 'transactional' or "
                 f"'compensation', got {entry!r}")
+        # item 256 Slice 3: the descriptor is durable plaintext, so a declared
+        # `Secret[T]` position and any value a marking already redacted are
+        # replaced before the record is built. `witness` is the same value again
+        # under a second key, so it goes through the same funnel — redacting one
+        # spelling and not the other would leak on the next line.
+        secret = self.secrets.crossing(method=method, key=receiver,
+                                       component=receiver)
+        safe_args = confidential.redact_args(args, secret, _describe)
+        safe_witness = _describe(witness)
         record = {
             "record": "discharge-descriptor",
             "seq": self._seq,
             "entry": entry,
-            "call": {"receiver": receiver, "method": method,
-                     "args": list(args)},
+            "call": {"receiver": receiver, "method": method, "args": safe_args},
             "origin": origin or {},
-            "witness": witness,          # transactional only; durable data, not a handle
+            "witness": safe_witness,     # transactional only; durable data, not a handle
             "idempotency": idempotency,  # author-supplied key where present (item 309)
             # item 309: the inverse's idempotency register, carried into the WAL
             # so a FRESH-process `recover` reads it (the descriptor, not the
@@ -1769,11 +1842,18 @@ class WriteAheadLog:
         A NAMED-CALL descriptor with captured serializable arguments, never a
         closure (243 rule 4) — a crashed session's queue must be enumerable from
         the log alone. Draws from the session's single ``_seq`` counter, so a seq
-        is a position in the session, not a per-kind index."""
+        is a position in the session, not a per-kind index.
+
+        `receiver` is the required-service KEY, not the service, so the declared
+        `Secret[T]` positions are resolved through the requiring component's
+        `requires` map and, failing that, by operation name — the checker's own
+        keying (item 256 Slice 3, §7b)."""
+        secret = self.secrets.crossing(method=method, key=receiver)
         record = {
             "record": "deferred-emission",
             "seq": self._seq,
-            "call": {"receiver": receiver, "method": method, "args": list(args)},
+            "call": {"receiver": receiver, "method": method,
+                     "args": confidential.redact_args(args, secret, _describe)},
             "origin": {"key": receiver, "method": method},
             "idempotency": idempotency,
         }
