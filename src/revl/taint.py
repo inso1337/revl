@@ -56,6 +56,17 @@ _QUALIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])(?:Untrusted|Trusted|Secret)\[")
 # `secret`).
 _QUALIFIERS = ("Untrusted", "Trusted", "Secret")
 
+# What a confidential value looks like once it leaves the process. A `Secret[T]`
+# declaration authorises disclosure to the DECLARED RECEIVER and to nobody else;
+# every durable or agent-visible rendering of that value (the WAL, the recorded
+# timeline, an MCP response, the run log) carries this placeholder in its place.
+#
+# The string is part of the WAL's on-disk contract, so it is defined ONCE here
+# and mirrored by `backends/python/confidential.py` (which must stay importable
+# with no `revl` on the path — an emitted program runs against the backend tree
+# alone). `tests/test_secret_externalization.py` pins the two to the same bytes.
+REDACTED_SECRET = "<redacted:secret>"
+
 # Coarse origin classes the static half tracks (Decision 2). The exact host in
 # `web:example.com` is a runtime refinement filled by Slice B. `secret` (item 256
 # Slice 1, the bound provider key) and `confidential` (item 256 Slice 3, the
@@ -257,9 +268,17 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     model.extern_names = frozenset(
         ext.name for ext in getattr(program, "externs", ()) or ())
 
-    def _note_params(name: str, typed_params) -> None:
+    def _note_params(name: str, typed_params) -> set:
         """`typed_params` is a list of (index, type_string, setter). Records
-        sink/untrusted params and strips the qualifier via `setter`."""
+        sink/untrusted params and strips the qualifier via `setter`.
+
+        Returns the indices declared `Secret[T]`, so the caller can stamp them
+        on the DECLARATION (`decl.secret_params`) as well as in the model. The
+        model is keyed by operation name and is consumed by the flow walk; the
+        stamp survives into the IR, which is the only channel by which a runtime
+        can learn that an argument position is confidential — the qualifier
+        itself is stripped here, so nothing downstream can re-derive it."""
+        secret_indices: set = set()
         for index, type_str, setter in typed_params:
             qual = top_qualifier(type_str)
             if qual == "Trusted":
@@ -276,9 +295,11 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 # the receiver, never onward disclosure.
                 model.confidential_params.setdefault(
                     name, {})[index] = CONFIDENTIAL_ORIGIN
+                secret_indices.add(index)
             clean = strip_qualifiers(type_str)
             if clean != type_str:
                 setter(clean)
+        return secret_indices
 
     # externs: an `Untrusted[T]` return is a taint source; a `Trusted[T]` param
     # is a sink; both are stripped to their base type.
@@ -295,7 +316,7 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         params = []
         for i, p in enumerate(ext.params):
             params.append((i, p.type, _fnparam_setter(p)))
-        _note_params(ext.name, params)
+        ext.secret_params = frozenset(_note_params(ext.name, params))
         # Slice D (D1/D3): derive sinks and sources from the crossing's declared
         # capability scope, under strict mode, for any parameter/return the author
         # left unqualified. Additive to the annotated surface above — an already
@@ -332,7 +353,7 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         params = []
         for i, p in enumerate(fn.params):
             params.append((i, p.type, _fnparam_setter(p)))
-        _note_params(fn.name, params)
+        fn.secret_params = frozenset(_note_params(fn.name, params))
         if fn.name in model.sinks:
             model.sink_kind[fn.name] = _sink_kind_for(fn.name, ())
         fn.returns = strip_qualifiers(fn.returns)
@@ -348,6 +369,7 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 # inherits the operation's declared declassification rights.
                 model.declared_endorse[method.name] = frozenset(endorse_origins)
             new_params = []
+            secret_indices: set = set()
             for i, (pname, ptype) in enumerate(method.params):
                 qual = top_qualifier(ptype)
                 clean = strip_qualifiers(ptype)
@@ -369,8 +391,15 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                     # qualifier away and is a universal declassifier.
                     model.confidential_params.setdefault(
                         method.name, {})[i] = CONFIDENTIAL_ORIGIN
+                    secret_indices.add(i)
                 new_params.append((pname, clean))
             method.params = new_params
+            # The stamp the IR carries into the runtime. `method.params` above no
+            # longer mentions `Secret[...]`, so this is the ONLY surviving record
+            # that position `i` is a declared disclosure receiver — the recorder
+            # reads it to decide what a crossing's argument may look like once it
+            # is written to the WAL or handed to an MCP client.
+            method.secret_params = frozenset(secret_indices)
             # Slice D (D1/D3): a shell/exec/terminal-scoped service operation is a
             # derived sink under strict mode, exactly as an extern is — a granted
             # tool surface annotates nothing yet still refuses untrusted input.
@@ -382,6 +411,21 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                     method.name,
                     _sink_kind_for(method.name, getattr(method, "capabilities", None)))
             method.returns = strip_qualifiers(method.returns)
+
+    # component config fields: a `Secret[T]` field is a declared confidential
+    # INPUT. The qualifier is stripped exactly as everywhere else — before this,
+    # `Secret[Str]` reached the base checker as an opaque type name, so the field
+    # matched no `_TYPES` entry and could not even take a `Str` default — and the
+    # flag it leaves behind is what the emitted `ConfigSchema` reads to keep the
+    # value out of the run log and the `revl_load` MCP response (item 256 Slice 3,
+    # §7b). Byte-identical for a field with no qualifier.
+    for comp in getattr(program, "components", ()):
+        for cfield in getattr(comp, "config", ()) or ():
+            if top_qualifier(cfield.type) == "Secret":
+                cfield.secret = True
+            clean = strip_qualifiers(cfield.type)
+            if clean != cfield.type:
+                cfield.type = clean
 
     return model
 
