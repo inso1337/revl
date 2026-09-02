@@ -36,8 +36,22 @@ def test_emit_router_class_and_strict_read():
     java = _emit(SCENARIO)
     assert "public static final class RevlRouterRouterWorker implements Worker {" in java
     # the strict single-realm liveness-checked read (the fork's primitive)
-    assert "ctx.serviceInRealm(Worker.class, r).isPresent()" in java
-    assert "ctx.serviceInRealm(Worker.class, cand).get()" in java
+    assert "ctx.serviceInRealm(Worker.class, realms[at])" in java
+    # item 433 F3: ONE resolution per call. The selection loop keeps the handle
+    # it just probed instead of discarding it, rebuilding a live-label list and
+    # resolving the winner a second time, which is the shape the go emitter
+    # already had. So there is exactly one `serviceInRealm` call site, no
+    # `revlLive()` and no `live.contains(..)` scan.
+    assert java.count("ctx.serviceInRealm(") == 1
+    assert "revlLive()" not in java
+    assert "live.contains(" not in java
+    # ...and the served counter is a `long[]` indexed by realm position, not a
+    # Map<String, Long> that boxes a Long past the valueOf cache on every call.
+    assert "private final long[] served = new long[3];" in java
+    assert "served.merge(" not in java
+    # the emitter knows the declared strategy, so only that branch is emitted
+    assert 'private final String strategy' not in java
+    assert 'strategy.equals("least_loaded")' not in java
     # forwards each op through a fresh selection (failover from the body)
     assert "public String call(String request) {" in java
     assert "revlSelect().call(request)" in java
