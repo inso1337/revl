@@ -362,7 +362,9 @@ class ProposeResult:
       The post-activation health gate rejected it and the swap REVERTED to gen N;
       the process keeps serving gen N (`code` `SWAP_REVERTED`).
     * `admitted` True, `swapped` True — the swap took: gen N+1 is live, `keys`
-      are what it provides, `state` is the resulting session state."""
+      are what it ACTUALLY provides (the live `providedKeys`, not the candidate's
+      declarations — a declared key with no live provider is never reported), and
+      `state` is the resulting session state."""
 
     __slots__ = ("admitted", "swapped", "reverted", "code", "message", "keys",
                  "state")
@@ -639,8 +641,14 @@ class Gate:
             return ProposeResult(True, swapped=False, reverted=True,
                                  code="SWAP_REVERTED", message=str(error))
 
-        keys = tuple(k for comp in (ir.get("components") or [])
-                     for k in (comp.get("provides") or {}))
+        # `keys` is what gen N+1 ACTUALLY provides, read off the swap's own
+        # state report (`providedKeys` -> `driver.resolved_keys()`, run.py:878),
+        # never re-derived from the candidate IR's `provides` declarations. The
+        # IR-derived form lied: a declaration whose provider is a `spawn` target
+        # never reaches ROOT, so the loop was handed a key it could not call —
+        # a refusal-shaped condition dressed as an admission. Reading the single
+        # live source means the report and the health gate cannot disagree.
+        keys = tuple(state.get("providedKeys") or ())
         return ProposeResult(True, swapped=True, keys=keys, state=state)
 
     def _compile_candidate_composition(self, source: str,
