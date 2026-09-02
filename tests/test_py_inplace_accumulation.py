@@ -41,6 +41,25 @@ def run(source: str) -> dict:
     return namespace
 
 
+def emit_py_modules(tmp_path, **modules: str) -> str:
+    """Emit one program built from SEPARATE modules that do not `use` each other.
+
+    Bare-name resolution is per-module (`Program.fn_scopes`) while the emitted
+    namespace is flat over the merged program, so this is the only way to reach
+    a call whose name is a local here and a module `fn` over there: the
+    same-module spelling is refused at lowering
+    (`lower._refuse_callable_shadowing`).
+    """
+    from revl import compile_files  # noqa: PLC0415
+
+    paths = []
+    for name, source in modules.items():
+        path = tmp_path / f"{name}.rvl"
+        path.write_text(source, encoding="utf-8")
+        paths.append(str(path))
+    return backend_emitter("python").emit(compile_files(paths))
+
+
 # ---------------------------------------------------------------------------
 # the shapes that DO qualify
 # ---------------------------------------------------------------------------
@@ -308,19 +327,29 @@ fn observed(n: Int) -> Int {
     assert "(out + [i])" in src
 
 
-def test_a_local_shadowing_a_fn_name_gets_no_summary():
-    """A local MAY shadow a module `fn` (`let helper = g` over a `fn helper`),
-    and the call node is spelled identically either way — a `var` callee named
-    `helper`. So a callee name the BODY BINDS gets no summary at all and the
-    call is assumed to retain, rather than letting the summary of a different
-    function decide an aliasing question.
+def test_a_local_shadowing_an_unimported_fn_name_gets_no_summary(tmp_path):
+    """A callee name the BODY BINDS gets no summary at all, and the call is
+    assumed to retain — rather than letting the summary of a DIFFERENT function
+    decide this one's aliasing question.
 
-    Which function such a call actually reaches is itself unsettled downstream
-    (the python emitter's template inliner resolves the name to the module fn
-    here), which is the whole reason this refuses to guess instead of picking
-    one answer."""
-    source = """
-fn helper(xs: List[Int]) -> Int { return xs.length() }
+    Shadowing a module `fn` that is visible to the same module is refused at
+    lowering now (examples/rejections/shadowed_module_fn_call.rvl): the call
+    node is spelled identically either way, so `helper(...)` had no single
+    referent. What survives, and what this pins, is the CROSS-MODULE case,
+    where both spellings are correct revl and must stay legal: resolution is
+    per-module, so `other.rvl`'s `fn helper` is invisible here, while the
+    summary table is keyed on the flat merged function list and still holds an
+    entry under that name. selfhost/lexer.rvl's `fn step` beside a local `step`
+    in selfhost/emit_py.rvl is the real instance.
+
+    `fn helper` does not retain its argument, so applying its summary here
+    would license the in-place write — while the local actually names `g`,
+    which may hold on to `out` forever.
+    """
+    src = emit_py_modules(
+        tmp_path,
+        other="fn helper(xs: List[Int]) -> Int { return xs.length() }\n",
+        user="""
 fn shadowed(g: (List[Int]) -> Int, n: Int) -> List[Int] {
   let helper = g
   var out: List[Int] = []
@@ -328,11 +357,20 @@ fn shadowed(g: (List[Int]) -> Int, n: Int) -> List[Int] {
   while (i < n) { out = out.push(i) i = i + helper(out) }
   return out
 }
-"""
-    src = emit_py(source)
+""",
+    )
     assert "out.append(i)" not in src, (
-        "`helper` names a local here, so the module fn's summary must not apply")
+        "`helper` names the local `g` here, so the module fn's summary must "
+        "not apply")
     assert "(out + [i])" in src
+
+    # and the value: a `g` that KEEPS what it is handed must not watch the list
+    # it kept grow under it
+    namespace: dict = {}
+    exec(compile(src, "<emitted>", "exec"), namespace)
+    kept: list = []
+    namespace["shadowed"](lambda xs: kept.append(xs) or 1, 3)
+    assert kept[0] == [0], f"the retained list was written through: {kept[0]}"
 
 
 def test_a_parameter_is_never_written_through():
