@@ -1205,6 +1205,22 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str,
         method_is_async = bool(declared[name].get("async"))
         prefix = "async " if method_is_async else ""
         lines.append(f"{indent}{prefix}{name}({sig}) {{")
+        # item 421 F6: a parameter the service declared `Secret[T]` is a declared
+        # DISCLOSURE RECEIVER. `taint.py` strips the qualifier before lowering, so
+        # `params[i]["secret"]` is the only surviving record that this position is
+        # confidential — the same stamp backends/python/emit.py reads. Registering
+        # the value at the head of the receiver is what lets `runtime.record`
+        # scrub it out of the host trace when the body goes on to use it as a
+        # `Map` key, a `pool.query` sql or a stream item. Emitted ONLY for a
+        # method that actually declares one, so every other module is
+        # byte-identical.
+        secret_params = [
+            param for param, spec in zip(params, spec_params)
+            if isinstance(spec, dict) and spec.get("secret")
+        ]
+        if secret_params:
+            lines.append(
+                f"{indent}  host.markSecret({', '.join(secret_params)})")
         lines.extend(_method_body(method.get("body") or [],
                                   ctx.with_scope(body_scope, in_async=method_is_async),
                                   indent + "  ", method_is_async,
@@ -1959,12 +1975,18 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
         spec_parts = []
         for field in fields:
             fname = field["name"]
+            # item 256 Slice 3 / 421 F6: a field declared `Secret[T]` is stamped
+            # so the runtime keeps its value out of the `<Component>.config`
+            # trace line while still handing the real value to the component.
+            # Emitted only when the author declared one, so every existing
+            # module stays byte-identical.
+            mark = ", secret: true" if field.get("secret") else ""
             if field.get("default") is not None:
                 spec_parts.append(
-                    f"{fname}: {{ default: {_literal(field['default'])} }}"
+                    f"{fname}: {{ default: {_literal(field['default'])}{mark} }}"
                 )
             else:
-                spec_parts.append(f"{fname}: {{ required: true }}")
+                spec_parts.append(f"{fname}: {{ required: true{mark} }}")
         spec = ", ".join(spec_parts)
         lines.append(
             f"    const config = host.applyConfigDefaults({_string(name)}, "
@@ -3295,6 +3317,14 @@ def _emit_ts_ref_thunk(name: str, params_decl: str, arg_names: str,
     symbol = _ident(ref["symbol"], "ref symbol")
     where = f"{rel}#{symbol}"
     is_async = bool(ext.get("async"))
+    # item 421 F6: the ORIGIN end of a declared marking. `taint.py` strips the
+    # `Secret[...]` qualifier before lowering, leaving `secret_return` as the
+    # only record that this extern's return is confidential (the counterpart of
+    # `params[i]["secret"]`). Registering the value where it enters the value
+    # world is what covers a composition the receiver-end marking misses.
+    def _mark(expr: str) -> str:
+        return f"host.secretResult({expr})" if ext.get("secret_return") else expr
+
     # item 410: a stdlib-origin ref (`"root": "stdlib"`) resolves against the
     # install root (`_revl_ref_path_stdlib`); a user ref against the user root
     # (`_revl_ref_path`, unchanged). Kind-dispatched, no cross-domain fallback.
@@ -3313,7 +3343,7 @@ def _emit_ts_ref_thunk(name: str, params_decl: str, arg_names: str,
                      f"{_string(f'revl extern `{name}`: {where} is not a function')})")
         lines.append(f"    _REVL_REFS.set({_string(name)}, _f)")
         lines.append("  }")
-        lines.append(f"  return await _f({arg_names})")
+        lines.append(f"  return await {_mark(f'_f({arg_names})')}")
         lines.append("}")
     else:
         lines.append(f"export function {name}({params_decl}): {returns} {{")
@@ -3327,7 +3357,7 @@ def _emit_ts_ref_thunk(name: str, params_decl: str, arg_names: str,
         lines.append(f"      throw new Error({_string(f'revl extern `{name}` is declared sync but {where} is an async function; declare the extern async or ref a sync symbol')})")
         lines.append(f"    _REVL_REFS.set({_string(name)}, _f)")
         lines.append("  }")
-        lines.append(f"  return _f({arg_names})")
+        lines.append(f"  return {_mark(f'_f({arg_names})')}")
         lines.append("}")
     lines.append("")
     return lines
@@ -3407,6 +3437,9 @@ def _emit_ts_externs(externs: list) -> list[str]:
             for p in ext.get("params") or []
         )
         returns = _ts_v3_type(ext.get("returns"))
+        arg_list = ", ".join(
+            _ident(p.get("name"), "extern parameter name")
+            for p in ext.get("params") or [])
         bodies = ext.get("bodies") or {}
         refs = ext.get("refs") or {}
         # item 396 option B: a `@ts ref` extern emits a lazy import thunk.
@@ -3431,9 +3464,27 @@ def _emit_ts_externs(externs: list) -> list[str]:
         # body line, mirroring the py bind (backends/python/emit.py). None for a
         # no-config extern, so its body splices byte-identically.
         config_bind = _ts_extern_config_bind(ext)
+        # item 421 F6: an extern whose DECLARED return was `Secret[T]` is the
+        # origin — where the value enters the value world, the case a
+        # receiver-end marking misses (`let t = emit mint(); effect
+        # store.insert(t, v)`). `taint.py` strips the qualifier before lowering,
+        # so `secret_return` is the only surviving record of it. The verbatim
+        # `@ts` body owns its own `return` statements, so it moves into an inner
+        # function and the exported name becomes the one-line marking wrapper —
+        # every call site is covered without the body being rewritten. Absent
+        # unless the author declared it, so every other module is byte-identical.
+        secret_return = bool(ext.get("secret_return"))
+        impl = f"_revl_secret_{name}" if secret_return else name
+        export_kw = "" if secret_return else "export "
         if ext.get("async"):
+            if secret_return:
+                lines.append(
+                    f"export async function {name}({params}): Promise<{returns}> {{")
+                lines.append(f"  return host.secretResult(await {impl}({arg_list}))")
+                lines.append("}")
+                lines.append("")
             lines.append(
-                f"export async function {name}({params}): Promise<{returns}> {{")
+                f"{export_kw}async function {impl}({params}): Promise<{returns}> {{")
             if config_bind:
                 lines.append("  " + config_bind)
             body = textwrap.dedent(bodies["ts"].strip("\n"))
@@ -3445,7 +3496,12 @@ def _emit_ts_externs(externs: list) -> list[str]:
             lines.append("}")
             lines.append("")
             continue
-        lines.append(f"export function {name}({params}): {returns} {{")
+        if secret_return:
+            lines.append(f"export function {name}({params}): {returns} {{")
+            lines.append(f"  return host.secretResult({impl}({arg_list}))")
+            lines.append("}")
+            lines.append("")
+        lines.append(f"{export_kw}function {impl}({params}): {returns} {{")
         if config_bind:
             lines.append("  " + config_bind)
         body = textwrap.dedent(bodies["ts"].strip("\n"))
