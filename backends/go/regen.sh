@@ -100,6 +100,17 @@ python3 "$here/emit.py" "$here/scenarios/emitted/jsonwire/jsonwire.ir.json" json
 python3 "$here/emit.py" "$here/scenarios/emitted/witnessed_teardown/witnessed_teardown.ir.json" witnessedteardown \
   > "$here/scenarios/emitted/witnessed_teardown/gen_witnessed_teardown_test.go"
 
+# --- a declared Secret[T] must not reach the host trace (item 421 F6) --------
+# secret_trace.ir.json is compiled from scenarios/secret_trace.rvl by the frozen
+# frontend (`revl compile`). The emitter reads the two markings `taint.py` leaves
+# behind (`externs[i].secret_return`, `params[i].secret`) and has the emitted
+# program register the declared value itself, at both ends; `hostRecord` then
+# scrubs every registered value out of every trace event. exec_test.go
+# (hand-written, not regenerated) drives both ends and the false-positive
+# control against the real stc-go runtime.
+python3 "$here/emit.py" "$here/scenarios/emitted/secret_trace/secret_trace.ir.json" secrettrace \
+  > "$here/scenarios/emitted/secret_trace/gen_secret_trace_test.go"
+
 # --- per-tool-call witnessed effect in a provide METHOD (item 318, the H1 gate,
 # docs/design/243-witnessed-externs.md) --------------------------------------
 # provide_method_witnessed.ir.json is compiled from
@@ -156,6 +167,7 @@ if command -v gofmt >/dev/null 2>&1; then
            "$here/scenarios/emitted/records/gen_records_test.go" \
            "$here/scenarios/emitted/jsonwire/gen_jsonwire_test.go" \
            "$here/scenarios/emitted/witnessed_teardown/gen_witnessed_teardown_test.go" \
+           "$here/scenarios/emitted/secret_trace/gen_secret_trace_test.go" \
            "$here/scenarios/emitted/provide_method_witnessed/gen_provide_method_witnessed_test.go" \
            "$here/scenarios/emitted/method_compensate/gen_method_compensate_test.go" \
            "$here/v3/tests/gen_test.go" \
