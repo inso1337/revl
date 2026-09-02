@@ -2733,6 +2733,23 @@ def _emit_load_helpers(ir, out):
             out.append("func Load%s(target *stc.Context, cfg %sConfig) *stc.Fiber {" % (cname, cname))
         else:
             out.append("func Load%s(target *stc.Context) *stc.Fiber {" % cname)
+        # item 421 F6, the config half: a `Secret[T]` config field is the third
+        # declared marking, beside a `Secret[T]` service parameter (the receiver,
+        # registered at the head of the provide method) and a `Secret[T]` extern
+        # return (the origin). It arrives ONCE, here, and `Load%s` is the single
+        # door every path uses — the lifecycle tests and the placement runner's
+        # `RevlLoad` alike — so the registration sits here rather than at each
+        # read. Without it the go host trace printed an operator-supplied
+        # credential verbatim while the py and ts tiers, which register their
+        # config values at load, scrubbed it: the same declaration meant
+        # different things on different tiers.
+        if _SECRET_MODE and has_config:
+            secret_fields = [
+                "cfg.%s" % _camel(f["name"]) for f in comp.get("config") or []
+                if isinstance(f, dict) and f.get("secret")
+            ]
+            if secret_fields:
+                out.append("\trevlMarkSecret(%s)" % ", ".join(secret_fields))
         if isolate or intercept:
             out.append("\tctx := target.Child()")
             for key, realm in isolate.items():
