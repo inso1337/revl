@@ -83,7 +83,7 @@ def cap_scope_enumerated_not_run(caps) -> bool:
 
 
 def _calls_in(node, found: set, values: set | None = None,
-              stop_async_arrows: bool = False) -> None:
+              stop_async_arrows: bool = False, _callee_pos: bool = False) -> None:
     """Function/extern names a lowered node calls. Component bodies lower a
     call to `{kind: fn, name}`; pure fn bodies to `{kind: call, callee:
     {kind: var, name}}`.
@@ -91,9 +91,20 @@ def _calls_in(node, found: set, values: set | None = None,
     With `values` (a set, filled in place), a *first-class* reference — a
     bare `{kind: var, name}` naming a callable in value position, where the
     function value itself flows instead of a call happening — is recorded
-    too. Call-callee positions are excluded: `f(x)` is a call (already in
-    `found`), not a value escaping. This is how the emission analysis sees
-    an emitting callable being handed to code that may dispatch it.
+    too. The *directly named* callee of a call is not such a reference:
+    `f(x)` is a call (already in `found`), not `f` escaping as a value.
+
+    Two things that read alike but are not: NOT RECORDING THE CALLEE NODE AS
+    A VALUE, and NOT VISITING THE CALLEE SUBTREE. Only the first is the rule.
+    A callee is an arbitrary expression, and a name nested inside a computed
+    one — `[send][0](x)`, `pick()(x)`, `(b ? send : other)(x)`, `xs[i](x)` —
+    is a real reference: the function value genuinely flows into the
+    index/ternary/factory that produces the target. Pruning the whole subtree
+    (as this walk once did) hid those names from *both* channels, so a module
+    `fn` dispatching through a computed callee entered neither `found` nor
+    `values` and the G4/G8/capability/async folds never reached it. The
+    subtree is therefore walked; only the immediate callee node is barred
+    from the value channel, by `_callee_pos` (internal, one level deep).
     """
     if isinstance(node, dict):
         kind = node.get("kind")
@@ -110,13 +121,12 @@ def _calls_in(node, found: set, values: set | None = None,
         if kind == "call" and isinstance(callee, dict) \
                 and callee.get("kind") == "var" and isinstance(callee.get("name"), str):
             found.add(callee["name"])
-        elif values is not None and kind == "var" \
+        elif values is not None and kind == "var" and not _callee_pos \
                 and isinstance(node.get("name"), str):
             values.add(node["name"])
         for key, value in node.items():
-            if key == "callee" and kind == "call":
-                continue  # the callee is a call target, not a flowing value
-            _calls_in(value, found, values, stop_async_arrows)
+            _calls_in(value, found, values, stop_async_arrows,
+                      _callee_pos=(key == "callee" and kind == "call"))
     elif isinstance(node, list):
         for value in node:
             _calls_in(value, found, values, stop_async_arrows)
