@@ -495,7 +495,7 @@ def test_a_non_canonical_mount_covers_nothing_rather_than_widening():
     """The two sides fail closed differently, on purpose. Canonicalizing a
     traversing MOUNT could only WIDEN it (`/scratch/..` denotes `/`), and a
     defense-in-depth pass must never be the thing that widens a grant, so such a
-    mount covers nothing here — and is refused outright where it enters."""
+    mount covers nothing here, and is refused outright where it enters."""
     assert _fs_covers(["/scratch/..:rw"], "/etc/shadow", "rw") is False
     assert _fs_covers(["/scratch/..:rw"], "/scratch/x", "rw") is False
     # a relative spelling has no meaning at this layer either

@@ -969,7 +969,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {rendered}", file=sys.stderr)
 
     # roadmap 422 F7: a `use "stdlib/..."` that did not land on the stdlib this
-    # compiler ships. Same channel and the same reason as the holes report —
+    # compiler ships. Same channel and the same reason as the holes report -
     # stderr, so a piped IR document stays exactly the IR document, with the
     # fact also on `ir["stdlib_shadow"]` for anything reading the JSON. Not a
     # refusal: shadowing is supported (a local `stdlib/` wins by design, item
@@ -979,7 +979,7 @@ def main(argv: list[str] | None = None) -> int:
     for shadow in ir.get("stdlib_shadow") or []:
         print(f"note: `use \"{shadow['written']}\"` resolved to "
               f"{shadow['resolved']} ({shadow['origin']}), not the stdlib this "
-              f"compiler ships — read that module, not the import line, for "
+              f"compiler ships, read that module, not the import line, for "
               f"what its externs are classified and confined to",
               file=sys.stderr)
 

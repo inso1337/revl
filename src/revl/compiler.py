@@ -193,7 +193,7 @@ class _ModuleLoader:
         `use "stdlib/fs.rvl"` is not identity-pinned: relative-to-the-importer
         resolution is primary and wins outright (item 319), and `REVL_IMPORT_PATH`
         is searched before `stdlib_root().parent`, so a `stdlib/` directory beside
-        the importing file — or one entry on an env var — supplies the module.
+        the importing file, or one entry on an env var, supplies the module.
         Both are DELIBERATE (vendoring a stdlib copy is supported, and item 389
         stamps and drift-checks one), so neither is refused here. What was
         unsound was the silence: reading `use "stdlib/fs.rvl"` and concluding

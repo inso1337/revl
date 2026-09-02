@@ -54,7 +54,7 @@ test with it) to admit a new one.
    arbitrary path, inside the root or out (see "why the inverses stay `pure`").
 4. `syscall-time` (`open_confined_write`, `replace_confined`, `remove_confined`,
    `mkdir_confined`, `rmdir_confined`, `snapshot_preimage`, `write_through`,
-   `confirm_landed`) — the mutation itself. Resolving a path and then
+   `confirm_landed`), the mutation itself. Resolving a path and then
    re-walking it BY NAME at the syscall leaves a check-to-syscall window;
    measured on the previous revision, a competing thread in the workspace won
    it on essentially every trial. Every mutation now runs through a directory
@@ -88,7 +88,7 @@ totality claim is about the surface a body can reach.
 # A write never lies (roadmap 431(b))
 
 `open_confined_write` holds an fd, so a competing writer that unlinks the leaf
-between the open and the write does not divert the bytes — they go to the inode
+between the open and the write does not divert the bytes, they go to the inode
 the check admitted, which by then is an ORPHAN with no directory entry. The
 write then reported `Ok` with a witness naming a path that does not hold those
 bytes: the discharge descriptor enumerated a successful witnessed write, the
@@ -96,7 +96,7 @@ file was gone, and the undo would "restore" a preimage over a forward mutation
 that never became visible. Confinement held throughout; the RESULT was false.
 
 The answer is not to recreate the vanished leaf. "Atomic against a concurrent
-unlink" is a liveness promise this jail cannot honour — the premise is that the
+unlink" is a liveness promise this jail cannot honour, the premise is that the
 workspace writer is untrusted, so whatever a create-or-replace put back can be
 unlinked again the instant after, and a rename-based write would additionally
 have to reintroduce the by-name step the directory-fd walk exists to remove.
@@ -290,7 +290,7 @@ def refuse_unusable_path(path) -> None:
             "path contains a NUL byte, which no filesystem name can hold; pass "
             "the same path with the NUL removed. A witnessed fs path is a "
             "plain name, relative to the session workspace root or absolute "
-            "inside it — never raw bytes or a length-prefixed buffer",
+            "inside it, never raw bytes or a length-prefixed buffer",
             _sanitized(path),
         )
 
@@ -310,7 +310,7 @@ def _make_total(name: str, fn):
     that states the choke point is also what states the totality: a fifth entry
     point is total the moment it is listed, and cannot be added to the table
     without gaining the property. An `FsOpError` (`ConfinementError` included)
-    passes through untouched — the guard's own refusals already carry a code, a
+    passes through untouched, the guard's own refusals already carry a code, a
     sentence and a path, and re-wrapping them would flatten the confinement
     refusal a caller and the test suite distinguish by type."""
     @functools.wraps(fn)
@@ -740,8 +740,8 @@ def _leaf_is_handle(handle: WriteHandle) -> bool:
     Answered through the same directory-fd walk the mutations use and with
     `follow_symlinks=False`, so neither a swapped component nor a symlink
     planted at the leaf can make a different inode answer yes. `False` for a
-    vanished leaf, a replaced one, or a walk that no longer reaches the parent
-    — every "the name and the fd have parted" case, which is exactly what both
+    vanished leaf, a replaced one, or a walk that no longer reaches the parent:
+    every "the name and the fd have parted" case, which is exactly what both
     callers need to know."""
     parent, leaf = _split(handle.real)
     try:
@@ -762,7 +762,7 @@ def confirm_landed(handle: WriteHandle) -> None:
     """Refuse the write unless `handle.real` still names the inode that was
     written (roadmap 431(b); the "a write never lies" section above).
 
-    Confinement is not in question here — the bytes went through a verified fd
+    Confinement is not in question here, the bytes went through a verified fd
     and reached the inode the check admitted, inside the root, whatever the name
     did afterwards. The question is whether the WITNESS is true. A competing
     writer that unlinks the leaf mid-call leaves that inode an orphan, and
@@ -784,8 +784,8 @@ def confirm_landed(handle: WriteHandle) -> None:
 
 def discard_write(handle: WriteHandle) -> None:
     """Abandon a write that failed after the open: remove the preimage sidecar
-    it snapshotted, and — if the open CREATED the target and the name still
-    holds that very inode — remove the target again.
+    it snapshotted, and, if the open CREATED the target and the name still
+    holds that very inode, remove the target again.
 
     A forward op that returns `Err` registers no inverse (Ok-conditional
     registration, item 243), so anything the failed attempt left behind would be
