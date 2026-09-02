@@ -142,6 +142,54 @@ class ApprovalRequired(Exception):
         self.ticket = ticket
 
 
+def two_step_payload(ticket: dict, *, how_to_approve: str) -> dict:
+    """Shape an `ApprovalRequired` into the ticket two-step RESULT (item 246).
+
+    Lives here, beside the exception, because more than one MCP surface can
+    raise it and the two have already drifted apart once: the compiler server
+    renders the ticket, while the composed server (`composed.py`) caught it in a
+    broad `except Exception` and returned an opaque `"ApprovalRequired: ..."`
+    runtime diagnostic with no ticket and no hash (roadmap 425 F4's shape, on
+    its second surface). Both fail CLOSED — the crossing does not fire either
+    way — but a caller that never receives a hash can never get the crossing
+    APPROVED, so the refusal is a dead end instead of a step.
+
+    `how_to_approve` is the surface's own answer to "what can I do instead"
+    (item 274): the two servers mint a yes through different channels.
+    """
+    return {
+        "ok": False,
+        "approvalRequired": True,
+        "note": ("a class-(c) crossing (an irreversible emission with no checked "
+                 "inverse) needs a human yes — nothing fired. " + how_to_approve),
+        "ticket": ticket,
+    }
+
+
+# What a yes ALSO does when the crossing's resource target came from a caller
+# argument (roadmap 425 F3 / 427 F5). The asymmetry this states is otherwise
+# invisible: a call's arguments are only ever HASHED into the ticket
+# (`argsDigest`), except for a parameter whose NAME happens to sit in
+# `cap_order._REGISTRY` (`path`, `host`, `table`), whose runtime VALUE is lifted
+# out and bound into the capability spelling — which `record_approval_granted`
+# then writes verbatim to a durable, cross-session, plaintext log. Nothing told
+# the author that naming a parameter `path` changes where its values end up, and
+# nothing told the operator that a yes persists this one. Same move item 425 F1
+# made with `unreviewedHostCode`: the ticket must not understate what a yes means.
+_CALLER_VALUE_DURABILITY = (
+    "this crossing's resource target is a value the CALLER passed in, not a "
+    "literal the author wrote. Approving binds that value into the durable "
+    "approval log (`record_approval_granted` -> the cross-session WAL, plaintext "
+    "at rest), where the rest of this call's arguments only ever appear as the "
+    "`argsDigest` hash. To keep a sensitive value out of it, declare the "
+    "parameter `Secret[Str]` — it then binds to the redacted placeholder "
+    "everywhere (item 416c), at the cost of the resource fold, since every "
+    "secret-valued crossing binds to the SAME placeholder and a standing grant "
+    "scoped to it is refused. An operator can withhold caller values from the log "
+    "for the whole session instead with `revl mcp serve "
+    "--approval-record-values withheld`.")
+
+
 class ClassMap:
     """The per-generation call classifier (Decision 2). Built at load/swap over
     EVERY scope of every component — each provide-method AND each activation
@@ -560,15 +608,16 @@ class ClassMap:
         touched, so the N1 ledger and the distiller keep reading real targets."""
         ext = self._declaring_extern(token)
         if ext is None:
-            return None, None       # a service-op key: no extern, keys bare
+            return None, None, False   # a service-op key: no extern, keys bare
         resource = self._resource_params(ext)
         if not resource:
-            return None, None       # no resource dimension to scope on
+            return None, None, False   # no resource dimension to scope on
         dimensions = ", ".join(f"`{name}`" for _i, name, _s in resource)
         if scope_id is None or scope_id not in self.index.scopes:
             return None, (
                 f"`{token}` was not resource-scoped: the crossing has no single "
-                f"calling scope to trace {dimensions} from. " + self._NO_DATAFLOW_HINT)
+                f"calling scope to trace {dimensions} from. "
+                + self._NO_DATAFLOW_HINT), False
         scope = self.index.scopes[scope_id]
         # an extern reached THROUGH a pure fn is not called with arguments this
         # scope wrote, so no site in this scope proves the value (fail closed).
@@ -579,17 +628,22 @@ class ClassMap:
                     f"`{token}` was not resource-scoped: `{ext.get('name')}` is "
                     f"reached through {helpers}, so revl cannot trace "
                     f"{dimensions} to this call's arguments. "
-                    + self._NO_DATAFLOW_HINT)
+                    + self._NO_DATAFLOW_HINT), False
         sites = _call_arg_lists(scope["nodes"], ext.get("name"))
         if not sites:
             return None, (
                 f"`{token}` was not resource-scoped: no direct call to "
                 f"`{ext.get('name')}` in this scope binds {dimensions}. "
-                + self._NO_DATAFLOW_HINT)
+                + self._NO_DATAFLOW_HINT), False
         params = self._scope_params(scope_id)
         rebound = _rebound_names(scope["nodes"])
         pairs: list[tuple[str, object]] = []
         unbound: list[str] = []
+        # roadmap 425 F3 / 427 F5: whether any bound dimension's value came from
+        # a CALLER argument rather than a literal the author wrote. A literal is
+        # already in the source and discloses nothing about the caller; an
+        # argument is the caller's runtime data.
+        from_caller = False
         for index, name, secret in resource:
             sources = {self._arg_source(site, index, params, rebound)
                        for site in sites}
@@ -601,6 +655,8 @@ class ClassMap:
             if value is None:
                 unbound.append(name)
                 continue
+            if source[0] == "param" and not secret:
+                from_caller = True
             pairs.append((name, REDACTED_SECRET if secret else value))
         refusal = None
         if unbound:
@@ -608,11 +664,11 @@ class ClassMap:
             refusal = (f"`{token}` was not resource-scoped on {named}: "
                        + self._NO_DATAFLOW_HINT)
         if not pairs:
-            return None, refusal
+            return None, refusal, False
         try:
-            return cap_order.make_cap(token, pairs).to_str(), refusal
+            return cap_order.make_cap(token, pairs).to_str(), refusal, from_caller
         except cap_order.CapError:
-            return None, refusal
+            return None, refusal, False
 
     @staticmethod
     def _arg_source(site: list, index: int, params: list, rebound: set):
@@ -715,12 +771,23 @@ class ClassMap:
         resource_scopes: dict[str, str] = {}
         refusals: dict[str, str] = {}
         bound_class_c: list[str] = []
+        # roadmap 425 F3 / 427 F5: the tokens whose bound valuation came from a
+        # CALLER ARGUMENT rather than a literal the author wrote. The ticket is
+        # the live decision and keeps the real value either way — an operator who
+        # cannot see the target cannot answer, and for a fresh call the value is
+        # the caller's own, just sent. What this marks is DURABILITY: the ledger
+        # copy (`_distillation_ledger_fields`) must not write a caller-supplied
+        # value into the cross-session WAL. See `Session._distillation_ledger_fields`.
+        caller_valued: list[str] = []
         for token in sorted(reach.get("classC") or []):
             sid = self.binding_scope(reach, token)
-            spelling, refusal = self.bind_resource_scope(token, args, sid)
+            spelling, refusal, from_caller = self.bind_resource_scope(
+                token, args, sid)
             if spelling is not None:
                 resource_scopes[token] = spelling
                 bound_class_c.append(spelling)
+                if from_caller:
+                    caller_valued.append(token)
             else:
                 bound_class_c.append(token)
             if refusal is not None:
@@ -730,6 +797,9 @@ class ClassMap:
             body["resourceScopes"] = resource_scopes
         if refusals:
             body["resourceScopeRefusals"] = refusals
+        if caller_valued:
+            body["resourceScopesFromCallerArgs"] = sorted(caller_valued)
+            body["resourceScopeDurability"] = _CALLER_VALUE_DURABILITY
         # item 251 Slice 2: the crossing's realm and its post-endorsement taint,
         # for the ledger's shape key (the distiller reads these; a recorded taint
         # set is KNOWN, closing the Slice-1 "taint-unknown" fail-close) and for the
