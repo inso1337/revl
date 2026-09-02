@@ -308,6 +308,33 @@ fn observed(n: Int) -> Int {
     assert "(out + [i])" in src
 
 
+def test_a_local_shadowing_a_fn_name_gets_no_summary():
+    """A local MAY shadow a module `fn` (`let helper = g` over a `fn helper`),
+    and the call node is spelled identically either way — a `var` callee named
+    `helper`. So a callee name the BODY BINDS gets no summary at all and the
+    call is assumed to retain, rather than letting the summary of a different
+    function decide an aliasing question.
+
+    Which function such a call actually reaches is itself unsettled downstream
+    (the python emitter's template inliner resolves the name to the module fn
+    here), which is the whole reason this refuses to guess instead of picking
+    one answer."""
+    source = """
+fn helper(xs: List[Int]) -> Int { return xs.length() }
+fn shadowed(g: (List[Int]) -> Int, n: Int) -> List[Int] {
+  let helper = g
+  var out: List[Int] = []
+  var i = 0
+  while (i < n) { out = out.push(i) i = i + helper(out) }
+  return out
+}
+"""
+    src = emit_py(source)
+    assert "out.append(i)" not in src, (
+        "`helper` names a local here, so the module fn's summary must not apply")
+    assert "(out + [i])" in src
+
+
 def test_a_parameter_is_never_written_through():
     """A parameter is the CALLER's object: `out = out.push(..)` on one would
     destructively update a binding this function does not own."""

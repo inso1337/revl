@@ -539,6 +539,49 @@ def _summary_walk(node: Any, state: dict, summary: dict) -> None:
             _gen(child, state, True, summary)
 
 
+def _bound_names(node: Any, found: set) -> set:
+    """Every name this body binds: a parameter, a `let`, a `for` bind, a
+    destructure, an arrow parameter, a match-arm payload.
+
+    A local MAY shadow a module `fn` (`let helper = g` over a `fn helper`), and
+    the call node is spelled identically either way, so a callee name this body
+    binds is not the function the summary describes and gets no summary at all.
+    """
+    if isinstance(node, list):
+        for item in node:
+            _bound_names(item, found)
+        return found
+    if not isinstance(node, dict):
+        return found
+    if "step" in node:
+        # a statement BINDS its `name`/`bind`; an expression's `name` is a READ
+        for key in ("name", "bind", "rest"):
+            if isinstance(node.get(key), str):
+                found.add(node[key])
+        for name in node.get("names") or []:
+            if isinstance(name, str):
+                found.add(name)
+    elif node.get("kind") == "arrow":
+        for name in list(node.get("params") or []) + list(node.get("captures") or []):
+            if isinstance(name, str):
+                found.add(name)
+    elif node.get("kind") == "match":
+        for arm in node.get("arms") or []:
+            bind = arm.get("bind") if isinstance(arm, dict) else None
+            if isinstance(bind, str):
+                found.add(bind)
+    for child in node.values():
+        _bound_names(child, found)
+    return found
+
+
+def _visible(summary: dict, fn_like: dict) -> dict:
+    """`summary` with every name this body binds removed."""
+    shadowed = _bound_names(fn_like.get("body"), set())
+    shadowed.update(p.get("name") for p in fn_like.get("params") or [])
+    return {name: keeps for name, keeps in summary.items() if name not in shadowed}
+
+
 def retention_summary(functions: Any) -> dict:
     """`{fn name: (retains param 0, retains param 1, ...)}` over one program."""
     bodies: dict = {}
@@ -552,11 +595,17 @@ def retention_summary(functions: Any) -> dict:
             bodies[name] = (fn.get("body"), params)
     summary = {name: (False,) * len(params) for name, (_, params) in bodies.items()}
     # each round can only turn a False into a True, and there are finitely many
+    shadows = {name: _bound_names(body, {p for p in params})
+               for name, (body, params) in bodies.items()}
     for _ in range(sum(len(p) for _, p in bodies.values()) + 2):
         changed = False
+        visible = {
+            fname: {k: v for k, v in summary.items() if k not in shadowed}
+            for fname, shadowed in shadows.items()
+        }
         for name, (body, params) in bodies.items():
             state = {param: _FRESH for param in params}
-            _summary_walk(body, state, summary)
+            _summary_walk(body, state, visible[name])
             keeps = tuple(
                 held or param not in state
                 for held, param in zip(summary[name], params))
@@ -583,7 +632,7 @@ def annotate(fn_like: dict, summary: dict | None = None) -> None:
     body = fn_like.get("body")
     if not body:
         return
-    walk = _Walk(summary or {})
+    walk = _Walk(_visible(summary or {}, fn_like))
     state: dict = {}
     walk.stmts(body, state)
     _apply(body, walk.marks)
