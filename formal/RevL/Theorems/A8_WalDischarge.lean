@@ -19,9 +19,11 @@ algebra and the small-step semantics live in the L1 farm
 2. **A commit replays nothing** (`commit_replays_no_inverse`,
    `committed_transaction_is_retained`). A witnessed/transactional
    inverse must NOT replay on a clean commit — only an abort replays it
-   (`backends/python/runtime.py`). Item 418 flags
+   (`backends/python/runtime.py`). Item 418 flagged the pre-step-5
    `G7.teardown_replays_all` as false of revl for exactly this reason;
-   `commit_witness` below pins the correct behaviour on a concrete trace.
+   G7 is now stated over the entry kind and the verdict
+   (`RevL.Semantics.EntryKind`), and `commit_witness` below pins the same
+   behaviour on a concrete trace.
 3. **The decision point** (`commit_record_is_the_decision`,
    `approved_decides_the_crash_window`, `crash_cut_converges`). Present
    is roll-forward, absent is roll-back; and once a crash point has
@@ -148,9 +150,10 @@ theorem committed_transaction_is_retained {L : Log} {s : Seq} {e : Entry} {b : B
 
 /-- **A commit rolls nothing back.** `_roll_forward`, the item 245 window
 path and `_fork_retired` all return without touching the world: only the
-abort verdict replays. This is the behaviour `G7.teardown_replays_all`
-gets wrong (item 418): a witnessed inverse replays on abort, never on a
-clean commit. -/
+abort verdict replays. This is the behaviour the pre-step-5
+`G7.teardown_replays_all` got wrong (item 418): a witnessed inverse
+replays on abort, never on a clean commit. `RevL.G7` now agrees, over the
+three-kind stack. -/
 theorem commit_replays_no_inverse {L : Log} (h : outcome L ≠ .rolledBack) :
     replayed L = [] := by
   cases hv : outcome L with
@@ -365,7 +368,8 @@ def committedTrace : Log :=
    .discharge [1, 2], .commitApproved, .activationComplete]
 
 /-- **A witnessed inverse does not replay on a clean commit.** Item 418
-flags `G7.teardown_replays_all` as false of revl for exactly this reason
+flagged the pre-step-5 `G7.teardown_replays_all` as false of revl for
+exactly this reason
 (`backends/python/runtime.py`): the transactional inverse is discharged
 by the commit, not replayed by it. The abort path replays; the commit
 path does not. Here that is a computation on a concrete trace, and the
@@ -410,5 +414,45 @@ theorem revert_witness : SemSteps ⟨revertBody, [], []⟩ ⟨.fail, [2, 1], rev
 
 theorem revert_witness_restores :
     replay [2, 1] (rollbackReplay revertLog) = [] := by decide
+
+
+/-- A fresh run: the descriptor becomes durable, then the fence, then the
+undeclared inverse fires. -/
+def fencedRun : Run :=
+  [.append (.descriptor 7 .transactional false), .append (.replayFence 7),
+   .apply 7]
+
+/-- No inverse in that run is declared idempotent. -/
+def noneIdem : Seq → Bool := fun _ => false
+
+/-- **Non-vacuity for the remaining hypothesis families** (roadmap item
+418, step 8). `revert_witness` and `commit_witness` already exhibit the
+`SemSteps` and commit hypotheses; these are the ones left over.
+`fence_before_apply_at_every_cut` and `at_most_once_across_crash` are
+stated over `WAFrom idem [] r` with an undeclared inverse that has
+observably FIRED and a unique seq space. All four conditions hold at
+once here, on a run that really applies something, so neither theorem is
+quantifying over runs that fire nothing. `SemLog` is inhabited by the
+revert trace, and `hasForkFrozen = false` and a discharged seq are
+exhibited on the concrete logs above. -/
+theorem a8_hypotheses_are_inhabited :
+    SemLog revertLog ∧
+    hasForkFrozen cleanAbort = false ∧
+    (7 : Seq) ∈ dischargedSeqs committedSession ∧
+    WAFrom noneIdem [] fencedRun ∧
+    noneIdem 7 = false ∧
+    (7 : Seq) ∈ fired fencedRun ∧
+    SeqUnique (durable fencedRun) ∧
+    Rec.descriptor 7 .transactional false ∈ durable fencedRun ∧
+    outcome committedTrace ≠ .rolledBack := by
+  have hsu : SeqUnique (durable fencedRun) := by
+    intro a ha b hb s hsa hsb
+    simp only [fencedRun, durable, List.mem_cons, List.not_mem_nil,
+      or_false] at ha hb
+    rcases ha with rfl | rfl <;> rcases hb with rfl | rfl <;>
+      simp_all [recSeq]
+  refine ⟨.descriptor (.descriptor .nil), by decide, by decide, ?_, rfl,
+    by decide, hsu, by decide, by decide⟩
+  exact .append (.append (.apply (Or.inr (by decide)) .nil))
 
 end RevL.A8

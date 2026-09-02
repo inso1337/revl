@@ -1,0 +1,175 @@
+# Non-vacuity registry (roadmap item 418, step 8).
+#
+# One row per theorem registered in CheckAxioms.lean, naming the concrete
+# evidence that the theorem's hypotheses can all hold at once. Checked by
+# scripts/nonvacuity_gate.py, which also requires CheckAxioms.lean and
+# run_gate.sh to register the same set.
+#
+# Fields, tab separated:
+#   theorem  kind  witnesses  note
+#
+# kind:
+#   instance    the hypotheses are jointly satisfiable and the witnesses
+#               exhibit a concrete instance satisfying them
+#   necessity   the theorem REFUSES, so joint satisfiability is what it
+#               denies; the witnesses show each hypothesis satisfiable on
+#               its own and the refusal not universal
+#   contentless the theorem is true by definition rather than by any
+#               property of its subject. A FINDING, kept visible; the
+#               witnesses record what it is worth and where the
+#               load-bearing statement lives
+#   concrete    the theorem is itself a computation on concrete data, so it
+#               has no hypotheses to satisfy. Only accepted when another
+#               row cites it as a witness
+RevL.G1.declared_only_access	instance	RevL.G1.g1_not_vacuous	a two-statement component admitted under exactly its declared requires, with a non-empty reach surface, beside the same body under a manifest that is neither admitted nor confined
+RevL.G2.linkOK_provision_disjoint	instance	RevL.G2.realm_separation_admitted,RevL.G2.same_realm_conflict_refused	LinkOK holds of the two-realm tenants composition, and drops when the realms do
+RevL.G2.linkOK_requires_closed	instance	RevL.G2.realm_separation_admitted	the same admitted composition supplies the LinkOK hypothesis
+RevL.G2.realm_separation_admitted	concrete	-	computes LinkOK and ProvidesDisjoint on the shape of examples/tenants.rvl
+RevL.G2.same_realm_conflict_refused	concrete	-	the same two providers without their isolate clauses, refused
+RevL.G3.depPath_rank_lt	instance	RevL.G3.g3_not_vacuous	a layering and a dependency path hold together on the admitted composition, and the rank really drops across the edge
+RevL.G3.no_dependency_cycles	necessity	RevL.G3.g3_not_vacuous,RevL.G3.layering_exists_for_admitted	the conclusion is False, so joint satisfiability is what it denies: the layering is establishable, a self-path is representable, only their conjunction is refused
+RevL.G3.linkOK_layeredBy_rankOf	instance	RevL.G3.g3_not_vacuous	LinkOK is derivable for a composition with a real dependency edge
+RevL.G3.linkOK_layered	instance	RevL.G3.g3_not_vacuous	the same LinkOK instance
+RevL.G3.linkOK_no_cycles	necessity	RevL.G3.g3_not_vacuous,RevL.G3.mutual_cycle_refused,RevL.G3.self_provision_refused	LinkOK is inhabited, the cyclic composition carries a genuine self-path, and no ordering of it links
+RevL.G3.self_provision_refused	concrete	-	the Ouroboros shape, refused
+RevL.G3.mutual_cycle_refused	concrete	-	g3_dependency_cycle.rvl refused in both orderings
+RevL.G3.layering_exists_for_admitted	concrete	-	the layering certificate is reachable, not only refutable
+RevL.G4.inverse_or_emit	instance	RevL.G4.g4_shape_not_vacuous,RevL.G4Classified.g4_not_vacuous	Typed and IsMutation hold together in both conclusion branches; the raw branch closes because Typed has no constructor for it, which is why the lattice restatement carries the real refusal
+RevL.G5.teardown_registers_nothing	contentless	RevL.G5.registrations_ignores_its_argument,RevL.G5Classified.registrations_depends_on_its_argument	FINDING: registrations is the constant zero function, so the conclusion holds by definition and not by any property of undo bodies. The counting statement is G5Classified's
+RevL.G6.confinement	instance	RevL.G6.g6_not_vacuous	TypedIn admits a statement with a non-empty reach surface and refuses the same shape reaching an undeclared key
+RevL.Semantics.replays_or_discharges	instance	RevL.G7.replay_table	the equivalence is computed at all six kind and verdict points
+RevL.Semantics.phase_lengths_add	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	a stack on which both phases are non-empty
+RevL.Semantics.teardown_length	instance	RevL.G7.commit_runs_the_bracket_only,RevL.G7.abort_runs_the_proof_pass_then_the_drain	the same stack replays one entry on commit and three on abort
+RevL.G7.replay_table	concrete	-	the teardown contract's replay rows, computed per kind and verdict
+RevL.G7.replayed_complete	instance	RevL.G7.commit_discharge_is_not_vacuous	a registered entry that the verdict does replay
+RevL.G7.teardown_replays_all	instance	RevL.G7.commit_discharge_is_not_vacuous	same, at the inverse level
+RevL.G7.replayed_sound	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	the abort replay list is non-empty, so soundness is not a claim about the empty list
+RevL.G7.teardown_only_witnessed	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	same, at the inverse level
+RevL.G7.commit_discharges_transactional	necessity	RevL.G7.commit_discharge_is_not_vacuous,RevL.G7.verdict_is_load_bearing	the transactional entry is on the stack the theorem quantifies over, absent from the commit replay and present in the abort replay
+RevL.G7.commit_discharges_compensation	necessity	RevL.G7.commit_runs_the_bracket_only,RevL.G7.abort_runs_the_proof_pass_then_the_drain	the compensation is registered, discharged on commit and drained on abort
+RevL.G7.commit_replays_only_brackets	instance	RevL.G7.commit_runs_the_bracket_only	the commit replay is exactly the bracket inverse, on a stack carrying all three kinds
+RevL.G7.abort_replays_every_transactional	instance	RevL.G7.commit_discharge_is_not_vacuous	the transactional entry really is in the abort replay
+RevL.G7.bracket_replays_under_every_verdict	instance	RevL.G7.commit_runs_the_bracket_only,RevL.G7.abort_runs_the_proof_pass_then_the_drain	the bracket inverse appears under both verdicts
+RevL.G7.teardown_eq_reversed_inverses	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	the LIFO order is exhibited on a three-entry stack
+RevL.G7.compensations_drain_after_the_proof_pass	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	the compensation registered LAST still runs last, which a single-phase LIFO walk would not do
+RevL.G7.phase1_is_lifo	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	phase 1 is non-empty and in reverse registration order
+RevL.G7.phase2_is_lifo	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	phase 2 is non-empty on the abort
+RevL.G7.commit_runs_the_bracket_only	concrete	-	computes the commit replay of a stack carrying all three entry kinds
+RevL.G7.abort_runs_the_proof_pass_then_the_drain	concrete	-	computes the abort replay of the same stack, proof pass first
+RevL.G7.verdict_is_load_bearing	concrete	-	the two replays of one stack differ
+RevL.G7.commit_discharge_is_not_vacuous	concrete	-	the discharged entry is on the stack the discharge theorem quantifies over
+RevL.G8.boundary_enumerates_emissions	instance	RevL.G8.g8_marker_level_not_vacuous	a typed body whose emission contributes a non-empty surface
+RevL.G8.boundary_only_declared	instance	RevL.G8.g8_marker_level_not_vacuous,RevL.G8Classified.effect_carrying_emission_is_on_the_surface	the hypotheses are satisfiable on a non-empty surface, and the same crossing inside an effect is scored empty by definition, which is the marker-level weakness
+RevL.CrossTier.cross_tier_agreement	instance	RevL.CrossTier.conformance_hypotheses_are_inhabited,RevL.CrossTier.annotation_necessary	two conformant profiles and a well-annotated map IR agreeing on a re-ordered non-empty value, and the annotation hypothesis cannot be dropped
+RevL.CrossTier.six_tier_agreement	instance	RevL.CrossTier.conformance_hypotheses_are_inhabited	the same conformant pair and IR
+RevL.CrossTier.annotation_necessary	concrete	-	python and typescript observe different values for a bare literal
+RevL.CapCeilings.cap_order_partial	instance	RevL.CapCeilings.parameter_widening_refused	Cap is inhabited and Covers is not universal, so the order is a real order and not the total relation
+RevL.CapCeilings.attenuation_monotone	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	a Lineage built by Lineage.spawn from a real program spawn edge, not the reflexive root
+RevL.CapCeilings.lineage_ceiling_le	instance	RevL.CapCeilings.ceiling_lineage_is_inhabited	a spawn edge whose root declares calls=3 and whose child narrows to 2, so the lineage and the ceiling bound hold together
+RevL.CapCeilings.spend_within_budget	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	Spends takes a real two-step run and refuses an overdraw
+RevL.CapCeilings.budget_never_exceeds_root_ceiling	instance	RevL.CapCeilings.ceiling_lineage_is_inhabited,RevL.CapCeilings.ceiling_check_not_subsumed	the lineage, the root ceiling bound and a counter run hold at once; the ceiling check is not implied by the resource fold
+RevL.CapCeilings.confinement_within_ceiling	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited,RevL.CapCeilings.derivation_refuses_unnameable	a non-reflexive lineage, and a TypedIn statement whose derived reach is refused
+RevL.CapCeilings.no_star_amplification	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	the lineage above, whose root holds only the star-free fs cone
+RevL.CapCeilings.parameter_widening_refused	concrete	-	five points of the path order, computed
+RevL.CapCeilings.ceiling_check_not_subsumed	concrete	-	a pair the resource fold admits and the ceiling check refuses
+RevL.CapCeilings.derived_held_tokens_are_declared_keys	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	NameableEmission holds of the child's whole body, on a component with a non-empty requires
+RevL.CapCeilings.derived_reach_is_emit_surface	instance	RevL.CapCeilings.derivation_non_vacuous	the derived reach is non-empty on a real component shape
+RevL.CapCeilings.unnameable_receiver_is_star	instance	RevL.CapCeilings.derivation_refuses_unnameable	a handle receiver that derives star, and a wiring key that resolves
+RevL.CapCeilings.derived_lineage	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	SpawnsAdmitted, program membership and a spawn edge hold together on wProgGood
+RevL.CapCeilings.derived_attenuation_monotone	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	the same, plus a Descends instance
+RevL.CapCeilings.derived_lineage_ceiling_le	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited,RevL.CapCeilings.ceiling_lineage_is_inhabited,RevL.CapCeilings.derived_ceiling_check_not_subsumed	the spawn hypotheses hold on wProgGood; the ceiling side condition is exhibited on the calls lineage, since the corpus fs cone declares none
+RevL.CapCeilings.derived_budget_never_exceeds_root_ceiling	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited,RevL.CapCeilings.ceiling_lineage_is_inhabited	the same pairing, with the counter run
+RevL.CapCeilings.derived_confinement_within_ceiling	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited,RevL.CapCeilings.derivation_refuses_unnameable	Resolves, the spawn edge, TypedIn and NameableEmission are all exhibited, and dropping NameableEmission has a concrete price
+RevL.CapCeilings.derived_no_star_amplification	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	the star-free and nameable side conditions both hold on wProgGood
+RevL.CapCeilings.derivation_non_vacuous	concrete	-	four facts computed from component shapes, none supplied by hand
+RevL.CapCeilings.derivation_refuses_unnameable	concrete	-	a handle emission derives star and is refused
+RevL.CapCeilings.derived_ceiling_check_not_subsumed	concrete	-	both relations still load-bearing once the sets are derived
+RevL.G9.origin_persists_or_is_declassified	instance	RevL.G9.g9_not_vacuous	an inhabited Flow carrying a declared origin
+RevL.G9.no_authority_from_untrusted	instance	RevL.G9.g9_not_vacuous,RevL.G9.authority_refusal_is_not_universal,RevL.G9.sink_rules_are_distinct	a Flow that reaches an authority sink, a refusal that is not universal, and four sink rules that are genuinely different predicates
+RevL.G9.untrusted_gains_no_authority	necessity	RevL.G9.g9_not_vacuous,RevL.G9.authority_refusal_is_not_universal	the declassifier-free flow exists and a disclosure sink admits it, so the refusal turns on the sink rule
+RevL.G9.declassification_is_the_only_escape	instance	RevL.G9.g9_not_vacuous	a declassifier-free flow the model admits
+RevL.G9.secret_persists	instance	RevL.G9.secret_rules_not_vacuous,RevL.G9.secret_refusal_is_load_bearing	a secret-carrying flow, and an algebra that CAN clear a secret, so the two explicit refusals are what stop it
+RevL.G9.secret_confined	instance	RevL.G9.secret_rules_not_vacuous,RevL.G9.secret_refusal_is_load_bearing	the same secret-carrying flow at every sink
+RevL.G9.confidential_needs_declassification	instance	RevL.G9.secret_rules_not_vacuous	an admitted endorse[confidential] downgrade reaching a disclosure sink
+RevL.G9.flow_declassifiers_granted	instance	RevL.G9.g9_context_hypotheses_are_inhabited,RevL.G9.secret_rules_not_vacuous	untrustedAuthor sets noDeclassify, and a granted declassifier sits on an admitted path
+RevL.G9.untrusted_author_needs_granted_declassifier	instance	RevL.G9.secret_rules_not_vacuous	the same declared endorse, admitted when granted and refused when self-minted
+RevL.G9.declassifier_must_be_declared	necessity	RevL.G9.secret_refusal_is_load_bearing,RevL.G9.secret_rules_not_vacuous	the declared endorse is admitted while the undeclared one and endorse[secret] are refused
+RevL.G9.taint_surface_within_declared_context	instance	RevL.G9.g9_context_hypotheses_are_inhabited	a TypedIn statement with a non-empty head list under a real capability scope
+RevL.G9.no_untrusted_without_a_declared_source	instance	RevL.G9.g9_context_hypotheses_are_inhabited	the untrusted-free side condition holds of an fs scope and fails of a web scope, so it is a real condition
+RevL.G9.g9_not_vacuous	concrete	-	admits the endorsed path, refuses the bare one and the foreign-origin endorse
+RevL.G9.secret_rules_not_vacuous	concrete	-	confidential downgrades, secret never does, a self-minted endorse flips to refused
+RevL.G9.authority_refusal_is_not_universal	concrete	-	one flow, admitted at a disclosure sink and refused at an authority sink
+RevL.G9.sink_rules_are_distinct	concrete	-	the four Admits rules separated pairwise
+RevL.G9.secret_refusal_is_load_bearing	concrete	-	the algebra can clear a secret, so taint.py's two refusals carry the theorem
+RevL.R4.residue_is_exactly_what_remains	instance	RevL.R4.txn_run,RevL.R4.r4_side_conditions_are_inhabited	the semantics genuinely takes the run and both side conditions hold at its trace
+RevL.R4.abort_leaves_no_residue	necessity	RevL.R4.txn_run,RevL.R4.r4_side_conditions_are_inhabited,RevL.R4.residue_necessary	the no-crossing hypothesis holds on one run and fails on a one-step variant whose conclusion is then false
+RevL.R4.residue_complete	instance	RevL.R4.emit_run,RevL.R4.r4_side_conditions_are_inhabited	the emitting run reports a non-empty residue, so completeness is not about the empty report
+RevL.R4.residue_sound	instance	RevL.R4.emit_run,RevL.R4.r4_side_conditions_are_inhabited,RevL.R4.emission_is_not_replayed	the same run, and an emission that is moved to the residue surface rather than replayed
+RevL.R4.txn_run	concrete	-	the step relation takes the witnessed-only run
+RevL.R4.emit_run	concrete	-	and the run that crosses the boundary
+RevL.R4.residue_necessary	concrete	-	one step apart: one reverts exactly, one leaves seq 2 out and says so
+RevL.R4.emission_is_not_replayed	concrete	-	an emission has no inverse and is not in the replay set
+RevL.A8.revert_on_failure	instance	RevL.A8.revert_witness,RevL.A8.revert_witness_restores	the step relation takes the run and replaying its trace empties the world again
+RevL.A8.trace_reads_back_as_abort	instance	RevL.A8.a8_hypotheses_are_inhabited	SemLog is inhabited by the revert trace, so this is not a claim about the empty log
+RevL.A8.committed_transaction_is_retained	instance	RevL.A8.a8_hypotheses_are_inhabited,RevL.A8.commit_witness	a discharged seq exists on a real committed log
+RevL.A8.commit_replays_no_inverse	instance	RevL.A8.commit_witness,RevL.A8.a8_hypotheses_are_inhabited	a concrete trace whose outcome is not rolledBack
+RevL.A8.outcome_trichotomy	contentless	RevL.A8.mixed_disposition_admitted,RevL.A8.crash_cut_witness	FINDING: Outcome has three constructors, so this holds by definition. Registered so the weight of the never-a-mixed-state claim is visible; the per-seq dispositions are heterogeneous by design
+RevL.A8.crash_cut_converges	instance	RevL.A8.crash_cut_witness,RevL.A8.a8_hypotheses_are_inhabited	fork-free logs that do roll forward at a cut
+RevL.A8.commit_record_is_the_decision	instance	RevL.A8.crash_cut_witness	four concrete logs exercising both directions of the equivalence
+RevL.A8.approved_decides_the_crash_window	instance	RevL.A8.crash_cut_witness	committedSession carries commit-approved with the terminal marker still missing
+RevL.A8.fence_before_apply_at_every_cut	instance	RevL.A8.a8_hypotheses_are_inhabited	WAFrom holds of a run that really applies an undeclared inverse, so the fired hypothesis is not empty
+RevL.A8.at_most_once_across_crash	instance	RevL.A8.a8_hypotheses_are_inhabited,RevL.A8.double_apply_observable	all four hypotheses hold at once on that run, and a second apply is observable
+RevL.A8.declared_idempotent_replay_free	necessity	RevL.A8.double_apply_observable	replay is idempotent on the declared subset while a general second apply is observable, so the declaration is load-bearing
+RevL.A8.double_apply_observable	concrete	-	a non-idempotent inverse's second apply is observable
+RevL.A8.crash_cut_witness	concrete	-	four cuts at one seq: clean abort, abort-then-crash, completed abort, committed
+RevL.A8.commit_witness	concrete	-	a witnessed inverse does not replay on a clean commit
+RevL.A8.mixed_disposition_admitted	concrete	-	committed-and-retained beside rolled-back in one verdict
+RevL.A8.revert_witness	concrete	-	the step relation genuinely takes the run
+RevL.A8.revert_witness_restores	concrete	-	replaying that trace empties the world again
+RevL.Lemmas.reach_mono_fuel	instance	RevL.G5Classified.fold_must_run_to_stability	fuel 0 and fuel 1 give different verdicts on the wrapped program, so monotonicity is not over a constant fold
+RevL.Lemmas.reaches_le	instance	RevL.G4Classified.fn_wrapper_still_crosses	a real ReachesFrom edge through a fn wrapper
+RevL.Lemmas.reach_exact	instance	RevL.G4Classified.fn_wrapper_still_crosses	the attained declaration is exhibited on that same program
+RevL.Lemmas.reach_le_trans	instance	RevL.G4Classified.fn_wrapper_still_crosses	a ReachesFrom edge to compose along
+RevL.Lemmas.reachCaps_sound	instance	RevL.G8Classified.witness_surface_traces_to_its_declaration	a non-empty reachCaps entry traced back to its declaration
+RevL.Lemmas.reachCaps_complete	instance	RevL.G8Classified.witness_surface_traces_to_its_declaration	ReachesFrom, lookupExtern and capsOfDecl membership all hold together
+RevL.G4Classified.inverse_or_emit_classified	instance	RevL.G4Classified.g4_not_vacuous,RevL.G4Classified.raw_mutation_is_representable	declOK and Mutates hold together on three admitted shapes, and the raw shape is an ordinary term rather than a missing constructor
+RevL.G4Classified.program_mutations_carry_inverse_or_marker	instance	RevL.G4Classified.g4_not_vacuous	CheckerAdmits holds of goodProg and fails of rawProg and fakeProg
+RevL.G4Classified.reached_crossing_is_classified	instance	RevL.G4Classified.fn_wrapper_still_crosses	a crossing reached through a fn
+RevL.G4Classified.reached_crossing_carries_inverse_or_marker	instance	RevL.G4Classified.g4_not_vacuous,RevL.G4Classified.fn_wrapper_still_crosses	an admitted program together with a reach whose classification crosses
+RevL.G4Classified.raw_mutation_is_representable	concrete	-	the raw shape is a term of the model
+RevL.G4Classified.g4_not_vacuous	concrete	-	three shapes admitted, two refused, and the refusal is a program-level verdict
+RevL.G4Classified.fn_wrapper_still_crosses	concrete	-	pure at fuel 0 and emission at fuel 1
+RevL.G5Classified.registrations_seq	instance	RevL.G5Classified.registrations_counts	the count is non-zero on a real body, so additivity is not over a constant
+RevL.G5Classified.registrations_zero_iff	instance	RevL.G5Classified.registrations_counts,RevL.G5Classified.registrations_depends_on_its_argument	both sides of the equivalence are exercised on concrete bodies
+RevL.G5Classified.inverse_reaches_no_emission	instance	RevL.G5Classified.sneaky_undo_is_refused,RevL.G5Classified.sneaky_inverse_run_emits	CheckerAdmits holds of a program with a witnessed extern and a declared undo, and the refused inverse really does emit
+RevL.G5Classified.admitted_inverse_registers_nothing	instance	RevL.G5Classified.sneaky_undo_is_refused,RevL.G5Classified.registrations_counts	the same admitted program, whose host-local inverse counts zero while the emission inverse counts one
+RevL.G5Classified.admitted_inverse_body_registers_nothing	instance	RevL.G5Classified.sneaky_undo_is_refused,RevL.G5Classified.registrations_counts	the same, with a body whose names are reachable from the declared inverse
+RevL.G5Classified.pureOnly_run	instance	RevL.G5Classified.clean_inverse_run_is_silent	a pure-only run the semantics genuinely takes
+RevL.G5Classified.clean_inverse_run_logs_nothing	instance	RevL.G5Classified.clean_inverse_run_is_silent	a body with registrations zero, and a run of it
+RevL.G5Classified.admitted_inverse_run_logs_nothing	instance	RevL.G5Classified.clean_inverse_run_is_silent,RevL.G5Classified.sneaky_undo_is_refused	the admitted program, its inverse, and the run
+RevL.G5Classified.registrations_depends_on_its_argument	concrete	-	refutes the review's constant-function probe
+RevL.G5Classified.registrations_counts	concrete	-	0 for the host-local inverse, 1 for the emission inverse and its fn-wrapped twin
+RevL.G5Classified.sneaky_undo_is_refused	concrete	-	clean program admitted, emission inverse and fn-wrapped inverse refused
+RevL.G5Classified.fold_must_run_to_stability	concrete	-	the wrapped escape is admitted at fuel 0 and refused at fuel 1
+RevL.G5Classified.sneaky_inverse_run_emits	concrete	-	the refused inverse takes an emit step and logs a one-way record
+RevL.G5Classified.clean_inverse_run_is_silent	concrete	-	the admitted inverse takes a pure step and every run of it is silent
+RevL.G8Classified.surface_enumerates_reached_crossings	instance	RevL.G8Classified.witness_surface_traces_to_its_declaration	every hypothesis exhibited at one declaration, with a non-empty surface
+RevL.G8Classified.surface_only_declared_crossings	instance	RevL.G8Classified.g8_surface_is_not_universal,RevL.G8Classified.witness_surface_traces_to_its_declaration,RevL.G8Classified.surface_agrees_with_an_honest_marker,RevL.G8Classified.raw_leak_is_on_the_surface	a non-empty surface beside a non-empty body with an empty one; the marker agrees where it is honest, and a raw leak is enumerated without a typing hypothesis
+RevL.G8Classified.surface_implies_crossing	instance	RevL.G8Classified.effect_carrying_emission_is_on_the_surface	a non-empty stmtSurface on a concrete statement
+RevL.G8Classified.effect_carrying_emission_is_on_the_surface	concrete	-	the two models disagree in both directions on concrete statements
+RevL.G8Classified.surface_agrees_with_an_honest_marker	concrete	-	where the emit marker is honest the two models agree
+RevL.G8Classified.raw_leak_is_on_the_surface	concrete	-	a raw leak is enumerated without needing Typed to exclude it
+RevL.G8Classified.g8_surface_is_not_universal	concrete	-	a body on the surface, and a non-empty body off it
+RevL.G8Classified.witness_surface_traces_to_its_declaration	concrete	-	the entry traces through a fn to the emission that owns it
+RevL.G1.g1_not_vacuous	concrete	-	a component admitted under its own requires, and the same body refused under a smaller manifest
+RevL.G3.g3_not_vacuous	concrete	-	a link, a layering, a dependency path with a strict rank drop, and a genuine self-path on the cyclic composition
+RevL.G4.g4_shape_not_vacuous	concrete	-	both conclusion branches inhabited, and the raw shape typed out rather than refused
+RevL.G5.registrations_ignores_its_argument	concrete	-	FINDING: the review's constant-function probe, proved, plus an undo body that calls an emission and still scores zero
+RevL.G6.g6_not_vacuous	concrete	-	an admitted statement with a non-empty reach surface and a refused one
+RevL.G8.g8_marker_level_not_vacuous	concrete	-	a typed body with a non-empty surface, and the effect whose surface is empty by definition
+RevL.CrossTier.conformance_hypotheses_are_inhabited	concrete	-	two conformant tiers and a well-annotated map IR, agreeing on a re-ordered non-empty value
+RevL.CapCeilings.capceilings_hypotheses_are_inhabited	concrete	-	a lineage built from a real spawn edge, a Descends, a Resolves, NameableEmission, and a counter run with an overdraw refused
+RevL.CapCeilings.ceiling_lineage_is_inhabited	concrete	-	a spawn edge that narrows a calls ceiling from 3 to 2, built with Lineage.spawn
+RevL.G9.g9_context_hypotheses_are_inhabited	concrete	-	a TypedIn crossing with a non-empty head list, an untrusted-free scope and an untrusted one
+RevL.R4.r4_side_conditions_are_inhabited	concrete	-	the freshness and disjointness side conditions hold at both traces, with the emitted set empty on one and not the other
+RevL.A8.a8_hypotheses_are_inhabited	concrete	-	SemLog, a fork-free log, a discharged seq, and a WAFrom run that really fires an undeclared inverse under a unique seq space

@@ -26,4 +26,42 @@ theorem confinement : ∀ (C : Ctx) (s : Stmt), TypedIn C s →
     ∀ k ∈ stmtHeads s, k ∈ C :=
   fun _ _ ht => RevL.Lemmas.typedIn_confined ht
 
+
+-- ------------------------------------------------------- non-vacuity
+
+/-- A manifest declaring one key. -/
+def declared : Ctx := ["db"]
+
+/-- A statement that reaches only the declared key. -/
+def okStmt : Stmt := .effect (.call "db" [.lit "row"]) (.call "db" [.lit "undo"])
+
+/-- The same shape reaching an undeclared one. -/
+def leakStmt : Stmt := .effect (.call "net" [.lit "row"]) (.call "db" [.lit "undo"])
+
+/-- **Non-vacuity** (roadmap item 418, step 8). `TypedIn` admits a
+statement with a NON-EMPTY reach surface, so `confinement`'s hypothesis
+is satisfiable and its conclusion is not about an empty surface; and the
+judgment is not universal, because the statement reaching an undeclared
+key is refused. -/
+theorem g6_not_vacuous :
+    TypedIn declared okStmt ∧ stmtHeads okStmt ≠ [] ∧
+    (∀ k ∈ stmtHeads okStmt, k ∈ declared) ∧
+    ¬ TypedIn declared leakStmt := by
+  have hok : TypedIn declared okStmt :=
+    TypedIn.effect _ _ _
+      (ReachIn.call _ "db" _ (by decide) (by
+        intro a ha
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at ha
+        rcases ha with rfl
+        exact ReachIn.lit _ _))
+      (ReachIn.call _ "db" _ (by decide) (by
+        intro a ha
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at ha
+        rcases ha with rfl
+        exact ReachIn.lit _ _))
+  refine ⟨hok, by simp [okStmt, stmtHeads, heads], confinement _ _ hok, ?_⟩
+  intro h
+  have hbad := confinement _ _ h "net" (by simp [leakStmt, stmtHeads, heads])
+  simp [declared] at hbad
+
 end RevL.G6
