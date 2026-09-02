@@ -155,6 +155,21 @@ gate crate if the change touched them. A branch is never merged on a local
 green alone, because a local green certifies only what actually ran on that
 machine at that moment.
 
+That regeneration is no longer only a habit. Issue #252: the committed
+playground/site wheel vendors all of `src/revl`, so it is stale after almost any
+source change, and it is deliberately not a per-PR gate (as one it reddened CI
+on every source change, which is an outage class rather than a defect). The
+merge-time assignment above was the whole of its ownership, and under the actual
+flow — agents run targeted tests, CI runs the matrix, the pipeline merges on
+green — nobody ran it, so the wheel was found stale three times in one day.
+`.github/workflows/site-wheel.yml` now runs `tools/check_site_wheel.py` on every
+push to main and weekly, and fails on main when the committed wheel does not
+match a fresh build. It never runs on a pull request, so no PR is red for not
+having rebuilt a deploy artifact. When it goes red, the fix is one command on a
+branch:
+
+    python3 tools/check_site_wheel.py --write
+
 ## Issues are the state
 
 Every unfinished roadmap item has an issue. The roadmap stays the
