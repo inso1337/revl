@@ -779,11 +779,16 @@ def test_legit_repoint_still_admitted_and_repoints(tmp_path):
 # item 337 Seam 2: boot-time bridge re-admission. Same seam as above, moved one
 # event earlier: before a consumer process wires its INITIAL proxy to a
 # provider served by another process, it re-admits that provider against its
-# own running manifest (`_boot_wiring_decision` / `_apply_boot_wiring`),
-# exactly the `swap_admission` call the repoint seam runs at cutover.
+# own running manifest (`_boot_wiring_decision` / `_apply_boot_wiring`).
 # placement.py stamps the provider's admissible identity (`component`,
 # `backend`) onto every same-composition proxy entry so the selector is
 # already in the spec the consumer already trusts — no new transport.
+#
+# The QUESTION differs from the repoint seam's, and that difference is load-
+# bearing (see tests/test_seam2_same_tier_readmission.py): a repoint MOVES a
+# provider under a live consumer and so asks `swap_admission`, while a boot
+# seam re-admits a provider that is already where it is and so asks
+# `placement.seam_readmission` — the conductor's own plan-time seam gate.
 # ---------------------------------------------------------------------------
 
 
@@ -791,15 +796,47 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+# A cache whose service hands back an OWNED resource handle. A resource cannot
+# cross a process seam by copy in EITHER direction, tier-agnostically, so this
+# is a seam the conductor itself refuses at plan time
+# (`resource_crossing_refusal`) — which is exactly why a consumer re-admitting
+# the same provider at boot refuses it too.
+_HANDLE_CACHE_RVL = """
+type Sock = { fd: Int }
+extern pure fn close_sock(h: Int) = @py { return None }
+extern acquire fn open_sock() -> Sock undo close_sock(0) = @py { return {"fd": 1} }
+
+service Cache {
+  async fn get(k: Str) -> Sock
+  async fn put(k: Str, v: Str)
+}
+service ApiSvc { async fn hit() -> Sock }
+
+component MemCache provides cache: Cache {
+  provide cache {
+    async fn get(k) = open_sock()
+    async fn put(k, v) = v
+  }
+}
+
+component Api requires cache: Cache provides api: ApiSvc {
+  provide api { async fn hit() = cache.get("k") }
+}
+"""
+
+
 def test_boot_wiring_refused_at_seam_when_provider_fails_admission(tmp_path):
     """A boot-time proxy whose named provider FAILS admission against the
     running manifest is refused AT THE SEAM: `wire` is never invoked, so the
-    proxy is never wired at all — not merely that admission complains."""
-    src = _write(tmp_path, "bound.rvl", _BOUND_CACHE_RVL)
+    proxy is never wired at all — not merely that admission complains.
+
+    The refusal used here is one the CONDUCTOR also makes: `Cache.get` returns
+    an owned `Sock` handle, and a resource cannot cross a process seam by copy,
+    same tier or across tiers. (A merely SYNC service is a different case: the
+    conductor permits that seam, so the boot seam must too —
+    tests/test_seam2_same_tier_readmission.py.)"""
+    src = _write(tmp_path, "handle.rvl", _HANDLE_CACHE_RVL)
     running = compile_files([src])
-    # MemCache's `cache` service is sync (address-space-bound) — the consumer
-    # re-admitting it onto the `rust` tier it is actually served from fails,
-    # exactly like the repoint seam's refusal above.
     info = {"socket": "provider.sock", "methods": ["get"], "service": "Cache",
            "component": "MemCache", "backend": "rust"}
     wired = []
@@ -809,7 +846,7 @@ def test_boot_wiring_refused_at_seam_when_provider_fails_admission(tmp_path):
 
     ok, reason = _pr._boot_wiring_decision([src], running, info)
     assert ok is False
-    assert reason and ("address-space-bound" in reason or "transport" in reason)
+    assert reason and "address-space-bound" in reason and "Sock" in reason
 
     accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire))
     assert accepted is False

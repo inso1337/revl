@@ -146,12 +146,13 @@ keys it must consume from other processes as bridge proxies"). Today the consume
 trusts that the provider process is running admitted code because the conductor
 compiled once. Under the mesh, the CONSUMER process re-admits the provider
 component it is about to bind a proxy to, against the consumer's own running
-manifest, before it wires the proxy, the same call `_repoint_decision` makes but
-at initial wiring rather than at cutover. Because every spec already carries
-`spec["files"]` (the full composition source) and the provider `component` name,
-the consumer already holds everything the gate needs; the boot-time re-admission
-is `swap_admission(spec_files, running_ir, provider_component,
-provider_backend)` with no new transport. This is expressible in the reference
+manifest, before it wires the proxy, at initial wiring rather than at cutover.
+Because every spec already carries `spec["files"]` (the full composition source)
+and the provider `component` name, the consumer already holds everything the
+gate needs; the boot-time re-admission is `seam_readmission(spec_files,
+running_ir, provider_component, provider_backend)` with no new transport - the
+IN-PLACE re-admission, not the relocation question `_repoint_decision` asks (see
+the amendment below). This is expressible in the reference
 layer today (it is the landed seam moved one event earlier), and the design
 recommends it as the second py slice.
 
@@ -162,6 +163,50 @@ tier-seam violation, but it cannot catch a provider whose ACTUAL running bytes
 differ from the source the consumer holds; detecting that is Seam 3's remote
 problem, below. Re-admitting what you can independently derive is sound and
 worth doing; claiming it verifies bytes you never saw would not be.
+
+#### Amendment: a boot seam re-admits IN PLACE, it does not re-ask the swap question
+
+As first landed, Seam 2 called `swap_admission`, which is the wrong question
+asked of the right seam. A swap asks "may this component be MOVED to that
+tier", and its extra outbound refusal - an address-space-bound (sync
+`fn`/`emission`) provided service - is a RELOCATION hazard: a cutover re-points
+a live consumer's in-address-space call site across a newly created process
+seam. At boot nothing moves. The provider is already on its tier, the seam
+already exists, the conductor already planned it, and the consumer's call sites
+were compiled against that seam from the start.
+
+The conductor's own plan-time gate says so in as many words: a resource
+crossing is REFUSED tier-agnostically, but the sync half is a REPORT, and only
+across tiers - "the sync (address-space-bound) REPORT half stays cross-tier
+only ... a same-tier value-typed seam is still byte-identical to today"
+(`cross_tier_boundary_check`). So the conductor planned and spawned the
+canonical py<->py `user_cache` placement, whose `Database` is sync, and the py
+consumer then refused to wire it: the `db` proxy went unwired, both probes
+failed with `'cache' has no method ...`, and `--once` still exited 0.
+
+The boot seam now asks `placement.seam_readmission`: recompile the provider
+against the running manifest (the structural G2/G3 half `swap_admission` also
+runs), then run the CONDUCTOR'S OWN `cross_tier_boundary_check` over the seam
+topology. Same gate, same verdict, independently re-derived by the receiver -
+this is not a same-tier bypass, and a resource or `cache`-split crossing is
+still refused at a py<->py seam. Property 1 is untouched: every gate input is
+still receiver-derived.
+
+And a refused boot proxy is now a BOOT FAILURE, not a note. A refused REPOINT
+leaves a healthy composition running, so a log line is the right weight there.
+A refused BOOT wiring has no healthy prior state: the consumer's components
+were compiled against a dependency that is now absent, and continuing produced
+a half-dead process that still printed `UP` under a green exit. The process
+names every refused seam (`_process_runner.BootRefused`), never prints `UP`,
+and exits non-zero, which the conductor's `--once` gate turns into a non-zero
+`revl run --placement`.
+
+Why this shipped, and the coverage that closes it: `ci/placement_smoke.sh`
+placed py as the PROVIDER in every seam it ran, and only a py CONSUMER executes
+Seam 2 at all, so no job ever ran the code path. The smoke script now carries
+`py-py:examples/placement/user_cache.toml`, and
+`tests/test_seam2_same_tier_readmission.py` boots a real py consumer over a
+real seam.
 
 ### Seam 3: the remote handoff (frontier: needs a per-tier native gate + a trust anchor)
 
@@ -189,7 +234,7 @@ What each seam carries, tabulated:
 | seam | identity on the wire | manifest admitted against | gate | status |
 |------|----------------------|---------------------------|------|--------|
 | 1. repoint cutover | `{key, socket, component, backend}` | receiver `running_ir` from `spec["files"]` | `swap_admission` (py) | LANDED |
-| 2. bridge boot wiring | provider `component` + `backend` (from spec) | receiver `running_ir` from `spec["files"]` | `swap_admission` (py) | expressible today (py) |
+| 2. bridge boot wiring | provider `component` + `backend` (from spec) | receiver `running_ir` from `spec["files"]` | `seam_readmission` (py) | expressible today (py) |
 | 3a. remote, source held | `component` + `backend` | receiver-held manifest | native gate per tier | frontier (crate/wasm) |
 | 3b. remote, source foreign | source + `component` + `backend` + attestation | receiver-held manifest | native gate per tier | frontier + trust anchor |
 
@@ -296,10 +341,11 @@ the reactive layer, not a change to it.
 
 - Seam 1 (repoint cutover re-admission). LANDED (`_process_runner.py`,
   `placement.py`, `tests/test_swap.py`).
-- Seam 2 (boot-time bridge re-admission on py). The same `swap_admission` call
-  moved to initial proxy wiring; no new machinery, no new transport, since every
-  spec already carries the source and the provider component name. This is the
-  recommended next py slice.
+- Seam 2 (boot-time bridge re-admission on py). The same gate moved to initial
+  proxy wiring, asked in its IN-PLACE form (`seam_readmission`, the conductor's
+  own `cross_tier_boundary_check`) rather than the relocation form; no new
+  machinery, no new transport, since every spec already carries the source and
+  the provider component name.
 - The seam-identity discipline (selector not IR; `gate_version()` skew check).
   All reference-layer, all shippable on py now.
 
