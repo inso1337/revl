@@ -1,0 +1,53 @@
+// The item-437 emitter decisions that the byte-agreement oracle CAN hold.
+//
+// Item 437 found that no corpus fixture exercised the shapes it measured, so
+// the reference emitter could be optimised and the self-host port left behind
+// without a single test going red. That is the item-429 trap: a green oracle
+// that proves nothing, because the corpus never reaches the code. This fixture
+// exists so the next change to either shape below is caught here rather than by
+// whoever next reads the generated rust.
+//
+// Everything here stays inside the covered subset: no stdlib `builtin`/`len`
+// node, which `selfhost/emit_rust.rvl` does not emit at all (see its header).
+// The `concat` spelling of the self-append is therefore NOT here; it has no
+// self-host mirror to diverge from.
+
+// 437(b): `x == "lit"` compares against a bare `&'static str`, not against a
+// freshly allocated `String::from("lit")` that is compared and dropped. Both
+// operand orders, both `==` and `!=`, and both an operand the emitter can type
+// (`s`, declared `Str`) and one it cannot (the `for` binding `x`).
+fn eq_literal(s: Str, xs: List[Str]) -> Int {
+  var n = 0
+  if (s == "alpha") { n = n + 1 }
+  if ("beta" == s) { n = n + 2 }
+  if (s != "gamma") { n = n + 3 }
+  for (x of xs) {
+    if (x == "delta") { n = n + 4 }
+  }
+  return n
+}
+
+// A non-Str `==` keeps its operands exactly as they were: the borrow applies to
+// a Str literal operand and to nothing else.
+fn eq_int(a: Int, b: Int) -> Bool { return a == b }
+
+// 437(a), the `+` spelling: `text = text + p` rebinds the accumulator over its
+// own value, so the pre-image is unreachable and the append can happen in place
+// instead of building a whole fresh String per iteration.
+fn join_strs_plus(parts: List[Str]) -> Str {
+  var text = ""
+  for (p of parts) {
+    text = text + p
+  }
+  return text
+}
+
+// The same `+` where the target is NOT the receiver: a plain rebuild, which the
+// in-place rewrite must leave alone.
+fn prefix_all(parts: List[Str], head: Str) -> Str {
+  var text = ""
+  for (p of parts) {
+    text = head + p
+  }
+  return text
+}
