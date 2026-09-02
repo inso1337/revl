@@ -280,6 +280,27 @@ inverses against it, and the **residue proof** is the set of referents still
 present afterward. Clean iff that set is empty. `revl recover` exits `0` on a
 clean recovery, `1` when honest residue remains.
 
+### Recovering a session that was forked (item 250)
+
+Two WALs read differently once a session has been forked.
+
+- The **frozen parent** carries `fork-frozen`. It was retired at the fork step:
+  its history above k was rewound into the branch and it takes no further steps,
+  so recovery neither rolls it forward nor rolls it back live. The verdict is
+  `FORK-RETIRED`, and the residue it reports is the crossed emissions and the
+  enumerated-but-unfired crossing inverses that `fork-begin` made durable
+  *before* the rewind, so a crash cannot lose them.
+- The **branch** carries `fork-branch`. It recovers exactly as any other session
+  does, over its own witnessed effects — but the report also names its lineage,
+  because a branch's rollback lands at the **fork point**, not at an empty
+  workspace. The state below the fork point is the parent's rewound step-k state
+  and is not the branch's to restore. Without that line an operator could read a
+  branch's clean rollback as "the workspace is back to nothing".
+
+`revl branch --wal FILE` reads the same lineage without recovering anything, and
+`revl compare LEFT.wal RIGHT.wal` diffs two histories that share a fork point
+(see [commands-reference.md](commands-reference.md)).
+
 ---
 
 ## 6. What this refuses to promise
