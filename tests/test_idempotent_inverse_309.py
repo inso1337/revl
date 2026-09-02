@@ -270,6 +270,81 @@ def test_a_committed_transaction_is_still_never_rolled_back(tmp_path):
     assert skipped["retained"] is True
 
 
+# ------------------------------------------------------- recovery: legacy boundary family
+#
+# The same free-vs-fenced contract as above, but for the OTHER record family
+# `_roll_back` walks: the reconstructible legacy-boundary path
+# (`WriteAheadLog.record_boundary`, the `effect`/`inverse.reconstructible`
+# records a durable-resource acquire writes). Before this fix `_roll_back`
+# re-applied a `record_boundary` inverse on EVERY `recover()` run, unfenced,
+# reporting `clean: true` each time — a HIGH-severity double-apply. These
+# tests are the regression coverage: FAILING before the fence was extended to
+# this family, PASSING after.
+
+
+def _boundary_wal(path: str, *, declared: bool) -> None:
+    """A durable `PaymentRow` acquire whose inverse is `billing.refund(order,
+    amount)` — a non-idempotent (delta-shaped) inverse, optionally declared
+    idempotent. Never writes `activation-complete` (the process 'crashed')."""
+    wal = replay.WriteAheadLog(path, ir={}, generation=1).open()
+    wal.record_boundary(
+        "Billing", "charge order-42", resource="PaymentRow",
+        inverse_op={"receiver": "billing", "method": "refund",
+                    "args": ["order-42", 100]},
+        undo_idempotent=declared,
+        register="declared" if declared else None)
+    wal.close()
+
+
+def test_undeclared_boundary_inverse_applies_once_then_fenced(tmp_path):
+    # BEFORE the fix: three `recover()` runs each re-ran `billing.refund`,
+    # every run reporting `clean: true` — an unbounded double-apply. AFTER:
+    # the first run takes the single at-most-once attempt, every run after
+    # that refuses to re-run it and reports fenced/deferred residue.
+    path = str(tmp_path / "boundary-undeclared.wal")
+    _boundary_wal(path, declared=False)
+
+    first = recover(path)
+    assert first["verdict"] == "rolled-back"
+    [entry] = first["ran"]
+    assert entry["op"]["method"] == "refund"
+    assert entry["replay"] == "fenced"
+    assert first["residue"]["clean"] is True
+    assert first["fencedDeferred"] == []
+    # the fence is now durable on the WAL
+    reread = replay.WriteAheadLog.read(path)
+    assert any(r.get("record") == "replay-fence" for r in reread["records"])
+
+    for _ in range(2):
+        again = recover(path)
+        assert again["verdict"] == "rolled-back"
+        assert again["ran"] == []  # NOT re-applied
+        [fenced] = again["fencedDeferred"]
+        assert fenced["referent"] is not None
+        assert again["residue"]["clean"] is False
+        [res] = again["residue"]["outstanding"]
+        assert res["kind"] == "fenced-residue"
+        assert "outcome unknown, will not re-run" in res["error"]["message"]
+
+
+def test_declared_idempotent_boundary_inverse_replays_freely(tmp_path):
+    path = str(tmp_path / "boundary-declared.wal")
+    _boundary_wal(path, declared=True)
+
+    for _ in range(3):
+        report = recover(path)
+        assert report["verdict"] == "rolled-back"
+        [entry] = report["ran"]
+        assert entry["op"]["method"] == "refund"
+        assert entry["replay"] == "free"
+        assert report["residue"]["clean"] is True
+        assert report["fencedDeferred"] == []
+
+    # a declared-idempotent inverse never needs a fence (a payoff of declaring)
+    reread = replay.WriteAheadLog.read(path)
+    assert not any(r.get("record") == "replay-fence" for r in reread["records"])
+
+
 # ------------------------------------------------------------ register partial order
 
 
