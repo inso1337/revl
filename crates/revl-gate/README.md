@@ -114,15 +114,45 @@ the drift gate.
 * The default panic hook prints to stderr when the fail-closed path fires.
   Install your own hook if that matters.
 
+## The navigation surface
+
+```rust
+use revl_gate::symbols::{symbols, Symbols};
+
+match symbols(source) {
+    // Every top-level declaration this crate will resolve, and the line each
+    // was declared on. A name that is ABSENT is not "undeclared" — it is "not
+    // resolvable here", and the caller must ask the reference.
+    Symbols::Table(rows) => navigate(rows),
+    // Not entitled to answer for this document at all.
+    Symbols::Undecided { reason } => ask_the_reference(source),
+}
+```
+
+A second surface over the same front end, for editor navigation (roadmap item
+336 slice 2): go-to-definition and the signature half of hover. It issues no
+verdicts — a program the gate REFUSES still has declarations to navigate — so it
+is versioned by `SYMBOLS_API_VERSION`, not by the gate api above.
+
+Its fail-closed rule mirrors the gate's, pointed at the risk navigation actually
+carries. A navigation engine that answers nothing merely fails to jump; one that
+answers WRONGLY sends a developer to the wrong declaration. So it answers only
+what it can answer exactly, and everything else is an absence: a construct the
+self-host parser cannot read makes the whole document `Undecided`, a name a
+parameter or `let` might shadow is dropped (this crate cannot see scopes), and a
+signature it cannot spell the way the reference spells it comes back as
+`detail: None`.
+
 ## Versions
 
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:cbe68e3fd53572bc"
+    // frontier "selfhost-admit:7ec06dcda43eb122"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
-`api` is the gate surface semver (bumped by surface changes only). `language` is
+`api` is the gate surface semver (bumped by surface changes only); the
+navigation surface carries its own, `SYMBOLS_API_VERSION`. `language` is
 the revl version this gate's refusals are drawn from. `frontier` identifies the
 COVERED surface: two gates with different frontier ids cover different
 languages, and their agreement carries no information. `layer` says in prose

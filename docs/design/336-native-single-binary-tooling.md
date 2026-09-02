@@ -530,6 +530,76 @@ against 391's oracle, never worked around in the LSP.
   json, shell, or a table, and none is a `revl` fence, so nothing here is expected
   to compile until the feature lands.
 
+## What slice 2 turned out to be (as implemented)
+
+Recorded after the fact, because two of this design's predictions did not
+survive contact with the crate and the corpus, and both corrections run in the
+direction the design cares about.
+
+**The diagnostics accelerator is not implementable on the `revl-gate` crate that
+landed, and the reason is a layer, not a schedule.** The plan above was: for a
+document the frontier pin proves fully covered, native `admit` produces the
+diagnostics at native speed. The crate 332 shipped issues NO admissions — its
+non-refusing arm is `NoObjection`, "this gate found nothing it is able to
+refuse", because it decides the composition and guarantee layer and does not run
+the reference type layer (`COVERED_LAYER`, measured in
+`tests/test_gate_crate_admit.py`). So "proven fully covered" has no witness: a
+clean native result does not show the document is clean, and a native REFUSAL
+does not show the reference would raise only that one diagnostic, since a
+multi-refusal compile carries several. Short-circuiting the reference on either
+is the missing-squiggle direction this design makes release-blocking. What
+shipped instead is the sound half of the same rule, agree-or-ADD: a native
+refusal the reference did not report is appended to the publish (tagged
+`source: "revl-native"`), never replacing anything, and on the covered corpus
+the add path stays silent, which the oracle asserts. One exclusion is
+load-bearing: a native `BAD` is the self-host's own parse failure — a frontier
+gap wearing a refusal's clothes — and surfacing it would put a meaningless
+second squiggle on `examples/rejections/v2_verified_direct_recursion.rvl`, which
+the reference diagnoses correctly as `G7`.
+
+**A4 named the wrong direction for navigation drift.** It anticipated a native
+parser LESS capable than the reference, where a missed symbol is benign. On the
+real corpus it is sometimes MORE capable: the reference PARSER raises on a large
+class of refusals (an `effect` with no `undo` raises `G4` inside
+`Parser.parse`), and after a parse failure `analysis.build_symbols` yields an
+empty table, so the reference resolves NOTHING anywhere in that document. The
+self-host parser reads the same document happily and would answer — an extra
+answer where `python -m revl.lsp` returns null, still a divergence, and one an
+in-frontier corpus would never show. The rule that closes it: native navigation
+answers only a document with NO diagnostics, which is exactly the set where the
+reference's own parse is known to have succeeded. Within that set the native
+table declines anything it cannot answer exactly — a construct the self-host
+parser does not model (`pub`, `verified`, a `fn` type-parameter list) makes the
+whole document undecided; a name a parameter or `let` might shadow is dropped,
+because the reference resolves the innermost scope and the native path cannot
+see scopes; a `type` sharing a name with a `fn` takes the name back; and a
+signature it cannot spell the way the reference spells it is offered as no
+signature at all, so hover defers while definition still answers.
+
+**What landed.** `revl_gate::symbols` (a second surface on the gate crate,
+versioned by its own `SYMBOLS_API_VERSION` because it issues no verdicts and has
+no `revl.gate` twin) returns the self-host front end's top-level declarations
+and the line each sits on; `crates/revl-lsp/src/native.rs` answers `definition`
+and the signature half of `hover` from it. `revl/gateVersion` grew a `native`
+block carrying the gate's own `{api, language, frontier, layer}` and the verbs
+it answers, which is the pin a stale-binary audit compares (A3). The exit tests
+are in `crates/revl-lsp/tests/reference_agreement.rs`:
+`the_binary_never_shows_fewer_squiggles_than_the_reference` (the release
+blocker, zero rows in the fewer direction) and
+`native_navigation_answers_and_never_disagrees`, which re-runs the binary with
+the reference fallback switched off so the NATIVE answers are observable alone,
+and asserts each is the reference's answer or null — never a third thing — and
+that the native path answered every declaration kind, signature included, so
+agreement cannot be bought by silence.
+
+**What slice 2 did NOT buy.** Not a native checker, not Python removal, and not
+navigation on a document that has a squiggle. The reference remains the engine
+for diagnostics, explain-hover and code actions over the whole language, and the
+interpreter is still a child process (slice 0's bundling spike is still open).
+Widening native navigation past declarations, or moving diagnostics at all, wants
+the self-host front end to carry scopes, parameters, `type` declarations, `pub`
+and `verified` — which is item 391, the same gate slice 3 waits on.
+
 ## The honest hard part (consolidated)
 
 Four costs, taken in the open. First, the native-checker half of this item is item

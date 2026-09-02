@@ -8,6 +8,14 @@
 //! (see that module for why a native checker may not stand in for it in slice
 //! 1).
 //!
+//! Slice 2 splits the analysis in two. Navigation (`definition`, and the
+//! symbol half of `hover`) is answered natively from `revl_gate::symbols` and
+//! never reaches the reference; diagnostics, explain-hover and code actions
+//! still do, because a native diagnostics engine off the self-host frontier
+//! shows green where the reference refuses (design A1). The native table is
+//! recomputed once per document version and held beside the text, so a
+//! navigation request costs a lookup instead of an interpreter round trip.
+//!
 //! `handle` maps one incoming message to the messages to send back, exactly as
 //! the reference's `handle` does, so a test can drive it with decoded messages
 //! and no stream.
@@ -16,15 +24,28 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
+use revl_gate::symbols::Symbols;
+
 use crate::engine::Engine;
+use crate::native;
 use crate::protocol;
 
 pub const SERVER_NAME: &str = "revl-lsp";
 pub const SERVER_VERSION: &str = "2.0";
 
 /// The `gate_version` API level this binary speaks (design: the version surface
-/// that makes a stale redistributed binary detectable).
-pub const GATE_API: &str = "0";
+/// that makes a stale redistributed binary detectable). Slice 2 answers
+/// navigation from the native gate, so the reported surface changed and the
+/// level is bumped with it.
+pub const GATE_API: &str = "1";
+
+/// Set to any value to stop navigation falling back to the reference, so the
+/// NATIVE answer is observable on its own. This exists for the oracle
+/// (`tests/reference_agreement.rs`), which has to see what the native path
+/// alone would say in order to prove it never says something WRONG. It is a
+/// strictly-fewer-answers mode: it can never produce an answer the ordinary
+/// binary does not.
+const NATIVE_ONLY_ENV: &str = "REVL_LSP_NATIVE_ONLY";
 
 /// A document key: the URI as the client sent it, with `None` for a message
 /// that carried none — the reference stores those under `None` too.
@@ -32,16 +53,27 @@ type DocKey = Option<String>;
 
 pub struct LspServer {
     documents: HashMap<DocKey, String>,
+    /// The native declaration table per document version, or the native front
+    /// end's refusal to decide the document.
+    symbols: HashMap<DocKey, Symbols>,
+    /// The diagnostics last published for a document, computed from this same
+    /// text. Navigation may only be answered natively for a document with none
+    /// (`native::answerable`), so this is what that decision reads.
+    published: HashMap<DocKey, Value>,
     pub shutting_down: bool,
     engine: Engine,
+    native_only: bool,
 }
 
 impl LspServer {
     pub fn new() -> Self {
         LspServer {
             documents: HashMap::new(),
+            symbols: HashMap::new(),
+            published: HashMap::new(),
             shutting_down: false,
             engine: Engine::new(),
+            native_only: std::env::var(NATIVE_ONLY_ENV).is_ok(),
         }
     }
 
@@ -109,7 +141,7 @@ impl LspServer {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        self.documents.insert(key_of(&uri), text);
+        self.store(&uri, text);
         vec![self.publish(&uri)]
     }
 
@@ -130,7 +162,7 @@ impl LspServer {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            self.documents.insert(key_of(&uri), text);
+            self.store(&uri, text);
         }
         vec![self.publish(&uri)]
     }
@@ -140,12 +172,23 @@ impl LspServer {
             .get("textDocument")
             .map(uri_of)
             .unwrap_or(Value::Null);
-        self.documents.remove(&key_of(&uri));
+        let key = key_of(&uri);
+        self.documents.remove(&key);
+        self.symbols.remove(&key);
+        self.published.remove(&key);
         // clear the client's squiggles for a document we no longer track
         vec![protocol::notification(
             "textDocument/publishDiagnostics",
             json!({"uri": uri, "diagnostics": []}),
         )]
+    }
+
+    /// Record a new document version and rebuild its native declaration table
+    /// in the same step, so the two can never describe different text.
+    fn store(&mut self, uri: &Value, text: String) {
+        let key = key_of(uri);
+        self.symbols.insert(key.clone(), native::table_for(&text));
+        self.documents.insert(key, text);
     }
 
     fn publish(&mut self, uri: &Value) -> Value {
@@ -155,13 +198,21 @@ impl LspServer {
             .cloned()
             .unwrap_or_default();
         let filename = filename_of(uri);
-        let diagnostics = match self.engine.diagnostics(&text, &filename) {
+        let mut diagnostics = match self.engine.diagnostics(&text, &filename) {
             Ok(value) => value,
             // Fail closed: an engine that cannot answer is reported as an error
             // on the document, never as an empty diagnostics list. Silence here
             // is the editor's false-admit.
             Err(reason) => json!([engine_diagnostic(&reason)]),
         };
+        // The agree-or-ADD rule: the reference's diagnostics are never dropped,
+        // and a native refusal it did not report is appended. Never the other
+        // way round — see `native::extra_diagnostics` for why the native gate
+        // cannot become the engine here.
+        if let Some(rows) = diagnostics.as_array_mut() {
+            rows.extend(native::extra_diagnostics(&text, &json!(rows.clone())));
+        }
+        self.published.insert(key_of(uri), diagnostics.clone());
         protocol::notification(
             "textDocument/publishDiagnostics",
             json!({"uri": uri, "diagnostics": diagnostics}),
@@ -170,21 +221,51 @@ impl LspServer {
 
     // ------------------------------------------------------------ requests
 
+    /// Hover: the native signature when the document is clean and the native
+    /// front end can spell it, else the reference (which owns the guarantee
+    /// text a diagnostic hover shows, and every answer on a document its own
+    /// parser refused).
     fn hover(&mut self, params: &Value) -> Value {
         let (uri, line, character) = locate(params);
-        let Some(text) = self.documents.get(&key_of(&uri)).cloned() else {
+        let key = key_of(&uri);
+        let Some(text) = self.documents.get(&key).cloned() else {
             return Value::Null;
         };
+        if native::answerable(self.published.get(&key)) {
+            if let Some(table) = self.symbols.get(&key) {
+                if let Some(answer) = native::hover(table, &text, line, character) {
+                    return answer;
+                }
+            }
+        }
+        if self.native_only {
+            return Value::Null;
+        }
         self.engine
             .hover(&text, &filename_of(&uri), line, character)
             .unwrap_or(Value::Null)
     }
 
+    /// Go-to-definition: the native declaration table when the document is
+    /// clean and the table resolves the word, else the reference. The table
+    /// never resolves a name a local could shadow, so an answer here is the
+    /// reference's answer or nothing.
     fn definition(&mut self, params: &Value) -> Value {
         let (uri, line, character) = locate(params);
-        let Some(text) = self.documents.get(&key_of(&uri)).cloned() else {
+        let key = key_of(&uri);
+        let Some(text) = self.documents.get(&key).cloned() else {
             return Value::Null;
         };
+        if native::answerable(self.published.get(&key)) {
+            if let Some(table) = self.symbols.get(&key) {
+                if let Some(answer) = native::definition(table, &text, &uri, line, character) {
+                    return answer;
+                }
+            }
+        }
+        if self.native_only {
+            return Value::Null;
+        }
         self.engine
             .definition(&text, &filename_of(&uri), &uri, line, character)
             .unwrap_or(Value::Null)
@@ -209,17 +290,29 @@ impl LspServer {
             .unwrap_or_else(|_| json!([]))
     }
 
+    /// The skew surface: what a client compares against its expected pin before
+    /// trusting this binary's greens.
+    ///
+    /// Slice 2 runs two engines, so it reports both. `frontier` stays
+    /// `"reference"` because DIAGNOSTICS — the answers a green depends on — are
+    /// still the reference's over the whole language; the native gate's own pin
+    /// is reported beside it under `native`, which is the surface navigation is
+    /// answered over and the one a stale-binary audit compares.
     fn gate_version(&mut self) -> Value {
         let reference = self.engine.version().unwrap_or(Value::Null);
+        let gate = revl_gate::gate_version();
         json!({
             "api": GATE_API,
             "language": reference.get("language").cloned().unwrap_or(Value::Null),
-            // Slice 1's engine is the reference front end, so the covered
-            // surface is the whole language, not the self-host frontier. A
-            // slice-2/3 binary reports the frontier pin its native engine is
-            // trusted over.
             "frontier": "reference",
-            "engine": "reference-subprocess",
+            "engine": "reference-diagnostics + native-navigation",
+            "native": {
+                "api": gate.api,
+                "language": gate.language,
+                "frontier": gate.frontier,
+                "layer": gate.layer,
+                "answers": ["textDocument/definition", "textDocument/hover (symbol)"],
+            },
             "server": {"name": SERVER_NAME, "version": SERVER_VERSION},
         })
     }
