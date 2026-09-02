@@ -203,6 +203,11 @@ def _classify(e: RevlError) -> str:
             or "unknown routing strategy" in m
             or "multi-realm bind of" in m):
         return "ROUTE"
+    # ---- item 350: the environment contract -------------------------------
+    # `_link`'s at-most-one-`boot`-component refusal. Code-less; the gate tags it
+    # "BOOT" so the oracle compares tag AND message.
+    if "at most one `boot` component" in m:
+        return "BOOT"
     if ("declared plain, but this implementation reaches" in m
             or "must be marked `emit`" in m
             or "emits through" in m):
@@ -280,6 +285,21 @@ component StoreB provides kv: Kv {
 # Programs the reference admits — the gate must admit them too. Kept
 # reference-clean (no out-of-slice defect), so "" is the only agreement.
 ACCEPTED_PROGRAMS = [
+    # item 350: a `boot` component — the environment contract. `boot` is a
+    # contextual keyword the admission gate carries no verdict for (the contract
+    # is an admission-time CONFIG concern, checked by `run.py`'s `--env`
+    # preflight, not a composition-guarantee one), so both implementations must
+    # step over it and admit the composition exactly as if it were plain.
+    ("boot component with a bounded environment contract", """
+service Env { fn data_root() -> Str }
+boot component HarnessBoot provides env: Env {
+  config {
+    data_dir: Str under "./.harness-data",
+    model: Str in ["mock", "real"] = "mock",
+  }
+  provide env { fn data_root() = config.data_dir }
+}
+"""),
     ("honest provider", """
 service Cache { fn put(key: Str, value: Str) }
 component HonestCache provides cache: Cache {
@@ -609,6 +629,21 @@ component C provides s: S {
 # reference's own text is the ground truth. Several are the documented
 # `expected error` of a checked-in rejection fixture.
 REJECTED_PROGRAMS = [
+    # item 350: two environment contracts cannot both be the exhaustive list of
+    # what the host must inject, and an admission check against "the" contract
+    # would silently check only one of them — so the link refuses the second.
+    ("two boot components", """
+service Env { fn a() -> Str }
+service Env2 { fn b() -> Str }
+boot component B1 provides e1: Env {
+  config { x: Str }
+  provide e1 { fn a() = config.x }
+}
+boot component B2 provides e2: Env2 {
+  config { y: Str }
+  provide e2 { fn b() = config.y }
+}
+""", "BOOT"),
     ("g4 emission not declared", _fixture("g4_emission_not_declared"), "G4"),
     ("g4 capability not declared", _fixture("g4_capability_not_declared"), "G4"),
     ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),

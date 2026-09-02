@@ -158,6 +158,65 @@ byte-identical to the pre-118 seam. Present, a request that fails
 authentication or is a replay is answered with an error and **never
 dispatched** — the guard runs before `_invoke`.
 
+### 2b. What a network seam can carry instead
+
+The guard above is four gates: shape, a **closed peer table**, an **HMAC** under
+that peer's own per-process secret, and a **replay ledger**. On a local UDS seam
+the transport authenticates nothing (`bridge.peer_identity` is `None` for a Unix
+socket), so the HMAC is the only thing binding the claimed identity to a real
+caller. That is what *sealed* means.
+
+**A TCP+mTLS seam cannot carry it, and the reason is structural.** The secret is
+minted fresh by one conductor at every `run_placement()` and delivered only
+inside the process specs of its own children. A network provider may also be
+dialled by an item-151 cross-composition consumer, which runs under a *different*
+conductor and can never hold that secret; distributing it is Slice 2's replicated
+control plane. Demanding a sealed envelope there does not harden the seam, it
+refuses the legitimate caller. The freshness gate needs an envelope to dedup, so
+it goes with the secret.
+
+What mTLS *does* prove — per session, with a CA-signed key — is **which** identity
+is calling. What was missing is a closed set to check that against:
+`verify_mode = CERT_REQUIRED` against a shared CA answers every identity that CA
+ever signed. `deploy.PeerAllowlist` is that set. It holds **names, not secrets**,
+which is exactly why it works across a composition boundary, and it needs nothing
+from the caller's bridge, so a py consumer, a node consumer and a stranger
+composition are all judged the same way.
+
+```python
+allow = deploy.PeerAllowlist(["edge", "partner"])
+server = await bridge.serve(ctx, exports, endpoint, peers=allow)
+```
+
+The verdict is taken **once per connection**, at the handshake's identity, before
+a request is read; a refused peer gets one `{"peer_refused": ...}` line and the
+connection closes. `correlation` and `peers` compose and neither implies the
+other.
+
+### 2c. The level a seam achieved, said out loud
+
+Because the two planes are not the same property, they are not reported under the
+same name. `deploy.SeamAdmission` records what each seam actually got, in
+`bundle.verify`'s vocabulary:
+
+| level | what holds |
+| --- | --- |
+| `sealed` | caller authenticated by its own per-process secret; replays refused |
+| `peer-pinned` | mTLS identity checked against a declared allowlist; **not** replay-checked |
+| `unverified` | **cannot verify who may call** |
+
+The conductor prints one line per cross-process seam, plus a count of the
+unverified ones:
+
+```
+  seam admission provider (tcp+mtls): peer-pinned — mTLS peer identity checked ...  peers: consumer, partner
+  seam admission cache (uds): UNVERIFIED — a consumer runs on a tier whose bridge cannot seal ...
+  seam admission: 1 of 2 seam(s) UNVERIFIED — ... a seam is only as closed as the peer set it can name
+```
+
+A seam that cannot prove who may call it says so. It does not stay quiet, and it
+does not borrow the stronger word.
+
 ## 3. The coordinated cross-process protocol
 
 `run_deploy(participants, approval_path=...)` drives PREPARE / COMMIT / ABORT

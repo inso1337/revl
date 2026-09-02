@@ -297,7 +297,32 @@ class _FakeProc:
         pass
 
 
-def _drive(tmp_path, toml_text):
+class _StubDriver:
+    """A sandbox runtime driver DOUBLE (item 411 Slice 2).
+
+    These tests are about the static half — the split, the config narrowing, the
+    boot summary — so they must not need a container runtime, exactly as they
+    already stand in for the cordis-py runtime and the toolchain preflight. The
+    real `container` driver (launch + in-sandbox canary + teardown, and every
+    refusal that replaces a silent downgrade) is exercised against a real
+    runtime in tests/test_sandbox_container_rung_411.py."""
+
+    torn_down = 0
+
+    def preflight(self, pname, env, ctx):
+        return {"rung": env["isolation"], "runtime": "stub driver (test double)",
+                "enforced": True, "image": env.get("image"), "mounts": [],
+                "runtime_mounts": [], "pythonpath": None,
+                "evidence": ["stub driver: no boundary established"]}, None
+
+    def wrap(self, pname, cmd, proc_env, achieved):
+        return cmd, proc_env
+
+    def teardown(self, pname=None):
+        type(self).torn_down += 1
+
+
+def _drive(tmp_path, toml_text, driver=None):
     app = _write(tmp_path, "app.rvl", _APP)
     toml = _write(tmp_path, "t.toml", toml_text)
     specs: dict = {}
@@ -310,8 +335,10 @@ def _drive(tmp_path, toml_text):
         specs[s["name"]] = s
         return _FakeProc(s["name"])
 
+    stub = _StubDriver() if driver is None else driver
     with mock.patch.object(_placement, "_cordis_py_installed", lambda: True), \
          mock.patch.object(_placement, "_preflight", lambda *a, **k: None), \
+         mock.patch.object(_placement, "resolve_sandbox_driver", lambda rung: stub), \
          mock.patch.object(_placement.subprocess, "Popen", fake_popen):
         rc = _placement.run_placement([app], toml, once=True)
     return rc, specs
@@ -352,8 +379,11 @@ def test_boot_summary_prints_the_envelope(tmp_path, capsys):
     assert "envelope confines fs+net only" in out
     assert "seam-served: work -> tier_py[py, unsandboxed: full host reach]" in out
     assert "bounds this process's own egress" in out
-    # honesty: the isolation is declared + gated, not yet enforced
-    assert "not yet enforced" in out
+    # Slice 2: the boundary is ESTABLISHED by a runtime driver (here a double),
+    # and the summary reports the rung actually achieved plus its evidence,
+    # rather than a declaration nothing backs.
+    assert "isolation ESTABLISHED by a runtime driver" in out
+    assert "enforcement: rung container ACHIEVED via stub driver (test double)" in out
 
 
 def test_unmappable_need_refuses_end_to_end(tmp_path):

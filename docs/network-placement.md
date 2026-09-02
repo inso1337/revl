@@ -97,6 +97,40 @@ seam call is attributable to a named process, not just an address. When the
 placement names an `operator_profile`, every network identity must be a declared
 operator token, or the placement is refused.
 
+**Who may call: the `peers` allowlist.** Mutual TLS proves *which* identity is
+calling; on its own it has no opinion about whether that one *may*. A shared CA
+is a shared CA, so `CERT_REQUIRED` alone answers every identity it ever signed —
+including a composition you did not mean to serve. Declare the closed set on the
+provider:
+
+```toml
+[processes.provider]
+components = ["PgDatabase"]
+peers = ["partner-edge"]   # identities allowed to call this network seam
+```
+
+This placement's own network consumers of that provider are always included, so
+naming an external peer never locks out a local one; `peers = []` is therefore
+meaningful and reads "only this composition's own consumers". A declared identity
+must be a declared operator when the placement names an `operator_profile`, the
+same rule the processes' own identities obey. An unlisted peer is refused at the
+connection, before a request is read.
+
+`peers` is deliberately **declared, not derived**: a placement cannot enumerate
+the consumers that live in other compositions (`[remotes]`, item 151), and a set
+derived from the ones it can see would lock them out.
+
+It is *not* the item-118 correlation guard, and the conductor does not pretend it
+is. That guard authenticates a caller by a per-boot secret only this conductor's
+own children hold, which a cross-composition peer can never have; it also refuses
+replays. The allowlist does neither. So each seam reports the level it actually
+achieved — `sealed`, `peer-pinned`, or `UNVERIFIED` when nothing closes the set
+(see docs/deploy.md §2b/§2c):
+
+```
+  seam admission provider (tcp+mtls): peer-pinned — ...  peers: consumer, partner-edge
+```
+
 **Deadlines and withdrawal, unchanged.** The deadline machinery bounds the reply
 read over TCP exactly as over the UDS — a wedged remote provider raises
 `SeamDeadline`, not a hang (`tests/test_network_placement.py`). The monitor
