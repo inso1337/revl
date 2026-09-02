@@ -320,8 +320,15 @@ class Handle:
             raise GateError(
                 f"key {key!r} is not one the admitted turn provides "
                 f"(provides: {', '.join(self.keys) or 'none'})")
-        return self._gate._invoke_with_approval(
-            self._gate._session.call, key, method, args)
+        try:
+            return self._gate._invoke_with_approval(
+                self._gate._session.call, key, method, args)
+        except _session_error() as error:
+            # item 416e: the facade's boundary type is `GateError`. Without this
+            # an embedder catching only `GateError` sees a raw internal
+            # `SessionError` cross the library edge, from the two `call` methods
+            # that lacked the wrapper every sibling carries.
+            raise GateError(str(error)) from error
 
 
 class AdmitResult:
@@ -698,7 +705,17 @@ class Gate:
         item-246 policy and the approver seam."""
         if not self._loaded:
             raise GateError("nothing is loaded; call load first")
-        return self._invoke_with_approval(self._session.call, key, method, args)
+        try:
+            return self._invoke_with_approval(
+                self._session.call, key, method, args)
+        except _session_error() as error:
+            # item 416e: see `Handle.call`. `GateRefused` is a `GateError`
+            # subclass and `ApprovalRequired` is resolved inside the loop, so
+            # only a genuine session refusal (an unknown key, a method that is
+            # not callable, a faulted crossing) reaches here, and it fails
+            # closed either way — this is a boundary-type fix, not a behavior
+            # change.
+            raise GateError(str(error)) from error
 
     def commit(self) -> dict:
         """Commit the session: the audited two-step (enumerate, then confirm the

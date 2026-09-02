@@ -400,7 +400,13 @@ def revl_digest_nonce() -> bytes:
 
 def revl_reset_run_trace_state() -> None:
     """Reset the per-run trace state (mint a fresh digest nonce, clear the
-    fiber-local model-hop registers). Called at run start; also the test seam."""
+    fiber-local model-hop registers).
+
+    Called by the driver at every generation boundary (`run._Driver._emit_module`,
+    which is gen 1 for a plain run and gen N+1 for each `--watch` reload), and
+    also the test seam. Item 416d: until that call was wired the contract line
+    "called at run start" was false, and the state survived for the whole
+    process."""
     global _revl_digest_nonce
     _revl_digest_nonce = None
     _revl_last_model_call.set(None)
@@ -3805,16 +3811,90 @@ def _fiber_withdrawn(ctx: Any) -> bool:
     return name not in ("ACTIVE", "LOADING")
 
 
+# item 416b: the parked-`next` withdrawal sweep.
+#
+# Three of the four conditions a parked `next` waits on are owned by the
+# `Subscription` itself (a delivered item, a provider terminal, the cancel
+# token), so each of those can WAKE the consumer directly. The fourth, owner
+# withdrawal, is not: `ctx.fiber.state` flips synchronously inside cordis with
+# no callback out, and a `next` that never observes it DEADLOCKS teardown
+# behind an await that never lands (see `_fiber_withdrawn`). That is why `next`
+# was a per-turn poll.
+#
+# It stays a per-turn poll, but ONE poll for the whole process instead of one
+# per parked consumer: parked owner-bearing subscriptions register here, a
+# single sweeper task re-checks each DISTINCT owning context once per scheduler
+# turn, and wakes the ones whose owner has withdrawn. Turn granularity and the
+# cancellation-first ladder are unchanged (the sweeper only sets the wake event;
+# `next` still re-reads every condition in order), so this is a scheduling fix,
+# not a semantics change. Per-turn work is now O(distinct owners) — one, in the
+# shape that matters, where a component parks many consumers in one activation.
+_STREAM_PARKED: "list" = []
+_STREAM_SWEEPER: Any = None
+
+
+def _stream_park_register(sub: "Subscription") -> None:
+    import asyncio  # noqa: PLC0415
+
+    global _STREAM_SWEEPER
+    _STREAM_PARKED.append(sub)
+    task = _STREAM_SWEEPER
+    live = task is not None and not task.done()
+    if live:
+        try:
+            live = task.get_loop() is asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover — always inside a running loop
+            live = False
+    if not live:
+        _STREAM_SWEEPER = asyncio.ensure_future(_stream_withdrawal_sweep())
+
+
+def _stream_park_unregister(sub: "Subscription") -> None:
+    try:
+        _STREAM_PARKED.remove(sub)
+    except ValueError:  # pragma: no cover — reset() cleared it underneath us
+        pass
+
+
+async def _stream_withdrawal_sweep() -> None:
+    """The single per-turn owner-withdrawal poll, shared by every parked `next`.
+
+    Exits as soon as nothing is parked, so an idle process runs no task at all;
+    the next park starts a fresh one."""
+    import asyncio  # noqa: PLC0415
+
+    global _STREAM_SWEEPER
+    try:
+        while _STREAM_PARKED:
+            seen: dict = {}
+            for sub in list(_STREAM_PARKED):
+                ctx = sub._ctx
+                key = id(ctx)
+                withdrawn = seen.get(key)
+                if withdrawn is None:
+                    withdrawn = seen[key] = _fiber_withdrawn(ctx)
+                if withdrawn:
+                    sub._signal()
+            await asyncio.sleep(0)
+    except asyncio.CancelledError:  # pragma: no cover — loop teardown
+        pass
+    finally:
+        _STREAM_SWEEPER = None
+
+
 class Subscription:
     """A single-consumer subscription (design §1, §4.6). `next()` awaits the
     next item raced against the cancel token; `close()` trips that token
     synchronously and releases the listener (the bracket inverse).
 
-    `next` is a COOPERATIVE poll (like `JobHandle._drive`): each turn it checks,
-    cancellation-first, the cancel token, then owner withdrawal, then a buffered
-    item, then a provider terminal — so `close`, a withdrawn owner, or a provider
-    `close`/`fault` all resolve a parked `next` at the next scheduler turn,
-    without ever waiting for the provider. Determinism, not wall-clock."""
+    `next` re-reads the same ladder it always did — cancellation-first, the
+    cancel token, then owner withdrawal, then a buffered item, then a provider
+    terminal — so `close`, a withdrawn owner, or a provider `close`/`fault` all
+    resolve a parked `next` at the next scheduler turn, without ever waiting for
+    the provider. Determinism, not wall-clock. What changed in item 416b is only
+    HOW the parked consumer is woken to re-read it: the three conditions this
+    object owns set a wake event directly, and owner withdrawal rides the one
+    shared `_stream_withdrawal_sweep` poll rather than a poll per consumer."""
 
     POLICIES = ("error", "drop_newest", "drop_oldest", "block")
 
@@ -3838,6 +3918,9 @@ class Subscription:
         self._paused = False
         self._drain_ms = drain_ms
         self._drain: Any = None
+        # item 416b: the wake event a parked `next` blocks on, created lazily
+        # because a subscription may be constructed with no running loop.
+        self._wake: Any = None
         source._subs.append(self)
         Stream._subs.append(self)
         _record("stream.subscribe")
@@ -3868,6 +3951,7 @@ class Subscription:
             return False
         if len(self._buffer) < self._capacity:
             self._buffer.append(item)
+            self._signal()
             return True
         if self._policy == "drop_newest":
             # lossy-tolerant telemetry: discard the incoming item. Explicitly
@@ -3878,6 +3962,7 @@ class Subscription:
             # latest-wins gauges: evict the buffer head, keep the newest item.
             evicted = self._buffer.pop(0)
             self._buffer.append(item)
+            self._signal()
             _record(f"stream.drop_oldest {evicted}")
             return True
         if self._policy == "block":
@@ -3890,6 +3975,7 @@ class Subscription:
         # backpressure `error` (default, §4.4): a full buffer is a terminal
         # `Faulted(overflow)` — deterministic, no silent loss.
         self._terminal = ("faulted", "overflow")
+        self._signal()
         _record("stream.overflow")
         return False
 
@@ -3946,6 +4032,34 @@ class Subscription:
         if self._closed or self._terminal is not None:
             return
         self._terminal = (kind, reason)
+        self._signal()
+
+    # item 416b: waking a parked `next` -----------------------------------------
+    def _signal(self) -> None:
+        """Wake a parked `next` so it re-reads the ladder. Never decides anything
+        itself: a spurious signal costs one re-read and re-park, and a missed one
+        is impossible because the event is cleared BEFORE the ladder runs, with
+        no await in between."""
+        wake = self._wake
+        if wake is not None and not wake.is_set():
+            wake.set()
+
+    async def _park(self) -> None:
+        """Suspend until something the ladder reads may have changed."""
+        if self._wake is None:
+            self._wake = asyncio.Event()
+        if self._ctx is None:
+            # no owner means withdrawal cannot happen, so nothing needs polling:
+            # this consumer costs the loop nothing while it waits.
+            await self._wake.wait()
+            self._wake.clear()
+            return
+        _stream_park_register(self)
+        try:
+            await self._wake.wait()
+        finally:
+            _stream_park_unregister(self)
+        self._wake.clear()
 
     async def next(self) -> Any:
         """Await the next item or a terminal event — a suspension point raced
@@ -3968,7 +4082,7 @@ class Subscription:
                 if kind == "faulted":
                     raise StreamFaulted(reason or "faulted")
                 return STREAM_CLOSED
-            await asyncio.sleep(0)
+            await self._park()
 
     def close(self) -> bool:
         """The bracket inverse: trip the cancel token synchronously, release the
@@ -3985,6 +4099,7 @@ class Subscription:
         if self._closed:
             return False
         self._closed = True
+        self._signal()   # item 416b: resolve a parked `next` as `Closed`
         self._cancel_drain()
         self._source._detach(self)
         _record("stream.close")
@@ -4065,6 +4180,9 @@ class Stream:
         cls._sources.clear()
         cls._subs.clear()
         cls._stages.clear()
+        # item 416b: a reset between runs drops the park registry too, so the
+        # sweeper from a finished loop cannot hold a dead subscription alive.
+        _STREAM_PARKED.clear()
 
 
 # ---------------------------------------------------------------------------
