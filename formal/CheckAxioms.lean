@@ -18,13 +18,23 @@ import RevL
 -- G1: undeclared access cannot be written (component level).
 #print axioms RevL.G1.declared_only_access
 
--- G2: provision disjointness + requirement closure from the link judgment.
+-- G2: provision disjointness per (key, realm) + requirement closure from
+-- the link judgment, with both sides of the realm distinction witnessed.
 #print axioms RevL.G2.linkOK_provision_disjoint
 #print axioms RevL.G2.linkOK_requires_closed
+#print axioms RevL.G2.realm_separation_admitted
+#print axioms RevL.G2.same_realm_conflict_refused
 
--- G3: layering certificate excludes dependency cycles.
+-- G3: the layering certificate excludes dependency cycles, and the link
+-- judgment supplies the certificate (so the hypothesis is dischargeable).
 #print axioms RevL.G3.depPath_rank_lt
 #print axioms RevL.G3.no_dependency_cycles
+#print axioms RevL.G3.linkOK_layeredBy_rankOf
+#print axioms RevL.G3.linkOK_layered
+#print axioms RevL.G3.linkOK_no_cycles
+#print axioms RevL.G3.self_provision_refused
+#print axioms RevL.G3.mutual_cycle_refused
+#print axioms RevL.G3.layering_exists_for_admitted
 
 -- G4: every admitted mutation carries an inverse or an emit marker.
 #print axioms RevL.G4.inverse_or_emit
@@ -39,6 +49,7 @@ import RevL
 #print axioms RevL.G7.teardown_replays_all
 #print axioms RevL.G7.teardown_only_witnessed
 #print axioms RevL.G7.teardown_eq_reversed_inverses
+#print axioms RevL.Semantics.teardown_length
 
 -- G8: the boundary surface is enumerable (completeness + soundness).
 #print axioms RevL.G8.boundary_enumerates_emissions
