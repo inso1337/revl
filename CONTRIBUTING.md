@@ -224,6 +224,7 @@ command, in order, reporting each step:
 | backend-java | `pytest backends/java/test_emit_java.py` (emit/golden tests) |
 | conformance matrix | `tools/conformance.py --check-readme` |
 | site wheel | `tools/check_site_wheel.py` (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
+| docs drift | `tools/docgen.py --check` (the source-derived doc blocks; `make docs-gen` regenerates) |
 | lint | `ruff check` (pinned `ruff==0.16.4` via `uvx` if not on `PATH`) |
 
 Two properties make it trustworthy rather than theatre:
