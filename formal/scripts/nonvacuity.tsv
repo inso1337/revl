@@ -37,7 +37,7 @@ RevL.G3.layering_exists_for_admitted	concrete	-	the layering certificate is reac
 RevL.G4.inverse_or_emit	instance	RevL.G4.g4_shape_not_vacuous,RevL.G4Classified.g4_not_vacuous	Typed and IsMutation hold together in both conclusion branches; the raw branch closes because Typed has no constructor for it, which is why the lattice restatement carries the real refusal
 RevL.G5.teardown_registers_nothing	contentless	RevL.G5.registrations_ignores_its_argument,RevL.G5Classified.registrations_depends_on_its_argument	FINDING: registrations is the constant zero function, so the conclusion holds by definition and not by any property of undo bodies. The counting statement is G5Classified's
 RevL.G6.confinement	instance	RevL.G6.g6_not_vacuous	TypedIn admits a statement with a non-empty reach surface and refuses the same shape reaching an undeclared key
-RevL.Semantics.replays_or_discharges	instance	RevL.G7.replay_table	the equivalence is computed at all six kind and verdict points
+RevL.Semantics.replays_or_discharges	instance	RevL.G7.replay_table,RevL.G7.estop_strands_the_bracket	the equivalence is computed at all six SETTLING kind and verdict points; item 443 added the settling hypothesis and the witness exhibits the E-Stop point it excludes
 RevL.Semantics.phase_lengths_add	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	a stack on which both phases are non-empty
 RevL.Semantics.teardown_length	instance	RevL.G7.commit_runs_the_bracket_only,RevL.G7.abort_runs_the_proof_pass_then_the_drain	the same stack replays one entry on commit and three on abort
 RevL.G7.replay_table	concrete	-	the teardown contract's replay rows, computed per kind and verdict
@@ -49,7 +49,7 @@ RevL.G7.commit_discharges_transactional	necessity	RevL.G7.commit_discharge_is_no
 RevL.G7.commit_discharges_compensation	necessity	RevL.G7.commit_runs_the_bracket_only,RevL.G7.abort_runs_the_proof_pass_then_the_drain	the compensation is registered, discharged on commit and drained on abort
 RevL.G7.commit_replays_only_brackets	instance	RevL.G7.commit_runs_the_bracket_only	the commit replay is exactly the bracket inverse, on a stack carrying all three kinds
 RevL.G7.abort_replays_every_transactional	instance	RevL.G7.commit_discharge_is_not_vacuous	the transactional entry really is in the abort replay
-RevL.G7.bracket_replays_under_every_verdict	instance	RevL.G7.commit_runs_the_bracket_only,RevL.G7.abort_runs_the_proof_pass_then_the_drain	the bracket inverse appears under both verdicts
+RevL.G7.bracket_replays_under_every_verdict	instance	RevL.G7.commit_runs_the_bracket_only,RevL.G7.abort_runs_the_proof_pass_then_the_drain,RevL.G7.estop_strands_the_bracket	the bracket inverse appears under both settling verdicts, and the E-Stop witness shows the settling hypothesis is not idle
 RevL.G7.teardown_eq_reversed_inverses	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	the LIFO order is exhibited on a three-entry stack
 RevL.G7.compensations_drain_after_the_proof_pass	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	the compensation registered LAST still runs last, which a single-phase LIFO walk would not do
 RevL.G7.phase1_is_lifo	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	phase 1 is non-empty and in reverse registration order
@@ -58,6 +58,19 @@ RevL.G7.commit_runs_the_bracket_only	concrete	-	computes the commit replay of a 
 RevL.G7.abort_runs_the_proof_pass_then_the_drain	concrete	-	computes the abort replay of the same stack, proof pass first
 RevL.G7.verdict_is_load_bearing	concrete	-	the two replays of one stack differ
 RevL.G7.commit_discharge_is_not_vacuous	concrete	-	the discharged entry is on the stack the discharge theorem quantifies over
+RevL.Semantics.disposition_trichotomy	instance	RevL.G7.estop_is_load_bearing	one stack realises all three dispositions across the verdicts: replayed and discharged on abort/commit, stranded on the halt
+RevL.Semantics.halted_strands_every_kind	instance	RevL.G7.estop_is_load_bearing	the halt column is exhibited on a stack carrying all three entry kinds, none of them replayed or discharged
+RevL.Semantics.replayed_length	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	a stack whose replay list is non-empty in both phases
+RevL.Semantics.book_lengths_add	instance	RevL.G7.estop_is_load_bearing,RevL.G7.commit_runs_the_bracket_only	the partition is exhibited with a non-zero stranded term (halt) and a non-zero discharged term (commit), so neither term is dead
+RevL.G7.estop_replays_nothing	instance	RevL.G7.estop_is_load_bearing	the same stack replays three inverses on abort and none on the halt, so the empty replay is a property of the verdict, not of an empty stack
+RevL.G7.estop_discharges_nothing	instance	RevL.G7.estop_is_load_bearing	two entries the commit would discharge are on the stack and the halt discharges neither
+RevL.G7.estop_strands_everything	instance	RevL.G7.estop_is_load_bearing	all three registered entries are on the halt inventory, and none is on the abort's
+RevL.G7.estop_strands_the_bracket	concrete	-	computes the bracket row of the E-Stop column: not replayed, stranded, and the verdict does not settle
+RevL.G7.halt_inventory_is_total	instance	RevL.G7.mid_abort_halt_cut_is_not_vacuous	a mid-abort cut with all three books non-empty
+RevL.G7.halt_ambiguity_is_at_most_one	instance	RevL.G7.mid_abort_halt_cut_is_not_vacuous	the bound is attained: the cut really has one ambiguous entry, so the theorem is not a claim about an always-empty list
+RevL.G7.halt_books_are_total	instance	RevL.G7.mid_abort_halt_cut_is_not_vacuous,RevL.G7.estop_is_load_bearing	the five books are exhibited with the cut split non-trivial on one verdict and the stranded term non-zero on the other
+RevL.G7.estop_is_load_bearing	concrete	-	computes the abort and halt dispositions of one stack carrying all three entry kinds
+RevL.G7.mid_abort_halt_cut_is_not_vacuous	concrete	-	computes the completed/ambiguous/unattempted split of a halt arriving one inverse into an abort
 RevL.G8.boundary_enumerates_emissions	instance	RevL.G8.g8_marker_level_not_vacuous	a typed body whose emission contributes a non-empty surface
 RevL.G8.boundary_only_declared	instance	RevL.G8.g8_marker_level_not_vacuous,RevL.G8Classified.effect_carrying_emission_is_on_the_surface	the hypotheses are satisfiable on a non-empty surface, and the same crossing inside an effect is scored empty by definition, which is the marker-level weakness
 RevL.CrossTier.cross_tier_agreement	instance	RevL.CrossTier.conformance_hypotheses_are_inhabited,RevL.CrossTier.annotation_necessary	two conformant profiles and a well-annotated map IR agreeing on a re-ordered non-empty value, and the annotation hypothesis cannot be dropped

@@ -228,7 +228,11 @@ def test_an_ordinary_host_still_renders_verbatim_in_the_ticket(tmp_path):
 
 @needs_cordis
 def test_an_ordinary_host_still_renders_verbatim_in_the_wal(tmp_path):
+    """Under the OPT-IN `bound` posture. The host here is a caller argument, so
+    since roadmap 427 F8's default flip it is withheld unless the operator asks
+    for the item-251 fold — see the two `..._is_the_default_...` tests below."""
     session = _session()
+    session.approval_record_values = "bound"
     session.load(_ir(), record=True)
     _open_wal(session, tmp_path)
     with pytest.raises(ApprovalRequired) as exc:
@@ -374,7 +378,30 @@ def test_a_short_or_default_registered_value_never_over_redacts():
 #     written verbatim to a durable cross-session log. The ticket now says so, and
 #     names the `Secret[Str]` declaration that changes it;
 #   * and the durability becomes an OPERATOR decision
-#     (`--approval-record-values`), defaulting to what shipped so N1 is unchanged.
+#     (`--approval-record-values`).
+#
+# ROADMAP 427 F8 then settled the DEFAULT, which the first pass deliberately left
+# at `bound` (what shipped). It is now `withheld`, because the two mistakes are
+# not symmetric: recording is irreversible and silent (a plaintext cross-session
+# file on disk, holding somebody else's value, selected by whether a parameter
+# happens to be NAMED `path`/`host`/`table`), while withholding costs only the
+# distiller's fold over caller-argument targets — visible, recoverable, and now
+# SELF-EXPLAINING, since `distill.Reason.RESOURCE_SCOPE_UNRECORDED` names the
+# flag that gets the fold back. Author-written literal targets are recorded under
+# both modes, so a composition that names its destinations in source pays nothing.
+# Both behaviours are pinned below so the choice cannot drift back by accident.
+#
+# NEGATIVE RESULT on the third option, recording a SCOPED DERIVATIVE instead of
+# the raw value (a per-segment keyed hash, say, which would preserve the equality
+# and longest-common-prefix joins `_resource_join` needs): it cannot work here.
+# The distilled artifact is a rule an operator READS and applies
+# (`AutoApproveRule.to_dsl()`), and a rule reading `fs.write(path="/9f3a/ab12")`
+# cannot be reviewed; the auto-approve matcher would have to re-derive the same
+# tokens at every later crossing, so the key must outlive the session and sit
+# beside the log it protects; and path/host segments are low-entropy enough that
+# a keyed hash over them is a dictionary attack, not a redaction. The fold and
+# the plaintext are the same fact, which is why this is a posture and not a
+# transform.
 # ===========================================================================
 
 _CALLER_TARGET = "/var/secrets/tenant-9f2c/prod-db-dump.sql"
@@ -396,7 +423,7 @@ _DURABILITY_SOURCE = (
 )
 
 
-def _durability_session(mode: str = "bound") -> Session:
+def _durability_session(mode: str = "withheld") -> Session:
     session = _session()
     session.approval_record_values = mode
     session.load(compile_source(_DURABILITY_SOURCE, "filer.rvl"), record=True)
@@ -409,7 +436,7 @@ def test_the_ticket_discloses_that_the_target_is_a_caller_value(tmp_path):
     the same move item 425 F1 made with `unreviewedHostCode`. The target itself
     is NOT hidden: the caller just sent it, and an operator who cannot see it
     cannot answer."""
-    session = _durability_session()
+    session = _durability_session(mode="bound")
     _open_wal(session, tmp_path)
     with pytest.raises(ApprovalRequired) as exc:
         session.call("ops", "store", [_CALLER_TARGET, "hi"])
@@ -421,6 +448,32 @@ def test_the_ticket_discloses_that_the_target_is_a_caller_value(tmp_path):
     assert "--approval-record-values withheld" in disclosure
     assert _CALLER_TARGET in json.dumps(ticket)   # the decision is still legible
     session.unload()
+
+
+@needs_cordis
+def test_the_disclosure_states_the_posture_this_session_actually_runs(tmp_path):
+    """Roadmap 427 F8. A disclosure describing the OTHER session's behaviour is
+    worse than none — it would teach an operator that the field is boilerplate.
+    Under the default the sentence says the value stays out of the log, and names
+    what that costs; under `bound` it says the opposite. The provenance half (the
+    target is a caller value, not an author literal) is stated under both."""
+    withheld = _durability_session()
+    _open_wal(withheld, tmp_path)
+    with pytest.raises(ApprovalRequired) as exc:
+        withheld.call("ops", "store", [_CALLER_TARGET, "hi"])
+    said = exc.value.ticket["resourceScopeDurability"]
+    assert "the CALLER passed in" in said              # provenance, both modes
+    assert "does NOT reach the durable" in said
+    assert "--approval-record-values bound" in said    # and how to get the fold
+    withheld.unload()
+
+    bound = _durability_session(mode="bound")
+    with pytest.raises(ApprovalRequired) as exc:
+        bound.call("ops", "store", [_CALLER_TARGET, "hi"])
+    said = exc.value.ticket["resourceScopeDurability"]
+    assert "the CALLER passed in" in said
+    assert "writes that value verbatim into the durable approval log" in said
+    bound.unload()
 
 
 @needs_cordis
@@ -443,11 +496,31 @@ def test_an_author_written_literal_target_is_not_a_caller_value(tmp_path):
 
 
 @needs_cordis
-def test_bound_is_the_default_so_n1_records_the_caller_target(tmp_path):
-    """A guard against a silent flip: the default posture is what shipped, so
-    item 251's N1 keeps recording the destination that actually crossed."""
-    assert Session().approval_record_values == "bound"
-    session = _durability_session()
+def test_withheld_is_the_default_so_a_caller_target_never_reaches_the_log(
+        tmp_path):
+    """Roadmap 427 F8, the decision itself. An operator who never reads the flag
+    does not silently persist somebody else's values: with NOTHING configured, the
+    caller's target is absent from the durable log and recorded as the fail-closed
+    UNRECORDED shape. Its twin below pins the opt-in, so the default is a choice
+    rather than an accident."""
+    assert Session().approval_record_values == "withheld"
+    session = _durability_session()          # i.e. nothing configured
+    _open_wal(session, tmp_path)
+    with pytest.raises(ApprovalRequired) as exc:
+        session.call("ops", "store", [_CALLER_TARGET, "hi"])
+    session.approve_ticket(exc.value.ticket["hash"])
+    records = _wal_records(session)
+    assert _CALLER_TARGET not in json.dumps(records)
+    granted = [r for r in records if r.get("record") == "approval-granted"]
+    assert granted[-1]["resourceScopes"] == {"fs.write": None}
+
+
+@needs_cordis
+def test_bound_is_still_available_and_still_records_the_caller_target(tmp_path):
+    """The OTHER behaviour, pinned so the flip is a posture and not a removal.
+    `--approval-record-values bound` records the destination that actually
+    crossed, which is what item 251's N1 needs to distil a rule that NAMES it."""
+    session = _durability_session(mode="bound")
     _open_wal(session, tmp_path)
     with pytest.raises(ApprovalRequired) as exc:
         session.call("ops", "store", [_CALLER_TARGET, "hi"])
@@ -456,6 +529,20 @@ def test_bound_is_the_default_so_n1_records_the_caller_target(tmp_path):
                if r.get("record") == "approval-granted"]
     assert granted[-1]["resourceScopes"] == \
         {"fs.write": f'fs.write(path="{_CALLER_TARGET}")'}
+
+
+def test_the_withheld_fold_loss_explains_itself_and_names_the_flag():
+    """The only substantive argument for keeping `bound` was that flipping would
+    SILENTLY disable the item-251 fold. It is not silent: the distiller's
+    fail-closed refusal for exactly this shape names the flag that restores it, so
+    the operator who loses a rule is told why and what to change."""
+    from revl import distill  # noqa: PLC0415
+
+    rec = {"component": "Filer", "session": "s", "operator": "op",
+           "resourceScopes": {"fs.write": None}}
+    refusal = distill._project(rec, "fs.write")
+    assert refusal.reason is distill.Reason.RESOURCE_SCOPE_UNRECORDED
+    assert "--approval-record-values bound" in refusal.detail
 
 
 @needs_cordis

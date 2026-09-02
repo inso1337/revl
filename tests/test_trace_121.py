@@ -632,3 +632,197 @@ def test_each_generation_gets_its_own_digest_salt():
     driver.runtime.revl_reset_run_trace_state()
     second = rt.revl_prompt_digest(args, arg_origins=set(), taint_engaged=True)
     assert first["salted"] != second["salted"]
+
+
+# ---------------------------------------------------------------------------
+# 9. item 444: the compile-to-runtime taint-origin channel.
+#
+#    Until this landed the driver passed `taint_engaged=False` unconditionally
+#    (run.py, the `emissionsCrossed` arm), so the digest was suppressed on EVERY
+#    shipped run and the whole surface was inert. The gate now reads the
+#    checker's own verdict off the IR the driver already holds — and still fails
+#    closed on every path it cannot prove.
+# ---------------------------------------------------------------------------
+
+# a composition that declares NO confidentiality surface: a web-tainted value
+# crosses a model emission, so the checker records a real origin (`web`) as
+# reaching the crossing, and neither `secret` nor `confidential` can exist.
+_CLEAN_MODEL_SRC = (
+    "extern emission[web.fetch] fn fetch() -> Untrusted[Str] "
+    "= @py { return \"x\" }\n"
+    "service Model { emission fn complete(p: Str) -> Str }\n"
+    "component Agent requires m: Model {\n"
+    "  emit m.complete(fetch())\n"
+    "}\n")
+
+# the same shape, but the program binds a provider key to `model.complete`
+# (item 256 Slice 1). That mints the `secret` origin, so nothing in this
+# composition is proven clean and every crossing must stay suppressed.
+_SECRET_MODEL_SRC = (
+    "secret openai_key for model.complete\n"
+    "extern emission[model.complete] fn complete(p: Str) -> Str "
+    "= @py { return p }\n"
+    "service Model { emission fn ask(p: Str) -> Str }\n"
+    "component Agent requires m: Model {\n"
+    "  emit m.ask(\"hello\")\n"
+    "}\n")
+
+
+def _driver_for(src: str, filename: str):
+    """A `_Driver` holding a REAL compiled IR plus the trace-recording state the
+    emit glue touches — the whole compile-to-runtime channel, minus the cordis
+    load (the glue reads pure-python contextvars)."""
+    driver = _bare_driver(generation=1)
+    driver.ir = compile_source(src, filename)
+    return driver
+
+
+def _cross(driver, args, activation_id="Agent#g1"):
+    """Drive one model completion through the item-257 seam and record the
+    crossing exactly as `run.py`'s `emissionsCrossed` arm does."""
+    rt.validate_retry(lambda: {"tag": "ok"}, budget=0,
+                      schema={"type": "object"}, where="Agent")
+    arg_origins, taint_engaged = driver._crossing_taint("Agent")
+    return driver._model_crossing_payload(
+        activation_id=activation_id, args=args,
+        arg_origins=arg_origins, taint_engaged=taint_engaged)
+
+
+def test_clean_composition_certifies_and_carries_the_checker_origins():
+    """The channel's two halves, read straight off a real compiled IR: the
+    whole-program certificate, and the checker's recorded crossing origins."""
+    from revl import taint
+
+    index = taint.OriginIndex(compile_source(_CLEAN_MODEL_SRC, "clean.rvl"))
+    assert index.engaged is True
+    # the checker's own verdict (item 249 Decision 5), not a driver guess
+    assert index.origins_for("Agent") == frozenset({"web"})
+    # a component the walk recorded nothing for carries no origin (not None)
+    assert index.origins_for("Nobody") == frozenset()
+
+
+def test_end_to_end_clean_model_arg_emits_a_within_run_stable_digest():
+    """A run whose model arg is PROVEN clean emits a digest, and the same prompt
+    twice within one run digests identically — the within-run equality the
+    surface exists to provide, and which no shipped run could ever observe while
+    `taint_engaged` was hard-wired False."""
+    driver = _driver_for(_CLEAN_MODEL_SRC, "clean.rvl")
+
+    first = _cross(driver, ["summarise this", "context"])
+    second = _cross(driver, ["summarise this", "context"])
+    other = _cross(driver, ["a different prompt"])
+
+    assert first["promptDigest"]["salted"].startswith("hmac-sha256:")
+    assert first["promptDigest"]["provenance"] == "revl-side-args"
+    # the same prompt twice in ONE run: equal
+    assert second["promptDigest"] == first["promptDigest"]
+    # a different prompt: a different digest, and no raw text anywhere
+    assert other["promptDigest"]["salted"] != first["promptDigest"]["salted"]
+    blob = json.dumps([first, second, other])
+    assert "summarise this" not in blob and "a different prompt" not in blob
+
+
+def test_end_to_end_secret_tainted_arg_suppresses_the_digest():
+    """The other half of the exit test: a composition that binds a provider key
+    mints the `secret` origin, so it is not certified and every crossing's
+    digest is suppressed. The hop is still recorded in full — suppression never
+    refuses and never drops the crossing (§4, HIGH 2)."""
+    driver = _driver_for(_SECRET_MODEL_SRC, "secret.rvl")
+    assert driver._crossing_taint("Agent") == (None, False)
+
+    llm = _cross(driver, ["summarise this", "context"])
+    assert llm is not None                      # the hop IS recorded
+    assert "promptDigest" not in llm            # ...with the digest suppressed
+    assert llm["attempts"] == 1 and llm["attemptCeiling"] == 1
+
+
+@pytest.mark.parametrize("src", [
+    # a `Secret[T]` extern return (item 256 Slice 3, §7a)
+    "extern emission[payment.charge] fn charge(a: Str) -> Secret[Str] "
+    "= @py { return a }\n"
+    "service Ops { emission fn go(u: Str) -> Int }\n"
+    "component Agent provides ops: Ops {\n  provide ops {\n"
+    "    fn go(u) {\n      let t = charge(u)\n      return 0\n    }\n  }\n}\n",
+    # a `Secret[T]` extern parameter (a declared disclosure receiver, §7b)
+    "extern emission[model.complete] fn prompt(p: Secret[Str]) -> Str "
+    "= @py { return \"\" }\n"
+    "service Ops { emission fn go(u: Str) -> Int }\n"
+    "component Agent provides ops: Ops {\n  provide ops {\n"
+    "    fn go(u) {\n      return 0\n    }\n  }\n}\n",
+    # a `Secret[T]` service-operation parameter
+    "service Ops { emission fn go(u: Secret[Str]) -> Int }\n"
+    "component Agent provides ops: Ops {\n  provide ops {\n"
+    "    fn go(u) {\n      return 0\n    }\n  }\n}\n",
+    # a `Secret[T]` config field
+    "service Ops { emission fn go(u: Str) -> Int }\n"
+    "component Agent provides ops: Ops {\n  config { key: Secret[Str] }\n"
+    "  provide ops {\n    fn go(u) {\n      return 0\n    }\n  }\n}\n",
+    # a `Secret[T]` parameter on a top-level fn — the marking that reached NO
+    # IR key at all before item 444 closed the gap in `lower.py`
+    "fn hold(x: Secret[Str]) -> Int { return 1 }\n"
+    "service Ops { emission fn go(u: Str) -> Int }\n"
+    "component Agent provides ops: Ops {\n  provide ops {\n"
+    "    fn go(u) {\n      let n = hold(u)\n      return 0\n    }\n  }\n}\n",
+])
+def test_any_declared_confidentiality_surface_certifies_false(src):
+    """The certificate is whole-program on purpose: ANY declaration that can
+    mint `secret`/`confidential` anywhere closes the gate for the whole
+    composition. Over-suppression is the safe direction; a per-crossing
+    judgement would rest on an under-approximation across call boundaries."""
+    from revl import taint
+
+    ir = compile_source(src, "surface.rvl")
+    assert taint.declares_confidential_surface(ir) is True
+    assert taint.OriginIndex(ir).engaged is False
+
+
+def test_a_secret_fn_parameter_now_rides_the_ir():
+    """`extract_and_normalize` strips the qualifier off the declared type before
+    lowering, so `params[i]["secret"]` is the only surviving record that a
+    top-level fn parameter was declared `Secret[T]`. Additive: a fn with no
+    qualifier is byte-identical."""
+    ir = compile_source(
+        "fn hold(x: Secret[Str], y: Str) -> Int { return 1 }\n"
+        "service Ops { emission fn go(u: Str) -> Int }\n"
+        "component Agent provides ops: Ops {\n  provide ops {\n"
+        "    fn go(u) {\n      let n = hold(u, u)\n      return 0\n    }\n  }\n}\n",
+        "fnsecret.rvl")
+    params = ir["functions"][0]["params"]
+    assert params[0] == {"name": "x", "type": "Str", "secret": True}
+    assert params[1] == {"name": "y", "type": "Str"}   # no marking, unchanged
+
+
+def test_the_gate_fails_closed_on_every_unproven_path():
+    """A fail-closed gate must stay closed wherever the channel proves nothing:
+    a driver with no IR at all, and an IR shape the index cannot read."""
+    from revl import taint
+
+    bare = _bare_driver()                       # no `ir` attribute at all
+    assert bare._crossing_taint("Agent") == (None, False)
+    assert _cross(bare, ["anything"]).get("promptDigest") is None
+
+    for unusable in (None, {}, {"services": {}}, "not-an-ir"):
+        index = taint.OriginIndex(unusable)
+        assert index.engaged is False
+        assert index.origins_for("Agent") is None
+
+
+def test_the_channel_is_wired_into_the_crossing_record():
+    """The gate must be fed BY the `emissionsCrossed` arm, not merely be
+    available — this is the assertion that fails if run.py goes back to passing
+    the hard-wired `taint_engaged=False`."""
+    import inspect
+    src = inspect.getsource(run._Driver)
+    arm = src[src.index("emissionsCrossed"):]
+    assert "_crossing_taint" in arm
+    assert "taint_engaged=taint_engaged" in arm
+    assert "taint_engaged=False" not in src
+
+
+def test_a_new_generation_rebuilds_the_origin_index():
+    """`--watch` replaces `self.ir` in place; the index is keyed on the
+    document's identity, so generation N+1's certificate is its own."""
+    driver = _driver_for(_CLEAN_MODEL_SRC, "clean.rvl")
+    assert driver._crossing_taint("Agent")[1] is True
+    driver.ir = compile_source(_SECRET_MODEL_SRC, "secret.rvl")
+    assert driver._crossing_taint("Agent") == (None, False)

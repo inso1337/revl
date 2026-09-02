@@ -1390,6 +1390,21 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
             sig += " " + ret
         sig += " {"
         out.append(sig)
+        # item 421 F6: a parameter the service declared `Secret[T]` is a declared
+        # DISCLOSURE RECEIVER. `taint.py` strips the qualifier before lowering,
+        # so `params[i]["secret"]` is the only surviving record that this
+        # position is confidential — the same stamp the py and ts emitters read.
+        # Registering the value at the head of the receiver is what lets
+        # `hostRecord` scrub it out of the host trace when the body goes on to
+        # use it as a `pool.query` sql or a stream item. Emitted ONLY for a
+        # method that actually declares one.
+        secret_params = [
+            _safe_local(p["name"]) for p in params_decl
+            if isinstance(p, dict) and p.get("secret")
+            and p.get("name") in (m.get("params") or [])
+        ]
+        if secret_params:
+            out.append("\trevlMarkSecret(%s)" % ", ".join(secret_params))
         env = _Env(binds, reqs, _config_fields_flag(has_config),
                    params=m.get("params", []), receiver=_METHOD_RECEIVER)
         for pn in m.get("params", []):
@@ -3132,6 +3147,13 @@ def _host_runtime() -> str:
     ir-v3.md §v3 — a type name the host already owns)."""
     int_ty = "int64" if _V3_MODE else "int"
     src = _HOST_RUNTIME.replace("@INT@", int_ty)
+    # item 421 F6: the confidentiality funnel, present only for a document that
+    # actually declares a `Secret[T]`. Both substitutions collapse to nothing
+    # otherwise, so a secret-free document emits byte-identically.
+    src = src.replace("@SECRET_PREAMBLE@",
+                      _SECRET_PREAMBLE if _SECRET_MODE else "")
+    src = src.replace("@SECRET_SCRUB@", _SECRET_SCRUB if _SECRET_MODE else "")
+    src = src.replace("@SECRET_RESET@", _SECRET_RESET if _SECRET_MODE else "")
     if _V3_TYPED_COMPONENTS:
         for name in _HOST_RUNTIME_RENAMES:
             if name in _V3_TYPES:
@@ -3147,6 +3169,133 @@ def _needs_sync(ir) -> bool:
 # record. Placement mode renames the HOST side to `Revl<Name>` so the declared
 # record struct keeps its name (see _host_runtime / _host_type_of_acquire).
 _HOST_RUNTIME_RENAMES = ("Row", "Map", "Pool")
+
+
+# item 421 F6: the go tier's confidentiality funnel, the peer of
+# backends/python/confidential.py and backends/typescript/runtime.ts.
+#
+# A `Secret[T]` declaration authorises disclosure TO THE DECLARED RECEIVER. It
+# does not authorise the host trace to keep a copy: `hostRecord` interpolates a
+# `pool.query` / `pool.execute` sql and a stream item straight into `_hostLog`,
+# which `HostMarks` hands to anything embedding this package.
+#
+# The scrub sits at `hostRecord`, the ONE choke point every event passes
+# through, not at each call site: an event is a string already interpolated
+# into, so a value funnel cannot reach it, and per-printer redaction is the
+# discipline this funnel exists to replace. The match is EXACT against the
+# values a declared marking registered, never a pattern.
+#
+# The whole block is emitted ONLY for a document that actually declares a
+# `Secret[T]` somewhere (`_SECRET_MODE`), so every existing golden — none of
+# which declares one — stays byte-identical.
+_SECRET_PREAMBLE = r"""// ---- declared Secret[T] confidentiality (item 421 F6) -----------------
+//
+// A declared marking registers its value here, at both ends: revlMarkSecret at
+// the head of a provide method that declares a Secret[T] parameter (the
+// receiver), revlSecretResult around an extern whose declared return was
+// Secret[T] (the origin, where the value enters the value world). hostRecord
+// then scrubs it out of every trace event, so a sink added later reads an
+// already-redacted line.
+
+// RevlRedactedSecret must equal confidential.REDACTED on the py tier: a
+// polyglot composition redacts to the SAME marker whichever tier wrote the line.
+const RevlRedactedSecret = "<redacted:secret>"
+
+// A remembered value has to be long enough that an exact match means something.
+// Below this it is a coin flip against ordinary trace data ("", "1", "ok"), and
+// blanket-erasing those would gut the trace for no confidentiality gain. Same
+// bound as the py tier's _MIN_MARKABLE.
+const revlMinMarkable = 4
+
+var _revlSecretMu sync.Mutex
+
+// Longest first, so a needle containing another leaves no tail behind.
+var _revlSecretValues []string
+
+func revlRememberSecret(v any) {
+	text := fmt.Sprintf("%v", v)
+	if len(text) < revlMinMarkable {
+		return
+	}
+	_revlSecretMu.Lock()
+	defer _revlSecretMu.Unlock()
+	for _, known := range _revlSecretValues {
+		if known == text {
+			return
+		}
+	}
+	_revlSecretValues = append(_revlSecretValues, text)
+	slices.SortFunc(_revlSecretValues, func(a, b string) int { return len(b) - len(a) })
+}
+
+// revlMarkSecret registers each declared-Secret value (the receiver end).
+func revlMarkSecret(values ...any) {
+	for _, v := range values {
+		revlRememberSecret(v)
+	}
+}
+
+// revlSecretResult registers a declared-Secret return and hands it back
+// unchanged, so a call site wraps with no change in meaning (the origin end).
+func revlSecretResult[T any](v T) T {
+	revlRememberSecret(v)
+	return v
+}
+
+// revlRedactText replaces every registered secret in free-form host text.
+func revlRedactText(text string) string {
+	_revlSecretMu.Lock()
+	defer _revlSecretMu.Unlock()
+	for _, needle := range _revlSecretValues {
+		if needle != "" && strings.Contains(text, needle) {
+			text = strings.ReplaceAll(text, needle, RevlRedactedSecret)
+		}
+	}
+	return text
+}
+
+// RevlForgetSecrets drops every remembered value (test isolation).
+func RevlForgetSecrets() {
+	_revlSecretMu.Lock()
+	_revlSecretValues = nil
+	_revlSecretMu.Unlock()
+}
+
+"""
+
+_SECRET_SCRUB = "\top = revlRedactText(op)\n"
+
+_SECRET_RESET = "\tRevlForgetSecrets()\n"
+
+# True when this document declares a `Secret[T]` anywhere the emitter can see
+# it: a service-method parameter, an extern return, or a component config
+# field. Off by default, so a secret-free document emits byte-identically.
+_SECRET_MODE = False
+
+
+def _declares_secret(ir: dict) -> bool:
+    """Does this IR carry a surviving `Secret[T]` marking?
+
+    `taint.py` strips the qualifier before lowering, so the markings ARE the
+    declaration: `params[i]["secret"]` on a service method (the receiver),
+    `secret_return` on an extern (the origin) and `secret` on a config field.
+    """
+    for service in (ir.get("services") or {}).values():
+        for method in (service.get("methods") or {}).values():
+            for param in method.get("params") or []:
+                if isinstance(param, dict) and param.get("secret"):
+                    return True
+    for ext in ir.get("externs") or []:
+        if ext.get("secret_return"):
+            return True
+        for param in ext.get("params") or []:
+            if isinstance(param, dict) and param.get("secret"):
+                return True
+    for comp in ir.get("components") or []:
+        for field in comp.get("config") or []:
+            if isinstance(field, dict) and field.get("secret"):
+                return True
+    return False
 
 
 _HOST_RUNTIME = r'''// ---- host runtime (minimal, recording) --------------------------------
@@ -3172,8 +3321,8 @@ func revlHostLive() int {
 var _hostMu sync.Mutex
 var _hostLog []string
 
-func hostRecord(op string) {
-	_hostMu.Lock()
+@SECRET_PREAMBLE@func hostRecord(op string) {
+@SECRET_SCRUB@	_hostMu.Lock()
 	_hostLog = append(_hostLog, op)
 	_hostMu.Unlock()
 }
@@ -3192,7 +3341,7 @@ func HostReset() {
 	_hostMu.Lock()
 	_hostLog = nil
 	_hostMu.Unlock()
-}
+@SECRET_RESET@}
 
 // Row is a query result row.
 type Row = map[string]string
@@ -3470,15 +3619,20 @@ class _V3GoCtx:
             ex.get("name"): [p.get("type") for p in ex.get("params") or []]
             for ex in externs or []
         }
-        # `{name: "List"|"Map"}` for the current function's uniquely-owned
-        # collection locals; see `_v3_self_rebind_locals` (item 434 (a)/(b)).
-        self.linear_locals: dict = {}
         # `{name: builder}` for the Str accumulators of the loops currently
         # being rendered, and a per-function counter that keeps two sequential
         # loops from declaring the same builder twice in one Go scope;
         # see `_v3_str_accumulators` (item 434 (e)).
         self.str_builders: dict = {}
         self.str_builder_seq = 0
+        # `{id(while node): (str name, index name)}` for the code-point scan
+        # loops of the current function, `{(str, index): rune var}` for the one
+        # being rendered, and the counter that keeps two sibling scans from
+        # declaring the same rune variable twice in one Go scope;
+        # see `_v3_scan_loops` (item 434 (c) stage two).
+        self.scan_loops: dict = {}
+        self.scan_cursors: dict = {}
+        self.scan_seq = 0
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple, str | None] = {}
@@ -4107,6 +4261,9 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         return f"func() {exp_t} {{ if {cond} {{ return {then} }}; return {els} }}()"
 
     if kind == "builtin":
+        scanned = _go_v3_scan_read(node, ctx)
+        if scanned is not None:
+            return scanned
         target_node = node.get("target")
         target = _go_v3_expr(target_node, ctx)
         if target_node.get("kind") not in _V3_GO_ATOMIC:
@@ -4508,7 +4665,8 @@ def _guard_frame_neutral_loop(body) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The self-rebind (unique-ownership) analysis, roadmap item 434 (a) and (b).
+# The self-rebind (unique-ownership) lowering, roadmap item 434 (a) and (b),
+# on item 445's frontend marker.
 #
 # `out = out.push(x)` and `m = m.set(k, v)` lower through revlListPush /
 # revlMapSet, which COPY: the correct lowering for a persistent value, and a
@@ -4517,29 +4675,29 @@ def _guard_frame_neutral_loop(body) -> None:
 # 4,274,103 B against a hand-written `append`'s 1 / 8,192; 1000 map insertions:
 # 3989 / 19,168,881 against an in-place `m[k] = v`'s 5 / 54,609.
 #
-# A destructive lowering is only sound where nothing else can observe the
-# write, so this recognises the shape that makes the value UNIQUELY OWNED by
-# the binding rather than special-casing the assignment. A name qualifies when
-# BOTH hold over the whole function body:
+# A destructive lowering is only sound where nothing else can observe the write,
+# so the rewrite is gated on a proof that the value is UNIQUELY OWNED by the
+# binding rather than on a special case for the assignment. THAT PROOF NO LONGER
+# LIVES HERE. It is an aliasing question about the source and not about Go, item
+# 436 had answered the same question independently for the python tier, and item
+# 445 lifted the single answer into the frontend (`src/revl/ownership.py`) —
+# where it is also flow-sensitive, so a local that escapes at one point and is
+# reborn from a fresh literal before the next write is owned at that write.
 #
-#   1. every write to it is either a fresh allocation this function made (a
-#      list literal or a `Map.empty()`/map literal) or a self-rebind through
-#      one of the write builtins below, with at least one of each; and
-#   2. every other occurrence of the name is a read that retains no reference
-#      to the value: the receiver of a read-only builtin, an index target, a
-#      `for ... of` iterable, or the returned expression.
+# What arrives is `"unique": True` on the `assign` step: the binding owns its
+# object outright at this write, so the copy revlListPush makes is unobservable
+# and `append` is the faithful lowering. Absence means "not proven", which is
+# always the persistent helper.
 #
-# Together these keep the value linear: it is never bound to a second name,
-# passed as an argument, stored into another collection, or captured, so no
-# alias exists to see an in-place write. `return` is allowed because the rule
-# closes over calls too. A caller binds the result with a `let` whose value is
-# a CALL, not a fresh literal, so the caller's binding never qualifies and
-# never writes destructively into what it was handed.
-_V3_LINEAR_READ_METHODS = frozenset({
-    "length", "indexOf", "slice", "concat", "join", "size", "keys",
-    "lookup", "has", "get", "contains",
-})
-# method -> the collection shape it writes, and the destructive Go statement.
+# `"unique": "copy"` is DELIBERATELY NOT HONOURED here. It marks a local born
+# off another name (`var out = m`), owned only if the tier materialises a
+# defensive copy at that birth; the python tier does (`out = dict(m)`), this one
+# does not, and ignoring the marker keeps the copying helper, which is correct.
+# Nothing is `Str`: a Go string cannot be mutated, which is what (e)'s
+# strings.Builder below exists for.
+
+
+# the persistent methods with a destructive Go statement.
 _V3_LINEAR_WRITE_METHODS = {"push": "List", "set": "Map", "remove": "Map"}
 
 
@@ -4552,66 +4710,6 @@ def _v3_walk_nodes(node):
     elif isinstance(node, list):
         for value in node:
             yield from _v3_walk_nodes(value)
-
-
-def _v3_self_rebind_locals(fn_node: dict) -> dict:
-    """The `{name: shape}` map of uniquely-owned collection locals in `fn_node`."""
-    body = fn_node.get("body") or []
-    shape: dict = {}
-    seeded: set = set()
-    rebound: set = set()
-    disqualified: set = {p.get("name") for p in fn_node.get("params") or []}
-    permitted: set = set()  # id() of the `var` nodes an occurrence may sit at
-
-    for stmt in _v3_walk_nodes(body):
-        if stmt.get("step") not in ("let", "assign"):
-            continue
-        name = stmt.get("name")
-        value = stmt.get("value")
-        value = value if isinstance(value, dict) else {}
-        kind = value.get("kind")
-        if kind in ("list", "maplit"):
-            found = "List" if kind == "list" else "Map"
-            target = None
-        elif kind == "builtin" and value.get("method") in _V3_LINEAR_WRITE_METHODS:
-            target = value.get("target")
-            if not (isinstance(target, dict) and target.get("kind") == "var"
-                    and target.get("name") == name):
-                disqualified.add(name)
-                continue
-            found = _V3_LINEAR_WRITE_METHODS[value["method"]]
-        else:
-            disqualified.add(name)
-            continue
-        if shape.setdefault(name, found) != found:
-            disqualified.add(name)
-            continue
-        if target is None:
-            seeded.add(name)
-        else:
-            rebound.add(name)
-            permitted.add(id(target))
-
-    for node in _v3_walk_nodes(body):
-        candidates = []
-        if node.get("kind") == "builtin" and node.get("method") in _V3_LINEAR_READ_METHODS:
-            candidates.append(node.get("target"))
-        elif node.get("kind") in ("index", "len"):
-            candidates.append(node.get("target"))
-        elif node.get("step") == "for":
-            candidates.append(node.get("iterable"))
-        elif node.get("step") == "return":
-            candidates.append(node.get("expr"))
-        for candidate in candidates:
-            if isinstance(candidate, dict) and candidate.get("kind") == "var":
-                permitted.add(id(candidate))
-
-    for node in _v3_walk_nodes(body):
-        if node.get("kind") == "var" and id(node) not in permitted:
-            disqualified.add(node.get("name"))
-
-    return {name: found for name, found in shape.items()
-            if name not in disqualified and name in seeded and name in rebound}
 
 
 # ---------------------------------------------------------------------------
@@ -4693,6 +4791,191 @@ def _v3_str_accumulators(loop: dict, ctx: _V3GoCtx) -> list:
             if name not in disqualified and name not in ctx.str_builders]
 
 
+# ---------------------------------------------------------------------------
+# The code-point scan lowering, roadmap item 434 (c) stage two.
+#
+# Stage one made a single `s.charCodeAt(i)` allocation-free by walking with
+# utf8.DecodeRuneInString instead of materializing `[]rune(s)`, but a read is
+# still O(i), so `while (i < n) { … s.charCodeAt(i) … i += 1 }` stays quadratic
+# in TIME: the harness measures the emitted 78-code-point scan at ~10 us and
+# the 780-code-point one at ~850 us, an 86x cost for a 10x input, against a
+# hand-written `for _, r := range s` that grows 10.5x.
+#
+# Go already has the linear form. A `while` loop qualifies for it when the
+# shape makes the rewrite unconditionally equivalent:
+#
+#   * the condition is `i < s.length()`, either written inline or through a
+#     local bound to it that nothing in the function ever reassigns — so the
+#     loop runs exactly `utf8.RuneCountInString(s)` times, which is exactly
+#     what `range s` yields;
+#   * `i` is 0 on entry (every write to it before the loop is at the top level
+#     of the enclosing block and the last one assigns the literal 0);
+#   * the only write to `i` inside the loop is a trailing `i = i + 1` at the
+#     top level of the body, and the body has no `continue` of its own, so `i`
+#     tracks the rune position on every iteration and is correct after a
+#     `break` and after the loop;
+#   * `s` is never reassigned in the function;
+#   * and at least one `s.charCodeAt(i)` / `charAt(i)` / `codepoint_at(i)` sits
+#     in the body, so there is something to gain.
+#
+# The loop then becomes `for _, r := range s`, keeping its own body verbatim,
+# increment included, and each qualifying read is answered from `r` instead of
+# walking the string again. Reads at any other index keep the helper, so they
+# stay correct.
+
+_V3_SCAN_READS = {
+    "charCodeAt": "int64({rune})",
+    "codepoint_at": "int64({rune})",
+    # `range` yields U+FFFD for an invalid byte and so does revlStrCharAt, so
+    # `string(r)` is what the helper would have answered.
+    "charAt": "string({rune})",
+}
+
+
+def _v3_stmt_blocks(node):
+    """Every statement list reachable from `node`, outermost first."""
+    if isinstance(node, list):
+        if any(isinstance(x, dict) and "step" in x for x in node):
+            yield node
+        for value in node:
+            yield from _v3_stmt_blocks(value)
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from _v3_stmt_blocks(value)
+
+
+def _v3_writes_to(name: str, node) -> list:
+    """Every `let`/`assign` to `name` anywhere under `node`."""
+    return [n for n in _v3_walk_nodes(node)
+            if n.get("step") in ("let", "assign") and n.get("name") == name]
+
+
+def _v3_is_lit(node, value) -> bool:
+    return (isinstance(node, dict) and node.get("kind") == "lit"
+            and node.get("value") == value and node.get("value") is not True
+            and node.get("value") is not False)
+
+
+def _v3_len_receiver(node) -> str | None:
+    """The name `x` for a `x.length()` node, else None."""
+    if not (isinstance(node, dict) and node.get("kind") == "builtin"
+            and node.get("method") == "length" and not (node.get("args") or [])):
+        return None
+    target = node.get("target") or {}
+    return target.get("name") if target.get("kind") == "var" else None
+
+
+def _v3_own_continue(body) -> bool:
+    """True if `body` contains a `continue` bound to its own loop."""
+    for stmt in body or []:
+        if not isinstance(stmt, dict):
+            continue
+        step = stmt.get("step")
+        if step == "continue":
+            return True
+        if step in ("while", "for"):
+            continue  # binds to the nested loop, not to this one
+        for key in ("body", "then", "else"):
+            if _v3_own_continue(stmt.get(key)):
+                return True
+    return False
+
+
+def _v3_scan_shape(loop: dict, preceding: list, fn_body) -> tuple | None:
+    """`(str name, index name)` if `loop` is a code-point scan, else None."""
+    cond = loop.get("cond") or {}
+    if cond.get("kind") != "bin" or cond.get("op") != "<":
+        return None
+    left = cond.get("left") or {}
+    if left.get("kind") != "var":
+        return None
+    index = left.get("name")
+    body = loop.get("body") or []
+
+    # the bound: `s.length()` inline, or a local bound to it once and never
+    # written again
+    right = cond.get("right") or {}
+    text = _v3_len_receiver(right)
+    if text is None and right.get("kind") == "var":
+        bound = right.get("name")
+        writes = _v3_writes_to(bound, fn_body)
+        if len(writes) != 1 or writes[0].get("step") != "let":
+            return None
+        text = _v3_len_receiver(writes[0].get("value"))
+    if text is None or text == index:
+        return None
+    if _v3_writes_to(text, fn_body):
+        return None
+
+    # `index` is 0 on entry: every write before the loop is at this block's top
+    # level, and the last of them assigns the literal 0
+    top = [s for s in preceding
+           if s.get("step") in ("let", "assign") and s.get("name") == index]
+    if not top or len(top) != len(_v3_writes_to(index, preceding)):
+        return None
+    if not _v3_is_lit(top[-1].get("value"), 0):
+        return None
+
+    # the only write inside the loop is a trailing `index = index + 1`
+    inner = _v3_writes_to(index, body)
+    if len(inner) != 1 or inner[0] is not body[-1]:
+        return None
+    step_value = inner[0].get("value") or {}
+    if not (step_value.get("kind") == "bin" and step_value.get("op") == "+"):
+        return None
+    step_left = step_value.get("left") or {}
+    if not (step_left.get("kind") == "var" and step_left.get("name") == index):
+        return None
+    if not _v3_is_lit(step_value.get("right"), 1):
+        return None
+    if _v3_own_continue(body):
+        return None
+
+    # something to gain: at least one code-point read at this index
+    for node in _v3_walk_nodes(body):
+        if node.get("kind") != "builtin" or node.get("method") not in _V3_SCAN_READS:
+            continue
+        target = node.get("target") or {}
+        args = node.get("args") or []
+        if (target.get("kind") == "var" and target.get("name") == text
+                and len(args) == 1 and isinstance(args[0], dict)
+                and args[0].get("kind") == "var"
+                and args[0].get("name") == index):
+            return text, index
+    return None
+
+
+def _v3_scan_loops(fn_node: dict) -> dict:
+    """`{id(while node): (str name, index name)}` for `fn_node`'s scan loops."""
+    body = fn_node.get("body") or []
+    found: dict = {}
+    for block in _v3_stmt_blocks(body):
+        for i, stmt in enumerate(block):
+            if isinstance(stmt, dict) and stmt.get("step") == "while":
+                shape = _v3_scan_shape(stmt, block[:i], body)
+                if shape is not None:
+                    found[id(stmt)] = shape
+    return found
+
+
+def _go_v3_scan_read(node: dict, ctx: _V3GoCtx) -> str | None:
+    """The rune already in hand for `s.charCodeAt(i)` inside a scan loop."""
+    if not ctx.scan_cursors:
+        return None
+    shape = _V3_SCAN_READS.get(node.get("method"))
+    if shape is None:
+        return None
+    target = node.get("target") or {}
+    args = node.get("args") or []
+    if target.get("kind") != "var" or len(args) != 1:
+        return None
+    arg = args[0]
+    if not (isinstance(arg, dict) and arg.get("kind") == "var"):
+        return None
+    rune = ctx.scan_cursors.get((target.get("name"), arg.get("name")))
+    return None if rune is None else shape.format(rune=rune)
+
+
 def _go_v3_open_builders(loop: dict, ctx: _V3GoCtx, out: list, pad: str) -> list:
     """Declare a strings.Builder per accumulator, seeded with its current value."""
     opened = []
@@ -4718,12 +5001,13 @@ def _go_v3_close_builders(opened: list, ctx: _V3GoCtx, out: list, pad: str) -> N
 def _go_v3_self_rebind(node: dict, ctx: _V3GoCtx, name: str):
     """The destructive Go statement for a qualifying self-rebind, else None.
 
-    `_v3_self_rebind_locals` has already decided that the binding uniquely owns
-    its value, so the copy the persistent helper makes is unobservable and the
-    in-place form is the faithful lowering.
+    The frontend has already decided that the binding uniquely owns its value
+    at THIS write (item 445), so the copy the persistent helper makes is
+    unobservable and the in-place form is the faithful lowering. `"copy"` is not
+    honoured: this tier does not materialise the birth copy it is conditional on.
     """
     raw = node.get("name")
-    if raw not in ctx.linear_locals:
+    if node.get("unique") is not True:
         return None
     value = node.get("value")
     if not (isinstance(value, dict) and value.get("kind") == "builtin"):
@@ -4800,10 +5084,27 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
     elif step == "while":
         _guard_frame_neutral_loop(node.get("body"))
         opened = _go_v3_open_builders(node, ctx, out, pad)
-        out.append(f"{pad}for {_go_v3_expr(node['cond'], ctx)} {{")
-        for child in node.get("body") or []:
-            _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
-        out.append(f"{pad}}}")
+        scan = ctx.scan_loops.get(id(node))
+        if scan is None:
+            out.append(f"{pad}for {_go_v3_expr(node['cond'], ctx)} {{")
+            for child in node.get("body") or []:
+                _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
+            out.append(f"{pad}}}")
+        else:
+            # item 434 (c) stage two: the loop runs exactly once per code point
+            # of `text`, so `range` is the same loop and hands the rune over
+            # instead of making every read walk the string again.
+            text, index = scan
+            rune = f"_revlR{ctx.scan_seq}"
+            ctx.scan_seq += 1
+            ctx.scan_cursors[(text, index)] = rune
+            out.append(f"{pad}for _, {rune} := range "
+                       f"{_v3_ident(text, 'binding')} {{")
+            out.append(f"{pad}\t_ = {rune}")
+            for child in node.get("body") or []:
+                _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
+            out.append(f"{pad}}}")
+            del ctx.scan_cursors[(text, index)]
         _go_v3_close_builders(opened, ctx, out, pad)
     elif step == "for":
         _guard_frame_neutral_loop(node.get("body"))
@@ -5000,6 +5301,24 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx) -> list[str]:
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         body = bodies["go"].strip()
+        # item 421 F6: an extern whose DECLARED return was `Secret[T]` is the
+        # ORIGIN — where the value enters the value world, the case a
+        # receiver-end marking misses (`let t = emit mint(); effect
+        # pool.execute(t)`). `taint.py` strips the qualifier before lowering, so
+        # `secret_return` is the only surviving record of it. The verbatim @go
+        # body owns its own `return` statements, so it moves into an inner
+        # function and the declared name becomes the one-line marking wrapper —
+        # every call site is covered without the body being rewritten. Absent
+        # unless the author declared it.
+        arg_list = ", ".join(
+            _v3_ident(p.get("name"), "extern parameter")
+            for p in ext.get("params") or [])
+        if ext.get("secret_return") and ret:
+            out.append(f"func {name}({params}){sig_ret} {{")
+            out.append(f"\treturn revlSecretResult(revlSecret_{name}({arg_list}))")
+            out.append("}")
+            out.append("")
+            name = f"revlSecret_{name}"
         out.append(f"func {name}({params}){sig_ret} {{")
         # item 378 Stage 5: a config extern binds `_revl_config` as the first
         # body line; None for a no-config extern (byte-identical body splice).
@@ -5048,9 +5367,11 @@ def _emit_v3_go_functions(functions: list, ctx: _V3GoCtx) -> list[str]:
         name = _v3_ident(fn.get("name"), "function name")
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         ctx.ret_type = fn.get("returns")
-        ctx.linear_locals = _v3_self_rebind_locals(fn)
         ctx.str_builders = {}
         ctx.str_builder_seq = 0
+        ctx.scan_loops = _v3_scan_loops(fn)
+        ctx.scan_cursors = {}
+        ctx.scan_seq = 0
         params = ", ".join(
             f"{_v3_ident(p.get('name'), 'parameter')} {_go_v3_type(p.get('type'), ctx.types)}"
             for p in fn.get("params") or []
@@ -5072,9 +5393,11 @@ def _emit_v3_go_tests(tests: list, ctx: _V3GoCtx) -> list[str]:
         tname = _go_v3_test_name(test.get("name"), used)
         ctx.var_types = {}
         ctx.ret_type = None
-        ctx.linear_locals = _v3_self_rebind_locals(test)
         ctx.str_builders = {}
         ctx.str_builder_seq = 0
+        ctx.scan_loops = _v3_scan_loops(test)
+        ctx.scan_cursors = {}
+        ctx.scan_seq = 0
         # `revlT` (not `t`) so a user binding named `t` can't shadow it.
         out.append(f"func {tname}(revlT *testing.T) {{")
         for stmt in test.get("body") or []:
@@ -6478,9 +6801,17 @@ func revlFtoa(x float64) string {
 _V3_STDLIB_PREAMBLE = '''// ---- stdlib builtins (docs/stdlib-2.0.md); positions are code-point based
 func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }
 
+// revlStrSlice walks to the byte offsets of code points a and b and returns
+// the substring between them. A Go substring shares the receiver's bytes, so
+// the slice itself allocates nothing (item 434 (g): the `[]rune(s)` form
+// measured 2 allocs / 328 B against 0 / 0 for the hand-written byte walk).
+// Code-point indexing and clamping are unchanged: `[]rune(s)` and this walk
+// both count one index per invalid byte, so the offsets agree. Only the
+// CONTENT of an invalid byte differs — `[]rune` substitutes U+FFFD — so an
+// invalid byte inside the requested range falls back to the old materializing
+// form and answers exactly what it always did.
 func revlStrSlice(s string, a, b int64) string {
-\tr := []rune(s)
-\tn := int64(len(r))
+\tn := int64(utf8.RuneCountInString(s))
 \tif a < 0 {
 \t\ta = 0
 \t}
@@ -6493,15 +6824,46 @@ func revlStrSlice(s string, a, b int64) string {
 \tif b < a {
 \t\tb = a
 \t}
-\treturn string(r[a:b])
+\tlo, hi, i := len(s), len(s), int64(0)
+\tfor off := 0; off < len(s); {
+\t\tif i == a {
+\t\t\tlo = off
+\t\t}
+\t\tif i == b {
+\t\t\thi = off
+\t\t\tbreak
+\t\t}
+\t\tr, w := utf8.DecodeRuneInString(s[off:])
+\t\tif r == utf8.RuneError && w == 1 && i >= a {
+\t\t\treturn string([]rune(s)[a:b])
+\t\t}
+\t\toff += w
+\t\ti++
+\t}
+\treturn s[lo:hi]
 }
 
+// revlStrIndexOf answers the code-point index of sub in s. Valid UTF-8 is
+// self-synchronizing — the first byte of a valid needle is never a
+// continuation byte — so a byte match found by strings.Index always starts on
+// a code-point boundary and answers the same question as the code-point scan,
+// with no copy and with the standard library's search instead of the naive
+// O(n*m) one (item 434 (g): 1 alloc / 320 B before, 0 / 0 hand-written).
+// Invalid UTF-8 on either side keeps the old `[]rune` scan, where each invalid
+// byte compares as U+FFFD.
 func revlStrIndexOf(s, sub string) int64 {
-\trs := []rune(s)
-\trn := []rune(sub)
-\tif len(rn) == 0 {
+\tif sub == "" {
 \t\treturn 0
 \t}
+\tif utf8.ValidString(s) && utf8.ValidString(sub) {
+\t\tb := strings.Index(s, sub)
+\t\tif b < 0 {
+\t\t\treturn -1
+\t\t}
+\t\treturn int64(utf8.RuneCountInString(s[:b]))
+\t}
+\trs := []rune(s)
+\trn := []rune(sub)
 \tif len(rn) > len(rs) {
 \t\treturn -1
 \t}
@@ -6522,12 +6884,21 @@ func revlStrIndexOf(s, sub string) int64 {
 
 func revlStrConcat(a, b string) string { return a + b }
 
+// revlStrSplit's empty-separator branch walks bytes and hands out substrings,
+// which share s's bytes, instead of materializing `[]rune(s)` and allocating a
+// fresh one-code-point string per element (item 434 (g)). An invalid byte
+// still yields U+FFFD, exactly as `[]rune(s)` did.
 func revlStrSplit(s, sep string) []string {
 \tif sep == "" {
-\t\tr := []rune(s)
-\t\tout := make([]string, len(r))
-\t\tfor i, c := range r {
-\t\t\tout[i] = string(c)
+\t\tout := make([]string, 0, utf8.RuneCountInString(s))
+\t\tfor off := 0; off < len(s); {
+\t\t\tr, w := utf8.DecodeRuneInString(s[off:])
+\t\t\tif r == utf8.RuneError && w == 1 {
+\t\t\t\tout = append(out, string(utf8.RuneError))
+\t\t\t} else {
+\t\t\t\tout = append(out, s[off:off+w])
+\t\t\t}
+\t\t\toff += w
 \t\t}
 \t\treturn out
 \t}
@@ -7011,6 +7382,8 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET, _COMP_NEEDS_STREAM
+    global _SECRET_MODE
+    _SECRET_MODE = _declares_secret(ir)
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
@@ -7123,6 +7496,10 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     if _COMP_NEEDS_STDLIB:
         out.append('\t"strings"')
         out.append('\t"unicode/utf8"')
+    if _SECRET_MODE and not _COMP_NEEDS_STDLIB:
+        # item 421 F6: the confidentiality funnel's exact-match replace.
+        # (`slices` is imported unconditionally below; Go rejects a repeat.)
+        out.append('\t"strings"')
     if _COMP_NEEDS_TEARDOWN:
         # `runCompensationPhase`'s budget/deadline (`time` — already imported
         # above when `has_lifecycle`, so guarded to keep Go's single-import
@@ -7686,6 +8063,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_STRCONV
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
+    global _SECRET_MODE
+    _SECRET_MODE = _declares_secret(ir)
     _V3_MODE = True
     _V3_TYPES = types
     _V3_TYPED_COMPONENTS = True
@@ -7759,6 +8138,9 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     if ctx.used_stdlib or _COMP_NEEDS_STDLIB:
         imports.append('\t"strings"')
         imports.append('\t"unicode/utf8"')
+    if _SECRET_MODE:
+        # item 421 F6: the confidentiality funnel's exact-match replace.
+        imports.append('\t"strings"')
     if ctx.needs_ftoa:
         imports.append('\t"math"')
         imports.append('\t"strconv"')

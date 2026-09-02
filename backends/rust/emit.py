@@ -11,7 +11,11 @@ Mapping (DESIGN.md §7 — the backend contract is small):
                  `plugin_sync` and `Inject`.
 - requires    -> `Inject::new([...])` + `ctx.require::<dyn <Svc>>("key")?`
 - provides    -> `impl <Svc> for <Comp><Key> { ... }` +
-                 `ctx.provide_arc("key", Arc::new(impl) as Arc<dyn <Svc>>)?`
+                 `let <key>_box: Box<dyn <Svc>> = Box::new(impl);`
+                 `ctx.provide("key", <key>_box)?`  (cordis-rs 0.3.0 stores the
+                 box; `require` hands back `Arc<Box<dyn <Svc>>>`, which is why
+                 the double indirection is a runtime bound and not emitter
+                 waste — item 437 negative result 3)
 - effect/undo -> `let x = Arc::new(<acquire>); ctx.effect(label, move || { <undo>; Ok(()) })?;`
 - config      -> `#[derive(Clone)] struct <Comp>Config { ... }`, read as `config.<field>`
 - emit        -> a plain method call (the emission marker is a revl-checker
@@ -303,9 +307,17 @@ def _borrow_str_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     The callee only reads the string, so the caller lends a borrow instead of
     cloning it. A bare borrowed `&str` parameter passed straight through is
     already a `&str`, so it goes untouched (no needless re-borrow); every other
-    string expression — an owned `String` local, a literal, a call result — is
-    borrowed with `&`, and `&String`/`&&str` both coerce to the `&str` slot.
+    string expression — an owned `String` local, a call result — is borrowed
+    with `&`, and `&String`/`&&str` both coerce to the `&str` slot.
+
+    A `Str` LITERAL is the exception: `&String::from("lit")` put the literal on
+    the heap purely so the `&` had something to point at, and the bare
+    `&'static str` fills the slot exactly (item 437b, 588 of the 633 remaining
+    sites in the emitted self-host compiler).
     """
+    lit = _v3_borrowed_str_lit(arg_node)
+    if lit is not None:
+        return lit
     name = _arg_ref_name(arg_node)
     if name is not None and name in ctx.borrowed_params:
         return rendered
@@ -843,6 +855,28 @@ def _rust_v3_lit(node: dict) -> str:
     if isinstance(value, float):
         return f"{value}f64"
     raise EmitError(f"unsupported literal node: {node!r}")
+
+
+def _v3_borrowed_str_lit(node: object) -> str | None:
+    """The bare `&'static str` rendering of a `Str` literal node, else None.
+
+    `_rust_v3_lit` renders every `Str` literal as an owned `String::from(..)`,
+    which is right for a slot that STORES the string and pure waste for one
+    that only READS it: the heap copy is taken, looked at once and dropped.
+    Item 437(b) measured 2,223 such sites in the 13,891 lines emitted for the
+    self-host stages, 57% of every `String::from` the emitter writes.
+
+    This is the read-only rendering. It is only ever substituted where the slot
+    is known to accept a `&str` (`_STR_READONLY_ARG_BUILTINS` argument slots and
+    the `==`/`!=` operands handled by `_v3_str_eq_borrow`); everywhere else the
+    owned form still applies, because a `&'static str` in an owned slot is a
+    type error, not a slower program.
+    """
+    if isinstance(node, dict) and node.get("kind") == "lit":
+        value = node.get("value")
+        if isinstance(value, str):
+            return _string(value)
+    return None
 
 
 def _default_for_rust_type(ftype: str) -> str:
@@ -3762,6 +3796,42 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
     return False
 
 
+def _v3_str_eq_borrow(node: dict, left: str, right: str,
+                      ctx: "_V3Ctx") -> tuple[str, str]:
+    """Compare a `Str` against a literal without allocating it (item 437b).
+
+    `x == "lit"` rendered as `x == String::from("lit")` put the literal on the
+    heap purely to compare it and drop it again: measured at 240,000 heap
+    allocations against ZERO for the same comparison written by hand. std
+    carries both `impl PartialEq<&str> for String` and `impl PartialEq<String>
+    for &str`, so the bare `&'static str` compares in place in EITHER operand
+    order and on a borrowed `&str` operand (item 282) alike.
+
+    The literal is borrowed unless the emitter POSITIVELY knows the other
+    operand is some other surface type. That is wider than "certainly `Str`",
+    and deliberately so: the other operand of a `Str` literal is a `Str` by the
+    checker, so the only open question is its RUST rendering, and the operands
+    the emitter cannot type (a `for` binding, an extern result) are the common
+    case in real code. The rule stays total on code that compiles today. A site
+    spelled `X == String::from("lit")` only builds when `X: PartialEq<String>`,
+    which on this tier means `X` renders as `String` or as a borrowed `&str`,
+    and both of those also carry `PartialEq<&str>`. A positively-known non-`Str`
+    surface type is the one case where the IR would disagree with that
+    reasoning, so it keeps the owned form.
+
+    Two literals compared to each other are both borrowed, which is
+    `&str == &str`.
+    """
+    lnode, rnode = node.get("left"), node.get("right")
+    l_lit = _v3_borrowed_str_lit(lnode)
+    r_lit = _v3_borrowed_str_lit(rnode)
+    if r_lit is not None and _v3_infer_type(lnode, ctx) in (None, "Str"):
+        right = r_lit
+    if l_lit is not None and _v3_infer_type(rnode, ctx) in (None, "Str"):
+        left = l_lit
+    return left, right
+
+
 def _list_element_type(surface: object) -> str | None:
     """The element surface type of a `List[T]` surface type, else None."""
     if isinstance(surface, str):
@@ -4380,6 +4450,8 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # declared. Widen both sides; IEEE division on f64 follows, so a
             # zero divisor gives +/-inf rather than the i64 panic.
             return f"(({left}) as f64 / ({right}) as f64)"
+        if node.get("op") in ("==", "!="):
+            left, right = _v3_str_eq_borrow(node, left, right, ctx)
         return f"({left} {op} {right})"
 
     if kind == "un":
@@ -4614,7 +4686,8 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
                     and isinstance(a0, dict) and a0.get("kind") in ("var", "name", "req")
                     and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
                 args[0] = f"{args[0]}.to_string()"
-        return _v3_builtin(method, target, args, node.get("recv"))
+        borrowed_lits = _v3_borrowed_lit_args(method, target_node, arg_nodes, args, ctx)
+        return _v3_builtin(method, target, args, node.get("recv"), borrowed_lits)
 
     if kind == "match":
         return _v3_match_expr(node, ctx, rename)
@@ -4738,19 +4811,67 @@ def _v3_checked_div(method: str, target: str, arg: str) -> str:
             f'else {{ Ok::<i64, String>({ok}) }} }}')
 
 
+def _v3_borrowed_lit_args(method: str, target_node: object, arg_nodes: list,
+                          args: list[str], ctx: "_V3Ctx") -> frozenset:
+    """Rewrite `Str` literal arguments bound for a `&str` helper slot to the
+    bare `&'static str`, in place, and answer the indexes rewritten (item 437b).
+
+    `_v3_builtin` lowers these methods to a helper-trait call whose argument is
+    declared `&str`, so `&String::from("lit")` allocated a whole String purely
+    to take a reference to it: measured at 400,000 heap allocations against
+    40,000 for the same four calls written by hand, and 1,235 sites in the
+    emitted self-host compiler.
+
+    Two of the six methods are overloaded on the receiver, and the List
+    overloads take `&T` / `&Vec<T>` rather than `&str`:
+
+    - `indexOf` on a `List[Str]` takes `&String`, and `List[Str].indexOf("a")`
+      is legal revl, so the borrowed rendering needs the receiver to be
+      certainly `Str`. An un-inferable receiver keeps the owned form.
+    - `concat` on a `List[T]` takes `&Vec<T>`, which a `Str` literal argument
+      can never be. So a `Str` literal in that slot already PROVES the `Str`
+      overload and needs no receiver check of its own.
+
+    The remaining four (`split`, `join`, `startsWith`, `endsWith`) have a single
+    overload whose argument is `&str` on every receiver.
+    """
+    if method not in _STR_READONLY_ARG_BUILTINS:
+        return frozenset()
+    if method == "indexOf" and _v3_infer_type(target_node, ctx) != "Str":
+        return frozenset()
+    borrowed = set()
+    for i, arg_node in enumerate(arg_nodes):
+        lit = _v3_borrowed_str_lit(arg_node)
+        if lit is not None:
+            args[i] = lit
+            borrowed.add(i)
+    return frozenset(borrowed)
+
+
 def _v3_builtin(method: str, target: str, args: list[str],
-                recv: str | None = None) -> str:
+                recv: str | None = None,
+                borrowed_lits: frozenset = frozenset()) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), dispatched via the Revl*Ops
     helper traits so every (method, Str|List) pair from the spec table
     compiles — Rust resolves the receiver type statically. `recv` carries
     the receiver's static type only where the lowering must dispatch on it
-    (`to_int`: the Int32 widen vs the Str parse)."""
+    (`to_int`: the Int32 widen vs the Str parse). `borrowed_lits` names the
+    argument indexes `_v3_borrowed_lit_args` already rendered as a bare
+    `&'static str`, so the `&str` helper slots below hand them straight over
+    instead of taking a second reference (item 437b)."""
+
+    def ref(i: int) -> str:
+        """An argument in a `&str` helper slot: already a `&'static str`, or
+        borrowed here. `&&str` would coerce, but writing the `&` on a literal
+        only leaves the reader a deref to resolve."""
+        return args[i] if i in borrowed_lits else f"&{args[i]}"
+
     if method == "length":
         return f"{target}.revl_length()"
     if method == "push":
         return f"{target}.revl_push({args[0]})"
     if method == "concat":
-        return f"{target}.revl_concat(&{args[0]})"
+        return f"{target}.revl_concat({ref(0)})"
     if method == "slice":
         return f"{target}.revl_slice({args[0]}, {args[1]})"
     if method == "charAt":
@@ -4764,20 +4885,20 @@ def _v3_builtin(method: str, target: str, args: list[str],
     if method == "codepoint_at":
         return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap() as u32 as i64 }}"
     if method == "indexOf":
-        return f"{target}.revl_index_of(&{args[0]})"
+        return f"{target}.revl_index_of({ref(0)})"
     if method == "split":
-        return f"{target}.revl_split(&{args[0]})"
+        return f"{target}.revl_split({ref(0)})"
     if method == "join":
-        return f"{target}.revl_join(&{args[0]})"
+        return f"{target}.revl_join({ref(0)})"
     if method == "repeat":
         return f"{target}.revl_repeat({args[0]})"
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
     # `str::starts_with`/`ends_with` match on char-boundary patterns, so a
     # code-point prefix of a UTF-8 string is exactly a prefix here.
     if method == "startsWith":
-        return f"{target}.revl_starts_with(&{args[0]})"
+        return f"{target}.revl_starts_with({ref(0)})"
     if method == "endsWith":
-        return f"{target}.revl_ends_with(&{args[0]})"
+        return f"{target}.revl_ends_with({ref(0)})"
     # The Map value type (docs/stdlib-2.0.md §Map): a std HashMap, cloned on
     # write. Every revl value type derives Clone on this tier, so the copy
     # is total; `lookup` answers Option<V> (the tier's Opt) via cloned().
@@ -4892,15 +5013,20 @@ def _stdlib_helper_traits() -> list[str]:
         "    fn revl_slice(&self, a: i64, b: i64) -> String {",
         "        self.chars().skip(a.max(0) as usize).take((b - a).max(0) as usize).collect()",
         "    }",
+        # `str::find` runs a two-way search over the bytes and allocates
+        # nothing, where the previous body materialised BOTH operands as
+        # `Vec<char>` on every call and then scanned in O(n*m) (item 437c).
+        # `find` reports a BYTE offset and revl's contract is a CODEPOINT
+        # index (docs/stdlib-2.0.md), so the prefix before the match is
+        # counted. A byte offset from `find` always lands on a char
+        # boundary, so the slice cannot panic. Same answer on every input:
+        # an empty needle matches at 0, an absent needle is -1, and a
+        # non-ASCII haystack yields the codepoint index.
         "    fn revl_index_of(&self, needle: &str) -> i64 {",
-        "        let hay: Vec<char> = self.chars().collect();",
-        "        let nee: Vec<char> = needle.chars().collect();",
-        "        if nee.is_empty() { return 0; }",
-        "        if nee.len() > hay.len() { return -1; }",
-        "        for i in 0..=(hay.len() - nee.len()) {",
-        "            if hay[i..i + nee.len()] == nee[..] { return i as i64; }",
+        "        match self.find(needle) {",
+        "            Some(b) => self[..b].chars().count() as i64,",
+        "            None => -1,",
         "        }",
-        "        -1",
         "    }",
         "    fn revl_concat(&self, other: &str) -> String { format!(\"{}{}\", self, other) }",
         "    fn revl_split(&self, sep: &str) -> Vec<String> {",
@@ -5053,14 +5179,57 @@ def _v3_let_pattern(node: dict, ctx: _V3Ctx, out: list[str], indent: int) -> Non
 # at this node). The in-place value equals the clone-then-return value: a discard
 # of `HashMap::insert`/`remove`'s returned Option is the only difference, and the
 # resulting collection is identical.
-def _v3_inplace_persistent(method: str, recv: str, args: list[str]) -> str | None:
+def _v3_inplace_persistent(method: str, recv: str, args: list[str],
+                           recv_ty: str | None = None) -> str | None:
     if method == "push" and len(args) == 1:
         return f"{recv}.push({args[0]});"
     if method == "set" and len(args) == 2:
         return f"{recv}.insert({args[0]}, {args[1]});"
     if method == "remove" and len(args) == 1:
         return f"{recv}.remove(&{args[0]});"
+    # item 437(a): `out = out.concat(x)`. Item 284 left `concat` out with the
+    # note that "its receiver type is not known at this node", which is true of
+    # a receiver in general and NOT true of the SELF-ASSIGN shape: the receiver
+    # is the assignment target, a bare local, so `ctx.var_types` names it and
+    # `recv_ty` carries the answer here. Both persistent lowerings have an exact
+    # in-place equivalent, so the resulting value is identical:
+    #   Str  `format!("{}{}", self, other)`                 -> `self.push_str(other)`
+    #   List `{ let mut _v = self.clone();                   -> `self.extend(
+    #          _v.extend(other.iter().cloned()); _v }`           other.iter().cloned())`
+    # The measured gap is a complexity class, not a constant: the persistent
+    # form copies the whole accumulator per iteration, so an n-step loop is
+    # O(n^2) copies where the in-place form is O(n) amortised (729,599
+    # allocations and 97.2 MB against 2,425 and 212 KB hand-written).
+    if method == "concat" and len(args) == 1:
+        if recv_ty == "Str":
+            return f"{recv}.push_str({args[0]});"
+        # `List` bare and `List[T]` both qualify: `_v3_infer_type` answers the
+        # bare `List` for an empty-list `let` (`var out: List[Str] = []`), which
+        # is the accumulator idiom this rewrite exists for, and `extend` does not
+        # need the element type either way.
+        if isinstance(recv_ty, str) and recv_ty.split("[", 1)[0].strip() == "List":
+            return f"{recv}.extend(({args[0]}).iter().cloned());"
     return None
+
+
+def _v3_mentions_name(node: object, name: str) -> bool:
+    """Does `node` read the binding `name` anywhere inside it?
+
+    The in-place rewrite turns a value the receiver is rebound over into a
+    mutation OF the receiver, so an appended operand that reads the receiver
+    (`out = out.concat(out)`, `s = s + s`) would take a shared borrow of a value
+    already borrowed mutably (E0502) where the persistent form built a fresh
+    value and compiled. It is a rare shape and the guard is cheap, so it is
+    checked rather than reasoned away.
+    """
+    if isinstance(node, dict):
+        if node.get("kind") in ("var", "name", "req"):
+            if (node.get("name") or node.get("id")) == name:
+                return True
+        return any(_v3_mentions_name(v, name) for v in node.values())
+    if isinstance(node, list):
+        return any(_v3_mentions_name(v, name) for v in node)
+    return False
 
 
 def _v3_self_append_inplace(target_name, recv: str, value_node,
@@ -5084,8 +5253,26 @@ def _v3_self_append_inplace(target_name, recv: str, value_node,
 
     Restricted to a bare `var` receiver (what a plain-fn body produces) so no
     rename-map indirection can make the printed receiver differ from the target.
+
+    Item 437(a) added the two remaining spellings of the same statement, both
+    measured as O(n^2) copies: `out = out.concat(x)` (a `builtin` node, handled
+    below and lowered by receiver type in `_v3_inplace_persistent`) and
+    `s = s + p` (a `bin` node, which never reached this function at all and is
+    handled first). The go tier's item-434 fix for the same defect needed a
+    whole-body ownership analysis, `_v3_self_rebind_locals`, because a Go slice
+    header aliases silently and nothing in the language would catch a second
+    live owner. Rust needs none of it: a second live owner can only come from a
+    move, rustc REFUSES a move-then-reuse (E0382), and every by-value move this
+    backend emits clones first. So the uniqueness argument above is discharged
+    by the borrow checker on the code that already compiles, and the fix stays
+    the local rewrite item 437(a) proposed.
     """
-    if not isinstance(value_node, dict) or value_node.get("kind") != "builtin":
+    if not isinstance(value_node, dict):
+        return None
+    recv_ty = ctx.var_types.get(target_name)
+    if value_node.get("kind") == "bin":
+        return _v3_self_append_plus(target_name, recv, value_node, ctx)
+    if value_node.get("kind") != "builtin":
         return None
     tgt = value_node.get("target")
     if not isinstance(tgt, dict) or tgt.get("kind") != "var":
@@ -5102,7 +5289,56 @@ def _v3_self_append_inplace(target_name, recv: str, value_node,
     if method in ("push", "set"):
         rendered = [
             _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, rendered)]
-    return _v3_inplace_persistent(method, recv, rendered)
+    if method == "concat":
+        if not arg_nodes or _v3_mentions_name(arg_nodes[0], target_name):
+            return None
+        if recv_ty is None and _v3_is_str(arg_nodes[0], ctx):
+            # A receiver the emitter could not type, appending something that is
+            # certainly a `Str`. `concat` on a `List[T]` takes a `List[T]`, so a
+            # `Str` argument PROVES the `Str` overload and names the receiver
+            # without needing `var_types` to have it. This is what the last ten
+            # census sites are: a message accumulator seeded from an expression
+            # the emitter cannot type, appending literals.
+            recv_ty = "Str"
+        if recv_ty == "Str":
+            # `String::push_str` takes `&str`, so the appended operand is
+            # borrowed exactly as every other `&str` slot is (item 437b). The
+            # List arm needs no such wrapping: `x.iter().cloned()` already
+            # borrows, so a reused operand is never moved and never cloned
+            # whole.
+            rendered = [_borrow_str_arg(arg_nodes[0], rendered[0], ctx)]
+    return _v3_inplace_persistent(method, recv, rendered, recv_ty)
+
+
+def _v3_self_append_plus(target_name, recv: str, value_node,
+                         ctx: "_V3Ctx") -> str | None:
+    """`s = s + p` in place, or None (item 437a).
+
+    The `Str` spelling of the self-append never reached `_v3_inplace_persistent`
+    at all: `+` is a `bin` node, lowered to `format!("{}{}", s, p)`, which builds
+    a whole fresh `String` per iteration. Measured at 5,999 allocations and 84.3
+    MB against 13 and 32 KB hand-written, the same O(n^2)-against-O(n) gap the
+    `concat` spelling has.
+
+    The liveness and uniqueness argument is `_v3_self_append_inplace`'s, verbatim
+    and for the same reason: the assign rebinds the receiver over its own value.
+    Only the APPEND direction qualifies, so the target must be the LEFT operand;
+    `s = p + s` is a prepend, which `push_str` does not express.
+    """
+    if value_node.get("op") != "+":
+        return None
+    left, right = value_node.get("left"), value_node.get("right")
+    if not isinstance(left, dict) or left.get("kind") != "var":
+        return None
+    if left.get("name") != target_name:
+        return None
+    # The same test the `+` lowering itself uses to pick `format!` over the
+    # arithmetic path, so this fires on exactly the `+`s that build a String.
+    if not (_v3_is_str(left, ctx) or _v3_is_str(right, ctx)):
+        return None
+    if _v3_mentions_name(right, target_name):
+        return None
+    return f"{recv}.push_str({_borrow_str_arg(right, _render_expr(right, ctx), ctx)});"
 
 
 # item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is

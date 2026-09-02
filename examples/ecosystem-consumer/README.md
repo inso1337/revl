@@ -42,6 +42,15 @@ Read each clause before reading the code:
 The full contract, written for a consumer rather than a design note, is
 [`../../docs/gate-dependency-contract.md`](../../docs/gate-dependency-contract.md).
 
+[`../ecosystem-consumer-rs/`](../ecosystem-consumer-rs/) is the rust sibling of
+this project, depending on the native `revl-gate` crate instead of the wheel.
+It is deliberately not the same program: that gate issues NO admissions (it
+decides the composition and guarantee layer, not the reference type layer), so
+its consumer has only two decisions, reject on a refusal and escalate on
+everything else. Clause 2's "scoped to the frontier" is not a hypothetical
+across those two directories — `double_tool.rvl` below is admitted here and
+merely not-refused there.
+
 ## What `ci_gate.py` actually does
 
 ```

@@ -44,6 +44,7 @@ from .compiler import compile_files
 from .holes import refuse_admission
 from .errors import RevlError
 from . import diagnostics
+from . import taint
 from . import why_runtime
 
 KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm", "go")
@@ -133,8 +134,15 @@ def _load_config(path: str | None) -> dict:
 
         data = tomllib.loads(text)
     if not isinstance(data, dict) or any(not isinstance(v, dict) for v in data.values()):
+        # `RevlError` is a diagnostic, not a bare message: its signature is
+        # (filename, line, message) and it renders `<file>:<line>: <message>`.
+        # Handing it a single string raises `TypeError` instead — and this
+        # branch only runs once the config is ALREADY malformed, so the bug
+        # surfaced as a traceback that the `except RevlError` in
+        # `run_command` could never catch.
         raise RevlError(
-            f"config {path}: expected a table of `component-name = {{ ... }}` entries"
+            path, 0,
+            "expected a table of `component-name = { ... }` entries",
         )
     return data
 
@@ -481,7 +489,8 @@ class _Driver:
     def __init__(self, ir, config, emit, runtime_mod, Context, FiberState,
                  record: bool = False, trace_path: str | None = None,
                  withdraw: str | None = None, wal_path: str | None = None,
-                 root_dirs: list | None = None, secrets: dict | None = None):
+                 root_dirs: list | None = None, secrets: dict | None = None,
+                 estop_latch: str | None = None):
         self.ir = ir
         self.config = config
         # item 256 Slice 1: an optional caller-supplied secret store (name ->
@@ -529,6 +538,13 @@ class _Driver:
         # this list (name, from_state, to_state), in the order they settle
         self._observing: dict | None = None
         self._settled: list[tuple] = []
+
+        # item 443: arm the operator E-Stop latch this run watches, so
+        # `revl estop --latch FILE` from another terminal halts it immediately —
+        # no unwind, an honest in-flight inventory instead
+        # (docs/design/443-estop.md). Unarmed by default, and a run with no
+        # latch never stats anything, so nothing changes for an existing run.
+        self.runtime.arm_estop_latch(estop_latch)
 
         self.runtime.set_trace(self._on_host)
         self.root.on("internal/status", self._on_fiber)
@@ -640,6 +656,31 @@ class _Driver:
             latency_seconds=latency, attempts=attempts, attempt_ceiling=ceiling,
             verified_by=verified_by or [], produced_seq=produced,
             prompt_digest=digest)
+
+    def _crossing_taint(self, component) -> tuple:
+        """Item 444: the compile-side taint facts a crossing in `component`
+        hands to the item-121 digest gate — ``(arg_origins, taint_engaged)``.
+
+        This IS the compile-to-runtime taint-origin channel. The checker's
+        per-crossing origins (`comp["taint"]["reaches"]`, item 249/256) and the
+        composition's `Secret[T]` / bound-secret declarations both already ride
+        the IR document this driver holds, so :class:`taint.OriginIndex` reads
+        them back with no new IR key and no golden churn; see its docstring for
+        why the `taint_engaged` certificate is whole-program rather than
+        per-crossing.
+
+        FAIL-CLOSED on every path this does not prove: no IR, an IR shape the
+        index cannot read, or any declared confidentiality surface all yield
+        ``(None, False)``, which `revl_prompt_digest` suppresses. The index is
+        rebuilt whenever `self.ir` is replaced (a `--watch` generation), keyed
+        on the document's identity."""
+        ir = getattr(self, "ir", None)
+        cached = getattr(self, "_origin_index", None)
+        if cached is None or cached[0] is not ir:
+            cached = (ir, taint.OriginIndex(ir))
+            self._origin_index = cached
+        index = cached[1]
+        return index.origins_for(component), index.engaged
 
     @staticmethod
     def _failure_code(err) -> str | None:
@@ -1093,14 +1134,21 @@ class _Driver:
                     # `validate_retry` seam stashed a fiber-local observation;
                     # thread its `llm` payload + `activationId` onto the record.
                     # A non-model crossing yields None here, so its record stays
-                    # byte-identical to a pre-121 v2 emit. The driver runs no
-                    # taint analysis, so the digest gate is left fail-closed
-                    # (`taint_engaged=False`): the hop is still recorded, just
-                    # with the digest suppressed (§4, the fail-closed default).
+                    # byte-identical to a pre-121 v2 emit. Item 444: the digest
+                    # gate reads the compile-side taint facts off the IR
+                    # (`_crossing_taint`) instead of being hard-wired shut — a
+                    # certified-clean composition now emits the digest, and every
+                    # unproven path still fails closed (§4, the fail-closed
+                    # default): the hop is recorded either way, only the digest
+                    # is suppressed.
                     activation_id = f"{timeline.component}#g{self.generation}"
+                    arg_origins, taint_engaged = self._crossing_taint(
+                        timeline.component)
                     llm = self._model_crossing_payload(
                         activation_id=activation_id,
-                        args=detail.get("args"))
+                        args=detail.get("args"),
+                        arg_origins=arg_origins,
+                        taint_engaged=taint_engaged)
                     self._record_emit(
                         timeline.component,
                         detail.get("service") or "",
@@ -1224,8 +1272,13 @@ class _Driver:
             problem = _required_config_problem(ir, self.config)
             if problem is not None:
                 # a new/changed requirement the host's config cannot meet is
-                # an edit the running composition refuses, not a boot failure
-                raise RevlError(problem)
+                # an edit the running composition refuses, not a boot failure.
+                # (filename, line, message) — a one-argument `RevlError` is a
+                # `TypeError` the `except RevlError` below would not catch,
+                # which would kill the watch loop on a bad edit instead of
+                # rejecting it.
+                raise RevlError(files[0] if files else "<composition>", 0,
+                                problem)
         except RevlError as exc:
             for i, text in enumerate(str(exc).splitlines()):
                 self._log("reject", "REJECTED" if i == 0 else "", text)
@@ -1378,6 +1431,7 @@ def run_command(args) -> int:
                      trace_path=getattr(args, "trace", None),
                      withdraw=withdraw,
                      wal_path=getattr(args, "wal", None),
+                     estop_latch=getattr(args, "estop_latch", None),
                      root_dirs=root_dirs)
     try:
         if withdraw is not None:

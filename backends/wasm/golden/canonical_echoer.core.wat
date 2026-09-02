@@ -7,6 +7,10 @@
   (data (i32.const 0) "\01\00\00\00!")
   (data (i32.const 8) "\07\00\00\00Hello, ")
   (global $__hp (mut i32) (i32.const 32))
+  ;; item 432(e): the per-call arena floor. Every canonical export
+  ;; rewinds $__hp here on the way out, so nothing a call allocates
+  ;; survives it (see `_arena_safe` for why that is sound here).
+  (global $__canon_arena_base i32 (i32.const 32))
   ;; item 432(f): the canonical return area is constant for the
   ;; module (the host reads it before it can re-enter), so one
   ;; cell serves every call instead of one bump allocation each.
@@ -529,6 +533,7 @@
     (local.set $rv (call $echo (local.get $a0)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_str (local.get $rv) (local.get $area))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
   ;; canonical export of `shout` -> WIT `echoer#shout`
   (func (export "revl:exported/echoer#shout") (param $c0 i32) (param $c1 i32) (result i32)
@@ -537,6 +542,7 @@
     (local.set $rv (call $shout (local.get $a0)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_str (local.get $rv) (local.get $area))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
   ;; canonical export of `greet` -> WIT `echoer#greet`
   (func (export "revl:exported/echoer#greet") (param $c0 i32) (param $c1 i32) (result i32)
@@ -545,5 +551,6 @@
     (local.set $rv (call $greet (local.get $a0)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_str (local.get $rv) (local.get $area))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
 )

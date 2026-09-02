@@ -49,11 +49,31 @@ inductive EntryKind where
 /-- The activation's verdict at teardown time: the reference's
 `Frame._committed` bit, read at disposal rather than captured at
 registration, because whether the activation commits depends on whether a
-LATER step aborts. -/
+LATER step aborts.
+
+Roadmap item 443 adds the third constructor. `commit` and `abort` are the
+two COOPERATIVE verdicts: each of them SETTLES the activation, because
+each entry on the stack ends up either replayed or discharged. `halted` is
+the operator E-Stop (`docs/design/443-estop.md`), and it settles nothing —
+it runs no inverse, drops no inverse, and leaves every registered entry
+OWED. That is not a defect in the halt; it is what an immediate stop
+means, and the model says so rather than pretending a teardown ran. -/
 inductive Verdict where
   | commit
   | abort
+  /-- Operator E-Stop (item 443): stop dispatching, replay nothing,
+  discharge nothing, owe everything. -/
+  | halted
   deriving Repr, BEq, DecidableEq
+
+/-- Whether this verdict SETTLES the activation: whether every entry it
+leaves behind is accounted for by the replay/discharge dichotomy alone.
+`commit` and `abort` do; the E-Stop deliberately does not, which is
+exactly why `EntryKind.strandedUnder` below exists (item 443). -/
+def Verdict.settles : Verdict → Bool
+  | .commit => true
+  | .abort => true
+  | .halted => false
 
 /-- One entry of the teardown stack: the kind, and the inverse the
 registration captured. -/
@@ -66,23 +86,68 @@ structure LogEntry where
 verdict. This is the "replays on clean unload" / "replays on abort" pair
 of rows of the contract's table, read straight off it. -/
 def EntryKind.replaysUnder : EntryKind → Verdict → Bool
+  | _, .halted => false          -- item 443: an E-Stop replays nothing
   | .bracket, _ => true
   | .transactional, .commit => false
   | .transactional, .abort => true
   | .compensation, .commit => false
   | .compensation, .abort => true
 
-/-- Discharged is the complement of replayed: registered, and then dropped
-without running (the reference's `discharged = True`, inverse and witness
-references released so no rollback state survives a committed
-transaction). -/
-def EntryKind.dischargedUnder (k : EntryKind) (v : Verdict) : Bool :=
-  !k.replaysUnder v
+/-- Discharged: registered, and then dropped without running (the
+reference's `discharged = True`, inverse and witness references released so
+no rollback state survives a committed transaction).
 
-theorem replays_or_discharges (k : EntryKind) (v : Verdict) :
+Under a SETTLING verdict this is the complement of `replaysUnder`, and it
+was defined as that complement before item 443. It is now spelled out per
+row, because under `.halted` an entry is neither replayed NOR discharged:
+discharge RELEASES the inverse and the witness, and an E-Stop must do the
+opposite — keep them, because the reconciliation path
+(`revl recover`) is what reads them back. -/
+def EntryKind.dischargedUnder : EntryKind → Verdict → Bool
+  | _, .halted => false          -- item 443: an E-Stop discharges nothing
+  | .bracket, _ => false
+  | .transactional, .commit => true
+  | .transactional, .abort => false
+  | .compensation, .commit => true
+  | .compensation, .abort => false
+
+/-- STRANDED (item 443): registered, not run, and NOT dropped — the
+obligation is still owed to whoever reconciles. This is the third
+disposition, and it is inhabited by exactly one verdict: the E-Stop. -/
+def EntryKind.strandedUnder (k : EntryKind) (v : Verdict) : Bool :=
+  !k.replaysUnder v && !k.dischargedUnder v
+
+/-- The replay/discharge dichotomy, now with the hypothesis that made it
+true all along: it is a property of a verdict that SETTLES. Item 443's
+E-Stop is the verdict at which it fails, and `disposition_trichotomy`
+below is what holds instead — the honest generalisation, not a weakening:
+the settling case is unchanged. -/
+theorem replays_or_discharges (k : EntryKind) (v : Verdict)
+    (hv : v.settles = true) :
     k.replaysUnder v = true ↔ k.dischargedUnder v = false := by
   cases k <;> cases v <;>
-    simp [EntryKind.replaysUnder, EntryKind.dischargedUnder]
+    simp_all [Verdict.settles, EntryKind.replaysUnder, EntryKind.dischargedUnder]
+
+/-- Every (kind, verdict) pair has EXACTLY ONE disposition. This is the
+total accounting item 443 needs: an entry is replayed, or discharged, or
+stranded, never two of them and never none. Nothing falls off the books,
+under any verdict including the halt. -/
+theorem disposition_trichotomy (k : EntryKind) (v : Verdict) :
+    (k.replaysUnder v = true ∧ k.dischargedUnder v = false
+       ∧ k.strandedUnder v = false)
+    ∨ (k.replaysUnder v = false ∧ k.dischargedUnder v = true
+       ∧ k.strandedUnder v = false)
+    ∨ (k.replaysUnder v = false ∧ k.dischargedUnder v = false
+       ∧ k.strandedUnder v = true) := by
+  cases k <;> cases v <;> decide
+
+/-- The E-Stop row of the table, per kind: no replay, no discharge, always
+stranded. The third column of `docs/design/teardown-contract.md`'s table
+(item 443). -/
+theorem halted_strands_every_kind (k : EntryKind) :
+    k.replaysUnder .halted = false ∧ k.dischargedUnder .halted = false
+      ∧ k.strandedUnder .halted = true := by
+  cases k <;> decide
 
 /-- Phase 1 is the proof pass: brackets and transactional entries only.
 Compensations are skipped here by construction. -/
@@ -112,6 +177,13 @@ def replayed (v : Verdict) (log : List LogEntry) : List LogEntry :=
 order. -/
 def discharged (v : Verdict) (log : List LogEntry) : List LogEntry :=
   log.filter (fun e => e.kind.dischargedUnder v)
+
+/-- Every entry the teardown STRANDS (item 443): neither run nor dropped,
+in registration order. This list is the E-Stop's in-flight inventory — the
+records the halt owes the operator, and the descriptors `revl recover`
+reads back. Empty under every settling verdict. -/
+def stranded (v : Verdict) (log : List LogEntry) : List LogEntry :=
+  log.filter (fun e => e.kind.strandedUnder v)
 
 /-- Derived teardown: the inverses that actually run, in the order they
 run. -/
@@ -161,5 +233,55 @@ theorem teardown_length : ∀ (v : Verdict) (log : List LogEntry),
 /-- Teardown of an empty activation is empty (no residue from nothing). -/
 theorem teardown_nil (v : Verdict) : teardown v [] = [] := by
   cases v <;> rfl
+
+/-! ### Item 443: the books balance under every verdict
+
+`teardown_length` counts what RAN. The E-Stop runs nothing, so on its own
+that count is `0` and says nothing about the entries left behind. What
+makes the halt honest is that the three dispositions PARTITION the stack:
+every registered entry is on exactly one of the replay list, the discharge
+list and the stranded inventory, so an entry can never be quietly dropped
+by adding a verdict. -/
+
+-- Two disjoint side conditions plus their joint complement partition a
+-- list. Kept local to L0 so this file still imports nothing outside L0
+-- (formal/scripts/layering_gate.py).
+private theorem filter_three_length {α : Type} (p q : α → Bool)
+    (hpq : ∀ a, (p a && q a) = false) :
+    ∀ l : List α,
+      (l.filter p).length + (l.filter q).length +
+        (l.filter (fun a => !p a && !q a)).length = l.length := by
+  intro l
+  induction l with
+  | nil => rfl
+  | cons a rest ih =>
+    have h := hpq a
+    cases hp : p a <;> cases hq : q a <;>
+      simp only [hp, hq] at h <;> simp [hp, hq] <;>
+      first
+        | omega
+        | exact absurd h (by decide)   -- p and q both true: excluded by `hpq`
+
+/-- The replay list has one element per entry the verdict replays: the
+phase split neither drops nor duplicates. (`teardown_length` is this,
+transported across the `map`.) -/
+theorem replayed_length (v : Verdict) (log : List LogEntry) :
+    (replayed v log).length
+      = (log.filter (fun e => e.kind.replaysUnder v)).length := by
+  simp only [replayed, phase1, phase2, List.length_append, List.length_reverse]
+  exact phase_lengths_add v log
+
+/-- **The books balance, under every verdict.** Replayed + discharged +
+stranded is the whole stack. Under `commit`/`abort` the stranded term is
+zero and this is the old two-way accounting; under `halted` the first two
+are zero and the whole stack is on the inventory. Either way nothing falls
+off (item 443). -/
+theorem book_lengths_add (v : Verdict) (log : List LogEntry) :
+    (replayed v log).length + (discharged v log).length
+      + (stranded v log).length = log.length := by
+  rw [replayed_length]
+  exact filter_three_length (fun e => e.kind.replaysUnder v)
+    (fun e => e.kind.dischargedUnder v)
+    (fun e => by cases e.kind <;> cases v <;> rfl) log
 
 end RevL.Semantics
