@@ -575,6 +575,52 @@ _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
 _DIV_ZERO_MSG = "revl: division by zero"
 
+# The receiver type a builtin reached through `?.` has: the `optcall` IR node
+# carries no `recv` tag (unlike a `builtin` node, which lowering annotates for
+# exactly this reason), so the one lowering that dispatches on it — `to_int`,
+# whose Int32 row is the identity and whose Str row parses — decides at
+# runtime instead.
+_RECV_VIA_OPT = "?"
+
+
+# `??`, `?.` and `?.()` must evaluate their LEFT OPERAND ONCE
+# (docs/syntax-2.0.md §3.2). Rendering it twice, once for the presence test and
+# once for the result, calls a call-shaped operand twice: a semantic defect
+# before it is a cost (item 436 F7, measured at 1500 extern invocations per
+# 1000 `??`). The ts tier inherits single evaluation from JS's own `??` and the
+# rust tier from `unwrap_or_else`; this tier binds the operand with a walrus,
+# the technique already used for `is_alpha`'s receiver.
+#
+# The temp is named after the OPT-CHAIN HEIGHT of the whole `??`/`?.` node, so
+# a chain nested in an argument can never clobber the one above it: the outer
+# node's height is strictly greater than every opt node under it, and some
+# builtins (`join`, `has`) render the argument BEFORE the receiver. The height
+# is a function of the node alone, so no emitter state is threaded through the
+# expression walk and the self-host port needs none either.
+def _opt_height(node: Any) -> int:
+    """1 + the deepest `??`/`?.`/`?.()` nested under `node`; 0 if there is none."""
+    if isinstance(node, list):
+        return max((_opt_height(v) for v in node), default=0)
+    if not isinstance(node, dict):
+        return 0
+    inner = max((_opt_height(v) for v in node.values()), default=0)
+    if node.get("kind") in ("optfield", "optcall") or (
+            node.get("kind") == "bin" and node.get("op") == "??"):
+        return inner + 1
+    return inner
+
+
+def _opt_bind(node: dict, target: Any, rendered: str) -> tuple[str, str]:
+    """`(binder, reader)` for an optional chain's left operand: the binder goes
+    in the presence test, the reader wherever the value is used. An operand
+    that is trivially re-readable (a local, a literal, `Map.empty()`) keeps the
+    plain double render, which costs nothing and leaves the common spelling
+    byte-identical to what a developer writes."""
+    if isinstance(target, dict) and target.get("kind") in _INLINE_TRIVIAL:
+        return f"({rendered})", rendered
+    name = f"_ov{_opt_height(node)}"
+    return f"({name} := {rendered})", name
+
 
 def _render_builtin(method, target: str, args: list, recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), rendered as portable Python.
@@ -674,17 +720,24 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     # type, so widening Int32 -> Int is the identity; narrowing Int -> Int32
     # re-imposes the 32-bit bound through `_revl_i32`, which traps out of range.
     if method == "to_int":
-        if recv == "Str":
+        if recv in ("Str", _RECV_VIA_OPT):
             # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the
             # ASCII digits with an optional leading `-`, `None` otherwise —
             # including out of the i64 range, which is None like every other
             # non-digit (the tier's ints are unbounded, so the bound must be
             # checked here rather than by int()).
-            return (f"(lambda _s: (None if (_s == \"\" or _s == \"-\" "
-                    f"or not _s.isascii() "
-                    f"or not (_s.isdigit() or (_s[0] == \"-\" and _s[1:].isdigit())) "
-                    f"or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) "
-                    f"else _n))({target})")
+            parse = ("(None if (_s == \"\" or _s == \"-\" "
+                     "or not _s.isascii() "
+                     "or not (_s.isdigit() or (_s[0] == \"-\" and _s[1:].isdigit())) "
+                     "or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) "
+                     "else _n)")
+            if recv == _RECV_VIA_OPT:
+                # reached through `?.`, whose node carries no receiver type:
+                # dispatch on the payload, the same split `indexOf` makes
+                # between a List and a Str receiver.
+                return (f"(lambda _s: {parse} if isinstance(_s, str) "
+                        f"else _s)({target})")
+            return f"(lambda _s: {parse})({target})"
         return f"({target})"
     if method == "to_int32":
         return f"_revl_i32({target})"
@@ -1175,11 +1228,15 @@ class _ComponentEmitter:
             return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
         if kind == "bin":
             if expr.get("op") == "??":
-                lhs = self._expr(expr.get("left"), where)
-                rhs = self._expr(expr.get("right"), where)
                 # `x ?? d`: `Opt[T]` is represented as `T | None` at runtime
-                # (matching the TS backend's `T | undefined` shape).
-                return f"({rhs} if {lhs} is None else {lhs})"
+                # (matching the TS backend's `T | undefined` shape). The left
+                # operand is evaluated ONCE — see `_opt_bind`.
+                left = expr.get("left")
+                rhs = self._expr(expr.get("right"), where)
+                binder, reader = _opt_bind(expr, left, self._expr(left, where))
+                if binder == f"({reader})":
+                    return f"({rhs} if {reader} is None else {reader})"
+                return f"({reader} if {binder} is not None else {rhs})"
             op = _PY_BIN_OPS.get(expr.get("op"))
             if op is None:
                 raise EmitError(f"{where}: unsupported binary operator {expr.get('op')!r}")
@@ -1236,16 +1293,21 @@ class _ComponentEmitter:
             name = expr.get("name")
             if not isinstance(name, str) or not name.isidentifier():
                 raise EmitError(f"{where}: bad optional field name {name!r}")
-            target = self._expr(expr.get("target"), where)
             # `x?.name`: short-circuit on Opt-None.
-            return f"(None if ({target}) is None else _revl_field({target}, {name!r}))"
+            binder, reader = _opt_bind(
+                expr, expr.get("target"), self._expr(expr.get("target"), where))
+            return f"(None if {binder} is None else _revl_field({reader}, {name!r}))"
         if kind == "optcall":
             method = expr.get("method")
             if not isinstance(method, str) or not method.isidentifier():
                 raise EmitError(f"{where}: bad optional method name {method!r}")
-            target = self._expr(expr.get("target"), where)
-            args = ", ".join(self._expr(a, where) for a in expr.get("args") or [])
-            return f"(None if ({target}) is None else ({target}).{method}({args}))"
+            # the method is a stdlib builtin, rendered by the same table a
+            # plain `.m(..)` uses — see the fn-body `optcall` branch.
+            binder, reader = _opt_bind(
+                expr, expr.get("target"), self._expr(expr.get("target"), where))
+            args = [self._expr(a, where) for a in expr.get("args") or []]
+            body = _render_builtin(method, reader, args, _RECV_VIA_OPT)
+            return f"(None if {binder} is None else {body})"
         if kind == "spawn":
             # instance-parametric components (docs/design-v2-instances.md):
             # `spawn(_revl_ctx, <Component>, {config}, (realms,))` plugs a fresh child
@@ -2290,9 +2352,17 @@ def _expr(node: dict) -> str:
         return _mangle(name)
     if kind == "bin":
         if node["op"] == "??":
-            lhs = _expr(node["left"])
+            left = node["left"]
             rhs = _expr(node["right"])
-            return f"({rhs} if {lhs} is None else {lhs})"
+            binder, reader = _opt_bind(node, left, _expr(left))
+            if binder == f"({reader})":
+                # a bare local/literal: re-reading it is free and observable
+                # only as the same value, so keep the plain spelling
+                return f"({rhs} if {reader} is None else {reader})"
+            # the walrus binds in the presence test, which a conditional
+            # expression evaluates FIRST, so the `then` branch reads a value
+            # the operand produced exactly once
+            return f"({reader} if {binder} is not None else {rhs})"
         if node["op"] in ("+", "-", "*") and node.get("operands") == "Int":
             # Int is bounded 64-bit and overflow TRAPS (docs/arithmetic.md).
             # python is arbitrary precision, so it is the tier that has to
@@ -2450,12 +2520,20 @@ def _expr(node: dict) -> str:
     if kind == "interp":
         return _interp_fstring(node["parts"])
     if kind == "optfield":
-        target = _expr(node["target"])
-        return f"(None if ({target}) is None else _revl_field({target}, {node['name']!r}))"
+        binder, reader = _opt_bind(node, node["target"], _expr(node["target"]))
+        return f"(None if {binder} is None else _revl_field({reader}, {node['name']!r}))"
     if kind == "optcall":
-        target = _expr(node["target"])
-        args = ", ".join(_expr(a) for a in node.get("args") or [])
-        return f"(None if ({target}) is None else ({target}).{node['method']}({args}))"
+        # `?.m(..)`: the method is a STDLIB builtin — the checker types an
+        # optcall through `builtin_check`, so there is no host-method row to
+        # reach — and it must be rendered by the same table a plain `.m(..)`
+        # goes through. Emitting `payload.m(..)` instead put a method python
+        # values do not have on the receiver (`'str' object has no attribute
+        # 'length'`), which item 436 caught executing what the byte-agreement
+        # oracle only ever emitted.
+        binder, reader = _opt_bind(node, node["target"], _expr(node["target"]))
+        args = [_expr(a) for a in node.get("args") or []]
+        body = _render_builtin(node["method"], reader, args, _RECV_VIA_OPT)
+        return f"(None if {binder} is None else {body})"
     raise EmitError(f"unsupported expression kind {kind!r}")
 
 
