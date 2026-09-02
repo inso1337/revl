@@ -2165,7 +2165,9 @@ class Frame:
         return entry
 
     def enqueue_deferred(self, receiver: str, method: str, args: list,
-                         fire: Callable[[], Any]) -> None:
+                         fire: Callable[[], Any], *,
+                         register: Optional[str] = None,
+                         idempotency: Optional[Any] = None) -> None:
         """Enqueue a class-(b) deferred emission onto the session's deferral
         queue instead of firing it (item 245, docs/design/245-session-commit.md,
         Decision 3). The host body does NOT run here; it runs exactly once at the
@@ -2184,7 +2186,8 @@ class Frame:
                 "a deferred emission needs a session owner runtime (the deferral "
                 "queue and the commit verb), which this composition has none — "
                 "load it under a driver that registers one (item 245)")
-        self._owner.enqueue(receiver, method, list(args), fire)
+        self._owner.enqueue(receiver, method, list(args), fire,
+                            register=register, idempotency=idempotency)
 
     def request_approval(self, capability: str, fields: dict) -> dict:
         """`let a = await approval[C] { fields }` at runtime (item 246). Resolve a
@@ -2729,15 +2732,24 @@ class SessionOwner:
     # -- deferral queue ----------------------------------------------------
 
     def enqueue(self, receiver: str, method: str, args: list,
-                fire: Callable[[], Any]) -> "_Deferred":
+                fire: Callable[[], Any], *,
+                register: Optional[str] = None,
+                idempotency: Optional[Any] = None) -> "_Deferred":
         """Append a class-(b) descriptor and WAL-log it at enqueue (Decision 3).
-        The intent is durable here; the outcome is a later `flushed` record."""
+        The intent is durable here; the outcome is a later `flushed` record.
+
+        item 440 §(b): `register`/`idempotency` ride the descriptor into the WAL
+        so a FRESH-process recover can decide whether an OWED emission is safe to
+        re-issue. Both default to absent, which reads as "not re-issuable" — the
+        fail-closed direction and the pre-440 behaviour."""
         descriptor = _Deferred(receiver, method, list(args), fire)
         self._queue.append(descriptor)
         wal = self._wal()
         if wal is not None:
             record = wal.record_deferred_emission(
-                receiver=receiver, method=method, args=list(args))
+                receiver=receiver, method=method, args=list(args),
+                register=register,
+                idempotency=None if idempotency is None else str(idempotency))
             descriptor.seq = record["seq"]
         return descriptor
 

@@ -488,6 +488,28 @@ class TeardownRule:
 
 
 @dataclass(frozen=True)
+class ReissueRule:
+    """A ``recovery may re-issue owed emissions [(strength: <level>)]`` rule
+    (item 440 §(b), item 309 §3b): the operator's knob for the crash-recovery
+    RE-ISSUE SEAM.
+
+    Absent — the default — `revl recover` auto-fires NOTHING, which is item 245's
+    v1 rule ("recover never auto-fires an owed emission"). Present, it lets
+    recovery re-fire an owed deferred emission whose WAL descriptor carries a
+    register at or above `strength`, under 309's partial order:
+
+    * bare (``strength = "keyed"``) — only the dedup-safe registers (`keyed`,
+      `shape-proven`, and 440's `read`, which crosses nothing at all). The fire
+      is safe BY CONSTRUCTION even if the pre-crash flush actually landed.
+    * ``(strength: declared)`` — additionally the author's unverified trust-me
+      claim, which an operator may choose to accept.
+
+    An owed emission with NO register is never auto-fired under any strength: the
+    ambiguous case stays human-finish, because nothing about it can be proven."""
+    strength: str                     # "declared" | "keyed" | "shape-proven" | "strong"
+
+
+@dataclass(frozen=True)
 class Policy:
     """A parsed boundary policy: rules, the tenants switch, the sandbox."""
     rules: tuple[Rule, ...] = ()
@@ -513,6 +535,11 @@ class Policy:
     # unattended-recovery floor over the recovery surface. Empty by default so
     # every existing policy parses/evaluates byte-identically.
     teardown_rules: tuple[TeardownRule, ...] = ()
+    # item 440: `recovery may re-issue owed emissions [(strength: <level>)]` —
+    # the crash-recovery re-issue seam's operator knob. Empty by default so every
+    # existing policy parses/evaluates byte-identically AND so a recover with no
+    # policy auto-fires nothing.
+    reissue_rules: tuple[ReissueRule, ...] = ()
     evidence_root_local: bool = False        # `evidence-root: local` (§6.3)
     # item 251, Slice 1: distilled `component <glob> may auto-approve <caps>`
     # rules. PARSE-ONLY this slice (no evaluation wiring); empty by default so
@@ -526,8 +553,24 @@ class Policy:
             and not self.declassify_rules and not self.taint_flow_rules \
             and not self.evidence_rules and not self.register_rules \
             and not self.teardown_rules \
+            and not self.reissue_rules \
             and not self.auto_approve_rules \
             and not self.evidence_root_local
+
+    def reissue_strength(self) -> str | None:
+        """The re-issue seam's strength floor for `revl recover`, or None when no
+        rule turns the seam on (item 440 §(b)).
+
+        Several rules take the WEAKEST floor, because a policy that says both
+        "keyed only" and "declared too" has authorized the wider one; the
+        recovery side then admits a descriptor iff it meets that floor. `None`
+        means the seam is OFF, which is what every policy written before this
+        item — and every recover run with no policy at all — gets."""
+        if not self.reissue_rules:
+            return None
+        from .lower import _REGISTER_RANK  # noqa: PLC0415 — the partial order
+        return min((r.strength for r in self.reissue_rules),
+                   key=lambda level: _REGISTER_RANK.get(level, 0))
 
     def requires_approval(self) -> bool:
         """Whether this policy names any approval-required capability — the
@@ -705,6 +748,26 @@ def _parse_teardown_strength(tail: str, source, lineno) -> str:
     return _parse_register_level(level.strip(), source, lineno)
 
 
+def _parse_reissue_strength(tail: str, source, lineno) -> str:
+    """Parse the `(strength: <level>)` argument of `recovery may re-issue owed
+    emissions` (item 440 §(b)). The bare rule is `keyed` — only the dedup-safe
+    registers — and an explicit argument names a level in `_REGISTER_LEVELS`."""
+    inner = tail.strip()
+    if not (inner.startswith("(") and inner.endswith(")")):
+        raise PolicyError(
+            source, lineno,
+            f"`recovery may re-issue owed emissions` takes either no argument or "
+            f"`(strength: <level>)`, got {tail.strip()!r} (item 440)")
+    inner = inner[1:-1].strip()
+    key, _, level = inner.partition(":")
+    if key.strip().lower() != "strength" or not level.strip():
+        raise PolicyError(
+            source, lineno,
+            f"the `recovery may re-issue owed emissions` argument is "
+            f"`(strength: <level>)`, got `({inner})` (item 440)")
+    return _parse_register_level(level.strip(), source, lineno)
+
+
 def _validate_evidence_rooting(rules, root_local: bool) -> None:
     """After the whole policy is parsed, refuse any evidence rule that
     thresholds an UNROOTED self-attesting facet without an acknowledgment — per
@@ -749,6 +812,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     evidence_rules: list[EvidenceRule] = []
     register_rules: list[RegisterRule] = []
     teardown_rules: list[TeardownRule] = []
+    reissue_rules: list[ReissueRule] = []
     auto_approve_rules: list[AutoApproveRule] = []
     evidence_root_local = False
     for lineno, raw in enumerate(text.splitlines(), start=1):
@@ -815,6 +879,20 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             if tail:
                 strength = _parse_teardown_strength(tail, source, lineno)
             teardown_rules.append(TeardownRule(strength))
+            continue
+        # item 440 §(b): `recovery may re-issue owed emissions` and its
+        # `(strength: <level>)` form — the crash-recovery re-issue seam's
+        # operator knob. Document-global, like the teardown floor: it authorizes
+        # `revl recover` to auto-fire an OWED deferred emission whose WAL
+        # descriptor carries a register at or above the floor. Absent, recover
+        # auto-fires nothing (item 245's v1 rule), so the DEFAULT is closed.
+        if "recovery may re-issue owed emissions" in low:
+            _, _, tail = line.partition("recovery may re-issue owed emissions")
+            tail = tail.strip()
+            strength = "keyed"
+            if tail:
+                strength = _parse_reissue_strength(tail, source, lineno)
+            reissue_rules.append(ReissueRule(strength))
             continue
         # item 249, Slice D (D2): `<origin>-taint may not reach <cap>[, ...]
         # [without approval]`. Checked before the generic `may not reach` loop
@@ -942,6 +1020,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                   tuple(declassify_rules), tuple(taint_flow_rules), source,
                   tuple(evidence_rules), tuple(register_rules),
                   tuple(teardown_rules),
+                  tuple(reissue_rules),
                   evidence_root_local,
                   tuple(auto_approve_rules))
 
@@ -1061,6 +1140,7 @@ def _parse_json(text: str, source: str | None) -> Policy:
             str(entry.get("atLeast") or entry.get("at_least") or ""), source, 1)
         register_rules.append(RegisterRule(cap, level))
     teardown_rules: list[TeardownRule] = []
+    reissue_rules: list[ReissueRule] = []
     for entry in doc.get("idempotentTeardown") or []:
         strength = _parse_register_level(
             str(entry.get("strength") or "declared"), source, 1)
@@ -1096,6 +1176,7 @@ def _parse_json(text: str, source: str | None) -> Policy:
                   tuple(declassify_rules), tuple(taint_flow_rules), source,
                   tuple(evidence_rules), tuple(register_rules),
                   tuple(teardown_rules),
+                  tuple(reissue_rules),
                   evidence_root_local,
                   tuple(auto_approve_rules))
 
