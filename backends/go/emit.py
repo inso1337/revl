@@ -3663,6 +3663,14 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         if op == "/":
             return "Float"  # true division (docs/arithmetic.md)
         if op in ("-", "*", "%"):
+            # The node carries the operand type the checker resolved, and
+            # `Float` arithmetic answers a Float. Before item 434 (f) this
+            # returned a flat "Int", which no caller could tell from a real
+            # one: interpolation then rendered `(0.0 - 1.0) * 0.0` through
+            # `%v` instead of the canonical revlFtoa
+            # (tests/test_cross_tier_execution.py's negative-zero probe).
+            if node.get("operands") == "Float":
+                return "Float"
             return "Int"
         return None
     if kind == "un":
