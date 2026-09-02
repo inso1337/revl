@@ -35,6 +35,32 @@ def test_the_schema_constants_are_identical():
     assert wal_core.WAL_GUARANTEE == replay.WAL_GUARANTEE
 
 
+def test_the_step_kind_vocabulary_is_identical():
+    """Item 250 Slice 2 mirrored the step-kind vocabulary into the core so the
+    offline branch surface can classify a durable tail with no backend on the
+    path. A kind added on one side and not the other would silently land in the
+    other's catch-all bucket, so the two copies are pinned together."""
+    assert wal_core.KINDS == replay.KINDS
+    for name in ("KIND_EFFECT", "KIND_PROVISION", "KIND_EMISSION",
+                 "KIND_COMPENSATION", "KIND_BOUNDARY", "KIND_HINGE",
+                 "KIND_OPAQUE"):
+        assert getattr(wal_core, name) == getattr(replay, name)
+
+
+def test_the_fork_scope_gate_is_identical():
+    """The scope gate decides whether a fork rewind may RUN an inverse (item 250,
+    Decision 2). The live fork asks the backend's copy and the offline branch
+    surface asks the core's; a drift would let one of them offer an outbound
+    inverse as rewindable, which is the CRITICAL the design exists to close."""
+    assert wal_core.HOST_CONFINED_CAPS == replay.HOST_CONFINED_CAPS
+    for scope in (None, {}, {"caps": []}, {"caps": ["fs"]}, {"caps": ["net"]},
+                  {"caps": ["fs", "net"]}, {"caps": ["unknown-token"]},
+                  {"confined": True, "caps": ["net"]},
+                  {"sandbox": True, "caps": ["net"]}, {"confined": False}):
+        assert wal_core.scope_host_confined(scope) \
+            == replay.scope_host_confined(scope), scope
+
+
 def test_the_reader_matches_py_replay_read_on_a_real_wal(tmp_path):
     """Write a WAL through the py in-process writer, then read it back both ways
     and require the same {header, records, complete, torn}. Exercises the header
