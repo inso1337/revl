@@ -44,6 +44,38 @@ two legs already read (`revl.audit_diff.audit_report`). A rule constrains the
 reach; a token outside an allow-list, inside a deny-list, or shared across
 tenants is a **violation**, and the first violation **refuses admission**.
 
+### Which spelling a rule selects
+
+A rule names a **token**, never a source construct, so the same crossing spelled
+two ways in the source is one token to the policy. The whole table (item 247;
+pinned by `tests/test_247_capability_reach_spellings.py`):
+
+| the component crosses through | the token a rule names |
+|---|---|
+| `emit db.execute(...)` on `emission[...] fn execute` required as key `db` | `db` — the **requirement key**, not the service name |
+| `emit cache.put(...)` on a bare `emission fn put` | `*` |
+| `emit pg_write(...)` on `extern emission[db] fn pg_write` | `db` — the **declared scope** |
+| `emit sendEmail(...)` on `extern emission fn sendEmail` | `sendEmail` — the extern **names itself** |
+| the same extern reached through a chain of plain `fn`s | unchanged: the scope, or the extern name |
+| `effect stash(...)` on `extern witnessed[fs] fn stash` | `fs` |
+| a `pure`/`acquire` extern the body reaches | its own name (no scope is declarable) |
+| an emitting callable handed to a dispatcher | `*` |
+
+Two consequences worth stating outright, because nothing in the source hints at
+them:
+
+- **A scoped extern's NAME is not a token.** `emission[db] fn pg_write`
+  contributes `db` and only `db`, so `component X may not reach pg_write`
+  selects nothing while `component X may not reach db` refuses. That is the same
+  rule item 343 applies to the approval gate (`capability db requires
+  approval`), the register floor (`capability db requires register keyed`) and
+  `secret K for db` — one namespace across all of them. The extern name is still
+  on the audit's `host code:` line, with the token beside it, so a refusal on
+  `db` is navigable back to the declaration that carries it.
+- **Whether a rule selects at all depends on reach, not on declaration.** A
+  floor on a capability nothing in the composition crosses refuses nothing. `revl
+  policy evaluate` reports such a rule as inert rather than as passing.
+
 ## The file format
 
 A small line DSL (`revl.policy`), or the equivalent JSON. Blank lines and

@@ -150,12 +150,16 @@ def _reach_zoo(kinds: frozenset[str]) -> str:
 
 
 def _boundary_reach(kinds: frozenset[str]) -> frozenset[str]:
-    """Surface: the G8 `_boundary` audit. Hub's crossed capability tokens plus
-    the names of the host externs it reaches."""
+    """Surface: the G8 `_boundary` audit. Hub's crossed capability tokens — the
+    scope of each emission call site, and the token of each host extern it
+    reaches (item 247: a scoped extern's DECLARED token, its NAME when
+    unscoped, the same `capabilities or (name,)` rule `component_reach` and the
+    approval fold use)."""
     audit = audit_report(compile_source(_reach_zoo(kinds), "reach.rvl"))
     stats = audit["boundary"]["Hub"]
     caps = {tok for caps in stats["capabilities"].values() for tok in caps}
-    externs = {e["name"] for e in stats["externs"]}
+    externs = {tok for e in stats["externs"]
+               for tok in (e.get("capabilities") or [e["name"]])}
     return frozenset(caps | externs)
 
 
@@ -964,12 +968,24 @@ def test_reach_surfaces_agree_on_the_full_zoo():
         assert token in full_boundary, token
         assert token in full_creach, token
         assert token in full_approval, token
-    # the transitively-reached host extern is on the boundary/component_reach axis
-    assert "host_extern" in full_boundary
-    assert "host_extern" in full_creach
-    # the first-class launder surfaces as the extern name on the enumeration axis
-    # and as the unnameable `*` on the approval axis
+    # item 247: the transitively-reached host extern is declared
+    # `emission[cap_ext]`, so ALL THREE surfaces key it on the declared TOKEN.
+    # Before 247 the two enumeration surfaces said `host_extern` while the
+    # approval fold said `cap_ext` — the same crossing graded in two namespaces,
+    # which is how `capability cap_ext requires register keyed` selected nothing.
+    for surface in (full_boundary, full_creach, full_approval):
+        assert "cap_ext" in surface
+        assert "host_extern" not in surface
+    # the extern NAME is not lost: the audit's `externs` table is the host-code
+    # enumeration (class, backends, ref provenance) and stays keyed by name.
+    audit = audit_report(compile_source(_reach_zoo(REACH_KINDS), "reach.rvl"))
+    assert "host_extern" in {e["name"]
+                             for e in audit["boundary"]["Hub"]["externs"]}
+    # the first-class launder is an UNSCOPED `emission` extern, so its token is
+    # its own name on the enumeration axis, and the unnameable `*` on the
+    # approval axis (what runs through a dispatcher is not statically boundable)
     assert "launder_write" in full_boundary
+    assert "launder_write" in full_creach
     assert "*" in full_approval
 
 
