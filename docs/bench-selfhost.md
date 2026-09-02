@@ -544,6 +544,106 @@ balloons every scan signature, so item 282 ships the borrow fix (the 97.4% of
 bytes) and leaves the `charAt` view as the next lever. Reproduce with
 `python3 tools/profile_selfhost_rust.py` and `python3 tools/bench_selfhost_rust.py`.
 
+### item 277: the interprocedural `&[char]` view (the front-walk removed)
+
+Item 282 closed naming the `charAt` front-walk as the dominant residual and left
+the fix open. Item 277 takes it — as the INTERPROCEDURAL view, not the scoped
+shadow that item 277 originally measured and rejected.
+
+**Re-measured first: the scoped shadow still regresses, and now catastrophically.**
+The original finding (348.8 ms -> 444.9 ms, ~28% worse) was taken before items 284
+and 282 removed the `revl_push` clone-append and the full-source clone. With those
+gone the collect has nothing left to hide behind. Same tool, same box, same corpus
+(8 files / 34,961 chars — the lexer corpus grew with `lexer.rvl` itself), one exact
+instrumented pass, `origin/main` @ `f7b1062` as the baseline:
+
+| measure (whole-corpus pass)              | baseline (main) | scoped per-fn shadow |
+|------------------------------------------|----------------:|---------------------:|
+| lexer run, release-default               | 44.86 ms        | **1375.46 ms**       |
+| total heap allocations / pass            | 332,367         | 379,502              |
+| total heap bytes / pass                  | **8.2 MB**      | **2,067.8 MB**       |
+| `charAt` front-walk calls                | 58,039          | 0                    |
+| chars walked by the front walk           | 535,781,113     | 0                    |
+
+The shadow does exactly what it promised — the 535.8 M-step front walk is gone —
+and the program is **30x slower**. The 47,135 extra allocations it adds are each a
+whole-buffer `Vec<char>`, which is why the byte count rises 253x while the count
+rises 14%. That is the whole mechanism in one row: the lexer threads `source`
+down a dozen per-token helpers, so a per-FUNCTION shadow is a per-CALL
+`chars().collect()`, and O(calls · n) of allocation is a far worse trade than
+O(calls · i) of iteration. The scoped shape is not a weaker version of the fix; it
+is the wrong shape, and no subset of it is a win.
+
+**The shape that works.** The collect belongs to whoever OWNS the buffer, and the
+view has to be threaded, so the pass is interprocedural, exactly like item 282's
+borrow analysis and running next to it in `backends/rust/emit.py`:
+
+* a non-`pub` free fn that positionally indexes a `Str` parameter — or hands that
+  parameter to another such fn — grows a synthetic trailing parameter
+  `<name>_revl_cs: &[char]`, and every call site in the document supplies it;
+* `charAt(i)` / `charCodeAt(i)` / `codepoint_at(i)` on that parameter lower to
+  `<name>_revl_cs[i as usize]` — an O(1) index over Unicode SCALARS, the same unit
+  `chars().nth(i)` indexed, so the values are unchanged (both panic out of bounds);
+* demand walks UP the call graph to a `pub` entry, whose signature is the module's
+  external contract and never changes: it collects once at the top of its body
+  (`let src_revl_cs: std::vec::Vec<char> = src.chars().collect();`) and lends
+  `&src_revl_cs` down. `lex_src` pays one collect per lex instead of one per access;
+* a `pub` callee demands nothing of ITS callers, since it collects its own view —
+  without that rule a caller collects a view nobody reads;
+* and the retraction that is the whole difference from the scoped shape: a viewed
+  slot whose argument at some in-module call site is NOT a parameter the caller
+  already holds a view for would need a fresh collect there, so that slot is
+  BANNED and the fixpoint recomputed. In the lexer that retracts `count_nl`
+  (called as `count_nl(source.slice(i, hb.j))`) and `radix_value`, which keep the
+  front walk over their short slices. **No in-module call site gains a collect.**
+  The emitted lexer contains exactly one `chars().collect()`, in `lex_src`.
+
+Gated like item 282 on the module using the stdlib, disabled outright if any
+identifier already ends in `_revl_cs`, and skipped for any function referenced as
+a value (its type would change). A name the enclosing function binds locally
+(`let step = ..` beside a free `fn step`, which `selfhost/lower.rvl` really does)
+is a local read, not a function reference.
+
+**Measured.** The allocation and walk counts are load-independent and exact (one
+deterministic instrumented pass, counting global allocator):
+
+| measure (whole-corpus pass)              | baseline (main) | interprocedural view | change      |
+|------------------------------------------|----------------:|---------------------:|-------------|
+| `charAt` front-walk calls                | 58,039          | 993                  | 98.3% fewer |
+| **chars walked by the front walk**       | **535,781,113** | **62**               | **eliminated** |
+| 1-char `String` allocs (`charAt`)        | 58,039          | 993                  | 98.3% fewer |
+| total heap allocations / pass            | 332,367         | 332,391              | +24 (the 8 per-file collects) |
+| total heap bytes / pass                  | 8.17 MB         | 8.42 MB              | +0.25 MB    |
+
+The residual 993 walks are the retracted `count_nl` / `radix_value` slices, whose
+summed index depth is 62 characters for the whole corpus.
+
+Timing was taken PAIRED, because this box was running several agents and a
+duration sampled under unknown load is not evidence (the discipline item 437
+adopted, for the reason item 277 itself supplies). Both variants were built and
+then run INTERLEAVED, 11 rounds, so any load burst hits both:
+
+| lexer native run (11 interleaved rounds) | baseline | view    | ratio |
+|------------------------------------------|---------:|--------:|------:|
+| min                                       | 80.23 ms | 29.88 ms | 2.69x |
+| median                                    | 111.50 ms | 49.78 ms | 2.24x |
+| max                                       | 218.58 ms | 64.02 ms | 3.42x |
+
+**The view is faster in every one of the 11 rounds.** The absolute floor is the
+quiet-machine baseline measured earlier in the same session, 44.86 ms, against the
+view's best 29.88 ms; a re-run on an idle box should be taken before quoting a
+single headline factor. The paired rounds say 2.2x-2.7x, and the CPython lexer
+this is measured against is 20.55 ms.
+
+Correctness backstops: the emitted `&[char]` signatures are checked by rustc (a
+mis-threaded view fails to compile, it cannot miscompile), the whole rust emit
+suite and rust goldens are green, `crates/revl-gate` — 402 emitted functions with
+the view threaded through the lexer half — regenerates, cargo-builds and admits
+identically (112 gate tests green), and a dedicated regression test in
+`backends/rust/test_emit_rust.py` cargo-RUNS the view over both ASCII and
+multi-byte input to prove it indexes the same scalars the front walk did.
+Reproduce with `python3 tools/profile_selfhost_rust.py`.
+
 ### Reading for item 231a
 
 Item 231a asks whether the lexer's residual py-tier overhead (4.9x → 4.4x after

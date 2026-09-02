@@ -74,20 +74,17 @@ def _resolve() -> tuple[str | None, str | None]:
 
 JAVAC, JAVA = _resolve()
 
-# Why a JDK is unusable here, for a skip reason that names the cause instead of
-# repeating "no working javac" on a machine that has one.
-def jdk_reason() -> str | None:
-    """``None`` when the gate can compile, else why it cannot."""
-    if JAVAC is None or JAVA is None:
-        return ("no JDK >= %s that responds to -version (checked JAVA_HOME/"
-                "JAVA21_HOME, the common install locations, java_home and "
-                "PATH; on macOS /usr/bin/javac is a shim and a Homebrew JDK is "
-                "keg-only — export JAVA_HOME=/opt/homebrew/opt/openjdk)"
-                % RELEASE)
-    return None
-
-
-SKIP_REASON = jdk_reason()
+# One reason string for every skip in the tier, naming the cause instead of
+# repeating "no working javac" on a machine that has a perfectly good one.
+# `--release 21` is part of "working": a JDK older than 21 answers -version and
+# then fails the compile with "release version 21 not supported", which is an
+# environment gap like a missing JDK and must read as a skip, not a red suite.
+NO_JDK = (
+    f"no working JDK >= {RELEASE} (javac/java that respond, and javac "
+    f"--release {RELEASE}); checked JAVA_HOME/JAVA21_HOME, the common install "
+    "locations, java_home and PATH. On macOS /usr/bin/javac is a shim and a "
+    "Homebrew JDK is keg-only: export JAVA_HOME=/opt/homebrew/opt/openjdk"
+)
 
 _stub_classes: Path | None = None
 # Emitted units already accepted by javac, keyed by source text. The suite
