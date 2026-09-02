@@ -37,5 +37,14 @@ python3 scripts/axioms_gate.py \
   RevL.G8.boundary_only_declared \
   RevL.CrossTier.cross_tier_agreement \
   RevL.CrossTier.six_tier_agreement \
-  RevL.CrossTier.annotation_necessary < .axioms.out
+  RevL.CrossTier.annotation_necessary \
+  RevL.CapCeilings.cap_order_partial \
+  RevL.CapCeilings.attenuation_monotone \
+  RevL.CapCeilings.lineage_ceiling_le \
+  RevL.CapCeilings.spend_within_budget \
+  RevL.CapCeilings.budget_never_exceeds_root_ceiling \
+  RevL.CapCeilings.confinement_within_ceiling \
+  RevL.CapCeilings.no_star_amplification \
+  RevL.CapCeilings.parameter_widening_refused \
+  RevL.CapCeilings.ceiling_check_not_subsumed < .axioms.out
 python3 harness/diff_corpus.py

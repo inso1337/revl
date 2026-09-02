@@ -34,9 +34,15 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.Semantics.teardown_length` | G7 — length form | **proved** | `propext` | one replay per witnessed effect |
 | `RevL.G8.boundary_enumerates_emissions` | G8 — boundary enumerable (§6.1) | **proved** | `propext, Quot.sound` | completeness: every emission is on the audited surface |
 | `RevL.G8.boundary_only_declared` | G8 | **proved** | `propext, Quot.sound` | soundness: on a typed body the surface is exactly the emissions |
-| `RevL.CrossTier.cross_tier_agreement` | item 133 — cross-tier agreement | **proved** | `propext` | conformant runtimes agree on a well-annotated IR |
-| `RevL.CrossTier.six_tier_agreement` | item 133 | **proved** | `propext` | the six-runtime corollary over `Tier` |
-| `RevL.CrossTier.annotation_necessary` | item 133 | **proved** | none | annotation is necessary: python/ts disagree on a bare literal |
+| `RevL.CapCeilings.cap_order_partial` | item 294 — the `(T,P)` capability order | **proved** | `propext, Quot.sound` | `covers` is reflexive, transitive, antisymmetric |
+| `RevL.CapCeilings.attenuation_monotone` | items 66/294 — attenuation is downward | **proved** | `propext` | a lineage never exceeds the root's declared authority |
+| `RevL.CapCeilings.lineage_ceiling_le` | item 260 — budgets only shrink | **proved** | `propext, Quot.sound` | a dropped child ceiling reads as `+∞`, so it cannot escape |
+| `RevL.CapCeilings.spend_within_budget` | item 260 — the runtime counter | **proved** | `propext, Quot.sound` | `remainingUses` is never overdrawn |
+| `RevL.CapCeilings.budget_never_exceeds_root_ceiling` | item 260 — end to end | **proved** | `propext, Quot.sound` | static shrink composed with the dynamic counter |
+| `RevL.CapCeilings.confinement_within_ceiling` | item 294 + G6 | **proved** | `propext, Quot.sound` | reach is bounded by `Γ`, `Γ` by the root ceiling |
+| `RevL.CapCeilings.no_star_amplification` | item 66 — the host boundary | **proved** | `propext` | `*` is covered only by `*`, so it is never manufactured |
+| `RevL.CapCeilings.parameter_widening_refused` | item 294 — non-vacuity | **proved** | `propext` | tracks `examples/rejections/g4_spawn_widens_parameter.rvl` |
+| `RevL.CapCeilings.ceiling_check_not_subsumed` | item 260 — non-vacuity | **proved** | `propext` | the resource fold is ceiling-blind; the budget check is not |
 
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
@@ -115,7 +121,23 @@ not yet express.
    the five `missed-G4` files. Needs a reachability model for
    arrow/spawn bodies in the export, not a checker change.
 2. **Capability ceilings/budgets** (2.0 features): parameterized
-   capabilities over the `Ctx` model.
+   capabilities over the `Ctx` model. **Mostly done.** The `(T,P)`
+   algebra of `src/revl/cap_order.py` is modelled in the L1 farm
+   `RevL.Lemmas.CapLemmas` (token + valuation, the component-wise path
+   order, discrete resource values, numeric ceilings, the
+   resource/ceiling split), and `RevL.Theorems.CapCeilings` proves the
+   nine rows above: the order is a partial order, attenuation is monotone
+   downward along a lineage of admitted spawns, budgets only shrink, the
+   runtime counter is not overdrawn, and the whole thing composes with
+   G6's confinement through the key-to-token bridge (`capKeys`).
+   **What is left**: the model takes a component's *held* and *reached*
+   capability sets as given, where `lower.py` derives them from the
+   syntax (`_collect_emit_caps`, `_held_capabilities_pairs`,
+   `_spawn_surface_closure`). Deriving them inside the L0 statement
+   fragment needs the same spawn/arrow reachability TODO 1 needs, so the
+   two should land together. Also not modelled: parse-time
+   canonicalization (upstream of the order), and `cap_order.disjoint`'s
+   deferred (D2) same-token clause.
 3. **L3, deliberately deferred**: `Trusted[T]`/`Secret[T]`
    non-interference and WAL commit/abort discharge. Both extend L0 (taint
    is a checker feature, not part of the current core; commit/abort is a
