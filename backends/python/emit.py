@@ -3683,6 +3683,47 @@ _INLINE_IMPURE = frozenset({"call", "optcall", "req", "spawn", "instance-get",
 _INLINE_TRIVIAL = frozenset({"var", "name", "lit", "config", "maplit"})
 
 
+def _inline_bound_names(node: Any, out: set) -> set:
+    """Every name a body BINDS: a `let`/`var`, a `for` bind, a destructure, an
+    arrow parameter, a match-arm payload.
+
+    The frontend refuses a binder that shadows a module callable *visible to
+    its module* (`lower._refuse_callable_shadowing`), but the emitted namespace
+    is FLAT over the whole merged program while resolution is per-module: two
+    modules that never `use` each other may each own the name (selfhost's
+    `fn step` in lexer.rvl against a local `step` in emit_py.rvl). A rewrite
+    keyed on the bare name alone therefore reaches calls that resolve to a
+    local, so a name the body binds is off limits — the same discipline
+    `revl.ownership` applies to its retention summary.
+    """
+    if isinstance(node, list):
+        for item in node:
+            _inline_bound_names(item, out)
+        return out
+    if not isinstance(node, dict):
+        return out
+    if "step" in node:
+        # a STATEMENT binds its `name`/`bind`/`rest`; an expression's `name` is
+        # a read, not a binding
+        for key in ("name", "bind", "rest"):
+            if isinstance(node.get(key), str):
+                out.add(node[key])
+        for name in node.get("names") or []:
+            if isinstance(name, str):
+                out.add(name)
+    elif node.get("kind") == "arrow":
+        for name in node.get("params") or []:
+            if isinstance(name, str):
+                out.add(name)
+    elif node.get("kind") == "match":
+        for arm in node.get("arms") or []:
+            if isinstance(arm, dict) and isinstance(arm.get("bind"), str):
+                out.add(arm["bind"])
+    for child in node.values():
+        _inline_bound_names(child, out)
+    return out
+
+
 def _inline_node_count(node: Any) -> int:
     if isinstance(node, dict):
         return 1 + sum(_inline_node_count(v) for v in node.values())
@@ -3856,13 +3897,14 @@ def _inline_templates(functions: list) -> dict:
 
     memo: dict = {}
 
-    def inline_calls(node: Any, stack: frozenset) -> Any:
+    def inline_calls(node: Any, stack: frozenset, bound: frozenset) -> Any:
         if isinstance(node, dict):
-            node = {k: inline_calls(v, stack) for k, v in node.items()}
+            node = {k: inline_calls(v, stack, bound) for k, v in node.items()}
             callee = node.get("callee")
             if node.get("kind") == "call" and isinstance(callee, dict) \
                     and callee.get("kind") == "var" and callee.get("name") in raw \
-                    and callee.get("name") not in stack:
+                    and callee.get("name") not in stack \
+                    and callee.get("name") not in bound:
                 name = callee["name"]
                 template = expand(name, stack)
                 if template is not None:
@@ -3875,14 +3917,19 @@ def _inline_templates(functions: list) -> dict:
                             return sub
             return node
         if isinstance(node, list):
-            return [inline_calls(v, stack) for v in node]
+            return [inline_calls(v, stack, bound) for v in node]
         return node
 
     def expand(name: str, stack: frozenset) -> dict | None:
         if name in memo:
             return memo[name]
-        result = inline_calls(copy.deepcopy(raw[name][1]), stack | {name})
         param = raw[name][0]
+        # the template's own binders (an arrow parameter, a match-arm payload)
+        # shadow a candidate of the same name inside it, exactly as in a caller
+        bound = _inline_bound_names(raw[name][1],
+                                    {param} if param is not None else set())
+        result = inline_calls(copy.deepcopy(raw[name][1]), stack | {name},
+                              frozenset(bound))
         allowed = {param} if param is not None else set()
         names: set = set()
         _inline_free_names(result, names)
@@ -3914,12 +3961,14 @@ def _inline_pure_fns(ir: dict) -> dict:
     if not templates:
         return ir
 
-    def rewrite(node: Any) -> Any:
+    def rewrite(node: Any, bound: frozenset) -> Any:
         if isinstance(node, dict):
-            node = {k: rewrite(v) for k, v in node.items()}
+            node = {k: rewrite(v, bound) for k, v in node.items()}
             callee = node.get("callee")
             if node.get("kind") == "call" and isinstance(callee, dict) \
-                    and callee.get("kind") == "var" and callee.get("name") in templates:
+                    and callee.get("kind") == "var" \
+                    and callee.get("name") in templates \
+                    and callee.get("name") not in bound:
                 param, template = templates[callee["name"]]
                 args = node.get("args") or []
                 if (param is None) == (len(args) == 0):
@@ -3929,12 +3978,18 @@ def _inline_pure_fns(ir: dict) -> dict:
                         return sub
             return node
         if isinstance(node, list):
-            return [rewrite(v) for v in node]
+            return [rewrite(v, bound) for v in node]
         return node
 
     ir = copy.deepcopy(ir)
     for fn in ir.get("functions") or []:
-        fn["body"] = rewrite(fn.get("body") or [])
+        body = fn.get("body") or []
+        # a call through a name this body binds is not a call to the module fn
+        # of that name (see `_inline_bound_names`), so it is left alone. Taken
+        # over the WHOLE body rather than per-position: a correct un-inlined
+        # call is always a better outcome than a risky inline.
+        bound = _inline_bound_names(body, {p.get("name") for p in fn.get("params") or []})
+        fn["body"] = rewrite(body, frozenset(n for n in bound if isinstance(n, str)))
     return ir
 
 

@@ -111,6 +111,7 @@ from .parser import (
     ExprUn,
     ExprVar,
     FnDecl,
+    FnParam,
     ForStmt,
     HandoffStmt,
     IfStmt,
@@ -5442,6 +5443,161 @@ def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# call-position name resolution (item 445 follow-up)
+#
+# A call whose callee is a bare name lowers to the SAME node either way — a
+# `var` callee — whether the name is a local binding or a module `fn`. Nothing
+# downstream can then tell the two apart, and the consumers do not agree about
+# which one they picked:
+#
+#   * the python backend's template inliner resolves the name to the MODULE FN
+#     (`let helper = g` over a `fn helper` emitted the body of `fn helper`,
+#     silently dropping `g`);
+#   * a TypeScript `const`, a Rust `let` and a Go `:=` all shadow the function
+#     in the emitted code, so those three resolve to the LOCAL;
+#   * Java keeps methods and variables in separate namespaces, so `helper(...)`
+#     next to a `final var helper` binds the STATIC METHOD;
+#   * and the name-keyed frontend analyses (cardinality's recursion set,
+#     emission_analysis' reach, ownership.py's retention summary, taint's
+#     callee map) all read the module fn's facts for a call that may never
+#     reach it.
+#
+# revl already refuses shadowing INSIDE a function — a `let` binds a name once
+# per scope — so the question is only reachable because a module callable was
+# left out of that rule. Putting it back is the whole fix: with no binder able
+# to take a called callable's name, a call-position name has one referent
+# again, and every consumer above is right without carrying a marker each would
+# have to honour separately.
+#
+# Two scoping facts keep this precise rather than merely strict:
+#
+#   * the visible set is the one the CHECKER resolves against, not the whole
+#     merged program. `fn_scopes` keeps a module-private declaration out of
+#     another module's namespace, and two modules that never `use` each other
+#     may reuse a name — selfhost/lexer.rvl declares `fn step` while
+#     selfhost/emit_py.rvl binds a local `step`, and both are correct. That
+#     residue (one flat EMITTED namespace over module-scoped resolution) is the
+#     emitters' to respect, and is handled where it bites, in
+#     backends/python/emit.py's `_inline_bound_names`.
+#   * only a name this body also CALLS is ambiguous. A binding that merely
+#     coincides with a callable's name reads fine and is common — see
+#     backends/wasm/golden/functions.revl, where `fn make_row(id: Int, name:
+#     Str)` sits beside `fn name(row: Row)` and never calls it.
+# ---------------------------------------------------------------------------
+
+def _binder_names(node, out: list) -> None:
+    """Append every `(name, line)` this subtree BINDS.
+
+    A parameter, a `let`/`var`, a destructure, a `for` bind, an arrow
+    parameter, a match-arm payload, and the component-body binders (an effect
+    `let`, an approval `let`, a lifecycle `call ... as`). Traversal is generic
+    over the AST dataclasses so a binder form added to the grammar is covered
+    without a second edit here; only the RECOGNITION is enumerated.
+    """
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _binder_names(item, out)
+        return
+    if not dataclasses.is_dataclass(node) or isinstance(node, type):
+        return
+    if isinstance(node, (FnParam, LetStmt)):
+        out.append((node.name, node.line))
+    elif isinstance(node, LetPatternStmt):
+        pattern = node.pattern
+        if isinstance(pattern, RecordPattern):
+            out.extend((name, pattern.line) for name in pattern.fields)
+        elif isinstance(pattern, ListPattern):
+            out.extend((name, pattern.line) for name in pattern.binds)
+            if pattern.rest:
+                out.append((pattern.rest, pattern.line))
+    elif isinstance(node, (ForStmt, LetEffect, LetApprovalStmt, CallStmt)):
+        if isinstance(node.bind, str):
+            out.append((node.bind, node.line))
+    elif isinstance(node, ExprArrow):
+        out.extend((name, node.line) for name in node.params or [])
+    elif isinstance(node, ExprMatch):
+        for arm in node.arms:
+            if len(arm) > 1 and isinstance(arm[1], str):
+                out.append((arm[1], node.line))
+    for field in dataclasses.fields(node):
+        _binder_names(getattr(node, field.name, None), out)
+
+
+def _called_names(node, out: set) -> None:
+    """Every name used in CALL position — the callee of `f(...)` where `f` is a
+    bare name. A method call (`x.m()`), a module-alias call (`m.f()`) and an
+    immediately applied arrow all name something other than a bare identifier,
+    so none of them can be ambiguous.
+    """
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _called_names(item, out)
+        return
+    if not dataclasses.is_dataclass(node) or isinstance(node, type):
+        return
+    if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
+        out.add(node.callee.name)
+    for field in dataclasses.fields(node):
+        _called_names(getattr(node, field.name, None), out)
+
+
+def _refuse_callable_shadowing(program: Program, filename: str) -> None:
+    """Refuse a body that both BINDS a name and CALLS it, where that name is
+    also a module callable visible to the body.
+
+    Precision matters here: a binding that merely coincides with a callable's
+    name is unambiguous and common (`fn name(row: Row)` alongside `fn
+    make_row(id: Int, name: Str)` — the parameter is a `Str` and is never
+    called), so the refusal is scoped to the position where the two readings
+    actually differ. Whole-body granularity, not per-block: the emitters and
+    the name-keyed analyses all work a function at a time, and a `let` in one
+    arm with the call in another reads no better than the same-block form.
+    """
+    declared = ({fn.name for fn in program.fn_decls}
+                | {ext.name for ext in program.externs})
+    if not declared:
+        return
+    externs = {ext.name for ext in program.externs}
+
+    def check(decl, visible: set, decl_file: str) -> None:
+        if not visible:
+            return
+        called: set = set()
+        _called_names(decl, called)
+        ambiguous = visible & called
+        if not ambiguous:
+            return
+        binders: list = []
+        _binder_names(decl, binders)
+        for name, line in binders:
+            if name not in ambiguous:
+                continue
+            kind = "extern" if name in externs else "function"
+            raise RevlError(
+                decl_file, line,
+                f"`{name}` is bound here and called in this body, and a "
+                f"module {kind} of that name is in scope",
+                hint=f"a call to `{name}` would name both, and the tiers do "
+                     "not agree which wins (a Java local does not shadow a "
+                     "static method, while a TypeScript, Rust or Go local "
+                     "does) — rename the binding. Module `fn`s and `extern`s "
+                     "share one namespace with local bindings, the same way a "
+                     "`let` binds a name once per scope.",
+            )
+
+    for decl in program.fn_decls:
+        # exactly the namespace `_lower_fns` resolves this body's bare names in
+        visible = set(program.fn_scopes.get(id(decl), declared)) | externs
+        check(decl, visible & declared, decl.source or filename)
+    # components and `test`/prop-test blocks resolve against the whole merged
+    # program (`component_callables` in `check_and_lower`), so their visible
+    # set is that same one.
+    for decl in (list(program.components) + list(program.tests)
+                 + list(program.prop_tests)):
+        check(decl, declared, getattr(decl, "source", "") or filename)
+
+
 def check_and_lower(program: Program, ambient: dict | None = None,
                     taint_strict: bool = False, untrusted: bool = False) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
@@ -5501,6 +5657,7 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     types = _lower_type_decls(program, program.filename)
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
+    _refuse_callable_shadowing(program, program.filename)
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename, types, fns)
     # item 256 Slice 1: cross-index the bound secrets against the extern emission

@@ -1,0 +1,17 @@
+// REJECTED — a binding takes the name of a module `fn` that the same body
+// CALLS, so `helper(...)` has two readings and the tiers do not pick the same
+// one: a python, TypeScript, Rust or Go local shadows the function, while a
+// Java local does not shadow a static method of that name. Rename the binding.
+//
+// A binding that merely SHARES a callable's name and never calls it is fine —
+// only the call position is ambiguous.
+//
+// expected error:
+//   `helper` is bound here and called in this body
+
+fn helper(xs: List[Int]) -> Int { return xs.length() }
+
+fn shadowed(g: (List[Int]) -> Int) -> Int {
+  let helper = g
+  return helper([1, 2, 3])
+}
