@@ -581,6 +581,65 @@ def _revl_router(ctx, key, realms, strategy):
     return _RevlRouter(ctx, key, realms, strategy)'''
 
 
+# item 310, `cache pure`: the body-level memo table. The seam gate memoizes a
+# `cache pure` SERVICE METHOD at the call (mcp/session.py), but a `cache pure`
+# plain `fn` is reached from inside a body, where no seam exists — so the memo
+# for it lives in the emitted module, which is where the call actually happens.
+#
+# Sound by construction and by construction only: `_check_cache_declarations`
+# admits `cache pure` on a plain fn ONLY when the emission fixed point says its
+# reach crosses nothing, and G6 then gives equal-arguments-equal-result outright
+# (bodies outside effect forms are pure, captures are by value, no revl value is
+# ever mutated in place). There is no authority in the key because there is no
+# authority in the reach: a crossing-free result is not derived from anyone's
+# grant, so re-delivering it cannot launder one. That is the whole argument, and
+# it is why this is the one cache class with no ledger interaction at all.
+#
+# The key is a WHITELIST over the value shapes this backend emits, never a
+# fallback: an unrecognized shape answers `_REVL_NOMEMO` and the call is simply
+# not memoized. A missing entry is always sound (a miss recomputes a pure
+# function), so an unknown shape costs performance and never correctness.
+_REVL_MEMO_SRC = '''_REVL_MEMO = {}
+_REVL_NOMEMO = object()
+_REVL_MISS = object()
+
+
+def _revl_memo_key(v):
+    """A hashable STRUCTURAL key for a revl value, or `_REVL_NOMEMO`."""
+    if v is None or isinstance(v, (bool, int, float, str, bytes)):
+        return (type(v).__name__, v)
+    if isinstance(v, (list, tuple)):
+        parts = []
+        for item in v:
+            key = _revl_memo_key(item)
+            if key is _REVL_NOMEMO:
+                return _REVL_NOMEMO
+            parts.append(key)
+        return ("seq", tuple(parts))
+    if isinstance(v, dict):
+        parts = []
+        for name in v:
+            if not isinstance(name, str):
+                return _REVL_NOMEMO
+            key = _revl_memo_key(v[name])
+            if key is _REVL_NOMEMO:
+                return _REVL_NOMEMO
+            parts.append((name, key))
+        parts.sort()
+        return ("rec", tuple(sorted(parts)))
+    if callable(v) or getattr(v, "__dict__", None):
+        return _REVL_NOMEMO
+    slots = getattr(type(v), "__slots__", None)
+    if slots == ():
+        return ("adt", type(v).__name__)
+    if slots == ("value",):
+        key = _revl_memo_key(v.value)
+        if key is _REVL_NOMEMO:
+            return _REVL_NOMEMO
+        return ("adt", type(v).__name__, key)
+    return _REVL_NOMEMO'''
+
+
 _REVL_FTOA_SRC = '''def _revl_ftoa(x):
     """Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md)."""
     if x != x:
@@ -2914,6 +2973,46 @@ def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
     out.add(indent, f"assert {_expr(expr)}")
 
 
+def _is_cache_pure(decl: dict) -> bool:
+    """item 310: does this declaration carry `cache pure`? `pure_fn` is the only
+    class that reaches a plain `fn` (the checker refuses the other two there),
+    and it is the only one with no ledger interaction, so it is the only one a
+    backend may honour on its own."""
+    return ((decl.get("cache") or {}).get("class") == "pure_fn")
+
+
+def _uses_cache_pure(ir: dict) -> bool:
+    return any(_is_cache_pure(fn) for fn in ir.get("functions") or [])
+
+
+def _emit_memo_wrapper(name: str, params: list, is_async: bool) -> "_Lines":
+    """The public `cache pure` entry point: a structural-key memo in front of
+    the real body, which is emitted under `_revl_uncached_<name>`.
+
+    The public NAME keeps the wrapper, so a call site and a first-class value
+    reference reach the memo identically — there is no spelling that gets the
+    un-memoized body by accident. The key is namespaced by the fn name, so one
+    table serves the module without two fns ever colliding on equal arguments."""
+    inner = f"_revl_uncached_{name}"
+    args = ", ".join(_ident(p["name"], "parameter name") for p in params)
+    call = f"{'await ' if is_async else ''}{inner}({args})"
+    key_parts = ", ".join([repr(name)] + [_ident(p["name"], "parameter name")
+                                          for p in params])
+    out = _Lines()
+    out.add(0, f"{'async def' if is_async else 'def'} {name}({args}):")
+    out.add(1, '"""item 310 `cache pure`: memoized on the structural args key."""')
+    out.add(1, f"_revl_k = _revl_memo_key(({key_parts},))")
+    out.add(1, "if _revl_k is _REVL_NOMEMO:")
+    out.add(2, f"return {call}")
+    out.add(1, "_revl_v = _REVL_MEMO.get(_revl_k, _REVL_MISS)")
+    out.add(1, "if _revl_v is _REVL_MISS:")
+    out.add(2, f"_revl_v = {call}")
+    out.add(2, "_REVL_MEMO[_revl_k] = _revl_v")
+    out.add(1, "return _revl_v")
+    out.add(0)
+    return out
+
+
 def _emit_functions(functions: list) -> "_Lines":
     global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
     out = _Lines()
@@ -2931,12 +3030,21 @@ def _emit_functions(functions: list) -> "_Lines":
         _PY_IN_ARROW = False
         _PY_AWAIT_LOCALS = {p["name"] for p in fn["params"]
                             if _is_async_fn_type(p.get("type"))}
+        # item 310: a `cache pure` fn renders its real body under a private name
+        # and gains a memo wrapper under the public one (below), so every caller
+        # — including a first-class value reference — goes through the table.
+        memoized = _is_cache_pure(fn)
+        if memoized:
+            name = f"_revl_uncached_{name}"
         out.add(0, f"{'async def' if is_async else 'def'} {name}({params}):")
         if not fn.get("body"):
             out.add(1, "pass")
         for stmt in fn.get("body") or []:
             _fn_stmt(stmt, out, 1)
         out.add(0)
+        if memoized:
+            out.extend(_emit_memo_wrapper(
+                _ident(fn["name"], "function name"), fn["params"], is_async))
     _PY_IN_ASYNC = False
     _PY_IN_ARROW = False
     _PY_AWAIT_LOCALS = set()
@@ -3704,6 +3812,13 @@ def _fn_inline_template(fn: dict) -> tuple[str | None, dict] | None:
     return shape, else None. The guards fold into one conditional expression."""
     if fn.get("async"):
         return None
+    # item 310: a `cache pure` fn is never inlined. The author declared that the
+    # call is worth a table lookup, and inlining would copy the body to every
+    # call site where no memo can see it — the declaration would silently do
+    # nothing. (Inlining is behaviour-preserving, so this costs speed, never
+    # correctness, on a fn small enough to have been a candidate.)
+    if _is_cache_pure(fn):
+        return None
     params = fn.get("params") or []
     if len(params) > 1:
         return None
@@ -4128,6 +4243,13 @@ def emit(ir: dict) -> str:
         # none of which match. `repr` supplies the shortest digits; the rest is
         # the ES notation rule (a shared spec each tier spells in host syntax).
         for line in _REVL_FTOA_SRC.splitlines():
+            out.add(0, line)
+        out.add(0)
+    if _uses_cache_pure(ir):
+        # item 310, `cache pure`: the body-level memo table and its structural
+        # key. Emitted only when some fn declares the clause, so every existing
+        # module is byte-identical.
+        for line in _REVL_MEMO_SRC.splitlines():
             out.add(0, line)
         out.add(0)
     # built-in Result is a tagged ADT (so `match` can discriminate Ok/Err),
