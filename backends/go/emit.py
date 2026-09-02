@@ -3470,9 +3470,6 @@ class _V3GoCtx:
             ex.get("name"): [p.get("type") for p in ex.get("params") or []]
             for ex in externs or []
         }
-        # `{name: "List"|"Map"}` for the current function's uniquely-owned
-        # collection locals; see `_v3_self_rebind_locals` (item 434 (a)/(b)).
-        self.linear_locals: dict = {}
         # `{name: builder}` for the Str accumulators of the loops currently
         # being rendered, and a per-function counter that keeps two sequential
         # loops from declaring the same builder twice in one Go scope;
@@ -4508,7 +4505,8 @@ def _guard_frame_neutral_loop(body) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The self-rebind (unique-ownership) analysis, roadmap item 434 (a) and (b).
+# The self-rebind (unique-ownership) lowering, roadmap item 434 (a) and (b),
+# on item 445's frontend marker.
 #
 # `out = out.push(x)` and `m = m.set(k, v)` lower through revlListPush /
 # revlMapSet, which COPY: the correct lowering for a persistent value, and a
@@ -4517,29 +4515,29 @@ def _guard_frame_neutral_loop(body) -> None:
 # 4,274,103 B against a hand-written `append`'s 1 / 8,192; 1000 map insertions:
 # 3989 / 19,168,881 against an in-place `m[k] = v`'s 5 / 54,609.
 #
-# A destructive lowering is only sound where nothing else can observe the
-# write, so this recognises the shape that makes the value UNIQUELY OWNED by
-# the binding rather than special-casing the assignment. A name qualifies when
-# BOTH hold over the whole function body:
+# A destructive lowering is only sound where nothing else can observe the write,
+# so the rewrite is gated on a proof that the value is UNIQUELY OWNED by the
+# binding rather than on a special case for the assignment. THAT PROOF NO LONGER
+# LIVES HERE. It is an aliasing question about the source and not about Go, item
+# 436 had answered the same question independently for the python tier, and item
+# 445 lifted the single answer into the frontend (`src/revl/ownership.py`) —
+# where it is also flow-sensitive, so a local that escapes at one point and is
+# reborn from a fresh literal before the next write is owned at that write.
 #
-#   1. every write to it is either a fresh allocation this function made (a
-#      list literal or a `Map.empty()`/map literal) or a self-rebind through
-#      one of the write builtins below, with at least one of each; and
-#   2. every other occurrence of the name is a read that retains no reference
-#      to the value: the receiver of a read-only builtin, an index target, a
-#      `for ... of` iterable, or the returned expression.
+# What arrives is `"unique": True` on the `assign` step: the binding owns its
+# object outright at this write, so the copy revlListPush makes is unobservable
+# and `append` is the faithful lowering. Absence means "not proven", which is
+# always the persistent helper.
 #
-# Together these keep the value linear: it is never bound to a second name,
-# passed as an argument, stored into another collection, or captured, so no
-# alias exists to see an in-place write. `return` is allowed because the rule
-# closes over calls too. A caller binds the result with a `let` whose value is
-# a CALL, not a fresh literal, so the caller's binding never qualifies and
-# never writes destructively into what it was handed.
-_V3_LINEAR_READ_METHODS = frozenset({
-    "length", "indexOf", "slice", "concat", "join", "size", "keys",
-    "lookup", "has", "get", "contains",
-})
-# method -> the collection shape it writes, and the destructive Go statement.
+# `"unique": "copy"` is DELIBERATELY NOT HONOURED here. It marks a local born
+# off another name (`var out = m`), owned only if the tier materialises a
+# defensive copy at that birth; the python tier does (`out = dict(m)`), this one
+# does not, and ignoring the marker keeps the copying helper, which is correct.
+# Nothing is `Str`: a Go string cannot be mutated, which is what (e)'s
+# strings.Builder below exists for.
+
+
+# the persistent methods with a destructive Go statement.
 _V3_LINEAR_WRITE_METHODS = {"push": "List", "set": "Map", "remove": "Map"}
 
 
@@ -4552,66 +4550,6 @@ def _v3_walk_nodes(node):
     elif isinstance(node, list):
         for value in node:
             yield from _v3_walk_nodes(value)
-
-
-def _v3_self_rebind_locals(fn_node: dict) -> dict:
-    """The `{name: shape}` map of uniquely-owned collection locals in `fn_node`."""
-    body = fn_node.get("body") or []
-    shape: dict = {}
-    seeded: set = set()
-    rebound: set = set()
-    disqualified: set = {p.get("name") for p in fn_node.get("params") or []}
-    permitted: set = set()  # id() of the `var` nodes an occurrence may sit at
-
-    for stmt in _v3_walk_nodes(body):
-        if stmt.get("step") not in ("let", "assign"):
-            continue
-        name = stmt.get("name")
-        value = stmt.get("value")
-        value = value if isinstance(value, dict) else {}
-        kind = value.get("kind")
-        if kind in ("list", "maplit"):
-            found = "List" if kind == "list" else "Map"
-            target = None
-        elif kind == "builtin" and value.get("method") in _V3_LINEAR_WRITE_METHODS:
-            target = value.get("target")
-            if not (isinstance(target, dict) and target.get("kind") == "var"
-                    and target.get("name") == name):
-                disqualified.add(name)
-                continue
-            found = _V3_LINEAR_WRITE_METHODS[value["method"]]
-        else:
-            disqualified.add(name)
-            continue
-        if shape.setdefault(name, found) != found:
-            disqualified.add(name)
-            continue
-        if target is None:
-            seeded.add(name)
-        else:
-            rebound.add(name)
-            permitted.add(id(target))
-
-    for node in _v3_walk_nodes(body):
-        candidates = []
-        if node.get("kind") == "builtin" and node.get("method") in _V3_LINEAR_READ_METHODS:
-            candidates.append(node.get("target"))
-        elif node.get("kind") in ("index", "len"):
-            candidates.append(node.get("target"))
-        elif node.get("step") == "for":
-            candidates.append(node.get("iterable"))
-        elif node.get("step") == "return":
-            candidates.append(node.get("expr"))
-        for candidate in candidates:
-            if isinstance(candidate, dict) and candidate.get("kind") == "var":
-                permitted.add(id(candidate))
-
-    for node in _v3_walk_nodes(body):
-        if node.get("kind") == "var" and id(node) not in permitted:
-            disqualified.add(node.get("name"))
-
-    return {name: found for name, found in shape.items()
-            if name not in disqualified and name in seeded and name in rebound}
 
 
 # ---------------------------------------------------------------------------
@@ -4718,12 +4656,13 @@ def _go_v3_close_builders(opened: list, ctx: _V3GoCtx, out: list, pad: str) -> N
 def _go_v3_self_rebind(node: dict, ctx: _V3GoCtx, name: str):
     """The destructive Go statement for a qualifying self-rebind, else None.
 
-    `_v3_self_rebind_locals` has already decided that the binding uniquely owns
-    its value, so the copy the persistent helper makes is unobservable and the
-    in-place form is the faithful lowering.
+    The frontend has already decided that the binding uniquely owns its value
+    at THIS write (item 445), so the copy the persistent helper makes is
+    unobservable and the in-place form is the faithful lowering. `"copy"` is not
+    honoured: this tier does not materialise the birth copy it is conditional on.
     """
     raw = node.get("name")
-    if raw not in ctx.linear_locals:
+    if node.get("unique") is not True:
         return None
     value = node.get("value")
     if not (isinstance(value, dict) and value.get("kind") == "builtin"):
@@ -5048,7 +4987,6 @@ def _emit_v3_go_functions(functions: list, ctx: _V3GoCtx) -> list[str]:
         name = _v3_ident(fn.get("name"), "function name")
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         ctx.ret_type = fn.get("returns")
-        ctx.linear_locals = _v3_self_rebind_locals(fn)
         ctx.str_builders = {}
         ctx.str_builder_seq = 0
         params = ", ".join(
@@ -5072,7 +5010,6 @@ def _emit_v3_go_tests(tests: list, ctx: _V3GoCtx) -> list[str]:
         tname = _go_v3_test_name(test.get("name"), used)
         ctx.var_types = {}
         ctx.ret_type = None
-        ctx.linear_locals = _v3_self_rebind_locals(test)
         ctx.str_builders = {}
         ctx.str_builder_seq = 0
         # `revlT` (not `t`) so a user binding named `t` can't shadow it.

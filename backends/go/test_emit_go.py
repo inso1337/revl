@@ -217,6 +217,14 @@ def _has(src, needle):
     assert _ws(needle) in _ws(src), f"missing (ws-insensitive): {needle!r}"
 
 
+def _body(src, name):
+    """One emitted function, so an assertion about a lowering cannot be
+    satisfied (or defeated) by an identically-spelled line in a runtime helper
+    — `revlListPush`'s own body is `out = append(out, x)`."""
+    start = src.index(f"func {name}(")
+    return src[start:src.index("\n}\n", start)]
+
+
 def test_v3_tests_emit_shapes():
     src = emit.emit(_load(V3_TESTS), package="tests")
     assert "ir_version 3" in src
@@ -917,9 +925,14 @@ fn drop(words: List[Str]) -> Int {
 
 def test_self_rebind_refused_when_the_old_value_can_be_observed():
     """Each function here writes the binding exactly as `collect` does, and
-    each adds one way for the previous value to survive the rebind. None may
-    lower in place: `append` would write into a slice a second name still
-    holds, and `m[k] = v` is visible through every reference to the map."""
+    each adds one way for the previous value to survive the rebind. The write
+    THAT ESCAPE CAN REACH may not lower in place: `append` would write into a
+    slice a second name still holds.
+
+    Item 445 made the question per-write instead of per-name, so the write
+    BEFORE each escape is still owned and still lowers in place — nothing holds
+    the value yet at that point. The copying `revlListPush` then rebinds `out`
+    to a brand-new slice, which is why the escape does not leak past it."""
     src = emit.emit(_compile("""
 fn size_of(xs: List[Int]) -> Int { return xs.length() }
 fn aliased(n: Int) -> List[Int] {
@@ -929,11 +942,6 @@ fn aliased(n: Int) -> List[Int] {
   out = out.push(n)
   return snap
 }
-fn passed(n: Int) -> Int {
-  var out: List[Int] = []
-  out = out.push(n)
-  return size_of(out)
-}
 fn nested(n: Int) -> List[List[Int]] {
   var out: List[Int] = []
   var rows: List[List[Int]] = []
@@ -942,12 +950,50 @@ fn nested(n: Int) -> List[List[Int]] {
   out = out.push(n)
   return rows
 }
+fn loopwise(xs: List[Int]) -> List[List[Int]] {
+  var out: List[Int] = []
+  var rows: List[List[Int]] = []
+  for (x of xs) {
+    rows = rows.push(out)
+    out = out.push(x)
+  }
+  return rows
+}
 """))
-    assert src.count("revlListPush(out, n)") == 5
+    # one refused write per function: the one the escape above it reaches
+    assert _body(src, "aliased").count("out = revlListPush(out, n)") == 1
+    assert _body(src, "aliased").count("out = append(out, n)") == 1
+    assert _body(src, "nested").count("out = revlListPush(out, n)") == 1
+    assert _body(src, "nested").count("out = append(out, n)") == 1
+    # the escape is a loop-carried one in `loopwise`: the fixpoint over the back
+    # edge carries `rows = rows.push(out)` round to the push below it, so unlike
+    # the straight-line pairs above there is no owned write left in that body
+    assert "out = append(out, x)" not in _body(src, "loopwise")
     # `rows` is written from `rows.push(out)`, a self-rebind, but `out` is an
     # ARGUMENT there, which is what disqualifies `out`, not `rows`. `rows` is
     # never aliased, so it still lowers in place.
     _has(src, "rows = append(rows, out)")
+
+
+def test_a_call_argument_still_disqualifies_the_write_after_it():
+    """The rule closes over calls: an intraprocedural analysis must assume a
+    call retains what it is handed, so the write the call's escape reaches
+    keeps the copying helper (roadmap item 445 (b) is the summary that would
+    answer it)."""
+    src = emit.emit(_compile("""
+fn size_of(xs: List[Int]) -> Int { return xs.length() }
+fn passed(xs: List[Int]) -> Int {
+  var out: List[Int] = []
+  var seen = 0
+  for (x of xs) {
+    seen = seen + size_of(out)
+    out = out.push(x)
+  }
+  return seen
+}
+"""))
+    assert "out = revlListPush(out, x)" in _body(src, "passed")
+    assert "out = append(out, x)" not in _body(src, "passed")
 
 
 # ---------------------------------------------------------------------------
