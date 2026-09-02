@@ -1788,7 +1788,7 @@ fn handle_call(inner: FieldN, op: &str, args: Vec<Expr>, tg: Expr, marked: bool,
 };
 }
 
-fn handle_emit(h: String, key: &str, op: &str, args: Vec<Expr>, marked: bool, cx: Ctx, a: Ac) -> Ac {
+fn handle_msig(h: String, key: &str, op: &str, cx: Ctx) -> MSig {
     let comp = match cx.handles.get(&h).cloned() {
     Some(c) => c,
     None => String::from(""),
@@ -1799,11 +1799,19 @@ fn handle_emit(h: String, key: &str, op: &str, args: Vec<Expr>, marked: bool, cx
     None => String::from(""),
     _ => unreachable!(),
 };
-    let decl = find_msig(svc_of(cx.clone(), svcName.clone()), op, 0i64);
+    return find_msig(svc_of(cx.clone(), svcName.clone()), op, 0i64);
+}
+
+fn handle_emit(h: String, key: &str, op: &str, args: Vec<Expr>, marked: bool, cx: Ctx, a: Ac) -> Ac {
+    let decl = handle_msig(h.clone(), key, op, cx.clone());
     if (decl.isEm && (!marked)) {
         return ac_refuse(a.clone(), String::from("G4"), (((((String::from("call to emission `").revl_concat(&h)).revl_concat(&String::from("."))).revl_concat(&key)).revl_concat(&String::from("."))).revl_concat(&op)).revl_concat(&String::from("` must be marked `emit` (G4)")));
     }
-    return walk_exprs(args.clone(), 0i64, marked, cx.clone(), a.clone());
+    let mut na = a.clone();
+    if (decl.isAsync && (!cx.underArrow)) {
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: union_into(na.aops.clone(), vec![(((h.revl_concat(&String::from("."))).revl_concat(&key)).revl_concat(&String::from("."))).revl_concat(&op)]), avals: na.avals.clone() };
+    }
+    return walk_exprs(args.clone(), 0i64, marked, cx.clone(), na.clone());
 }
 
 fn is_upper_head(name: &str) -> bool {
@@ -2165,6 +2173,13 @@ fn reach_reqcall(v: String, meth: &str, args: Vec<Expr>, cx: Ctx, cr: bool, a: R
     return reach_exprs(args.clone(), 0i64, cx.clone(), cr, a2.clone());
 }
 
+fn reach_handlecall(inner: FieldN, op: &str, args: Vec<Expr>, tg: Expr, cx: Ctx, cr: bool, a: ReachAcc) -> ReachAcc {
+    return match inner.target.clone() {
+    Expr::Var(h) => if (cr && cx.handles.contains_key(&h)) { reach_exprs(args.clone(), 0i64, cx.clone(), cr, if handle_msig(h.clone(), &inner.name, op, cx.clone()).isAsync { reach_set_req(a.clone()) } else { a.clone() }) } else { reach_exprs(args.clone(), 0i64, cx.clone(), cr, reach_scan(tg.clone(), cx.clone(), cr, a.clone())) },
+    _ => reach_exprs(args.clone(), 0i64, cx.clone(), cr, reach_scan(tg.clone(), cx.clone(), cr, a.clone())),
+};
+}
+
 fn reach_args(args: Vec<Expr>, i: i64, asl: Vec<i64>, cx: Ctx, cr: bool, a: ReachAcc) -> ReachAcc {
     if (i >= args.revl_length()) {
         return a;
@@ -2179,6 +2194,7 @@ fn reach_call(tg: Expr, args: Vec<Expr>, cx: Ctx, cr: bool, a: ReachAcc) -> Reac
     return match tg.clone() {
     Expr::Field(fl) => { let fl = *fl; match fl.target.clone() {
     Expr::Var(v) => reach_reqcall(v.clone(), &fl.name, args.clone(), cx.clone(), cr, a.clone()),
+    Expr::Field(inner) => { let inner = *inner; reach_handlecall(inner, &fl.name, args.clone(), tg.clone(), cx.clone(), cr, a.clone()) },
     _ => reach_exprs(args.clone(), 0i64, cx.clone(), cr, reach_scan(tg.clone(), cx.clone(), cr, a.clone())),
 } },
     Expr::Var(n) => reach_args(args.clone(), 0i64, match cx.fnAsyncSlots.get(&n).cloned() {
