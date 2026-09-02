@@ -12,7 +12,9 @@ default session and (for two of them) the item-246 approval policy fully engaged
      exfiltrated a `.env`;
   4. `files` accepted absolute paths and `../` traversal, making every path on
      the machine a syntax/existence/line-number oracle — and `revl_restore` +
-     `revl_snapshot` returned an arbitrary file's full CONTENT.
+     `revl_snapshot` returned an arbitrary file's full CONTENT. The same oracle
+     was reachable a second way (roadmap 425 F2's tail): a `use` path written
+     inside transport-carried source, which the compile follows and reads.
 
 The decision, asserted here: an MCP-driving agent is NOT a trusted host-code
 author. `server.AUTHORING` is the operator's explicit, default-closed control;
@@ -267,6 +269,94 @@ def test_restore_plus_snapshot_is_no_longer_an_arbitrary_file_read(tmp_path):
     assert payload["ok"] is False
     assert "outside the operator-sanctioned root" in _message(payload)
     assert _call("revl_snapshot", {})["ok"] is False
+
+
+# --------------------------------- (4b) the jail covers `use` paths in source
+#
+# Roadmap 425 F2's tail: the argument jail reads path ARGUMENTS, and a `use`
+# path is a path argument that rides inside the source text instead of beside
+# it. The compile follows it (`_ModuleLoader.resolve_use` joins it to the
+# importing directory and reads whatever is there), so it was the same
+# filesystem oracle by another carrier. Item 422's lesson: a guard on the
+# destination that does not cover the source is not a guard.
+
+_IMPORTER = 'use "{path}" as m\ncomponent A {{ }}\n'
+
+
+@pytest.mark.parametrize("path", [
+    "/etc/passwd",
+    "/etc/definitely-not-here-9f2c",
+    "../../../../../etc/passwd",
+    "../outside.rvl",
+])
+def test_a_use_path_leaving_the_root_is_refused_in_transport_source(path):
+    for verb in ("revl_check", "revl_audit", "revl_plan", "revl_tools",
+                 "revl_load"):
+        payload = _call(verb, {"source": _IMPORTER.format(path=path),
+                               "modules": {"unused.rvl": "// x\n"}})
+        assert payload["ok"] is False, verb
+        assert "leaves the operator-sanctioned root" in _message(payload), verb
+        assert payload["note"] == "nothing was read, compiled or loaded", verb
+
+
+def test_a_use_path_inside_a_supplied_module_is_refused_too():
+    """The importer does not have to be the top-level candidate: a `modules`
+    entry is transport-carried source as well, and its imports resolve the
+    same way."""
+    payload = _call("revl_check", {
+        "source": 'use "m.rvl" as m\ncomponent A { }\n',
+        "modules": {"m.rvl": 'use "/etc/passwd" as p\n'
+                             "pub fn q(n: Int) -> Int { return n }\n"}})
+    assert payload["ok"] is False
+    assert "leaves the operator-sanctioned root" in _message(payload)
+
+
+def test_the_use_refusal_is_not_itself_an_oracle():
+    present = "/etc/passwd"
+    absent = "/etc/definitely-not-here-9f2c"
+    a = _call("revl_check", {"source": _IMPORTER.format(path=present)})
+    b = _call("revl_check", {"source": _IMPORTER.format(path=absent)})
+    assert a["diagnostics"][0]["message"].replace(present, "X") == \
+        b["diagnostics"][0]["message"].replace(absent, "X")
+
+
+def test_the_use_refusal_names_what_the_caller_can_do_instead():
+    payload = _call("revl_check", {"source": _IMPORTER.format(path="/etc/passwd")})
+    hint = payload["diagnostics"][0]["hint"]
+    assert "`modules`" in hint and "stdlib/str.rvl" in hint
+
+
+def test_an_in_memory_module_import_still_works():
+    """The exemption that keeps the jail from breaking the normal shape: a path
+    the caller also supplies in `modules` resolves out of the sources map, so no
+    filesystem is touched and there is nothing to confine."""
+    payload = _call("revl_check", {
+        "source": 'use "m.rvl" as m\ncomponent A { }\n',
+        "modules": {"m.rvl": "pub fn q(n: Int) -> Int { return n }\n"}})
+    assert payload["ok"] is True, _message(payload)
+
+
+def test_the_installed_stdlib_spelling_still_resolves():
+    payload = _call("revl_check", {
+        "source": 'use "stdlib/str.rvl" as s\ncomponent A { }\n',
+        "modules": {"unused.rvl": "// x\n"}})
+    assert payload["ok"] is True, _message(payload)
+
+
+def test_an_operator_authored_file_keeps_its_own_relative_imports(tmp_path):
+    """The premise the jail rests on, asserted: bytes reach a sanctioned path
+    only because a human put them there, so a composition laid out as
+    `root/app.rvl` importing `../lib/x.rvl` is the OPERATOR's layout and is not
+    an agent traversal. Refusing it would be the regression."""
+    lib = tmp_path.parent / f"lib-{tmp_path.name}.rvl"
+    lib.write_text("pub fn q(n: Int) -> Int { return n }\n", encoding="utf-8")
+    app = tmp_path / "app.rvl"
+    app.write_text(f'use "../{lib.name}" as l\n'
+                   "service S { fn f(x: Str) -> Str }\n"
+                   "component C provides s: S { provide s { fn f(x) = x } }\n",
+                   encoding="utf-8")
+    payload = _call("revl_check", {"files": [str(app)]})
+    assert payload["ok"] is True, _message(payload)
 
 
 # ------------------------------------------- the operator's granted providers
