@@ -1,0 +1,7 @@
+// F4: `==` on two Int operands, in a loop. The java emitter renders every
+// `==` as `java.util.Objects.equals(..)`, which boxes both sides.
+fn count_eq(xs: List[Int], t: Int) -> Int {
+  var n = 0
+  for (x of xs) { if (x == t) { n += 1 } }
+  return n
+}
