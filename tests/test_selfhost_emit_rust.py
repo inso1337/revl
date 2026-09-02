@@ -120,6 +120,10 @@ CORPUS = [
     "strings.rvl",   # string `+` via format!, `${..}` interpolation, literals
     "lists.rvl",     # list literal, index, the sync arrow bound to a `let`
     "maps.rvl",      # the empty map literal and the Map/List generic type lowering
+    "perf_shapes.rvl",  # item 437 — the `== "lit"` literal borrow and the `+`
+                        #   self-append rewrite. 437 found NO fixture reached
+                        #   either shape, so the oracle stayed green over an
+                        #   unported optimisation; this closes that (item 429)
     # slice 2 — the v3 typed-core:
     "records.rvl",   # record `type` -> `pub struct`, record literal + field clone,
                      #   field access, a record-typed field, List[Point] lowering
