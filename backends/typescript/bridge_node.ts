@@ -19,6 +19,7 @@
 
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -33,8 +34,16 @@ const REPO = path.resolve(HERE, '..', '..')
 const VENV_PY = path.join(REPO, 'backends', 'python', '.venv', 'bin', 'python')
 const PROVIDER = path.join(REPO, 'demo', 'bridge_pypy.py')
 
-const sock = `/tmp/revl_pynode_${process.pid}.sock`
-const trace = `/tmp/revl_pynode_${process.pid}.trace`
+// Both the socket and the trace live in a private directory that mkdtemp
+// CREATES (0700, name chosen by the OS), not at a path derived from the pid.
+// A pid-derived name under a world-writable /tmp is guessable, so anyone on
+// the box can pre-create the path — as a symlink, say — and the writeFileSync
+// below follows it. mkdtemp fails rather than reuses if the name is taken,
+// which is the property that closes it. Kept under os.tmpdir() because `sock`
+// is bound as a unix socket and that path has a ~100-byte limit.
+const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'revl-pynode-'))
+const sock = path.join(tmpdir, 'bridge.sock')
+const trace = path.join(tmpdir, 'bridge.trace')
 fs.writeFileSync(trace, '')
 
 let failures = 0
@@ -102,12 +111,10 @@ check('reactive-deactivation',
 const inverses = hostLog.filter((e) => e.includes('.remove(') || e.includes('.drop'))
 check('lifo-inverses', inverses.length > 0, `consumer inverses replayed: ${JSON.stringify(inverses)}`)
 
-for (const stale of [sock, trace]) {
-  try {
-    fs.unlinkSync(stale)
-  } catch {
-    /* already gone */
-  }
+try {
+  fs.rmSync(tmpdir, { recursive: true, force: true })
+} catch {
+  /* already gone */
 }
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) FAILED`)
 process.exit(failures === 0 ? 0 : 1)
