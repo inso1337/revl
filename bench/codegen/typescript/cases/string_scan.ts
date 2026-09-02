@@ -1,15 +1,21 @@
 // CASE: a character scan over a string.
 //
-// Emitter sites: backends/typescript/emit.py `_REVL_STR_HELPER` (the
-// `Array.from(...)` bodies of `revlLen` / `revlCharAt` / `revlCharCodeAt` /
-// `revlSlice`) and the `while` lowering in `_v3_stmt`, which re-evaluates the
-// loop condition (hence `revlLen(s)`) on every iteration.
+// Emitter sites: backends/typescript/emit.py `_REVL_STR_HELPER` (the bodies of
+// `revlLen` / `revlCharAt` / `revlCharCodeAt` / `revlSlice`, which all index a
+// code-point decode of the receiver) and the `while` lowering in `_v3_stmt`,
+// which re-evaluates the loop condition (hence `revlLen(s)`) on every
+// iteration.
 //
-// Two hand variants so the two costs separate:
-//   handMemo   - helper-level only: one memoised code-point array. No change
-//                to the loop shape, so an emitter fix here touches ONLY the
-//                helper text, not any lowering.
-//   handHoist  - what a competent developer actually writes: decode once,
+// Item 435(c) fixed the helper: the decode is now memoised in `revlCps`, so
+// the emitted scan materialises exactly n code points instead of 2n^2 + n. The
+// `while` lowering is UNCHANGED — it still calls `revlLen(s)` per iteration —
+// which is exactly the point: the helper fix alone makes that call O(1).
+//
+// Two hand variants so the two costs stay separated:
+//   handMemo   - helper-level only: a memoised code-point array, loop shape
+//                untouched. This is the shape the emitter now produces, kept
+//                as an independent implementation to compare against.
+//   hand       - what a competent developer actually writes: decode once,
 //                index an array, hoist the length.
 
 import { count_digits as emittedCountDigits, checksum as emittedChecksum }
@@ -87,13 +93,16 @@ export function handChecksum(s: string): bigint {
 
 export const name = 'string-scan-helpers'
 export const summary =
-  'revlLen/revlCharAt/revlCharCodeAt each rebuild the whole code-point array, ' +
-  'and the while lowering re-evaluates revlLen every iteration, so an index ' +
-  'scan is quadratic in time and allocation'
+  'revlLen/revlCharAt/revlCharCodeAt/revlSlice share one memoised code-point ' +
+  'decode (item 435(c)), so an index scan materialises n code points, not ' +
+  '2n^2 + n, even though the while lowering still calls revlLen per iteration'
 
 export const provenance = [
-  { file: 'string_scan.ts', snippet: 'return BigInt(typeof x === "string" ? Array.from(x).length : x.length)' },
-  { file: 'string_scan.ts', snippet: 'const c = Array.from(s)[Number(i)]' },
+  // the single decode site: every helper goes through it
+  { file: 'string_scan.ts', snippet: 'const v = Array.from(s)' },
+  { file: 'string_scan.ts', snippet: 'return BigInt(typeof x === "string" ? revlCps(x).length : x.length)' },
+  { file: 'string_scan.ts', snippet: 'const c = revlCps(s)[Number(i)]' },
+  // the loop condition is still re-evaluated: the win is the helper, not a hoist
   { file: 'string_scan.ts', snippet: 'while ((i < revlLen(s)))' },
 ]
 

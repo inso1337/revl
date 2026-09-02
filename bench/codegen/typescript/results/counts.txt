@@ -45,7 +45,7 @@ all default numbers are COUNTS, not durations: they do not move with machine loa
   EXCESS vs hand: 0 microtask turns, 0 promise allocations
 
 ## string-scan-helpers
-  revlLen/revlCharAt/revlCharCodeAt each rebuild the whole code-point array, and the while lowering re-evaluates revlLen every iteration, so an index scan is quadratic in time and allocation
+  revlLen/revlCharAt/revlCharCodeAt/revlSlice share one memoised code-point decode (item 435(c)), so an index scan materialises n code points, not 2n^2 + n, even though the while lowering still calls revlLen per iteration
   emitted     microtask turns         2   promise allocs         3 per run
   hand-memo   microtask turns         2   promise allocs         3 per run
   hand        microtask turns         2   promise allocs         3 per run
@@ -54,11 +54,11 @@ all default numbers are COUNTS, not durations: they do not move with machine loa
 ## string-scan allocation complexity: code points materialised by Array.from
   (count_digits over an n-code-point ASCII string; exact counts, no timing)
   n           emitted        memo         hand
-  200             80200          200          200
-  400            320400          400          400
-  800           1280800          800          800
-  1600          5121600         1600         1600
-  emitted grows as 2n^2 + n; memo and hand are n. Quadratic in the input length.
+  200               200          200          200
+  400               400          400          400
+  800               800          800          800
+  1600             1600         1600         1600
+  emitted: LINEAR in n (x2.0 per doubling of 200..1600)
 
 ## list-build element copies (exact counts, no timing)
   n         emitted         hand
@@ -66,4 +66,4 @@ all default numbers are COUNTS, not durations: they do not move with machine loa
   100          4950            0
   200         19900            0
   400         79800            0
-  emitted grows as n(n-1)/2; hand copies nothing. Quadratic in the list length.
+  emitted: QUADRATIC in n (x4.0 per doubling of 50..400); hand copies nothing.

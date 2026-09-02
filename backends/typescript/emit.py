@@ -3073,8 +3073,42 @@ _REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
 # the union rather than failing overload resolution, and the last signature
 # is the implementation: it keeps the runtime dispatch for that same case,
 # where lying with a cast would be worse than admitting the union.
-_REVL_STR_HELPER = """function revlLen(x: string | ArrayLike<unknown>): bigint {
-  return BigInt(typeof x === "string" ? Array.from(x).length : x.length)
+#
+# `revlCps` is the decode, and it is MEMOISED (item 435(c)). Every helper below
+# measures or indexes a string's code points, and `Array.from` builds that
+# decomposition in O(n); done per call, the idiomatic index scan
+# `while (i < s.length()) { ... s.charAt(i) ... }` materialises 2n^2 + n code
+# points and throws all but n of them away, which put 94.8% of that program's
+# self-samples inside these helpers. Memoising collapses the count to exactly
+# n and touches no lowering. TWO slots, not one: a pairwise scan over two
+# strings (comparing them, merging them) is common enough that a single slot
+# thrashes, and a thrashing cache is the pre-memo cost. The miss path IS the
+# pre-memo code, so the cache never costs more than the compare that missed;
+# `===` on strings checks the pointer first, so the hot case — the same string
+# handed back every iteration — is one pointer compare. The array is never
+# handed out to a mutating caller (`slice` copies), and the cache retains at
+# most two strings for the module's lifetime, which is the price of linearity.
+# `revlIndexOf` deliberately stays on its own `Array.from`: its argument is a
+# fresh substring per call, so caching it would evict the scan's entry.
+_REVL_STR_HELPER = """let revlCpsK0: string | undefined
+let revlCpsV0: string[] = []
+let revlCpsK1: string | undefined
+let revlCpsV1: string[] = []
+function revlCps(s: string): string[] {
+  if (s === revlCpsK0) return revlCpsV0
+  if (s === revlCpsK1) {
+    const k = revlCpsK1, v = revlCpsV1
+    revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0
+    revlCpsK0 = k; revlCpsV0 = v
+    return v
+  }
+  const v = Array.from(s)
+  revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0
+  revlCpsK0 = s; revlCpsV0 = v
+  return v
+}
+function revlLen(x: string | ArrayLike<unknown>): bigint {
+  return BigInt(typeof x === "string" ? revlCps(x).length : x.length)
 }
 function revlSlice(x: string, a: bigint, b: bigint): string
 function revlSlice(x: Uint8Array, a: bigint, b: bigint): Uint8Array
@@ -3083,15 +3117,15 @@ function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unkn
 function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[] {
   const i = Number(a), j = Number(b)
   return typeof x === "string"
-    ? Array.from(x).slice(i, j).join("")
+    ? revlCps(x).slice(i, j).join("")
     : (x as string | Uint8Array | unknown[]).slice(i, j)
 }
 function revlCharAt(s: string, i: bigint): string {
-  const c = Array.from(s)[Number(i)]
+  const c = revlCps(s)[Number(i)]
   return c === undefined ? "" : c
 }
 function revlCharCodeAt(s: string, i: bigint): bigint {
-  const c = Array.from(s)[Number(i)]
+  const c = revlCps(s)[Number(i)]
   return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))
 }
 function revlIndexOf(x: string | unknown[], v: unknown): bigint {
