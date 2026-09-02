@@ -228,8 +228,11 @@ def test_exit_py_executes_both_paths(tmp_path):
     import subprocess
     import sys
 
-    (tmp_path / "runtime.py").write_text(
-        (ROOT / "backends" / "python" / "runtime.py").read_text())
+    # `runtime.py` reads its sibling `confidential.py` (the item-256
+    # Slice 3 redaction choke point), so the scratch dir needs both.
+    for _module in ("runtime.py", "confidential.py"):
+        (tmp_path / _module).write_text(
+            (ROOT / "backends" / "python" / _module).read_text())
     (tmp_path / "app.py").write_text(_emit("python", compile_source(_EXIT, "exit.rvl")))
     (tmp_path / "driver.py").write_text(
         "import warnings\n"

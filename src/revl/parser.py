@@ -115,6 +115,12 @@ class ConfigField:
     type: str
     default: object
     line: int
+    # item 256 Slice 3: set by `taint.extract_and_normalize` when the author
+    # declared the field `Secret[T]`. The qualifier is stripped off `type` there
+    # (so the base checker and every emitter see a bare type, exactly as for a
+    # parameter), and this flag is what survives into the IR — the only channel
+    # by which the runtime learns the field must not be externalised.
+    secret: bool = False
 
 
 @dataclass

@@ -324,8 +324,11 @@ def test_exit_py_async_extern_await_runs_with_no_coroutine_leak(tmp_path):
         + '  unload Plugin\n  assert no_residue\n'
         + '}\n'
     )
-    (tmp_path / "runtime.py").write_text(
-        (root / "backends" / "python" / "runtime.py").read_text())
+    # `runtime.py` reads its sibling `confidential.py` (the item-256
+    # Slice 3 redaction choke point), so the scratch dir needs both.
+    for _module in ("runtime.py", "confidential.py"):
+        (tmp_path / _module).write_text(
+            (root / "backends" / "python" / _module).read_text())
     (tmp_path / "app.py").write_text(_emit_py(compile_source(exit_src, "exit.rvl")))
     (tmp_path / "driver.py").write_text(
         "import warnings\n"
