@@ -36,7 +36,7 @@ import json
 
 from .. import cap_order
 from ..policy import TAINT_FOLD_ORIGINS, component_realms
-from ..query import Composition, SHARED_REALM
+from ..query import Composition, SHARED_REALM, _walk
 from ..taint import REDACTED_SECRET
 
 # worst-class ordering: (c) > (b) > (a) > none. One prompt covers the whole call
@@ -71,6 +71,52 @@ def _semantic(entry: dict) -> dict:
     `operator._changed_targets` use). Two compiles of the same component compare
     equal, so the reach-closure hash is stable across an edit elsewhere."""
     return {k: v for k, v in entry.items() if k != "source"}
+
+
+def _called_names(nodes) -> set:
+    """Callable names a lowered tree references, both call encodings (the same
+    walk `query._called_names` uses). Used to close the candidate hash over the
+    host bodies a component actually reaches (item 427 F4)."""
+    from ..lower import _calls_in  # noqa: PLC0415
+
+    found: set = set()
+    _calls_in(nodes, found)
+    return found
+
+
+def _rebound_names(nodes) -> set:
+    """Every name a lowered scope BINDS after entry: `let`/`assign` targets and
+    `for`/`effect` binders. A method parameter that appears here no longer names
+    the caller's argument at the extern call site, so the resource-scope dataflow
+    refuses to bind it (item 427 F2)."""
+    names: set = set()
+    for node in _walk(nodes):
+        if not isinstance(node, dict):
+            continue
+        step = node.get("step")
+        if step in ("let", "assign") and isinstance(node.get("name"), str):
+            names.add(node["name"])
+        elif step in ("for", "effect") and isinstance(node.get("bind"), str):
+            names.add(node["bind"])
+    return names
+
+
+def _call_arg_lists(nodes, callee: str) -> list:
+    """Every positional argument list at a DIRECT call to `callee` inside
+    `nodes`. Both lowered encodings: the component `{kind: fn, name}` form and
+    the pure `{kind: call, callee: {kind: var, name}}` form."""
+    out: list = []
+    for node in _walk(nodes):
+        if not isinstance(node, dict):
+            continue
+        if node.get("kind") == "fn" and node.get("name") == callee:
+            out.append(list(node.get("args") or []))
+        elif node.get("kind") == "call":
+            target = node.get("callee")
+            if isinstance(target, dict) and target.get("kind") == "var" \
+                    and target.get("name") == callee:
+                out.append(list(node.get("args") or []))
+    return out
 
 
 def _canon(obj) -> str:
@@ -111,6 +157,19 @@ class ClassMap:
         self._direct: dict[str, dict] = {}
         for sid, scope in self.index.scopes.items():
             self._direct[sid] = self._classify_direct(scope)
+        # class-(c) capability -> the scopes that raise it DIRECTLY. The
+        # resource-scope dataflow (item 427 F2) may only bind a token whose sole
+        # origin inside the reach closure is the scope the caller's args land in.
+        self._classc_scopes: dict[str, set] = {}
+        for sid, direct in self._direct.items():
+            for cap in direct["classC"]:
+                self._classc_scopes.setdefault(cap, set()).add(sid)
+        # component -> (externs, pure fns) its scopes reach. The candidate hash
+        # closes over these (item 427 F4): the `@py` host bodies ARE the crossing,
+        # so a swap that rewrites only a body must invalidate the standing token.
+        self._reached_host: dict[str, tuple] = {}
+        for name in self.index.components:
+            self._reached_host[name] = self._reached_host_code(name)
         # the reach-closure fold: worst class over the scope AND every scope it
         # reaches across the service seam (Decision 1's worst-class-over-reach).
         self._reach: dict[str, dict] = {}
@@ -207,6 +266,29 @@ class ClassMap:
 
     # -- reach-closure fold -------------------------------------------------
 
+    def _reached_host_code(self, component: str) -> tuple:
+        """The externs and pure functions this component's scopes reach, directly
+        or through the pure-fn call graph. The candidate hash folds their SEMANTIC
+        entries in (item 427 F4) so a swap that changes only an `@py` host body -
+        the thing that actually crosses the boundary - recomputes a different hash
+        and every standing token pinned to the old closure fails closed."""
+        work: list = []
+        for sid in self.index.scopes_of.get(component) or []:
+            scope = self.index.scopes.get(sid)
+            if scope is not None:
+                work += sorted(_called_names(scope["nodes"]))
+        externs: set = set()
+        fns: set = set()
+        while work:
+            name = work.pop()
+            if name in self.index.externs:
+                externs.add(name)
+            elif name in self.index.functions and name not in fns:
+                fns.add(name)
+                body = self.index.functions[name].get("body") or []
+                work += sorted(_called_names(body))
+        return frozenset(externs), frozenset(fns)
+
     def _fold_closure(self, sid: str) -> dict:
         direct = self._direct[sid]
         cls = direct["class"]
@@ -214,6 +296,7 @@ class ClassMap:
         caps = set(direct["capabilities"])
         class_c = set(direct["classC"])
         comps = {self.index.scopes[sid]["component"]}
+        scopes = {sid}
         for reached in self.index.closure(sid):
             rsid = reached["scope"]
             rdirect = self._direct[rsid]
@@ -222,8 +305,10 @@ class ClassMap:
             caps |= rdirect["capabilities"]
             class_c |= rdirect["classC"]
             comps.add(self.index.scopes[rsid]["component"])
+            scopes.add(rsid)
         return {"class": cls, "crossings": crossings, "capabilities": caps,
-                "classC": class_c, "closureComponents": comps}
+                "classC": class_c, "closureComponents": comps,
+                "closureScopes": frozenset(scopes)}
 
     # -- lookups ------------------------------------------------------------
 
@@ -260,7 +345,8 @@ class ClassMap:
         reach = self._reach.get(sid)
         if reach is None:
             return None
-        return {**reach, "component": provider, "key": key, "method": method}
+        return {**reach, "component": provider, "key": key, "method": method,
+                "scopeId": sid}
 
     def crossings_for_capability(self, capability: str) -> list[dict]:
         """Every LIVE class-(c) crossing whose declared reach COVERS `capability`,
@@ -308,7 +394,8 @@ class ClassMap:
             reach = self._reach.get(sid)
             if reach is None:
                 continue
-            out.append({**reach, "component": name, "key": None, "method": None})
+            out.append({**reach, "component": name, "key": None, "method": None,
+                        "scopeId": sid})
         return out
 
     # -- the reach-closure candidate hash (Fix 3) ---------------------------
@@ -316,13 +403,37 @@ class ClassMap:
     def candidate_hash(self, closure_components) -> str:
         """A sha256 over the canonical JSON of the semantic entries of the
         call's REACH CLOSURE — the target's provider plus the providers of every
-        service on its checked reach path. A swap of ANY of those (changed
-        behaviour, same names) recomputes a different hash, so every standing
-        token whose closure includes the changed provider fails the check,
-        including one held by an untouched caller (invariant 4)."""
-        entries = [self._semantic[c] for c in sorted(closure_components)
-                   if c in self._semantic]
-        return _sha(_canon(entries))
+        service on its checked reach path, AND the host code those components
+        reach. A swap of ANY of those (changed behaviour, same names) recomputes
+        a different hash, so every standing token whose closure includes the
+        changed provider fails the check, including one held by an untouched
+        caller (invariant 4).
+
+        Item 427 F4: the closure is not the component entries alone. A component
+        entry names the extern it calls; the `@py` BODY of that extern is where
+        the crossing actually happens, and a swap that rewrites only the body
+        (same extern name, same declared class and capabilities, different
+        destination) left the hash bit-identical and carried every standing grant
+        across untouched. The reached externs and the reached pure functions are
+        therefore hashed alongside the components. Reach is per-component over all
+        its scopes, the same granularity the component entry itself has, so the
+        hash never depends on which method of a component the call entered."""
+        comps = [c for c in sorted(closure_components) if c in self._semantic]
+        externs: set = set()
+        fns: set = set()
+        for c in comps:
+            reached_ext, reached_fns = self._reached_host.get(
+                c, (frozenset(), frozenset()))
+            externs |= reached_ext
+            fns |= reached_fns
+        body = {
+            "components": [self._semantic[c] for c in comps],
+            "externs": [_semantic(self.index.externs[n])
+                        for n in sorted(externs) if n in self.index.externs],
+            "functions": [_semantic(self.index.functions[n])
+                          for n in sorted(fns) if n in self.index.functions],
+        }
+        return _sha(_canon(body))
 
     # -- item 251 Slice 2: the resource / realm / taint projections ---------
 
@@ -341,16 +452,102 @@ class ClassMap:
                 return ext
         return None
 
-    def bind_resource_scope(self, token: str, args) -> str | None:
-        """Bind the RUNTIME resource args into the crossing capability `token`,
-        turning bare `gateway.send` into `gateway.send(host="api.stripe.com")` at
-        ticket time (design §6 N1). The registered-resource projection: for each
-        of the declaring extern's parameters whose NAME is a `cap_order._REGISTRY`
-        resource kind (host/path/table, never a ceiling), bind the positional arg
-        at that parameter's index. Returns the canonical spelling, or None when the
-        token exposes no resource param or no arg is bound (it then keys bare, byte
-        for byte as before). Only the registered-resource projection is bound, NOT
-        the whole argsDigest, so the ledger carries a STRUCTURED target.
+    def _resource_params(self, ext: dict) -> list:
+        """`(index, name, secret)` for each of the extern's parameters naming a
+        `cap_order._REGISTRY` RESOURCE kind (host/path/table, never a ceiling).
+        These are the dimensions a crossing capability can be scoped on."""
+        out: list = []
+        for index, param in enumerate(ext.get("params") or []):
+            if not isinstance(param, dict):
+                continue
+            name = param.get("name")
+            if name is None or not cap_order.is_registered(name) \
+                    or cap_order.is_ceiling(name):
+                continue
+            out.append((index, name, bool(param.get("secret"))))
+        return out
+
+    def _scope_params(self, sid: str) -> list:
+        """The provide-method parameter names of scope `sid`, in the order the
+        caller's positional args arrive in. Empty for an activation scope (no
+        caller and no args) and for a scope that is not a provide-method."""
+        scope = self.index.scopes.get(sid)
+        if scope is None or scope.get("kind") != "provide-method":
+            return []
+        comp = self.index.components.get(scope["component"]) or {}
+        for step in comp.get("body") or []:
+            if not isinstance(step, dict) or step.get("step") != "provide":
+                continue
+            if step.get("name") != scope.get("key"):
+                continue
+            for method in step.get("methods") or []:
+                if method.get("name") == scope.get("method"):
+                    return [p for p in (method.get("params") or [])
+                            if isinstance(p, str)]
+        return []
+
+    def binding_scope(self, reach: dict, token: str) -> str | None:
+        """The one scope whose args may be bound into `token`'s resource scope,
+        or None when no scope may be (item 427 F2).
+
+        The caller's positional args land in exactly ONE scope: the provide-method
+        the call names. A class-(c) token raised anywhere ELSE on the reach closure
+        (a downstream provider across the service seam, a spawned instance, a
+        second method of the same component) is crossed with arguments this call
+        never supplied, so binding this call's args into it would state a resource
+        target that is not the one the crossing uses. Refused: the token then keys
+        bare and the operator is shown the whole cone, which is wide but true."""
+        root = reach.get("scopeId")
+        if root is None:
+            return None
+        origins = set(self._classc_scopes.get(token) or ())
+        origins &= set(reach.get("closureScopes") or {root})
+        return root if origins == {root} else None
+
+    _NO_DATAFLOW_HINT = (
+        "revl could not prove which value reaches this parameter, so the "
+        "crossing is shown UNSCOPED rather than with a resource scope that "
+        "might be wrong. To get a resource-scoped prompt (and a standing grant "
+        "narrowed to one target), forward the provide-method's own parameter "
+        "straight into the extern's resource parameter (`fn send(host, body) "
+        "{ emit http_post(host, body) }`), or pass a string literal. A value "
+        "that is computed, rebound by a `let`, reached through a helper "
+        "function, or crossed by a different component cannot be bound.")
+
+    def bind_resource_scope(self, token: str, args,
+                            scope_id: str | None = None) -> tuple:
+        """Bind the resource args into the crossing capability `token`, turning
+        bare `gateway.send` into `gateway.send(host="api.stripe.com")` at ticket
+        time (design §6 N1). Returns `(spelling, refusal)`: the canonical spelling
+        or None, and a refusal sentence naming the unbindable parameters or None.
+        A token with no resource parameter binds nothing and refuses nothing (it
+        keys bare, byte for byte as before).
+
+        Item 427 F2: the binding is now a DATAFLOW fact, not a positional
+        coincidence. The old projection indexed the CALLER's positional args by
+        the DECLARING EXTERN's parameter list, which agree only when the
+        provide-method forwards its parameters straight through in the same
+        positions: nothing checked that, so a body that ignored its `host`
+        argument and posted somewhere else still produced a ticket, a ledger entry
+        and a distilled rule reading the caller's host. The operator narrowed a
+        grant to a target the call never used. A resource scope that MIGHT be
+        wrong is worse than none, because the operator reads it as a fact.
+
+        So each resource parameter is bound only from a proven source, at the one
+        call site (or several agreeing sites) inside the scope the caller's args
+        land in:
+
+          * a `{kind: lit}` string argument binds to that literal: it is what
+            executes, whatever the caller passed;
+          * a `{kind: name/var}` argument naming a provide-method PARAMETER that
+            the scope never rebinds binds to the caller's arg at that parameter's
+            index.
+
+        Anything else leaves the parameter unbound and returns a refusal naming
+        the fix the author can enact (item 274): a computed expression, a rebound
+        name, an extern reached THROUGH a pure function
+        (`facts["externs"][...]["through"]`), call sites that disagree, or a token
+        raised by another scope on the reach closure.
 
         Item 416c: a resource dimension the author declared `Secret[T]` is bound
         to the REDACTED placeholder, never the runtime value. This spelling is
@@ -362,29 +559,90 @@ class ClassMap:
         as before: only a param the program itself marked confidential is
         touched, so the N1 ledger and the distiller keep reading real targets."""
         ext = self._declaring_extern(token)
-        if ext is None or not args:
-            return None
-        params = ext.get("params") or []
+        if ext is None:
+            return None, None       # a service-op key: no extern, keys bare
+        resource = self._resource_params(ext)
+        if not resource:
+            return None, None       # no resource dimension to scope on
+        dimensions = ", ".join(f"`{name}`" for _i, name, _s in resource)
+        if scope_id is None or scope_id not in self.index.scopes:
+            return None, (
+                f"`{token}` was not resource-scoped: the crossing has no single "
+                f"calling scope to trace {dimensions} from. " + self._NO_DATAFLOW_HINT)
+        scope = self.index.scopes[scope_id]
+        # an extern reached THROUGH a pure fn is not called with arguments this
+        # scope wrote, so no site in this scope proves the value (fail closed).
+        for fact in scope["facts"]["externs"]:
+            if fact["name"] == ext.get("name") and fact.get("through"):
+                helpers = ", ".join(f"`{h}`" for h in fact["through"])
+                return None, (
+                    f"`{token}` was not resource-scoped: `{ext.get('name')}` is "
+                    f"reached through {helpers}, so revl cannot trace "
+                    f"{dimensions} to this call's arguments. "
+                    + self._NO_DATAFLOW_HINT)
+        sites = _call_arg_lists(scope["nodes"], ext.get("name"))
+        if not sites:
+            return None, (
+                f"`{token}` was not resource-scoped: no direct call to "
+                f"`{ext.get('name')}` in this scope binds {dimensions}. "
+                + self._NO_DATAFLOW_HINT)
+        params = self._scope_params(scope_id)
+        rebound = _rebound_names(scope["nodes"])
         pairs: list[tuple[str, object]] = []
-        for index, param in enumerate(params):
-            name = param.get("name")
-            if name is None or not cap_order.is_registered(name) \
-                    or cap_order.is_ceiling(name):
+        unbound: list[str] = []
+        for index, name, secret in resource:
+            sources = {self._arg_source(site, index, params, rebound)
+                       for site in sites}
+            if len(sources) != 1:
+                unbound.append(name)        # sites disagree: no single target
                 continue
-            if index >= len(args):
+            source = next(iter(sources))
+            value = self._arg_value(source, args)
+            if value is None:
+                unbound.append(name)
                 continue
-            value = args[index]
-            if not isinstance(value, str):
-                continue        # a resource value is a string literal; skip else
-            if isinstance(param, dict) and param.get("secret"):
-                value = REDACTED_SECRET
-            pairs.append((name, value))
+            pairs.append((name, REDACTED_SECRET if secret else value))
+        refusal = None
+        if unbound:
+            named = ", ".join(f"`{n}`" for n in unbound)
+            refusal = (f"`{token}` was not resource-scoped on {named}: "
+                       + self._NO_DATAFLOW_HINT)
         if not pairs:
-            return None
+            return None, refusal
         try:
-            return cap_order.make_cap(token, pairs).to_str()
+            return cap_order.make_cap(token, pairs).to_str(), refusal
         except cap_order.CapError:
+            return None, refusal
+
+    @staticmethod
+    def _arg_source(site: list, index: int, params: list, rebound: set):
+        """The PROVEN source of the argument at `index` of one extern call site:
+        `("lit", value)` for a string literal, `("param", i)` for an unrebound
+        provide-method parameter, or None when nothing proves it. Hashable, so
+        several call sites can be compared for agreement."""
+        if index >= len(site):
             return None
+        arg = site[index]
+        if not isinstance(arg, dict):
+            return None
+        if arg.get("kind") == "lit" and isinstance(arg.get("value"), str):
+            return ("lit", arg["value"])
+        if arg.get("kind") in ("name", "var"):
+            name = arg.get("id") if arg.get("kind") == "name" else arg.get("name")
+            if isinstance(name, str) and name in params and name not in rebound:
+                return ("param", params.index(name))
+        return None
+
+    @staticmethod
+    def _arg_value(source, args) -> str | None:
+        """The runtime string a proven source resolves to, or None."""
+        if source is None:
+            return None
+        kind, payload = source
+        if kind == "lit":
+            return payload
+        value = (args or [])[payload] if payload < len(args or []) else None
+        return value if isinstance(value, str) else None
 
     def component_realm(self, component: str) -> str:
         """The single item-33 realm the crossing component is isolated into, or
@@ -448,18 +706,30 @@ class ClassMap:
         # target. A token with no resource param keys bare, byte for byte as
         # before, so a composition that crosses no registered resource is
         # unchanged. All three fields land AFTER the hash, additive.
+        #
+        # item 427 F2: the binding is only made where DATAFLOW proves it. A token
+        # whose resource dimension cannot be traced from this call's arguments
+        # keys bare and lands in `resourceScopeRefusals`, so the operator reads
+        # the wide-but-true cone plus the sentence naming what the author must
+        # change to get a narrow one: never a scope that might be wrong.
         resource_scopes: dict[str, str] = {}
+        refusals: dict[str, str] = {}
         bound_class_c: list[str] = []
         for token in sorted(reach.get("classC") or []):
-            spelling = self.bind_resource_scope(token, args)
+            sid = self.binding_scope(reach, token)
+            spelling, refusal = self.bind_resource_scope(token, args, sid)
             if spelling is not None:
                 resource_scopes[token] = spelling
                 bound_class_c.append(spelling)
             else:
                 bound_class_c.append(token)
+            if refusal is not None:
+                refusals[token] = refusal
         body["classCCapabilities"] = sorted(bound_class_c)
         if resource_scopes:
             body["resourceScopes"] = resource_scopes
+        if refusals:
+            body["resourceScopeRefusals"] = refusals
         # item 251 Slice 2: the crossing's realm and its post-endorsement taint,
         # for the ledger's shape key (the distiller reads these; a recorded taint
         # set is KNOWN, closing the Slice-1 "taint-unknown" fail-close) and for the
