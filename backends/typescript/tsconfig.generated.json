@@ -1,0 +1,45 @@
+// Typecheck settings for EMITTED TypeScript (issue #198).
+//
+// `tsconfig.json` includes `golden/**` and nothing else, so the modules
+// `scripts/emit-fixtures.ts` writes into `tests/generated/` — the ones the
+// vitest suites actually import and execute — were never typechecked. For a
+// compiler backend that is most of what the target language buys us: the
+// emitter could produce type-incorrect TypeScript and stay green as long as
+// the code happened to RUN. Widening the check found a real defect the day it
+// first ran (`Frame.transactional`/`transactionalMethod` typed their inverse's
+// parameter `unknown`, so every emitted `(result) => undo(result)` was a type
+// error — 21 of them across five modules).
+//
+// This is a SEPARATE config, not a widened `include` on the main one, for two
+// reasons.
+//
+// 1. Generated code legitimately wants looser STYLISTIC settings than
+//    hand-written source. The emitter binds every crossing argument to a
+//    `$revl_wit<N>_acq_argN` local whether or not the inverse reads it, so
+//    `noUnusedLocals`/`noUnusedParameters` report 19 findings here, none of
+//    them a defect. `noUncheckedIndexedAccess` reports 69, all on indexing the
+//    emitter itself proved in-bounds. Every SEMANTIC check stays on: this
+//    config inherits `strict` from the base and turns nothing off that could
+//    hide a wrong type.
+//
+// 2. Emitted modules must be checked ONE PROGRAM PER MODULE, which a plain
+//    `tsc -p` cannot express. Each `emit.py` invocation produces a standalone
+//    program, and each one augments cordis' global `Context`
+//    (`declare module 'cordis' { interface Context { db: Database } }`). Put
+//    two modules that both provide a `db` in one program and TypeScript merges
+//    the augmentations, reports TS2717, and then resolves `ctx.db` to the
+//    WRONG interface — 7 spurious errors across the fixture set, none of which
+//    says anything about the emitter. `scripts/typecheck-generated.mjs` reads
+//    this file and builds a program per root; it is the entry point, not `tsc
+//    -p tsconfig.generated.json`.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Stylistic, OFF — see (1). Listed explicitly rather than inherited-absent
+    // so that turning one on in the base config does not silently start
+    // reporting non-defects here.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["tests/generated/**/*.ts"]
+}

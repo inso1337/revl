@@ -858,6 +858,33 @@ byte-identical throughout (the 342/363/396 additivity discipline).
   in its extern frame while the composition keeps running; a launch with
   the envelope flags stripped (a stand-in for a non-enforcing daemon) dies
   at the canary and withdraws.
+  **Landed so far (Stage 2a, `src/revl/sandbox_runtime.py`):** the
+  envelope-to-flags derivation (`--network=none`, `--read-only`,
+  `--cap-drop=ALL`, `--security-opt=no-new-privileges`, a tmpfs `/tmp`, uid
+  mapping, identity-mapped grants), the image preflight, the in-sandbox boot
+  canary and the teardown sweep, with the py runner launched INSIDE the
+  boundary. The canary reads the kernel from inside the namespace and its
+  egress clause is ACTIVE (a connect to TEST-NET-1 must fail at once): a
+  passive interface list is not evidence, because a `--network=none`
+  namespace still shows the kernel's address-less tunnel stubs. Every failure
+  is a refusal — no driver for the rung, no runtime, an unresolvable image, a
+  non-py backend, an image that cannot host the runner, or any clause the
+  canary cannot confirm — so a declared isolation is never downgraded to an
+  ordinary process. The rung ACHIEVED and its evidence print in the boot
+  summary; the static `revl audit --placement` view says which rungs have a
+  driver at all, and therefore which placements would refuse.
+
+  **Not yet, and why (the seam transport).** A container-sandboxed process
+  with a cross-boundary seam is REFUSED rather than launched. The 363 seam is
+  a Unix socket in the placement directory, and a bind mount does not carry
+  one portably: measured on Docker Desktop (macOS), a container binding the
+  socket under the mount is not connectable from the host, and the reverse
+  direction gets ECONNREFUSED. So the composing half of Stage 2 waits on the
+  per-rung transport variant (TCP+mTLS over the item-56 network seam, or a
+  shared network namespace), which is also what Stage 5 needs. Until then a
+  container-sandboxed process must be seam-free, and the approval channel
+  rides on the same missing transport.
+
 - **Stage 3 (all compiled tiers + mixed-arch).** The wrapper generalized to
   node/rust/go/java runner images; `platform` and the emulation preflight;
   the boot-summary emulation note. Exit: a foreign-platform container
