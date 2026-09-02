@@ -260,15 +260,38 @@ def _mangle(name: str) -> str:
     identifier that happens to be a Java keyword emits and RUNS instead of
     crashing at emit (roadmap item 165).
 
-    This is the same A3 append-`_` scheme `_fn_name` already applies to
-    top-level callables (and `src/revl/lower.py::_safe_name` to revl keywords):
-    append `_` until the name is free. A pure function of the name, so the
-    declaration site and every use site agree without a table; a non-reserved
-    name is returned unchanged, so no existing program (none of which can name
-    a Java keyword — those crash today) changes its emitted output. Target
-    keywords only; the emitter scaffolding stays rejected in `_ident`."""
-    while name in _JAVA_RESERVED:
-        name += "_"
+    This is the same A3 scheme `_fn_name` applies to top-level callables (and
+    `src/revl/lower.py::_safe_name` to revl keywords). It must be a pure
+    function of the name — declaration site and use sites agree without a table
+    — and ALSO INJECTIVE: two distinct revl identifiers may never land on one
+    Java identifier.
+
+    The naive "append `_` while the name is reserved" loop is pure but not
+    injective: it sends `double` to `double_` and leaves the equally legal revl
+    identifier `double_` alone, so both reach `double_`. Here that breaks
+    loudly (javac: "variable double_ is already defined"), but the python tier
+    silently CAPTURES on the same shape, so the rule is fixed identically on
+    every tier rather than left to a downstream compiler CI does not run.
+
+    The injective rule: escape a name iff the name OR any name reachable from
+    it by dropping trailing `_` is reserved, and escape it by exactly ONE `_`.
+    Names whose underscore-stripped root is reserved shift up one rung of the
+    `kw`/`kw_`/`kw__` ladder (`double` -> `double_`, `double_` -> `double__`),
+    which is injective; every other name is returned unchanged and can never
+    equal a shifted name, because a shifted name's root is reserved and an
+    unchanged name's root is not. The output is never itself reserved: no
+    member of `_JAVA_RESERVED` ends in `_`.
+
+    Only a name whose root is reserved can change, so no existing program that
+    does not name a Java keyword changes its emitted output. Target keywords
+    only; the emitter scaffolding stays rejected in `_ident`."""
+    root = name
+    while root:
+        if root in _JAVA_RESERVED:
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
     return name
 
 
@@ -286,26 +309,36 @@ def _fn_name(name: object) -> str:
     revl's name space is larger than Java's: `fn double(..)` is a perfectly
     legal revl program, but `double` is a Java keyword. Rejecting it would make
     a portable program unportable for a spelling reason, so rename it with the
-    same A3 scheme `src/revl/lower.py::_safe_name` uses for bindings — append
-    `_` until the name is free. The mapping is a pure function of the name, so
-    declaration sites and call sites agree without threading a table around;
-    `_check_fn_name_collisions` covers the one case where that is not enough.
+    same A3 scheme `src/revl/lower.py::_safe_name` uses for bindings. The
+    mapping is a pure function of the name, so declaration sites and call sites
+    agree without threading a table around, and it is INJECTIVE by the same
+    ladder-shift rule `_mangle` documents above: escape iff the name or any
+    name reachable from it by dropping trailing `_` is reserved, by exactly one
+    `_`, so `double` -> `double_` and `double_` -> `double__` stay distinct.
+    `_check_fn_name_collisions` re-checks the property on the whole callable
+    set as a belt-and-braces guard.
     """
     if not isinstance(name, str) or not _IDENT_RE.match(name):
         raise EmitError(f"invalid function identifier: {name!r}")
-    candidate = name
-    while candidate in _JAVA_RESERVED or candidate in _EMITTER_RESERVED:
-        candidate += "_"
-    return candidate
+    root = name
+    while root:
+        if root in _JAVA_RESERVED or root in _EMITTER_RESERVED:
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return name
 
 
 def _check_fn_name_collisions(functions: list, externs: list) -> None:
     """Reject programs where A3 renaming would merge two distinct callables.
 
-    `_fn_name` is table-free, so a program declaring both `double` and
-    `double_` would map both onto `double_`. That is the only way the scheme
-    can lose information, and silently emitting one over the other would be
-    wrong code — refuse instead.
+    `_fn_name` is table-free. It used to map both `double` and `double_` onto
+    `double_`, and this check was the only thing standing between that and
+    wrong code. `_fn_name` is now injective in its own right, so this can no
+    longer fire on a keyword rename; it stays as a belt-and-braces assertion
+    that the property actually holds over a whole program's callable set, and
+    would still catch any future non-injective renaming added on this path.
     """
     seen: dict[str, str] = {}
     for decl in list(functions or []) + list(externs or []):

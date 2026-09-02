@@ -76,3 +76,80 @@ def test_go_build_accepts_keyword_named_identifiers():
     results = validator.check([("reserved-word-idents", src)])
     status, detail = results["reserved-word-idents"]
     assert status == "ok", detail
+
+
+# --------------------------------------------------------------------------
+# Injectivity. The rename was "reserved -> name + '_'", a pure function of the
+# name but NOT injective: `func` and the equally legal revl identifier `func_`
+# both landed on `func_`. On this tier that breaks loudly (`go build`: "no new
+# variables on left side of :="); on the python tier the same shape silently
+# captures, so the rule is injective on every tier now.
+# --------------------------------------------------------------------------
+
+LOCALS = """
+pub fn probe() -> Str {
+  let func = "PUBLIC-VALUE"
+  let func_ = "SEKRIT-CANARY-416"
+  return func
+}
+"""
+
+FNS = """
+pub fn func() -> Str { return "PUBLIC-VALUE" }
+pub fn func_() -> Str { return "SEKRIT-CANARY-416" }
+"""
+
+
+def test_renames_are_injective_over_the_keyword_ladder():
+    for word in sorted(emit._GO_RESERVED):
+        ladder = [word, word + "_", word + "__", word + "___"]
+        images = [emit._v3_ident(n, "x") for n in ladder]
+        assert len(set(images)) == len(ladder), f"{word!r} ladder collapsed: {images}"
+        assert not set(images) & emit._GO_RESERVED
+    for word in sorted(emit._GO_KEYWORDS):
+        ladder = [word, word + "_", word + "__", word + "___"]
+        images = [emit._safe_local(n) for n in ladder]
+        assert len(set(images)) == len(ladder), f"{word!r} ladder collapsed: {images}"
+        assert not set(images) & emit._GO_KEYWORDS
+
+
+def test_keyword_local_does_not_collide_with_its_underscore_twin():
+    out = emit.emit(compile_source(LOCALS))
+    assert 'func_ := "PUBLIC-VALUE"' in out
+    assert 'func__ := "SEKRIT-CANARY-416"' in out
+    assert "return func_" in out
+    assert out.count('func_ := ') == 1
+
+
+def test_top_level_fn_pair_stays_two_functions():
+    out = emit.emit(compile_source(FNS))
+    assert out.count("func func_()") == 1
+    assert out.count("func func__()") == 1
+
+
+def test_record_field_pair_is_refused_loudly():
+    """Go record fields are EXPORTED (`Func`), so `func`/`func_` collide under
+    the exported-name mapping rather than under the keyword rename. That path
+    already refuses instead of emitting one field twice; this pins the refusal
+    so the go tier never silently drops a field the way python did."""
+    src = ("type Box = { func: Str, func_: Str }\n"
+           "fn mk(a: Str, b: Str) -> Box { return { func: a, func_: b } }\n")
+    with pytest.raises(emit.EmitError, match="both lower to the exported Go field"):
+        emit.emit(compile_source(src))
+
+
+def test_ordinary_keyword_rename_is_unchanged():
+    """False-positive guard: one `_`, not two, when there is no twin."""
+    out = emit.emit(compile_source(
+        "pub fn f(func: Str) -> Str { let range = func\n  return range }"))
+    assert "func_ string" in out
+    assert "range_ := func_" in out
+    assert "func__" not in out and "range__" not in out
+
+
+def test_non_keyword_underscore_names_are_untouched():
+    out = emit.emit(compile_source(
+        "pub fn g(value_: Str) -> Str { let out_ = value_\n  return out_ }"))
+    assert "value_ string" in out
+    assert "out_ := value_" in out
+    assert "value__" not in out and "out__" not in out
