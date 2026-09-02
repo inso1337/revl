@@ -1,3 +1,14 @@
+# API stability (roadmap item 338, docs/gate-dependency-contract.md): the
+# ONLY promised dependency surface for `pip install revl` is `revl.gate`
+# (its `__all__`, pinned exactly by tests/test_gate_compat.py). Every other
+# `revl.*` module is importable — a wheel cannot hide its modules — but
+# UNVERSIONED, and may change on any release including a patch. Within
+# `revl.gate`, `gate_version().api` (see src/revl/gate.py) is the semver of
+# that surface itself, independent of this package's own `version` below,
+# which tracks the revl LANGUAGE. See docs/gate-dependency-contract.md for
+# the full consumer-facing security contract this classifier implies: a
+# refusal is authoritative and fail-closed; an admission is a compile-time
+# judgment scoped to `gate_version().frontier`, never a runtime sandbox.
 [project]
 name = "revl"
 version = "2.0.0"
@@ -5,6 +16,13 @@ description = "A research language for spatiotemporal composability (Cordis para
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Compilers",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0", "pytest-asyncio"]
