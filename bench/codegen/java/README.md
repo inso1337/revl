@@ -18,6 +18,20 @@ Runtime", so being on PATH proves nothing and the driver probes `-version`
 instead. A JDK 21 or newer is required (the emitted sources are compiled with
 `--release 21`). `--static` needs no JDK at all.
 
+**Before you believe a 77, look where the package manager put the JDK.** Item
+433's whole perf audit was written as static because that stub answered for
+`java`, while a working openjdk sat keg-only at `/opt/homebrew/opt/openjdk` and
+so was absent from PATH by design. Homebrew, `jenv`, SDKMAN and a bundled IDE
+runtime all install a JDK that `shutil.which("java")` will not find:
+
+```
+export JAVA_HOME=/opt/homebrew/opt/openjdk   # or: /usr/libexec/java_home -V
+export PATH="$JAVA_HOME/bin:$PATH"
+java -version
+```
+
+A 77 means "not on PATH", never "not installed".
+
 ## What a case is
 
 Each directory under `cases/` holds three files.
