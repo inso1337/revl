@@ -47,7 +47,7 @@ table, or **[vision.md](vision.md)** for what this is *for*. The
 ## Agents and interop
 
 - [gauntlet.md](gauntlet.md) — graded admission · [registry.md](registry.md) — find a component to import
-- [import-openapi.md](import-openapi.md) · [import-wit.md](import-wit.md) · [import-cordis.md](import-cordis.md) · [wit-bridge.md](wit-bridge.md) — importers and the WIT bridge
+- [import-openapi.md](import-openapi.md) · [import-wit.md](import-wit.md) · [import-cordis.md](import-cordis.md) · [import-a2a.md](import-a2a.md) · [wit-bridge.md](wit-bridge.md) — importers and the WIT bridge
 - [interchange-format.md](interchange-format.md) — the manifest + G8 audit format · [interop-bridge.md](interop-bridge.md) — cross-tier interop
 
 ## Internals and project
