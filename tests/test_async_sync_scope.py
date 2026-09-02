@@ -89,8 +89,10 @@ def test_263_match_arm_async_emits_importable_py():
 def test_263_await_lands_at_the_async_frame_via_walrus():
     py = _emit("python", compile_source(_263, "i263.rvl"))
     # scrutinee bound by walrus, arm await at the async-def top level, and NOT
-    # a `lambda match:` wrapper (which would re-trap the await).
-    assert "((match := c)," in py
+    # a `lambda match:` wrapper (which would re-trap the await). Item 436 F3
+    # moved the bind into the first arm's test, so it reads `(match := c)`
+    # wherever that test is, rather than heading a `(<bind>, <chain>)[1]` tuple.
+    assert "(match := c)" in py
     assert "(await _revl_ctx.store.get('go'))" in py
     assert "lambda match:" not in py
 
