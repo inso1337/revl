@@ -1,40 +1,41 @@
 
-## string scan, emitted   815 samples
-      389   47.7%  EMITTED  revlLen
-      371   45.5%  EMITTED  revlCharAt
-       40    4.9%  other  (garbage collector)
-        4    0.5%  EMITTED  revlI64
-        4    0.5%  other  (anonymous)
-        3    0.4%  EMITTED  count_digits
-        2    0.2%  node  post
-        1    0.1%  node  (anonymous)
-        1    0.1%  other  profile
+## string scan, emitted   13 samples
+        3   23.1%  EMITTED  revlLen
+        3   23.1%  other  (anonymous)
+        2   15.4%  other  (garbage collector)
+        2   15.4%  EMITTED  revlCps
+        1    7.7%  node  post
+        1    7.7%  EMITTED  revlCharAt
+        1    7.7%  EMITTED  count_digits
 
-## string scan, hand-written   2134 samples
-     1403   65.7%  hand  handCountDigits
-      467   21.9%  other  profile
-      122    5.7%  hand  revlI64
-       97    4.5%  other  (garbage collector)
-       43    2.0%  other  (anonymous)
-        2    0.1%  node  post
+## string scan, hand-written   1198 samples
+      776   64.8%  hand  handCountDigits
+      293   24.5%  other  profile
+       70    5.8%  hand  revlI64
+       46    3.8%  other  (garbage collector)
+       11    0.9%  other  (anonymous)
+        1    0.1%  node  post
+        1    0.1%  other  dispatch
 
-## match with sync arms, emitted   95 samples
-       34   35.8%  other  (program)
-       23   24.2%  other  (garbage collector)
-       23   24.2%  EMITTED  classify
-        7    7.4%  other  (anonymous)
-        3    3.2%  EMITTED  fetch_one
-        3    3.2%  EMITTED  revlEq
-        1    1.1%  node  post
-        1    1.1%  EMITTED  decode
+## match with sync arms, emitted   165 samples
+       59   35.8%  other  (program)
+       38   23.0%  EMITTED  classify
+       21   12.7%  other  (garbage collector)
+       17   10.3%  EMITTED  revlEq
+       15    9.1%  other  (anonymous)
+        8    4.8%  EMITTED  decode
+        3    1.8%  EMITTED  fetch_one
+        2    1.2%  EMITTED  (anonymous)
+        1    0.6%  node  post
+        1    0.6%  hand  emitted
 
-## match with sync arms, hand-written   270 samples
-       91   33.7%  other  (program)
-       61   22.6%  hand  handClassify
-       42   15.6%  other  (garbage collector)
-       40   14.8%  other  (anonymous)
-       18    6.7%  EMITTED  revlEq
-        8    3.0%  EMITTED  fetch_one
-        7    2.6%  EMITTED  decode
-        2    0.7%  hand  hand
-        1    0.4%  node  post
+## match with sync arms, hand-written   151 samples
+       54   35.8%  other  (program)
+       33   21.9%  hand  handClassify
+       24   15.9%  other  (garbage collector)
+       15    9.9%  other  (anonymous)
+        9    6.0%  EMITTED  decode
+        7    4.6%  EMITTED  fetch_one
+        7    4.6%  EMITTED  revlEq
+        1    0.7%  node  post
+        1    0.7%  hand  hand
