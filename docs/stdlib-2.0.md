@@ -175,9 +175,10 @@ like what they are: an empty persistent value vs a stateful host object.
   the compatibility relation, so the empty map flows into any `Map[Str,
   V]` — the same trick the untyped empty list literal plays — and `set`
   widens it from there.
-- **Bottom-typed receivers learn `V` from use.** Because `Never` is a
-  wildcard, `set` on a `Map[Str, Never]` receiver would otherwise prove
-  nothing about its value argument and return another `Map[Str, Never]` —
+- **Bottom-typed receivers learn `V` from use.** A bottom `V` is not a
+  constraint the call has to satisfy, so `set` on a `Map[Str, Never]`
+  receiver would otherwise prove nothing about its value argument and
+  return another `Map[Str, Never]` —
   which flows into *any* `Map[Str, X]`, planting any value under any
   declared map type. So when the receiver's `V` is bottom, `set` unifies
   `V` against its concrete value argument and returns `Map[Str, learned]`;

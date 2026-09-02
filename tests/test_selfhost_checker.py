@@ -574,7 +574,6 @@ ACCEPTED_PROG_EXPR = [
     ("type Box = Wrap(Any) | Empty", "Empty"),
     ("type W = Wrap(Int)", "Wrap(x)"),
     ("type W = Wrap(Int)", "Wrap(q)"),
-    ("type N = Wrap(Never) | X", "Wrap(1)"),
     ("type M = M(Opt[Int]) | N", "M(1)"),
     ("type M = M(Opt[Int]) | N", "M(Some(1))"),
     # Some/Ok/Err keep their builtin parametric results
@@ -666,6 +665,10 @@ REJECTED_PROG_EXPR = [
     ("type Bad = Result", "1"),
     ("type R = { a: Opt }", "1"),
     ("type S = A(Opt) | B", "1"),
+    # `Never` is the inferred bottom, uninhabited and ONE-WAY: it flows out of a
+    # `Never` position into any other, and nothing flows in. So an `Int` payload
+    # for a `Wrap(Never)` case is a definite argument mismatch, not a cast.
+    ("type N = Wrap(Never) | X", "Wrap(1)"),
 ]
 
 

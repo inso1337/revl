@@ -92,8 +92,14 @@ fn orderable(t: Str) -> Bool { return is_numeric(t) || t == "Str" }
 // (no fn-typed value exists in base_env or the corpus).
 fn compatible(expected: Str, actual: Str) -> Bool {
   if (expected == "" || actual == "") { return true }
-  if (expected == "Any" || expected == "Never"
-      || actual == "Any" || actual == "Never") { return true }
+  // `Never` is the checker's inferred bottom, not a two-way wildcard: it flows
+  // OUT of a `Never` position into any other (nothing inhabits it) and NOTHING
+  // flows in. Port of the reference's one-way bottom rule; the two-way version
+  // was an unchecked cast under a spelling with no cast syntax.
+  if (split_type(expected).head == "Never") {
+    return actual == "Never" || actual == "Any"
+  }
+  if (expected == "Any" || actual == "Any" || actual == "Never") { return true }
   if (expected == actual) { return true }
   let es = split_type(expected)
   let as_ = split_type(actual)
