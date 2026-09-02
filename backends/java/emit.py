@@ -2048,6 +2048,187 @@ def _emit_checked_div_helpers() -> list[str]:
     ]
 
 
+# A v3 record/variant-case component whose Java type is one of these is a
+# PRIMITIVE: `==` on it is already the language's equality (and for `double`,
+# already the IEEE one), so the generated `equals` compares it directly instead
+# of boxing it through `revlEq`.
+_JAVA_PRIMITIVE_COMPONENTS = frozenset({"long", "int", "double", "boolean"})
+
+
+def _v3_component_eq(jtype: str, left: str, right: str) -> str:
+    """One component of a generated `equals`.
+
+    `double` is compared with the PRIMITIVE `==`, never `Double.equals` /
+    `Double.compare`: both of those compare `doubleToLongBits`, which makes
+    `NaN` equal to itself and `0.0` unequal to `-0.0`, the exact inversion of
+    IEEE 754 that item 433 rider R2 fixed at the top level. Everything else is
+    a reference and goes through `revlEq`, so a nested record recurses into
+    the `equals` generated below it, and a `Float` buried in a `List`/`Map`/
+    `Opt` keeps the same IEEE rule."""
+    if jtype in _JAVA_PRIMITIVE_COMPONENTS:
+        return f"{left} == {right}"
+    return f"revlEq({left}, {right})"
+
+
+def _v3_component_hash(jtype: str, expr: str) -> str:
+    """The `hashCode` term matching `_v3_component_eq`'s comparison.
+
+    `Double.hashCode` hashes `doubleToLongBits`, so it gives `0.0` and `-0.0`
+    different hashes even though `==` calls them equal; folding every zero to
+    `+0.0` first restores `equal implies same hash`. NaN needs no such care:
+    all NaNs canonicalise to one bit pattern there, and a NaN component is
+    never equal to anything anyway (see `_emit_v3_value_equality`)."""
+    if jtype == "double":
+        return f"java.lang.Double.hashCode({expr} == 0.0d ? 0.0d : {expr})"
+    if jtype == "long":
+        return f"java.lang.Long.hashCode({expr})"
+    if jtype == "int":
+        return f"java.lang.Integer.hashCode({expr})"
+    if jtype == "boolean":
+        return f"java.lang.Boolean.hashCode({expr})"
+    return f"revlHash({expr})"
+
+
+def _emit_v3_value_equality(cls: str, components: list, *, tag: str = None) -> list[str]:
+    """`equals`/`hashCode` for a v3 record class or sealed-variant case class.
+
+    Without these both kinds inherit `Object.equals`, which is REFERENCE
+    IDENTITY, so `{ id: 1 } == { id: 1 }` answered `false` on this tier alone
+    while python, TypeScript, rust and go all answered `true` against
+    docs/syntax-2.0.md §3.4's single structural equality. `revlEq`'s fallback
+    is `java.util.Objects.equals`, which is exactly that inherited method, so
+    the helper could not fix this on its own: the structure has to exist on
+    the class.
+
+    Both classes are `final`, so `instanceof` is an exact type test and the
+    relation stays symmetric. The parameter is `__revl_o`, not the canonical
+    `o`, because a record is free to declare a field NAMED `o`: every term
+    below spells its operands `this.x`/`__revl_other.x` so a plain `o` would
+    still compile, and the point is that the `frontend` job has no javac to
+    catch the day that stops being true.
+
+    There is NO `if (this == o) { return true; }` fast path, deliberately.
+    revl's `==` on `Float` is IEEE (docs/arithmetic.md), so a component that is
+    `NaN` is not equal to itself, and the shortcut would make the answer depend
+    on whether the two operands happen to be the same reference. rust, the
+    precedent tier, derives `PartialEq`, which is a plain field-by-field `==`
+    with no such shortcut, and this matches it.
+
+    The consequence, stated plainly and MEASURED on openjdk 26.0.2 rather
+    than argued: a value containing a `NaN` is not equal to itself, so it
+    breaks `Object.equals`'s REFLEXIVITY requirement and is not a well-behaved
+    hash key. `HashMap`/`HashSet` short-circuit on `key == k`, so a lookup
+    with the identical reference still finds it while a structurally identical
+    one returns null, and `HashSet` will hold two "equal" NaN values at once.
+    `ArrayList` has no such short-circuit: `contains`/`indexOf`/`remove` call
+    `equals` directly, so a NaN-carrying value is NOT FOUND IN A LIST IT IS
+    LITERALLY IN, same reference and all. That is what "matching every other
+    tier" costs on a host whose collections assume an equivalence relation,
+    and IEEE equality is not one. Every non-NaN value, including a nested
+    record and a `-0.0`/`0.0` pair, round-trips through `HashMap` correctly."""
+    lines = ["", "    @Override", "    public boolean equals(Object __revl_o) {"]
+    if not components:
+        lines.append(f"        return __revl_o instanceof {cls};")
+    else:
+        lines.append(f"        if (!(__revl_o instanceof {cls})) {{ return false; }}")
+        lines.append(f"        {cls} __revl_other = ({cls}) __revl_o;")
+        terms = [
+            _v3_component_eq(jtype, f"this.{field}", f"__revl_other.{field}")
+            for jtype, field in components
+        ]
+        lines.append(f"        return {' && '.join(terms)};")
+    lines.append("    }")
+    lines.append("")
+    lines.append("    @Override")
+    lines.append("    public int hashCode() {")
+    # A variant case carries its qualified name into the hash so that two cases
+    # of one variant with the same payload do not collide; a record has no such
+    # sibling and starts from the conventional 1.
+    seed = f'"{tag}".hashCode()' if tag else "1"
+    if not components:
+        lines.append(f"        return {seed};")
+    else:
+        lines.append(f"        int h = {seed};")
+        for jtype, field in components:
+            lines.append(
+                f"        h = 31 * h + {_v3_component_hash(jtype, 'this.' + field)};")
+        lines.append("        return h;")
+    lines.append("    }")
+    return lines
+
+
+def _v3_types_need_value_helpers(types: dict) -> bool:
+    """True when some generated `equals`/`hashCode` above will CALL `revlEq` /
+    `revlHash`, i.e. some record field or variant payload is a reference type.
+    A record of nothing but `Int`/`Float`/`Bool` compares and hashes with
+    primitive operators and needs neither helper, so it stays byte-identical
+    to what a document with no `==` emitted before. Same gating idiom as
+    `_uses_equality`: the helper is emitted exactly where it is called."""
+    for spec in (types or {}).values():
+        if spec.get("kind") == "record":
+            for ftype in (spec.get("fields") or {}).values():
+                if _java_v3_type(ftype) not in _JAVA_PRIMITIVE_COMPONENTS:
+                    return True
+        else:
+            for case in spec.get("cases") or []:
+                payload = case.get("payload")
+                if payload is None:
+                    continue
+                if _java_v3_type(payload) not in _JAVA_PRIMITIVE_COMPONENTS:
+                    return True
+    return False
+
+
+def _emit_hash_helper() -> list[str]:
+    """`hashCode` for a value compared by `revlEq`.
+
+    `Objects.hashCode` would disagree with `revlEq` in three places, each one a
+    broken `HashMap` waiting to happen: `Double.hashCode` separates `0.0` from
+    `-0.0` (which `revlEq` calls equal), and `List`/`Map`/`Optional` delegate
+    to the ELEMENT's `hashCode`, so a `Float` nested inside one is hashed by
+    `doubleToLongBits` again no matter what `revlEq` does with it. This mirrors
+    `revlEq` arm for arm, and hashes each container exactly the way its JDK
+    class does apart from swapping in this rule for the elements: `List` is
+    `AbstractList`'s 31-fold, `Map` is `AbstractMap`'s sum of `key ^ value`
+    (keys hash with the HOST `hashCode`, because `revlEq` matches map keys with
+    the host `containsKey`), and `Optional` is its element's hash or 0.
+
+    Not a hypothetical. On openjdk 26.0.2, `Objects.hashCode(List.of(-0.0))`
+    and `Objects.hashCode(Map.of("k", -0.0))` both differ from their `0.0`
+    twins (`Double.hashCode(-0.0)` is `-2147483648`, `Double.hashCode(0.0)` is
+    `0`), so a record holding either would be `equals` to its twin and hash
+    apart. With this helper the pair hashes alike and a `HashMap` keyed on one
+    finds the other, executed in docs/contract-errata.md's table."""
+    return [
+        "// The hash that agrees with `revlEq`: 0.0 and -0.0 are one key, and",
+        "// a Float nested in a List/Map/Opt is hashed under the same rule.",
+        "private static int revlHash(Object a) {",
+        "    if (a instanceof Double) {",
+        "        double d = ((Double) a).doubleValue();",
+        "        return java.lang.Double.hashCode(d == 0.0d ? 0.0d : d);",
+        "    }",
+        "    if (a instanceof java.util.List<?>) {",
+        "        int h = 1;",
+        "        for (Object x : (java.util.List<?>) a) { h = 31 * h + revlHash(x); }",
+        "        return h;",
+        "    }",
+        "    if (a instanceof java.util.Map<?, ?>) {",
+        "        int h = 0;",
+        "        for (java.util.Map.Entry<?, ?> e : ((java.util.Map<?, ?>) a).entrySet()) {",
+        "            h += java.util.Objects.hashCode(e.getKey()) ^ revlHash(e.getValue());",
+        "        }",
+        "        return h;",
+        "    }",
+        "    if (a instanceof java.util.Optional<?>) {",
+        "        java.util.Optional<?> xs = (java.util.Optional<?>) a;",
+        "        return xs.isEmpty() ? 0 : revlHash(xs.get());",
+        "    }",
+        "    return java.util.Objects.hashCode(a);",
+        "}",
+        "",
+    ]
+
+
 def _emit_v3_types(types: dict) -> list[str]:
     lines: list[str] = []
     for name, spec in types.items():
@@ -2067,6 +2248,11 @@ def _emit_v3_types(types: dict) -> list[str]:
                 field = _ident(field, "record field")
                 lines.append(f"        this.{field} = {field};")
             lines.append("    }")
+            components = [
+                (_java_v3_type(ftype), _ident(field, "record field"))
+                for field, ftype in fields.items()
+            ]
+            lines.extend(_emit_v3_value_equality(name, components))
             lines.append("}")
         else:
             cases = spec.get("cases") or []
@@ -2079,6 +2265,11 @@ def _emit_v3_types(types: dict) -> list[str]:
                 if payload is None:
                     lines.append(f"    final class {cname} implements {name} {{")
                     lines.append(f"        public {cname}() {{}}")
+                    lines.extend(
+                        "    " + line if line else line
+                        for line in _emit_v3_value_equality(
+                            cname, [], tag=f"{name}.{cname}")
+                    )
                     lines.append("    }")
                 else:
                     ptype = _java_v3_type(payload)
@@ -2086,6 +2277,11 @@ def _emit_v3_types(types: dict) -> list[str]:
                     lines.append(f"        public final {ptype} value;")
                     lines.append(
                         f"        public {cname}({ptype} value) {{ this.value = value; }}"
+                    )
+                    lines.extend(
+                        "    " + line if line else line
+                        for line in _emit_v3_value_equality(
+                            cname, [(ptype, "value")], tag=f"{name}.{cname}")
                     )
                     lines.append("    }")
             lines.append("}")
@@ -4716,8 +4912,14 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     if services:
         out.extend(["    " + line if line else line for line in _emit_service_interfaces_v3(services)])
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
-    if _uses_equality(ir):
+    # The generated record/case `equals`/`hashCode` call these too, so a
+    # document that declares a type with a reference-typed component needs them
+    # even when it never writes `==` itself.
+    needs_value_helpers = _v3_types_need_value_helpers(types)
+    if _uses_equality(ir) or needs_value_helpers:
         out.extend(["    " + line if line else line for line in _emit_eq_helper()])
+    if needs_value_helpers:
+        out.extend(["    " + line if line else line for line in _emit_hash_helper()])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
     if _uses_float_interp(ir):
