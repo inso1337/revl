@@ -1,0 +1,12 @@
+// Persistent list self-append. Item 284 lowered this to an in-place
+// `Vec::push`; this benchmark is the regression guard for that win and
+// the control against which the Str version is judged.
+pub fn list_append(n: Int) -> Int {
+  var out: List[Int] = []
+  var i = 0
+  while (i < n) {
+    out = out.push(i * 3)
+    i = i + 1
+  }
+  return out.length()
+}
