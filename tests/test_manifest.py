@@ -137,12 +137,29 @@ def test_audit_cli_json(capsys):
     assert report["manifest"]["loadOrder"] == ["Migrator"]
 
 
-def test_boundary_counts_teardown_position_emissions():
+def test_teardown_position_emissions_are_refused_so_the_boundary_never_sees_one():
+    """The boundary report used to count a teardown-position emission. There is
+    no longer such a thing to count: a bracket inverse "may emit in teardown: no
+    (G5)" (docs/design/teardown-contract.md), so the crossing is refused at
+    compile time rather than reported after the fact."""
+    with pytest.raises(RevlError, match=r"may not cross a boundary \(G5\)"):
+        compile_source(
+            """
+            service Bus { emission fn send(msg: Str) }
+            component Quiet requires bus: Bus {
+              effect Map.new() undo bus.send("goodbye")
+            }
+            """
+        )
+
+
+def test_boundary_counts_forward_position_emissions():
     ir = compile_source(
         """
         service Bus { emission fn send(msg: Str) }
-        component Quiet requires bus: Bus {
-          effect Map.new() undo bus.send("goodbye")
+        service Door { emission fn shut() }
+        component Quiet requires bus: Bus provides door: Door {
+          provide door { fn shut() { emit bus.send("goodbye") } }
         }
         """
     )
