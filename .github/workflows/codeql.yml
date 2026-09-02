@@ -28,7 +28,7 @@ jobs:
         - language: actions
           build-mode: none
         - language: go
-          build-mode: none
+          build-mode: autobuild
         - language: java-kotlin
           build-mode: none
         - language: javascript-typescript
@@ -53,26 +53,30 @@ jobs:
         # no such sources. Note that if a lane is added for a language with
         # no files, CodeQL fails the job rather than skipping it.
         #
-        # Every lane is `build-mode: none`, including go and rust, which the
-        # upstream template would autobuild. Two reasons, both specific to
-        # this tree:
-        #   * go has FIVE independent modules (backends/go/placement_runner,
-        #     backends/go/scenarios, backends/go/v3, bench/codegen/go and
-        #     forks/stc-go). Autobuild picks one and the analysis silently
-        #     covers a fraction of the Go, which is the "green means the
-        #     tests that ran, ran" failure this project keeps finding.
-        #   * rust and go builds here resolve pinned third-party runtimes
-        #     (cordis-rs, stc-go) from their registries. A scanner that can
-        #     go red on a network hiccup gets muted.
-        # `none` analyses every tracked source file of the language with no
-        # build, which is what a security scan wants here.
+        # go is `autobuild` because CodeQL REFUSES `none` for Go: the first
+        # run failed with "Go does not support the none build mode". Worth
+        # knowing what that costs here, because this tree has FIVE
+        # independent go modules (backends/go/placement_runner,
+        # backends/go/scenarios, backends/go/v3, bench/codegen/go and
+        # forks/stc-go) and no root module. Autobuild builds what it can
+        # find, so Go coverage may be PARTIAL, and a partial scan reporting
+        # green is the "the tests that ran, ran" failure this project keeps
+        # hitting. If the Go lane stays green while obviously reachable Go
+        # goes unanalysed, switch it to `manual` with a per-module build
+        # rather than trusting the green.
+        #
+        # Every other lane is `build-mode: none`, which analyses every
+        # tracked source file with no build. That matters for rust in
+        # particular: a build there resolves pinned cordis-rs from the
+        # registry, and a scanner that can go red on a network hiccup gets
+        # muted.
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
+      uses: github/codeql-action/init@v4
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
@@ -86,6 +90,6 @@ jobs:
         queries: security-extended
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
+      uses: github/codeql-action/analyze@v4
       with:
         category: "/language:${{matrix.language}}"
