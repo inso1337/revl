@@ -49,3 +49,17 @@ import RevL
 #print axioms RevL.CrossTier.cross_tier_agreement
 #print axioms RevL.CrossTier.six_tier_agreement
 #print axioms RevL.CrossTier.annotation_necessary
+
+-- Item 294/66/260: capability ceilings and budgets — the (T,P) partial
+-- order, downward-monotone attenuation along a lineage, budgets that only
+-- shrink, the runtime counter, composition with confinement, the
+-- unmanufacturable host boundary, and the two non-vacuity witnesses.
+#print axioms RevL.CapCeilings.cap_order_partial
+#print axioms RevL.CapCeilings.attenuation_monotone
+#print axioms RevL.CapCeilings.lineage_ceiling_le
+#print axioms RevL.CapCeilings.spend_within_budget
+#print axioms RevL.CapCeilings.budget_never_exceeds_root_ceiling
+#print axioms RevL.CapCeilings.confinement_within_ceiling
+#print axioms RevL.CapCeilings.no_star_amplification
+#print axioms RevL.CapCeilings.parameter_widening_refused
+#print axioms RevL.CapCeilings.ceiling_check_not_subsumed
