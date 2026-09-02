@@ -479,6 +479,39 @@ class ComponentDecl:
     require_carry: dict = field(default_factory=dict)
 
 
+# --- item 426 S1: composition rows (docs/design/426-composition-layers.md) --
+
+@dataclass
+class RowDecl:
+    """One row of a composition: one component placed into one composition.
+
+    `label` is IDENTITY (426 decision 1) — declared, stable, and scoped to the
+    declaring document's origin. `claims` is the CONTRACT, asserted here and
+    checked against the component header at resolution (§1.3). `component` is
+    PROVENANCE and never identity (§1.5), so an upstream rename is a non-event.
+    """
+    label: str
+    path: str                      # the `from "..."` source file
+    claims: list[tuple[str, int]]  # asserted (key, line); empty == `nothing`
+    line: int
+    component: str | None = None   # optional disambiguator, provenance only
+    config: list[tuple[str, object, int]] = field(default_factory=list)
+    # item 424 R2 / 426 §9.3 Part 2: the per-row reach allowlist a confined row
+    # may compose against. `None` == the clause was not written (an unconfined,
+    # first-party row); a written clause defaults to EMPTY, never to "whatever
+    # the row requires".
+    granted: list[tuple[str, int]] | None = None
+
+
+@dataclass
+class CompositionDecl:
+    name: str
+    rows: list[RowDecl]
+    line: int
+    uses: list[tuple[str, int]] = field(default_factory=list)
+    source: str = ""  # provenance: the file this composition was parsed from
+
+
 # --- v2.0: types & pure functions (docs/syntax-2.0.md §2–§3) ----------------
 
 @dataclass
@@ -1190,6 +1223,10 @@ class Program:
     tests: list[TestDecl] = field(default_factory=list)
     fault_tests: list[FaultTestDecl] = field(default_factory=list)
     prop_tests: list[PropTestDecl] = field(default_factory=list)
+    # item 426 S1: composition documents. A PRE-LINKER artifact — the resolver
+    # in `revl.composition` folds these into a row table and a file list; the
+    # lowerer never reads them, so a program that declares none is byte-identical.
+    compositions: list[CompositionDecl] = field(default_factory=list)
     # Set by compile_files so the checker can resolve module-private vs
     # imported names without merging all files into one global namespace.
     fn_scopes: dict[int, set[str]] = field(default_factory=dict)
@@ -1532,6 +1569,16 @@ class Parser:
                 # an ordinary identifier, and the self-hosted lexer's KEYWORDS
                 # table needs no sync (roadmap item 37).
                 program.prop_tests.append(self.prop_test_decl())
+
+            elif self.at("ident", "composition") \
+                    and self.toks[self.pos + 1].kind == "ident":
+                # item 426 S1. `composition` is a CONTEXTUAL keyword — it heads
+                # a declaration only in the shape `composition NAME {`, so no
+                # program that already uses `composition` as an ordinary
+                # identifier breaks and the self-hosted lexer's KEYWORDS table
+                # needs no sync (the same discipline `fault`/`prop`/`lifecycle`
+                # use).
+                program.compositions.append(self.composition_decl())
 
             elif self.at("ident", "lifecycle"):
                 # contextual keyword: `lifecycle` is a modifier on `test`
@@ -2355,6 +2402,151 @@ class Parser:
         self.expect("}")
         return ComponentDecl(name, config, requires, provides, body, line,
                              require_carry=require_carry)
+
+    # -- item 426 S1: the composition document -----------------------------
+
+    def _row_label(self) -> str:
+        """`@label` — the `@` token followed by a name.
+
+        No lexer change: `@` heads a host body only when the identifier after it
+        is followed by `{` (lexer.py:422-446), and a row label never is. NOTE
+        for 426 S2: `configure @db { ... }` DOES put a `{` after the label, so
+        that spelling lexes as a `@db` HOST BODY and the fold's parser must
+        either take a different shape or the lexer must learn the composition
+        context. Recorded here rather than discovered there."""
+        self.expect("@", what="`@` before a row label")
+        return self._name(what="a row label after `@`")
+
+    def composition_decl(self) -> CompositionDecl:
+        line = self.next().line                       # `composition`
+        name = self.expect("ident", what="a composition name").value
+        self.expect("{")
+        rows: list[RowDecl] = []
+        uses: list[tuple[str, int]] = []
+        seen: dict[str, int] = {}
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
+            if self.at("kw", "use"):
+                uline = self.next().line
+                uses.append((self.expect("string", what="a module path string").value, uline))
+                continue
+            if not self.at("ident", "row"):
+                tok = self.peek()
+                raise self.err(
+                    tok.line,
+                    f"expected `row`, `use`, or `}}` in composition {name}, "
+                    f"found {tok.value!r}",
+                    hint="a composition document declares rows: "
+                         '`row @label from "path.rvl" provides key`')
+            rows.append(self.row_decl(name))
+            # 426 §1.2: two labels with the same spelling WITHIN ONE ORIGIN is a
+            # refusal at parse time, the same shape as a duplicate component
+            # name. Across origins they are distinct qualified labels and do not
+            # collide, which is why this check is per document.
+            if rows[-1].label in seen:
+                raise self.err(
+                    rows[-1].line,
+                    f"duplicate row label `@{rows[-1].label}` in composition "
+                    f"{name} (first declared on line {seen[rows[-1].label]})",
+                    hint="a label is the row's identity and is scoped to this "
+                         "document's origin, so it must be unique here "
+                         "(426 §1.2)")
+            seen[rows[-1].label] = rows[-1].line
+        self.expect("}")
+        return CompositionDecl(name, rows, line, uses)
+
+    def row_decl(self, composition: str) -> RowDecl:
+        line = self.next().line                       # `row`
+        label = self._row_label()
+        if not self.at("ident", "from"):
+            tok = self.peek()
+            raise self.err(tok.line,
+                           f"expected `from` after row label `@{label}`, "
+                           f"found {tok.value!r}",
+                           hint='a row names its source file: `row @%s from '
+                                '"path.rvl" provides key`' % label)
+        self.next()
+        path = self.expect("string", what="a row source path string").value
+        if not path:
+            raise self.err(line, f"row `@{label}` has an empty `from` path")
+        # 426 §1.3: the claim assertion is REQUIRED. It is what makes the
+        # document unable to lie about the wiring, and `provides nothing` is the
+        # ordinary spelling for a sink row, not a special case.
+        if not self.at("kw", "provides"):
+            tok = self.peek()
+            raise self.err(tok.line,
+                           f"expected `provides` after the `from` path of row "
+                           f"`@{label}`, found {tok.value!r}",
+                           hint="every row asserts what it claims; a row that "
+                                "claims nothing writes `provides nothing` "
+                                "(426 §1.3)")
+        self.next()
+        claims: list[tuple[str, int]] = []
+        if self.at("ident", "nothing"):
+            self.next()
+        else:
+            while True:
+                kline = self.peek().line
+                claims.append((self._provision_key(what="a provision key"), kline))
+                if self.at(","):
+                    self.next()
+                    continue
+                break
+        component: str | None = None
+        config: list[tuple[str, object, int]] = []
+        granted: list[tuple[str, int]] | None = None
+        while True:
+            if self.at("kw", "component"):
+                cline = self.next().line
+                if component is not None:
+                    raise self.err(cline, f"duplicate `component` clause on row `@{label}`")
+                component = self.expect("ident", what="a component name").value
+            elif self.at("kw", "config"):
+                cline = self.peek().line
+                if config:
+                    raise self.err(cline, f"duplicate `config` clause on row `@{label}`")
+                config = self.row_config_block(label)
+            elif self.at("ident", "granted"):
+                gline = self.next().line
+                if granted is not None:
+                    raise self.err(gline, f"duplicate `granted` clause on row `@{label}`")
+                granted = []
+                self.expect("{")
+                while not self.at("}"):
+                    kline = self.peek().line
+                    granted.append((self._provision_key(what="a granted key"), kline))
+                    if self.at(","):
+                        self.next()
+                self.expect("}")
+            else:
+                break
+        return RowDecl(label, path, claims, line, component, config, granted)
+
+    def row_config_block(self, label: str) -> list[tuple[str, object, int]]:
+        """`config { field: <literal>, ... }` on a row.
+
+        Values, not types: the component declares the typed `config` block and
+        the row supplies constants for it, checked against those declared types
+        at resolution (426 §3.2's "a value that does not fit the declared return
+        type does not admit", applied to the base composition)."""
+        self.expect("kw", "config")
+        self.expect("{")
+        out: list[tuple[str, object, int]] = []
+        seen: set[str] = set()
+        while not self.at("}"):
+            fline = self.peek().line
+            field_name = self._name(what="a config field name")
+            if field_name in seen:
+                raise self.err(fline, f"duplicate config field `{field_name}` on row `@{label}`")
+            seen.add(field_name)
+            self.expect(":")
+            out.append((field_name, self.literal(), fline))
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return out
 
     def _carry_tokens(self) -> tuple[str, ...]:
         """`(cache, log)` after `carrying` on a require binding (item 296) — the
@@ -5083,6 +5275,8 @@ def parse_file(path: str) -> Program:
     source = os.path.relpath(path)
     for component in program.components:
         component.source = source
+    for composition in program.compositions:
+        composition.source = source
     for decl in (*program.fn_decls, *program.externs, *program.services):
         program.decl_files[id(decl)] = source
     for fn in program.fn_decls:
