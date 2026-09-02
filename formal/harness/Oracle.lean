@@ -1,15 +1,69 @@
 import RevL.Manifest
+import RevL.Lemmas.CapLemmas
+import RevL.Theorems.CapCeilings
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
 "differential oracle"). Reads the corpus TSV the exporter wrote and emits
-verdicts computed from the machine-checked models (`RevL.Manifest` for
-G2/G3, the G4-family judgments over the extracted facts), coded
-independently of the Python reference. A diff against the reference is
-definitional drift between model and spec/extraction.
+verdicts.
+
+**Every verdict this file can state in the model is `decide`d from the
+proved model itself**, not from a private restatement of it (roadmap item
+418, C4 / step 6):
+
+  * `V … disjoint=` is `decide (RevL.Manifest.ProvidesDisjoint comps)`;
+  * `V … closed=` is `decide (RevL.Manifest.RequiresClosed comps)`;
+  * `V … link=` is `linkOKB`, and `linkOKB_iff` below PROVES
+    `linkOKB l = true ↔ RevL.Manifest.LinkOK l`;
+  * `W … atten=` is `attenuatesB`, and `attenuatesB_iff` PROVES
+    `attenuatesB H R = true ↔ RevL.CapCeilings.Attenuates H R`, whose
+    resource half is the proved `RevL.Lemmas.Covers` over
+    `stripCeilings` and whose ceiling half is the proved `budgetOf`
+    development (`ceilingOKB_iff` discharges the unbounded `∀ k` through
+    `RevL.Lemmas.budgetOf_attained`).
+
+The components are `RevL.Manifest.LComponent` values built from the `M`
+rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
+`provider_of` table is indexed by — are the model's, not a copy. Edit an
+L0 definition and these verdicts move.
+
+### What is still a private restatement, and why
+
+Three verdicts have no counterpart in the model, and are computed here by
+hand. They are listed so the gate's reach is not overstated:
+
+1. `g4OK` (the `G` row, marker rule). The G4 model
+   (`RevL.Theorems.G4_InverseOrEmit` over `RevL.Syntax.Stmt`) is indexed
+   by statement syntax. The export carries call FACTS — receiver, service,
+   method, marker context — and no statement terms, so no model
+   definition takes its shape.
+2. `methodBoundOK` (the `P` row, a provide method against its service's
+   `emission[...]` declaration). The model has no definition of that
+   rule at all; `RevL.Boundary.bodyBoundary` enumerates a body's crossing
+   heads (G8) but never compares them to a declared bound.
+3. `closeN` (the spawn-surface transitive closure feeding the `W` row).
+   `RevL.CapCeilings.reachIn` IS that closure, but it is indexed by a
+   `Comp` whose `body : List Stmt` the export cannot produce — the
+   exporter resolves reach in Python and ships capabilities, not terms.
+   The per-edge JUDGMENT the closure feeds is the model's `Attenuates`;
+   only the closure that computes its argument is local.
+
+A fourth row, `X … refused=`, is a verdict of RECORD, not a computed one:
+revl's own parser refused the file, so there is no manifest to model. It
+is carried so the file is counted and its refusal code is diffed rather
+than dropped (item 418 step 7).
 
 Fact rows in (tab-separated, one fact per line):
-  M <file> <comp> <reqs-csv> <provs-csv>     component manifest
+  Z <cap> <token>                            canonical cap decomposition
+  Y <cap> <param> <path|discrete|ceiling> <value>   one cap parameter
+  M <file> <comp> <reqs-csv> <provs-csv> <realms-csv> <member|template>
+                                             component manifest; realms is
+                                             `key=realm` pairs from the
+                                             component's `isolate` clauses,
+                                             and a `template` is a spawn
+                                             target, excluded from the
+                                             static composition exactly as
+                                             `lower._link` excludes it
   R <file> <comp> <local> <svc>              require binding -> service
   B <file> <svc> <meth> <plain|any|scoped>   service-method emission bound
   Q <file> <svc> <meth> <entry>              a scoped bound's declared entry
@@ -21,105 +75,325 @@ Fact rows in (tab-separated, one fact per line):
   H <file> <comp> <var> <child>              spawn handle var
   U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context
   T <file> <comp> <kind>                     statement class (census)
+  X <file> <code>                            revl refused the file at parse
+  N <file>                                   parsed, no component
 
-Capabilities are canonical strings `tok` or `tok(n=v,..)`, where a value
-is `"string"`, `/a/b` (a path), or an int (a ceiling). `covers` is the
-cap_order fold: same token (unless `*` is top), per-param value <=
-(path: component-prefix; int: <=; discrete: equality).
+Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
+— the checker's own parser. Nothing here re-reads the capability grammar.
 
 Verdict rows out:
-  V <file> <disjoint=ok|fail> <closed=ok|fail>     G2/G3 manifest verdict
+  V <file> <disjoint=ok|fail> <closed=ok|fail> <link=ok|fail>
   G <file> <comp> <g4=ok|fail>                     marker rule (incl. handle)
   P <file> <comp> <key> <svc> <meth> <bound=ok|fail>
-                                                   provide-method bound
   W <file> <comp> <child> <atten=ok|fail>          spawn attenuation
+  X <file> <refused=CODE>                          refusal of record
 -/
 
 namespace RevLOracle
 
 open RevL.Manifest
+open RevL.Lemmas
+open RevL.CapCeilings (ResourceOK CeilingOK Attenuates)
 
 def splitKeys (s : String) : List String :=
   if s == "" then [] else (s.splitOn ",").filter (fun k => k != "")
 
 def union (x y : List String) : List String := (x ++ y).eraseDups
 
--- ---------------------------------------------------------------- caps
+/-! ## Deciding the manifest model
 
-/-- Canonical capability value: a string, a path (component list), or an
-integer (a ceiling). -/
-inductive CapVal where
-  | str : String → CapVal
-  | path : List String → CapVal
-  | num : Int → CapVal
-  deriving BEq, Repr
+`ProvidesDisjoint` and `RequiresClosed` are `def`s returning `Prop`, so
+instance search will not see through them on its own; unfolding them is
+all it takes, and the Bool the oracle prints is then literally
+`decide` of the model's proposition. -/
 
-def dropLast (s : String) : String := (s.take (s.length - 1)).toString
+instance instDecProvidesDisjoint (cs : List LComponent) :
+    Decidable (ProvidesDisjoint cs) := by
+  unfold ProvidesDisjoint; infer_instance
 
-/-- Character index of `c` in `s`, or `s.length` when absent - a `Nat`-based
-replacement for `String.find?` (whose result is a `String.Pos` here), so it
-composes with the `Nat`-indexed `String.take`/`String.drop`. -/
-def findCharIndex (c : Char) (s : String) : Nat :=
-  let rec go (i : Nat) (rest : List Char) : Nat :=
-    match rest with
-    | [] => s.length
-    | x :: xs => if x == c then i else go (i + 1) xs
-  go 0 s.toList
+instance instDecRequiresClosed (cs : List LComponent) :
+    Decidable (RequiresClosed cs) := by
+  unfold RequiresClosed; infer_instance
 
-def parseVal (raw : String) : CapVal :=
-  if raw.startsWith "\"" then CapVal.str (dropLast ((raw.drop 1).toString))
-  else if raw.startsWith "/" then
-    CapVal.path ((raw.splitOn "/").filter (fun p => p != ""))
-  else match raw.toInt? with
-    | some n => CapVal.num n
-    | none => CapVal.str raw
+/-- The `LinkOK` judgment as a decision procedure. Each conjunct is
+`decide`d from the corresponding side condition of `LinkOK.cons`, so the
+only content here is the recursion — `linkOKB_iff` proves it is faithful. -/
+def linkOKB : List LComponent → Bool
+  | [] => true
+  | c :: cs =>
+      decide (List.Nodup (slots c)) &&
+      decide (∀ s ∈ slots c, s ∉ cs.flatMap slots) &&
+      decide (∀ s ∈ needs c, s ∈ cs.flatMap slots) &&
+      linkOKB cs
 
-/-- Parse one `name=value` chunk of a canonical cap's parameter list. -/
-def paramOf (chunk : String) : Option (String × CapVal) :=
-  let i := findCharIndex '=' chunk
-  if i < chunk.length then
-    let name := ((chunk.take i).toString).trimAscii.toString
-    let value := ((chunk.drop (i + 1)).toString).trimAscii.toString
-    some (name, parseVal value)
-  else none
+/-- **The link verdict is the model's judgment.** -/
+theorem linkOKB_iff : ∀ l : List LComponent, linkOKB l = true ↔ LinkOK l := by
+  intro l
+  induction l with
+  | nil => exact ⟨fun _ => LinkOK.nil, fun _ => rfl⟩
+  | cons c cs ih =>
+    constructor
+    · intro h
+      simp only [linkOKB, Bool.and_eq_true, decide_eq_true_eq] at h
+      obtain ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩ := h
+      exact LinkOK.cons c cs h1 h2 h3 (ih.mp h4)
+    · intro h
+      cases h with
+      | cons _ _ h1 h2 h3 h4 =>
+        simp only [linkOKB, Bool.and_eq_true, decide_eq_true_eq]
+        exact ⟨⟨⟨h1, h2⟩, h3⟩, ih.mpr h4⟩
 
-def parseParams (inner : String) : List (String × CapVal) :=
-  ((inner.splitOn ",").map (fun c => c.trimAscii.toString)).filterMap (fun c =>
-    if c == "" then none else paramOf c)
+/-- Pick a component whose consumed slots are all already provided — the
+linker's Kahn step. Returns it with the rest of the queue. -/
+def pick (provided : List Slot) : List LComponent →
+    Option (LComponent × List LComponent)
+  | [] => none
+  | c :: cs =>
+      if (needs c).all (fun s => provided.contains s) then some (c, cs)
+      else match pick provided cs with
+        | some (d, rest) => some (d, c :: rest)
+        | none => none
 
-/-- `(token, params)` of a canonical capability string. -/
-def parseCap (s : String) : String × List (String × CapVal) :=
-  let i := findCharIndex '(' s
-  if i < s.length then
-    let tok := (s.take i).toString
-    let inner := dropLast ((s.drop (i + 1)).toString)
-    (tok, parseParams inner)
-  else (s, [])
+/-- The admission search. `acc` is the composition in `LinkOK` order (its
+head is admitted LAST), so each newly admitted component is prepended. -/
+def kahn : Nat → List Slot → List LComponent → List LComponent →
+    Option (List LComponent)
+  | 0, _, acc, rem => if rem.isEmpty then some acc else none
+  | fuel + 1, provided, acc, rem =>
+      if rem.isEmpty then some acc
+      else match pick provided rem with
+        | none => none
+        | some (c, rest) => kahn fuel (provided ++ slots c) (c :: acc) rest
 
-def valLEQ (narrow wide : CapVal) : Bool :=
-  match narrow, wide with
-  | CapVal.str a, CapVal.str b => a == b
-  | CapVal.path a, CapVal.path b => a.take b.length == b
-  | CapVal.num a, CapVal.num b => a <= b
+/-- A requirement no component in THIS FILE provides is not a dangling
+edge — the linker resolves it against the whole composition and simply
+adds no edge (`lower._link`: `provider = provider_of.get(...)`, and a
+`None` provider contributes nothing). The local composition therefore
+elides those requirements before the judgment is applied. Elided, not
+supplied by a fabricated provider: nothing is added to the provision
+surface, so disjointness is untouched, and a component that requires a
+key it provides ITSELF keeps that requirement and is refused, which is
+the linker's G3 self-provision refusal. -/
+def localComposition (comps : List LComponent) : List LComponent :=
+  let provided := comps.flatMap slots
+  comps.map fun c =>
+    { c with requires := c.requires.filter (fun k => provided.contains (k, c.realm k)) }
+
+/-- `link=ok` iff the search found an admission order AND `linkOKB`
+certified it. A `fail` is a failure to find one; for this judgment the
+greedy pass is complete (admitting an eligible component never blocks
+another: needs only become more satisfied, and a slot collision is
+order-independent), so the two coincide. -/
+def linkVerdict (comps : List LComponent) : Bool :=
+  let l := localComposition comps
+  match kahn l.length [] [] l with
+  | none => false
+  | some ord => linkOKB ord
+
+/-! ## Deciding the capability order
+
+The capability rows arrive already decomposed by `cap_order.parse_cap`,
+so `Cap`/`PVal` are built directly and `Covers` is `decide`d through
+`coversB`. -/
+
+/-- `PathLe` as a decision procedure: `wide` is a component-wise prefix
+of `narrow`. -/
+def pathPrefixB : List String → List String → Bool
+  | [], _ => true
+  | _ :: _, [] => false
+  | w :: ws, n :: ns => (w == n) && pathPrefixB ws ns
+
+theorem pathPrefixB_iff : ∀ (w n : List String),
+    pathPrefixB w n = true ↔ PathLe n w := by
+  intro w
+  induction w with
+  | nil => intro n; exact ⟨fun _ => ⟨n, rfl⟩, fun _ => rfl⟩
+  | cons x ws ih =>
+    intro n
+    cases n with
+    | nil =>
+      constructor
+      · intro h; simp [pathPrefixB] at h
+      · rintro ⟨r, hr⟩; simp at hr
+    | cons y ns =>
+      simp only [pathPrefixB, Bool.and_eq_true, beq_iff_eq]
+      constructor
+      · rintro ⟨rfl, h⟩
+        obtain ⟨r, hr⟩ := (ih ns).mp h
+        exact ⟨r, by simp [hr]⟩
+      · rintro ⟨r, hr⟩
+        simp only [List.cons_append, List.cons.injEq] at hr
+        exact ⟨hr.1.symm, (ih ns).mpr ⟨r, hr.2⟩⟩
+
+/-- `PLeq` as a decision procedure. -/
+def pleqB : PVal → PVal → Bool
+  | .path n, .path w => pathPrefixB w n
+  | .discrete a, .discrete b => a == b
+  | .ceiling m, .ceiling n => decide (m ≤ n)
   | _, _ => false
 
-/-- `held` covers `reach` iff same token (unless `*` is top) and reach
-narrows every parameter held binds — cap_order.covers on the canonical
-string form. -/
-def capCovers (held reach : String) : Bool :=
-  let (th, ph) := parseCap held
-  let (tr, pr) := parseCap reach
-  if th == "*" then tr == "*"
-  else if tr == "*" then false
-  else if th != tr then false
-  else ph.all fun (k, av) =>
-    match pr.find? (fun (k2, _) => k2 == k) with
-    | none => false
-    | some (_, bv) => valLEQ bv av
+theorem pleqB_iff : ∀ a b : PVal, pleqB a b = true ↔ PLeq a b := by
+  intro a b
+  cases a with
+  | path n =>
+    cases b with
+    | path w =>
+      exact ⟨fun h => .path _ _ ((pathPrefixB_iff w n).mp h),
+             fun h => by cases h with
+               | path _ _ hp => exact (pathPrefixB_iff w n).mpr hp⟩
+    | discrete _ => exact ⟨fun h => absurd h (by simp [pleqB]), fun h => by cases h⟩
+    | ceiling _ => exact ⟨fun h => absurd h (by simp [pleqB]), fun h => by cases h⟩
+  | discrete s =>
+    cases b with
+    | path _ => exact ⟨fun h => absurd h (by simp [pleqB]), fun h => by cases h⟩
+    | discrete t =>
+      constructor
+      · intro h
+        have : s = t := by simpa [pleqB] using h
+        subst this; exact .discrete _
+      · intro h; cases h; simp [pleqB]
+    | ceiling _ => exact ⟨fun h => absurd h (by simp [pleqB]), fun h => by cases h⟩
+  | ceiling m =>
+    cases b with
+    | path _ => exact ⟨fun h => absurd h (by simp [pleqB]), fun h => by cases h⟩
+    | discrete _ => exact ⟨fun h => absurd h (by simp [pleqB]), fun h => by cases h⟩
+    | ceiling n =>
+      constructor
+      · intro h; exact .ceiling _ _ (by simpa [pleqB] using h)
+      · intro h
+        cases h with
+        | ceiling _ _ hn => simpa [pleqB] using hn
 
-def capToken (s : String) : String :=
-  let i := findCharIndex '(' s
-  if i < s.length then (s.take i).toString else s
+theorem mem_keys_of_lookupV : ∀ (P : Valuation) (k : String) (v : PVal),
+    lookupV P k = some v → k ∈ P.map (·.1) := by
+  intro P
+  induction P with
+  | nil => intro k v h; simp [lookupV] at h
+  | cons kv rest ih =>
+    intro k v h
+    simp only [lookupV] at h
+    by_cases hk : kv.1 = k
+    · simp [hk]
+    · rw [if_neg hk] at h
+      exact List.mem_cons_of_mem _ (ih k v h)
+
+theorem lookupV_isSome_of_mem_keys : ∀ (P : Valuation) (k : String),
+    k ∈ P.map (·.1) → ∃ v, lookupV P k = some v := by
+  intro P
+  induction P with
+  | nil => intro k h; simp at h
+  | cons kv rest ih =>
+    intro k h
+    simp only [lookupV]
+    by_cases hk : kv.1 = k
+    · rw [if_pos hk]; exact ⟨kv.2, rfl⟩
+    · rw [if_neg hk]
+      simp only [List.map_cons, List.mem_cons] at h
+      rcases h with h | h
+      · exact absurd h.symm hk
+      · exact ih k h
+
+/-- `Covers` as a decision procedure. It quantifies over the parameter
+NAMES `a` binds, which is exactly the set on which `Covers`'s hypothesis
+`lookupV a.params k = some v` can hold, so the equivalence is
+unconditional (duplicate names included — both sides read `lookupV`). -/
+def coversB (a b : Cap) : Bool :=
+  a.token == b.token &&
+  (a.params.map (·.1)).all fun k =>
+    match lookupV a.params k, lookupV b.params k with
+    | some v, some w => pleqB w v
+    | some _, none => false
+    | none, _ => true
+
+/-- **The coverage verdict is the model's relation.** -/
+theorem coversB_iff (a b : Cap) : coversB a b = true ↔ Covers a b := by
+  simp only [coversB, Bool.and_eq_true, beq_iff_eq, List.all_eq_true]
+  constructor
+  · rintro ⟨ht, hall⟩
+    refine ⟨ht, fun k v hv => ?_⟩
+    have hk := mem_keys_of_lookupV a.params k v hv
+    have := hall k hk
+    rw [hv] at this
+    cases hb : lookupV b.params k with
+    | none => rw [hb] at this; exact absurd this (by simp)
+    | some w =>
+      rw [hb] at this
+      exact ⟨w, rfl, (pleqB_iff w v).mp this⟩
+  · rintro ⟨ht, hcov⟩
+    refine ⟨ht, fun k hk => ?_⟩
+    obtain ⟨v, hv⟩ := lookupV_isSome_of_mem_keys a.params k hk
+    obtain ⟨w, hw, hwv⟩ := hcov k v hv
+    rw [hv, hw]
+    exact (pleqB_iff w v).mpr hwv
+
+/-! ## Deciding the spawn-attenuation judgment
+
+`RevL.CapCeilings.Attenuates` is the checker's spawn gate in the model:
+the resource fold over ceiling-stripped capabilities, AND the ceiling
+budget check. Both halves are decided here against the model's own
+definitions. -/
+
+def resourceOKB (held reach : List Cap) : Bool :=
+  reach.all fun c => held.any fun h => coversB (stripCeilings h) (stripCeilings c)
+
+theorem resourceOKB_iff (held reach : List Cap) :
+    resourceOKB held reach = true ↔ ResourceOK held reach := by
+  simp only [resourceOKB, List.all_eq_true, List.any_eq_true, ResourceOK]
+  constructor
+  · intro h c hc
+    obtain ⟨x, hx, hxc⟩ := h c hc
+    exact ⟨x, hx, (coversB_iff _ _).mp hxc⟩
+  · intro h c hc
+    obtain ⟨x, hx, hxc⟩ := h c hc
+    exact ⟨x, hx, (coversB_iff _ _).mpr hxc⟩
+
+/-- The parameter names any held capability binds. `CeilingOK` quantifies
+over ALL names; `budgetOf_attained` says a `some` budget is some held
+capability's own declaration, so no name outside this list can carry
+one — which is what makes the unbounded quantifier decidable. -/
+def heldParamKeys (held : List Cap) : List String :=
+  held.flatMap (fun h => h.params.map (·.1))
+
+def ceilingOKB (held reach : List Cap) : Bool :=
+  reach.all fun c =>
+    (heldParamKeys held).all fun k =>
+      match budgetOf held c.token k with
+      | none => true
+      | some n =>
+          match ceilingOf c k with
+          | some m => decide (m ≤ n)
+          | none => false
+
+theorem ceilingOKB_iff (held reach : List Cap) :
+    ceilingOKB held reach = true ↔ CeilingOK held reach := by
+  simp only [ceilingOKB, List.all_eq_true, CeilingOK]
+  constructor
+  · intro h c hc k n hn
+    obtain ⟨x, hx, hxt, hxc⟩ := budgetOf_attained hn
+    have hk : k ∈ heldParamKeys held := by
+      refine List.mem_flatMap.mpr ⟨x, hx, ?_⟩
+      exact mem_keys_of_lookupV x.params k _ (ceilingOf_lookup hxc)
+    have := h c hc k hk
+    rw [hn] at this
+    cases hm : ceilingOf c k with
+    | none => rw [hm] at this; exact absurd this (by simp)
+    | some m => rw [hm] at this; exact ⟨m, rfl, of_decide_eq_true this⟩
+  · intro h c hc k _
+    cases hn : budgetOf held c.token k with
+    | none => rfl
+    | some n =>
+      obtain ⟨m, hm, hmn⟩ := h c hc k n hn
+      rw [hm]
+      exact decide_eq_true hmn
+
+def attenuatesB (held reach : List Cap) : Bool :=
+  resourceOKB held reach && ceilingOKB held reach
+
+/-- **The spawn-attenuation verdict is the model's judgment.** -/
+theorem attenuatesB_iff (held reach : List Cap) :
+    attenuatesB held reach = true ↔ Attenuates held reach := by
+  simp only [attenuatesB, Bool.and_eq_true, Attenuates]
+  exact and_congr (resourceOKB_iff held reach) (ceilingOKB_iff held reach)
 
 -- ---------------------------------------------------------------- rows
 
@@ -128,6 +402,8 @@ structure MRow where
   name : String
   requires : List String
   provides : List String
+  realms : List (String × String)
+  isTemplate : Bool
 
 structure URow where
   path : String
@@ -173,9 +449,22 @@ structure SRow where
   parent : String
   child : String
 
+structure XRow where
+  path : String
+  code : String
+
+/-- `key=realm` pairs from a component's `isolate` clauses. -/
+def parseRealms (s : String) : List (String × String) :=
+  (splitKeys s).filterMap fun chunk =>
+    match chunk.splitOn "=" with
+    | [k, r] => some (k, r)
+    | _ => none
+
 def parseM (f : List String) : Option MRow :=
   match f with
-  | ["M", path, name, reqs, provs] => some ⟨path, name, splitKeys reqs, splitKeys provs⟩
+  | ["M", path, name, reqs, provs, realms, role] =>
+      some ⟨path, name, splitKeys reqs, splitKeys provs, parseRealms realms,
+            role == "template"⟩
   | _ => none
 
 def parseU (f : List String) : Option URow :=
@@ -213,24 +502,79 @@ def parseS (f : List String) : Option SRow :=
   | ["S", path, parent, child] => some ⟨path, parent, child⟩
   | _ => none
 
+def parseX (f : List String) : Option XRow :=
+  match f with
+  | ["X", path, code] => some ⟨path, code⟩
+  | _ => none
+
+/-- `Z <cap> <token>`. -/
+def parseZ (f : List String) : Option (String × String) :=
+  match f with
+  | ["Z", cap, tok] => some (cap, tok)
+  | _ => none
+
+/-- `Y <cap> <param> <kind> <value>`, already canonical: a path value is
+its `/`-joined component list, a ceiling its base-unit integer. -/
+def parseY (f : List String) : Option (String × String × PVal) :=
+  match f with
+  | ["Y", cap, name, "path", v] =>
+      some (cap, name, .path ((v.splitOn "/").filter (fun p => p != "")))
+  | ["Y", cap, name, "discrete", v] => some (cap, name, .discrete v)
+  | ["Y", cap, name, "ceiling", v] =>
+      match v.toNat? with
+      | some n => some (cap, name, .ceiling n)
+      | none => none
+  | _ => none
+
+/-- The decomposition table: canonical cap string -> the model's `Cap`. -/
+abbrev CapTable := List (String × Cap)
+
+def buildCapTable (zs : List (String × String))
+    (ys : List (String × String × PVal)) : CapTable :=
+  zs.map fun (s, tok) =>
+    (s, ⟨tok, (ys.filter (fun y => y.1 == s)).map (fun y => (y.2.1, y.2.2))⟩)
+
+/-- A missing decomposition is a hard error, never a silently empty cap. -/
+def capOf (t : CapTable) (s : String) : Option Cap :=
+  match t.find? (·.1 == s) with
+  | some (_, c) => some c
+  | none => none
+
+def capToken (t : CapTable) (s : String) : String :=
+  match capOf t s with
+  | some c => c.token
+  | none => s
+
 -- ------------------------------------------------------------ verdicts
-
-def disjointOK (providesLists : List (List String)) : Bool :=
-  decide (List.Nodup providesLists.flatten)
-
-def closedOK (mrows : List MRow) : Bool :=
-  mrows.all fun r =>
-    r.requires.all fun k =>
-      mrows.any fun q => q.provides.contains k
 
 /-- Marker rule (G4-shaped): marker presence must equal the interface's
 declaration — every call to a declared emission method must be `emit`
 -marked, and an `emit`-marked call to a non-emission method is refused.
-Receivers include spawn handles (the exporter resolves them). -/
+Receivers include spawn handles (the exporter resolves them).
+
+PRIVATE RESTATEMENT (see the header): the G4 model is indexed by
+statement syntax, and the export carries call facts. -/
 def g4OK (ems : List (String × String)) (calls : List URow) : Bool :=
   !calls.any fun u =>
     let em := ems.any fun e => e.1 == u.svc && e.2 == u.meth
     (u.ctx == "emit") != em
+
+/-- Provide-method bound: the reached emission tokens must be within the
+declared bound (plain => none; any => free; scoped => the declared
+entries).
+
+PRIVATE RESTATEMENT (see the header): the model states no
+declaration-versus-reach bound. -/
+def methodBoundOK (t : CapTable)
+                   (bounds : List (String × String × String × List String))
+                   (svc meth : String) (caps : List String) : Bool :=
+  let b := bounds.find? (fun x => x.1 == svc && x.2.1 == meth)
+  let mode := match b with | some x => x.2.2.1 | none => "plain"
+  let entries := match b with | some x => x.2.2.2 | none => []
+  if mode == "any" then true
+  else if mode == "scoped" then
+    (caps.map (capToken t)).all fun tk => entries.contains tk
+  else caps.isEmpty
 
 /-- Component -> capability set, as an association list. -/
 abbrev CapMap := List (String × List String)
@@ -242,9 +586,7 @@ def lookupCaps (m : CapMap) (k : String) : List String :=
 
 /-- Insert-or-union. An ABSENT key is ADDED, not dropped: a component with
 no reach of its own still holds whatever its `requires` bindings grant it,
-and a spawner with no emissions of its own is still a closure node. This is
-the reference's `setdefault(k, set()).update(caps)`; losing the absent case
-is what made a reach-less spawner look like it held nothing at all. -/
+and a spawner with no emissions of its own is still a closure node. -/
 def upsertCaps (m : CapMap) (k : String) (caps : List String) : CapMap :=
   if m.any (·.1 == k) then
     m.map (fun (n, cs) => if n == k then (n, union cs caps) else (n, cs))
@@ -255,9 +597,12 @@ def groupCaps (pairs : List (String × String)) : CapMap :=
   pairs.foldl (fun acc (k, c) => upsertCaps acc k [c]) []
 
 /-- One closure step over the spawn edges: every parent absorbs its
-children's caps. Monotone and edge-order independent at the fixed point, so
-`edges.length + 1` passes reach what the reference's `while changed` loop
-reaches. -/
+children's caps.
+
+PRIVATE RESTATEMENT (see the header): `RevL.CapCeilings.reachIn` is this
+closure in the model, but it is indexed by a `Comp` carrying
+`body : List Stmt`, which the export does not produce. Only the CLOSURE
+is local; the judgment it feeds (`attenuatesB`) is the model's. -/
 def oneStep (edges : List (String × String)) (closed : CapMap) : CapMap :=
   edges.foldl (fun acc (p, c) => upsertCaps acc p (lookupCaps acc c)) closed
 
@@ -266,27 +611,17 @@ def closeN (n : Nat) (edges : List (String × String)) (closed : CapMap) : CapMa
   | 0 => closed
   | n + 1 => closeN n edges (oneStep edges closed)
 
-/-- The spawn-attenuation verdict per edge: the child's transitively closed
-reach must be covered by the spawner's held capabilities. -/
-def attenOK (closed held : CapMap) (parent child : String) : Bool :=
-  let childCaps := lookupCaps closed child
-  let heldCaps := lookupCaps held parent
-  childCaps.all fun c => heldCaps.any fun h => capCovers h c
-
-/-- Provide-method bound: the reached emission tokens must be within the
-declared bound (plain => none; any => free; scoped => the declared
-entries). -/
-def methodBoundOK (bounds : List (String × String × String × List String))
-                   (svc meth : String) (caps : List String) : Bool :=
-  let b := bounds.find? (fun x => x.1 == svc && x.2.1 == meth)
-  let mode := match b with | some x => x.2.2.1 | none => "plain"
-  let entries := match b with | some x => x.2.2.2 | none => []
-  if mode == "any" then true
-  else if mode == "scoped" then
-    (caps.map capToken).all fun t => entries.contains t
-  else caps.isEmpty
-
 -- ---------------------------------------------------------------- main
+
+/-- Build the model's component from an `M` row. `realm` is the
+component's own `isolate` map, defaulting to `sharedRealm` — `lower._realm`
+exactly. -/
+def toLComponent (r : MRow) : LComponent :=
+  { name := r.name, requires := r.requires, provides := r.provides,
+    realm := fun k =>
+      match r.realms.find? (·.1 == k) with
+      | some (_, rl) => rl
+      | none => sharedRealm }
 
 def main (args : List String) : IO UInt32 := do
   match args with
@@ -302,8 +637,20 @@ def main (args : List String) : IO UInt32 := do
     let frows := fields.filterMap parseF
     let krows := fields.filterMap parseK
     let srows := fields.filterMap parseS
+    let xrows := fields.filterMap parseX
+    let capTable := buildCapTable (fields.filterMap parseZ) (fields.filterMap parseY)
+    -- A capability with no decomposition row would silently become the
+    -- bare token; refuse instead.
+    let allCaps := ((arows.map (·.cap)) ++ (frows.map (·.cap))
+                    ++ (krows.map (·.cap))).eraseDups
+    let missing := allCaps.filter (fun c => (capOf capTable c).isNone)
+    if !missing.isEmpty then
+      IO.eprintln s!"oracle: capability rows without a Z decomposition: {missing}"
+      return 1
     let paths := (mrows.map (·.path)).eraseDups
     let mut out := ""
+    for x in xrows do
+      out := out ++ s!"X\t{x.path}\trefused={x.code}\n"
     for p in paths do
       let fm := mrows.filter (fun r => r.path == p)
       let ub := brows.filter (fun r => r.path == p)
@@ -319,9 +666,14 @@ def main (args : List String) : IO UInt32 := do
         ub.map fun b =>
           (b.svc, b.meth, b.mode,
            (uq.filter (fun q => q.svc == b.svc && q.meth == b.meth)).map (·.entry))
-      let dv := if disjointOK (fm.map (·.provides)) then "ok" else "fail"
-      let cv := if closedOK fm then "ok" else "fail"
-      out := out ++ s!"V\t{p}\tdisjoint={dv}\tclosed={cv}\n"
+      -- The static composition: spawn TEMPLATES are runtime instances, not
+      -- composition members, and `lower._link` excludes them from the G2/G3
+      -- table for exactly that reason.
+      let comps := (fm.filter (fun r => !r.isTemplate)).map toLComponent
+      let dv := if decide (ProvidesDisjoint comps) then "ok" else "fail"
+      let cv := if decide (RequiresClosed comps) then "ok" else "fail"
+      let lv := if linkVerdict comps then "ok" else "fail"
+      out := out ++ s!"V\t{p}\tdisjoint={dv}\tclosed={cv}\tlink={lv}\n"
       let aPairs := ua.map (fun r => (r.comp, r.cap))
       let fPairs := uf.map (fun r => (r.comp, r.cap))
       let owns := groupCaps (aPairs ++ fPairs)
@@ -339,12 +691,14 @@ def main (args : List String) : IO UInt32 := do
         let caps := (uf.filter (fun r => r.comp == k.1 && r.key == k.2.1
                                 && r.svc == k.2.2.1 && r.meth == k.2.2.2))
                     |>.map (·.cap) |>.eraseDups
-        let ok := methodBoundOK bounds k.2.2.1 k.2.2.2 caps
+        let ok := methodBoundOK capTable bounds k.2.2.1 k.2.2.2 caps
         let pv := if ok then "ok" else "fail"
         out := out ++ s!"P\t{p}\t{k.1}\t{k.2.1}\t{k.2.2.1}\t{k.2.2.2}\tbound={pv}\n"
       -- W verdicts (spawn attenuation) per edge
       for e in edges do
-        let av := if attenOK closed held e.1 e.2 then "ok" else "fail"
+        let childCaps := (lookupCaps closed e.2).filterMap (capOf capTable)
+        let heldCaps := (lookupCaps held e.1).filterMap (capOf capTable)
+        let av := if attenuatesB heldCaps childCaps then "ok" else "fail"
         out := out ++ s!"W\t{p}\t{e.1}\t{e.2}\tatten={av}\n"
     IO.FS.writeFile outPath out
     return 0
