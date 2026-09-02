@@ -664,7 +664,11 @@ def _open_leaf(dirfd: int, leaf: str, real: str) -> tuple[int, bool]:
                 real,
             ) from None
         try:
-            return os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o666,
+            # 0o600, not the 0o666 `open()` itself would pass: a file this
+            # module creates inside the confined root is owner-only, so a
+            # permissive umask cannot widen it. Matches the sidecar create
+            # below (which then `fchmod`s back to the preimage's own mode).
+            return os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600,
                            dir_fd=dirfd), True
         except FileExistsError:
             continue
