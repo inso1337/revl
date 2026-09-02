@@ -272,6 +272,9 @@ def test_session_default_wal_uses_durable_helper():
     assert "gettempdir" not in src
 
 
+@pytest.mark.skipif(
+    __import__("importlib.util", fromlist=["util"]).find_spec("cordis") is None,
+    reason="opening a session's approval WAL needs a live cordis-py composition")
 def test_session_default_wal_lands_in_the_durable_dir(monkeypatch, tmp_path):
     """The behavioural half of the same guard, immune to a refactor: a policy
     session that names no `wal_path` opens its approval WAL UNDER the durable
