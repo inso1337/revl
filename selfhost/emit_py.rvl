@@ -1896,6 +1896,16 @@ fn walk_result(n: Any) -> Bool {
   return false
 }
 fn uses_builtin_result(ir: Any) -> Bool {
+  // The two extern clauses the walk cannot see, because neither writes a
+  // surface `match`/`adt` that names `Ok`/`Err`. A WITNESSED extern (item 243)
+  // has its emitted call site branch on `Ok` to register the transactional
+  // inverse; ANY Result-returning extern (item 362) builds `Ok(..)`/`Err(..)`
+  // inside its own verbatim host body. Either one needs the classes present.
+  // Missing here, the emitted module referenced names it never defined.
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (value_str(value_field(ext, "class")) == "witnessed") { return true }
+    if (value_str(value_field(ext, "returns")).startsWith("Result")) { return true }
+  }
   if (walk_result(value_field(ir, "components"))) { return true }
   if (walk_result(value_field(ir, "functions"))) { return true }
   if (walk_result(value_field(ir, "tests"))) { return true }
