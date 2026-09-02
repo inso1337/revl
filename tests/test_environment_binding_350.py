@@ -382,3 +382,51 @@ def test_tightening_a_bound_is_not_an_addition_of_the_old_token():
     delta = diff_crossings(before, after)
     assert "env:model:in=mock" in delta["added"]
     assert "env:model:in=mock|real|engine" in delta["removed"]
+
+
+# ---------------------------------------------------------------- the MCP seam
+
+
+def _session():
+    from revl.mcp.session import Session
+
+    return Session()
+
+
+def test_the_mcp_load_seam_enforces_the_same_bounds():
+    """`revl_load` has a single config channel, so a boot component's entry in it
+    IS the environment injection. Without this check the MCP surface would be a
+    way to inject past the bounds the CLI enforces."""
+    from revl.mcp.session import SessionError
+
+    ir = _ir(BOOT)
+    with pytest.raises(SessionError) as caught:
+        _session().load(ir, {"HarnessBoot": {"data_dir": "/etc/shadow"}})
+    assert "absolute" in str(caught.value)
+
+    with pytest.raises(SessionError) as caught:
+        _session().load(ir, {"HarnessBoot": {"data_dir": "./.harness-data",
+                                             "model": "attacker-endpoint"}})
+    assert "is not one of them" in str(caught.value)
+
+    with pytest.raises(SessionError) as caught:
+        _session().load(ir, {"HarnessBoot": {"endpoint": "http://elsewhere"}})
+    assert 'does not declare "endpoint"' in str(caught.value)
+
+
+def test_the_mcp_refusal_never_echoes_the_injected_value():
+    from revl.mcp.session import SessionError
+
+    canary = "./.harness-data/../../var/secrets/tenant-9f2c-prod-key"
+    with pytest.raises(SessionError) as caught:
+        _session().load(_ir(BOOT), {"HarnessBoot": {"data_dir": canary}})
+    assert "tenant-9f2c" not in str(caught.value)
+
+
+def test_the_mcp_seam_is_inert_without_a_boot_component():
+    """A composition with no boot component reaches the runtime exactly as
+    before; the contract check adds no refusal of its own."""
+    session = _session()
+    # `_enforce_environment_contract` is the whole addition to `load`; calling it
+    # directly proves inertness without needing a cordis runtime installed.
+    session._enforce_environment_contract(_ir(PLAIN), {"Ordinary": {"data_dir": "/etc"}})

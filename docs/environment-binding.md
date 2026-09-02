@@ -137,6 +137,18 @@ The table carries name, type, requiredness, the `Secret[T]` marking and the
 author-written bound. It never carries a value: values arrive at `revl run
 --env` time, after the audit, and never enter the IR.
 
+## The MCP load seam
+
+`revl_load` over the MCP surface has a single config channel, so there is no
+`--env`/`--config` split to enforce there: a boot component's entry in the
+supplied config map IS the environment injection. Everything that is a property
+of the *value* rather than of the channel still holds, checked before any
+runtime is touched: an undeclared key, a value of the wrong declared type, and a
+value outside its declared bound are each refused. Without that, the MCP surface
+would be a way to inject past the bounds the CLI enforces, which is the silent
+widening this contract exists to remove. The refusal travels back over the wire,
+so like the CLI's it names the field and the bound and never the value.
+
 ## Rules the shape implies
 
 - **At most one boot component per composition.** Two contracts cannot both be

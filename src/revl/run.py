@@ -279,13 +279,37 @@ def _env_contract_problem(ir: dict, env: dict, config: dict) -> str | None:
             )
         return None
     name = boot["name"]
-    fields = {f["name"]: f for f in (boot.get("config") or [])}
     problems: list[str] = []
     # rule 1 — one door.
     if config.get(name):
         problems.append(
             f"{name} is the boot component: its values arrive through --env, not --config"
         )
+    problems.extend(_contract_violations(boot, env))
+    if not problems:
+        return None
+    rendered = "\n".join(f"  - {entry}" for entry in problems)
+    return (
+        "invalid env:\n"
+        f"{rendered}\n"
+        f"  `boot component {name}` is this composition's environment contract — "
+        "the exhaustive, typed list of what the host must inject (item 350)."
+    )
+
+
+def _contract_violations(boot: dict, env: dict) -> list[str]:
+    """Rules 2 and 4 over one name->value map: an undeclared key, a value of the
+    wrong declared type, and a value outside its declared bound.
+
+    Split out from :func:`_env_contract_problem` because rule 1 (one door) is a
+    CLI-shaped rule — it separates `--env` from `--config` — while these three
+    are properties of the value itself and hold at every injection point. The
+    MCP `revl_load` seam has a single config channel, so a boot component's entry
+    there IS the environment injection and is checked with exactly these rules
+    (`revl.mcp.session.Session._enforce_environment_contract`)."""
+    fields = {f["name"]: f for f in (boot.get("config") or [])}
+    problems: list[str] = []
+    name = boot["name"]
     # rule 2 — no silent arrival.
     for key in sorted(env):
         if key not in fields:
@@ -323,15 +347,7 @@ def _env_contract_problem(ir: dict, env: dict, config: dict) -> str | None:
                 f'"{key}" is declared `{_bound_render(bound)}` and the injected '
                 "value is not one of them"
             )
-    if not problems:
-        return None
-    rendered = "\n".join(f"  - {entry}" for entry in problems)
-    return (
-        "invalid env:\n"
-        f"{rendered}\n"
-        f"  `boot component {name}` is this composition's environment contract — "
-        "the exhaustive, typed list of what the host must inject (item 350)."
-    )
+    return problems
 
 
 def _merge_env(ir: dict, env: dict, config: dict) -> dict:
