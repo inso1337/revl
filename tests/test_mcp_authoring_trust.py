@@ -105,6 +105,9 @@ def test_a_host_body_hidden_in_an_agent_supplied_module_is_refused(tmp_path):
     assert payload.get("authoringTrust") == "untrusted"
 
 
+@pytest.mark.skipif(
+    __import__("importlib.util", fromlist=["util"]).find_spec("cordis") is None,
+    reason="patching a loaded composition needs a live cordis-py composition")
 def test_revl_edit_cannot_patch_a_host_body_in(tmp_path):
     """`revl_edit` re-admits through its own compile; it is an authoring verb and
     carries the same trust (`edit.compile_virtual`)."""
