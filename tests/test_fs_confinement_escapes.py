@@ -301,8 +301,8 @@ def test_a_concurrent_writer_cannot_divert_a_write_out_of_the_root(workspace, ou
 # ===========================================================================
 
 def test_a_nul_byte_in_a_path_is_refused_not_raised(workspace):
-    """`os.path.realpath` calls `lstat`, which raises `ValueError` — not an
-    `OSError` — on an embedded NUL. The `@py` bodies catch `FsOpError` only, so
+    """`os.path.realpath` calls `lstat`, which raises `ValueError`, not an
+    `OSError`, on an embedded NUL. The `@py` bodies catch `FsOpError` only, so
     that escaped all four witnessed ops as a raw exception and broke fs.rvl's
     declared `-> Result[_, FsError]` contract: a caller handling the `Err` arm
     still crashed. `hostfile.py:189-196` already handled exactly this for the
@@ -365,8 +365,8 @@ def _unlink_during(monkeypatch, hook: str, target: Path):
 def test_a_write_racing_an_unlink_refuses_rather_than_claiming_ok(
         workspace, monkeypatch, hook):
     """Before item 431(b) this returned **Ok** with a witness naming a path that
-    did not hold the bytes. Confinement held the whole way — the fd reached the
-    inode the check admitted — but the unlink had made that inode an ORPHAN, so
+    did not hold the bytes. Confinement held the whole way, the fd reached the
+    inode the check admitted, but the unlink had made that inode an ORPHAN, so
     the discharge descriptor enumerated a successful witnessed write of a file
     that was gone, and the registered undo would have restored a preimage over a
     forward mutation that never became visible.
@@ -390,7 +390,7 @@ def test_a_write_racing_an_unlink_refuses_rather_than_claiming_ok(
 def test_a_lost_race_leaves_no_preimage_residue(workspace, monkeypatch):
     """An `Err` registers no inverse, so anything the attempt left behind is
     residue nothing enumerates. The snapshot is taken before the write, so the
-    refusal has to clear it — which the body cannot do itself (the family scan
+    refusal has to clear it, which the body cannot do itself (the family scan
     admits only paths bound from a family 1-3 guard), hence the sidecar is
     recorded on the handle and `discard_write` removes it."""
     target = workspace / "racy.txt"
@@ -408,8 +408,8 @@ def test_a_lost_race_leaves_no_preimage_residue(workspace, monkeypatch):
 def test_a_lost_race_does_not_delete_the_competing_writers_file(
         workspace, monkeypatch):
     """`discard_write` removed the created leaf BY NAME. After a lost race that
-    name is the competitor's file, not ours — ours is an unlinked orphan that
-    goes away with the fd — so removing by name deleted somebody else's data
+    name is the competitor's file, not ours, ours is an unlinked orphan that
+    goes away with the fd, so removing by name deleted somebody else's data
     while cleaning up our own. It is inode-checked now."""
     target = workspace / "fresh.txt"          # does not exist: the open creates it
     original = ws.write_through

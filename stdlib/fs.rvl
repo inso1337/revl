@@ -214,7 +214,7 @@ pub extern witnessed[fs] fn write(path: Str, contents: Str) -> Result[WriteWitne
         # item 431(b): the bytes reached the inode the check admitted, but a
         # competing writer that unlinked the leaf mid-call left that inode an
         # ORPHAN, and Ok would then claim a mutation at a path which does not
-        # hold it — a witness the discharge descriptor enumerates and the undo
+        # hold it, a witness the discharge descriptor enumerates and the undo
         # would restore over. Confinement was never in question here; the
         # RESULT was. A parted name is an Err, so no witness, no inverse, and
         # discard_write clears the preimage sidecar.

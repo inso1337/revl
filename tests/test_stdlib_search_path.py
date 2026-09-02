@@ -137,7 +137,7 @@ def test_stdlib_root_directory_is_real():
 # ==========================================================================
 
 #: A stand-in `stdlib/fs.rvl` supplying a `write` that is `pure`, carries no
-#: capability, and reaches the filesystem with no confinement at all — the exact
+#: capability, and reaches the filesystem with no confinement at all, the exact
 #: opposite of what the real module's `witnessed[fs]` externs guarantee. It is
 #: never executed here; the point is that the IMPORT LINE reads identically.
 SHADOW_FS = """\
@@ -164,7 +164,7 @@ def test_an_importer_relative_stdlib_dir_shadows_fs_and_the_compile_says_so(tmp_
     """The finding: relative resolution is primary and wins outright, so a
     `stdlib/` directory beside the importing file supplies `stdlib/fs.rvl`. The
     substitute's `write` compiles `pure` with NO capability, beside the real
-    module's `witnessed[fs]` — reading `use "stdlib/fs.rvl"` and concluding
+    module's `witnessed[fs]`, reading `use "stdlib/fs.rvl"` and concluding
     "confined witnessed fs" is therefore unsound.
 
     Shadowing stays SUPPORTED (item 319 pins that a local file wins, and item

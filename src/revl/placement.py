@@ -496,7 +496,7 @@ def _canonical_fs_path(path: str) -> str | None:
 
     `posixpath.normpath` folds `.` and `..` lexically and collapses repeated
     separators, except that POSIX reserves a leading exactly-double slash, which
-    `normpath` preserves and which no mount ever means — so it is folded here.
+    `normpath` preserves and which no mount ever means, so it is folded here.
     A relative path has no canonical form at this layer (relative to WHAT? the
     conductor's cwd is not a thing the envelope can bind) and comes back `None`,
     which every caller reads as fail-closed."""
@@ -528,12 +528,12 @@ def _bad_fs_path(path: str, what: str) -> str | None:
     if canonical is None:
         return (f"{what} names {path!r}, which is not an absolute path; an "
                 f"fs mount and an fs need are both absolute host paths "
-                f"(`/scratch`, `/scratch:rw`) — there is no directory for a "
+                f"(`/scratch`, `/scratch:rw`), there is no directory for a "
                 f"relative one to be relative to")
     if canonical != path:
         return (f"{what} names {path!r}, which is not its canonical spelling: "
                 f"it denotes {canonical!r}. Write {canonical!r}, so the mount "
-                f"list and the needs table say what they grant and reach — a "
+                f"list and the needs table say what they grant and reach, a "
                 f"`.`/`..`/`//` spelling is compared LITERALLY here, which is "
                 f"how `/scratch/../../etc/shadow` read as covered by a "
                 f"`/scratch:rw` mount")
@@ -547,7 +547,7 @@ def _fs_covers(mounts: list[str], path: str, mode: str) -> bool:
 
     Both sides are canonicalized first (roadmap 422 F5). This used to be a raw
     string prefix test, so `/scratch/../../etc/shadow` was COVERED by a
-    `/scratch:rw` mount while the direct `/etc/shadow` spelling was refused —
+    `/scratch:rw` mount while the direct `/etc/shadow` spelling was refused -
     bounded while Slice 1 launches no jail and the needs gate is advisory, but
     this function is what Slice 2 inherits for deriving real mounts. The
     spellings are refused where they enter (`_normalize_sandbox_table` for a
