@@ -848,16 +848,30 @@ class _Driver:
     def _model_crossing_payload(self, *, activation_id: str | None = None,
                                 args=None, arg_origins=None,
                                 taint_engaged: bool = False,
-                                verified_by=None) -> dict | None:
+                                verified_by=None, crossing=None) -> dict | None:
         """Item 121: assemble the `llm` payload for a model-completion crossing,
         or ``None`` when this crossing is not one.
 
         The completion fires at exactly one runtime seam — ``validate_retry``
-        (`backends/python/runtime.py`) — which stashes a fiber-local observation
-        ``(latencySeconds, attempts, attemptCeiling, rawReturn)``. This reads
-        (and consumes) it via ``revl_take_model_call()``: a present observation
-        IS the model-hop discriminator, so a NON-model crossing (nothing stashed)
-        returns ``None`` and its record stays byte-identical.
+        (`backends/python/runtime.py`) — which stashes an observation
+        ``(latencySeconds, attempts, attemptCeiling, rawReturn)`` BOUND TO THE
+        CROSSING it was measured at. This reads (and consumes) the entry for
+        ``crossing`` — ``(component, stepIndex)``, the identity of the
+        ``emissionsCrossed`` entry being recorded — via
+        ``revl_take_model_call()``: an observation bound to THIS crossing IS the
+        model-hop discriminator, so a NON-model crossing gets ``None`` and its
+        record stays byte-identical.
+
+        Item 242: the key is what makes that discriminator correct. Before it,
+        the seam wrote one fiber-wide register and this consumed it for whichever
+        crossing it was asked about first — and the walk that asks
+        (``replay.Timeline.step_back``) reports crossings NEWEST FIRST, so a run
+        that crossed a model completion and then a filesystem write attributed
+        the model, token, cost and latency numbers to the write. (It could not
+        forge a `produced` edge — the back-patch requires the target to carry an
+        `llm` payload, so a misplaced payload degrades to no edge — but the hop
+        itself named the wrong crossing.) Omitting ``crossing`` keeps the
+        pre-242 unkeyed take, for a caller that holds no crossing identity.
 
         From the observation this threads the revl-OWNED numbers (the latency
         bracket, the attempt count against the item-257 static ``N + 1`` ceiling)
@@ -870,7 +884,10 @@ class _Driver:
         Digest/token/host-usage all honest-degrade to absent; the assembly and
         every provenance tag live in `revl_model_hop`."""
         take = getattr(self.runtime, "revl_take_model_call", None)
-        obs = take() if take is not None else None
+        if take is None:
+            obs = None
+        else:
+            obs = take() if crossing is None else take(crossing)
         if obs is None:
             return None
         latency, attempts, ceiling, raw = obs
@@ -1360,10 +1377,14 @@ class _Driver:
                     # a capability (the target service) and labelled `key.method`.
                     detail = step.get("detail") or {}
                     # item 121: if this crossing is a model completion, the
-                    # `validate_retry` seam stashed a fiber-local observation;
-                    # thread its `llm` payload + `activationId` onto the record.
-                    # A non-model crossing yields None here, so its record stays
-                    # byte-identical to a pre-121 v2 emit. Item 444: the digest
+                    # `validate_retry` seam stashed an observation BOUND TO IT
+                    # (keyed on the identity `record_emission` published, item
+                    # 242); thread its `llm` payload + `activationId` onto the
+                    # record. This walk is NEWEST FIRST, so the key is what keeps
+                    # a completion's numbers off a later non-model crossing. A
+                    # crossing that carried no completion yields None here, so
+                    # its record stays byte-identical to a pre-121 v2 emit.
+                    # Item 444: the digest
                     # gate reads the compile-side taint facts off the IR
                     # (`_crossing_taint`) instead of being hard-wired shut — a
                     # certified-clean composition now emits the digest, and every
@@ -1377,7 +1398,8 @@ class _Driver:
                         activation_id=activation_id,
                         args=detail.get("args"),
                         arg_origins=arg_origins,
-                        taint_engaged=taint_engaged)
+                        taint_engaged=taint_engaged,
+                        crossing=(timeline.component, step.get("index")))
                     self._record_emit(
                         timeline.component,
                         detail.get("service") or "",

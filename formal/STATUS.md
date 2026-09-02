@@ -51,7 +51,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G4** inverse-or-emit | full over the lattice; the shape-level statement is weak and marked | 2 + 7 | **yes** (182 G rows, 25 P rows, 6 agree-G4) | `G4.inverse_or_emit` is shape-level and superseded. For the lattice form: the reach fold's **fuel bound** is real and named (`fold_must_run_to_stability`), `FnDecl.calls` stands in for `_calls_in` (an empirical obligation on the lowering), first-class dispatch is `*`, and `inverseOK` reads `undo` only where the reference walks `compensate` too. **Unbuilt work**, not modelling limits |
 | **G5** teardown registers nothing | full over the lattice; the shape-level statement is **contentless** and registered as a finding | 2 + 14 | no | `G5.teardown_registers_nothing` is true by definition (`registrations` is constant zero) and says so in the registry. `G5Classified` carries the real count, including two operational runs. **Gap: no oracle row** — the lattice model is checked against the paper, not the checker |
 | **G6** purity outside effect forms | partial | 2 | no | content is the shape of `TypedIn`/`ReachIn`; the derived form (reach computed from program text) exists only inside `CapCeilings.derived_confinement_within_ceiling`. **Unbuilt work** |
-| **G7** derived LIFO teardown | full for *which* entries run, in *what order*, under *which verdict* — including the E-Stop | 32 + 7 | no | deliberately not modelled: Phase-1 continue-and-record and its residue severities, the Phase-2 budget, deferred method-registered entries (item 318), escrow under a pending session verdict (item 245), cascading abort. This model says which entries run, **not what happens when one of them fails**. **Modelling limit, scoped on purpose** |
+| **G7** derived LIFO teardown | full for *which* entries run, in *what order*, under *which verdict* — including the E-Stop | 32 + 7 | **yes** (267 D rows) | the row RUNS `backends/python/runtime.py` over an enumerated scenario corpus and diffs the reference's observed disposition against the model's predicted one, with a coverage ratchet (`teardown_coverage`) that fails the gate if the corpus stops distinguishing LIFO from FIFO, Phase 2 from Phase 1, or the three dispositions from one another. Still deliberately not modelled, and so not under the row: Phase-1 continue-and-record and its residue severities, the Phase-2 budget, escrow under a pending session verdict (item 245), cascading abort. This model says which entries run, **not what happens when one of them fails**. The cordis LIFO unwind of the activation-body stack is supplied by the harness, not observed — only `drain`'s own `reversed` loop (item 369) is revl's own ordering code. **Modelling limit, scoped on purpose** |
 | **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 8 | no | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. **Gap: no oracle row**; the harness's `methodBoundOK` is a private restatement, not the model |
 | **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
 | **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | no | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly |
@@ -69,11 +69,14 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 
 Three summary readings of that map:
 
-- **The oracle reaches G2, G3, G4 and the capability order, and nothing
-  else.** G5, G6, G7, G8, G9, A8 and R4 are proved against the design
-  documents and the reference source read by hand. That is the single
-  largest gap in the layer, and it is a gap in *coverage of the gate*, not
-  in the proofs.
+- **The oracle reaches G2, G3, G4, G7 and the capability order.** G5, G6,
+  G8, G9, A8 and R4 are still proved against the design documents and the
+  reference source read by hand. That remains the single largest gap in
+  the layer, and it is a gap in *coverage of the gate*, not in the proofs.
+  G7 was the largest body of theorems without a row (32 + 7) and now has
+  one; it is also the first row whose reference side *executes* the
+  runtime rather than reading a manifest, because a teardown disposition
+  is a property of a run and not of a text.
 - **Seven guarantee codes have no theorem at all** (A1, A2, A3, A5, A6,
   A9, T1-T3). Of those, A5 is the one worth naming twice: G7 proves how a
   `compensation` entry is disposed without anything proving one has to
@@ -683,6 +686,13 @@ spawn edges (S), and the spawn handles (H) through which
 capability decompositions (Z/Y, straight out of `cap_order.parse_cap`),
 parse refusals (X) and componentless files (N).
 
+The G7 row's facts are of a different kind and are listed apart for that
+reason: **teardown scenarios (E/J)** are not extracted from any `.rvl`
+text. A teardown disposition is a property of a RUN, not of a manifest,
+so the fact is the shape of one activation's LIFO stack (E — one row per
+entry, in registration order, carrying its model `EntryKind` and the
+reference's registration seam) and the verdict it unwound under (J).
+
 Two extraction facts on the `M` row are what make the corrected G2/G3
 rules observable:
 
@@ -729,6 +739,96 @@ Verdicts:
   parser) and is reported separately from the computed verdicts for
   exactly that reason. If a parser change ever makes one of these files
   parse, it flows into the full model and the buckets move loudly.
+- **D rows (per teardown scenario, G7)**: the three columns of
+  `RevL.Semantics` — `replayed` (ordered: this is the LIFO claim),
+  `discharged` and `stranded`. Unlike every row above, the reference side
+  does not recompute a judgment: it RUNS
+  `backends/python/runtime.py` over the scenario's stack and reports what
+  actually happened, reading each entry's fate off the reference's own
+  state (`_Transactional.discharged`, `runtime.estop_residue()`) and the
+  replay order off the inverses as they run. So the diff is the model's
+  *predicted* disposition against the reference's *observed* one.
+
+### The G7 row, and what it is evidence of
+
+The G7 row exists because the audit's central reading was that a
+guarantee with 32 theorems and no oracle row is in a different epistemic
+position from one with 9 theorems and a row, and the proved-row count
+cannot tell them apart. G7 was the largest such body.
+
+**It is the first row whose reference side executes rather than reads.**
+`teardown_observation` builds a real `runtime.Frame`, registers entries
+through the reference's own five seams (a bare guarded `lambda` for a
+bracket, `transactional` / `compensation` for the activation body,
+`transactional_method` / `compensation_method` for a provide method), and
+drives the teardown the way the emitted body drives it: `drain` is
+yielded last so it is disposed first, the activation-body disposers
+unwind newest-first, and `begin` is yielded first so it is disposed last
+and runs the Phase-2 drain. Nothing about the outcome is computed by the
+harness.
+
+**The corpus is enumerated, not chosen.** Every registration sequence up
+to depth 3 over the five seams, constrained to body-before-method because
+a provide method runs after its component activated and a stack that
+interleaves them is a run that cannot happen, crossed with all three
+verdicts: 267 scenarios. An oracle row over cases someone picked is an
+oracle row over the cases they thought of.
+
+**What the row does NOT check, said plainly.** The LIFO unwind of the
+activation-body disposer stack is cordis's, and the harness stands in for
+cordis there — so for body-seam entries the row checks the *dispositions*
+(which revl owns, in `_Transactional.__call__`, `_Compensation.__call__`,
+`_guard` and `drain`) and not the unwind order. The one ordering the row
+checks against revl's own code is `drain`'s `reversed(deferred)` loop
+over the method-registered entries (item 369). Phase-1
+continue-and-record, the Phase-2 budget, escrow and cascading abort are
+outside the model and so outside the row.
+
+**Non-vacuity is enforced, not assumed** (`teardown_coverage`). The audit
+found the capability-ceiling half of the `W` row agreeing *vacuously* —
+no corpus file declares an integer parameter, so the `ceilingOKB` branch
+the theorems are about is never entered — and recorded that this is the
+same defect class as roadmap item 429's self-host byte-agreement being
+green over a corpus that never reached the logic. So this row ships with
+a ratchet that fails the gate unless the corpus still contains a witness
+for each of: a replay of length ≥ 2 whose order is not registration order
+(LIFO is distinguishable from FIFO), a compensation that ran strictly
+after a Phase-1 inverse (the two phases are distinguishable from one
+interleaved pass), a non-empty discharge column, a non-empty stranded
+column, and a replay set that is a proper subset of its stack. Every
+clause is a property some plausible defect would remove.
+
+**The row was seen to fail before it was trusted.** Three independent
+injections, each reverted:
+
+| Injection | Caught by | Result |
+|---|---|---|
+| `drain` replays method-registered transactional entries FIFO (delete item 369's `reversed`) | the D row | exit 1, **8 mismatches**, e.g. `g7/abort/TT: reference=('e0','e1') formal=('e1','e0')` |
+| `_Compensation.__call__` discharges on abort instead of deferring to Phase 2 | the D row | exit 1, **64 mismatches**, the compensation correctly reported as having moved from the replayed column to the discharged column |
+| `sorry` in `RevLOracle.row_is_total` | the axioms gate over `harness/Oracle.lean` | exit 1, `depends on sorryAx — unfinished proof` |
+
+Two further injections were caught *earlier* than the row, which is worth
+recording because it says where each layer bites. Making the printed
+replay column ignore the verdict does not produce a mismatch — it fails
+to **elaborate**, because `mem_replayedLabels_iff` is what ties the
+column to `RevL.G7.replayed_sound` / `replayed_complete`. Making the
+model run compensations inline in Phase 1
+(`EntryKind.inPhase1 .compensation := true`) does not produce a mismatch
+either — it breaks `lake build`, because the G7 theorem file pins the
+phase split. So model-side drift is caught by the theorem layer and
+implementation-side drift by the row, and the two are complementary
+rather than redundant.
+
+**Bridge theorems** (all inside the axioms gate, `run_gate.sh` step 5):
+`mem_replayedLabels_iff` proves the replayed column is exactly the
+model's replay set (soundness left-to-right, completeness
+right-to-left); `mem_dischargedLabels_iff` and `mem_strandedLabels_iff`
+do the same for the other two columns; `row_is_total` proves the three
+columns account for the whole stack via
+`RevL.Semantics.book_lengths_add`, so an entry cannot fall off the row by
+appearing in no column; and `replayedLabels_phase_order` pins the printed
+order as the whole Phase-1 pass, LIFO, then the Phase-2 drain, LIFO,
+which is what makes the column's *order* checkable.
 
 **What is still a private restatement in `Oracle.lean`**, listed so the
 gate's reach is not overstated: `g4OK` (the G row — the G4 model is
@@ -746,10 +846,11 @@ only the closure is local, the judgment it feeds is the model's).
 Nothing is dropped and nothing is counted without being named. Over the
 corpus as of `chore/formal-review`: **305 .rvl files → 189 components →
 414 statements = 137 modeled + 140 componentless + 28 refused at parse**,
-and **387 verdicts compared (137 files + 189 components + 27 provide
-methods + 6 spawn edges + 28 parse refusals), 387 agree, 0 mismatches**.
-(The corpus grows; the shape of the census does not. The step-6 numbers
-were 296 / 182 / 403 and 371 verdicts.)
+and **654 verdicts compared (137 files + 189 components + 27 provide
+methods + 6 spawn edges + 28 parse refusals + 267 teardown scenarios),
+654 agree, 0 mismatches**. (The corpus grows; the shape of the census
+does not. The step-6 numbers were 296 / 182 / 403 and 371 verdicts; the
+387 before the G7 row.)
 
 - The 28 parse refusals are LISTED by name and code, not counted. The
   previous "(28 parse-error skips, loud)" parenthesis hid

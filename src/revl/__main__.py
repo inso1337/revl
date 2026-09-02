@@ -713,7 +713,7 @@ def _run_audit(args, ir: dict) -> int:
     # deferred emission, and compensation with its replay class (`replay: free`
     # for a declared/keyed idempotent entry, `replay: fenced` for an undeclared
     # inverse, `recovery: human-finish` for an unkeyed owed emission) and its
-    # register (`declared`/`keyed`/`shape-proven`/item 440's `read`).
+    # register (`declared`/`keyed`/item 440's `read`).
     if getattr(args, "recovery", None):
         for line in _recovery_audit_view(ir):
             print(line)
@@ -748,8 +748,7 @@ def _recovery_audit_view(ir: dict) -> list:
             # item 440 §(b): the seam can now ACT on this classification, but only
             # under the operator's `recovery may re-issue owed emissions` knob, so
             # the class says "re-issuable" rather than promising a fire.
-            cls = ("replay: re-issuable" if register in ("read", "keyed",
-                                                         "shape-proven")
+            cls = ("replay: re-issuable" if register in ("read", "keyed")
                    else "recovery: human-finish")
         else:  # compensation
             cls = ("compensate: keyed-retry" if register == "keyed"
@@ -923,30 +922,35 @@ def compile_source_holes(source: str, filename: str) -> list[dict]:
     return compile_source(source, filename).get("holes") or []
 
 
-def _run_composition(args) -> int:
-    """`revl composition FILE` — resolve a composition document's ROW TABLE
-    (roadmap item 426, slice S1).
+def _parse_overlay(overrides: list[str]) -> dict:
+    """`--set @db.pool=16` into the invocation overlay (426 S2, §3.1 level 3).
 
-    Header-only by default: every row id resolves and the whole wiring renders
-    without lowering a single component body (426 exit test 12). `--admit` also
-    compiles the rows the table names, which is where `_link` runs G2/G3 — the
-    resolver itself never calls the gate (§3.3)."""
-    from .composition import (  # noqa: PLC0415
-        claim_str, compile_composition, resolve_file)
+    VALUES ONLY, never structure: the spelling reaches a field of a row that
+    already exists and there is no `--add` or `--remove`, because the last level
+    is where dynamic configuration lives and structure is the part that is
+    declared, checked and diffable.
+    """
+    overlay: dict = {}
+    for raw in overrides or []:
+        target, sep, value = raw.partition("=")
+        label, dot, field_name = target.strip().lstrip("@").partition(".")
+        if not sep or not dot or not label or not field_name:
+            raise RevlError("<invocation>", 1,
+                            f"`--set {raw}` is not `@row.field=value`",
+                            hint="the overlay names one field of one row: "
+                                 "`--set @db.pool=16`")
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = value                    # a bare word is a string
+        overlay[(label, field_name)] = parsed
+    return overlay
 
-    try:
-        table = resolve_file(args.file, args.root)
-        document = compile_composition(args.file, args.root) if args.admit else None
-    except RevlError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
 
-    if args.json:
-        out = table.to_ir()
-        if document is not None:
-            out["loadOrder"] = document["manifest"]["loadOrder"]
-        print(json.dumps(out, indent=2))
-        return 0
+def _print_table(table, document=None, provenance: bool = False) -> None:
+    """The ROWS / WIRING panels, shared by `revl composition` and
+    `revl layer check`."""
+    from .composition import claim_str  # noqa: PLC0415
 
     print(f"COMPOSITION  {table.name}  (origin `{table.origin}`, "
           f"{len(table.rows)} rows)")
@@ -964,6 +968,13 @@ def _run_composition(args) -> int:
         if row.granted is not None:
             listed = ", ".join(f"`{k}`" for k in row.granted) or "<empty>"
             print(f"  {'':<24}   granted {listed}")
+        if provenance and any(level for level, _, _ in row.provenance):
+            # 426 §3.3 step 5: which (level, layer, op) touched this row, in
+            # order. Recording it is what makes a row's provider never a
+            # mystery — every layer that reached the row is named.
+            trail = " -> ".join(f"{op} by `{layer}` (L{level})"
+                                for level, layer, op in row.provenance)
+            print(f"  {'':<24}   {trail}")
     print()
     print("WIRING")
     for label, edges in table.wiring().items():
@@ -982,6 +993,56 @@ def _run_composition(args) -> int:
     else:
         print("ADMITTED     load order "
               f"{' -> '.join(document['manifest']['loadOrder'])}")
+
+
+def _run_layer(args) -> int:
+    """`revl layer check FILE` — fold a composition's declared layers into its
+    row table (roadmap item 426, slice S2).
+
+    426 exit test 12: every row id resolves and the whole wiring renders with no
+    component body lowered. The fold itself never calls the gate (§3.3), so a
+    bug here can only over-refuse; `_link` still decides admission."""
+    from .composition import resolve_file  # noqa: PLC0415
+
+    try:
+        table = resolve_file(args.file, args.root, _parse_overlay(args.overrides))
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(table.to_ir(), indent=2))
+        return 0
+    _print_table(table, provenance=True)
+    return 0
+
+
+def _run_composition(args) -> int:
+    """`revl composition FILE` — resolve a composition document's ROW TABLE
+    (roadmap item 426, slice S1), with its declared layers folded in (S2).
+
+    Header-only by default: every row id resolves and the whole wiring renders
+    without lowering a single component body (426 exit test 12). `--admit` also
+    compiles the rows the table names, which is where `_link` runs G2/G3 — the
+    resolver itself never calls the gate (§3.3)."""
+    from .composition import compile_composition, resolve_file  # noqa: PLC0415
+
+    try:
+        overlay = _parse_overlay(getattr(args, "overrides", []))
+        table = resolve_file(args.file, args.root, overlay)
+        document = compile_composition(args.file, args.root, overlay) \
+            if args.admit else None
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        out = table.to_ir()
+        if document is not None:
+            out["loadOrder"] = document["manifest"]["loadOrder"]
+        print(json.dumps(out, indent=2))
+        return 0
+
+    _print_table(table, document, provenance=True)
     return 0
 
 
@@ -1000,6 +1061,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_verify(args)
     if args.command == "composition":
         return _run_composition(args)
+    if args.command == "layer":
+        return _run_layer(args)
     if args.command == "emit":
         return _run_emit(args)
     if args.command == "explain":
