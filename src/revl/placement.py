@@ -2460,7 +2460,11 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         # `backend`) so the consumer process re-admits it against its own running
         # manifest before accepting the cutover (item 337): the seam re-runs the
         # same admission gate this conductor already passed, so a raced or
-        # injected repoint can never substitute an un-admitted provider.
+        # injected repoint can never substitute an un-admitted provider. The
+        # selector is only half of it: the consumer also binds `component` to
+        # `key` against its own manifest, and refuses any socket outside the
+        # placement directory it was handed its own spec in — which is why
+        # `new_sock` is bound HERE, under `tmp`, like every other seam socket.
         for key in serve_keys:
             for qname, qspec in specs.items():
                 if qname in (old, succ):
