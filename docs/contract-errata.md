@@ -239,15 +239,32 @@ This goes in the compiler spec, not the runtimes.
     `NaN` is not equal to *itself* and does not satisfy `Object.equals`'s
     reflexivity requirement. That is deliberate: matching every other tier is
     the requirement, and IEEE equality is not an equivalence relation. It does
-    mean such a value is not a well-behaved hash key on this tier.
-    `HashMap`/`HashSet` compare `key == k || key.equals(k)`, so a lookup with
-    the identical reference still finds it, but a lookup with a structurally
-    identical NaN-carrying value never will, and
-    `List.contains`/`List.indexOf`/`Set.remove` on one can miss. The generated
-    `equals` also has no `if (this == o) return true` fast path, for the same
-    reason: it would make the answer depend on aliasing. rust, the tier fixed
-    just above, derives `PartialEq`, which is a plain field-by-field `==` with
-    no such shortcut, and java now matches it.
+    mean such a value is not a well-behaved hash key on this tier. Measured on
+    openjdk 26.0.2, not reasoned about:
+
+    | expression | result |
+    |---|---|
+    | `wt(nan).equals(wt(nan))`, distinct objects | `false` |
+    | `x.equals(x)` where `x = wt(nan)`, SAME reference | `false` (reflexivity gone) |
+    | `map.get(x)` after `map.put(x, v)`, same reference | `v` (HashMap short-circuits on `key == k`) |
+    | `map.get(wt(nan))`, a structurally identical key | `null` |
+    | `set.add(x)` twice, then `set.add(wt(nan))` | size 2, two "equal" NaN values held at once |
+    | `list.contains(x)` where `list` holds `x` itself | **`false`** |
+    | `wt(-0.0).equals(wt(0.0))` and their hashes | `true`, `true` |
+    | `bag(-0.0).equals(bag(0.0))` (Float inside a `List`) and their hashes | `true`, `true` |
+    | `map.get(seg(p, q))` for a distinct but equal nested record | found |
+
+    The `ArrayList` row is the sharp one: `contains`/`indexOf`/`remove` call
+    `equals` with no identity short-circuit, so a NaN-carrying value is not
+    found in a list it is literally in. Every non-NaN value, `-0.0` and nested
+    records included, round-trips through `HashMap` correctly.
+
+    The generated `equals` also has no `if (this == o) return true` fast path,
+    for the same reason: it would make the answer depend on aliasing, and the
+    reflexivity row above would then read `true` for an aliased value and
+    `false` for a copy. rust, the tier fixed just above, derives `PartialEq`,
+    which is a plain field-by-field `==` with no such shortcut, and java now
+    matches it.
 
   How it survived: `tests/test_cross_tier.py` checks that every emitter
   *accepts* a construct, which catches a tier that refuses and cannot catch a
@@ -265,10 +282,27 @@ This goes in the compiler spec, not the runtimes.
   working JDK" is recorded as a skip and reads as a pass. `PROBES["structural
   equality"]` asserted the record defect the whole time and never once
   executed. This is roadmap item 430's shape exactly: a test that exists, runs
-  nowhere, and whose skip looks like green. So the guards that actually hold
-  this line are the STATIC ones, which need no toolchain and run in the
-  `frontend` job; there is now one per lowering per tier, and four of them for
-  this defect specifically.
+  nowhere, and whose skip looks like green.
+
+  Both halves of that gate are now confirmed by running it. With
+  `REVL_CROSS_TIER_SLOW=1` and a JDK on PATH, the pre-fix emitter FAILS
+  `PROBES["structural equality"]` on a real JVM with
+  `java.lang.AssertionError` at `testRecordsCompareByValue`, and passes after
+  the fix. So this defect was always one environment variable away from being
+  a red build, and the environment variable is the thing nothing sets.
+
+  A caution that cost this repository real time: on macOS, `java` and `javac`
+  exist on PATH as `/usr/bin/*` stubs that error with "Unable to locate a
+  Java Runtime", so `shutil.which("java")` succeeds while the JDK check
+  fails, and a keg-only Homebrew install (`/opt/homebrew/opt/openjdk/bin`) is
+  invisible to both. Roadmap item 433's header records "NO JDK ON THE AUDIT
+  MACHINE" on the strength of exactly that stub, and it was wrong. Check
+  `/opt/homebrew/opt/openjdk` and `/usr/libexec/java_home -V` before
+  concluding a machine cannot run java.
+
+  Until the switch is on in CI, the guards that hold this line are the STATIC
+  ones, which need no toolchain and run in the `frontend` job; there is now
+  one per lowering per tier, and four of them for this defect specifically.
 
 ## Arithmetic divergences (open, pinned — one root cause)
 

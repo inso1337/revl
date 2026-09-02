@@ -2104,8 +2104,8 @@ def _emit_v3_value_equality(cls: str, components: list, *, tag: str = None) -> l
     relation stays symmetric. The parameter is `__revl_o`, not the canonical
     `o`, because a record is free to declare a field NAMED `o`: every term
     below spells its operands `this.x`/`__revl_other.x` so a plain `o` would
-    still compile, but there is no javac in this repository's default test run
-    to catch the day that stops being true.
+    still compile, and the point is that the `frontend` job has no javac to
+    catch the day that stops being true.
 
     There is NO `if (this == o) { return true; }` fast path, deliberately.
     revl's `==` on `Float` is IEEE (docs/arithmetic.md), so a component that is
@@ -2114,14 +2114,18 @@ def _emit_v3_value_equality(cls: str, components: list, *, tag: str = None) -> l
     precedent tier, derives `PartialEq`, which is a plain field-by-field `==`
     with no such shortcut, and this matches it.
 
-    The consequence, stated plainly: a value containing a `NaN` breaks
-    `Object.equals`'s REFLEXIVITY requirement, so it is not a well-behaved
-    hash key. `HashMap`/`HashSet` compare `key == k || key.equals(k)`, so a
-    lookup with the identical reference still finds it, but a lookup with a
-    structurally identical NaN-carrying value never will, and `List.contains`
-    /`List.indexOf`/`Set.remove` on such a value can miss. That is what
-    "matching every other tier" costs on a host whose collections assume an
-    equivalence relation, and IEEE equality is not one."""
+    The consequence, stated plainly and MEASURED on openjdk 26.0.2 rather
+    than argued: a value containing a `NaN` is not equal to itself, so it
+    breaks `Object.equals`'s REFLEXIVITY requirement and is not a well-behaved
+    hash key. `HashMap`/`HashSet` short-circuit on `key == k`, so a lookup
+    with the identical reference still finds it while a structurally identical
+    one returns null, and `HashSet` will hold two "equal" NaN values at once.
+    `ArrayList` has no such short-circuit: `contains`/`indexOf`/`remove` call
+    `equals` directly, so a NaN-carrying value is NOT FOUND IN A LIST IT IS
+    LITERALLY IN, same reference and all. That is what "matching every other
+    tier" costs on a host whose collections assume an equivalence relation,
+    and IEEE equality is not one. Every non-NaN value, including a nested
+    record and a `-0.0`/`0.0` pair, round-trips through `HashMap` correctly."""
     lines = ["", "    @Override", "    public boolean equals(Object __revl_o) {"]
     if not components:
         lines.append(f"        return __revl_o instanceof {cls};")
