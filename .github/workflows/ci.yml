@@ -10,6 +10,17 @@ on:
   # changes; this only lets the workflow be `uses:`-called from the tag build.
   workflow_call:
 
+# One run per branch at a time. Agents push to a PR branch repeatedly while
+# iterating, and without this every push stacked another full matrix behind the
+# last one: the queue hit 16 runs deep with 2 executing, which made CI the
+# bottleneck the whole push-and-let-CI-test workflow exists to remove.
+# Superseded PR runs are cancelled because only the newest commit matters.
+# Runs on main are NOT cancelled: main's history is the signal, and dropping a
+# run there would leave a landed commit with no verdict.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Go module resolution resilience. The go cross-tier tests download the pinned
 # stc-go module during `go test`, which intermittently fails verifying it against
 # the online checksum database (sum.golang.org stream errors) and reddens CI on a
