@@ -1001,3 +1001,22 @@ fn early(xs: List[Str]) -> Str {
 """))
     assert "strings.Builder" not in src
     assert src.count("out = (out + x)") == 2
+
+
+def test_str_accumulator_refused_when_the_loop_condition_reads_it():
+    """The subtle one: the read is in the `while` condition, OUTSIDE the body,
+    and it runs before every iteration. The occurrence scan therefore covers
+    the whole loop node, not just its body."""
+    src = emit.emit(_compile("""
+fn capped(xs: List[Str]) -> Str {
+  var out = ""
+  var i = 0
+  while (out.length() < 10 && i < xs.length()) {
+    out = out + xs[i]
+    i += 1
+  }
+  return out
+}
+"""))
+    assert "strings.Builder" not in src
+    _has(src, "out = (out + xs[i])")
