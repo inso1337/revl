@@ -149,6 +149,44 @@ def _file_digest(path: Path) -> str:
     return _sha256_bytes(path.read_bytes())
 
 
+def _artifact_files(root: Path) -> list[Path]:
+    """Every REGULAR file under `root`, walked without following a single link.
+
+    `rglob` plus `p.is_file()` followed symlinks, so a link inside
+    `emitted/<backend>/` bound bytes that live OUTSIDE the bundle and stay
+    writable after the signature is taken: the digest covered a path the bundle
+    does not own (roadmap 428 F11). A tree digest is only a statement about the
+    bundle if every byte it folds is IN the bundle, so a link is refused rather
+    than resolved. The same refusal covers a fifo, socket or device node, whose
+    "bytes" are not bytes the receiver can re-read and get the same answer.
+    """
+    if root.is_symlink():
+        raise RevlError(str(root), 0,
+                        "the emitted artifact directory is a symlink; a digest "
+                        "over it would bind bytes the bundle does not contain")
+    found: list[Path] = []
+    stack = [root]
+    while stack:
+        for entry in sorted(stack.pop().iterdir()):
+            if entry.is_symlink():
+                raise RevlError(
+                    str(entry), 0,
+                    "the emitted artifact tree contains a symlink, so the "
+                    "bytes it binds live outside the bundle and stay writable "
+                    "after the signature is taken; it is refused rather than "
+                    "followed")
+            if entry.is_dir():
+                stack.append(entry)
+            elif entry.is_file():
+                found.append(entry)
+            else:
+                raise RevlError(
+                    str(entry), 0,
+                    "the emitted artifact tree contains an entry that is not a "
+                    "regular file, so it has no stable bytes to bind")
+    return sorted(found)
+
+
 def artifact_digest(backend_dir: Path | str) -> str:
     """The digest of one backend's emitted artifact — a *tree* digest, since a
     backend may emit several files (the wasm emitter emits one `.wat` per
@@ -159,10 +197,27 @@ def artifact_digest(backend_dir: Path | str) -> str:
     split of the emitted set can collide with another. This is the value the
     signer binds and the value the receiver RE-COMPUTES from the bytes it is
     about to execute.
+
+    Two things it REFUSES rather than digests, both `RevlError` (428 F11):
+
+      * a symlink anywhere in the tree, or a `backend_dir` that is itself one —
+        the bytes would live outside the bundle and stay writable after
+        signing, so the digest would not be a statement about the bundle;
+      * an EMPTY tree — it folds nothing and yields `sha256(b"")`, a value
+        anyone can produce without holding any artifact at all. An artifact of
+        no bytes is not an artifact, and admitting one means admitting a bundle
+        with nothing to execute on the strength of a matching hash.
     """
     root = Path(backend_dir)
+    files = _artifact_files(root)
+    if not files:
+        raise RevlError(
+            str(root), 0,
+            "the emitted artifact directory is empty, so its tree digest is "
+            f"sha256 of nothing ({_sha256_bytes(b'')[:12]}…) — a value that "
+            "matches without any artifact being present. An empty artifact is "
+            "refused, never digested")
     digest = hashlib.sha256()
-    files = sorted(p for p in root.rglob("*") if p.is_file())
     for path in files:
         rel = path.relative_to(root).as_posix().encode("utf-8")
         data = path.read_bytes()
@@ -177,6 +232,12 @@ def chain_bindings(bundle_dir: Path | str, *,
                    backends: Optional[Iterable[str]] = None) -> dict:
     """Collect every link of the chain as a per-facet sha256, ready to fold into
     item 127's signed `evidence_bindings`.
+
+    A facet whose file the bundle does not carry is simply absent from the
+    bindings. An `emitted/<backend>/` that EXISTS but holds no bytes, or that
+    reaches outside the bundle through a link, is not an absent facet: it is a
+    bundle that cannot be honestly signed, and :func:`artifact_digest` raises
+    rather than binding it (roadmap 428 F11).
 
     Nothing here is re-derived: `bundle.py` already wrote `components.lock`,
     `policy.json`, `emitted/<backend>/...` and `gauntlet.json`, and
@@ -577,7 +638,17 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
         return _refusal(LINK_ARTIFACT,
                         f"the staged bundle has no emitted/{trust.backend}/ "
                         "artifact to execute")
-    recomputed_artifact = artifact_digest(backend_dir)
+    # Fail CLOSED on a tree this receiver cannot honestly digest: a symlink
+    # binding bytes outside the bundle, a non-regular entry, or an empty
+    # directory whose digest is `sha256(b"")` and therefore matches without any
+    # artifact being present (roadmap 428 F11).
+    try:
+        recomputed_artifact = artifact_digest(backend_dir)
+    except RevlError as error:
+        return _refusal(
+            LINK_ARTIFACT,
+            f"the bytes staged at emitted/{trust.backend}/ cannot be digested "
+            f"as an artifact this receiver holds: {error}")
     if not hmac.compare_digest(recomputed_artifact, str(bindings[facet])):
         return _refusal(
             LINK_ARTIFACT,
@@ -797,6 +868,63 @@ def verify_receipt(receipt: Mapping, host_key: bytes) -> tuple[bool, str]:
     if receipt.get("verdict") not in (ACCEPT, REFUSE):
         return False, f"receipt verdict is {receipt.get('verdict')!r}"
     return True, "receipt is authentic"
+
+
+def repin(bundle_dir: Path | str, receipt: Mapping) -> tuple[bool, str]:
+    """Re-derive the composition hash and the artifact digest from the staged
+    bytes and check them against an ACCEPT `receipt`. Answers `(ok, reason)`.
+
+    :func:`admit` is PREPARE: it verifies and LOADS NOTHING, so everything it
+    checked was checked at admission time and nothing re-checked it at the
+    moment of execution. Between the two the staged tree is ordinary files on
+    ordinary disk, so an ACCEPT receipt can end up describing bytes that have
+    since changed or gone (roadmap 428 F11). This is the check a loader runs
+    IMMEDIATELY before it executes: same two re-derivations `admit` ran,
+    against the receipt this receiver itself signed rather than against the
+    sender's attestation.
+
+    It is not a substitute for `admit` and cannot be: a receipt binds only what
+    the receiver already admitted. It closes the admit-to-load window, and
+    nothing else.
+
+    Fails CLOSED everywhere: a receipt that is not an ACCEPT, one carrying no
+    hashes, an IR that cannot be read or canonicalized, and an artifact tree
+    that cannot be honestly digested are each a refusal.
+    """
+    root = Path(bundle_dir)
+    if receipt.get("verdict") != ACCEPT:
+        return False, (f"the receipt verdict is {receipt.get('verdict')!r}, "
+                       f"not {ACCEPT}: there is nothing it authorises loading")
+    bound_ir = receipt.get("composition_hash")
+    bound_artifact = receipt.get("artifact_hash")
+    backend = receipt.get("backend")
+    if not (isinstance(bound_ir, str) and isinstance(bound_artifact, str)
+            and isinstance(backend, str) and bound_ir and bound_artifact
+            and backend):
+        return False, ("the receipt does not pin a composition, an artifact and "
+                       "a backend, so there is nothing to re-pin against")
+    try:
+        recomputed_ir = attest.canonical_hash(staged_ir(root))
+    except (RevlError, attest.NotCanonicalizable) as error:
+        return False, f"the staged {IR_DOCUMENT} cannot be re-hashed: {error}"
+    if not hmac.compare_digest(recomputed_ir, bound_ir):
+        return False, (f"the staged {IR_DOCUMENT} changed since admission: the "
+                       f"receipt pins {bound_ir[:12]}…, the bytes on disk now "
+                       f"hash to {recomputed_ir[:12]}…")
+    backend_dir = root / EMITTED_ROOT / backend
+    if not backend_dir.is_dir():
+        return False, (f"the admitted emitted/{backend}/ artifact is gone; the "
+                       "receipt describes bytes this receiver no longer holds")
+    try:
+        recomputed_artifact = artifact_digest(backend_dir)
+    except RevlError as error:
+        return False, (f"the staged emitted/{backend}/ can no longer be "
+                       f"digested as an artifact: {error}")
+    if not hmac.compare_digest(recomputed_artifact, bound_artifact):
+        return False, (f"the staged emitted/{backend}/ changed since admission: "
+                       f"the receipt pins {bound_artifact[:12]}…, the bytes on "
+                       f"disk now hash to {recomputed_artifact[:12]}…")
+    return True, "the staged bytes are still the admitted ones"
 
 
 def render_receipt(receipt: Mapping) -> str:
