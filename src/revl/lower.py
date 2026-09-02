@@ -1971,10 +1971,10 @@ def _site_inverse_refusal(err: RevlError, slot: str) -> RevlError:
                      navigate=err.navigate)
 
 
-def _check_inverse_args(expr, *, slot: str, where: str, filename: str,
-                        line: int = 0, tenv: dict | None = None,
-                        types: dict | None = None, env: "Env | None" = None) -> None:
-    """The ONE argument judgment both inverse slots run.
+def _check_inverse_args(expr, *, where: str, filename: str,
+                        tenv: dict | None = None,
+                        types: dict | None = None) -> None:
+    """The EXTERN slot's half of the one inverse-slot argument judgment.
 
     An inverse slot - the extern's DECLARED `undo`/`compensate`, and the
     SITE-spelled `undo` of an `effect`/`subscribe` (and the site `compensate`
@@ -1986,34 +1986,50 @@ def _check_inverse_args(expr, *, slot: str, where: str, filename: str,
     documented to raise only when handed one (`infer_ast`: "with `filename`,
     definite operator/branch/argument mismatches raise"; `infer_ir`: the same
     sentence), and the component lowering calls `infer_ir` in its
-    non-raising oracle mode everywhere. Item 404's `_sweep` handed the
-    filename over for a provide-method `let`; this is that same move for the
-    one slot whose code runs during teardown, on the abort path.
+    non-raising oracle mode everywhere.
 
     The two slots hold their expression in different STRATA, which is why
-    this dispatches rather than making one call: an extern slot keeps the
-    parser AST (its names resolve against the slot's own tenv - `result`, or
-    nothing), while a site slot has already lowered through the component
-    machinery, where names are safe names and host verbs, service methods and
-    spawn handles are resolved shapes no `infer_ast` arm models. What IS
-    shared is everything the judgment consults: one signature table
-    (`FNS_KEY`), one arity rule, one `unify`, one `mismatch` renderer.
+    they enter the judgment at different points rather than sharing one call:
+    an extern slot keeps the parser AST (its names resolve against the slot's
+    own tenv - `result`, or nothing), while a site slot has already lowered
+    through the component machinery, where names are safe names and host
+    verbs, service methods and spawn handles are resolved shapes no
+    `infer_ast` arm models. What IS shared is everything the judgment
+    consults: one signature table (`FNS_KEY`), one arity rule, one `unify`,
+    one `mismatch` renderer.
 
-    On the site stratum every declared-callable node in the tree is swept,
-    not only the root: `undo db.rollback(release(h))` roots at an opaque host
-    `call` node whose arguments `infer_ir` deliberately does not visit, so a
-    laundered inner call would slip a root-only sweep."""
-    if env is None:
-        check_ast(expr, None, tenv or {}, types or {}, filename, where)
-        return
-    if expr is None:
-        return
+    The site stratum's entry is `_lower_site_inverse` below, which rides on
+    item 423's general component-body call check."""
+    check_ast(expr, None, tenv or {}, types or {}, filename, where)
+
+
+def _lower_site_inverse(expr, env: "Env", *, slot: str):
+    """Lower a SITE-spelled inverse slot with the slot named on `env`.
+
+    Item 423 argument-checks EVERY component-body call, at the one place a
+    component-stratum `fn` node is built (`_check_component_call`), so the
+    site slot needs no argument sweep of its own: its calls are judged as they
+    are built, bottom-up, at their own line, including the ones nested under
+    an opaque host `call` node whose arguments `infer_ir` deliberately does
+    not visit (`undo store.insert("k", note(42))`), which a root-only sweep
+    could not reach.
+
+    What that general check cannot know on its own is the POSITION, and the
+    position is what makes this particular refusal navigable (item 274). A
+    site `undo` is the teardown that actually runs on abort, and the generic
+    hint offers advice the author cannot take there: at a provide-method seam
+    the acquisition cannot be bound and `result` is not in scope, so the only
+    move that releases the acquired handle is `witnessed`. So the slot rides
+    on `env` for the duration of the lowering - the same idiom `_lower_expr`
+    already uses for the expression mode - and `_check_component_call` renders
+    the slot-naming, spelling-listing refusal while it is set, the generic one
+    otherwise. One judgment, one message table, two hints."""
+    saved = getattr(env, "_inverse_slot", None)
+    env._inverse_slot = slot
     try:
-        for sub in _walk_value_nodes(expr):
-            if isinstance(sub, dict) and sub.get("kind") == "fn":
-                infer_ir(sub, env.type_env, env.types, env.services, filename, line)
-    except RevlError as err:
-        raise _site_inverse_refusal(err, slot) from None
+        return _lower_expr(expr, env, mode="undo")
+    finally:
+        env._inverse_slot = saved
 
 
 def _check_extern_undo(expr, decl_name: str, slot: str, types: dict,
@@ -2139,10 +2155,8 @@ def _check_extern_undo(expr, decl_name: str, slot: str, types: dict,
     # of an acquire with a declared return, nothing otherwise — so argument
     # type-checking sees the acquired value at its declared type
     tenv = {"result": result_type} if result_type is not None else {}
-    _check_inverse_args(expr, slot=slot,
-                        where=f"{slot} of extern `{decl_name}`",
-                        filename=filename, line=getattr(expr, "line", 0),
-                        tenv=tenv, types=types)
+    _check_inverse_args(expr, where=f"{slot} of extern `{decl_name}`",
+                        filename=filename, tenv=tenv, types=types)
 
 
 _UNIT_RETURNS = (None, "Unit")
@@ -5857,8 +5871,24 @@ def _check_component_call(node: dict, env: Env, filename: str, line: int) -> Non
 
     Leniency is unchanged and load-bearing: an argument of unknown or
     host-frontier provenance infers to `None`, `unify` accepts it, and the
-    call stays admitted. Only a DEFINITE mismatch raises."""
-    infer_ir(node, env.type_env, env.types, env.services, filename, line)
+    call stays admitted. Only a DEFINITE mismatch raises.
+
+    Item 420's slot-specific refusal composes here rather than beside here.
+    The general judgment is the only one that runs, so it is the one that has
+    to carry the position: `_lower_site_inverse` names the inverse slot on
+    `env` for the duration of that slot's lowering, and a mismatch raised
+    while it is set is re-rendered with the slot named and the two legal
+    spellings listed. The MESSAGE is the stratum checker's verbatim either
+    way, so the T1 shape consumers classify on never depends on position;
+    only the HINT does, because at a site `undo` the generic hint offers
+    advice the author cannot take (item 274)."""
+    try:
+        infer_ir(node, env.type_env, env.types, env.services, filename, line)
+    except RevlError as err:
+        slot = getattr(env, "_inverse_slot", None)
+        if slot is None:
+            raise
+        raise _site_inverse_refusal(err, slot) from None
 
 
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
@@ -7295,9 +7325,7 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
     # `sub.next()` / `sub.close()` are checked against that verb surface (item
     # 401) and `next` is recognised as a suspension in a teardown slot (§3.4).
     env.host_locals[safe] = "Subscription"
-    undo = _lower_expr(stmt.undo, env, mode="undo")
-    _check_inverse_args(undo, slot="undo", where="an `undo` expression",
-                        filename=filename, line=stmt.line, env=env)
+    undo = _lower_site_inverse(stmt.undo, env, slot="undo")
     acquire = {"kind": "subscribe", "stream": stream_ir, "policy": sub_expr.policy}
     step = {
         "step": "let-effect",
@@ -7406,15 +7434,13 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
             code="G4", category="witnessed",
         )
     else:
-        undo = _lower_expr(undo_expr, env, mode="undo")
-        # the site slot's argument judgment (`_check_inverse_args`): the code
+        # the site slot's argument judgment (`_lower_site_inverse`): the code
         # that runs on abort, while the activation is already unwinding, is
-        # held to the same declared signature the extern's own slot is. This
-        # one call covers the bound and unbound activation-body forms and both
-        # provide-method acquire forms, since every one of them builds its step
-        # here.
-        _check_inverse_args(undo, slot="undo", where="an `undo` expression",
-                            filename=filename, line=line, env=env)
+        # held to the same declared signature the extern's own slot is, and
+        # refuses with the slot named. Lowering through this one entry covers
+        # the bound and unbound activation-body forms and both provide-method
+        # acquire forms, since every one of them builds its step here.
+        undo = _lower_site_inverse(undo_expr, env, slot="undo")
         step = {"step": step_kind, "acquire": acquire, "undo": undo}
     if bind is not None:
         step["bind"] = bind
@@ -8551,10 +8577,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 handle_type = infer_ir(acquire, env.type_env, env.types, env.services)
                 if handle_type is not None:
                     env.type_env[safe] = handle_type
-                undo = _lower_expr(mstmt.undo, env, mode="undo")
-                _check_inverse_args(undo, slot="undo",
-                                    where="an `undo` expression",
-                                    filename=filename, line=mstmt.line, env=env)
+                undo = _lower_site_inverse(mstmt.undo, env, slot="undo")
                 mbody.append({"step": "let-effect", "bind": safe,
                               "acquire": acquire, "undo": undo})
             elif isinstance(mstmt, EffectStmt):
@@ -8968,13 +8991,11 @@ def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
     step = {"step": "emit", "expr": node}
     if stmt.compensate is not None:
         # compensation is teardown-position: emissions are permitted bare (A5)
-        comp = _lower_expr(stmt.compensate, env, mode="undo")
         # the compensate twin of the site `undo` judgment: the extern's own
         # `compensate` slot is argument-checked (`_check_extern_undo`), and the
-        # site slot runs in teardown Phase 2, so it gets the same judgment.
-        _check_inverse_args(comp, slot="compensate",
-                            where="a `compensate` expression",
-                            filename=env.filename, line=stmt.line, env=env)
+        # site slot runs in teardown Phase 2, so it gets the same judgment and
+        # the same slot-naming refusal.
+        comp = _lower_site_inverse(stmt.compensate, env, slot="compensate")
         step["compensate"] = comp
         # item 308, B1 clause 5 (compensate half): a compensation runs in
         # teardown Phase 2, AFTER Phase 1 closed every bracket, so ANY resource
