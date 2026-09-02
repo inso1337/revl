@@ -687,6 +687,21 @@ class _Driver:
 
     def _emit_module(self, ir: dict) -> types.ModuleType:
         self.generation += 1
+        # item 416d: reset the per-run trace state at the ONE place a generation
+        # begins. `revl_reset_run_trace_state`'s contract has always read
+        # "called at run start"; until now only tests called it, so the item-121
+        # digest nonce and the fiber-local model-hop registers survived for the
+        # process lifetime. Under `--watch` that is a real leak across
+        # generations: a completion observed in gen N and never consumed by a
+        # crossing is still stashed when gen N+1 boots, and the first emit
+        # crossing of the NEW program consumes it and is recorded as a model
+        # hop it never made. Resetting per generation also gives each generation
+        # its own digest salt, so two runs of two different programs cannot be
+        # correlated by digest equality. Guarded: a custom runtime module need
+        # not carry the seam.
+        reset = getattr(self.runtime, "revl_reset_run_trace_state", None)
+        if reset is not None:
+            reset()
         source = self.emit.emit(ir)
         module = types.ModuleType(f"revl_run_gen{self.generation}")
         filename = f"<revl-run gen{self.generation}>"

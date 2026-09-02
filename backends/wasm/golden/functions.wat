@@ -8,15 +8,43 @@
   (data (i32.const 8) "\03\00\00\00neg")
   (data (i32.const 16) "\03\00\00\00pos")
   (global $__hp (mut i32) (i32.const 24))
+  (func $__heap_exhausted
+    (unreachable))
+  (func $__heap_grow (param $end i32)
+    (local $want i32)
+    (local $have i32)
+    (local.set $want
+      (i32.add
+        (i32.shr_u (local.get $end) (i32.const 16))
+        (i32.ne
+          (i32.and (local.get $end) (i32.const 65535))
+          (i32.const 0))))
+    (local.set $have (memory.size))
+    (if (i32.le_u (local.get $want) (local.get $have))
+      (then (return)))
+    (if (i32.eq
+          (memory.grow (i32.sub (local.get $want) (local.get $have)))
+          (i32.const -1))
+      (then (call $__heap_exhausted))))
   (func $alloc (param $n i32) (result i32)
     (local $p i32)
+    (local $sz i32)
+    (local $end i32)
+    (local.set $sz
+      (i32.and
+        (i32.add (local.get $n) (i32.const 7))
+        (i32.const -8)))
+    (if (i32.lt_u (local.get $sz) (local.get $n))
+      (then (call $__heap_exhausted)))
     (local.set $p (global.get $__hp))
-    (global.set $__hp
-      (i32.add
-        (global.get $__hp)
-        (i32.and
-          (i32.add (local.get $n) (i32.const 7))
-          (i32.const -8))))
+    (local.set $end (i32.add (local.get $p) (local.get $sz)))
+    (if (i32.lt_u (local.get $end) (local.get $p))
+      (then (call $__heap_exhausted)))
+    (if (i32.gt_u
+          (local.get $end)
+          (i32.shl (memory.size) (i32.const 16)))
+      (then (call $__heap_grow (local.get $end))))
+    (global.set $__hp (local.get $end))
     (local.get $p))
   (func $alloc_str (param $len i32) (result i32)
     (local $p i32)

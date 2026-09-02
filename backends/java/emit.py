@@ -476,6 +476,33 @@ _V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
 _V3_POSTFIX_SAFE_KINDS = _V3_ATOMIC_KINDS | {"name", "req", "config", "host", "fn"}
 _HOST_ROOTS = {"Pool", "Map", "Job"}
 
+# item 416a: host roots this tier emits no runtime class for. `_emit_host_stubs`
+# only ever writes a class for a root in `_HOST_STUBS`, so a call on any other
+# root lowered to a bare `Stream.source()` naming a type the generated file
+# never declares — the emitter was happy and javac was not. That is a SILENT
+# EMIT where the design promises a refusal. `subscribe`/`stream-merge` were
+# already refused here; a `Stream.source()`-only program was not, so the honest
+# refusal covered only half the surface. Refuse the whole root instead.
+_UNIMPLEMENTED_HOST_ROOTS = {
+    "Stream": (
+        "opens a stream, and a stream subscription suspends a fiber. The java "
+        "blocking-tier lowering (a `BlockingQueue.poll` interruptible by the "
+        "cancel signal, item 130 §4.6) is not implemented and this tier emits "
+        "no `Stream` runtime class, so the emitted program would name a type "
+        "the generated file never declares: streams run on py, go and rust; "
+        "try `--backend py`"
+    ),
+}
+
+
+def _refuse_missing_host_root(fn: str) -> None:
+    """Refuse a host builtin whose ROOT this tier emits no runtime for, instead
+    of emitting a call against a type the generated file does not declare."""
+    root = (fn or "").split(".")[0]
+    reason = _UNIMPLEMENTED_HOST_ROOTS.get(root)
+    if reason is not None:
+        raise EmitError(f"`{fn}` {reason}")
+
 
 def _split_v3_types(inner: str) -> list[str]:
     parts: list[str] = []
@@ -1298,6 +1325,7 @@ def _expr(
 
     if kind == "host":
         fn = node.get("fn")
+        _refuse_missing_host_root(fn)
         host, _, method = fn.partition(".")
         _refuse_stream_host(fn)
         args = ", ".join(
