@@ -1440,6 +1440,48 @@ def placement_slice(ir: dict, kept) -> dict:
     return out
 
 
+def host_ref_pins(ir: dict, own, files) -> dict:
+    """The three host-module pin keys a placement spec carries for a process
+    hosting the components `own` (item 396 option B / 410).
+
+    * `refRoot` — the user root compile tree a non-stdlib `@ts ref` resolves
+      and hash-checks against;
+    * `stdlibRefRoot` — the install tree a stdlib-origin ref resolves against
+      (the runner self-derives this one, but the spec states it);
+    * `refs` — the per-ref hash-check list the node runner walks BEFORE it
+      imports the emitted module, so a host module that changed since compile
+      refuses the boot instead of running host code.
+
+    Built for the components the process actually hosts, not for the whole
+    composition: a process must not hash-check the refs of an extern its slice
+    never reaches (F4).  Harmless for non-node backends, which ignore the keys.
+
+    ONE function, called by the boot path AND by `do_swap`'s successor. A swap
+    re-hosts a component in a NEW process, and a spec key that carries a
+    security property must survive that or the guarantee only reads "held until
+    the first swap". The pins are read off the SAME running `ir` the tier
+    artifact is emitted from (`ensure_backend` slices this very document), so
+    they always describe the bytes the process is about to load — never a
+    re-hash of whatever is on disk at swap time, which would bless a host
+    module that changed since the composition was compiled.
+    """
+    own_externs = {e.get("name")
+                   for e in placement_slice(ir, set(own)).get("externs") or []}
+    return {
+        "refRoot": (os.path.dirname(os.path.abspath(str(files[0])))
+                    if files else ""),
+        "stdlibRefRoot": str(stdlib_root().parent),
+        "refs": [
+            {"extern": e.get("name"), "path": r["path"],
+             "sha256": r["sha256"],
+             **({"root": r["root"]} if r.get("root") else {})}
+            for e in ir.get("externs") or []
+            if e.get("name") in own_externs
+            for r in [(e.get("refs") or {}).get("ts")] if r is not None
+        ],
+    }
+
+
 # per-backend emitter modules, imported lazily for the plan-time capability
 # dry-run. Every emitter is pure-python codegen (stdlib only), so the gate
 # needs no tier toolchain — a fn-typed component placed on java is refused at
@@ -2558,8 +2600,6 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         # does not host). A process hosting every component gets the full slice
         # back, so a single-process placement is byte-identical.
         own_config = {c: config[c] for c in own if c in config}
-        own_externs = {e.get("name")
-                       for e in placement_slice(ir, set(own)).get("externs") or []}
         spec = {
             "name": pname,
             "backend": backend,
@@ -2583,20 +2623,9 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             # joins a `@ts ref` against, plus the per-ref hash-check list. 396(B)
             # set NEITHER under placement (a pre-existing gap for user refs); 410
             # fixes it for the stdlib kind (self-derived by the runner too) and in
-            # passing for the user kind. `refRoot` is the user root compile tree;
-            # `stdlibRefRoot` the install tree. Harmless for non-node backends,
-            # which ignore the keys.
-            "refRoot": (os.path.dirname(os.path.abspath(str(files[0])))
-                        if files else ""),
-            "stdlibRefRoot": str(stdlib_root().parent),
-            "refs": [
-                {"extern": e.get("name"), "path": r["path"],
-                 "sha256": r["sha256"],
-                 **({"root": r["root"]} if r.get("root") else {})}
-                for e in ir.get("externs") or []
-                if e.get("name") in own_externs
-                for r in [(e.get("refs") or {}).get("ts")] if r is not None
-            ],
+            # passing for the user kind. Built by `host_ref_pins`, which the swap
+            # path calls too so the pins survive a re-host (see `do_swap`).
+            **host_ref_pins(ir, own, files),
         }
         if serve_keys:
             # `methods` is the stub's allowlist: the operations the *service
@@ -3070,17 +3099,69 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         new_sock = str(tmp / f"{succ}.sock")
         old_serve = specs[old].get("serve") or {}
         serve_keys = old_serve.get("keys") or [k for k in provides[old]]
+        # INVARIANT for anyone adding a key to the per-process spec above: a key
+        # that carries a security property must either be CARRIED onto the
+        # successor here, or the swap must REFUSE. A swap is ordinary use, not
+        # an edge case, so a property that only holds until the first swap is
+        # not a property. Two keys have already been through this — the
+        # correlation guard (carried, 421 F8) and the host-ref pins (carried,
+        # below) — and both were silently absent for a while first. A key that
+        # CANNOT be carried correctly makes the swap refuse instead, the way a
+        # sandboxed component is refused above (item 411).
+        # `tests/test_swap_ref_pins.py::test_successor_spec_carries_every_boot_spec_key`
+        # is the guard: it reads both dict literals out of this file and fails
+        # when a key exists in one and not the other, so the NEXT key cannot be
+        # forgotten the way these were. Add the key to both, or record it in
+        # that test's exception table with a reason.
         succ_spec = {
             "name": succ,
             "backend": to_backend,
             "files": [str(f) for f in files],
             "components": [component],  # the swapped component, alone (v1 scope)
+            # §46: the successor's intra-process dependency edges, COMPUTED for
+            # the component set it hosts rather than assumed empty. Today it is
+            # `{component: []}`, because the v1 scope rule above refuses swapping
+            # a component that shares its process — but that is a fact about the
+            # scope rule, not about §46, and nothing tied the two together. When
+            # the scope rule relaxes to a multi-component successor this line
+            # already produces the right edges instead of silently serializing
+            # (or mis-parallelizing) the successor's activation.
+            "depends": local_prereqs(manifest_entries, subset=[component]),
             # F4: the successor hosts `component` alone, so it gets only that
             # component's config — never the whole [config] table.
             "config": {c: config[c] for c in [component] if c in config},
             "provides": list(provides[old]),
             "proxies": {k: dict(v) for k, v in (specs[old].get("proxies") or {}).items()},
+            # `probe` is EMPTY BY THE SAME RULE THE BOOT PATH APPLIES, not
+            # dropped: a process runs the probes its own `[processes.<name>]`
+            # entry declares (`pconf.get("probe") or []`), and the successor is
+            # a synthesized process (`<component>__t<n>`) that the placement
+            # file does not name. A boot of a process with no placement entry
+            # would produce `[]` here too. Probes are one-shot boot smoke calls
+            # that invoke real service methods; re-firing the predecessor's on a
+            # cutover would perform operator-authored side effects at a moment
+            # no operator asked for, and the swap has its own verification
+            # (admission gate, repoint acknowledgement, drain + no-residue).
             "probe": [],
+            # item 396 option B / 410: the successor's host-module pins. Built
+            # by the SAME `host_ref_pins` the boot path uses — this is the whole
+            # point of it being one function. Two things about the CONTENT:
+            #   * scoped to `[component]`, the successor's own slice, not copied
+            #     from the predecessor's spec (whose list is its PROCESS's
+            #     slice; the two coincide only because of the v1 scope rule);
+            #   * read off the running `ir`, which is exactly the document
+            #     `ensure_backend` slices to emit the successor's tier artifact
+            #     — so the pins describe the bytes this process is about to
+            #     load. Re-deriving them from `swap_admission`'s freshly
+            #     compiled `candidate` would instead re-hash whatever is on disk
+            #     at swap time and quietly bless a host module that changed
+            #     since the running composition was compiled.
+            # Without this the successor booted with no refs and no `refRoot`,
+            # so the node runner's deploy-contract hash check (which walks
+            # `spec.refs`, `placement_runner.ts`) had nothing to walk: host
+            # module integrity was verified at boot and unverified from the
+            # first `revl swap` on, silently, while the swap reported success.
+            **host_ref_pins(ir, [component], files),
             # The successor always serves on a LOCAL socket: a network
             # provider is refused above, so `old` is a UDS provider by
             # construction here and no network-only serve key (`endpoint`, and
