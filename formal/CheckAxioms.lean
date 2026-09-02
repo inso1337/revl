@@ -154,3 +154,60 @@ import RevL
 #print axioms RevL.A8.mixed_disposition_admitted
 #print axioms RevL.A8.revert_witness
 #print axioms RevL.A8.revert_witness_restores
+
+-- Item 418 step 4 — the effect-classification lattice (L1 farm
+-- RevL.Lemmas.ClassLemmas). The emission-reach fold is sound along a
+-- path, exact (its verdict is attained at a real declaration), monotone
+-- in fuel, and its capability surface is sound and complete. G4/G5/G8's
+-- restatements below all rest on these.
+#print axioms RevL.Lemmas.reach_mono_fuel
+#print axioms RevL.Lemmas.reaches_le
+#print axioms RevL.Lemmas.reach_exact
+#print axioms RevL.Lemmas.reach_le_trans
+#print axioms RevL.Lemmas.reachCaps_sound
+#print axioms RevL.Lemmas.reachCaps_complete
+
+-- Item 418 step 4 — G4 over the classification lattice: the rule is
+-- `declOK` (acquire/witnessed must declare an inverse, emission IS the
+-- marker), not a missing constructor. The `raw` shape is a representable
+-- term that the check refuses, and the refusal is not universal.
+#print axioms RevL.G4Classified.inverse_or_emit_classified
+#print axioms RevL.G4Classified.program_mutations_carry_inverse_or_marker
+#print axioms RevL.G4Classified.reached_crossing_is_classified
+#print axioms RevL.G4Classified.reached_crossing_carries_inverse_or_marker
+#print axioms RevL.G4Classified.raw_mutation_is_representable
+#print axioms RevL.G4Classified.g4_not_vacuous
+#print axioms RevL.G4Classified.fn_wrapper_still_crosses
+
+-- Item 418 step 4 — G5 as `_check_witnessed_inverse`: an inverse's
+-- TRANSITIVE classification excludes emission and witnessed; the
+-- registration count reads its argument (proved); the teardown, run
+-- under step 2's semantics, appends nothing to the WAL; and the
+-- `sneakyUndo` shape is exhibited, refused, and shown to emit.
+#print axioms RevL.G5Classified.registrations_seq
+#print axioms RevL.G5Classified.registrations_zero_iff
+#print axioms RevL.G5Classified.inverse_reaches_no_emission
+#print axioms RevL.G5Classified.admitted_inverse_registers_nothing
+#print axioms RevL.G5Classified.admitted_inverse_body_registers_nothing
+#print axioms RevL.G5Classified.pureOnly_run
+#print axioms RevL.G5Classified.clean_inverse_run_logs_nothing
+#print axioms RevL.G5Classified.admitted_inverse_run_logs_nothing
+#print axioms RevL.G5Classified.registrations_depends_on_its_argument
+#print axioms RevL.G5Classified.registrations_counts
+#print axioms RevL.G5Classified.sneaky_undo_is_refused
+#print axioms RevL.G5Classified.fold_must_run_to_stability
+#print axioms RevL.G5Classified.sneaky_inverse_run_emits
+#print axioms RevL.G5Classified.clean_inverse_run_is_silent
+
+-- Item 418 step 4 — G8 computed from the classification instead of from
+-- `boundaryOf`'s per-constructor cases: completeness and soundness kept,
+-- the typing hypothesis dropped, and the two models shown to disagree in
+-- both directions on concrete statements.
+#print axioms RevL.G8Classified.surface_enumerates_reached_crossings
+#print axioms RevL.G8Classified.surface_only_declared_crossings
+#print axioms RevL.G8Classified.surface_implies_crossing
+#print axioms RevL.G8Classified.effect_carrying_emission_is_on_the_surface
+#print axioms RevL.G8Classified.surface_agrees_with_an_honest_marker
+#print axioms RevL.G8Classified.raw_leak_is_on_the_surface
+#print axioms RevL.G8Classified.g8_surface_is_not_universal
+#print axioms RevL.G8Classified.witness_surface_traces_to_its_declaration

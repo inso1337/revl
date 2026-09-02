@@ -35,15 +35,15 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.G3.self_provision_refused` | G3 — non-vacuity | **proved** | `propext` | `Ouroboros` (requires a key it provides) cannot link |
 | `RevL.G3.mutual_cycle_refused` | G3 — non-vacuity | **proved** | `propext` | `g3_dependency_cycle.rvl` refused in both orderings |
 | `RevL.G3.layering_exists_for_admitted` | G3 — non-vacuity | **proved** | `propext, Quot.sound` | the certificate is reachable, not just refutable |
-| `RevL.G4.inverse_or_emit` | G4 — inverse-or-emit (Def. 8) | **proved** | none | content is the shape of `Typed` |
-| `RevL.G5.teardown_registers_nothing` | G5 — teardown registers nothing | **proved** | none | undo bodies are a separate constructor set |
+| `RevL.G4.inverse_or_emit` | G4 — inverse-or-emit (Def. 8) | **proved (shape-level)** | none | *weaker*: content is the shape of `Typed`, which has no `raw` constructor, so the same sentence holds of a relation admitting nothing. **Superseded by `RevL.G4Classified.inverse_or_emit_classified`** (item 418 step 4); kept as the syntactic statement |
+| `RevL.G5.teardown_registers_nothing` | G5 — teardown registers nothing | **proved (shape-level)** | none | *weaker*: `registrations` ignores its argument (constant zero), so a `sneakyUndo` calling `db.insert` counts 0. **Superseded by `RevL.G5Classified.inverse_reaches_no_emission`** (item 418 step 4); kept as the grammar-level statement |
 | `RevL.G6.confinement` | G6 — confinement (Def. 48) | **proved** | `propext, Quot.sound` | content is the shape of `TypedIn`/`ReachIn` |
 | `RevL.G7.teardown_replays_all` | G7 — LIFO-completeness (Thm. 16) | **proved** | `propext, Quot.sound` | every witnessed inverse is replayed |
 | `RevL.G7.teardown_only_witnessed` | G7 | **proved** | `propext, Quot.sound` | nothing unwitnessed is replayed |
 | `RevL.G7.teardown_eq_reversed_inverses` | G7 | **proved** | `propext` | the LIFO equation; positions via `List.getElem_reverse` |
 | `RevL.Semantics.teardown_length` | G7 — length form | **proved** | `propext` | one replay per witnessed effect |
-| `RevL.G8.boundary_enumerates_emissions` | G8 — boundary enumerable (§6.1) | **proved** | `propext, Quot.sound` | completeness: every emission is on the audited surface |
-| `RevL.G8.boundary_only_declared` | G8 | **proved** | `propext, Quot.sound` | soundness: on a typed body the surface is exactly the emissions |
+| `RevL.G8.boundary_enumerates_emissions` | G8 — boundary enumerable (§6.1) | **proved (shape-level)** | `propext, Quot.sound` | *weaker*: completeness over the syntactic `emit` marker. **Superseded by `RevL.G8Classified.surface_enumerates_reached_crossings`** (item 418 step 4); kept as the marker-level statement |
+| `RevL.G8.boundary_only_declared` | G8 | **proved (shape-level)** | `propext, Quot.sound` | *weaker*: rests on `boundaryOf (.effect _ _) = []` **by definition**, so a typed `.effect` carrying an emission has an empty surface. **Superseded by `RevL.G8Classified.surface_only_declared_crossings`** (item 418 step 4); kept as the marker-level statement |
 | `RevL.CapCeilings.cap_order_partial` | item 294 — the `(T,P)` capability order | **proved** | `propext, Quot.sound` | `covers` is reflexive, transitive, antisymmetric |
 | `RevL.CapCeilings.attenuation_monotone` | items 66/294 — attenuation is downward | **proved** | `propext` | a lineage never exceeds the root's declared authority |
 | `RevL.CapCeilings.lineage_ceiling_le` | item 260 — budgets only shrink | **proved** | `propext, Quot.sound` | a dropped child ceiling reads as `+∞`, so it cannot escape |
@@ -109,6 +109,41 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.R4.residue_necessary` | TODO 3 / R4 — non-vacuity | **proved** | `propext` | one step apart: one reverts exactly, one leaves seq 2 out and says so |
 | `RevL.R4.emission_is_not_replayed` | TODO 3 / R4 — non-vacuity | **proved** | `propext` | an emission has no inverse; it moves to the residue surface |
 
+| `RevL.Lemmas.reach_mono_fuel` | item 418 step 4 — the reach fold | **proved** | `propext, Quot.sound` | more fuel only raises a classification: the fold under-approximates, never over |
+| `RevL.Lemmas.reaches_le` | item 418 step 4 — fold soundness | **proved** | `propext, Quot.sound` | every transitively reachable name is bounded by the fold's verdict |
+| `RevL.Lemmas.reach_exact` | item 418 step 4 — fold exactness | **proved** | `propext, Quot.sound` | the verdict is attained at a real declaration; nothing is invented |
+| `RevL.Lemmas.reach_le_trans` | item 418 step 4 — paths compose | **proved** | `propext, Quot.sound` | one verdict at the declared inverse constrains every call beneath it |
+| `RevL.Lemmas.reachCaps_sound` | item 418 step 4 — capability surface | **proved** | `propext, Quot.sound` | every surface entry traces to a reachable crossing declaration |
+| `RevL.Lemmas.reachCaps_complete` | item 418 step 4 — capability surface | **proved** | `propext, Quot.sound` | nothing a reachable crossing declares is dropped |
+| `RevL.G4Classified.inverse_or_emit_classified` | G4 over the lattice (item 418 step 4) | **proved** | `propext` | the rule is `declOK`, i.e. `lower.py:2573`/`:2744`/`:2614` — not a missing constructor |
+| `RevL.G4Classified.program_mutations_carry_inverse_or_marker` | G4 — program level | **proved** | `propext, Quot.sound` | every mutating declaration of an admitted program |
+| `RevL.G4Classified.reached_crossing_is_classified` | G4 — the fn wrapper | **proved** | `propext, Quot.sound` | a crossing reached through a `fn` is still classified as crossing |
+| `RevL.G4Classified.reached_crossing_carries_inverse_or_marker` | G4 — transitively | **proved** | `propext, Quot.sound` | a reached crossing has a concrete declaration behind it that satisfies G4 |
+| `RevL.G4Classified.raw_mutation_is_representable` | G4 — anti-tautology guard | **proved** | none | the `raw` shape IS a term here; the old G4 could not write it |
+| `RevL.G4Classified.g4_not_vacuous` | G4 — non-vacuity | **proved** | `propext` | three shapes admitted, two refused (`raw_write`, an emission claiming `undo`); refusal not universal |
+| `RevL.G4Classified.fn_wrapper_still_crosses` | G4 — non-vacuity | **proved** | `propext` | `audit_log` is pure at fuel 0 and `emission` at fuel 1 |
+| `RevL.G5Classified.registrations_seq` | G5 — the real count | **proved** | `propext` | the count is additive over sequencing |
+| `RevL.G5Classified.registrations_zero_iff` | G5 — the real count | **proved** | `propext, Classical.choice, Quot.sound` | zero registrations iff no call crosses |
+| `RevL.G5Classified.inverse_reaches_no_emission` | G5 as `_check_witnessed_inverse` | **proved** | `propext, Quot.sound` | NO name transitively reachable from an admitted inverse is `emission` or `witnessed` |
+| `RevL.G5Classified.admitted_inverse_registers_nothing` | G5 | **proved** | `propext, Classical.choice, Quot.sound` | the declared inverse itself registers zero crossings |
+| `RevL.G5Classified.admitted_inverse_body_registers_nothing` | G5 — whole teardown | **proved** | `propext, Classical.choice, Quot.sound` | every call anywhere beneath the inverse, not only the immediate callee |
+| `RevL.G5Classified.pureOnly_run` | G5 — over the step-2 semantics | **proved** | none | a pure-only run moves neither log nor world |
+| `RevL.G5Classified.clean_inverse_run_logs_nothing` | G5 — operational | **proved** | `propext, Classical.choice, Quot.sound` | a teardown that registers nothing appends nothing to the WAL |
+| `RevL.G5Classified.admitted_inverse_run_logs_nothing` | G5 — end to end | **proved** | `propext, Classical.choice, Quot.sound` | admitted program ⇒ its teardown runs without touching the WAL |
+| `RevL.G5Classified.registrations_depends_on_its_argument` | G5 — anti-tautology guard | **proved** | none | refutes the review's probe `∀ u v, registrations u = registrations v` |
+| `RevL.G5Classified.registrations_counts` | G5 — non-vacuity | **proved** | none | 0 for the host-local inverse, 1 for the emission inverse and its `fn`-wrapped twin |
+| `RevL.G5Classified.sneaky_undo_is_refused` | G5 — non-vacuity (`sneakyUndo`) | **proved** | `propext` | clean program admitted, emission inverse and `fn`-wrapped inverse refused |
+| `RevL.G5Classified.fold_must_run_to_stability` | G5 — the fuel caveat, named | **proved** | `propext` | the wrapped escape is admitted at fuel 0 and refused at fuel 1 |
+| `RevL.G5Classified.sneaky_inverse_run_emits` | G5 — non-vacuity, operational | **proved** | `propext` | the refused inverse really takes an `emit` step and logs a one-way record |
+| `RevL.G5Classified.clean_inverse_run_is_silent` | G5 — non-vacuity, operational | **proved** | `propext, Classical.choice, Quot.sound` | the admitted inverse takes a `pure` step and every run of it is silent |
+| `RevL.G8Classified.surface_enumerates_reached_crossings` | G8 completeness over the lattice | **proved** | `propext, Quot.sound` | nothing a reachable crossing declares is dropped from the audit |
+| `RevL.G8Classified.surface_only_declared_crossings` | G8 soundness over the lattice | **proved** | `propext, Quot.sound` | everything on the surface traces to a reachable crossing declaration — **no typing hypothesis** |
+| `RevL.G8Classified.surface_implies_crossing` | G8 — the two folds agree | **proved** | `propext, Quot.sound` | a non-empty surface has a crossing classification behind it |
+| `RevL.G8Classified.effect_carrying_emission_is_on_the_surface` | G8 — anti-tautology guard | **proved** | `propext, Quot.sound` | the two models disagree in BOTH directions on concrete statements |
+| `RevL.G8Classified.surface_agrees_with_an_honest_marker` | G8 — non-vacuity | **proved** | `propext, Quot.sound` | where the `emit` marker is honest the two agree; `witnessed[db]` names its scope |
+| `RevL.G8Classified.raw_leak_is_on_the_surface` | G8 — the dropped hypothesis | **proved** | `propext, Quot.sound` | a `raw` leak is enumerated without needing `Typed` to exclude it |
+| `RevL.G8Classified.g8_surface_is_not_universal` | G8 — non-vacuity | **proved** | `propext, Quot.sound` | a body on the surface, a non-empty body off it |
+| `RevL.G8Classified.witness_surface_traces_to_its_declaration` | G8 — non-vacuity | **proved** | `propext, Quot.sound` | the entry `db_insert` traces through a `fn` to the `emission` that owns it |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -261,6 +296,96 @@ declares. No differential-oracle row references any of these definitions
 — the oracle carries no taint verdicts, so item 418's C4 applies here
 too: G9 is not covered by that gate.
 
+
+## The effect-classification lattice — G4/G5/G8 re-proved (item 418, step 4)
+
+`RevL.Lemmas.ClassLemmas` (L1, core only) models what `src/revl` actually
+computes, and `RevL.Theorems.G{4,5,8}_Classified*` restate G4, G5 and G8
+over it. The old three theorems are kept, marked **proved (shape-level)**
+in the table above with the specific weakness spelled out in each Notes
+cell. They are not deleted and they are not wrong: they are statements
+about the syntax, and the review's finding was that the syntax was doing
+all the work.
+
+### The model
+
+`Cls` is the four-point lattice `pure | acquire | witnessed | emission`
+(`parser.ExternDecl.classification`, `parser.py:513`), ordered by how much
+of the host a declaration can disturb. Two predicates cut it, and both are
+read straight off the reference:
+
+- `Cls.crosses` = `witnessed` or `emission` — the seed set of
+  `emission_analysis._emitting_capabilities` ("a witnessed extern crosses
+  the same boundary as an emission", item 243);
+- `Cls.inverseAdmissible` = `pure` or `acquire` — the admissible set of
+  `lower._check_witnessed_inverse` ("the declared inverse is a host-LOCAL
+  restore, so only `pure`/`acquire` callees are admissible").
+  `crosses_eq_not_admissible` proves the two are one predicate.
+
+`reachCls` / `reachCaps` are `_emitting_capabilities`' least fixed point
+over the fn call graph: an extern stops the fold (it *is* the boundary),
+a `fn` joins what its callees reach. `declOK` is the per-declaration rule
+set (`lower.py:2573`, `:2608`, `:2614`, `:2735`, `:2744`) and `inverseOK`
+is `_check_witnessed_inverse` read off the fold.
+
+The fold is proved **sound** (`reaches_le`), **exact** (`reach_exact` —
+its verdict is attained at a concrete declaration, so nothing is
+invented), **monotone in fuel** (`reach_mono_fuel`) and **compositional
+along a path** (`reach_le_trans`). Those four are what let a single
+verdict taken at a declared inverse constrain every call beneath it.
+
+### What changed for each guarantee
+
+- **G4.** The old proof ends `| raw _ => cases ht`. Here the `raw` shape
+  is an ordinary term (`rawWrite : ExternDecl`, an `acquire` with no
+  `undo`), and `raw_mutation_is_representable` pins that. The refusal is a
+  computation (`declOK`), and `g4_not_vacuous` shows three shapes admitted
+  beside two refused, so it is not universal.
+- **G5.** The old `registrations` is the constant-zero function, so an
+  inverse calling `db.insert` scores clean. The new one counts calls whose
+  *reached* classification crosses, and
+  `registrations_depends_on_its_argument` refutes the review's probe
+  outright. `sneaky_undo_is_refused` exhibits the `sneakyUndo` shape (a
+  witnessed extern whose `undo` calls an `emission`), refuses it, refuses
+  its one-`fn`-deeper twin, and admits the host-local inverse beside them.
+  `sneaky_inverse_run_emits` then RUNS the refused inverse under step 2's
+  semantics and shows the one-way boundary record land in the WAL, while
+  `clean_inverse_run_is_silent` shows the admitted one take a `pure` step.
+- **G8.** `boundaryOf` decides the surface per constructor, which is the
+  definitional escape. `stmtSurface` is `stmtHeads` composed with the
+  reach fold, uniformly over all four statement forms, so there is no
+  per-constructor case to escape through. Both directions are kept, and
+  soundness now carries **no typing hypothesis**: a `raw` leak is
+  enumerated like anything else (`raw_leak_is_on_the_surface`) rather than
+  discharged by `Typed` lacking a constructor.
+  `effect_carrying_emission_is_on_the_surface` shows the two models
+  disagreeing in both directions — an `effect` carrying an emission is on
+  the new surface and not the old one; an `emit` marker on a host-local
+  call is on the old surface and not the new one.
+
+### What this does NOT close
+
+- **The fuel bound is real and is named, not hidden.**
+  `reachCls p fuel n` unrolls the closure `fuel` times, so it
+  under-approximates when `fuel` is smaller than the longest `fn` chain.
+  `fold_must_run_to_stability` exhibits exactly that: the `fn`-wrapped
+  emission inverse is admitted at fuel 0 and refused at fuel 1. That
+  `_emitting_capabilities` iterates to stability is a property of the
+  reference implementation, not a theorem here.
+- **The call graph is given, not derived.** `FnDecl.calls` stands for
+  `_calls_in` over a lowered body. That `_calls_in` finds every call is an
+  empirical obligation on the lowering; it is documented, not smuggled in
+  as an axiom.
+- **First-class dispatch is out of scope.** `_emitting_capabilities` adds
+  the unnameable `*` when an emitting callable escapes as a value.
+  `RevL.Theorems.CapCeilings` models `*`; nothing in this farm claims to.
+- **`compensate` is not modelled as a separate slot's walk.**
+  `_check_witnessed_inverse` walks `undo` and `compensate` alike; the
+  model carries the `compensate` field and `declOK`'s witnessed rule
+  refuses it, but `inverseOK` reads only the `undo` callee.
+- No differential-oracle row references these definitions, so item 418's
+  C4 applies here as it does to G9: the lattice model is not covered by
+  that gate.
 
 ## Differential oracle (two re-statements, not the model)
 
