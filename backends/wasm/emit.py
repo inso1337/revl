@@ -758,8 +758,8 @@ class _ComponentEmitter:
                 raise EmitError(
                     f"{where}: `{fn}` opens a stream; a stream subscription "
                     f"suspends a fiber, but this tier awaits only `Job.run(name)` "
-                    f"— streams live on the hosted and blocking backends "
-                    f"(py/ts/go/java/rust); try `--backend py`"
+                    f"— streams live on the tiers that lower the subscription "
+                    f"protocol (py, go, rust); try `--backend py`"
                 )
             raise EmitError(
                 f"{where}: host builtin {node.get('fn')!r} is not available on "
@@ -1267,8 +1267,9 @@ class _ComponentEmitter:
                 # Refuse honestly, matching the awaited-step and `advance` refusals.
                 raise EmitError(
                     f"{where}: a stream subscription suspends a fiber; this tier "
-                    f"awaits only `Job.run(name)`; streams live on the hosted and "
-                    f"blocking backends (py/ts/go/java/rust) — try `--backend py`"
+                    f"awaits only `Job.run(name)`; streams live on the tiers that "
+                    f"lower the subscription protocol (py, go, rust) — try "
+                    f"`--backend py`"
                 )
             if kind in ("let-effect", "effect", "emit") and step.get("async"):
                 # item 131: the awaited effect-composition spellings (`effect

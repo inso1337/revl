@@ -330,7 +330,25 @@ def _expr(node, env: _Env, expected=None) -> str:
         if fn == "Map.new":
             return "%s[%s](%s)" % (go, getattr(env, "map_new_value", None)
                                    or "string", args)
+        if recv == "Stream":
+            # item 130: `Stream.source()` opens a stream provider; the host
+            # runtime carrying it is emitted only when a document reaches a
+            # stream (see `_COMP_NEEDS_STREAM`).
+            _flag_stream()
         return "%s(%s)" % (go, args)
+    if kind == "subscribe":
+        # item 130 Slice 3 (design §4.6, the go row): this tier ERASES the async
+        # color — `next` is a blocking two-case `select` on the item channel and
+        # the CANCEL channel, and `close` closes the cancel channel. So the
+        # bracket inverse is reachable off the teardown goroutine even while a
+        # `next` is parked: teardown never has to wait for the provider.
+        _flag_stream()
+        _refuse_unlowered_stream_surface(node, "cordis-go")
+        stream = _stream_head(node.get("stream") or {}, env)
+        policy = node.get("policy") or "error"
+        capacity = int(node.get("buffer") or 0)
+        return "StreamSubscribe(%s, %s, %d)" % (stream, _go_string(policy),
+                                                capacity)
     if kind == "call":
         # A built-in Opt/Result constructor arriving as call(callee=Some, ...).
         callee = node.get("callee")
@@ -950,6 +968,17 @@ _COMP_NEEDS_PARSE_INT = False
 _COMP_NEEDS_TIMER = False
 # Per-emit counter for unique timer local names (`_revlTimer1`, `_revlTimer2`).
 _TIMER_COUNTER = 0
+# item 130 Slice 3: a `subscribe` bracket (or any `Stream.*` host verb) in a
+# component body flags the stream host runtime (`_STREAM_PREAMBLE`) — the
+# cancel-channel `select` this tier's `next` parks on. A document that uses no
+# stream leaves it False and emits byte-identically to before.
+_COMP_NEEDS_STREAM = False
+
+
+def _flag_stream() -> None:
+    """Pull the stream host runtime into this module's preamble (item 130)."""
+    global _COMP_NEEDS_STREAM
+    _COMP_NEEDS_STREAM = True
 
 # item 243/247 (docs/design/teardown-contract.md): witnessed externs by name,
 # so a component step's acquisition can be recognised as a `transactional`
@@ -1784,6 +1813,12 @@ def _emit_component(comp, services, out):
                 # item 397: a CAS binds a checked `bool`, not a host pointer.
                 host = "bool"
                 _BIND_IS_PTR[bind] = False
+            elif akind == "subscribe":
+                # item 130: a `subscribe` bracket binds a live `*Subscription`
+                # — a host resource whose inverse (`Close`) trips the cancel
+                # channel, so it is a pointer resource exactly like a Pool.
+                host = "Subscription"
+                _BIND_IS_PTR[bind] = True
             elif akind in ("host", "spawn"):
                 host = _host_type_of_acquire(acquire)
                 # item 113 (FR-4): the host Map is generic over its value type.
@@ -1909,11 +1944,15 @@ def _emit_component(comp, services, out):
 
 def _collect_host_calls(node, acc):
     """Record (receiver, method) of every `host` expr not covered by the fixed
-    host runtime (Pool / Map)."""
+    host runtime (Pool / Map / Stream)."""
     if isinstance(node, dict):
         if node.get("kind") == "host":
             recv, _, meth = str(node.get("fn", "")).partition(".")
-            if recv and recv not in ("Pool", "Map"):
+            # item 130: `Stream` has a REAL runtime on this tier (the cancel-
+            # channel select, `_STREAM_PREAMBLE`), so it must not also get a
+            # `func StreamSource(_args ...any) any` no-op stub — that would
+            # redeclare the real constructor and drop the semantics.
+            if recv and recv not in ("Pool", "Map", "Stream"):
                 acc.add((recv, meth))
         for v in node.values():
             _collect_host_calls(v, acc)
@@ -2226,6 +2265,64 @@ def _emit_method_witnessed_step(out, pad, step, ext, env) -> None:
     _COMP_NEEDS_METHOD_WITNESSED = True
 
 
+def _refuse_unlowered_stream_surface(node, tier: str) -> None:
+    """Refuse the item-130 Slice 2 surface this blocking tier does not lower.
+
+    Slice 2 shipped `map`/`filter`/`take` and the three non-default backpressure
+    policies on the py reference tier only; Slice 3 lowered subscribe/next/close
+    and the `merge` fan-in here. Emitting a subscription that SILENTLY dropped a
+    combinator chain, a lossy policy or a drain window would be the worst
+    outcome available: the program would run and quietly disagree with the
+    reference tier. Refuse by name instead, the same call the wasm tier makes
+    for the whole surface."""
+    if node.get("stages"):
+        raise EmitError(
+            "a stream combinator chain (`map`/`filter`/`take`) is not lowered "
+            "on the %s tier; the derived-stream chain runs on the py reference "
+            "tier (item 130 Slice 2) while this tier lowers subscribe / next / "
+            "close and `merge` (Slice 3) — try `--backend py`" % tier)
+    policy = node.get("policy") or "error"
+    if policy != "error":
+        raise EmitError(
+            "backpressure policy `%s` is not lowered on the %s tier; this tier "
+            "lowers the default `error` policy (a full bounded buffer faults "
+            "with `Faulted(overflow)` and closes, no silent loss). "
+            "`drop_newest`/`drop_oldest`/`block` run on the py reference tier "
+            "(item 130 §4.4) — try `--backend py`" % (policy, tier))
+    if node.get("drain") is not None:
+        raise EmitError(
+            "a `drain` window is the `block`-policy drain interval and is not "
+            "lowered on the %s tier; it fires on the deterministic test clock, "
+            "which lives on the py reference tier (item 130 §8) — try "
+            "`--backend py`" % tier)
+
+
+def _stream_head(node, env) -> str:
+    """The stream a `subscribe` acquires: a plain source, or a `merge(a, b)`
+    fan-in (item 130 Slice 3). Recursive — a merged stream is itself a stream.
+    Every link is a DERIVED stream OWNED by the subscription, so `Close` unwinds
+    the whole chain off the ONE bracket the subscribe registers and each plain
+    source is left to its own."""
+    if isinstance(node, dict) and node.get("kind") == "stream-merge":
+        args = ", ".join(_stream_head(src, env)
+                         for src in node.get("sources") or [])
+        return "StreamMerge(%s)" % args
+    return _expr(node, env)
+
+
+def _is_stream_next(expr) -> bool:
+    """True for `<sub>.next()` where `<sub>` is a `subscribe` bracket's bind
+    (item 130). The bind table already records the acquisition's Go type, so
+    this recognises a subscription's suspension verb without re-walking the IR."""
+    if not isinstance(expr, dict) or expr.get("kind") != "call":
+        return False
+    if expr.get("method") != "next":
+        return False
+    target = expr.get("target") or {}
+    name = target.get("id") if target.get("kind") == "name" else None
+    return name is not None and _BIND_HOST.get(name) == "Subscription"
+
+
 def _host_type_of_acquire(acquire):
     if acquire.get("kind") == "host":
         recv = acquire["fn"].split(".")[0]
@@ -2303,7 +2400,22 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # cordis-go's Apply runs synchronously; an awaited host call is just a
         # blocking call whose result is discarded (the A1 ordering boundary is
         # the statement position, preserved here).
-        out.append("%s%s" % (pad, _expr(step["expr"], env)))
+        if _is_stream_next(step.get("expr")):
+            # item 130: `await sub.next()` on this tier is the blocking
+            # cancel-channel `select` (design §4.6, the go row). Two of its three
+            # outcomes are terminals, and they are NOT the same: `Closed` (an
+            # orderly provider close, or the owner's own `close` tripping the
+            # cancel channel) is an ordinary value the activation carries on
+            # from, while `Faulted` (a provider abort, or a bounded-buffer
+            # overflow under the default `error` policy) FAILS the activation —
+            # so the accumulated prefix, subscription bracket included, reverts
+            # LIFO and the stream is closed. Never a silent drop of either.
+            out.append("%sif _, err := %s; err != nil {"
+                       % (pad, _expr(step["expr"], env)))
+            out.append("%sreturn nil, err" % inner)
+            out.append("%s}" % pad)
+        else:
+            out.append("%s%s" % (pad, _expr(step["expr"], env)))
     elif s == "emit":
         # `emit X compensate Y` (item 247, docs/design/teardown-contract.md):
         # perform the emission; the compensation is a `compensation` entry,
@@ -5240,6 +5352,487 @@ func RevlClockReset() {
 '''
 
 
+# ---- Stream[T] on the blocking tier (item 130 Slice 3) --------------------
+#
+# docs/design/130-stream-reactive-types.md §4.6, the go row: this tier ERASES
+# the async color. `next` is a `select` on the item channel and the CANCEL
+# channel; `close` closes the cancel channel. That is the whole reason the
+# blocking tiers are their own slice — the select is what makes the bracket
+# inverse reachable off the teardown goroutine (§9 Part A), so a `next` parked
+# on a provider that never emits cannot make teardown deadlock behind it.
+#
+# The two guarantees this preamble is accountable for, and where they live:
+#
+#   * cancellation-first `next` (§9 Part A) — `Subscription.Next` probes the
+#     cancel channel BEFORE the buffer, then parks in the three-case select
+#     whose cancel case `Close` closes. `Close` is synchronous and never waits
+#     for the park to drain.
+#   * a terminal always reaches an outstanding `next` (§9 Part B) — a provider
+#     `Close`/`Fault` delivers `Closed`/`Faulted` to every live subscription,
+#     and `merge` counts its upstreams so a fan-in whose last source closes
+#     still delivers `Closed` rather than stranding the consumer.
+#
+# Emitted only for a document that reaches a stream (`_COMP_NEEDS_STREAM`), so
+# every stream-free program on this tier stays byte-identical (exit test §10.9).
+_STREAM_PREAMBLE = '''// ---- Stream[T] reactive host (item 130, docs/design/130-stream-reactive-types.md)
+// The blocking-tier lowering: `next` is a cancel-channel select, `close` closes
+// the cancel channel. Unloading the subscription owner runs `Close` (the bracket
+// inverse), which resolves a parked `Next` as the `Closed` terminal — the core
+// guarantee, delivered by the same LIFO teardown any bracket rides.
+
+// streamClosedT is the `Closed` terminal — a VALUE, mirroring the py reference
+// tier's STREAM_CLOSED sentinel. A `Faulted` terminal is an error instead, so
+// the two outcomes cannot be confused at a call site.
+type streamClosedT struct{}
+
+// StreamClosed is the singleton `Closed` terminal value.
+var StreamClosed any = streamClosedT{}
+
+// IsStreamClosed reports whether a `Next` result is the Closed terminal.
+func IsStreamClosed(v any) bool { _, ok := v.(streamClosedT); return ok }
+
+// StreamBufferCapacity is the bounded buffer every subscription gets: there are
+// no unbounded buffers (design §4.4). Overflow under the default `error` policy
+// is a `Faulted(overflow)` terminal — deterministic, never a silent drop.
+const StreamBufferCapacity = 8
+
+var (
+	_revlStreamMu   sync.Mutex
+	_revlStreams    []*Stream
+	_revlStreamSubs []*Subscription
+)
+
+// Stream is the PROVIDER side: a source (`Stream.source()`) or the derived
+// stream behind `subscribe merge(a, b)`. Both are the same object, so a merged
+// stream is itself a terminal-delivering provider another `merge` can take.
+type Stream struct {
+	mu          sync.Mutex
+	kind        string // "source" | "merge"
+	subs        []*Subscription
+	down        []*Stream // merged streams fed by this one
+	up          []*Stream // sources feeding this merged stream
+	pending     int       // upstream sources not yet terminal (merged only)
+	state       string    // "open" | "closed" | "faulted"
+	faultReason string
+	released    bool
+}
+
+// StreamSource opens a provider. It takes a live-resource slot; `Close`
+// returns it, so a source that outlives its owner shows up as residue.
+func StreamSource() *Stream {
+	s := &Stream{kind: "source", state: "open"}
+	_revlStreamMu.Lock()
+	_revlStreams = append(_revlStreams, s)
+	_revlStreamMu.Unlock()
+	hostRecord("stream.source open")
+	revlHostAcquire()
+	return s
+}
+
+// StreamMerge is the fan-in behind `subscribe merge(a, b)` (design §1). The
+// merged stream is NOT a bracket of its own: it is DERIVED, owned by the
+// subscription opened on it, so multi-source teardown rides the ONE bracket the
+// `subscribe` registers. The subscription's Close closes the merge; closing the
+// merge detaches it from both sources; each source is left to its own bracket.
+// One LIFO stack, no orphaned fan-in, and no source left feeding — or holding a
+// reference to — a merged stream whose owner is gone.
+func StreamMerge(a *Stream, b *Stream) *Stream {
+	m := &Stream{kind: "merge", state: "open", pending: 2, up: []*Stream{a, b}}
+	_revlStreamMu.Lock()
+	_revlStreams = append(_revlStreams, m)
+	_revlStreamMu.Unlock()
+	hostRecord("stream.merge open")
+	revlHostAcquire()
+	a.attachDown(m)
+	b.attachDown(m)
+	return m
+}
+
+func (s *Stream) attachDown(m *Stream) {
+	s.mu.Lock()
+	if s.state != "open" {
+		state, reason := s.state, s.faultReason
+		s.mu.Unlock()
+		m.upstreamTerminal(state, reason)
+		return
+	}
+	s.down = append(s.down, m)
+	s.mu.Unlock()
+}
+
+func (s *Stream) detachDown(m *Stream) {
+	s.mu.Lock()
+	for i, d := range s.down {
+		if d == m {
+			s.down = append(s.down[:i], s.down[i+1:]...)
+			break
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *Stream) detach(sub *Subscription) {
+	s.mu.Lock()
+	for i, x := range s.subs {
+		if x == sub {
+			s.subs = append(s.subs[:i], s.subs[i+1:]...)
+			break
+		}
+	}
+	s.mu.Unlock()
+}
+
+// Emit delivers one item to the single consumer (and into any merged stream fed
+// by this provider). A no-op once terminal.
+func (s *Stream) Emit(item string) bool {
+	s.mu.Lock()
+	open := s.state == "open"
+	s.mu.Unlock()
+	if !open {
+		return false
+	}
+	hostRecord("stream.emit " + item)
+	s.forward(item)
+	return true
+}
+
+func (s *Stream) forward(item string) {
+	s.mu.Lock()
+	if s.state != "open" {
+		s.mu.Unlock()
+		return
+	}
+	subs := append([]*Subscription(nil), s.subs...)
+	downs := append([]*Stream(nil), s.down...)
+	s.mu.Unlock()
+	for _, sub := range subs {
+		sub.deliver(item)
+	}
+	for _, d := range downs {
+		d.forward(item)
+	}
+}
+
+// Close is the provider's terminal-delivering inverse (§9 Part B) and, for a
+// merged stream, its detach from both upstreams. Idempotent, and the
+// live-resource slot is released exactly once — so a provider that FAULTED and
+// is then unloaded still leaves no residue.
+func (s *Stream) Close() bool {
+	s.mu.Lock()
+	first := s.state == "open"
+	if first {
+		s.state = "closed"
+	}
+	release := !s.released
+	s.released = true
+	kind := s.kind
+	subs := append([]*Subscription(nil), s.subs...)
+	downs := append([]*Stream(nil), s.down...)
+	ups := append([]*Stream(nil), s.up...)
+	s.up = nil
+	s.mu.Unlock()
+	if first {
+		for _, sub := range subs {
+			sub.terminate("closed", "")
+		}
+		for _, d := range downs {
+			d.upstreamTerminal("closed", "")
+		}
+	}
+	// A merged stream leaves its upstreams on the way out. A DERIVED upstream
+	// (a nested `merge`) is owned by this one, so it closes with it; a plain
+	// source is left to its own bracket.
+	for _, u := range ups {
+		u.detachDown(s)
+		if u.kind != "source" {
+			u.Close()
+		}
+	}
+	if release {
+		hostRecord("stream." + kind + " close")
+		revlHostRelease()
+	}
+	return first
+}
+
+// Fault is a provider abort: every outstanding `Next` resolves to `Faulted`,
+// never a silent pending (design §4.3). It does not release the slot — the
+// bracket inverse `Close` still runs on teardown and releases it there.
+func (s *Stream) Fault(reason string) bool {
+	s.mu.Lock()
+	if s.state != "open" {
+		s.mu.Unlock()
+		return false
+	}
+	s.state = "faulted"
+	s.faultReason = reason
+	subs := append([]*Subscription(nil), s.subs...)
+	downs := append([]*Stream(nil), s.down...)
+	s.mu.Unlock()
+	hostRecord("stream." + s.kind + " fault " + reason)
+	for _, sub := range subs {
+		sub.terminate("faulted", reason)
+	}
+	for _, d := range downs {
+		d.upstreamTerminal("faulted", reason)
+	}
+	return true
+}
+
+// upstreamTerminal is how a merged stream learns one of its sources is done.
+// A FAULT propagates at once (no silent loss). An orderly CLOSE only counts
+// down: the fan-in stays live while any source is, so one source's death never
+// strands a consumer the other source can still feed — and when the LAST source
+// closes, the merged stream delivers its own `Closed`, so a parked `Next` is
+// terminated rather than left waiting on a dead fan-in.
+func (m *Stream) upstreamTerminal(kind string, reason string) {
+	m.mu.Lock()
+	if m.state != "open" {
+		m.mu.Unlock()
+		return
+	}
+	if kind == "faulted" {
+		m.state = "faulted"
+		m.faultReason = reason
+	} else {
+		m.pending--
+		if m.pending > 0 {
+			m.mu.Unlock()
+			return
+		}
+		m.state = "closed"
+		kind = "closed"
+	}
+	subs := append([]*Subscription(nil), m.subs...)
+	downs := append([]*Stream(nil), m.down...)
+	m.mu.Unlock()
+	for _, sub := range subs {
+		sub.terminate(kind, reason)
+	}
+	for _, d := range downs {
+		d.upstreamTerminal(kind, reason)
+	}
+}
+
+// Subscription is the CONSUMER side: a single-consumer acquisition whose
+// inverse is `Close`. `items` is the bounded buffer, `cancel` is the cancel
+// channel teardown closes, `term` carries a provider terminal.
+type Subscription struct {
+	src    *Stream
+	policy string
+	items  chan string
+	cancel chan struct{}
+	term   chan struct{}
+	mu     sync.Mutex
+	kind   string // "" | "closed" | "faulted"
+	reason string
+	closed bool
+	termed bool
+}
+
+// StreamSubscribe opens the single-consumer subscription a `subscribe` bracket
+// binds. `capacity` is the declared `buffer` (0 = the default); every buffer is
+// BOUNDED either way, since there are no unbounded buffers (design §4.4).
+// Subscribing to an already-terminal provider terminates immediately, so the
+// first `Next` cannot park on a provider that is already gone.
+func StreamSubscribe(src *Stream, policy string, capacity int) *Subscription {
+	if capacity <= 0 {
+		capacity = StreamBufferCapacity
+	}
+	sub := &Subscription{
+		src:    src,
+		policy: policy,
+		items:  make(chan string, capacity),
+		cancel: make(chan struct{}),
+		term:   make(chan struct{}),
+	}
+	src.mu.Lock()
+	src.subs = append(src.subs, sub)
+	terminal := src.state != "open"
+	state, reason := src.state, src.faultReason
+	src.mu.Unlock()
+	_revlStreamMu.Lock()
+	_revlStreamSubs = append(_revlStreamSubs, sub)
+	_revlStreamMu.Unlock()
+	hostRecord("stream.subscribe")
+	revlHostAcquire()
+	if terminal {
+		sub.terminate(state, reason)
+	}
+	return sub
+}
+
+func (sub *Subscription) deliver(item string) {
+	sub.mu.Lock()
+	dead := sub.closed || sub.termed
+	sub.mu.Unlock()
+	if dead {
+		return
+	}
+	select {
+	case sub.items <- item:
+	default:
+		switch sub.policy {
+		case "", "error":
+			hostRecord("stream.overflow")
+			sub.terminate("faulted", "overflow")
+		default:
+			panic("revl: backpressure policy " + sub.policy +
+				" is not lowered on the cordis-go tier")
+		}
+	}
+}
+
+func (sub *Subscription) terminate(kind string, reason string) {
+	sub.mu.Lock()
+	if sub.closed || sub.termed {
+		sub.mu.Unlock()
+		return
+	}
+	sub.termed = true
+	sub.kind, sub.reason = kind, reason
+	sub.mu.Unlock()
+	close(sub.term)
+}
+
+// Next parks until an item, a provider terminal, or the cancel channel.
+// Returns the item; `StreamClosed` on a `Closed` terminal (an orderly provider
+// close, or the owner's own `Close` tripping the cancel channel); an error on a
+// `Faulted` one.
+//
+// CANCELLATION-FIRST (§9 Part A): the cancel channel is probed BEFORE the
+// buffer, so a `Close` racing a buffered item still wins. Go's `select` picks
+// among ready cases at RANDOM, which is exactly why the priority is spelled as
+// non-blocking probes ahead of the blocking select instead of left to it.
+func (sub *Subscription) Next() (any, error) {
+	select {
+	case <-sub.cancel:
+		return StreamClosed, nil
+	default:
+	}
+	select {
+	case item := <-sub.items:
+		return item, nil
+	default:
+	}
+	select {
+	case <-sub.term:
+		return sub.terminal()
+	default:
+	}
+	// The blocking cancel-channel select. Whichever arrives first ends the park,
+	// and the cancel case is the one TEARDOWN closes from another goroutine —
+	// the reason a parked `Next` can never make the bracket inverse unreachable.
+	select {
+	case <-sub.cancel:
+		return StreamClosed, nil
+	case item := <-sub.items:
+		return item, nil
+	case <-sub.term:
+		return sub.terminal()
+	}
+}
+
+func (sub *Subscription) terminal() (any, error) {
+	sub.mu.Lock()
+	kind, reason := sub.kind, sub.reason
+	sub.mu.Unlock()
+	if kind == "faulted" {
+		if reason == "" {
+			reason = "faulted"
+		}
+		return nil, fmt.Errorf("stream faulted: %s", reason)
+	}
+	return StreamClosed, nil
+}
+
+// Close is the bracket inverse: trip the cancel channel synchronously, detach
+// the listener, release the slot. Infallible, idempotent, and it NEVER waits
+// for a parked `Next` to drain — closing `cancel` is what resolves that park.
+//
+// A DERIVED upstream (a `merge(a, b)` fan-in) is owned by this subscription
+// rather than by a bracket of its own, so closing here closes it too — and
+// closing a merge is what detaches it from both sources. The sources stay on
+// their own brackets, which keeps the LIFO close-order proof exact.
+func (sub *Subscription) Close() bool {
+	sub.mu.Lock()
+	if sub.closed {
+		sub.mu.Unlock()
+		return false
+	}
+	sub.closed = true
+	sub.mu.Unlock()
+	close(sub.cancel)
+	sub.src.detach(sub)
+	hostRecord("stream.close")
+	revlHostRelease()
+	if sub.src.kind != "source" {
+		sub.src.Close()
+	}
+	return true
+}
+
+// StreamPending is the residue probe: unreleased providers plus live
+// (un-closed) subscriptions. Zero after a clean unload proves every bracket
+// inverse ran and no host listener outlived its owner.
+func StreamPending() int {
+	_revlStreamMu.Lock()
+	streams := append([]*Stream(nil), _revlStreams...)
+	subs := append([]*Subscription(nil), _revlStreamSubs...)
+	_revlStreamMu.Unlock()
+	n := 0
+	for _, s := range streams {
+		s.mu.Lock()
+		if !s.released {
+			n++
+		}
+		s.mu.Unlock()
+	}
+	for _, sub := range subs {
+		sub.mu.Lock()
+		if !sub.closed {
+			n++
+		}
+		sub.mu.Unlock()
+	}
+	return n
+}
+
+// StreamProviders is the harness handle on this package's providers in opening
+// order, so a scenario can drive one (Emit/Close/Fault) from ANOTHER goroutine
+// — the go mirror of the py reference's `Stream.sources()`.
+func StreamProviders() []*Stream {
+	_revlStreamMu.Lock()
+	defer _revlStreamMu.Unlock()
+	return append([]*Stream(nil), _revlStreams...)
+}
+
+// StreamLiveSubscriptions counts subscriptions whose `Close` has not run.
+func StreamLiveSubscriptions() int {
+	_revlStreamMu.Lock()
+	subs := append([]*Subscription(nil), _revlStreamSubs...)
+	_revlStreamMu.Unlock()
+	n := 0
+	for _, sub := range subs {
+		sub.mu.Lock()
+		if !sub.closed {
+			n++
+		}
+		sub.mu.Unlock()
+	}
+	return n
+}
+
+// StreamReset clears the provider/subscription registry (call between scenarios).
+func StreamReset() {
+	_revlStreamMu.Lock()
+	_revlStreams = nil
+	_revlStreamSubs = nil
+	_revlStreamMu.Unlock()
+}
+'''
+
+
 # The pure-tier runtime preamble. Groups are emitted only when used, but every
 # helper here is an ordinary package-level declaration — Go never errors on an
 # unused func/type, only on unused imports (which is why the group flags gate
@@ -5944,9 +6537,10 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
-    global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET
+    global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET, _COMP_NEEDS_STREAM
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
+    _COMP_NEEDS_STREAM = False
     # item 243/247: witnessed externs by name, for this document's component
     # steps (see `_witnessed_extern`); empty for a document with none, so
     # every existing v1/v2 golden emits exactly as before.
@@ -6092,6 +6686,8 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
             out.append(_RECORD_PREAMBLE)
     if _COMP_NEEDS_TIMER:
         out.append(_TIMER_PREAMBLE)
+    if _COMP_NEEDS_STREAM:
+        out.append(_STREAM_PREAMBLE)
 
     out.extend(body)
 
@@ -6605,7 +7201,7 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
-    global _COMP_NEEDS_TIMER, _TIMER_COUNTER
+    global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
     _V3_MODE = True
     _V3_TYPES = types
     _V3_TYPED_COMPONENTS = True
@@ -6614,6 +7210,7 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     _COMP_NEEDS_PARSE_INT = False
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
+    _COMP_NEEDS_STREAM = False
 
     has_lifecycle = any(t.get("lifecycle") for t in tests)
     has_spawn = _spawn_targets(ir) and any(
@@ -6806,6 +7403,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append(_V3_STDLIB_PREAMBLE)
     if _COMP_NEEDS_TIMER:
         out.append(_TIMER_PREAMBLE)
+    if _COMP_NEEDS_STREAM:
+        out.append(_STREAM_PREAMBLE)
     out.extend(body)
     out.extend(host_stubs)
 
