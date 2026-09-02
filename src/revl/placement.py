@@ -74,6 +74,7 @@ from .deploy import (ADMISSION_PEER_PINNED, ADMISSION_SEALED,
 from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
+from .sandbox_runtime import resolve_driver as resolve_sandbox_driver
 
 KNOWN_BACKENDS = ("py", "node", "ts", "rust", "java", "go")
 
@@ -721,11 +722,21 @@ def sandbox_capability_gate(ir: dict, processes: dict, sandboxes: dict,
 
 def render_sandbox_summary(processes: dict, sandboxes: dict, reach: dict,
                            needs: dict, requires: dict, provides: dict,
-                           owner: dict, backends: dict) -> list[str]:
+                           owner: dict, backends: dict,
+                           achieved: dict | None = None) -> list[str]:
     """The per-sandboxed-process boot-summary / audit lines: the envelope-scope
     note, the opaque-reach report, the seam-served keys with each provider's
-    reach, the claimed-vouched externs, and the net=none egress note. Empty for
-    a placement with no sandbox (additivity)."""
+    reach, the claimed-vouched externs, the net=none egress note, and the
+    ENFORCEMENT line. Empty for a placement with no sandbox (additivity).
+
+    `achieved` (item 411 Slice 2) is the per-process record the runtime driver
+    returns once it has established the boundary and its in-sandbox canary has
+    confirmed it. Given one, the enforcement line reports the rung actually
+    ACHIEVED plus the canary's evidence, so what the composition is running
+    under is auditable rather than inferred from the manifest. Without one (the
+    static `revl audit --placement` view, which launches nothing) it reports
+    which rungs have a runtime driver at all — and therefore which placements
+    `revl run` would refuse on this build."""
     lines: list[str] = []
     for pname in processes:
         if pname not in sandboxes:
@@ -755,7 +766,35 @@ def render_sandbox_summary(processes: dict, sandboxes: dict, reach: dict,
                          + ", ".join(vouched))
         lines.append(f"    note: net={env['net']} bounds this process's own egress, "
                      f"not the reach of its seam-served providers")
+        lines.extend(_enforcement_lines(pname, env, (achieved or {}).get(pname)))
     return lines
+
+
+def _enforcement_lines(pname: str, env: dict, achieved: dict | None) -> list[str]:
+    """The item-411 Slice-2 enforcement rows for one sandboxed process."""
+    rung = env["isolation"]
+    if achieved:
+        lines = [f"    enforcement: rung {rung} ACHIEVED via {achieved['runtime']} "
+                 f"(image {achieved.get('image')!r})"]
+        for note in achieved.get("evidence") or []:
+            lines.append(f"      canary: {note}")
+        host = achieved.get("host_mounts") or []
+        if host:
+            # the mounts the DRIVER adds so the confined process can be the
+            # runner at all (its own sources, and the conductor's runtime when
+            # the image does not carry one). They widen what the body can read
+            # beyond the declared envelope, read-only, so they are named here
+            # rather than left to be discovered.
+            lines.append("      note: driver-added read-only mounts, outside the "
+                         "declared envelope: " + ", ".join(p for p, _ in host))
+        return lines
+    if resolve_sandbox_driver(rung) is None:
+        return [f"    enforcement: NONE — rung {rung} has no runtime driver in this "
+                f"build, so `revl run --placement` REFUSES this placement rather "
+                f"than running {pname} unconfined (Slice 2 implements `container`)"]
+    return [f"    enforcement: rung {rung} has a runtime driver; `revl run "
+            f"--placement` establishes the boundary at boot, verifies it with an "
+            f"in-sandbox canary, and refuses if it cannot"]
 
 
 def sandbox_audit_view(ir: dict, placement: dict) -> tuple[list[str], str | None]:
@@ -2764,24 +2803,67 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     for pname, spec in specs.items():
         adapt_spec(spec, backends[pname])
 
+    # --- sandbox runtime driver (item 411, Slice 2): ESTABLISH each declared
+    # isolation boundary before anything spawns, or refuse the placement.
+    #
+    # There is no third outcome here on purpose. A rung with no driver, a
+    # missing container runtime, an unresolvable image, a backend with no
+    # in-boundary runner form, a seam that cannot cross the boundary, or a boot
+    # canary that cannot CONFIRM the confinement from inside all abort. A
+    # sandbox that quietly degraded to an ordinary process would leave the rest
+    # of the composition trusting a body nothing confines, which is strictly
+    # worse than a placement that declared no sandbox at all.
+    sandbox_drivers: dict = {}
+    sandbox_achieved: dict[str, dict] = {}
+    for pname in processes:
+        if pname not in sandboxes:
+            continue
+        env = sandboxes[pname]
+        driver = resolve_sandbox_driver(env["isolation"])
+        if driver is None:
+            return abort(
+                f"process {pname!r} declares the {env['isolation']!r} isolation "
+                f"rung, which has no runtime driver in this build (item 411 "
+                f"Slice 2 implements `container`). The boundary cannot be "
+                f"established, and a declared isolation is never downgraded to an "
+                f"unconfined process — the placement refuses. Use the `container` "
+                f"rung, or take the process out of the sandbox.")
+        spec = specs[pname]
+        ctx = {
+            "backend": backends[pname],
+            "seam_dir": str(tmp),
+            "seam_keys": sorted(set(spec.get("proxies") or {})
+                                | set((spec.get("serve") or {}).get("keys") or [])),
+            "files": [str(f) for f in files],
+            "cwd": os.getcwd(),
+        }
+        achieved, sb_err = driver.preflight(pname, env, ctx)
+        if sb_err:
+            for started in sandbox_drivers.values():
+                started.teardown()
+            return abort(f"sandbox refused (item 411): {sb_err}")
+        achieved["_env"] = env
+        sandbox_drivers[pname] = driver
+        sandbox_achieved[pname] = achieved
+
     summary = "  ".join(process_tag(p, processes, backends, sandboxes) for p in processes)
     print(f"placement: {summary}", flush=True)
     if sandboxes:
-        # item 411 Slice 1: the envelope + effective reach per sandboxed
-        # process (the per-key seam-served provider reach, the opaque residue,
-        # the claimed-vouched externs, and the net=none egress note), so
-        # `net=none` is never readable as a total-egress claim. The isolation
-        # is DECLARED and gated here but not yet ENFORCED; the runtime driver
-        # (container/microVM/wasm-cell launch, boot canary, per-rung transport,
-        # the conductor-served approval channel) is Slice 2.
-        # TODO(411 Slice 2): wrap the runner in the isolation boundary, print
-        # the derived confinement flags, and add the approval channel row.
-        print("  sandbox placement (item 411, Slice 1): isolation DECLARED + "
-              "gated, not yet enforced (runtime driver is Slice 2)", flush=True)
+        # item 411: the envelope + effective reach per sandboxed process (the
+        # per-key seam-served provider reach, the opaque residue, the
+        # claimed-vouched externs, and the net=none egress note), so `net=none`
+        # is never readable as a total-egress claim — plus, since Slice 2, the
+        # rung actually ACHIEVED and the in-sandbox canary's evidence for it.
+        # Still deferred: the per-rung seam transport, the conductor-served
+        # approval channel, and the wasm-cell / microVM rungs (all three of
+        # which REFUSE rather than degrade above).
+        print("  sandbox placement (item 411, Slice 2): isolation ESTABLISHED by "
+              "a runtime driver and verified in-sandbox; a rung that cannot be "
+              "established refuses the placement", flush=True)
         reach = _component_reach(ir)
         for line in render_sandbox_summary(
                 processes, sandboxes, reach, sandbox_needs,
-                requires, provides, owner, backends):
+                requires, provides, owner, backends, sandbox_achieved):
             print(line, flush=True)
     if "java" in built:
         note = ("real cordis4j (reactive)" if built["java"][0] == "real"
@@ -2839,6 +2921,11 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         spec_file = tmp / f"{pname}.spec.json"
         spec_file.write_text(json.dumps(spec), encoding="utf-8")
         cmd, proc_env, stop_mode = command_for(backend, spec_file)
+        if pname in sandbox_drivers:
+            # item 411 Slice 2: the SAME runner command, rewritten to run inside
+            # the boundary the driver established and the canary confirmed above.
+            cmd, proc_env = sandbox_drivers[pname].wrap(
+                pname, cmd, proc_env, sandbox_achieved[pname])
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env=proc_env, text=True,
@@ -3139,6 +3226,11 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         pass
     finally:
         _stop_all(children)
+        # item 411 Slice 2: `--rm` already fires on a clean exit; this is the
+        # belt, so a torn-down placement never leaves a confined process (or a
+        # container holding its granted mounts) behind it.
+        for driver in sandbox_drivers.values():
+            driver.teardown()
         for thread in threads:
             thread.join(timeout=2)
         for stale in cleanup:
