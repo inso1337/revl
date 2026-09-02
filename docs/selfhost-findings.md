@@ -1590,3 +1590,58 @@ The second one is the more interesting failure: a per-stage oracle can be green 
 every stage while their COMPOSITION drops a security property, because no stage's
 corpus is the composition's corpus. Fixing the emitter (1) did not fix the
 program; only the frontend port did.
+
+3. **And then one consumer ignored one of the stamps the frontend had started
+   supplying (#234).** With the frontend port in, the four stamps arrive.
+   `selfhost/emit_py.rvl` read `secret_return` and a provide method's
+   `params[i].secret` and had NO config-field site at all, so it closed a
+   component's schema with `])` where `backends/python/emit.py` closes it with
+   `], secret=['api_key'])`. The runtime reads that argument to keep a secret
+   field's value out of the `<name>.config` trace line while still handing the
+   real value to the component, so a composition compiled through `compile_to`
+   on the py tier got a schema that does not know which fields are secret.
+
+   Nothing was red because `tests/fixtures/emit_py_corpus/secrets_nested.rvl`
+   already carried a `Secret[T]` config field and was in NEITHER the emit_py
+   oracle corpus nor the fully-native compile corpus. Added to both, seen to red
+   on exactly the missing argument, then ported. The order matters more than the
+   fix does: the fixture existed and was inert, which is the same failure the two
+   findings above describe, one turn later.
+
+### Sibling survey, redone on source (#234)
+
+The earlier survey in this file and in roadmap 429(d) recorded that `secret`
+appears zero times in the ts/go/java/rust/wasm reference emitters. That is no
+longer true — the cross-tier work happened — so the survey was redone by diffing
+each self-host emitter against its reference counterpart site by site, per item
+429's rule that a green byte-agreement oracle is not evidence.
+
+| tier | reference sites | self-host emitter |
+| --- | --- | --- |
+| py | `secret_return`, `params[i].secret`, config field | all three, config field as of #234 |
+| ts | `secret_return`, `params[i].secret`, config field | all three (#209) |
+| go | `secret_return`, `params[i].secret`, config field via `_declares_secret`, `secret_witness` | `secret_return` only (#216) |
+| rust | `secret_witness` | none |
+| java | `secret_witness` | none |
+| wasm | `secret_witness` | none |
+
+Only the py row was a gap. Every other missing site is OUT OF the self-host
+emitter's covered surface rather than absent from it, which is a different thing
+and was checked rather than assumed: `revlMarkSecret` lives in
+`_emit_provide_impl` and the `_SECRET_MODE` config scan in `emit()` /
+`_emit_v3_placement`, the live-component and placement worlds
+`selfhost/emit_go.rvl` lists as deferred in its own header; and every
+`secret_witness` site is `--record` WAL emission, which no self-host emitter
+reaches at all (`REVL_WAL|wal_record|revlRecord|revl_record` is zero hits across
+all six files).
+
+One more, unrelated to secrets, found because the same corpus addition reddened
+it: `uses_builtin_result` in `selfhost/emit_py.rvl` mirrored only the
+`adt`/`match`/checked-division walk of `_uses_builtin_result` and neither of its
+two extern clauses (a witnessed extern, item 243; any Result-returning extern,
+item 362). A document whose only Result is an extern's declared return therefore
+emitted a module that references `Ok`/`Err` from the extern body and never
+defines them — a NameError at the first call rather than a byte divergence.
+Fixed in #234 as its own commit. `secrets_nested.rvl` is the first corpus
+document with a Result-returning extern, which is the whole reason this was
+reachable.

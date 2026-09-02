@@ -11,8 +11,8 @@ first-class:
 * the ABORT FENCE + recovery FREE vs FENCED replay (a declared-idempotent inverse
   replays freely across two recovery passes; an undeclared one is fenced and
   deferred, at-most-once across abort-then-crash);
-* the register PARTIAL ORDER helper (keyed and shape-proven are peers, either
-  satisfies a strong floor).
+* the register ORDER helper (`declared < keyed < read`; a strong floor is met
+  by `keyed` and above, never by `declared`).
 
 The 413 WAL integrity gates and the 247 compensation policy are untouched: the
 existing test files for those pass unchanged (additivity).
@@ -387,48 +387,41 @@ def test_idempotent_teardown_strength_floor_refuses_declared_only():
     assert any(v.kind == "teardown" for v in evaluate(pol, audit))
 
 
-def test_register_partial_order():
-    # declared is the floor; keyed and shape-proven are strong peers.
+def test_register_order():
+    # declared is the floor; keyed is strong; 440's read is above both.
     assert _register_satisfies("declared", "declared")
     assert _register_satisfies("keyed", "declared")
-    assert _register_satisfies("shape-proven", "declared")
-    # a strong floor is satisfied by either strong peer, never by declared.
+    assert _register_satisfies("read", "declared")
+    # a strong floor is met by keyed and above, never by declared.
     assert _register_satisfies("keyed", "keyed")
-    assert _register_satisfies("shape-proven", "keyed")
-    assert _register_satisfies("keyed", "shape-proven")
+    assert _register_satisfies("read", "keyed")
+    assert _register_satisfies("keyed", "strong")
     assert not _register_satisfies("declared", "keyed")
-    assert not _register_satisfies("declared", "shape-proven")
+    assert not _register_satisfies("declared", "strong")
     # no claim never satisfies a floor.
     assert not _register_satisfies(None, "declared")
 
 
-# ------------------------------------------------- slice 4: shape-proven is a
-# ------------------------------------------------- tier NOTHING produces
+# --------------------------------------------- the register vocabulary is CLOSED
 
-def test_shape_proven_is_a_tier_no_declaration_can_reach_today():
-    """The tripwire for 309 slice 4 (`lower.py::_idempotent_register`).
+def test_the_register_vocabulary_is_exactly_what_declarations_produce():
+    """The lattice accepts exactly the registers declarations can produce.
 
-    `shape-proven` is in the partial order and in `REDISPATCH_FREE`, so the
-    lattice ACCEPTS it — but the check that would produce it is a syntactic rule
-    over a restore-to-recorded-value inverse BODY, and revl has no body to read:
-    `parser.py::_extern` requires every extern to carry a `@backend` host body,
-    so an inverse is G8-opaque by construction. Until an extern can carry a
-    revl-expressed body, every native `undo idempotent` must lower to `declared`
-    — the fail-closed direction.
+    This used to be a tripwire: `shape-proven` sat in `_REGISTER_RANK` and
+    `REDISPATCH_FREE` for a slice-4 check nothing ever ran, and this test pinned
+    the gap between what the lattice accepted and what the world could reach.
+    Item 207 deleted the name, so the assertion now holds BY CONSTRUCTION rather
+    than by luck: the rank map's IR registers and the producible set are the same
+    three words.
 
-    This test fails the day a declaration produces `shape-proven`. That is the
-    point: it is the reminder that the promise now has to be kept for real
-    (`REDISPATCH_FREE` lets recovery re-dispatch it with no fence), not a claim
-    that the tier should stay empty forever.
+    `strong` is in the rank map but is a policy FLOOR spelling only, never an IR
+    register, so it is excluded from the comparison rather than expected on a
+    declaration.
     """
     from revl.lower import REDISPATCH_FREE, _REGISTER_RANK
 
-    # the tier exists in the type ...
-    assert "shape-proven" in _REGISTER_RANK
-    assert "shape-proven" in REDISPATCH_FREE
-
-    # ... and in the world, nothing reaches it. Every declaration surface that
-    # produces a register at all, over the shapes 309 admits.
+    # every declaration surface that produces a register at all, over the shapes
+    # 309 and 440 admit.
     surfaces = [
         # a native `undo idempotent` over a host body — the slice-4 candidate.
         _PRE + ("extern witnessed[fs] fn rm(path: Str) -> Result[W, E]\n"
@@ -441,7 +434,7 @@ def test_shape_proven_is_a_tier_no_declaration_can_reach_today():
          "extern acquire fn open(path: Str) -> Handle\n"
          "    undo idempotent shut(result)\n"
          "    = @py { pass }\n"),
-        # the read tier (item 440) — stronger than shape-proven, still not it.
+        # the read tier (item 440) — the top of the order.
         _PRE + ("extern witnessed[fs] fn probe(path: Str) -> Result[W, E]\n"
                 "    undo pure restore(result)\n"
                 "    = @py { pass }\n"),
@@ -456,19 +449,21 @@ def test_shape_proven_is_a_tier_no_declaration_can_reach_today():
             if "register" in ext:
                 produced.add(ext["register"])
     assert produced == {"declared", "read", "keyed"}
-    assert "shape-proven" not in produced
+    # and the lattice names exactly those, plus the `strong` floor spelling.
+    assert set(_REGISTER_RANK) - {"strong"} == produced
+    assert REDISPATCH_FREE <= produced
 
 
-def test_a_pure_classified_inverse_does_not_earn_shape_proven():
+def test_a_pure_classified_inverse_does_not_earn_a_strong_register():
     """The unsoundness slice 4 must not take, stated as a test.
 
     `pure` is checked for SHAPE only — `stdlib/fs.rvl`'s `restore`, `unrm` and
     `rmdir_if_empty` are all `extern pure fn` and all unlink or rename real
     files. So "the inverse is classified pure" cannot be read as "the inverse
-    restores a recorded value": deriving the tier from the classification would
-    promote mutating inverses into the free-replay tier, which is unsound in the
-    UNSAFE direction (item 440 found the same trap for the `read` tier and
-    anchored it to an explicit `undo pure` word instead).
+    restores a recorded value": deriving a strong register from the
+    classification would promote mutating inverses into the free-replay tier,
+    which is unsound in the UNSAFE direction (item 440 found the same trap for
+    the `read` tier and anchored it to an explicit `undo pure` word instead).
     """
     ir = _lower(_PRE + (
         "extern witnessed[fs] fn rm(path: Str) -> Result[W, E]\n"
