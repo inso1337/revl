@@ -681,7 +681,10 @@ verbs it accepts today:
   state, so the launcher intercepts it before the component dispatch rather than
   routing it through `cli.rvl`.
   - `component` - the component to reproduce, `name` or `name@version`
-    (required; omitting it exits 2).
+    (required; omitting it exits 2). The registry records no per-component
+    version, so a `@version` cannot be checked against anything: it is a
+    MISMATCH on the `version` tier, never a silent reproduction of whatever
+    `name` is today.
   - `--registry PATH` - reproduce against this registry directory instead of the
     one declared in `truc.toml`.
   - `--json` - print the tier-by-tier report as JSON.
