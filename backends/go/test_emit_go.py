@@ -975,14 +975,20 @@ fn loopwise(xs: List[Int]) -> List[List[Int]] {
     _has(src, "rows = append(rows, out)")
 
 
-def test_a_call_argument_still_disqualifies_the_write_after_it():
-    """The rule closes over calls: an intraprocedural analysis must assume a
-    call retains what it is handed, so the write the call's escape reaches
-    keeps the copying helper (roadmap item 445 (b) is the summary that would
-    answer it)."""
+def test_a_retaining_call_disqualifies_the_write_after_it():
+    """The rule closes over calls, but on the whole-program summary item 445 (b)
+    added rather than on "every call retains". `echo` hands its parameter back,
+    so the caller's next `append` would be visible through what came back and
+    the copying helper stays. `size_of` walks its argument and answers an Int,
+    so it keeps nothing and the write is still owned — which is what takes
+    `stdlib/list.rvl`'s `list_dedup` off its emitted quadratic.
+
+    A `slice` header is exactly the alias this is protecting: `append` into a
+    slice a second name still holds writes through both."""
     src = emit.emit(_compile("""
 fn size_of(xs: List[Int]) -> Int { return xs.length() }
-fn passed(xs: List[Int]) -> Int {
+fn echo(xs: List[Int]) -> List[Int] { return xs }
+fn measured(xs: List[Int]) -> Int {
   var out: List[Int] = []
   var seen = 0
   for (x of xs) {
@@ -991,9 +997,20 @@ fn passed(xs: List[Int]) -> Int {
   }
   return seen
 }
+fn handed_back(xs: List[Int]) -> Int {
+  var out: List[Int] = []
+  var snap: List[Int] = []
+  for (x of xs) {
+    snap = echo(out)
+    out = out.push(x)
+  }
+  return snap.length()
+}
 """))
-    assert "out = revlListPush(out, x)" in _body(src, "passed")
-    assert "out = append(out, x)" not in _body(src, "passed")
+    assert "out = append(out, x)" in _body(src, "measured")
+    assert "revlListPush" not in _body(src, "measured")
+    assert "out = revlListPush(out, x)" in _body(src, "handed_back")
+    assert "out = append(out, x)" not in _body(src, "handed_back")
 
 
 # ---------------------------------------------------------------------------
