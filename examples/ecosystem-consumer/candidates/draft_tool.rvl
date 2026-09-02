@@ -1,0 +1,9 @@
+service Lookup {
+  fn lookup(key: Str) -> Str
+}
+
+component DraftTool provides lk: Lookup {
+  provide lk {
+    fn lookup(key) = hole "call the real API once credentials are wired"
+  }
+}

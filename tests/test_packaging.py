@@ -76,6 +76,27 @@ def test_pyproject_declares_console_script():
     assert scripts.get("revl") == "revl.__main__:main"
 
 
+def test_pyproject_declares_a_stability_posture():
+    """Roadmap item 338: the packaging metadata must state a Development
+    Status, so a consumer sees the stability posture from `pip show revl` /
+    PyPI itself, not only a design note buried in the checkout."""
+    classifiers = _pyproject()["project"].get("classifiers", [])
+    assert any(c.startswith("Development Status ::") for c in classifiers), (
+        "pyproject.toml [project.classifiers] must include a "
+        "'Development Status ::' entry (roadmap 338)")
+
+
+def test_pyproject_states_the_gate_api_stability_contract():
+    """The promised dependency surface (`revl.gate`) and where its full
+    contract lives must be discoverable directly from pyproject.toml, since
+    that is the one file every consumer's tooling actually fetches — a
+    design note under docs/design/ is not (docs/gate-dependency-contract.md
+    is the consumer-facing version this comment must point at)."""
+    text = (_REPO / "pyproject.toml").read_text(encoding="utf-8")
+    assert "revl.gate" in text
+    assert "docs/gate-dependency-contract.md" in text
+
+
 def test_pyproject_ships_backends_in_wheel():
     """The wheel target must force-include the `backends/` tree, else the
     installed package cannot resolve any emitter."""
