@@ -995,6 +995,18 @@ _HOST_ARG_SIG: dict[str, list[str]] = {
     "Pool.query": ["Str"],
     "Pool.execute": ["Str"],
     "Job.run": ["Str"],
+    # item 130 (docs/design/130-stream-reactive-types.md). `Stream.source()` is
+    # the reference-tier provider host; its verbs (`emit`/`fault`/`close`) drive a
+    # single-consumer stream, and `close` is the terminal-delivering inverse the
+    # subscription's core guarantee rests on. `Subscription` is the host-local
+    # family a `subscribe` binds — `next` awaits an item raced against a cancel
+    # token, `close` is the synchronous bracket inverse. Results stay opaque.
+    "Stream.source": [],
+    "Stream.emit": ["Str"],
+    "Stream.fault": ["Str"],
+    "Stream.close": [],
+    "Subscription.next": [],
+    "Subscription.close": [],
 }
 
 
