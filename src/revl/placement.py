@@ -1735,6 +1735,14 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     for comp in components.values():
         key_service.update(comp.get("provides") or {})
         key_service.update(comp.get("requires") or {})
+    # key -> the component (in THIS composition) that provides it. Seam 2 (item
+    # 337) stamps this onto every same-composition proxy entry below, so the
+    # consuming process can re-admit its provider against its own manifest at
+    # boot without any new transport.
+    key_component: dict[str, str] = {}
+    for cname, comp in components.items():
+        for key in (comp.get("provides") or {}):
+            key_component[key] = cname
     load_order = (ir.get("manifest") or {}).get("loadOrder") or [c["name"] for c in ir["components"]]
     # §46: the manifest entries carry the G3 inject/provides structure the
     # per-process activation DAG is reconstructed from (docs/parallel-activation.md).
@@ -1966,6 +1974,18 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     # base specs (backend-neutral)
     specs: dict[str, dict] = {}
     backends: dict[str, str] = {}
+    # item 337 Seam 2: a proxy entry's "backend" names its PROVIDER's tier,
+    # which may be a process not yet reached by the per-process loop below (it
+    # builds `backends` incrementally, in `processes` insertion order, while it
+    # ALSO builds that same process's proxies against every OTHER process's
+    # backend). Populate `backends` for every process up front so a proxy
+    # entry can always resolve its provider's tier regardless of declaration
+    # order; the per-process loop's own assignment below is then just a
+    # harmless re-affirmation (and still owns the backend validation/abort).
+    for _pname, _pconf in processes.items():
+        _backend = _canonical_backend(_pconf.get("backend", "py"))
+        if _backend in KNOWN_BACKENDS:
+            backends[_pname] = _backend
     for pname, pconf in processes.items():
         backend = _canonical_backend(pconf.get("backend", "py"))
         if backend == "wasm" or pconf.get("backend") == "wasm":
@@ -1999,12 +2019,17 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 # The consumer presents its own mTLS identity/CA (certs[pname])
                 # and verifies the remote against the same CA — the shared trust
                 # root two independent placements agree on out of band; there is
-                # no local process to own the key.
+                # no local process to own the key. Deliberately NO
+                # `component`/`backend` here: this key is not a component of
+                # THIS composition's `running_ir`, so it is not Seam-2 eligible
+                # (design doc 337, "Seam 3: the remote handoff" — a different,
+                # deferred seam with its own trust-anchor requirement).
                 rs = remote_specs[key]
                 entry["endpoint"] = {"host": rs["host"], "port": rs["port"],
                                      "tls": {**certs[pname],
                                              "server_hostname": rs["server_hostname"]}}
                 entry["latency_ms"] = rs["rtt_ms"]
+                entry["remote"] = True
                 net_seams.append((pname, key, rs["host"], rs["port"], rs["rtt_ms"]))
             elif host in addresses:
                 # a network seam: point the proxy at the machine over TCP+mTLS,
@@ -2015,8 +2040,20 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 entry["latency_ms"] = rtt
                 ehost, eport, _ = addresses[host]
                 net_seams.append((pname, key, ehost, eport, rtt))
+                # item 337 Seam 2: this is still the SAME composition, just
+                # network-distributed, so the consumer holds its provider's
+                # source (`spec["files"]`) and can re-admit it at boot.
+                entry["component"] = key_component.get(key)
+                entry["backend"] = backends.get(host)
             else:
                 entry["socket"] = sockets[host]
+                # item 337 Seam 2: the provider's admissible identity, so the
+                # consuming process can re-admit it against its own running
+                # manifest before wiring the proxy (`_process_runner.py`,
+                # `_boot_wiring_decision`) — the landed repoint seam
+                # (`swap_admission`) moved one event earlier, no new transport.
+                entry["component"] = key_component.get(key)
+                entry["backend"] = backends.get(host)
             if p_deadlines:
                 entry["deadlines"] = dict(p_deadlines)
             proxies[key] = entry
