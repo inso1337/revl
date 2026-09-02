@@ -22,6 +22,16 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    That is what lets the shaped model see a provider exceeding its
    declaration and a spawn widening a child's authority, not just a missing
    `emit` marker.
+2b. for G7 the facts are of a different kind, and the reference is a RUN.
+   A teardown disposition is a property of an execution, not of a
+   manifest, so the corpus is an enumerated set of activation scenarios —
+   one activation's LIFO stack (the three entry kinds, registered through
+   the reference's five seams) and the verdict it unwound under — and the
+   reference side DRIVES `backends/python/runtime.py` over each of them,
+   reading each entry's fate off the runtime's own state rather than
+   recomputing it. See `teardown_scenarios` / `teardown_observation`, and
+   `teardown_coverage` for the non-vacuity ratchet that keeps the row
+   from agreeing over shapes the corpus never reaches.
 3. compute reference verdicts here AND run the Lean oracle
    (`formal/harness/Oracle.lean`) over the same TSV, then diff them. This
    is the HARD gate, and since item 418 step 6 the two sides are no longer
@@ -51,6 +61,7 @@ with no component has no composition to model and is named in the
 """
 
 import dataclasses
+import itertools
 import shutil
 import subprocess
 import sys
@@ -62,11 +73,16 @@ FORMAL = Path(__file__).resolve().parents[1]
 CORPUS_DIRS = ("examples", "tck", "tests")
 
 sys.path.insert(0, str(REPO / "src"))
+# The G7 row RUNS the reference runtime rather than reading a manifest, so the
+# python backend's module directory joins the path exactly as the runtime's own
+# suites (`tests/test_estop_443.py`) put it there.
+sys.path.insert(0, str(REPO / "backends" / "python"))
 
 from revl import cap_order
 from revl.compiler import compile_source
 from revl.diagnostics import classify
 from revl.errors import RevlError
+import runtime as _rt  # backends/python/runtime.py — the reference teardown
 from revl.parser import (
     EffectStmt,
     EmitExpr,
@@ -625,10 +641,284 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         file_facts[rel] = ff
     # Z/Y decomposition rows go FIRST so the oracle can build its table in
     # one pass; the harness refuses a capability the checker cannot re-read.
-    return cap_decomposition_rows(caps_seen) + tsv, file_facts, {
+    # The G7 scenario corpus is not extracted from `.rvl` text: a teardown
+    # disposition is a property of a RUN, not of a manifest, so the facts are
+    # the shape of one activation's stack and the verdict it unwound under
+    # (`teardown_scenario_rows`). Both sides read them from this same TSV.
+    return (cap_decomposition_rows(caps_seen) + tsv + teardown_scenario_rows(),
+            file_facts, {
         "files": files, "components": comps, "statements": stmts,
         "refusals": refusals, "componentless": componentless,
-    }
+    })
+
+
+# ------------------------------------------------- G7 teardown dispositions
+
+#: The registration seams a scenario can use, as (seam, model kind). The
+#: model has ONE per-activation LIFO stack and no seam distinction; the
+#: reference has two, and they are different code paths in
+#: `backends/python/runtime.py`:
+#:
+#:  * `body` — the activation body yields the disposer, so cordis holds it
+#:    and unwinds it LIFO. A `bracket` entry exists only here: an emitted
+#:    bracket is a bare `lambda: <undo>` with no entry object.
+#:  * `method` — a provide-method registered it (`transactional_method` /
+#:    `compensation_method`), so it is parked on `_deferred_transactional` /
+#:    `_deferred_compensations` and disposed by `drain` itself, newest-first
+#:    (item 369's `reversed`). That loop is revl's OWN LIFO, not cordis's,
+#:    which is why the seam is in the corpus at all.
+_G7_SHAPES: tuple = (
+    ("body", "bracket"),
+    ("body", "transactional"),
+    ("body", "compensation"),
+    ("method", "transactional"),
+    ("method", "compensation"),
+)
+
+_G7_CODE = {("body", "bracket"): "b", ("body", "transactional"): "t",
+            ("body", "compensation"): "c",
+            ("method", "transactional"): "T",
+            ("method", "compensation"): "C"}
+
+_G7_VERDICTS = ("commit", "abort", "halted")
+
+#: Longest stack the scenario corpus enumerates. Three is the shortest
+#: length at which the Phase-1/Phase-2 split, the LIFO order WITHIN a phase
+#: and a mixed-seam stack are all observable at once.
+_G7_DEPTH = 3
+
+
+def _g7_stacks() -> list:
+    """Every registration sequence up to `_G7_DEPTH`, body seams first.
+
+    Enumerated, not hand-picked: an oracle row over cases someone chose is
+    an oracle row over the cases they thought of. The body-before-method
+    constraint is temporal, not cosmetic — a provide method runs AFTER its
+    component activated, so a method-registered entry is always NEWER than
+    every activation-body one, and a stack that interleaves them is a run
+    that cannot happen.
+    """
+    body = [s for s in _G7_SHAPES if s[0] == "body"]
+    method = [s for s in _G7_SHAPES if s[0] == "method"]
+    out: list = []
+    for total in range(1, _G7_DEPTH + 1):
+        for nbody in range(total + 1):
+            for bseq in itertools.product(body, repeat=nbody):
+                for mseq in itertools.product(method, repeat=total - nbody):
+                    out.append(list(bseq) + list(mseq))
+    return out
+
+
+def teardown_scenarios() -> list:
+    """The G7 scenario corpus: `(scenario id, stack, verdict)` triples."""
+    out = []
+    for stack in _g7_stacks():
+        code = "".join(_G7_CODE[s] for s in stack)
+        for verdict in _G7_VERDICTS:
+            out.append((f"g7/{verdict}/{code}", stack, verdict))
+    return out
+
+
+def teardown_scenario_rows() -> list:
+    """The G7 fact rows: the stack shape and the verdict, nothing decided."""
+    rows: list = []
+    for scen, stack, verdict in teardown_scenarios():
+        for i, (seam, kind) in enumerate(stack):
+            rows.append(f"E\t{scen}\te{i}\t{kind}\t{seam}")
+        rows.append(f"J\t{scen}\t{verdict}")
+    return rows
+
+
+class _G7Ctx:
+    """The minimum a `Frame` reads off its context on a run with no WAL —
+    the shape `tests/test_estop_443.py` drives it with. No timeline, so
+    every entry carries `seq is None`, which is what a plain `revl run`
+    really has."""
+
+
+def _g7_inverse(label: str, ran: list):
+    """One author inverse, named after its entry.
+
+    It calls a CLOSURE variable, so its code object loads no globals and no
+    attributes — which is what makes `runtime._named_call_method` /
+    `_inverse_label` read the label back off `__name__` / `_revl_method`
+    instead of off some incidental bytecode name. `_revl_method` is the
+    same field `Frame.acquire` stamps on a bracket inverse, and it is the
+    only way a bracket (which has no entry object) can be NAMED on the
+    E-Stop inventory."""
+    def _undo(*_args, **_kwargs):
+        ran(label)
+    _undo.__name__ = label
+    _undo._revl_method = label
+    return _undo
+
+
+def teardown_observation(stack: list, verdict: str) -> tuple:
+    """Drive `backends/python/runtime.py` over one scenario and report what
+    the REFERENCE did: the labels whose inverse ran (in the order they
+    ran), the labels it discharged, and the labels it stranded.
+
+    Nothing here decides anything. The dispositions are read off the
+    reference's own state — `_Transactional.discharged` / the E-Stop
+    inventory `runtime.estop_residue()` builds — and the replay order is
+    observed by the inverses themselves as they run.
+
+    The teardown is driven exactly as the emitted body drives it:
+
+      * `drain` is yielded LAST, so it is disposed FIRST — it settles the
+        commit bit and disposes the method-registered entries;
+      * the activation-body disposers then unwind newest-first, which is
+        cordis's LIFO and the one part of the walk revl does not own (the
+        harness stands in for cordis here, and says so);
+      * `begin` is yielded FIRST, so it is disposed LAST — it is the
+        post-unwind hook that drains Phase 2.
+
+    An `abort` is the session-level flavour (`Frame.abort()` then `drain`),
+    which is the only one a method-registered entry can reach: a mid-body
+    raise never yields `drain`, so there are no method entries yet.
+    """
+    _g7_reset()
+    ran: list = []
+    frame = _rt.Frame(_G7Ctx(), "G7Probe")
+    disposers: list = []          # the cordis disposer stack, in yield order
+    entries: list = []            # (label, entry) for the ones with an object
+    for i, (seam, kind) in enumerate(stack):
+        label = f"e{i}"
+        undo = _g7_inverse(label, ran.append)
+        if seam == "body" and kind == "bracket":
+            disposers.append(frame._guard(undo))
+        elif seam == "body" and kind == "transactional":
+            entry = frame.transactional(undo, {"witness": label})
+            entries.append((label, entry))
+            disposers.append(frame._guard(entry))
+        elif seam == "body" and kind == "compensation":
+            entry = frame.compensation(undo)
+            entries.append((label, entry))
+            disposers.append(frame._guard(entry))
+        elif seam == "method" and kind == "transactional":
+            entries.append((label, frame.transactional_method(undo, {"witness": label})))
+        elif seam == "method" and kind == "compensation":
+            entries.append((label, frame.compensation_method(undo)))
+        else:  # pragma: no cover — the shape table is closed
+            raise SystemExit(f"differential oracle: unknown G7 seam {seam}/{kind}")
+
+    if verdict == "halted":
+        _rt.estop("differential oracle scenario", operator="oracle")
+    elif verdict == "abort":
+        frame.abort()
+    frame.drain()
+    for disposer in reversed(disposers):
+        disposer()
+    frame.begin()
+
+    discharged = sorted(l for l, e in entries if getattr(e, "discharged", False))
+    stranded = sorted(r.get("method") for r in _rt.estop_residue()
+                      if r.get("method") is not None)
+    _g7_reset()
+    return list(ran), discharged, stranded
+
+
+def _g7_reset() -> None:
+    """No halt and no frame leaks between scenarios. The E-Stop is
+    process-global BY DESIGN (a halt that stopped one activation would not
+    be a halt), so the live-frame registry has to be reset too or one
+    scenario's frames land on the next scenario's inventory —
+    `tests/test_estop_443.py` keeps the same discipline."""
+    _rt.clear_estop()
+    _rt.arm_estop_latch(None)
+    _rt._LIVE_FRAMES.clear()
+
+
+def teardown_coverage(observed: dict) -> list[str]:
+    """The non-vacuity ratchet for the G7 row (roadmap item 429's lesson).
+
+    An oracle row that has never been seen to fail is not evidence, and the
+    cheapest way for a row to never fail is to agree over a shape the
+    corpus does not reach. The formal-layer audit found exactly that: the
+    capability-ceiling half of the `W` row agreed VACUOUSLY, because no
+    corpus file declared an integer parameter, so the `ceilingOKB` branch
+    the theorems are about was never entered.
+
+    So this row states, and enforces, what the corpus must actually have
+    EXERCISED — measured on the REFERENCE's observations, not on the
+    model's predictions, because a model that computed nothing would
+    otherwise satisfy its own coverage claim. Each clause below is a
+    property some plausible defect would remove:
+
+      * every verdict and every entry kind reached at all;
+      * both registration seams reached, so `drain`'s own `reversed` loop
+        (item 369) is under the row and not just cordis's unwind;
+      * a replay of length >= 2 whose order is NOT registration order, so
+        LIFO is distinguishable from FIFO — the direct analogue of the
+        missing integer parameter;
+      * a compensation that ran strictly AFTER a phase-1 inverse, so the
+        two-phase split is distinguishable from one interleaved pass;
+      * a non-empty discharge and a non-empty stranded column, so the two
+        non-replay dispositions are inhabited;
+      * a scenario whose replay set is a PROPER subset of its stack, so
+        "everything replays" would be visible.
+
+    Returns findings, which the caller treats as gate failures — a corpus
+    that stopped covering a clause is a row that quietly stopped biting.
+    """
+    seen_verdicts: set = set()
+    seen_kinds: set = set()
+    seen_seams: set = set()
+    order_witness = phase_witness = discharge_witness = None
+    strand_witness = proper_subset_witness = None
+    for scen, stack, verdict in teardown_scenarios():
+        row = observed.get(scen)
+        if row is None:
+            return [f"teardown coverage: no observation for {scen}"]
+        ran, discharged, stranded = row
+        seen_verdicts.add(verdict)
+        for seam, kind in stack:
+            seen_kinds.add(kind)
+            seen_seams.add(seam)
+        labels = [f"e{i}" for i in range(len(stack))]
+        if len(ran) >= 2 and list(ran) != [l for l in labels if l in set(ran)]:
+            order_witness = order_witness or (scen, ran)
+        comp = {f"e{i}" for i, (_s, k) in enumerate(stack) if k == "compensation"}
+        other = {f"e{i}" for i, (_s, k) in enumerate(stack) if k != "compensation"}
+        if comp & set(ran) and other & set(ran):
+            first_comp = min(ran.index(x) for x in comp & set(ran))
+            last_other = max(ran.index(x) for x in other & set(ran))
+            if first_comp > last_other:
+                phase_witness = phase_witness or (scen, ran)
+        if discharged:
+            discharge_witness = discharge_witness or (scen, discharged)
+        if stranded:
+            strand_witness = strand_witness or (scen, stranded)
+        if ran and len(ran) < len(stack):
+            proper_subset_witness = proper_subset_witness or (scen, ran)
+
+    findings: list[str] = []
+    if seen_verdicts != set(_G7_VERDICTS):
+        findings.append(f"teardown coverage: verdicts {sorted(seen_verdicts)} "
+                        f"!= {sorted(_G7_VERDICTS)}")
+    want_kinds = {k for _s, k in _G7_SHAPES}
+    if seen_kinds != want_kinds:
+        findings.append(f"teardown coverage: kinds {sorted(seen_kinds)} "
+                        f"!= {sorted(want_kinds)}")
+    if seen_seams != {"body", "method"}:
+        findings.append(f"teardown coverage: seams {sorted(seen_seams)} "
+                        "!= ['body', 'method']")
+    for label, witness in (("LIFO is not FIFO", order_witness),
+                           ("phase 2 runs after phase 1", phase_witness),
+                           ("some entry is discharged", discharge_witness),
+                           ("some entry is stranded", strand_witness),
+                           ("some replay set is a proper subset",
+                            proper_subset_witness)):
+        if witness is None:
+            findings.append(f"teardown coverage: NO witness that {label} — "
+                            "the row would agree vacuously")
+    if not findings:
+        print(f"teardown coverage: {len(observed)} scenarios, all "
+              f"{len(_G7_VERDICTS)} verdicts x {len(want_kinds)} kinds x 2 "
+              f"seams; LIFO={order_witness[0]} phase2={phase_witness[0]} "
+              f"discharge={discharge_witness[0]} strand={strand_witness[0]} "
+              f"subset={proper_subset_witness[0]}")
+    return findings
 
 
 def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
@@ -650,16 +940,25 @@ def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
 
 class Verdicts(NamedTuple):
     """One side's verdicts. `files` are V rows (disjoint, closed, link),
-    `comps` G rows, `providers` P rows, `spawns` W rows, `refused` X rows."""
+    `comps` G rows, `providers` P rows, `spawns` W rows, `refused` X rows,
+    `dispositions` D rows (G7 teardown: replayed / discharged / stranded)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
     spawns: dict[tuple[str, str, str], str]
     refused: dict[str, str]
+    dispositions: dict[str, tuple[tuple, tuple, tuple]]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
-                + len(self.spawns) + len(self.refused))
+                + len(self.spawns) + len(self.refused)
+                + len(self.dispositions))
+
+
+def _cols(field: str) -> list[str]:
+    """One `key=a,b,c` verdict column as a label list; empty for `key=`."""
+    body = field.split("=", 1)[1]
+    return [x for x in body.split(",") if x]
 
 
 def parse_verdicts(text: str) -> Verdicts:
@@ -669,6 +968,7 @@ def parse_verdicts(text: str) -> Verdicts:
     providers: dict[tuple[str, str, str, str, str], str] = {}
     spawns: dict[tuple[str, str, str], str] = {}
     refused: dict[str, str] = {}
+    dispositions: dict[str, tuple[tuple, tuple, tuple]] = {}
     for line in text.splitlines():
         parts = line.split("\t")
         if parts[0] == "V" and len(parts) == 5:
@@ -684,9 +984,19 @@ def parse_verdicts(text: str) -> Verdicts:
             spawns[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
         elif parts[0] == "X" and len(parts) == 3:
             refused[parts[1]] = parts[2].split("=", 1)[1]
+        elif parts[0] == "D" and len(parts) == 5:
+            # The replayed column is ORDERED (that is the LIFO claim); the
+            # other two are not — the reference flips `discharged` in place
+            # and builds the E-Stop inventory in two passes, so neither has
+            # an order the model claims. Compared sorted, and said so.
+            dispositions[parts[1]] = (
+                tuple(_cols(parts[2])),
+                tuple(sorted(_cols(parts[3]))),
+                tuple(sorted(_cols(parts[4]))),
+            )
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
-    return Verdicts(files, comps, providers, spawns, refused)
+    return Verdicts(files, comps, providers, spawns, refused, dispositions)
 
 
 def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
@@ -844,7 +1154,23 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         spawns[(rel, parent, child)] = "ok" if ok else "fail"
 
     refused = {r[1]: r[2] for r in xrows}
-    return Verdicts(files, comps, providers, spawns, refused)
+
+    # D rows: the G7 teardown disposition, OBSERVED. The stack shape and the
+    # verdict come off the same TSV the Lean side read; what each entry's fate
+    # was comes from actually running `backends/python/runtime.py` over it.
+    erows = [r for r in rows if r and r[0] == "E" and len(r) == 5]
+    jrows = [r for r in rows if r and r[0] == "J" and len(r) == 3]
+    stacks: dict[str, list] = {}
+    for r in erows:
+        stacks.setdefault(r[1], []).append((r[4], r[3]))
+    dispositions: dict[str, tuple[tuple, tuple, tuple]] = {}
+    for r in jrows:
+        ran, discharged, stranded = teardown_observation(
+            stacks.get(r[1], []), r[2])
+        dispositions[r[1]] = (tuple(ran), tuple(sorted(discharged)),
+                              tuple(sorted(stranded)))
+
+    return Verdicts(files, comps, providers, spawns, refused, dispositions)
 
 
 # The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
@@ -985,7 +1311,8 @@ def main() -> int:
             ("comp", ref.comps, formal.comps),
             ("provider", ref.providers, formal.providers),
             ("spawn", ref.spawns, formal.spawns),
-            ("refusal", ref.refused, formal.refused)):
+            ("refusal", ref.refused, formal.refused),
+            ("teardown", ref.dispositions, formal.dispositions)):
         for key, want in refmap.items():
             got = gotmap.get(key)
             if got is None:
@@ -997,9 +1324,11 @@ def main() -> int:
         f"differential oracle: {compared} verdicts compared "
         f"({len(ref.files)} files + {len(ref.comps)} comps + "
         f"{len(ref.providers)} methods + {len(ref.spawns)} spawns + "
-        f"{len(ref.refused)} parse refusals) — "
+        f"{len(ref.refused)} parse refusals + "
+        f"{len(ref.dispositions)} teardowns) — "
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
+    mismatches.extend(teardown_coverage(ref.dispositions))
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
     if len(mismatches) > 10:

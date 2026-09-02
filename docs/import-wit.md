@@ -204,16 +204,49 @@ tagged for. `--backend wasm` (the default) matches where a WIT world lives;
 The roadmap's §4 premise was that "the wasm tier's types line up one-to-one
 with WIT worlds, so it is codegen rather than design". The *types* do line up
 one-to-one — that is section 2 above, and it went through without a
-negotiation. But the **cordis-wasm tier is i32-only today**
-(`backends/wasm/emit.py`: "type 'Str' is not lowerable — the cordis-wasm tier
-is i32-only"), so a WIT interface carrying strings, records or lists imports
-into perfectly good revl that the wasm emitter cannot yet lower. The
-generated header says so when `--backend wasm` is used. With
-`--backend py`, `tests/fixtures/wit/catalog.wit` goes all the way to a
-cordis-py module.
+negotiation, and the round trip back down to wasm closes as well. The
+cordis-wasm tier carries `Int` as an **i64**, and `Str`, `Bytes`, lists,
+records, variants, `Opt` and `Result` cross its service boundary as
+canonical-ABI pointers into linear memory. What it refuses is **`Float`,
+`Map` and declared function types**, and nothing else
+(`backends/wasm/emit.py`, `_V3Emitter._check_type`, whose refusal reads "type
+'Float' is not lowerable — this tier supports
+Int/Bool/Str/Bytes/List/record/variant/Opt/Result values", with a separate
+message for a declared function type). WIT `f32`/`f64` map to `Float`, so a
+world reaching for a float is the remaining gap; a world of strings, records
+and lists imports *and* emits. With `--backend py`,
+`tests/fixtures/wit/catalog.wit` goes all the way to a cordis-py module
+instead.
 
-So the import is codegen, as predicted; the *round trip back down to wasm*
-still waits on the wasm tier growing non-i32 lowering.
+So the import is codegen, as predicted.
+
+### The component edge is a second, narrower boundary
+
+Do not read `_check_type`'s refusal as the only one. Presenting a component
+over the **canonical ABI** (`backends/wasm/canonical.py`, `emit_component`,
+the thing `build_component` wraps into a real component binary) is a separate
+surface with its own, *narrower* gate: `_Canon.can_lower_param` and
+`can_lower_result` carry `Int`, `Bool`, `Str`, lists, records and
+variants/`Opt`/`Result`. A method whose whole signature is not lowerable
+*there* is left off the exported WIT interface and stays a core-module export
+for intra-module calls, never mis-lowered; `emit_component` raises only when
+no method crosses at all.
+
+Two differences from the service-type check, spelled out because conflating
+the two surfaces is how a reader ends up blaming the wrong construct:
+
+- **`Bytes` lowers at the service boundary but does not cross the component
+  edge**, and neither does a variant *parameter* whose payload is itself an
+  aggregate (the same variant is fine as a *result*, which crosses through
+  memory).
+- **A resource handle is not refused at either surface.** `canonical.py`'s
+  prose and its two `EmitError` messages name "a resource handle" among the
+  things it cannot lower, and that is about a WIT-native `own<r>`/`borrow<r>`
+  handle. Nothing this importer generates is one: a WIT `resource` imports as
+  `type Descriptor = { handle: Int }` (section 3), a record of `Int`, and the
+  IR type table has no resource kind at all — only `record` and `variant`.
+  `tests/fixtures/wit/resource.wit` imports on `--backend wasm` and the wasm
+  emitter lowers it.
 
 ## 5. Fixtures and verification
 

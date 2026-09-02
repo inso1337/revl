@@ -97,9 +97,10 @@ def test_string_typed_services_reach_every_tier():
 
 
 def test_wasm_now_emits_str_at_the_service_boundary():
-    """Was a documented limit (wasm was i32-only at the boundary); wasm gained
-    Str via linear-memory pointers, so it must now emit a Str-typed service
-    rather than refuse it. The inverse of the old refusal assertion."""
+    """Was a documented limit (wasm refused `Str` at the service boundary); it
+    gained Str via linear-memory pointers, so it must now emit a Str-typed
+    service rather than refuse it. The inverse of the old refusal assertion.
+    """
     _emitter("wasm").emit(compile_source(STR_SERVICE))
 
 
