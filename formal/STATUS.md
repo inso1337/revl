@@ -60,23 +60,28 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **A3** host-safe identifiers | **none** | 0 | no | lexical, checked by extraction rather than by a theorem shape. **Out of scope by kind** |
 | **A5** compensation accompanies an emission | **none** | 0 | no | G7 *models* the `compensation` entry kind and proves how it is disposed, but **nothing states that an emission must register one**. **Unbuilt work**, and the nearest thing to a surprise on this map |
 | **A6** provide-methods match the service signature | **none** | 0 | partial | the oracle's P row is a *capability bound* check, not the signature match, and `methodBoundOK` is a private restatement. **Unbuilt work** |
-| **A8** mid-body failure reverts and contains | full over the WAL model | 18 | no | crash cuts covered: fence-to-apply, abort-then-crash, the approved-to-discharged window. **Not covered and not claimed**: a crash between a witnessed mutation and its record (the reference logs the descriptor *after* the forward extern returns), the roll-forward `flush-residue` surface, cascading abort, escrow. Durability is a floor, not a theorem |
+| **A8** mid-body failure reverts and contains | full over the WAL model | 18 | **yes** (1620 O rows) | the row WRITES each scenario's records as a real JSON-Lines WAL and runs `src/revl/recovery.py` over it, diffing recover's own verdict, the set it actually applied to the `World`, and its reported residue against the model's `outcome` / `replayed` / `reported`. It found the legacy-`effect` family's item-309 fence branch missing from `RevL.Lemmas.dispose` (see below). Crash cuts covered: fence-to-apply, abort-then-crash, the approved-to-discharged window. **Not covered and not claimed**: a crash between a witnessed mutation and its record (the reference logs the descriptor *after* the forward extern returns), the roll-forward `flush-residue` surface, cascading abort, escrow. Durability is a floor, not a theorem |
 | **A9** provide key declared in `provides` | **none** | 0 | no | **Unbuilt work** |
 | **T1/T2/T3** typing, `Opt[T]`, holes | **none** | 0 | no | the type checker is outside the guarantee backbone. **Out of scope by kind** |
-| **R4** no residue | full for the **abort path** | 9 | no | stated over the abort; the roll-forward window's `flush-residue` surface is not modelled. **Unbuilt work** |
-| items 66/294/260 capability ceilings | full, with the held/reach sets **derived** from component shapes | 23 | **yes** (6 W rows) | the corpus declares no integer-valued capability parameter, so the ceiling half of the oracle comparison agrees **vacuously** — wired, but not yet exercised. Also unmodelled: parse-time canonicalization and `cap_order.disjoint`'s D2 same-token clause |
+| **R4** no residue | full for the **abort path** | 9 | **yes** (the residue column of the 1620 O rows) | the column is the model's `reported`, diffed against `recover`'s `residue.outstanding`; it is printed only under `outcome = rolledBack`, which is R4's own scope condition. Stated over the abort; the roll-forward window's `flush-residue` surface is still not modelled and the column says `n/a` there rather than agreeing about a claim neither side makes. **Unbuilt work** |
+| items 66/294/260 capability ceilings | full, with the held/reach sets **derived** from component shapes | 23 | **yes** (8 W rows) | the ceiling half is now EXERCISED: `examples/budget_attenuation.rvl` (50 ≤ 100, admitted) and `examples/rejections/g4_spawn_widens_budget.rvl` (1000 > 100, refused by the ceiling half alone — strip the ceilings and the resource fold finds nothing uncovered), with `attenuation_coverage` failing the gate if the corpus stops containing both. Before those two files the row agreed over 6 edges with `ceilingOKB` never entered. Also unmodelled: parse-time canonicalization and `cap_order.disjoint`'s D2 same-token clause |
 | item 133 cross-tier agreement | full, under two named hypotheses | 4 | no | that the real emitters realise a `Conformant` profile is the differential conformance matrix's empirical obligation; map values are one level deep |
 
 Three summary readings of that map:
 
-- **The oracle reaches G2, G3, G4, G7 and the capability order.** G5, G6,
-  G8, G9, A8 and R4 are still proved against the design documents and the
-  reference source read by hand. That remains the single largest gap in
-  the layer, and it is a gap in *coverage of the gate*, not in the proofs.
-  G7 was the largest body of theorems without a row (32 + 7) and now has
-  one; it is also the first row whose reference side *executes* the
-  runtime rather than reading a manifest, because a teardown disposition
-  is a property of a run and not of a text.
+- **The oracle reaches G2, G3, G4, G7, A8, R4 and the capability order.**
+  G5, G6, G8 and G9 are still proved against the design documents and the
+  reference source read by hand. That remains the largest gap in the
+  layer, and it is a gap in *coverage of the gate*, not in the proofs. The
+  four that are left are left for a reason and the reason is the same one:
+  each is indexed by `RevL.Syntax.Stmt` (or, for G9, by a `Flow` over a
+  path), and the export carries FACTS — call sites, capabilities,
+  manifests — not statement terms, so there is no shape for a corpus row
+  to take. Closing them is an export change, not an oracle change.
+  Two rows now *execute* rather than read, because their subject is a run
+  and not a text: G7 drives `backends/python/runtime.py` over an
+  enumerated teardown corpus, and A8/R4 drive `src/revl/recovery.py` over
+  an enumerated WAL corpus.
 - **Seven guarantee codes have no theorem at all** (A1, A2, A3, A5, A6,
   A9, T1-T3). Of those, A5 is the one worth naming twice: G7 proves how a
   `compensation` entry is disposed without anything proving one has to
@@ -686,12 +691,20 @@ spawn edges (S), and the spawn handles (H) through which
 capability decompositions (Z/Y, straight out of `cap_order.parse_cap`),
 parse refusals (X) and componentless files (N).
 
-The G7 row's facts are of a different kind and are listed apart for that
-reason: **teardown scenarios (E/J)** are not extracted from any `.rvl`
-text. A teardown disposition is a property of a RUN, not of a manifest,
-so the fact is the shape of one activation's LIFO stack (E — one row per
-entry, in registration order, carrying its model `EntryKind` and the
-reference's registration seam) and the verdict it unwound under (J).
+Two families of facts are of a different kind and are listed apart for
+that reason, because neither is extracted from any `.rvl` text:
+
+- **teardown scenarios (E/J)**, for G7. A teardown disposition is a
+  property of a RUN, not of a manifest, so the fact is the shape of one
+  activation's LIFO stack (E — one row per entry, in registration order,
+  carrying its model `EntryKind` and the reference's registration seam)
+  and the verdict it unwound under (J).
+- **crash-recovery scenarios (L)**, for A8 and R4. A recovery verdict is
+  a property of a durable LOG, so the facts are the records of one WAL —
+  the constructors of `RevL.Lemmas.Rec`, one row each, in append order —
+  plus the re-issue oracle 243 rule 6 makes fallible (`L … fails <seq>`,
+  a property of the world rather than a record) and a `L … run` row
+  declaring the scenario.
 
 Two extraction facts on the `M` row are what make the corrected G2/G3
 rules observable:
@@ -748,6 +761,17 @@ Verdicts:
   state (`_Transactional.discharged`, `runtime.estop_residue()`) and the
   replay order off the inverses as they run. So the diff is the model's
   *predicted* disposition against the reference's *observed* one.
+- **O rows (per crash-recovery scenario, A8 + R4)**: the model's
+  `RevL.Lemmas.outcome` (which of the three verdicts `recover`'s if-chain
+  converges to), `replayed` (the seqs a whole recovery run APPLIES) and
+  `reported` (the residue surface of a roll-back). Reference side: write
+  the records as a real WAL, call `revl.recovery.recover` over it, and
+  read the verdict, the applied set and `residue.outstanding` off what it
+  did. `replayed` is compared as a SET — the model walks the log in
+  append order and `_roll_back` walks each record family newest-first, and
+  neither order is a claim the other makes; the ordered LIFO claim is
+  G7's and the D row checks it ordered. `reported` is compared only under
+  `outcome = rolledBack`, the model's own scope.
 
 ### The G7 row, and what it is evidence of
 
@@ -786,10 +810,11 @@ outside the model and so outside the row.
 
 **Non-vacuity is enforced, not assumed** (`teardown_coverage`). The audit
 found the capability-ceiling half of the `W` row agreeing *vacuously* —
-no corpus file declares an integer parameter, so the `ceilingOKB` branch
-the theorems are about is never entered — and recorded that this is the
-same defect class as roadmap item 429's self-host byte-agreement being
-green over a corpus that never reached the logic. So this row ships with
+no corpus file declared an integer parameter, so the `ceilingOKB` branch
+the theorems are about was never entered (closed since; see the `W` row's
+own ratchet, `attenuation_coverage`) — and recorded that this is the same
+defect class as roadmap item 429's self-host byte-agreement being green
+over a corpus that never reached the logic. So this row ships with
 a ratchet that fails the gate unless the corpus still contains a witness
 for each of: a replay of length ≥ 2 whose order is not registration order
 (LIFO is distinguishable from FIFO), a compensation that ran strictly
@@ -797,6 +822,72 @@ after a Phase-1 inverse (the two phases are distinguishable from one
 interleaved pass), a non-empty discharge column, a non-empty stranded
 column, and a replay set that is a proper subset of its stack. Every
 clause is a property some plausible defect would remove.
+
+### The A8/R4 row, and the divergence it found
+
+A8 carried 18 theorems and R4 carried 9, and neither had an oracle row:
+both were checked against `docs/` and against `src/revl/recovery.py` read
+by hand. The `O` row closes that, and it is the second row whose reference
+side executes.
+
+**What the corpus is.** A recovery verdict is a property of a durable
+log, so the scenario is a log: every multiset of up to two content
+records over nine shapes — an undeclared transactional inverse, a
+declared-idempotent one, one whose re-issue FAILS, a compensation, an
+in-process effect, a reconstructible boundary effect declared and
+undeclared, a closure-only one, and a deferred emission — crossed with a
+durable `discharge` set (none / one / all), the at-most-once fences (none
+/ all), and the trailing decision record (none / `aborted` /
+`activation-complete` / `commit-approved` / `fork-frozen`). 1620
+scenarios, enumerated rather than picked, for the same reason G7's are.
+
+**What the reference does.** `recovery_observation` writes the records as
+a real JSON-Lines WAL — the schema `revl.wal.read_wal` reads — and calls
+`revl.recovery.recover` over it with a `DictWorld` that watches what is
+actually applied. That distinction is load-bearing exactly once: a fenced
+inverse resolved by a durable `aborted` record lands on
+`transactionalRolledBack` and is NOT applied, so reading the applied set
+off the report rather than off the world would report an apply that never
+happened.
+
+**The re-issue oracle is a fact, not an assumption.** 243 rule 6 makes
+the inverse fallible and the model carries that as a parameter
+(`ok : Seq → Bool`); the corpus ships `fails` rows and the world raises
+on them, which is what puts `Disp.residue .restoreFailed` under the row at
+all. Fixing it to `okAll` would have made one whole residue kind
+unreachable.
+
+**The divergence it found.** `RevL.Lemmas.dispose` and `reissued` modelled
+the legacy `effect` family as "reconstructible ⇒ re-issued", which is what
+`_roll_back` did before item 309 §3a was extended to it. The shipped code
+refuses an UNDECLARED reconstructible boundary inverse whose fence is
+already durable and reports fenced-residue instead
+(`test_idempotent_inverse_309.test_undeclared_boundary_inverse_applies_once_then_fenced`
+pins it). The model was therefore *weaker than the implementation* in the
+dangerous direction: it claimed a clean re-issue and no residue where revl
+refuses and reports one. 60 of the 1620 scenarios disagreed. Fixed here by
+giving `Rec.effect` the `undoIdempotent` flag the reference reads and
+adding the fence branch to both `dispose` and `reissued`; `SemLog` only
+ever produces `.effect s true false false`, so no semantic lemma and no L2
+theorem moved.
+
+**Non-vacuity is enforced** (`recovery_coverage`), on the reference's own
+observations rather than on the model's predictions: all three outcomes
+and both roll-forward routes, a run that applied an inverse and a
+roll-back that applied none, a committed seq retained and a fenced one
+refused, a declared-idempotent inverse applied freely over a durable
+fence, a fenced inverse resolved by an `aborted` record, every residue
+kind the model can produce, and a clean abort over a non-empty log — R4's
+headline, and the one shape a model that reported everything would fail.
+
+Each column was also watched to FAIL before being relied on. Perturbing
+the shipped side one invariant at a time — `_replay_tier` stops fencing
+(80 mismatches), a committed seq is rolled back (198), a completed
+activation rolls back (324), a closure-only inverse is dropped from the
+residue (120), a re-issued compensation is reported clean (56), a failed
+re-issue is reported clean (52), the `aborted` record stops deciding the
+fenced branch (11) — reddens the row every time, and on the column the
+invariant belongs to.
 
 **The row was seen to fail before it was trusted.** Three independent
 injections, each reverted:
