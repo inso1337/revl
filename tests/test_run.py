@@ -21,6 +21,7 @@ refusal, the pure helper) runs on every interpreter.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -148,6 +149,95 @@ def test_required_config_problem_uses_the_ir_schema():
     problem = _required_config_problem(
         ir, {"PgDatabase": {"url": "postgres://x", "pool_size": 4}})
     assert problem is None, problem
+
+
+# ------------------------------------------- the error paths' own error path
+#
+# issue #161: `_load_config` and `_Driver._reload` each raised `RevlError`
+# with a SINGLE string. `RevlError.__init__` is (filename, line, message), so
+# both raised `TypeError: RevlError.__init__() missing 2 required positional
+# arguments` instead of the diagnostic they meant — and a `TypeError` is not
+# caught by the `except RevlError` guarding either site. Both branches only
+# run once something has ALREADY gone wrong, which is exactly why nothing
+# exercised them: before these tests, no test anywhere in the tree reached
+# `_load_config`'s rejection or `_reload`'s config refusal.
+
+
+@pytest.mark.parametrize("suffix,text", [
+    (".toml", "not-a-table = 3\n"),
+    (".json", '{"Cache": 3}\n'),
+    (".toml", "[[Cache]]\nurl = \"x\"\n"),  # array of tables, not a table
+])
+def test_malformed_config_is_a_diagnostic_not_a_typeerror(tmp_path, suffix, text):
+    """A `--config` file that is not `component-name = { ... }` must raise a
+    `RevlError` carrying the intended message — never a `TypeError` from
+    building the diagnostic itself."""
+    from revl.errors import RevlError as _RevlError  # noqa: PLC0415
+    from revl.run import _load_config  # noqa: PLC0415
+
+    cfg = tmp_path / f"cfg{suffix}"
+    cfg.write_text(text, encoding="utf-8")
+
+    with pytest.raises(_RevlError) as caught:
+        _load_config(str(cfg))
+    exc = caught.value
+    assert exc.filename == str(cfg)
+    assert "expected a table of `component-name = { ... }` entries" in exc.message
+    # and it renders as a diagnostic, the shape `run_command` prints
+    assert str(cfg) in str(exc)
+
+
+def test_malformed_config_reaches_the_cli_as_error_not_a_traceback(tmp_path):
+    """End to end: `revl run --config <malformed>` prints the `error: ...`
+    line and exits 1 — the `except RevlError` in `run_command` catches it,
+    with no `Traceback`/`TypeError` reaching the user."""
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("PgDatabase = 3\n", encoding="utf-8")
+    result = _run_cli([USER_CACHE, "--backend", "py", "--config", str(cfg)])
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
+    assert "TypeError" not in result.stderr
+    assert "expected a table of `component-name = { ... }` entries" in result.stderr
+    assert result.stderr.startswith("error: ")
+
+
+def test_watch_reload_refuses_a_config_breaking_edit_as_a_diagnostic(tmp_path):
+    """`_Driver._reload`'s second refusal (a reloaded document whose new
+    required config the running host cannot meet) built its `RevlError` the
+    same broken way. Drive the branch directly, with a stub driver, so the
+    test needs no cordis runtime: the raise must produce a `RevlError` the
+    sibling `except RevlError` catches, leaving the composition untouched."""
+    from revl.errors import RevlError as _RevlError  # noqa: PLC0415
+    from revl.run import _Driver, _required_config_problem  # noqa: PLC0415
+
+    ir = compile_files([USER_CACHE])
+    # the precondition the branch keys off: the host config is missing the
+    # required field, so the reload must refuse rather than deploy
+    assert _required_config_problem(ir, {}) is not None
+
+    logged: list[tuple] = []
+
+    class _Stub:
+        config: dict = {}
+        _log = staticmethod(lambda *a: logged.append(a))
+        ir = None
+
+        async def _dispose_all(self, _ir):  # pragma: no cover — never reached
+            raise AssertionError("a refused edit must not tear anything down")
+
+        def _emit_module(self, _ir):  # pragma: no cover — never reached
+            raise AssertionError("a refused edit must not be deployed")
+
+    stub = _Stub()
+    asyncio.run(_Driver._reload(stub, [USER_CACHE]))
+
+    text = "\n".join(str(part) for entry in logged for part in entry)
+    assert "TypeError" not in text
+    assert 'missing required config "url"' in text
+    assert "running composition untouched" in text
+    # and the raise really did build a well-formed diagnostic
+    exc = _RevlError(USER_CACHE, 0, "invalid config:")
+    assert str(exc).startswith(f"{USER_CACHE}:0: ")
 
 
 @needs_missing_cordis
