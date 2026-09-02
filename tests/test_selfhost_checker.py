@@ -665,10 +665,10 @@ REJECTED_PROG_EXPR = [
     ("type Bad = Result", "1"),
     ("type R = { a: Opt }", "1"),
     ("type S = A(Opt) | B", "1"),
-    # `Never` is not denotable: it is the inferred bottom, a two-way wildcard
-    # and uninhabited, so writing it into a payload/field is an unchecked cast
+    # `Never` is the inferred bottom, uninhabited and ONE-WAY: it flows out of a
+    # `Never` position into any other, and nothing flows in. So an `Int` payload
+    # for a `Wrap(Never)` case is a definite argument mismatch, not a cast.
     ("type N = Wrap(Never) | X", "Wrap(1)"),
-    ("type R = { a: Never }", "1"),
 ]
 
 

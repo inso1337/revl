@@ -66,7 +66,8 @@ At any **declared boundary** — an annotated `let`, a `return`, an argument —
 structural type **unifies field-wise** with the nominal record it meets: the
 field sets must match and each field type must be compatible. The `List[Never]`
 bottom rule applies recursively (an empty-list field flows into any `List[T]`),
-because `Never` is a wildcard in the elementwise compatibility check. So
+because `Never` is the bottom of the elementwise compatibility check: it flows
+out of a `Never` position into any other, and nothing flows in. So
 `let a = { h: "x" }` still flows into a `C = { h: Str }` position exactly as a
 named `C` value would, while a shape that disagrees is refused at the boundary.
 

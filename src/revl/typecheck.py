@@ -29,9 +29,10 @@ Design (see the "type safety" milestone discussion):
       not checked against it (same §limits).
 - `Any` and `Value` launder in both directions by design (the gradual
   frontier and the erased dynamic document of stdlib/value.rvl, item 180).
-  `Never` does NOT: it is the checker's inferred bottom (`List[Never]`), a
-  two-way wildcard, and uninhabited, so it is non-denotable as a written
-  annotation — writing it would be an unchecked cast with no cast syntax.
+  `Never` does NOT: it is the checker's inferred bottom (`List[Never]` for
+  `[]`, `Map[Str, Never]` for `Map.empty()`) and it is uninhabited, so it is
+  ONE-WAY. A `Never` flows out into any position, vacuously; nothing flows
+  in. The two-way version was an unchecked cast with no cast syntax.
 - Function types (docs/function-types.md): `(Int, Str) -> Bool` is a type
   like any other. `parse_type` normalises it to the head `FN_HEAD` with
   `[param..., return]`, so the whole algebra below — unify, substitute,
@@ -221,8 +222,7 @@ _GENERIC_ARITY = {"Opt": 1, "List": 1, "Map": 2, "Result": 2}
 
 
 def check_type_wellformed(filename: str, line: int, type_name: str | None,
-                          *, allow_async_param: bool = False,
-                          allow_never: bool = False) -> None:
+                          *, allow_async_param: bool = False) -> None:
     """Reject a malformed declared type annotation (a builtin generic head
     used with the wrong number of arguments, e.g. bare `Opt` or `List`).
     Recurses into type arguments. User/nominal heads are not arity-checked.
@@ -233,37 +233,15 @@ def check_type_wellformed(filename: str, line: int, type_name: str | None,
     (`allow_async_param=True`). Every other declaration site leaves the flag
     False, so an async function type there is refused with a "not yet" hint."""
     _check_type_wf(filename, line, type_name, type_name,
-                   allow_async=allow_async_param, in_fn_return=False,
-                   allow_never=allow_never)
+                   allow_async=allow_async_param, in_fn_return=False)
 
 
 def _check_type_wf(filename: str, line: int, type_name: str | None,
                    root: str | None, *, allow_async: bool,
-                   in_fn_return: bool, allow_never: bool = False) -> None:
+                   in_fn_return: bool) -> None:
     if not type_name:
         return
     head, args = parse_type(type_name)
-    if head == "Never" and not allow_never:
-        # `Never` is the checker's INFERRED bottom (`List[Never]` for `[]`,
-        # `Map[Str, Never]` for `Map.empty()`), and `_is_wildcard` makes it
-        # compatible with everything in BOTH directions. Written into an
-        # annotation it is therefore an unchecked-cast primitive with no cast
-        # syntax — `pub fn nv(x: Never) -> Int { return x }` admits `nv("s")`
-        # and hands the body a `Str` as an `Int`. It is also uninhabited, so no
-        # honest caller could ever supply one. Like `Approval[C]` above, it is
-        # produced by the checker and non-denotable by the author; the
-        # inference-only spellings never reach this check because it runs on
-        # *written* annotations.
-        raise RevlError(
-            filename, line,
-            f"`Never` cannot be written as a type (`{root}`) — it is the "
-            "checker's inferred bottom (the element type of `[]`), and no "
-            "value inhabits it",
-            hint="use `Any` for a deliberately unchecked position, `Value` for "
-                 "an erased dynamic document (stdlib/value.rvl), or a type "
-                 "parameter (`fn f[T](x: T)`) for a genuinely generic one",
-            code="G4", category="type-mismatch",
-        )
     if head == "Approval":
         # item 246, Decision 3, invariant 5 (non-persistence): `Approval[C]` is
         # produced ONLY by `await approval[C]` and is non-denotable as a written
@@ -311,8 +289,7 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
             )
         # inside the wrapped T, `Async` may not appear again.
         _check_type_wf(filename, line, args[0], root,
-                       allow_async=False, in_fn_return=False,
-                       allow_never=allow_never)
+                       allow_async=False, in_fn_return=False)
         return
     arity = _GENERIC_ARITY.get(head or "")
     if arity is not None and len(args) != arity:
@@ -333,11 +310,10 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
             is_return = i == len(args) - 1
             _check_type_wf(filename, line, arg, root,
                            allow_async=allow_async and is_return,
-                           in_fn_return=is_return, allow_never=allow_never)
+                           in_fn_return=is_return)
         else:
             _check_type_wf(filename, line, arg, root,
-                           allow_async=False, in_fn_return=False,
-                           allow_never=allow_never)
+                           allow_async=False, in_fn_return=False)
 
 
 # ------------------------------------------------- config is data, not a capability
@@ -744,6 +720,22 @@ def compatible(expected: str | None, actual: str | None,
     position (F3), admitting a record literal as `Str`, `Bool`, an ADT,
     `List[Int]`, `(Int) -> Int` and `Int`, and admitting a scalar into a
     structural field. Fail closed, and give every real boundary the table."""
+    # `Never` is the checker's inferred BOTTOM (`List[Never]` for `[]`,
+    # `Map[Str, Never]` for `Map.empty()`), and it used to sit in `_is_wildcard`
+    # beside `Any`, which made it launder in BOTH directions: `pub fn nv(x:
+    # Never) -> Int { return x }` admitted `nv("s")`, and the same hole one
+    # level down admitted a `List[Int]` into a `List[Never]` parameter and then
+    # read its elements out as anything. That is the F3 unchecked cast under a
+    # different spelling. A bottom is one-way: it flows OUT of a `Never`
+    # position into any other (vacuously, since nothing inhabits it), and
+    # NOTHING flows in. So the bottom keeps every inferred spelling denotable
+    # and usable (`let xs: List[Int] = []` and a written `Map[Str, Never]`
+    # receiver still check, and a value-type mismatch under one still reports
+    # the specific mismatch) while the laundering direction is refused.
+    # `Any`/`Value` keep their documented two-way laundering (item 180), so an
+    # `Any` on the actual side still flows in.
+    if parse_type(expected)[0] == "Never" and not _is_wildcard(actual):
+        return False
     if _is_wildcard(expected) or _is_wildcard(actual):
         return True
     # `Value` is the stdlib erased-dynamic type (stdlib/value.rvl, roadmap item
@@ -836,6 +828,44 @@ def join(a: str | None, b: str | None, types: dict | None = None) -> str | None:
     return None
 
 
+def widen_bottom(declared: str | None, actual: str | None,
+                 types: dict | None = None) -> str | None:
+    """Widen a binding whose type still carries the checker's inferred BOTTOM.
+
+    `var m = Map.empty()` types `m` as `Map[Str, Never]` and `var xs = []` as
+    `List[Never]`: the accumulator idiom names its element type at the first
+    reassignment, not at the declaration. `Never` is one-way (nothing flows
+    into a bottom), so `m = m.set(k, 1)` is not a `compatible` flow. It is the
+    point where the element type is LEARNED, exactly as `builtin_check` learns
+    it for a bottom-typed receiver.
+
+    Returns the widened type when `actual` only fills bottoms in `declared`
+    (same head, same arity, every non-bottom position still compatible), else
+    None so the caller reports the mismatch. This is deliberately NOT `join`:
+    join would also widen `Int` to `Float`, which is a real refusal at an
+    assignment."""
+    if not declared or not actual:
+        return None
+    if declared == "Never":
+        return actual
+    dhead, dargs = parse_type(declared)
+    ahead, aargs = parse_type(actual)
+    if not dargs or dhead != ahead or len(dargs) != len(aargs):
+        return None
+    widened: list[str] = []
+    grew = False
+    for d, a in zip(dargs, aargs):
+        inner = widen_bottom(d, a, types)
+        if inner is not None and inner != d:
+            widened.append(inner)
+            grew = True
+        elif compatible(d, a, types):
+            widened.append(d)
+        else:
+            return None
+    return format_type(dhead, widened) if grew else None
+
+
 def mismatch(filename: str, line: int, where: str,
              expected: str | None, actual: str | None) -> RevlError:
     hint = None
@@ -849,6 +879,27 @@ def mismatch(filename: str, line: int, where: str,
                      f"{where} expects `{expected}`, got `{actual}`", hint,
                      code="T1", category="type-mismatch",
                      expected=expected, actual=actual)
+
+
+def incomparable(filename: str, line: int, op: str,
+                 lt: str | None, rt: str | None) -> RevlError:
+    """Two operands of `==`/`!=` that have no common type.
+
+    NOT `mismatch`: equality has no expected/actual direction (neither side is
+    the position the other must fit), and `mismatch`'s renderer supplies its own
+    verb ("... expects `X`, got `Y`"). Composing the two produced the
+    ungrammatical "`==` comparison between `Rec0` and expects `{f0: Bool}`, got
+    `Rec0`". The `expected`/`actual` fields are still populated (left, then
+    right) so the structured consumers that read them off a T1 keep working."""
+    left, right = render_type(lt), render_type(rt)
+    return RevlError(
+        filename, line,
+        f"`{op}` cannot compare `{left}` with `{right}` — the operands have "
+        "no type in common",
+        hint="compare values of the same type, or destructure the two sides "
+             "and compare their fields",
+        code="T1", category="type-mismatch",
+        expected=left, actual=right)
 
 
 def opt_escape_error(filename: str, line: int, what: str, target: str,
@@ -887,10 +938,15 @@ def null_error(filename: str, line: int) -> RevlError:
 # ------------------------------------------------------- AST inference
 
 def _binop_type(op: str, lt: str | None, rt: str | None,
-                filename: str | None, line: int):
+                filename: str | None, line: int, types: dict | None = None):
     if op in ("==", "!=", "===", "!=="):
-        if filename and lt and rt and not (compatible(lt, rt) or compatible(rt, lt)):
-            raise mismatch(filename, line, f"`{op}` comparison between `{render_type(lt)}` and", rt, lt)
+        # `types` is the declared-type table: without it a record LITERAL
+        # compared with a value of a declared record type (`p == { x: 1, y: 2 }`)
+        # meets an unresolvable nominal and fails closed now that `compatible`
+        # decides structural-vs-nominal instead of waving it through.
+        if filename and lt and rt and not (compatible(lt, rt, types)
+                                           or compatible(rt, lt, types)):
+            raise incomparable(filename, line, op, lt, rt)
         return "Bool"
     if op in ("<", "<=", ">", ">="):
         for t in (lt, rt):
@@ -1347,20 +1403,18 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
         elem = targs[0]
     elif thead == "Map" and len(targs) == 2:
         elem = targs[1]
-    for spec, actual in zip(params, arg_types):
-        expected = {"@elem": elem, "@member": elem if thead == "List" else ("Str" if thead == "Str" else None), "@self": target_type}.get(spec, spec)
-        if filename and expected and actual \
-                and not compatible(expected, actual, types):
-            raise mismatch(filename, line, f"builtin `{method}` argument", expected, actual)
-    if ret == "@self" and elem == "Never":
-        # Bottom-typed receiver — the empty literal `[]` / `Map.empty()`.
-        # Its element type is a wildcard, so the argument checks above
-        # proved NOTHING (compatible(Never, anything) is True), and the
-        # @self result would flow into ANY Map[Str, X] / List[T] the same
-        # way. Learn the element type from a concrete argument and carry it
-        # in the rebuilt container, so `[].push("s")` types as List[Str]
-        # and is refused where List[Int] is expected. When no argument
-        # offers a concrete type (holes, unknowns), behavior is unchanged.
+    if elem == "Never":
+        # Bottom-typed receiver: the empty literal `[]` / `Map.empty()`. Its
+        # element type is the checker's INFERRED BOTTOM, not a constraint this
+        # call has to satisfy: `Never` is one-way, so comparing a concrete
+        # argument against it in the sweep below would refuse every honest
+        # `[].push("s")`. The element type is the thing to LEARN here. Take it
+        # from a concrete argument and carry it in the rebuilt receiver, so
+        # `[].push("s")` types as `List[Str]` and is refused where `List[Int]`
+        # is expected, and so the argument sweep then checks against the
+        # LEARNED element instead of against the bottom. When no argument
+        # offers a concrete type (holes, unknowns), nothing is learned and the
+        # receiver stays bottom-typed.
         learned = None
         for spec, actual in zip(params, arg_types):
             if not actual or _is_wildcard(actual):
@@ -1372,8 +1426,15 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
                 if ahead == thead and aargs and not _is_wildcard(aargs[-1]):
                     learned = aargs[-1]
         if learned is not None:
-            return format_type(thead,
-                               [learned] if thead == "List" else [targs[0], learned])
+            elem = learned
+            target_type = format_type(
+                thead, [elem] if thead == "List" else [targs[0], elem])
+            targs = parse_type(target_type)[1]
+    for spec, actual in zip(params, arg_types):
+        expected = {"@elem": elem, "@member": elem if thead == "List" else ("Str" if thead == "Str" else None), "@self": target_type}.get(spec, spec)
+        if filename and expected and actual \
+                and not compatible(expected, actual, types):
+            raise mismatch(filename, line, f"builtin `{method}` argument", expected, actual)
     if ret == "@self":
         return target_type
     if ret == "@elem":
@@ -1524,7 +1585,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
     if isinstance(expr, ExprBin):
         lt = infer_ast(expr.left, tenv, types, filename)
         rt = infer_ast(expr.right, tenv, types, filename)
-        return _binop_type(expr.op, lt, rt, filename, line)
+        return _binop_type(expr.op, lt, rt, filename, line, types)
     if isinstance(expr, ExprUn):
         t = infer_ast(expr.operand, tenv, types, filename)
         if expr.op == "!":
@@ -2604,7 +2665,7 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
     if kind == "bin":
         lt = infer_ir(node.get("left"), tenv, types, services, filename, line)
         rt = infer_ir(node.get("right"), tenv, types, services, filename, line)
-        return _binop_type(node.get("op"), lt, rt, filename, line)
+        return _binop_type(node.get("op"), lt, rt, filename, line, types)
     if kind == "un":
         # item 404: bring the lowered-node unary checks to parity with
         # `infer_ast`'s `ExprUn` (stratum 1). Before this, `!` returned `Bool`
