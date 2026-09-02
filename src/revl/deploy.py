@@ -214,6 +214,46 @@ def staged_ir(bundle_dir: Path | str) -> dict:
                         f"cannot read the staged IR document: {error}") from error
 
 
+def capability_surface(ir: Mapping) -> tuple[set[str], dict]:
+    """The capability labels a composition reaches, DERIVED FROM THE IR.
+
+    This is the same derivation `bundle.build_bundle` runs to *write*
+    `policy.json` (`_policy_of(_audit_document(ir))`, itself G4's own boundary
+    analysis over the IR), so `policy.json` is a projection of this value and
+    never the other way round.
+
+    Admission needs the value, not the projection. `ir/ir.json` is the only
+    capability authority a receiver has that the deploying side cannot move:
+    admission has already re-derived its `composition_hash` from the staged
+    bytes and checked it against the SIGNED one, so an IR whose boundary
+    analysis reaches fewer capabilities is a different composition and refuses
+    at :data:`LINK_COMPOSITION` before the ceiling is ever consulted. It is also
+    the document every emitter emits from, so the capability set it yields is
+    the set the artifact in hand can actually reach.
+
+    Returns `(capability labels, the full derived policy surface)`. Raises
+    :class:`RevlError` when the surface cannot be derived: the ceiling has no
+    honest answer then, and its caller refuses.
+    """
+    import copy  # noqa: PLC0415 (lazy, with the two below)
+
+    from .bundle import _policy_of          # noqa: PLC0415 (avoids a cycle)
+    from .registry import _audit_document   # noqa: PLC0415
+
+    try:
+        surface = _policy_of(_audit_document(copy.deepcopy(dict(ir))))
+    except Exception as error:              # noqa: BLE001 (any failure refuses)
+        raise RevlError(IR_DOCUMENT, 0,
+                        "cannot derive the capability surface from the staged "
+                        f"IR: {type(error).__name__}: {error}") from error
+    labels = surface.get("capabilities")
+    if not isinstance(labels, (list, tuple, set, frozenset)):
+        raise RevlError(IR_DOCUMENT, 0,
+                        "the capability surface derived from the staged IR has "
+                        f"no readable `capabilities` member (got {labels!r})")
+    return {str(label) for label in labels}, surface
+
+
 def staged_sources(bundle_dir: Path | str) -> list[str]:
     """The bundle's `.rvl` sources, in the order the bundle recorded them.
 
@@ -540,23 +580,62 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
                             "not the bound one (re-hashed here, and it differs)")
 
     # (g) capability ceiling: a deploy may not widen authority (§2.2, G1/G9).
+    #
+    # Measured off `ir/ir.json`, the AUTHORITY, and never off `policy.json`,
+    # which is a projection `bundle.build_bundle` derives from that same IR. The
+    # ceiling used to read the projection, and a projection is writable by the
+    # party the ceiling constrains: deleting `policy.json`, leaving it valid but
+    # dropping `capabilities`, emptying the list, or leaving bytes `json.loads`
+    # refuses (whose failure was swallowed to `{}`) each gave `wanted = set()`
+    # and passed ANY ceiling, all four with a fully valid signature and a
+    # matching binding, because every one of them was signed over as staged. The
+    # IR is not writable that way: it is re-hashed against the signed
+    # `composition_hash` at (c) above, so any edit that lowers the derived
+    # surface is a different composition and refuses there first.
     if trust.capability_ceiling is not None:
-        policy_path = root / POLICY_NAME
-        policy = {}
-        if policy_path.is_file():
-            try:
-                policy = json.loads(policy_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                policy = {}
-        wanted = set(policy.get("capabilities") or [])
+        try:
+            wanted, _derived = capability_surface(ir)
+        except RevlError as error:
+            # Fail CLOSED. An unreadable surface is not an empty one.
+            return _refusal(
+                LINK_CAPABILITY,
+                "this receiver cannot measure the capability surface of the "
+                f"staged composition, so it cannot check its ceiling: {error}")
         over = sorted(wanted - set(trust.capability_ceiling))
         if over:
             return _refusal(
                 LINK_CAPABILITY,
-                f"the artifact's capability policy requires {', '.join(over)}, "
-                "outside this receiver's ceiling "
+                f"the staged composition reaches {', '.join(over)}, outside "
+                "this receiver's ceiling "
                 f"({', '.join(sorted(trust.capability_ceiling)) or 'none'}); "
-                "a deploy may not silently widen authority")
+                "a deploy may not silently widen authority. Measured from the "
+                f"signature-bound {IR_DOCUMENT}, not from {POLICY_NAME}.")
+        # `policy.json` stays a checked projection rather than a decorative one:
+        # if the chain binds it, it must agree with what the IR derives. It is
+        # not what the ceiling was measured against, so a disagreement is a
+        # tamper signal and not a bypass.
+        if FACET_POLICY in bindings:
+            try:
+                recorded = json.loads(
+                    (root / POLICY_NAME).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+                return _refusal(
+                    LINK_POLICY,
+                    f"the chain binds `{FACET_POLICY}` but the staged "
+                    f"{POLICY_NAME} cannot be read as JSON ({error}); it is "
+                    "refused rather than read as an empty policy")
+            if isinstance(recorded, dict):
+                projected = sorted({str(c)
+                                    for c in (recorded.get("capabilities") or [])})
+            else:
+                projected = None
+            if projected is None or set(projected) != wanted:
+                shown = projected if projected is not None else repr(recorded)
+                return _refusal(
+                    LINK_POLICY,
+                    f"the staged {POLICY_NAME} does not project the staged "
+                    f"composition: it records {shown}, the {IR_DOCUMENT} this "
+                    f"receiver admitted reaches {sorted(wanted)}")
 
     # (h) freshness: a signature proves authenticity, never current validity.
     if trust.evidence_ttl_seconds is not None:

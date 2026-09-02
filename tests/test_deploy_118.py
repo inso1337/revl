@@ -39,6 +39,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -234,6 +235,117 @@ def test_capability_expansion_beyond_the_ceiling_is_refused(staged):
     # inside the ceiling it admits
     wide = _trust(capability_ceiling=frozenset(policy["capabilities"]))
     assert deploy.admit(bundle, trust=wide, attestation=att)["verdict"] == deploy.ACCEPT
+
+
+@pytest.mark.parametrize("label,written", [
+    # every way roadmap 428 F4 found of making the DERIVED projection say
+    # nothing, each one signed over as staged so the chain still verifies end
+    # to end and the `policy` facet still re-hashes.
+    ("absent", None),
+    ("malformed", "{not json at all"),
+    ("relabelled", '{"emissions": 1, "caps": ["smtp"]}'),
+    ("emptied", '{"capabilities": [], "emissions": 1}'),
+])
+def test_the_ceiling_is_measured_off_the_ir_not_off_policy_json(
+        staged, tmp_path, label, written):
+    """Roadmap 428 F4. `policy.json` is a PROJECTION `build_bundle` derives from
+    the IR, and the party a ceiling constrains is the party that writes it. So
+    the ceiling is measured off `ir/ir.json`, re-hashed against the signed
+    `composition_hash` two steps earlier, and moving, emptying, corrupting or
+    deleting the projection does not move it."""
+    bundle, _att = staged
+    target = tmp_path / f"tampered-{label}"
+    shutil.copytree(bundle, target)
+    policy_path = target / deploy.POLICY_NAME
+    real = set(json.loads(policy_path.read_text(encoding="utf-8"))["capabilities"])
+    assert real, "the fixture must cross a capability"
+    if written is None:
+        policy_path.unlink()
+    else:
+        policy_path.write_text(written, encoding="utf-8")
+
+    # sign the chain over the bundle AS TAMPERED: this is not a forgery, it is
+    # what a deploying operator's own `bundle` + sign run produces.
+    att = deploy.make_deploy_attestation(target, SIGNER_KEY, signer="ci")
+    assert attest.verify_attestation(att, SIGNER_KEY)[0] is True
+    assert attest.canonical_hash(deploy.staged_ir(target)) == att["composition_hash"]
+
+    receipt = deploy.admit(target, trust=_trust(capability_ceiling=frozenset()),
+                           attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE, receipt
+    assert receipt["link"] == deploy.LINK_CAPABILITY
+    assert sorted(real)[0] in receipt["reason"]
+    # and the authority the refusal was measured against is the IR, whose
+    # derived surface is untouched by anything done to the projection.
+    assert deploy.capability_surface(deploy.staged_ir(target))[0] == real
+
+
+def test_a_regenerated_policy_json_does_not_move_the_ceiling(staged, tmp_path):
+    """The projection is not merely tamper-evident by hash: REGENERATING it (so
+    the binding is honest, the signature is fresh and every re-hash agrees) over
+    a narrowed capability list still does not widen what the receiver admits."""
+    bundle, _att = staged
+    target = tmp_path / "regenerated"
+    shutil.copytree(bundle, target)
+    policy_path = target / deploy.POLICY_NAME
+    real = set(json.loads(policy_path.read_text(encoding="utf-8"))["capabilities"])
+    policy_path.write_text(
+        json.dumps({"capabilities": [], "emissions": 0}, indent=2, sort_keys=True)
+        + "\n", encoding="utf-8")
+    att = deploy.make_deploy_attestation(target, SIGNER_KEY, signer="ci")
+    # the regenerated projection IS the bound one: the facet re-hash passes.
+    assert att["evidence_bindings"][deploy.FACET_POLICY] == \
+        deploy._file_digest(policy_path)
+    receipt = deploy.admit(target, trust=_trust(capability_ceiling=frozenset()),
+                           attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_CAPABILITY
+    assert sorted(real)[0] in receipt["reason"]
+
+
+def test_a_projection_that_disagrees_with_the_ir_is_refused(staged, tmp_path):
+    """Even INSIDE the ceiling, a bound `policy.json` that does not project the
+    admitted IR is a tamper signal, not a pass. The ceiling is not measured from
+    it, so this refusal is about the chain's honesty rather than about
+    authority."""
+    bundle, _att = staged
+    target = tmp_path / "disagreeing"
+    shutil.copytree(bundle, target)
+    policy_path = target / deploy.POLICY_NAME
+    real = set(json.loads(policy_path.read_text(encoding="utf-8"))["capabilities"])
+    policy_path.write_text(json.dumps({"capabilities": ["something-else"],
+                                       "emissions": 1}), encoding="utf-8")
+    att = deploy.make_deploy_attestation(target, SIGNER_KEY, signer="ci")
+    wide = _trust(capability_ceiling=frozenset(real | {"something-else"}))
+    receipt = deploy.admit(target, trust=wide, attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_POLICY
+    assert "does not project" in receipt["reason"]
+
+
+def test_the_ceiling_fails_closed_when_the_surface_cannot_be_measured(
+        staged, monkeypatch):
+    """Item 428 F11's fail-open shape, checked here and CLOSED: an unmeasurable
+    capability surface is refused, never read as an empty one."""
+    from revl.errors import RevlError
+
+    bundle, att = staged
+
+    def _explode(_ir):
+        raise RevlError(deploy.IR_DOCUMENT, 0, "boundary analysis is unavailable")
+
+    monkeypatch.setattr(deploy, "capability_surface", _explode)
+    receipt = deploy.admit(bundle, trust=_trust(capability_ceiling=frozenset()),
+                           attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_CAPABILITY
+    assert "cannot measure" in receipt["reason"]
+
+    # and the derivation itself refuses rather than returning an empty set when
+    # the IR it is handed cannot be analysed.
+    monkeypatch.undo()
+    with pytest.raises(RevlError):
+        deploy.capability_surface({"components": "not a list"})
 
 
 def test_stale_evidence_is_refused_even_with_a_valid_signature(staged):

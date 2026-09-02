@@ -87,9 +87,32 @@ A refusal always names one chain link:
 | `source-or-ir-hash` | the staged IR does not hash to the bound composition hash |
 | `backend` | the chain binds no artifact for this receiver's backend |
 | `artifact-bytes` | the staged artifact does not hash to the bound digest |
-| `policy` | the staged `policy.json` is not the bound facet |
-| `capability-ceiling` | the policy requires a capability outside the ceiling |
+| `policy` | the staged `policy.json` is not the bound facet, or does not project the admitted IR |
+| `capability-ceiling` | the staged composition reaches a capability outside the ceiling, or its surface cannot be measured |
 | `evidence-stale` | the attestation is past the receiver's TTL, or a bound cert differs |
+
+### The ceiling is measured off the IR, not off `policy.json`
+
+`policy.json` is a **projection**: `build_bundle` derives it from the IR with
+G4's boundary analysis, and the party a ceiling constrains is the same party
+that writes it. So `admit` measures the capability surface itself, with
+`deploy.capability_surface(ir)` over `ir/ir.json` as staged: the document whose
+`composition_hash` was already re-derived here and checked against the
+signature, and the document every emitter emits from.
+
+The difference is not theoretical. When the ceiling read the projection,
+deleting `policy.json`, emptying its `capabilities`, renaming that key, or
+leaving bytes `json.loads` refuses each produced an empty wanted-set that passed
+any ceiling, all four with a valid signature and a matching facet binding,
+because each was signed over as staged. None of them can move the measured
+surface: an edit to the IR that lowers it is a different composition and refuses
+at `source-or-ir-hash` first.
+
+Two consequences. A surface that cannot be measured is a `capability-ceiling`
+refusal, never an empty set. And a bound `policy.json` that disagrees with what
+the IR derives is refused at `policy`, so the projection stays a checked
+artifact rather than a decorative one, without ever being the thing the ceiling
+is measured against.
 
 ### The Ed25519 prerequisite is recorded, not papered over
 
