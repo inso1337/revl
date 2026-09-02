@@ -315,7 +315,9 @@ def _run_import(args) -> int:
                                          emission=args.emission,
                                          compensate=args.compensate,
                                          preimage=args.preimage, undo=args.undo,
-                                         if_match=args.if_match)
+                                         if_match=args.if_match,
+                                         undo_key=args.undo_key,
+                                         require_if_match=args.require_if_match)
         elif args.import_command == "cordis":
             from ..import_cordis import import_cordis_file
             source = import_cordis_file(args.file, backend=args.backend,

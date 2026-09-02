@@ -44,6 +44,7 @@ from .compiler import compile_files
 from .holes import refuse_admission
 from .errors import RevlError
 from . import diagnostics
+from . import taint
 from . import why_runtime
 
 KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm", "go")
@@ -870,6 +871,31 @@ class _Driver:
             verified_by=verified_by or [], produced_seq=produced,
             prompt_digest=digest)
 
+    def _crossing_taint(self, component) -> tuple:
+        """Item 444: the compile-side taint facts a crossing in `component`
+        hands to the item-121 digest gate — ``(arg_origins, taint_engaged)``.
+
+        This IS the compile-to-runtime taint-origin channel. The checker's
+        per-crossing origins (`comp["taint"]["reaches"]`, item 249/256) and the
+        composition's `Secret[T]` / bound-secret declarations both already ride
+        the IR document this driver holds, so :class:`taint.OriginIndex` reads
+        them back with no new IR key and no golden churn; see its docstring for
+        why the `taint_engaged` certificate is whole-program rather than
+        per-crossing.
+
+        FAIL-CLOSED on every path this does not prove: no IR, an IR shape the
+        index cannot read, or any declared confidentiality surface all yield
+        ``(None, False)``, which `revl_prompt_digest` suppresses. The index is
+        rebuilt whenever `self.ir` is replaced (a `--watch` generation), keyed
+        on the document's identity."""
+        ir = getattr(self, "ir", None)
+        cached = getattr(self, "_origin_index", None)
+        if cached is None or cached[0] is not ir:
+            cached = (ir, taint.OriginIndex(ir))
+            self._origin_index = cached
+        index = cached[1]
+        return index.origins_for(component), index.engaged
+
     @staticmethod
     def _failure_code(err) -> str | None:
         """The diagnostic code for a FAILED settle's error, or ``None`` when it
@@ -1322,14 +1348,21 @@ class _Driver:
                     # `validate_retry` seam stashed a fiber-local observation;
                     # thread its `llm` payload + `activationId` onto the record.
                     # A non-model crossing yields None here, so its record stays
-                    # byte-identical to a pre-121 v2 emit. The driver runs no
-                    # taint analysis, so the digest gate is left fail-closed
-                    # (`taint_engaged=False`): the hop is still recorded, just
-                    # with the digest suppressed (§4, the fail-closed default).
+                    # byte-identical to a pre-121 v2 emit. Item 444: the digest
+                    # gate reads the compile-side taint facts off the IR
+                    # (`_crossing_taint`) instead of being hard-wired shut — a
+                    # certified-clean composition now emits the digest, and every
+                    # unproven path still fails closed (§4, the fail-closed
+                    # default): the hop is recorded either way, only the digest
+                    # is suppressed.
                     activation_id = f"{timeline.component}#g{self.generation}"
+                    arg_origins, taint_engaged = self._crossing_taint(
+                        timeline.component)
                     llm = self._model_crossing_payload(
                         activation_id=activation_id,
-                        args=detail.get("args"))
+                        args=detail.get("args"),
+                        arg_origins=arg_origins,
+                        taint_engaged=taint_engaged)
                     self._record_emit(
                         timeline.component,
                         detail.get("service") or "",

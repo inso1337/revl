@@ -751,7 +751,15 @@ precisely backwards. Three rules close both:
    landed as a general wiring feature with its own tests over hand-written
    renamed requires. Admission then runs through the otherwise-unchanged
    `check_and_lower`. The twin test (E5) lands here.
-3. **Registry, diff, federation.** `resolve` reports
+3. **Registry, diff, federation.** (Resolver half LANDED: `registry.resolve`
+   probes a §5-refused candidate with `bridge_plan`, reports
+   `compatible-with-adapter` with the plan, the rendered artifact, the wiring
+   rename and the derivation hash, ranks it below direct-compatible at equal
+   authority, reads chain depth off the section-4 marking and ranks a chain
+   below a fresh single bridge, discounts the error-semantics evidence class
+   behind an outcome merge, and rides near-miss refusals out under
+   `nearMisses`. `revl adapt --check` FLATTENING, `revl diff` and the
+   federation pin remain.) `resolve` reports
    compatible-with-adapter below direct-compatible at equal authority, with
    plan, generated `adapt` text, and near-miss refusals inline; chain
    depth read from the derivation marking, chains ranked below fresh

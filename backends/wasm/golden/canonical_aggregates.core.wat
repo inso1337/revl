@@ -6,6 +6,10 @@
   (memory (export "memory") 1)
   (data (i32.const 0) "\0b\00\00\00nonpositive")
   (global $__hp (mut i32) (i32.const 32))
+  ;; item 432(e): the per-call arena floor. Every canonical export
+  ;; rewinds $__hp here on the way out, so nothing a call allocates
+  ;; survives it (see `_arena_safe` for why that is sound here).
+  (global $__canon_arena_base i32 (i32.const 32))
   ;; item 432(f): the canonical return area is constant for the
   ;; module (the host reads it before it can re-enter), so one
   ;; cell serves every call instead of one bump allocation each.
@@ -646,6 +650,7 @@
     (local.set $rv (call $make (local.get $a0) (local.get $a1)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_rec_Person (local.get $rv) (local.get $area))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
   ;; canonical export of `age_of` -> WIT `registry#age-of`
   (func (export "revl:exported/registry#age-of") (param $c0 i32) (param $c1 i32) (param $c2 i64) (result i64)
@@ -655,6 +660,7 @@
     (i64.store (i32.add (local.get $t1) (i32.const 8)) (local.get $c2))
     (local.set $a0 (local.get $t1))
     (local.set $rv (call $age_of (local.get $a0)))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $rv))
   ;; canonical export of `rename` -> WIT `registry#rename`
   (func (export "revl:exported/registry#rename") (param $c0 i32) (param $c1 i32) (param $c2 i64) (param $c3 i32) (param $c4 i32) (result i32)
@@ -667,18 +673,21 @@
     (local.set $rv (call $rename (local.get $a0) (local.get $a1)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_rec_Person (local.get $rv) (local.get $area))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
   ;; canonical export of `dbl` -> WIT `registry#dbl`
   (func (export "revl:exported/registry#dbl") (param $c0 i64) (result i64)
     (local $a0 i64) (local $rv i64)
     (local.set $a0 (local.get $c0))
     (local.set $rv (call $dbl (local.get $a0)))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $rv))
   ;; canonical export of `flip` -> WIT `registry#flip`
   (func (export "revl:exported/registry#flip") (param $c0 i32) (result i32)
     (local $a0 i32) (local $rv i32)
     (local.set $a0 (local.get $c0))
     (local.set $rv (call $flip (local.get $a0)))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $rv))
   ;; canonical export of `pair` -> WIT `registry#pair`
   (func (export "revl:exported/registry#pair") (param $c0 i64) (param $c1 i64) (result i32)
@@ -688,12 +697,14 @@
     (local.set $rv (call $pair (local.get $a0) (local.get $a1)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_list_Int (local.get $rv) (local.get $area))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
   ;; canonical export of `head` -> WIT `registry#head`
   (func (export "revl:exported/registry#head") (param $c0 i32) (param $c1 i32) (result i64)
     (local $a0 i32) (local $rv i64)
     (local.set $a0 (call $__canon_lift_list_Int (local.get $c0) (local.get $c1)))
     (local.set $rv (call $head (local.get $a0)))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $rv))
   ;; canonical export of `roster` -> WIT `registry#roster`
   (func (export "revl:exported/registry#roster") (param $c0 i32) (param $c1 i32) (param $c2 i64) (result i32)
@@ -703,6 +714,7 @@
     (local.set $rv (call $roster (local.get $a0) (local.get $a1)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_list_Person (local.get $rv) (local.get $area))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
   ;; canonical export of `maybe` -> WIT `registry#maybe`
   (func (export "revl:exported/registry#maybe") (param $c0 i64) (result i32)
@@ -711,6 +723,7 @@
     (local.set $rv (call $maybe (local.get $a0)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_var_Opt_Int_ (local.get $rv) (local.get $area))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
   ;; canonical export of `or_zero` -> WIT `registry#or-zero`
   (func (export "revl:exported/registry#or-zero") (param $c0 i32) (param $c1 i64) (result i64)
@@ -721,6 +734,7 @@
     (if (i32.eq (local.get $c0) (i32.const 1)) (then (i64.store (i32.add (local.get $t3) (i32.const 8)) (local.get $c1))))
     (local.set $a0 (local.get $t3))
     (local.set $rv (call $or_zero (local.get $a0)))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $rv))
   ;; canonical export of `checked` -> WIT `registry#checked`
   (func (export "revl:exported/registry#checked") (param $c0 i64) (result i32)
@@ -729,5 +743,6 @@
     (local.set $rv (call $checked (local.get $a0)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_var_Result_Int__Str_ (local.get $rv) (local.get $area))
+    (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
 )

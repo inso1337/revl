@@ -38,6 +38,7 @@ table, or **[vision.md](vision.md)** for what this is *for*. The
 
 - [plan.md](plan.md) — a dry run for admission · [apply.md](apply.md) — execute a plan artifact · [swap.md](swap.md) — migrate a live component across tiers
 - [deploy.md](deploy.md) — attested admission with re-hash-on-receive, peer-authenticated seam correlation, and the coordinated cross-process commit/abort
+- [composition-rows.md](composition-rows.md) — the composition as declared ROWS: a stable label per row, the claim assertion checked against the component header, typed row config
 - [composition-bootstrap.md](composition-bootstrap.md) — a composition manifest that declares its own file list, and the two-stage host bootstrap that gets it running
 - [environment-binding.md](environment-binding.md) — the `boot` component: the declared, bounded, audited contract for the values (port, token, data dir, model provider) the host must inject before the composition exists
 - [queries.md](queries.md) — ask the composition questions
@@ -55,5 +56,5 @@ table, or **[vision.md](vision.md)** for what this is *for*. The
 - [backend-ir-v1.md](backend-ir-v1.md) · [backend-ir-v3.md](backend-ir-v3.md) — the IR contract
 - [v2.0-roadmap.md](v2.0-roadmap.md) — what is done and what is in flight
 - [stability.md](stability.md) — what a version number promises
-- [gate-dependency-contract.md](gate-dependency-contract.md) — the security contract for a host that `pip install`s revl and calls `revl.gate` directly, and the promised `revl.gate.__all__` surface
+- [gate-dependency-contract.md](gate-dependency-contract.md) — the security contract for a host that depends on the gate as a library: `pip install revl` + `revl.gate` (the promised `__all__` surface), and the native `revl-gate` crate, which issues no admissions at all
 - [../CONTRIBUTING.md](../CONTRIBUTING.md) — the wave/worktree workflow and the pre-commit contract · [../SECURITY.md](../SECURITY.md) — reporting a soundness escape
