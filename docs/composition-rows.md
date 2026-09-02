@@ -163,7 +163,8 @@ Three rules:
 - a row whose `requires` is not a subset of its `granted` is refused at
   resolution, naming the ungranted key;
 - it is writable only by the composition's owner and the operator, never by a
-  third-party layer, for the same reason no layer may raise its own trust class.
+  third-party layer, for the same reason no layer may raise its own trust class
+  ([composition layers](composition-layers.md#granted-is-never-in-a-stack-layer)).
 
 A row that writes no `granted` clause at all is unconfined: it is the project's
 own code, and confining it would be wrong. Wiring the untrusted-author profile
@@ -208,16 +209,20 @@ manifest" ([composition-bootstrap.md](composition-bootstrap.md)).
 The row table is the object everything else in item 426 needs, and it is
 deliberately the whole of this slice.
 
+The FOLD is built and is documented separately in
+[composition layers](composition-layers.md): a composition names its `stack` and
+`site` layers, and the four operations (`add`, `remove`, `replace`, `configure`)
+patch the rows this document defines.
+
 | next | what it adds | what it waits on |
 |---|---|---|
-| the fold | layers and the four operations (`add`, `remove`, `replace`, `configure`), the four levels, peer conflicts that refuse with layer provenance, address resolution by `key(...)` or by qualified label | the row table only |
 | incremental admission | admitting a resolved delta through `admit_into` with a `replacing` withdrawal set, so the cost is one compile of the patched rows | the fold |
 | confinement | non-first-party rows compiled under the untrusted-author profile, and the per-root profile split in `compile_files` that makes a mixed-trust delta expressible in one call | roadmap 425 F1's decision |
 | the authority panel | crossing tokens re-keyed by row label, a `config:` token carrying a value digest, a fail-closed headline, and a printed blind-spots block | confinement, and roadmap 428 F3 |
 | distribution | a layer is a truc, the `[trucs]` origin namespace becomes real, the pin becomes mandatory | roadmap 428 F3 |
 
-Two surface clauses the design defines are therefore not grammar yet, and
-writing one is a parse error rather than a silently ignored clause: `open`
+Two surface clauses the design defines are still not grammar, and writing one is
+a parse error rather than a silently ignored clause: `open`
 (which fields a third-party layer may configure) and `reach` (the
 composition-level authority bound). `place` and `variant` are the same. Each
 arrives with the slice that gives it meaning, because a clause that parses and
