@@ -325,13 +325,13 @@
       ],
       "returns": "Unit",
       "bodies": {
-        "py": "\n    import revl_fs_workspace as _ws\n    # must #2: the inverse path is confined too. A raise here is recorded by\n    # the teardown loop as restore-residue, never a silent write outside root.\n    target = _ws.resolve_within(w[\"path\"])\n    import os\n    if w[\"created\"]:\n        # the file did not exist before the write: undo == delete it.\n        # idempotent \u2014 a second replay finds it already gone.\n        if os.path.exists(target):\n            os.remove(target)\n        return\n    # restore the preimage snapshot over the target. os.replace is atomic and\n    # consumes the snapshot (residue-free). idempotent \u2014 once the snapshot is\n    # gone (already restored), a second replay is a no-op.\n    if os.path.exists(w[\"preimage\"]):\n        os.replace(w[\"preimage\"], target)\n    return\n"
+        "py": "\n    import revl_fs_workspace as _ws\n    # must #2: BOTH endpoints are confined, not just the target. The target is\n    # a `named-endpoint`; the preimage is the SOURCE of a rename, and a rename\n    # REMOVES what it names, so an unguarded source made this capability-free\n    # inverse a steal-and-destroy primitive for any file the process can reach.\n    # It routes through the `inverse-source` guard, which confines it AND\n    # requires it to be a sidecar this workspace itself produced. A raise here\n    # is recorded by the teardown loop as restore-residue, never a silent write\n    # (or a silent theft) outside the root.\n    target = _ws.resolve_within(w[\"path\"])\n    if w[\"created\"]:\n        # the file did not exist before the write: undo == delete it.\n        # idempotent \u2014 a second replay finds it already gone.\n        _ws.remove_confined(target)\n        return\n    # restore the preimage snapshot over the target. the rename is atomic and\n    # consumes the snapshot (residue-free). idempotent \u2014 once the snapshot is\n    # gone (already restored), a second replay is a no-op.\n    preimage = _ws.resolve_sidecar(w[\"preimage\"], \"preimage\")\n    if _ws.lexists_confined(preimage):\n        _ws.replace_confined(preimage, target)\n    return\n"
       },
       "refs": {
         "ts": {
           "symbol": "fsRestore",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "1721f1cc40e93500e2ab657ed34616e27bceb7551d8017d732871bea0a960f29",
+          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
           "root": "stdlib"
         }
       }
@@ -347,13 +347,13 @@
       ],
       "returns": "Unit",
       "bodies": {
-        "py": "\n    import revl_fs_workspace as _ws\n    target = _ws.resolve_within(w[\"path\"])   # must #2\n    import os\n    # rename the parked file back. idempotent \u2014 once moved back (garbage gone),\n    # a second replay is a no-op.\n    if os.path.exists(w[\"garbage\"]):\n        os.replace(w[\"garbage\"], target)\n    return\n"
+        "py": "\n    import revl_fs_workspace as _ws\n    target = _ws.resolve_within(w[\"path\"])   # must #2, the TARGET endpoint\n    # ...and the SOURCE endpoint, the same rename-steals-what-it-names hole\n    # `restore` had: only a sidecar from the session garbage dir is admissible.\n    parked = _ws.resolve_sidecar(w[\"garbage\"], \"garbage\")\n    # rename the parked file back. idempotent \u2014 once moved back (garbage gone),\n    # a second replay is a no-op.\n    if _ws.lexists_confined(parked):\n        _ws.replace_confined(parked, target)\n    return\n"
       },
       "refs": {
         "ts": {
           "symbol": "fsUnrm",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "1721f1cc40e93500e2ab657ed34616e27bceb7551d8017d732871bea0a960f29",
+          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
           "root": "stdlib"
         }
       }
@@ -369,13 +369,13 @@
       ],
       "returns": "Unit",
       "bodies": {
-        "py": "\n    import revl_fs_workspace as _ws\n    src = _ws.resolve_within(w[\"from\"])      # must #2: BOTH endpoints confined\n    dst = _ws.resolve_within(w[\"to\"])\n    import os\n    # move it back. idempotent \u2014 once back (dst gone), a second replay no-ops.\n    if os.path.exists(dst):\n        os.replace(dst, src)\n    return\n"
+        "py": "\n    import revl_fs_workspace as _ws\n    src = _ws.resolve_within(w[\"from\"])      # must #2: BOTH endpoints confined\n    dst = _ws.resolve_within(w[\"to\"])\n    # move it back. idempotent \u2014 once back (dst gone), a second replay no-ops.\n    if _ws.lexists_confined(dst):\n        _ws.replace_confined(dst, src)\n    return\n"
       },
       "refs": {
         "ts": {
           "symbol": "fsUnmove",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "1721f1cc40e93500e2ab657ed34616e27bceb7551d8017d732871bea0a960f29",
+          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
           "root": "stdlib"
         }
       }
@@ -391,13 +391,13 @@
       ],
       "returns": "Unit",
       "bodies": {
-        "py": "\n    import revl_fs_workspace as _ws\n    target = _ws.resolve_within(w[\"path\"])   # must #2\n    import os\n    # remove the created directory iff still empty \u2014 never delete a dir the\n    # activation (or a concurrent writer) populated. idempotent + total: a\n    # missing or non-empty dir is left as-is, no raise.\n    try:\n        os.rmdir(target)\n    except OSError:\n        pass\n    return\n"
+        "py": "\n    import revl_fs_workspace as _ws\n    target = _ws.resolve_within(w[\"path\"])   # must #2\n    # remove the created directory iff still empty \u2014 never delete a dir the\n    # activation (or a concurrent writer) populated. idempotent + total: a\n    # missing or non-empty dir is left as-is, no raise.\n    _ws.rmdir_confined(target)\n    return\n"
       },
       "refs": {
         "ts": {
           "symbol": "fsRmdirIfEmpty",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "1721f1cc40e93500e2ab657ed34616e27bceb7551d8017d732871bea0a960f29",
+          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
           "root": "stdlib"
         }
       }
@@ -417,13 +417,13 @@
       ],
       "returns": "Result[WriteWitness, FsError]",
       "bodies": {
-        "py": "\n    import revl_fs_workspace as _ws\n    import os\n    try:\n        target = _ws.resolve_within(path)    # must #1: realpath BEFORE the check\n    except _ws.ConfinementError as e:\n        return Err(e.as_error())\n    existed = os.path.exists(target)\n    preimage = \"\"\n    if existed:\n        if not os.path.isfile(target):\n            return Err({\"code\": \"ENOTFILE\",\n                        \"message\": \"write target exists and is not a regular file\",\n                        \"path\": target})\n        # snapshot the preimage INSIDE the root (must #3) before diverging it.\n        preimage = _ws.fresh_sidecar(_ws.preimage_dir(), \"pre\")\n        _ws.snapshot(target, preimage)\n    else:\n        # require the parent to exist \u2014 we create no directories, so the\n        # inverse (delete the created file) leaves zero residue.\n        parent = os.path.dirname(target)\n        if parent and not os.path.isdir(parent):\n            return Err({\"code\": \"ENOENT\",\n                        \"message\": \"parent directory does not exist\",\n                        \"path\": target})\n    with open(target, \"w\", encoding=\"utf-8\") as fh:\n        fh.write(contents)\n    return Ok({\"path\": target, \"preimage\": preimage, \"created\": not existed})\n"
+        "py": "\n    import revl_fs_workspace as _ws\n    try:\n        target = _ws.resolve_within(path)    # must #1: realpath BEFORE the check\n        # ...and then the syscall-time guard, which is what actually opens the\n        # file: it walks to the parent through directory fds with O_NOFOLLOW\n        # (so no component can be swapped for a symlink after the check closed\n        # the check-to-syscall window), opens the leaf O_NOFOLLOW, and fstats\n        # the fd. A non-regular target is ENOTFILE, a missing parent ENOENT (we\n        # create no directories, so the inverse leaves zero residue), and a\n        # HARDLINKED target is EMULTILINK \u2014 realpath cannot see through a hard\n        # link, so a multiply-linked name is refused rather than written\n        # through. The open does not truncate: a refusal leaves the target\n        # byte-identical, and Ok-conditional registration means no inverse.\n        handle = _ws.open_confined_write(target)\n    except _ws.FsOpError as e:\n        return Err(e.as_error())\n    try:\n        preimage = \"\"\n        if not handle.created:\n            # snapshot the preimage INSIDE the root (must #3) before diverging\n            # it \u2014 taken from the verified fd, into a guarded sidecar path. A\n            # refused sidecar (a planted `.revl-fs-preimage` symlink) fails\n            # HERE, before any byte is written, so the target is untouched.\n            preimage = _ws.snapshot_preimage(handle)\n        _ws.write_through(handle, contents)\n        # item 431(b): the bytes reached the inode the check admitted, but a\n        # competing writer that unlinked the leaf mid-call left that inode an\n        # ORPHAN, and Ok would then claim a mutation at a path which does not\n        # hold it, a witness the discharge descriptor enumerates and the undo\n        # would restore over. Confinement was never in question here; the\n        # RESULT was. A parted name is an Err, so no witness, no inverse, and\n        # discard_write clears the preimage sidecar.\n        _ws.confirm_landed(handle)\n    except _ws.FsOpError as e:\n        _ws.discard_write(handle)   # residue-free: an Err registers no inverse\n        return Err(e.as_error())\n    finally:\n        _ws.close_handle(handle)\n    return Ok({\"path\": handle.real, \"preimage\": preimage,\n               \"created\": handle.created})\n"
       },
       "refs": {
         "ts": {
           "symbol": "fsWrite",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "1721f1cc40e93500e2ab657ed34616e27bceb7551d8017d732871bea0a960f29",
+          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
           "root": "stdlib"
         }
       },
@@ -459,13 +459,13 @@
       ],
       "returns": "Result[RmWitness, FsError]",
       "bodies": {
-        "py": "\n    import revl_fs_workspace as _ws\n    import os\n    try:\n        target = _ws.resolve_within(path)    # must #1\n    except _ws.ConfinementError as e:\n        return Err(e.as_error())\n    if not os.path.exists(target):\n        # Ok-conditional: an rm on a missing path registers nothing (item 243).\n        return Err({\"code\": \"ENOENT\", \"message\": \"no such file\", \"path\": target})\n    parked = _ws.fresh_sidecar(_ws.garbage_dir(), \"rm\")   # must #3: inside root\n    os.replace(target, parked)\n    return Ok({\"path\": target, \"garbage\": parked})\n"
+        "py": "\n    import revl_fs_workspace as _ws\n    try:\n        target = _ws.resolve_within(path)    # must #1\n        if not _ws.lexists_confined(target):\n            # Ok-conditional: an rm on a missing path registers nothing (243).\n            return Err({\"code\": \"ENOENT\", \"message\": \"no such file\",\n                        \"path\": target})\n        # must #3: inside root \u2014 and the garbage dir is now itself resolved and\n        # refused if it is a symlink, so a planted `.revl-fs-garbage` link can\n        # no longer park the removed file outside the boundary.\n        parked = _ws.fresh_sidecar(_ws.garbage_dir(), \"rm\")\n        _ws.replace_confined(target, parked)\n    except _ws.FsOpError as e:\n        return Err(e.as_error())\n    return Ok({\"path\": target, \"garbage\": parked})\n"
       },
       "refs": {
         "ts": {
           "symbol": "fsRm",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "1721f1cc40e93500e2ab657ed34616e27bceb7551d8017d732871bea0a960f29",
+          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
           "root": "stdlib"
         }
       },
@@ -505,13 +505,13 @@
       ],
       "returns": "Result[MoveWitness, FsError]",
       "bodies": {
-        "py": "\n    import revl_fs_workspace as _ws\n    import os\n    try:\n        real_from = _ws.resolve_within(src)  # must #1, BOTH endpoints\n        real_to = _ws.resolve_within(dst)\n    except _ws.ConfinementError as e:\n        return Err(e.as_error())\n    if not os.path.exists(real_from):\n        return Err({\"code\": \"ENOENT\", \"message\": \"no such source\", \"path\": real_from})\n    if os.path.exists(real_to):\n        return Err({\"code\": \"EEXIST\", \"message\": \"destination exists\", \"path\": real_to})\n    os.replace(real_from, real_to)\n    return Ok({\"from\": real_from, \"to\": real_to})\n"
+        "py": "\n    import revl_fs_workspace as _ws\n    try:\n        real_from = _ws.resolve_within(src)  # must #1, BOTH endpoints\n        real_to = _ws.resolve_within(dst)\n        if not _ws.lexists_confined(real_from):\n            return Err({\"code\": \"ENOENT\", \"message\": \"no such source\",\n                        \"path\": real_from})\n        if _ws.lexists_confined(real_to):\n            return Err({\"code\": \"EEXIST\", \"message\": \"destination exists\",\n                        \"path\": real_to})\n        _ws.replace_confined(real_from, real_to)\n    except _ws.FsOpError as e:\n        return Err(e.as_error())\n    return Ok({\"from\": real_from, \"to\": real_to})\n"
       },
       "refs": {
         "ts": {
           "symbol": "fsMove",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "1721f1cc40e93500e2ab657ed34616e27bceb7551d8017d732871bea0a960f29",
+          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
           "root": "stdlib"
         }
       },
@@ -547,13 +547,13 @@
       ],
       "returns": "Result[MkdirWitness, FsError]",
       "bodies": {
-        "py": "\n    import revl_fs_workspace as _ws\n    import os\n    try:\n        target = _ws.resolve_within(path)    # must #1\n    except _ws.ConfinementError as e:\n        return Err(e.as_error())\n    if os.path.exists(target):\n        return Err({\"code\": \"EEXIST\", \"message\": \"path already exists\", \"path\": target})\n    os.mkdir(target)\n    return Ok({\"path\": target})\n"
+        "py": "\n    import revl_fs_workspace as _ws\n    try:\n        target = _ws.resolve_within(path)    # must #1\n        if _ws.lexists_confined(target):\n            return Err({\"code\": \"EEXIST\", \"message\": \"path already exists\",\n                        \"path\": target})\n        _ws.mkdir_confined(target)\n    except _ws.FsOpError as e:\n        return Err(e.as_error())\n    return Ok({\"path\": target})\n"
       },
       "refs": {
         "ts": {
           "symbol": "fsMkdir",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "1721f1cc40e93500e2ab657ed34616e27bceb7551d8017d732871bea0a960f29",
+          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
           "root": "stdlib"
         }
       },
