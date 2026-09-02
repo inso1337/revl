@@ -517,6 +517,21 @@ def _run_recover(args) -> int:
 
     from ..recovery import recover, render, RecoveryError  # noqa: PLC0415
 
+    # item 440 §(b): the re-issue seam's operator knob rides the SAME `--policy`
+    # file the roll-forward path already re-establishes, and is read whether or
+    # not `--restore` was given (the seam acts on the owed-emission report, which
+    # has nothing to do with resuming a snapshot). No policy → `None` → the seam
+    # is off and recover auto-fires nothing, exactly as before this item.
+    reissue = None
+    if getattr(args, "policy", None):
+        from ..policy import PolicyError, load_policy  # noqa: PLC0415
+        try:
+            reissue = load_policy(args.policy).reissue_strength()
+        except (OSError, PolicyError) as error:
+            print(f"error: cannot load policy {args.policy}: {error}",
+                  file=sys.stderr)
+            return 1
+
     session = snapshot = None
     if getattr(args, "restore", None):
         try:
@@ -545,7 +560,8 @@ def _run_recover(args) -> int:
             session.approval_policy = args.approval_policy
 
     try:
-        report = recover(args.wal, session=session, snapshot=snapshot)
+        report = recover(args.wal, session=session, snapshot=snapshot,
+                         reissue=reissue)
     except RecoveryError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

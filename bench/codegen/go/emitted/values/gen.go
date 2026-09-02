@@ -111,9 +111,17 @@ func revlMapKeys[V any](m map[string]V) []string {
 // ---- stdlib builtins (docs/stdlib-2.0.md); positions are code-point based
 func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }
 
+// revlStrSlice walks to the byte offsets of code points a and b and returns
+// the substring between them. A Go substring shares the receiver's bytes, so
+// the slice itself allocates nothing (item 434 (g): the `[]rune(s)` form
+// measured 2 allocs / 328 B against 0 / 0 for the hand-written byte walk).
+// Code-point indexing and clamping are unchanged: `[]rune(s)` and this walk
+// both count one index per invalid byte, so the offsets agree. Only the
+// CONTENT of an invalid byte differs — `[]rune` substitutes U+FFFD — so an
+// invalid byte inside the requested range falls back to the old materializing
+// form and answers exactly what it always did.
 func revlStrSlice(s string, a, b int64) string {
-	r := []rune(s)
-	n := int64(len(r))
+	n := int64(utf8.RuneCountInString(s))
 	if a < 0 {
 		a = 0
 	}
@@ -126,15 +134,46 @@ func revlStrSlice(s string, a, b int64) string {
 	if b < a {
 		b = a
 	}
-	return string(r[a:b])
+	lo, hi, i := len(s), len(s), int64(0)
+	for off := 0; off < len(s); {
+		if i == a {
+			lo = off
+		}
+		if i == b {
+			hi = off
+			break
+		}
+		r, w := utf8.DecodeRuneInString(s[off:])
+		if r == utf8.RuneError && w == 1 && i >= a {
+			return string([]rune(s)[a:b])
+		}
+		off += w
+		i++
+	}
+	return s[lo:hi]
 }
 
+// revlStrIndexOf answers the code-point index of sub in s. Valid UTF-8 is
+// self-synchronizing — the first byte of a valid needle is never a
+// continuation byte — so a byte match found by strings.Index always starts on
+// a code-point boundary and answers the same question as the code-point scan,
+// with no copy and with the standard library's search instead of the naive
+// O(n*m) one (item 434 (g): 1 alloc / 320 B before, 0 / 0 hand-written).
+// Invalid UTF-8 on either side keeps the old `[]rune` scan, where each invalid
+// byte compares as U+FFFD.
 func revlStrIndexOf(s, sub string) int64 {
-	rs := []rune(s)
-	rn := []rune(sub)
-	if len(rn) == 0 {
+	if sub == "" {
 		return 0
 	}
+	if utf8.ValidString(s) && utf8.ValidString(sub) {
+		b := strings.Index(s, sub)
+		if b < 0 {
+			return -1
+		}
+		return int64(utf8.RuneCountInString(s[:b]))
+	}
+	rs := []rune(s)
+	rn := []rune(sub)
 	if len(rn) > len(rs) {
 		return -1
 	}
@@ -155,12 +194,21 @@ func revlStrIndexOf(s, sub string) int64 {
 
 func revlStrConcat(a, b string) string { return a + b }
 
+// revlStrSplit's empty-separator branch walks bytes and hands out substrings,
+// which share s's bytes, instead of materializing `[]rune(s)` and allocating a
+// fresh one-code-point string per element (item 434 (g)). An invalid byte
+// still yields U+FFFD, exactly as `[]rune(s)` did.
 func revlStrSplit(s, sep string) []string {
 	if sep == "" {
-		r := []rune(s)
-		out := make([]string, len(r))
-		for i, c := range r {
-			out[i] = string(c)
+		out := make([]string, 0, utf8.RuneCountInString(s))
+		for off := 0; off < len(s); {
+			r, w := utf8.DecodeRuneInString(s[off:])
+			if r == utf8.RuneError && w == 1 {
+				out = append(out, string(utf8.RuneError))
+			} else {
+				out = append(out, s[off:off+w])
+			}
+			off += w
 		}
 		return out
 	}
@@ -287,6 +335,10 @@ func index_of(hay string, needle string) int64 {
 
 func take(s string, a int64, b int64) string {
 	return revlStrSlice(s, a, b)
+}
+
+func chars(s string) []string {
+	return revlStrSplit(s, "")
 }
 
 func render(n int64) string {

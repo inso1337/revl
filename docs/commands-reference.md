@@ -9,8 +9,9 @@ flags.
 The verb set, in the order the parser declares it:
 
 ```text
-compile  explain  doctor  scaffold  audit  diff  version  contract
-erase-report  plan  apply  undo  canary  query  fmt  quarantine  test
+compile  explain  doctor  scaffold  composition  audit  diff  version
+contract  erase-report  plan  apply  undo  canary  query  fmt  quarantine
+test
 mcp  import  export  serve  run  recover  estop  why  metrics  profile  attest
 dash  repair  truc
 ```
@@ -132,6 +133,30 @@ the boundary with a matching `--requires`/`--capabilities` pair, or drop
 ---
 
 ## Composition analysis
+
+### `revl composition`
+
+Resolve a composition document's ROW TABLE: the label, claims, component,
+config and requires of every row ([composition-rows.md](composition-rows.md)).
+Header-only by default, so every row id resolves and the whole wiring renders
+without lowering a single component body.
+
+- `FILE` - the `.rvl` document declaring the composition (required).
+- `--json` - the row table as JSON instead of the ROWS/WIRING panels.
+- `--admit` - also COMPILE the rows the table names and print the resulting
+  load order. Resolution alone compiles nothing.
+- `--root DIR` - the project root row provenance and origins are recorded
+  against (default: the working directory). A document under `trucs/<key>/`
+  is scoped to the origin `<key>`; anything else to the project origin `.`.
+
+Exits nonzero on a refusal: an unresolvable row, an assertion the component
+header contradicts, two rows claiming one `(key, realm)` pair, a config field
+the component does not declare or a value that does not fit its type, or a
+`requires` outside the row's `granted` set.
+
+```bash
+revl composition base.rvl --admit
+```
 
 ### `revl audit`
 
