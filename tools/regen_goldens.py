@@ -239,12 +239,11 @@ TARGETS: tuple[Target, ...] = (
         produce=produce_java,
         commands=(("sh", "backends/java/scenarios/crashproof/regen.sh"),),
         gate="pytest tests/test_goldens.py backends/java/test_emit_java.py",
-        unstable=("backends/java/scenarios/crashproof/revl/Components.java",),
-        notes=("Components.java is regenerated but NOT drift-checked: the java emitter "
-               "names a witnessed step's temporary from the AST node's `id()`, so two "
-               "runs of the same input differ (`_revl_wit4419035648` vs "
-               "`_revl_wit4345361728`). It is compiled by the backend-java job, never "
-               "byte-compared. Making that gensym deterministic would let it be "
+        notes=("Components.java used to be regenerated but NOT drift-checked: the java "
+               "emitter named a witnessed step's temporary from the AST node's `id()`, "
+               "so two runs of the same input differed (`_revl_wit4419035648` vs "
+               "`_revl_wit4345361728`). That gensym is emission-order indexed now "
+               "(`_V3Ctx.next_gensym`), so the file is byte-reproducible and drift-"
                "checked like every other target.",),
     ),
     Target(

@@ -104,8 +104,8 @@ Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 6+):
     lifecycle-test emission; the canonical Float->Str ``revlFtoa`` (float
     interpolation excluded); the ``_reject_fn_type`` refusal; local ``let``-bound
     arrows and their ``_inline_arrow`` beta-reduction; and ``let_pattern`` (its
-    temp name ``__revl_destructure_{id(node)}`` is a host identity no port can
-    reproduce).
+    temp name carries a per-``_V3Ctx`` emission-order index this port does not
+    thread yet).
 """
 
 import importlib.util
