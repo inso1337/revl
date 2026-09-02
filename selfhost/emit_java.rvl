@@ -942,7 +942,9 @@ fn v3_component_hash(jt: Str, expr: Str) -> Str {
 // tier alone. `revlEq`'s fallback is `Objects.equals`, i.e. that same inherited
 // method, so the helper could not fix it from outside: the structure has to
 // live on the class. Both classes are final, so `instanceof` is an exact type
-// test and the relation stays symmetric. There is deliberately NO
+// test and the relation stays symmetric. The parameter is `__revl_o`, not
+// the canonical `o`, because a record may declare a field NAMED `o`.
+// There is deliberately NO
 // `if (this == o) { return true; }` fast path: `==` on Float is IEEE, so a NaN
 // component is not equal to itself, and the shortcut would make the answer
 // depend on whether the operands happen to share a reference. rust, the
@@ -951,12 +953,12 @@ fn v3_component_hash(jt: Str, expr: Str) -> Str {
 // variant case, so two cases of one variant with the same payload do not
 // collide in the hash.
 fn emit_v3_value_equality(cls: Str, eq_terms: List[Str], hash_terms: List[Str], tag: Str) -> List[Str] {
-  var out = ["", "    @Override", "    public boolean equals(Object o) {"]
+  var out = ["", "    @Override", "    public boolean equals(Object __revl_o) {"]
   if (eq_terms.length() == 0) {
-    out = out.push(`        return o instanceof ${cls};`)
+    out = out.push(`        return __revl_o instanceof ${cls};`)
   } else {
-    out = out.push(`        if (!(o instanceof ${cls})) { return false; }`)
-    out = out.push(`        ${cls} __revl_other = (${cls}) o;`)
+    out = out.push(`        if (!(__revl_o instanceof ${cls})) { return false; }`)
+    out = out.push(`        ${cls} __revl_other = (${cls}) __revl_o;`)
     out = out.push(`        return ${eq_terms.join(" && ")};`)
   }
   out = out.push("    }")

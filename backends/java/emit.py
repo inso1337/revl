@@ -2101,7 +2101,11 @@ def _emit_v3_value_equality(cls: str, components: list, *, tag: str = None) -> l
     the class.
 
     Both classes are `final`, so `instanceof` is an exact type test and the
-    relation stays symmetric.
+    relation stays symmetric. The parameter is `__revl_o`, not the canonical
+    `o`, because a record is free to declare a field NAMED `o`: every term
+    below spells its operands `this.x`/`__revl_other.x` so a plain `o` would
+    still compile, but there is no javac in this repository's default test run
+    to catch the day that stops being true.
 
     There is NO `if (this == o) { return true; }` fast path, deliberately.
     revl's `==` on `Float` is IEEE (docs/arithmetic.md), so a component that is
@@ -2118,12 +2122,12 @@ def _emit_v3_value_equality(cls: str, components: list, *, tag: str = None) -> l
     /`List.indexOf`/`Set.remove` on such a value can miss. That is what
     "matching every other tier" costs on a host whose collections assume an
     equivalence relation, and IEEE equality is not one."""
-    lines = ["", "    @Override", "    public boolean equals(Object o) {"]
+    lines = ["", "    @Override", "    public boolean equals(Object __revl_o) {"]
     if not components:
-        lines.append(f"        return o instanceof {cls};")
+        lines.append(f"        return __revl_o instanceof {cls};")
     else:
-        lines.append(f"        if (!(o instanceof {cls})) {{ return false; }}")
-        lines.append(f"        {cls} __revl_other = ({cls}) o;")
+        lines.append(f"        if (!(__revl_o instanceof {cls})) {{ return false; }}")
+        lines.append(f"        {cls} __revl_other = ({cls}) __revl_o;")
         terms = [
             _v3_component_eq(jtype, f"this.{field}", f"__revl_other.{field}")
             for jtype, field in components
