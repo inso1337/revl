@@ -74,14 +74,21 @@ modelled one level deep (nested maps are a mechanical extension of
 ## Differential oracle (wired)
 
 `harness/diff_corpus.py` + `harness/Oracle.lean`: parse every corpus
-`.rvl` with revl's real parser, export one TSV row per *fact* — component
-manifests (M), require-binding resolutions (R), declared emission methods
-(E), per-statement classifications (T), and call facts with marker
-context (U) — then run the Lean oracle (`RevL.Manifest` + a G4-shaped
-body judgment, coded independently) over the same TSV and diff against a
-plain-Python reference of the same semantics. A mismatch is definitional
-drift between the model and the spec/extraction, and it fails
-`make formal`.
+`.rvl` with revl's real parser, export one TSV row per *fact*, then run
+the Lean oracle (`RevL.Manifest` plus the G4-family judgments, coded
+independently) over the same TSV and diff against a plain-Python
+reference of the same semantics. A mismatch is definitional drift between
+the model and the spec/extraction, and it fails `make formal`.
+
+Facts exported: component manifests (M), require-binding resolutions (R),
+provide-key resolutions (C), per-statement classifications (T), call
+facts with marker context (U), service-method emission bounds (B) and a
+scoped bound's declared entries (Q), and the **reachability** facts that
+let the model see past the marker — the capabilities a component's
+`requires` bindings grant it (K), its activation emit-step surface (A),
+the emission capabilities a provide method's body crosses (F), the
+activation-body spawn edges (S), and the spawn handles (H) through which
+`w.task.run(...)` resolves to the child's provision.
 
 Verdicts:
 
@@ -90,36 +97,66 @@ Verdicts:
   be its own provisions).
 - **G rows (per component, G4-shaped)**: marker presence must equal the
   interface's declaration — a plain call to a declared emission method,
-  or an `emit`'d call to a non-emission method, is refused.
+  or an `emit`'d call to a non-emission method, is refused. Receivers
+  include spawn handles, not just `requires` bindings.
+- **P rows (per provide method, G4)**: a service declaration is an upper
+  bound on its providers. The method's reached capabilities must sit
+  inside its declared bound — `plain` admits none, bare `emission` admits
+  any, `emission[...]` admits exactly the declared entries.
+- **W rows (per activation spawn edge, G4/item 66/294)**: a spawned
+  child's transitively closed reach must be covered by the spawner's held
+  capabilities, comparing canonical `(token, params)` capabilities so a
+  child under `fs(path="/etc")` is refused beneath a parent holding
+  `fs(path="/tmp")`. Activation-body spawns only, matching
+  `lower._activation_spawn_sites`: a provide-method spawn is already
+  bounded by that method's `emission[...]` clause.
 
-Current status over the corpus: **289 files → 179 components → 531
-statements → 127 manifest-bearing files → 306 verdicts compared
-(127 files + 179 components), 306 agree, 0 mismatches** (28 parse-error
-skips, loud).
+Current status over the corpus: **289 files → 179 components → 400
+statements → 127 manifest-bearing files → 337 verdicts compared
+(127 files + 179 components + 25 provide methods + 6 spawn edges), 337
+agree, 0 mismatches** (28 parse-error skips, loud).
 A mismatch is definitional drift between the model and the
 spec/extraction — this is the gate that keeps parallel edits to the
 formal model honest.
 
 Checker alignment (informational, not a gate): each parsed file is also
 compiled with the real checker and its refusal code is compared against
-the formal verdicts. Current buckets: 50 agree-accept, 2 agree-G2, 1
-agree-G4, 36 formal-strict (formal clean, checker refuses for reasons
-outside the modeled fragment), 5 missed-G4 (checker G4-refuses where the
-shaped model sees no violation), 12 formal-found-other, 21 out-of-
-fragment. The five missed-G4 files are known model-coverage gaps
-(`examples/rejections/g4_capability_not_declared`,
-`g4_emission_not_declared`, `g4_spawn_widens_capability`,
-`g4_spawn_widens_parameter`, `g4_unmarked_handle_emission`) — they need
-capability scope and spawn/wrapper reachability the shaped model does
-not yet express.
+the formal verdicts. Current buckets: 50 agree-accept, 2 agree-G2, 6
+agree-G4, 36 formal-strict (the checker *accepts* the file but the shaped
+model does not — the model is stricter than the fragment it covers), 12
+formal-found-other, 21 out-of-fragment. **0 missed-G4**: the five
+previously missed files are now modeled, each by the verdict row its
+rejection comment names —
+`g4_emission_not_declared` and `g4_capability_not_declared` by a P row
+(provider exceeds its declared bound), `g4_spawn_widens_capability` and
+`g4_spawn_widens_parameter` by a W row (spawn widens authority), and
+`g4_unmarked_handle_emission` by a G row (unmarked crossing through a
+spawn handle). No other bucket changed membership, so nothing was
+manufactured: the only files that moved are the five.
+
+Known fidelity limits of the shaped model, deliberately not papered over:
+
+- An emission reached through a spawn handle, an emission extern, or a
+  transitively-emitting named function contributes the unnameable `*`
+  capability rather than a resolved boundary. That mirrors the checker's
+  own `*`, but it is coarse: `*` is covered only by `*`.
+- Capability **ceilings** are not modeled. The checker runs the crossing-
+  coverage fold ceiling-blind (`_strip_ceilings`) and checks budgets
+  separately; the model compares whole canonical capabilities. The corpus
+  carries no integer-valued capability parameter today, so the two agree
+  on it vacuously — this is TODO 2's work, not a live divergence.
+- The 36 `formal-strict` files are unchanged and remain the standing
+  finding: the shaped model refuses files the real checker accepts.
 
 ## TODO (in dependency order)
 
-1. **Close the modeled G4 gaps**: extend the export's call facts with the
-   `g4_*_rejection` shapes (spawn-widened capability/parameter, handle
-   emissions, undeclared-sink refusals) so the shaped G4 stops missing
-   the five `missed-G4` files. Needs a reachability model for
-   arrow/spawn bodies in the export, not a checker change.
+1. ~~**Close the modeled G4 gaps**~~ — **done**. The export now carries a
+   reachability model for provide-method and spawn bodies (B/Q/C/K/A/F/S/H
+   facts) and the oracle grew the P and W verdicts over it; the
+   `missed-G4` bucket is empty and all five files are modeled by the rule
+   their rejection comment names. No checker change: `src/revl/` is
+   untouched. Residue, tracked above under *fidelity limits*: unnameable
+   `*` for handle/extern-reached emissions, and ceilings deferred to 2.
 2. **Capability ceilings/budgets** (2.0 features): parameterized
    capabilities over the `Ctx` model. **Mostly done.** The `(T,P)`
    algebra of `src/revl/cap_order.py` is modelled in the L1 farm
@@ -130,14 +167,20 @@ not yet express.
    downward along a lineage of admitted spawns, budgets only shrink, the
    runtime counter is not overdrawn, and the whole thing composes with
    G6's confinement through the key-to-token bridge (`capKeys`).
-   **What is left**: the model takes a component's *held* and *reached*
-   capability sets as given, where `lower.py` derives them from the
-   syntax (`_collect_emit_caps`, `_held_capabilities_pairs`,
-   `_spawn_surface_closure`). Deriving them inside the L0 statement
-   fragment needs the same spawn/arrow reachability TODO 1 needs, so the
-   two should land together. Also not modelled: parse-time
+   **What is left**, two halves:
+   (a) *theorem side* — the model takes a component's *held* and
+   *reached* capability sets as given, where `lower.py` derives them from
+   the syntax (`_collect_emit_caps`, `_held_capabilities_pairs`,
+   `_spawn_surface_closure`). TODO 1 has now built that spawn/arrow
+   reachability in the EXPORT, so the remaining work is deriving the same
+   sets inside the L0 statement fragment. Also not modelled: parse-time
    canonicalization (upstream of the order), and `cap_order.disjoint`'s
    deferred (D2) same-token clause.
+   (b) *oracle side* — teach the oracle the checker's ceiling-blind
+   coverage fold plus its separate budget attenuation, so an
+   integer-valued capability parameter is compared the way the checker
+   compares it. The corpus has no such parameter today, so the two agree
+   vacuously; this closes that gap rather than resting on it.
 3. **L3, deliberately deferred**: `Trusted[T]`/`Secret[T]`
    non-interference and WAL commit/abort discharge. Both extend L0 (taint
    is a checker feature, not part of the current core; commit/abort is a
