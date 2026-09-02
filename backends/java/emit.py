@@ -2191,7 +2191,14 @@ def _emit_hash_helper() -> list[str]:
     class does apart from swapping in this rule for the elements: `List` is
     `AbstractList`'s 31-fold, `Map` is `AbstractMap`'s sum of `key ^ value`
     (keys hash with the HOST `hashCode`, because `revlEq` matches map keys with
-    the host `containsKey`), and `Optional` is its element's hash or 0."""
+    the host `containsKey`), and `Optional` is its element's hash or 0.
+
+    Not a hypothetical. On openjdk 26.0.2, `Objects.hashCode(List.of(-0.0))`
+    and `Objects.hashCode(Map.of("k", -0.0))` both differ from their `0.0`
+    twins (`Double.hashCode(-0.0)` is `-2147483648`, `Double.hashCode(0.0)` is
+    `0`), so a record holding either would be `equals` to its twin and hash
+    apart. With this helper the pair hashes alike and a `HashMap` keyed on one
+    finds the other, executed in docs/contract-errata.md's table."""
     return [
         "// The hash that agrees with `revlEq`: 0.0 and -0.0 are one key, and",
         "// a Float nested in a List/Map/Opt is hashed under the same rule.",
