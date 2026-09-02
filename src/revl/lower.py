@@ -9630,25 +9630,63 @@ def _collect_emit_caps(node, caps: set) -> None:
             _collect_emit_caps(value, caps)
 
 
+# The token namespace for a boundary that has NO declared capability token: the
+# G2 wiring key names it. A declared capability token is a dotted identifier
+# (`_capability_list`/`_capability_params` in parser.py), so a token carrying a
+# `:` is UNSPELLABLE in source and a wiring key can never collide with — and so
+# never be mistaken by `covers` for — a declared boundary. Rendered back to the
+# bare key by `_cap_render`, so refusal messages and the G8 audit chain read
+# exactly as before.
+_WIRE_NS = "key:"
+
+
+def _wire_cap(key: str) -> "object":
+    """The fold element for a wiring key with no declared capability token."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    return cap_order.Cap(_WIRE_NS + key, ())
+
+
+def _cap_render(cap: "object") -> str:
+    """The source-facing spelling of a fold element: a namespaced wiring key
+    renders as the bare key, everything else as its canonical `(T, P)`."""
+    text = cap.to_str()
+    return text[len(_WIRE_NS):] if text.startswith(_WIRE_NS) else text
+
+
 def _cap_keyed(key: str, cap_str: str) -> "object":
     """The key-to-token bridge (item 294): resolve a declared emission token
-    string to a `Cap` keyed by the WIRING KEY, carrying the declared token's
-    VALUATION. The token identity stays the wiring key (exactly today's fold
-    element, so a parameter-free token (`kv_a`) yields `Cap("kv_a", ())` which
-    compares bit-for-bit like the old string) while the parameter map now rides
-    into the fold so a narrowing that lives only in `P` actually changes the
-    verdict. Both `reach` and `held` are built through this one function, so the
-    two sides of `covers` are always structured `(T, P)` valuations."""
+    string to the `Cap` it names — the DECLARED token and its valuation.
+
+    `key` is the local `requires` spelling the declaration was reached through
+    and is deliberately NOT the token: two components wire the same boundary
+    under whatever key each likes, so keying the fold element by the wiring key
+    compared two identifiers that name nothing in common. `covers` clause 1 is a
+    BOUNDARY identity test, so both sides must be spelled in the one namespace
+    the boundary actually has — the declared token, the same source of truth
+    `parallel._resolve_emission` reads for the very same crossings. The wiring
+    key still names the boundary where the declaration does NOT (a method with
+    `emission` and no `capabilities[...]` list, an unresolvable service): that
+    element is built by `_wire_cap` in its own token namespace, so a key spelling
+    can never masquerade as a declared token.
+
+    A malformed stored spelling (impossible on a validated IR) degrades to the
+    unnameable `*`, which is fail-closed on BOTH sides: as a reach element it is
+    covered by nothing, as a held element it covers nothing but `*`."""
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
-    return cap_order.Cap(key, cap_order.parse_cap(cap_str).params)
+    del key  # the boundary is the declared token, never the local wiring key
+    try:
+        return cap_order.parse_cap(cap_str)
+    except cap_order.CapError:
+        return cap_order.Cap("*", ())
 
 
 def _emit_step_caps_pairs(node: dict, requires_map: dict, services: dict) -> list:
     """The `Cap`(s) a single lowered `emit` step crosses, resolved through the
     key-to-token bridge. A req-keyed emission resolves key -> requires-target
     service -> the method being called -> that method's `emission[...]`
-    valuation(s); a bare or unresolvable method degrades to the bare key
-    (`Cap(key, ())`, today's element); a host emission is the unnameable `*`."""
+    valuation(s); a bare or unresolvable method declares no token, so the G2
+    wiring key names the boundary (`_wire_cap`, its own namespace); a host
+    emission is the unnameable `*`."""
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
     expr = node.get("expr") or {}
     target = expr.get("target") or {}
@@ -9659,7 +9697,7 @@ def _emit_step_caps_pairs(node: dict, requires_map: dict, services: dict) -> lis
     decl = svc.methods.get(expr.get("method")) if svc is not None else None
     cap_strs = getattr(decl, "capabilities", None) if decl is not None else None
     if not cap_strs:
-        return [cap_order.Cap(key, ())]
+        return [_wire_cap(key)]
     return [_cap_keyed(key, s) for s in cap_strs]
 
 
@@ -9699,25 +9737,26 @@ def _held_capabilities_pairs(comp: dict, base_surface: set,
                              services: dict) -> set:
     """What a component holds (the capabilities it may pass down to a child it
     spawns, item 66, lineage) as structured `(T, P)` pairs. A requires key
-    resolves, through the same bridge, to the declared emission valuation(s) of
-    the service it wires: a bare-token service method contributes the bare key
-    `Cap(key, ())` (today's element, byte-identical), and a parameterized one
-    contributes its narrower cone INSTEAD of the bare key, which is what lets a
-    parent that holds `fs.write(path="/tmp")` refuse a child reaching wider. A
-    plain or unresolvable service keeps the bare key (a child cannot reach a
-    non-emission key, so this only preserves byte-identity)."""
-    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    resolves, through the same bridge, to the DECLARED emission token(s) of the
+    service it wires — the boundary the wiring reaches, not the local spelling
+    it was reached through — carrying each declaration's valuation, which is what
+    lets a parent that holds `fs.write(path="/tmp")` refuse a child reaching
+    wider. A method that declares `emission` with no capability list names no
+    token, so the G2 wiring key names that boundary (`_wire_cap`, its own token
+    namespace). A plain or unresolvable service likewise keeps the namespaced
+    key; a child cannot reach a non-emission key, so that element only ever
+    covers another key-named boundary of the same name."""
     held: set = set(base_surface)
     for key, svcname in (comp.get("requires") or {}).items():
         svc = services.get(svcname)
         emission_methods = ([m for m in svc.methods.values() if m.emission]
                             if svc is not None else [])
         if not emission_methods:
-            held.add(cap_order.Cap(key, ()))
+            held.add(_wire_cap(key))
             continue
         for m in emission_methods:
             if not m.capabilities:
-                held.add(cap_order.Cap(key, ()))
+                held.add(_wire_cap(key))
             else:
                 for s in m.capabilities:
                     held.add(_cap_keyed(key, s))
@@ -9786,9 +9825,10 @@ def _activation_spawn_sites(comp: dict) -> "list[dict]":
 def _cap_offending(cap: "object") -> str:
     """Render an uncovered capability for a refusal message: the unnameable host
     boundary reads in words, everything else as its canonical `(T, P)` spelling
-    (`fs.write`, `fs.write(path="/etc")`)."""
+    (`fs.write`, `fs.write(path="/etc")`, or the bare wiring key that names a
+    boundary no declaration tokens)."""
     return ("an unnameable host boundary" if cap.token == "*"
-            else f"`{cap.to_str()}`")
+            else f"`{_cap_render(cap)}`")
 
 
 def _widening_reason(cap: "object", held: set) -> str | None:
@@ -9796,30 +9836,33 @@ def _widening_reason(cap: "object", held: set) -> str | None:
     held but the VALUATION widens it (the item 294 case). Names the parameter
     and the direction; returns None when the token itself is absent (today's
     missing-boundary case, whose message is enough)."""
-    same_token = [h for h in held if h.token == cap.token and h.token != "*"]
+    same_token = sorted((h for h in held
+                         if h.token == cap.token and h.token != "*"),
+                        key=lambda h: h.to_str())
     if not same_token:
         return None
     child_params = cap.param_map()
     for h in same_token:
         for name, _wide in h.params:
             if name not in child_params:
-                return (f"a capability parameter only narrows; `{cap.to_str()}` "
-                        f"drops `{name}`, which `{h.to_str()}` binds; a dropped "
-                        f"parameter is wider, so the child reaches more than the "
-                        f"parent holds")
+                return (f"a capability parameter only narrows; "
+                        f"`{_cap_render(cap)}` drops `{name}`, which "
+                        f"`{_cap_render(h)}` binds; a dropped parameter is "
+                        f"wider, so the child reaches more than the parent "
+                        f"holds")
     # the token is held with the parameter bound on both sides but the value
     # widens (e.g. a path outside the held cone)
     h = same_token[0]
-    return (f"a capability parameter only narrows; `{cap.to_str()}` is wider "
-            f"than the held `{h.to_str()}` (its value is not within the parent's "
-            f"cone)")
+    return (f"a capability parameter only narrows; `{_cap_render(cap)}` is wider "
+            f"than the held `{_cap_render(h)}` (its value is not within the "
+            f"parent's cone)")
 
 
 def _cap_sorted_strs(caps: set) -> list[str]:
     """Canonical spellings of a Cap set, sorted (the audit-chain rendering). A
-    bare `Cap(key, ())` renders as `key`, byte-identical to the old string, so a
-    parameter-free chain is unchanged."""
-    return sorted(c.to_str() for c in caps)
+    key-named boundary renders as the bare key, byte-identical to the old
+    string, so a parameter-free chain is unchanged."""
+    return sorted(_cap_render(c) for c in caps)
 
 
 def _declares_calls_ceiling(services: dict) -> bool:
@@ -9934,32 +9977,57 @@ def _ceiling_attenuation_check(held: set, child_reach: set) -> "list[dict]":
     since a missing child ceiling reads as `+inf` (unbounded, hence wider). It
     reuses the SAME `_param_leq` ceiling order `covers` would have used.
 
-    The parent's held ceiling for a token is its DECLARED ceiling (the §5.3
+    The parent's held ceiling for a crossing is its DECLARED ceiling (the §5.3
     conservative first cut: the parent's own pre-spawn spend is NOT yet
-    subtracted). When a parent holds several caps under one token, its budget for
-    a param is the most generous (`max`) it declares. Returns a list of
-    violations `{cap, param, child, parent}`; empty means the child attenuates."""
+    subtracted). A budget is scoped to a RESOURCE CONE, never to a bare token:
+    the only held caps that can license a child crossing are those whose
+    resource-only projection COVERS the crossing's own (`covers` on the stripped
+    pairs, the same cone test the crossing fold uses). Aggregating per token
+    instead — the old `max` over every same-token held cap — let a generous
+    budget on a sibling cone (`fs(calls=100,path="/b")`) license a crossing on a
+    cone the parent barely holds (`fs(calls=1,path="/a")`), which is conservative
+    in the UNSOUND direction.
+
+    Nor is the rule a per-parameter `max` over the covering caps: a parent
+    holding `fs(path="/a",calls=1,size=100)` and `fs(path="/a",calls=100,size=1)`
+    holds neither `calls=100` AND `size=100` together. The sound rule is
+    EXISTENTIAL — one single held cap must license the whole crossing: its cone
+    covers, and every ceiling it binds is bound at-or-below by the child. A
+    covering cap that binds NO ceiling licenses freely (the parent declares no
+    budget on that cone at all), which is the byte-identical no-ceiling path.
+
+    Returns a list of violations `{cap, param, child, parent}` (the failures of
+    the closest-fitting covering cap, so the message names one real bound);
+    empty means the child attenuates."""
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
-    # parent budget per (token -> param -> declared ceiling), max over held caps.
-    parent: dict[str, dict[str, int]] = {}
-    for h in held:
-        _, ceils = cap_order.split_ceilings(h)
-        if not ceils:
-            continue
-        row = parent.setdefault(h.token, {})
-        for p, v in ceils.items():
-            row[p] = v if p not in row else max(row[p], v)
+    # (held cap, resource-only cone, declared ceilings), sorted so the violation
+    # reported for an unlicensed crossing is deterministic.
+    split = []
+    for h in sorted(held, key=lambda c: c.to_str()):
+        h_res, h_ceils = cap_order.split_ceilings(h)
+        split.append((h_res, h_ceils))
     violations: list[dict] = []
-    for c in child_reach:
-        budget = parent.get(c.token)
-        if not budget:
-            continue                         # parent declares no ceiling here
-        _, child_ceils = cap_order.split_ceilings(c)
-        for p, wide in budget.items():
-            narrow = child_ceils.get(p)      # None == dropped == +inf == wider
-            if narrow is None or not cap_order._param_leq(p, narrow, wide):
-                violations.append({"cap": c, "param": p,
-                                   "child": narrow, "parent": wide})
+    for c in sorted(child_reach, key=lambda c: c.to_str()):
+        c_res, child_ceils = cap_order.split_ceilings(c)
+        closest: list[dict] | None = None
+        for h_res, h_ceils in split:
+            if not cap_order.covers(h_res, c_res):
+                continue                     # a sibling cone licenses nothing
+            fails: list[dict] = []
+            for p, wide in sorted(h_ceils.items()):
+                narrow = child_ceils.get(p)  # None == dropped == +inf == wider
+                if narrow is None or not cap_order._param_leq(p, narrow, wide):
+                    fails.append({"cap": c, "param": p,
+                                  "child": narrow, "parent": wide})
+            if not fails:
+                closest = None               # this held cap licenses the whole
+                break                        # crossing: admitted, cone and all
+            if closest is None or len(fails) < len(closest):
+                closest = fails
+        # `closest is None` also covers "no held cap's cone covers this crossing"
+        # — unreachable here, since the crossing fold refuses that first.
+        if closest:
+            violations.extend(closest)
     return violations
 
 
@@ -9979,10 +10047,19 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
     parameterized token is actually compared: a child declaring
     `fs.write(path="/etc")` under a parent holding `fs.write(path="/tmp")` is
     refused, and a bare `fs.write` child under that parent is refused too (a
-    dropped parameter widens). A parameter-free program yields bare `Cap`s that
-    compare bit-for-bit like the old wiring-key strings (additive, item 294
-    Slice 1). Where G4 bounds a component's declaration, item 33 the
-    composition, and item 55 the operators, this bounds **lineage**.
+    dropped parameter widens). Where G4 bounds a component's declaration, item
+    33 the composition, and item 55 the operators, this bounds **lineage**.
+
+    Both sides are spelled in the BOUNDARY's namespace, never in a component's
+    local `requires` spelling: `covers` clause 1 is a boundary identity test, so
+    the element carries the DECLARED capability token — the same source of truth
+    `parallel._resolve_emission` reads for the very same crossings. Keying it by
+    the wiring key instead compared two identifiers that name nothing in common,
+    and renaming a child's `requires` key was enough to launder any boundary
+    past the invariant quoted above. A boundary that no declaration tokens (a
+    method with `emission` and no capability list) is still named by its G2
+    wiring key, in its own token namespace (`_wire_cap`), so a key spelling can
+    never masquerade as a declared token.
 
     Applies to activation-body spawns (see `_activation_spawn_sites`); returns
     the per-instance attenuation chain (spawner → child narrowing) for the G8
