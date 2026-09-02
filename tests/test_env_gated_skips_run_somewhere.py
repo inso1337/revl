@@ -24,6 +24,16 @@ So the rule: a variable that `tests/` READS but never SETS is a switch owned by
 something outside the suite. Either CI throws it, or somebody writes down why
 it is a developer-machine-only switch. Silence is no longer one of the options.
 
+AND ONE STEP FURTHER, because "is it set in CI" is the wrong question on its
+own. `REVL_CORDIS4J_CLASSES` is set in the `backend-java` job, which runs only
+`backends/java/test_emit_java.py`; the test that READS it lives in
+`tests/test_realm_conformance.py`, and every job that collects `tests/` leaves
+it unset. So a naive audit answers "yes, it is set" while the probe has still
+never executed. That is item 430's shape exactly, and it is the variant most
+likely to survive a review, so it gets its own check below:
+`test_a_ci_set_gate_is_set_in_a_job_that_actually_runs_it` matches each
+setting step's pytest targets against the files that read the variable.
+
 WHAT THIS DOES NOT CATCH, stated plainly so nobody reads more into a green run
 than is there. This checks env-var gates only. A skip guarded on a FILESYSTEM
 probe -- `shutil.which("cargo")`, `node_modules/.bin/vitest` existing,
@@ -96,6 +106,42 @@ _INTENTIONALLY_LOCAL: dict[str, str] = {
 # the shape is a plain string inside generated source.
 _MIN_REASON_CHARS = 80
 
+# A BARE read -- `os.environ.get(NAME)` with no default, or `os.environ[NAME]`
+# -- is the signature of a gate: nothing supplies a value if CI does not. A read
+# WITH a default is an override, and unset is its correct state. Some bare reads
+# still fall back further down the function, so they are overrides in fact if
+# not in shape; those are named here rather than guessed at.
+_OVERRIDE_NOT_GATE: dict[str, str] = {
+    "REVL_PY": (
+        "Read bare in test_seam_value_leaks_421_f5f6.py, but the helper falls "
+        "back to backends/python/.venv immediately after, exactly as "
+        "ci/placement_smoke.sh does. test_seam2_same_tier_readmission.py reads "
+        "it WITH a default and shows the intent plainly. Unset is correct."
+    ),
+    "REVL_CONFORMANCE_PY": _INTENTIONALLY_LOCAL["REVL_CONFORMANCE_PY"],
+    "REVL_CONFORMANCE_TS": _INTENTIONALLY_LOCAL["REVL_CONFORMANCE_TS"],
+}
+
+# Gates that ARE set in CI, but in a job that does not run the test reading
+# them. This is the item-430 shape once more and the nastiest variant of the
+# class, because "is it set anywhere in CI" answers YES while the test has
+# still never executed. An entry here is an ENUMERATED hole, not an excuse:
+# it must name the job, the reading test, and why it is not closed yet.
+_KNOWN_WRONG_JOB: dict[str, str] = {
+    "REVL_CORDIS4J_CLASSES": (
+        "Set in the `backend-java` job, which runs ONLY "
+        "backends/java/test_emit_java.py. The test that reads it is "
+        "tests/test_realm_conformance.py::test_cordis4j_realm_conformance, and "
+        "every job that collects tests/ (`frontend`, `frontend-cordis`, and the "
+        "item-445 step in `conformance`) leaves it unset, so that probe has "
+        "skipped in CI as completely as the REVL_CROSS_TIER_SLOW ones did. "
+        "Closing it means cloning and compiling cordis4j-core in `conformance` "
+        "the way `backend-java` already does; it is left off here because it "
+        "could not be executed on the audit machine to prove it green first, "
+        "and an unverified CI step is how a red build happens. Roadmap 445."
+    ),
+}
+
 
 def _test_sources() -> list[Path]:
     return sorted(p for p in TESTS.rglob("*.py") if "__pycache__" not in p.parts)
@@ -127,12 +173,17 @@ def _is_environ(node: ast.expr) -> bool:
     return isinstance(node, ast.Attribute) and node.attr == "environ"
 
 
-def _scan(path: Path) -> tuple[set[str], set[str]]:
-    """(names this module reads from the environment, names it sets itself)."""
+def _scan(path: Path) -> tuple[set[str], set[str], set[str]]:
+    """(names read, names the module sets itself, names read with NO default).
+
+    The third set is what separates a gate from an override: a read with a
+    default cannot be starved by CI, a bare one can.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     consts = _const_map(tree)
     reads: set[str] = set()
     owned: set[str] = set()
+    bare: set[str] = set()
 
     for node in ast.walk(tree):
         # os.environ[NAME] -- a read, or a write when it is an assign target
@@ -140,6 +191,7 @@ def _scan(path: Path) -> tuple[set[str], set[str]]:
             name = _as_name(node.slice, consts)
             if name:
                 reads.add(name)
+                bare.add(name)
         # os.environ[NAME] = ... -- the suite owns the variable
         if isinstance(node, ast.Assign):
             for target in node.targets:
@@ -156,31 +208,61 @@ def _scan(path: Path) -> tuple[set[str], set[str]]:
             # os.environ.get(NAME) / os.getenv(NAME)
             if attr == "get" and isinstance(func, ast.Attribute) and _is_environ(func.value):
                 reads.add(first)
+                if len(node.args) == 1:
+                    bare.add(first)
             elif attr == "getenv":
                 reads.add(first)
+                if len(node.args) == 1:
+                    bare.add(first)
             # monkeypatch.setenv(NAME, ...) / monkeypatch.delenv(NAME)
             elif attr in ("setenv", "delenv"):
                 owned.add(first)
 
-    return reads, owned
+    return reads, owned, bare
+
+
+def _scan_all() -> tuple[dict[str, set[Path]], set[str], set[str]]:
+    """(name -> reading files, names the suite owns, names read with no default)."""
+    reads: dict[str, set[Path]] = {}
+    owned: set[str] = set()
+    bare: set[str] = set()
+    for path in _test_sources():
+        try:
+            module_reads, module_owned, module_bare = _scan(path)
+        except SyntaxError:  # pragma: no cover - a broken test file is its own failure
+            continue
+        owned |= module_owned
+        bare |= module_bare
+        for name in module_reads:
+            reads.setdefault(name, set()).add(path)
+    return reads, owned, bare
 
 
 def _external_switches() -> dict[str, set[str]]:
     """Env names `tests/` reads but never sets: name -> modules that read it."""
-    reads: dict[str, set[str]] = {}
-    owned: set[str] = set()
-    for path in _test_sources():
-        try:
-            module_reads, module_owned = _scan(path)
-        except SyntaxError:  # pragma: no cover - a broken test file is its own failure
-            continue
-        owned |= module_owned
-        for name in module_reads:
-            reads.setdefault(name, set()).add(path.name)
+    reads, owned, _ = _scan_all()
+    return {
+        name: {p.name for p in where}
+        for name, where in reads.items()
+        if name not in owned and name not in _AMBIENT
+    }
+
+
+def _external_gate_files() -> dict[str, set[Path]]:
+    """Bare-read external switches: name -> the test files that read them.
+
+    Bare means no default, so nothing but CI can supply a value. Names listed
+    in `_OVERRIDE_NOT_GATE` fall back further down their own helper and are
+    excluded by hand, because that fallback is not visible at the call site.
+    """
+    reads, owned, bare = _scan_all()
     return {
         name: where
         for name, where in reads.items()
-        if name not in owned and name not in _AMBIENT
+        if name in bare
+        and name not in owned
+        and name not in _AMBIENT
+        and name not in _OVERRIDE_NOT_GATE
     }
 
 
@@ -215,6 +297,58 @@ def _ci_sets() -> set[str]:
         found |= set(yaml_env.findall(live))
         found |= set(shell_set.findall(live))
     return found
+
+
+def _pytest_targets(run: str) -> list[str]:
+    """Repo-relative paths a `run:` block hands to pytest.
+
+    A step that runs pytest with no path at all collects the whole rootdir, so
+    it covers everything; that is returned as a bare ".".
+    """
+    targets: list[str] = []
+    for line in run.splitlines():
+        if "pytest" not in line:
+            continue
+        prefix = ""
+        # `cd backends/python && .venv/bin/pytest -q` runs in a subdirectory,
+        # so its paths are relative to that, not to the repo root.
+        cd_match = re.search(r"cd\s+([\w./-]+)\s*&&", line)
+        if cd_match:
+            prefix = cd_match.group(1).rstrip("/") + "/"
+        args = line.split("pytest", 1)[1].split()
+        paths = [
+            a for a in args
+            if not a.startswith("-") and (a.endswith(".py") or "/" in a)
+        ]
+        if not paths:
+            targets.append(prefix or ".")
+        targets += [prefix + p for p in paths]
+    return targets
+
+
+def _covers(target: str, rel: str) -> bool:
+    """Does a pytest target collect the test file at repo-relative `rel`?"""
+    if target in (".", ""):
+        return True
+    target = target.rstrip("/")
+    return rel == target or rel.startswith(target + "/")
+
+
+def _steps_setting(name: str) -> list[tuple[str, str]]:
+    """(job, run-command) for every workflow step whose `env:` sets `name`."""
+    yaml = pytest.importorskip(
+        "yaml", reason="PyYAML is needed to read which job sets which variable"
+    )
+    out: list[tuple[str, str]] = []
+    for path in sorted(WORKFLOWS.rglob("*.yml")) + sorted(WORKFLOWS.rglob("*.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job, spec in (doc.get("jobs") or {}).items():
+            job_env = (spec or {}).get("env") or {}
+            for step in (spec or {}).get("steps") or []:
+                step_env = {**job_env, **((step or {}).get("env") or {})}
+                if name in step_env:
+                    out.append((job, str((step or {}).get("run", ""))))
+    return out
 
 
 # STAGED, and deliberately not green yet.
@@ -284,18 +418,80 @@ def test_no_stale_local_declarations():
     )
 
 
-@pytest.mark.parametrize("name", sorted(_INTENTIONALLY_LOCAL))
+def test_a_ci_set_gate_is_set_in_a_job_that_actually_runs_it():
+    """"Set in CI" is not the question. "Set in the job that runs the test" is.
+
+    This is the nastiest variant of the class and the one item 430 was: the
+    variable IS assigned somewhere in the workflow, so every naive audit --
+    including `test_every_env_gate_in_tests_is_set_in_ci_or_declared_local`
+    above -- answers YES, while the test that reads it still executes nowhere
+    because the assignment lives in a job that never collects that file.
+
+    `REVL_CORDIS4J_CLASSES` is exactly that today and is enumerated in
+    `_KNOWN_WRONG_JOB` rather than left silent.
+    """
+    ci = _ci_sets()
+    stranded: dict[str, str] = {}
+
+    for name, files in sorted(_external_gate_files().items()):
+        if name not in ci or name in _KNOWN_WRONG_JOB:
+            continue
+        rels = sorted(f.relative_to(ROOT).as_posix() for f in files)
+        setting = _steps_setting(name)
+        covered = any(
+            _covers(target, rel)
+            for _job, run in setting
+            for target in _pytest_targets(run)
+            for rel in rels
+        )
+        if not covered:
+            jobs = sorted({job for job, _ in setting}) or ["<no step env>"]
+            stranded[name] = f"set in {jobs}, but read by {rels}, which no such step runs"
+
+    assert not stranded, (
+        "these gates are set in CI but in a job that does not run the test "
+        "reading them, so the test still skips everywhere:\n"
+        + "\n".join(f"  {n}: {why}" for n, why in stranded.items())
+        + "\n\nSet the variable in the job that actually collects the file, or "
+        "enumerate it in _KNOWN_WRONG_JOB with the job, the test, and why it is "
+        "not closed. Roadmap items 430 and 445."
+    )
+
+
+def test_no_stale_wrong_job_declarations():
+    """The enumerated-hole registry may only shrink, same as the local one."""
+    gates = _external_gate_files()
+    ci = _ci_sets()
+    for name in sorted(_KNOWN_WRONG_JOB):
+        assert name in gates, (
+            f"{name} is enumerated as a wrong-job hole but is no longer a "
+            f"bare-read gate in tests/. Drop the entry."
+        )
+        assert name in ci, (
+            f"{name} is enumerated as a wrong-job hole but is no longer set in "
+            f"CI at all, so it belongs in _INTENTIONALLY_LOCAL or nowhere."
+        )
+
+
+@pytest.mark.parametrize(
+    "name", sorted({**_INTENTIONALLY_LOCAL, **_KNOWN_WRONG_JOB, **_OVERRIDE_NOT_GATE})
+)
 def test_local_declaration_carries_a_real_reason(name):
     """A one-word excuse is how the class survives. Make writing it cost."""
-    reason = _INTENTIONALLY_LOCAL[name]
+    reason = {**_INTENTIONALLY_LOCAL, **_KNOWN_WRONG_JOB, **_OVERRIDE_NOT_GATE}[name]
     assert len(reason) >= _MIN_REASON_CHARS, (
         f"{name}: the reason is {len(reason)} characters. Explain why CI "
         f"cannot set it, not merely that it does not."
     )
-    lowered = reason.lower()
-    assert "slow" not in lowered or "separate repo" in lowered, (
+    # Look for "slow" as an English word offered as the justification, not as
+    # part of an identifier: REVL_CROSS_TIER_SLOW is legitimately named in
+    # several of these reasons, and it is a name, not an excuse.
+    prose = re.sub(r"`[^`]*`", " ", reason)          # drop backticked code
+    prose = re.sub(r"\b[A-Z][A-Z0-9_]{2,}\b", " ", prose)  # drop SHOUTY identifiers
+    assert not re.search(r"\bslow(ness|ly)?\b", prose, re.IGNORECASE), (
         f"{name}: slowness is not a reason to measure nothing. A slow suite "
-        f"belongs in a dedicated job, which is what `conformance` is for."
+        f"belongs in a dedicated job, which is what `conformance` is for. "
+        f"Give the reason CI cannot set it."
     )
 
 
