@@ -1,10 +1,26 @@
-"""The agent-first component registry — phase 0, the read path (roadmap item 49).
+"""The agent-first component registry (roadmap item 49).
 
 The product line (docs/registry.md): *agents import existing components instead
-of regenerating them, and the whole loop costs two calls.* Phase 0 builds the
+of regenerating them, and the whole loop costs two calls.* Phase 0 built the
 half that lets an agent find something to import — `revl_resolve` — over a
-git-backed index. Publish/gauntlet (phase 1) and hosted-index/versioning
-(phase 2) are explicitly out of scope here.
+git-backed index, and that is still the bulk of this module.
+
+What has landed since, and where it lives here:
+
+* **phase 1, publish/gauntlet.** `truc ship` (src/revl/truc/components/shipper.rvl)
+  is the publish front end, gated by the target registry's declared evidence
+  policy and a cold gauntlet re-run; `build_evidence` assembles the item-293
+  evidence bundle from the existing producers' verbatim output.
+* **phase 2, versioning.** An entry declares its release in `<entry>/version`
+  (428 F12), and the *release* section below is the update flow on top of it:
+  `release_facts` / `publish_release` — a second release of a name, the item-64
+  computed-bump refusal, the item-261 derived changelog attached to each
+  release, and a frozen `releases/<version>/` history so the chain survives the
+  next publish.
+
+Still out of scope, and still phase 2's: a hosted index, accounts and tokens,
+authenticated publisher identity, and key namespacing (item 9's deferred half).
+docs/registry.md §7 keeps that list.
 
 Two ideas do all the work, and neither is new:
 
@@ -42,7 +58,8 @@ from .errors import RevlError
 from .lower import _service_compatible, _service_equal, _service_from_ir
 from .parser import MethodDecl, ServiceDecl
 
-INDEX_VERSION = "1"          # bumped for the per-entry `version` row (428 F12)
+INDEX_VERSION = "2"          # "1": the per-entry `version` row (428 F12)
+#                              "2": the per-entry `releases` row (item 49 phase 2)
 INDEX_FILENAME = "index.json"
 
 # A published component's version, declared by the publisher in a one-line
@@ -58,6 +75,34 @@ INDEX_FILENAME = "index.json"
 # unversioned: nothing is invented for it, and a consumer asking for a version
 # is refused rather than answered about a different one.
 ENTRY_VERSION_FILENAME = "version"
+
+# The frozen release history of one entry: `<entry>/releases/<version>/`, written
+# by `publish_release` and never rewritten (roadmap item 49 phase 2).
+#
+# Phase 0 kept exactly one release per name, which is why an update was refused
+# outright and why item 261's derived changelog had nothing to diff ACROSS: the
+# only prior release was the one about to be overwritten. A release directory
+# freezes the bytes, the manifest and the derived changelog of each release as it
+# is published, so the chain `1.0.0 -> 1.1.0 -> 2.0.0` survives the next publish
+# and a consumer can read what changed between two named releases.
+RELEASES_DIRNAME = "releases"
+RELEASE_RECORD_FILENAME = "release.json"
+RELEASE_CHANGELOG_FILENAME = "changelog.json"
+
+# How a release-to-release version bump was (or was not) checked against the
+# bump item 64 COMPUTES from the interface diff. These are the three honest
+# answers, and `cannot verify` is never rounded to `verified`.
+BUMP_VERIFIED = "verified"
+BUMP_UNVERIFIABLE = "cannot verify"
+BUMP_FIRST_RELEASE = "first release"
+
+# The publisher's declared version scheme. `semver` (the default) is the only
+# scheme whose bump can be checked; `opaque` is a publisher OPTING OUT of that
+# check for dates/build ids, and every release published under it is recorded
+# `cannot verify` forever — the opt-out is visible to consumers, not silent.
+SCHEME_SEMVER = "semver"
+SCHEME_OPAQUE = "opaque"
+SCHEMES = (SCHEME_SEMVER, SCHEME_OPAQUE)
 
 # Deliberately narrow: one line, no whitespace, no path or shell metacharacters,
 # so a version is safe to print, compare and put in a lock row. Nothing here
@@ -509,7 +554,8 @@ def _audit_document(ir: dict) -> dict:
 
 
 def _entry_index_row(name: str, ir: dict, source: str, manifest: dict,
-                     manifest_text: str, version: str | None = None) -> dict:
+                     manifest_text: str, version: str | None = None,
+                     releases: list | None = None) -> dict:
     """What the generated index records for one component — enough to rank and
     shortlist without opening its source."""
     provides: dict = {}
@@ -534,6 +580,13 @@ def _entry_index_row(name: str, ir: dict, source: str, manifest: dict,
     # string this code could have made up, and consumers read it that way.
     if version is not None:
         row["version"] = version
+    # The frozen release chain, read off `<entry>/releases/`. Only present when
+    # the entry has one: an absent key means "this entry has no release history
+    # recorded here", which is what every entry published before item 49 phase 2
+    # honestly is. A consumer deriving a changelog ACROSS releases reads this to
+    # learn which releases it may ask about.
+    if releases:
+        row["releases"] = list(releases)
     return row
 
 
@@ -621,7 +674,8 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
         if write:
             (entry_dir / "manifest.json").write_text(manifest_text, encoding="utf-8")
         rows[name] = _entry_index_row(name, ir, source, manifest, manifest_text,
-                                      _entry_version(entry_dir))
+                                      _entry_version(entry_dir),
+                                      released_versions(entry_dir))
     index = {"indexVersion": INDEX_VERSION, "components": rows}
     if write:
         index_text = json.dumps(index, indent=2, sort_keys=True) + "\n"
@@ -663,6 +717,421 @@ def verify(registry_dir: str | os.PathLike) -> list[str]:
                 f"{entry_dir.name}: manifest.json is not reproducible from "
                 f"component.rvl by the current compiler")
     return problems
+
+
+# ------------------------------------------------------------- releases (phase 2)
+#
+# Phase 0 was a read path, and the one write path built on top of it (`truc
+# ship`) could only ever publish a name ONCE: a name already in `components/`
+# was refused as first-come, so there was no update flow, no second release, and
+# therefore nothing for item 64's computed bump to be checked against or for item
+# 261's derived changelog to be derived across. This is that flow.
+#
+# **Who may write.** Unchanged and stated plainly: whoever can write the registry
+# directory. This is a git-backed repository, so that authority is the repository's
+# (a commit, a review, a merge), and there is no registry-side identity yet —
+# accounts, tokens and signed publisher identity are the REMAINING half of phase 2
+# (docs/registry.md §7). What changes here is that this authority can now REPLACE
+# an existing name rather than only claim a free one, so every replacement is
+# checked and recorded:
+#
+#   * an update must DECLARE its release, and a release already published is
+#     immutable (the bytes of every release stay frozen under `releases/`, so a
+#     substitution is visible and diffable rather than silent);
+#   * the declared version must satisfy the bump item 64 COMPUTES from the
+#     interface diff against the release being replaced — an under-bump is
+#     refused by name (item 64's registry-refusal half);
+#   * where that bump CANNOT be computed the publish is REFUSED, not waved
+#     through, unless the publisher explicitly declares an opaque version scheme,
+#     and then every release under it is recorded `cannot verify` forever;
+#   * where the entry being replaced records a publisher, the replacement must
+#     declare the same one; where it records none there is no continuity claim to
+#     check and the release says so. That is continuity of a self-asserted label,
+#     NOT authentication — it catches a name quietly changing hands, and it is not
+#     a substitute for the signed publisher identity phase 2 still owes.
+#
+# Nothing here invents a diff, a bump or a release note: the bump is
+# `version.derive` (item 64) and the note is `changelog.derive_changelog`
+# (item 261), both handed the two compiled IRs.
+
+
+def _semver(value: str | None) -> tuple[int, int, int] | None:
+    """`MAJOR.MINOR.PATCH` as a comparable triple, or None when the token is not
+    semver. None is the honest answer for a date or a build id — the registry
+    imposes no scheme (§1.1); it only reports that an unschemed token cannot be
+    ORDERED or bump-checked."""
+    if not value:
+        return None
+    parts = str(value).strip().lstrip("v").split(".")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return None
+    return (int(parts[0]), int(parts[1]), int(parts[2]))
+
+
+def released_versions(entry_dir: str | os.PathLike) -> list[str]:
+    """The frozen releases of one entry, oldest-comparable first.
+
+    Read off `<entry>/releases/`, so it is a fact about the directory rather
+    than a claim the index makes about itself. Semver releases sort by value and
+    anything else sorts after them by name, so the order is total and
+    deterministic (the index is a regenerate-or-red artifact)."""
+    releases = Path(entry_dir) / RELEASES_DIRNAME
+    if not releases.is_dir():
+        return []
+    names = [p.name for p in releases.iterdir() if p.is_dir()]
+    return sorted(names, key=lambda v: (_semver(v) is None, _semver(v) or (), v))
+
+
+def _compile_source(name: str, source: str) -> dict:
+    """Compile an in-memory component source under a stable virtual path, so the
+    IR (and therefore the manifest and the bump) does not depend on where the
+    publisher's working copy happens to live."""
+    path = f"/__revl_registry__/{name}/component.rvl"
+    return compile_files([path], sources={path: source})
+
+
+def _recorded_publisher(entry_dir: Path, previous: str) -> str:
+    """The publisher this entry is on record as coming from, or "" when nothing
+    records one.
+
+    Two places record it, nearest first: the release record frozen when the
+    current release was published, then the evidence bundle's provenance. Both
+    are SELF-ASSERTED — a field in a file the publisher wrote — so this is used
+    only for CONTINUITY: the same label must keep publishing the same name. It
+    catches a name quietly changing hands; it is not authentication, and it is
+    not a substitute for the signed publisher identity phase 2 still owes
+    (docs/registry.md §7)."""
+    if previous:
+        record = _read_json(entry_dir / RELEASES_DIRNAME / previous /
+                            RELEASE_RECORD_FILENAME)
+        if record and record.get("publisher"):
+            return str(record["publisher"])
+    provenance = _read_json(entry_dir / EVIDENCE_DIRNAME / "provenance.json")
+    return str((provenance or {}).get("publisher") or "")
+
+
+def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
+                  declared_version: str | None = None, *,
+                  scheme: str = SCHEME_SEMVER,
+                  publisher: str | None = None) -> dict:
+    """Everything a publish gate needs to decide whether this publish may
+    proceed, computed from the registry exactly as it stands. Writes nothing.
+
+    `refusals` is the answer: empty means the publish may proceed, and every
+    entry in it is a reason a consumer would have been misled. It is computed
+    here, in the registry, because these are registry semantics — `truc ship`
+    reads the same facts to phrase its refusal, and `publish_release` re-checks
+    them itself so the write path is not safe only because its caller looked.
+    """
+    entry_dir = _components_dir(registry_dir) / name
+    declared = (declared_version or "").strip()
+    scheme = scheme or SCHEME_SEMVER
+    refusals: list[str] = []
+
+    facts: dict = {
+        "name": name,
+        "isUpdate": entry_dir.is_dir(),
+        "declaredVersion": declared,
+        "scheme": scheme,
+        "previousVersion": "",
+        "publishedReleases": [],
+        "releaseExists": False,
+        "computedBump": "",
+        "requiredMinimum": "",
+        "declaredSatisfiesBump": False,
+        "declaredIsNewer": False,
+        "bumpCheck": BUMP_FIRST_RELEASE,
+        "bumpCheckReason": "",
+        "publisherContinuity": "not applicable",
+        "recordedPublisher": "",
+        "declaredPublisher": (publisher or "").strip(),
+        "changes": [],
+        "refusals": refusals,
+    }
+
+    if scheme not in SCHEMES:
+        refusals.append(
+            f"unknown version scheme {scheme!r}; the registry knows "
+            f"{', '.join(SCHEMES)}")
+        return facts
+
+    if declared and not _VERSION_RE.match(declared):
+        refusals.append(
+            f"declared version {declared!r} is not one token matching "
+            f"{_VERSION_RE.pattern}; a version a consumer cannot pin against is "
+            "worse than none at all")
+        return facts
+
+    # The new source must compile before anything is written: every check below
+    # reads its IR, and a registry left holding a source the compiler refuses is
+    # exactly the half-written state the empty-guard exists to prevent.
+    try:
+        new_ir = _compile_source(name, source)
+    except RevlError as error:
+        refusals.append(f"{name} does not compile, so it cannot be published:\n{error}")
+        return facts
+
+    if not facts["isUpdate"]:
+        # A first publish: nothing to bump from, nothing to diff, no publisher to
+        # continue. An unversioned first release stays legal (§1.1) but can never
+        # be UPDATED, because rule 2 below has nothing to bump from — `truc ship`
+        # says so at publish time rather than at the surprise a year later.
+        return facts
+
+    facts["publishedReleases"] = released_versions(entry_dir)
+    facts["releaseExists"] = declared in facts["publishedReleases"]
+    previous = _entry_version(entry_dir) or ""
+    facts["previousVersion"] = previous
+    facts["recordedPublisher"] = _recorded_publisher(entry_dir, previous)
+
+    # 1. an update must name its release.
+    if not declared:
+        refusals.append(
+            f'"{name}" is already published; an update must declare which '
+            "release it is (`[ship] version` in truc.toml). Replacing the "
+            "published bytes without naming a new release leaves every consumer "
+            "pinned to a version that no longer describes what it fetches")
+
+    # 2. and it must have something to bump FROM.
+    if not previous:
+        refusals.append(
+            f'the published "{name}" declares no version, so there is no '
+            "release to bump from and no computed bump to check a new one "
+            "against. Give the published entry a `version` file naming the "
+            "release it already is before publishing over it")
+
+    # 3. releases are immutable.
+    if facts["releaseExists"]:
+        refusals.append(
+            f'"{name}@{declared}" is already published and a release is '
+            "immutable; publish the next release instead")
+    elif declared and declared == previous:
+        refusals.append(
+            f'"{name}@{declared}" is the release already published under this '
+            "name; publish the next release instead")
+
+    prev_triple, new_triple = _semver(previous), _semver(declared)
+    facts["declaredIsNewer"] = bool(
+        prev_triple and new_triple and new_triple > prev_triple)
+
+    # 4. the computed bump (item 64), and 5. the declared version against it.
+    if previous and declared:
+        prior_source = _read(entry_dir / "component.rvl")
+        try:
+            prior_ir = _compile_source(name, prior_source)
+        except RevlError as error:
+            facts["bumpCheck"] = BUMP_UNVERIFIABLE
+            facts["bumpCheckReason"] = (
+                f"the published release {previous} no longer compiles with this "
+                f"toolchain, so the interface diff cannot be taken: {error}")
+        else:
+            from .version import derive as version_derive  # noqa: PLC0415
+            verdict = version_derive(prior_ir, new_ir, previous if prev_triple else None)
+            facts["computedBump"] = verdict["bump"]
+            facts["changes"] = verdict["changes"]
+            if prev_triple and new_triple:
+                facts["requiredMinimum"] = verdict["nextVersion"] or ""
+                required = _semver(facts["requiredMinimum"])
+                # An OVER-bump is not a contradiction: declaring 2.0.0 where a
+                # minor suffices is conservative and misleads nobody. An
+                # UNDER-bump is, and that is the one this refuses.
+                facts["declaredSatisfiesBump"] = bool(
+                    required and new_triple >= required)
+                facts["bumpCheck"] = BUMP_VERIFIED
+            else:
+                facts["bumpCheck"] = BUMP_UNVERIFIABLE
+                facts["bumpCheckReason"] = (
+                    f"the versions in play ({previous!r} -> {declared!r}) are not "
+                    "both MAJOR.MINOR.PATCH, so the computed bump "
+                    f"({verdict['bump']}) cannot be compared against them")
+
+        if facts["bumpCheck"] == BUMP_UNVERIFIABLE and scheme != SCHEME_OPAQUE:
+            refusals.append(
+                f'the required bump for "{name}" cannot be verified '
+                f'({facts["bumpCheckReason"]}). Publishing anyway would ship a '
+                "version number nothing checked; declare "
+                f'`[ship] version_scheme = "{SCHEME_OPAQUE}"` to publish with the '
+                "check recorded as unverified for every consumer to see, or use "
+                "MAJOR.MINOR.PATCH versions so the bump can be checked")
+        elif facts["bumpCheck"] == BUMP_VERIFIED:
+            if not facts["declaredIsNewer"]:
+                refusals.append(
+                    f'"{declared}" does not follow "{previous}"; a new release '
+                    "must be greater than the one it replaces")
+            elif not facts["declaredSatisfiesBump"]:
+                why = "; ".join(
+                    c["reason"] for c in facts["changes"][:3]) or "no interface change"
+                refusals.append(
+                    f'the declared version "{declared}" contradicts the computed '
+                    f'bump: the interface diff against "{previous}" requires a '
+                    f'{facts["computedBump"]} bump ({facts["requiredMinimum"]} or '
+                    f"later) — {why}. The version number is a measurement, not a "
+                    "choice (`revl version --against`, roadmap item 64)")
+
+    # 6. publisher continuity.
+    recorded, claimed = facts["recordedPublisher"], facts["declaredPublisher"]
+    if not recorded:
+        facts["publisherContinuity"] = BUMP_UNVERIFIABLE
+    elif recorded == claimed:
+        facts["publisherContinuity"] = BUMP_VERIFIED
+    else:
+        facts["publisherContinuity"] = "mismatch"
+        refusals.append(
+            f'"{name}" is published by {recorded!r} and this publish declares '
+            f"{claimed or 'no publisher'}; a name does not change hands "
+            "silently. (This is continuity of a self-asserted label, not "
+            "authentication — see docs/registry.md §7)")
+
+    return facts
+
+
+def _release_record(facts: dict, source: str, manifest_text: str,
+                    headline: dict | None) -> dict:
+    """The frozen record of one release: what it is, what it replaced, what was
+    checked, and — where a check could not be made — that it could not."""
+    record = {
+        "kind": "revl.release",
+        "version": facts["declaredVersion"],
+        "previousVersion": facts["previousVersion"],
+        "sourceSha256": _sha256(source),
+        "manifestSha256": _sha256(manifest_text),
+        "scheme": facts["scheme"],
+        "computedBump": facts["computedBump"] or None,
+        "bumpCheck": facts["bumpCheck"],
+        "publisherContinuity": facts["publisherContinuity"],
+        "publisher": facts["declaredPublisher"] or None,
+    }
+    if facts["bumpCheckReason"]:
+        record["bumpCheckReason"] = facts["bumpCheckReason"]
+    if headline is not None:
+        record["headline"] = headline
+    return record
+
+
+def _freeze_release(entry_dir: Path, version: str, *, source: str,
+                    manifest_text: str, record: dict | None,
+                    changelog: dict | None) -> None:
+    """Write `<entry>/releases/<version>/` from bytes already on disk. Never
+    overwrites an existing release directory: a frozen release is frozen."""
+    if not version:
+        return
+    target = entry_dir / RELEASES_DIRNAME / version
+    if target.exists():
+        return
+    target.mkdir(parents=True)
+    (target / "component.rvl").write_text(source, encoding="utf-8")
+    (target / "manifest.json").write_text(manifest_text, encoding="utf-8")
+    if record is not None:
+        (target / RELEASE_RECORD_FILENAME).write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if changelog is not None:
+        (target / RELEASE_CHANGELOG_FILENAME).write_text(
+            json.dumps(changelog, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
+                    version: str | None = None, scheme: str = SCHEME_SEMVER,
+                    publisher: str | None = None,
+                    description: str | None = None,
+                    tags: list | None = None,
+                    dossier_text: str | None = None) -> dict:
+    """Publish `source` as `name` (a first release or an update), and return the
+    release record. Raises `RevlError` on any refusal, having written nothing.
+
+    The registry's write path. It re-runs `release_facts` itself rather than
+    trusting the caller to have looked, freezes the release being replaced
+    before it is replaced, regenerates the index the way CI would, and attaches
+    the derived changelog (item 261) for the release it publishes.
+    """
+    facts = release_facts(registry_dir, name, source, version,
+                          scheme=scheme, publisher=publisher)
+    if facts["refusals"]:
+        raise RevlError(
+            str(Path(registry_dir) / "components" / name), 0,
+            f"registry: refusing to publish \"{name}\" — "
+            + "; ".join(facts["refusals"]))
+
+    entry_dir = _components_dir(registry_dir) / name
+    declared = facts["declaredVersion"]
+    previous = facts["previousVersion"]
+    prior_source = _read(entry_dir / "component.rvl") if facts["isUpdate"] else ""
+    prior_manifest_text = ""
+    if facts["isUpdate"] and (entry_dir / "manifest.json").exists():
+        prior_manifest_text = _read(entry_dir / "manifest.json")
+
+    # Freeze the release being replaced, if this registry never froze it (an
+    # entry published before phase 2 has bytes but no release directory). Its
+    # record is honest about being reconstructed at replacement time.
+    if previous and prior_manifest_text:
+        _freeze_release(
+            entry_dir, previous, source=prior_source,
+            manifest_text=prior_manifest_text,
+            record={"kind": "revl.release", "version": previous,
+                    "previousVersion": "",
+                    "sourceSha256": _sha256(prior_source),
+                    "manifestSha256": _sha256(prior_manifest_text),
+                    "computedBump": None, "bumpCheck": BUMP_UNVERIFIABLE,
+                    "bumpCheckReason": "archived when it was replaced, not when "
+                                       "it was published: this registry did not "
+                                       "record releases at the time",
+                    "publisherContinuity": BUMP_UNVERIFIABLE,
+                    "publisher": facts["recordedPublisher"] or None,
+                    "scheme": facts["scheme"]},
+            changelog=None)
+
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    (entry_dir / "component.rvl").write_text(source, encoding="utf-8")
+    if declared:
+        (entry_dir / ENTRY_VERSION_FILENAME).write_text(declared + "\n", encoding="utf-8")
+    if dossier_text:
+        (entry_dir / "dossier.json").write_text(dossier_text, encoding="utf-8")
+
+    # manifest.json is produced by the current compiler, never copied from the
+    # publisher — the reproducibility invariant does the honesty work (§1).
+    build_index(registry_dir)
+    manifest_text = _read(entry_dir / "manifest.json")
+
+    # The release note is computed (item 261): the same two IRs the bump was
+    # read off, handed to the shipped renderer. A first release has nothing to
+    # diff against and gets no changelog rather than an invented one.
+    changelog = None
+    headline = None
+    if previous and prior_source:
+        from .changelog import derive_changelog  # noqa: PLC0415
+        try:
+            changelog = derive_changelog(
+                _compile_source(name, prior_source), _compile_source(name, source),
+                previous if _semver(previous) else None,
+                from_label=f"{name}@{previous}", to_label=f"{name}@{declared}")
+        except (RevlError, ValueError):
+            changelog = None
+        else:
+            headline = changelog.get("headline")
+
+    record = _release_record(facts, source, manifest_text, headline)
+    _freeze_release(entry_dir, declared, source=source, manifest_text=manifest_text,
+                    record=record, changelog=changelog)
+
+    # The index row's `releases` list is read off the directory, so it only
+    # becomes true after the freeze above; regenerate once more so the committed
+    # index is the one CI would regenerate.
+    index = build_index(registry_dir)
+    row = (index.get("components") or {}).get(name)
+    if row is not None and (description is not None or tags is not None):
+        row["description"] = description or ""
+        row["tags"] = list(tags or [])
+        (Path(registry_dir) / INDEX_FILENAME).write_text(
+            json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return record
+
+
+def release_changelog(registry_dir: str | os.PathLike, name: str,
+                      version: str) -> dict | None:
+    """The changelog attached to one published release, or None when that
+    release carries none (a first release, or one published before phase 2)."""
+    entry_dir = _components_dir(registry_dir) / name
+    return _read_json(entry_dir / RELEASES_DIRNAME / version /
+                      RELEASE_CHANGELOG_FILENAME)
 
 
 # --------------------------------------------------------------- evidence publish
@@ -1709,4 +2178,8 @@ __all__ = ["Registry", "RegistryEntry", "EvidenceBundle", "EvidenceAssessment",
            "build_index", "build_evidence", "verify", "resolve",
            "load_evidence_bundle", "assess_evidence", "INDEX_VERSION",
            "ENTRY_VERSION_FILENAME",
+           "release_facts", "publish_release", "released_versions",
+           "release_changelog", "RELEASES_DIRNAME", "RELEASE_RECORD_FILENAME",
+           "RELEASE_CHANGELOG_FILENAME", "BUMP_VERIFIED", "BUMP_UNVERIFIABLE",
+           "BUMP_FIRST_RELEASE", "SCHEME_SEMVER", "SCHEME_OPAQUE", "SCHEMES",
            "EVIDENCE_DIRNAME", "EVIDENCE_FILES"]

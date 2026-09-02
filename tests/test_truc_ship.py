@@ -87,7 +87,9 @@ def _gauntlet_dossier(source: str) -> str:
 
 def _project(tmp_path: Path, *, registry: Path, reg_name: str, source: str,
              description: str | None, tags: list[str] | None,
-             dossier: str | None) -> Path:
+             dossier: str | None, version: str | None = None,
+             version_scheme: str | None = None,
+             publisher: str | None = None) -> Path:
     proj = tmp_path / "proj"
     (proj / "src").mkdir(parents=True, exist_ok=True)
     (proj / "src" / "comp.rvl").write_text(source)
@@ -100,6 +102,12 @@ def _project(tmp_path: Path, *, registry: Path, reg_name: str, source: str,
         toml.append(f'description = "{description}"')
     if tags is not None:
         toml.append("tags = [" + ", ".join(f'"{t}"' for t in tags) + "]")
+    if version is not None:
+        toml.append(f'version = "{version}"')
+    if version_scheme is not None:
+        toml.append(f'version_scheme = "{version_scheme}"')
+    if publisher is not None:
+        toml.append(f'publisher = "{publisher}"')
     if dossier is not None:
         (proj / "dossier.json").write_text(dossier)
         toml.append('evidence = "dossier.json"')
@@ -240,23 +248,135 @@ def test_ship_default_policy_is_audit_when_registry_declares_none(tmp_path):
     assert not (reg / "components" / "greeter" / "dossier.json").exists()
 
 
-# ---------------------------------------------------------------- first-come
+# ------------------------------------------------- first-come and the update flow
+# A free name is still claimed first-come. A name already published may now be
+# REPUBLISHED as a new release (roadmap item 49 phase 2), and every rule that
+# makes that safe is the registry's — `tests/test_registry_releases.py` is the
+# gate on those; these prove `truc ship` enforces exactly them, end to end.
 
-def test_ship_refuses_a_name_already_claimed(tmp_path):
+GREETER_PLUS = """\
+service Greet {
+  fn hello(name: Str) -> Str
+  fn bye(name: Str) -> Str
+}
+component Greeter provides greet: Greet {
+  provide greet {
+    fn hello(name) = "hello, ".concat(name)
+    fn bye(name) = "bye, ".concat(name)
+  }
+}
+"""
+
+
+def test_ship_refuses_an_update_to_a_name_published_without_a_version(tmp_path):
+    """Fail closed. Nothing recorded which release the published bytes are, so
+    there is no bump to compute and nothing a new version could be checked
+    against — this is also what protects every entry published before phase 2."""
     reg = _empty_registry(tmp_path, "community", "audit")
     proj = _project(tmp_path, registry=reg, reg_name="community", source=GREETER,
                     description="First one.", tags=["a"], dossier=None)
-    assert _truc(proj, "ship", "greeter").returncode == 0
+    first = _truc(proj, "ship", "greeter")
+    assert first.returncode == 0, first.stdout
+    assert "UNVERSIONED" in first.stdout
 
-    # a second, different project trying to claim the same name is refused.
+    # a second, different project trying to take the name over is refused.
     other = GREETER.replace("hello, ", "hi, ")
     proj2 = _project(tmp_path / "second", registry=reg, reg_name="community",
                      source=other, description="Second one.", tags=["b"],
+                     dossier=None, version="2.0.0")
+    r = _truc(proj2, "ship", "greeter")
+    assert r.returncode == 1, r.stdout
+    assert "declares no version" in r.stdout
+    # the original entry is unchanged (still the first source).
+    assert (reg / "components" / "greeter" / "component.rvl").read_text() == GREETER
+
+
+def test_ship_refuses_an_update_that_does_not_declare_its_release(tmp_path):
+    reg = _empty_registry(tmp_path, "community", "audit")
+    proj = _project(tmp_path, registry=reg, reg_name="community", source=GREETER,
+                    description="First one.", tags=["a"], dossier=None,
+                    version="1.0.0")
+    assert _truc(proj, "ship", "greeter").returncode == 0
+
+    proj2 = _project(tmp_path / "second", registry=reg, reg_name="community",
+                     source=GREETER_PLUS, description="Next.", tags=["a"],
                      dossier=None)
     r = _truc(proj2, "ship", "greeter")
     assert r.returncode == 1, r.stdout
-    assert "already published" in r.stdout and "first-come" in r.stdout
-    # the original entry is unchanged (still the first source).
+    assert "an update must declare which release it is" in r.stdout
+    assert (reg / "components" / "greeter" / "component.rvl").read_text() == GREETER
+
+
+def test_ship_publishes_a_new_release_and_attaches_its_changelog(tmp_path):
+    """The item 49 phase 2 loop end to end: the release is declared, the prior
+    release is frozen, the index carries the chain, and the derived changelog
+    (item 261) is stored beside the release with item 64's bump as its
+    headline."""
+    reg = _empty_registry(tmp_path, "community", "audit")
+    proj = _project(tmp_path, registry=reg, reg_name="community", source=GREETER,
+                    description="Greets.", tags=["greet"], dossier=None,
+                    version="1.0.0", publisher="acme")
+    assert _truc(proj, "ship", "greeter").returncode == 0
+
+    proj2 = _project(tmp_path / "second", registry=reg, reg_name="community",
+                     source=GREETER_PLUS, description="Greets, and says bye.",
+                     tags=["greet"], dossier=None, version="1.1.0",
+                     publisher="acme")
+    r = _truc(proj2, "ship", "greeter")
+    assert r.returncode == 0, r.stdout
+    assert '"greeter@1.1.0" (replacing 1.0.0)' in r.stdout
+
+    entry = reg / "components" / "greeter"
+    assert entry.joinpath("component.rvl").read_text() == GREETER_PLUS
+    assert entry.joinpath("version").read_text().strip() == "1.1.0"
+    # the release it replaced keeps its own bytes.
+    assert entry.joinpath("releases", "1.0.0", "component.rvl").read_text() == GREETER
+    row = json.loads((reg / "index.json").read_text())["components"]["greeter"]
+    assert row["version"] == "1.1.0"
+    assert row["releases"] == ["1.0.0", "1.1.0"]
+    changelog = json.loads(
+        entry.joinpath("releases", "1.1.0", "changelog.json").read_text())
+    assert changelog["headline"]["bump"] == "minor"
+    record = json.loads(entry.joinpath("releases", "1.1.0", "release.json").read_text())
+    assert record["bumpCheck"] == "verified"
+    assert record["publisherContinuity"] == "verified"
+
+
+def test_ship_refuses_a_release_that_under_bumps_the_computed_one(tmp_path):
+    """Item 64's registry-refusal half, through truc: a breaking reshape
+    declared as a patch is refused by name and the registry is untouched."""
+    reg = _empty_registry(tmp_path, "community", "audit")
+    proj = _project(tmp_path, registry=reg, reg_name="community", source=GREETER,
+                    description="Greets.", tags=["greet"], dossier=None,
+                    version="1.0.0")
+    assert _truc(proj, "ship", "greeter").returncode == 0
+
+    breaking = GREETER.replace("fn hello(name: Str) -> Str",
+                               "fn hello(name: Str, loud: Bool) -> Str").replace(
+        "fn hello(name) =", "fn hello(name, loud) =")
+    proj2 = _project(tmp_path / "second", registry=reg, reg_name="community",
+                     source=breaking, description="Greets louder.",
+                     tags=["greet"], dossier=None, version="1.0.1")
+    r = _truc(proj2, "ship", "greeter")
+    assert r.returncode == 1, r.stdout
+    assert "contradicts the computed bump" in r.stdout
+    assert "major bump" in r.stdout
+    assert (reg / "components" / "greeter" / "component.rvl").read_text() == GREETER
+
+
+def test_ship_refuses_a_name_changing_publisher(tmp_path):
+    reg = _empty_registry(tmp_path, "community", "audit")
+    proj = _project(tmp_path, registry=reg, reg_name="community", source=GREETER,
+                    description="Greets.", tags=["greet"], dossier=None,
+                    version="1.0.0", publisher="acme")
+    assert _truc(proj, "ship", "greeter").returncode == 0
+
+    proj2 = _project(tmp_path / "second", registry=reg, reg_name="community",
+                     source=GREETER_PLUS, description="Mine now.", tags=["greet"],
+                     dossier=None, version="1.1.0", publisher="squatter")
+    r = _truc(proj2, "ship", "greeter")
+    assert r.returncode == 1, r.stdout
+    assert "does not change hands silently" in r.stdout
     assert (reg / "components" / "greeter" / "component.rvl").read_text() == GREETER
 
 

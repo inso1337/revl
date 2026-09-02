@@ -90,6 +90,22 @@ def _toolchain_or_skip(canonical):
                     "(set REVL_REQUIRE_WASMTIME=1 to make this a failure)")
 
 
+def _in_memory_driver_or_skip():
+    """The payloads argv cannot carry are driven through the wasmtime PYTHON
+    package (a different artifact from the CLI tarball), so its absence is its
+    own gate — fatal under REVL_REQUIRE_WASMTIME, a named skip otherwise, never
+    a silent pass."""
+    if importlib.util.find_spec("wasmtime") is not None:
+        return
+    if _REQUIRE:
+        pytest.fail(
+            "the wasmtime Python package is absent, so a string larger than "
+            "one argv entry cannot be driven at all. REVL_REQUIRE_WASMTIME is "
+            "set (CI), so this fails instead of skipping.", pytrace=False)
+    pytest.skip("wasmtime Python package not installed (pip install wasmtime; "
+                "set REVL_REQUIRE_WASMTIME=1 to make this a failure)")
+
+
 def _core_module(canonical, core_wat: str, out: pathlib.Path) -> pathlib.Path:
     """The emitted core WAT with the export driver spliced in, as core wasm.
 
@@ -271,16 +287,27 @@ def test_the_memory_never_grows_past_its_first_page(tmp_path):
 
 def test_a_call_bigger_than_the_arena_still_grows_and_still_answers(tmp_path):
     """Reclaim must not undo item 432(e)'s growth half: one call may still need
-    more than the initial page, and the rewind only runs on the way out."""
+    more than the initial page, and the rewind only runs on the way out.
+
+    200000 bytes will not fit in one argv entry on Linux (`MAX_ARG_STRLEN`, 128
+    KiB), so it goes through the guest's memory rather than through the
+    wasmtime CLI — see `test_heap_growth_432e` for the full note. Same emitted
+    module, same allocator, same assertion."""
     canonical = _canonical()
     _toolchain_or_skip(canonical)
+    _in_memory_driver_or_skip()
     emitted = _emit()
     comp = canonical.build_component(
         emitted["core_wat"], emitted["wit"], tmp_path / "comp",
         emitted["world"], name="echo")
     for n in (65521, 200000):
-        out = canonical.run_component_str(comp, "echo", "a" * n)
-        assert out == "a" * n
+        if n <= canonical.ARGV_STR_LIMIT:
+            assert canonical.run_component_str(comp, "echo", "a" * n) == "a" * n
+            continue
+        answer, pages = canonical.call_str_export_in_memory(
+            emitted["core_wat"], "echo", "a" * n)
+        assert answer == "a" * n
+        assert pages > 1, f"{n} bytes answered from {pages} page(s)"
 
 
 def test_repeated_calls_through_the_component_still_round_trip(tmp_path):
