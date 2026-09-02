@@ -51,6 +51,7 @@ distinction lives in the entry, not in a separate structure).
 | surface | proof (G4/G7) | proof (reversible crossing) | audit (G8 intent) |
 | replays on clean unload | **yes** (release the handle) | **no** (discharge + witness GC) | **no** (discharge, never run) |
 | replays on abort | yes, Phase 1 | yes, Phase 1 | yes, Phase 2, best-effort |
+| **on an E-Stop (443)** | **stranded** | **stranded** | **stranded** |
 | may emit in teardown | no (G5) | no (host-local inverse) | yes (that is the point) |
 | may fail | no (G5-infallible by contract) | yes, anticipated (243 rule 6) | yes, best-effort |
 | failure severity on abort | `bracket-fault` (contract-grade) | `restore-residue` (anticipated) | `compensation-residue` (anticipated) |
@@ -108,6 +109,26 @@ teardown(stack, committed, budget):
   surface(residue)                   # merged schema below; the abort SUCCEEDS
   return ABORTED(residue)
 ```
+
+### The third column: E-Stop (item 443)
+
+Amendment ([443-estop.md](443-estop.md)): an OPERATOR HALT is a third verdict,
+`halted`, and the table's third row above is its whole content. It replays
+nothing, discharges nothing, and STRANDS every registered entry — a third
+disposition meaning registered, not run, and NOT dropped.
+
+Stranded is not a synonym for discharged, and the difference is the point.
+Discharge releases the inverse and the witness so no rollback state survives;
+stranding KEEPS both, because `revl recover` is what reads them back. Since the
+halt also writes no `discharge` record, the discharge descriptors with nothing
+behind them are exactly the entries still owed — which is exactly what a crash
+leaves. An E-Stop is deliberately shaped to look like a crash to the recovery
+path.
+
+The teardown algorithm below is therefore NOT run at all under `halted`. There
+is no Phase 1, no Phase 2, no budget: the halt's cost is a latch flip, which is
+the entire reason the verb exists. What it produces instead is the in-flight
+inventory — two residue kinds, in the merged schema below.
 
 Mechanism is free, observable order is not. A tier may implement the phase
 split as two literal stack walks, or (natural on cordis tiers, where the
@@ -389,7 +410,14 @@ not here is a change to THIS doc, not a tier-local addition:
   "kind":      "restore-residue"      # witnessed inverse failed on abort (anticipated, 243 rule 6)
              | "bracket-fault"        # bracket inverse failed on abort (CONTRACT-GRADE)
              | "compensation-residue" # compensation failed / timed out / not attempted
-             | "unreconstructible",   # recovery only: WAL descriptor could not be rebuilt
+             | "unreconstructible"    # recovery only: WAL descriptor could not be rebuilt
+             | "estop-stranded"       # item 443: registered, NEVER attempted, still owed.
+                                      # outcome "not-attempted", attempted null,
+                                      # error.type "estop"
+             | "estop-ambiguous",     # item 443: dispatched and unconfirmed when the
+                                      # operator halt landed, so it MAY have landed.
+                                      # outcome "unknown" — item 440's ambiguous tier,
+                                      # created deliberately. At most one per activation
   "crossing":  {                      # the ORIGINAL effect this entry belonged to
       "key":    str,                  # capability / service key
       "method": str,
