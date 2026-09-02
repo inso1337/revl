@@ -67,5 +67,22 @@ python3 scripts/axioms_gate.py \
   RevL.CapCeilings.derived_no_star_amplification \
   RevL.CapCeilings.derivation_non_vacuous \
   RevL.CapCeilings.derivation_refuses_unnameable \
-  RevL.CapCeilings.derived_ceiling_check_not_subsumed < .axioms.out
+  RevL.CapCeilings.derived_ceiling_check_not_subsumed \
+  RevL.G9.origin_persists_or_is_declassified \
+  RevL.G9.no_authority_from_untrusted \
+  RevL.G9.untrusted_gains_no_authority \
+  RevL.G9.declassification_is_the_only_escape \
+  RevL.G9.secret_persists \
+  RevL.G9.secret_confined \
+  RevL.G9.confidential_needs_declassification \
+  RevL.G9.flow_declassifiers_granted \
+  RevL.G9.untrusted_author_needs_granted_declassifier \
+  RevL.G9.declassifier_must_be_declared \
+  RevL.G9.taint_surface_within_declared_context \
+  RevL.G9.no_untrusted_without_a_declared_source \
+  RevL.G9.g9_not_vacuous \
+  RevL.G9.secret_rules_not_vacuous \
+  RevL.G9.authority_refusal_is_not_universal \
+  RevL.G9.sink_rules_are_distinct \
+  RevL.G9.secret_refusal_is_load_bearing < .axioms.out
 python3 harness/diff_corpus.py
