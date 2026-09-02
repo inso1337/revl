@@ -324,8 +324,7 @@ edit. On 2026-09-02 twelve per-finding markers still read ``FIXING on
 behind a stale in-progress marker, one open item was a duplicate of a landed
 one, and two agents fixed the same defect in parallel because neither could see
 the other's scope. `make roadmap-check` (`tools/check_roadmap_markers.py`, run
-in the `lint` CI job) now fails when a marker contradicts git. Three rules, and
-only three:
+in the `lint` CI job) now fails when a marker contradicts git. Four rules:
 
 1. **State lives in GitHub issues. The roadmap holds the reasoning.** Whether
    something is open, assigned, in flight or closed is a tracker's job, and a
@@ -343,7 +342,32 @@ only three:
    actually swept and the instances you knowingly left, by name. "Fixed" with no
    scope is the sentence that costs the next person a full re-investigation.
 
-3. **Security findings go to private GitHub Security Advisories, never public
+3. **Say what is still open in the same breath as what is closed, and say
+   which tiers.** Git can only answer questions about branches and shas, and
+   four failures on 2026-09-02 were invisible to it. Four more checks exist
+   for them, each behind its own flag, all four under `make roadmap-check-all`.
+   What they ask of a writer:
+
+   - A header that claims closure must not have open findings under it, and a
+     closed finding must not contradict itself in its own body. Item 422's
+     header read "ALL SEVEN FINDINGS FIXED" while its own body said F1-F4 were
+     untouched on the typescript tier, and a disclosed CRITICAL sat unowned
+     because the header was believed. Qualify the claim instead: "fixed on the
+     py tier, F1-F4 still open on the ts tier" passes, because it is true.
+   - "Folded into X" tracks something only if X exists, is open, and is owned.
+     Item 425 F3 and item 427 F5 both pointed at item 416's block (c), a list
+     of unexecuted hypotheses with no owner, so the residual was closed
+     nowhere and nobody was working it.
+   - An open finding names a branch, an issue, an owner, or the sha that fixed
+     it. The sha you re-verified it on does not count: that records that the
+     finding is still live, not that anybody is closing it.
+   - A fix that touches one `backends/<tier>/` path says which other tiers it
+     does not cover. Three defects were fixed on the python tier on 2026-09-02
+     and left live everywhere else. No gate can decide semantic parity;
+     naming the other tier is the whole discipline, and it is also the escape
+     hatch that silences the check honestly.
+
+4. **Security findings go to private GitHub Security Advisories, never public
    issues.** See [SECURITY.md](SECURITY.md). This repository is public and the
    roadmap already carries working reproducers, so this is a going-forward rule,
    not a claim about what is already out there. Note plainly: deleting a
