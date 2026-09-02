@@ -28,10 +28,22 @@ Five groups:
 4. **The one liveness fact the net does surface**, an unprovided place, and the
    two shipped surfaces that already report it.
 
-5. **The finding.** G3 is acyclic over components; placement quotients that
-   graph by a process partition, and a quotient of a DAG can have a cycle. Two
-   processes that require each other both wire every proxy before either
-   serves, so neither comes up. Nothing checks the process graph.
+5. **The finding, and the check that closes it.** G3 is acyclic over
+   components; placement quotients that graph by a process partition, and a
+   quotient of a DAG can have a cycle. Two processes that require each other
+   both wire every proxy before either serves, so neither comes up. Roadmap
+   item 171 landed `placement.process_cycle_refusal` for exactly this shape:
+   the crosswise placement is now a plan-time refusal naming the cycle, and
+   the control - the same components placed TOGETHER - still admits, which is
+   what proves the check is about the partition rather than the components.
+
+6. **The wait-edge inventory** (design note §8.2, in the shape item 414
+   established). Not a proof: a completeness checklist the type system cannot
+   forget. Every wait primitive in the language carries a verdict saying what
+   already covers it, every keyword and every host verb is classified against
+   that table, and a new one that suspends cannot be added without a verdict.
+   §5.2's finding was found by walking this table by hand; this is the
+   mechanised version, and it is what will find the next one.
 """
 
 from __future__ import annotations
@@ -46,7 +58,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import RevlError, compile_source  # noqa: E402
+from revl import placement as _placement  # noqa: E402
 from revl import query  # noqa: E402
+from revl.lexer import KEYWORDS  # noqa: E402
+from revl.typecheck import _HOST_ARG_SIG  # noqa: E402
 
 SHARED_REALM = ""
 
@@ -255,8 +270,27 @@ component C2 requires k1: K1 provides out2: Out2 {
 """
 
 # The placement a conductor would be handed: process A holds P1 and C1,
-# process B holds P2 and C2. Nothing in `placement.py` checks this partition.
+# process B holds P2 and C2. This is the partition item 171's gate refuses.
 CROSSWISE_PARTITION = {"A": ["P1", "C1"], "B": ["P2", "C2"]}
+
+# Six components in three independent chains, split three ways so the quotient
+# is a 3-cycle: the refusal must walk the whole loop, not just name one edge.
+CROSSWISE_THREE = """
+service Ka { fn a() -> Int }
+service Kb { fn b() -> Int }
+service Kc { fn c() -> Int }
+service Oa { fn x() -> Int }
+service Ob { fn y() -> Int }
+service Oc { fn z() -> Int }
+
+component A1 provides ka: Ka { provide ka { fn a() = 1 } }
+component B1 provides kb: Kb { provide kb { fn b() = 2 } }
+component C1 provides kc: Kc { provide kc { fn c() = 3 } }
+
+component A2 requires kb: Kb provides oa: Oa { provide oa { fn x() = 4 } }
+component B2 requires kc: Kc provides ob: Ob { provide ob { fn y() = 5 } }
+component C2 requires ka: Ka provides oc: Oc { provide oc { fn z() = 6 } }
+"""
 
 
 def _process_graph(ir: dict, partition: dict) -> dict:
@@ -509,8 +543,39 @@ def test_the_dead_transition_is_already_reported_by_two_shipped_surfaces():
 
 
 # --------------------------------------------------------------------------- #
-# 5. The one wait cycle that IS reachable, and is not covered.
+# 5. The one wait cycle that IS reachable, and the check that refuses it.
 # --------------------------------------------------------------------------- #
+
+def _placement_inputs(ir: dict, partition: dict) -> dict:
+    """The four tables `run_placement` derives from an IR plus a partition.
+
+    Mirrors `placement.run_placement` exactly (`placed`, then `merged(...)` for
+    `provides`/`requires`, then `owner`), so the gate under test is handed the
+    same shapes the conductor hands it.
+    """
+    components = {c["name"]: c for c in ir.get("components") or []}
+    placed = {c: p for p, members in partition.items() for c in members}
+    assert set(placed) == set(components), "every component must be placed"
+
+    def merged(cnames, which):
+        out: dict = {}
+        for cname in cnames:
+            out.update(components[cname].get(which) or {})
+        return out
+
+    provides = {p: merged(m, "provides") for p, m in partition.items()}
+    requires = {p: merged(m, "requires") for p, m in partition.items()}
+    owner = {key: p for p, keys in provides.items() for key in keys}
+    return {"components": components, "placed": placed, "provides": provides,
+            "requires": requires, "owner": owner}
+
+
+def _refusal(ir: dict, partition: dict, placement_path: str = "p.toml") -> str | None:
+    args = _placement_inputs(ir, partition)
+    return _placement.process_cycle_refusal(
+        args["requires"], args["provides"], args["owner"], args["placed"],
+        args["components"], placement_path=placement_path)
+
 
 def test_a_process_partition_can_close_a_cycle_the_component_dag_does_not():
     """G3 is acyclic over COMPONENTS. Placement quotients that graph by a
@@ -523,10 +588,9 @@ def test_a_process_partition_can_close_a_cycle_the_component_dag_does_not():
     "makes start order irrelevant", which is true of a DAG of processes and
     false of this one.
 
-    This is the design note's §5.2 finding and the one thing worth building.
-    The check is a cycle detection on a graph with one node per process, which
-    is the same linear DFS `_link` already runs one level down - not a
-    marking-graph search.
+    This is the design note's §5.2 finding. The check is a cycle detection on
+    a graph with one node per process, which is the same linear DFS `_link`
+    already runs one level down - not a marking-graph search.
     """
     ir = compile_source(CROSSWISE, "crosswise.rvl")          # G3 is satisfied
     assert set(ir["manifest"]["loadOrder"]) == {"P1", "P2", "C1", "C2"}
@@ -543,3 +607,530 @@ def test_the_same_components_placed_together_are_acyclic():
     edges = _process_graph(ir, {"A": ["P1", "P2"], "B": ["C1", "C2"]})
     assert edges == {"A": set(), "B": {"A"}}
     assert not _has_cycle(edges)
+
+
+def test_the_shipped_gate_derives_the_same_process_graph_as_the_runner():
+    """`placement.process_graph` and the mirror above agree.
+
+    The mirror is written from `_process_runner`'s own boot steps; the shipped
+    function is written from the proxy-construction loop. They are two readings
+    of the same relation, and the check is only worth anything if they match.
+    """
+    ir = compile_source(CROSSWISE, "crosswise.rvl")
+    for partition in (CROSSWISE_PARTITION,
+                      {"A": ["P1", "P2"], "B": ["C1", "C2"]},
+                      {"A": ["P1", "P2", "C1", "C2"]},
+                      {"A": ["P1"], "B": ["P2"], "C": ["C1"], "D": ["C2"]}):
+        args = _placement_inputs(ir, partition)
+        shipped = _placement.process_graph(args["requires"], args["provides"],
+                                           args["owner"])
+        assert shipped == _process_graph(ir, partition), partition
+
+
+def test_the_crosswise_placement_is_refused_and_the_refusal_names_the_cycle():
+    """Item 171. A refusal that says "there is a cycle" without saying WHICH
+    processes is not actionable, so this pins the whole message shape: the
+    cycle, one line per proxied key that closes a hop naming the requiring and
+    providing components, the boot-order reason, and the fix.
+    """
+    ir = compile_source(CROSSWISE, "crosswise.rvl")
+    message = _refusal(ir, CROSSWISE_PARTITION, "crosswise.toml")
+    assert message is not None
+    assert message.splitlines()[0] == "process cycle: A -> B -> A"
+    assert "  A proxies `k2` from B  (required by C1, provided by P2)" in message
+    assert "  B proxies `k1` from A  (required by C2, provided by P1)" in message
+    assert "wires every proxy before it serves" in message
+    assert "crosswise.toml" in message          # the PARTITION is named, not an author
+    assert "co-locate" in message
+    # and it names no author-facing blame: the components are cited as evidence
+    # for the hops, never as the thing at fault.
+    assert "G3 passed" in message
+
+
+def test_the_control_the_same_components_placed_together_still_admits():
+    """The control is the load-bearing half: it proves the refusal is about the
+    partition and not about the components. Same source, same G3, same four
+    components - placed so the quotient is a DAG, and the gate is silent.
+    """
+    ir = compile_source(CROSSWISE, "crosswise.rvl")
+    assert _refusal(ir, {"A": ["P1", "P2"], "B": ["C1", "C2"]}) is None
+    assert _refusal(ir, {"A": ["P1", "P2", "C1", "C2"]}) is None
+    # even one process per component is fine: the component graph IS the
+    # quotient there, and G3 already proved it acyclic.
+    assert _refusal(ir, {"A": ["P1"], "B": ["P2"], "C": ["C1"], "D": ["C2"]}) is None
+
+
+def test_a_longer_process_cycle_is_named_in_full():
+    """Three processes, three hops. The refusal walks the whole cycle rather
+    than naming the two ends of one edge."""
+    ir = compile_source(CROSSWISE_THREE, "three.rvl")
+    message = _refusal(ir, {"A": ["A1", "A2"], "B": ["B1", "B2"], "C": ["C1", "C2"]})
+    assert message is not None
+    head = message.splitlines()[0]
+    assert head.startswith("process cycle: ")
+    hops = head[len("process cycle: "):].split(" -> ")
+    assert len(hops) == 4 and hops[0] == hops[-1]
+    assert set(hops) == {"A", "B", "C"}
+    for proc in ("A", "B", "C"):
+        assert f"  {proc} proxies " in message
+
+
+def test_a_remote_key_is_not_a_process_edge():
+    """Scoping decision one: a `[remotes.<key>]` provider is a SEPARATE
+    composition on its own placement (item 151), reached by address. This
+    process graph cannot see its boot order and must not pretend to, so a
+    remote key contributes no edge even when a local process happens to be
+    named the same way."""
+    ir = compile_source(CROSSWISE, "crosswise.rvl")
+    args = _placement_inputs(ir, CROSSWISE_PARTITION)
+    # pretend `k1` is served by a remote composition rather than process A
+    assert _placement.process_graph(args["requires"], args["provides"],
+                                    args["owner"], remote_keys={"k1"}) == {
+        "A": {"B"}, "B": set()}
+    assert _placement.process_cycle_refusal(
+        args["requires"], args["provides"], args["owner"], args["placed"],
+        args["components"], remote_keys={"k1"}) is None
+
+
+def test_an_unprovided_key_is_not_a_process_edge():
+    """A key no process provides has its own refusal ("provided by no
+    process"); it must not be mistaken for an edge to nowhere here."""
+    ir = compile_source(UNPROVIDED, "unprovided.rvl")
+    args = _placement_inputs(ir, {"A": ["LedgerSvc"]})
+    assert _placement.process_graph(args["requires"], args["provides"],
+                                    args["owner"]) == {"A": set()}
+
+
+def test_a_key_a_process_both_requires_and_provides_is_not_an_edge():
+    """A locally-served key is not proxied at all, so it is not a wait: this
+    is the same in-process short-circuit the proxy loop takes."""
+    ir = compile_source(CROSSWISE, "crosswise.rvl")
+    args = _placement_inputs(ir, {"A": ["P1", "C2"], "B": ["P2", "C1"]})
+    # A provides k1 and requires k1 locally; B provides k2 and requires k2.
+    assert _placement.process_graph(args["requires"], args["provides"],
+                                    args["owner"]) == {"A": set(), "B": set()}
+
+
+def test_the_refusal_fires_from_run_placement_before_anything_is_spawned(
+        tmp_path, monkeypatch, capsys):
+    """End to end, through the conductor the CLI calls. The point of putting
+    this at plan time is that it lands as a diagnostic on `revl run
+    --placement` rather than as two `ConnectionError`s five seconds into a
+    boot, so it must fire before any TLS material is minted or any child
+    process is started."""
+    app = tmp_path / "crosswise.rvl"
+    app.write_text(CROSSWISE, encoding="utf-8")
+    plc = tmp_path / "crosswise.toml"
+    plc.write_text('[processes.A]\ncomponents = ["P1", "C1"]\n\n'
+                   '[processes.B]\ncomponents = ["P2", "C2"]\n', encoding="utf-8")
+
+    monkeypatch.setattr(_placement, "_cordis_py_installed", lambda: True)
+    monkeypatch.setattr(_placement.subprocess, "Popen", _never_spawned)
+
+    rc = _placement.run_placement([str(app)], str(plc), once=True)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: process cycle: A -> B -> A\n")
+    assert "A proxies `k2` from B" in err
+    assert str(plc) in err
+
+
+def _never_spawned(*args, **kwargs):
+    raise AssertionError("run_placement spawned a child past the cycle refusal")
+
+
+def test_the_tiers_sugar_form_is_gated_too(tmp_path, monkeypatch, capsys):
+    """A `[tiers]` manifest (item 363) partitions by BACKEND, which is the most
+    likely way to draw the partition across the component DAG rather than along
+    it - an author picks a tier per component and never sees the quotient.
+    `expand_tiers` runs before this gate, so the synthesized `tier_<backend>`
+    processes are checked exactly like a hand-written `[processes]` topology.
+    """
+    app = tmp_path / "crosswise.rvl"
+    app.write_text(CROSSWISE, encoding="utf-8")
+    plc = tmp_path / "crosswise.toml"
+    plc.write_text('default_tier = "py"\n\n[tiers]\n'
+                   'P1 = "py"\nC1 = "py"\nP2 = "node"\nC2 = "node"\n',
+                   encoding="utf-8")
+
+    monkeypatch.setattr(_placement, "_preflight", lambda *a, **k: None)
+    monkeypatch.setattr(_placement.subprocess, "Popen", _never_spawned)
+
+    rc = _placement.run_placement([str(app)], str(plc), once=True)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: process cycle: ")
+    assert "tier_py" in err and "tier_node" in err
+    assert "proxies `k1`" in err and "proxies `k2`" in err
+
+
+# --------------------------------------------------------------------------- #
+# 6. The wait-edge inventory (design note §8.2), in the item-414 shape.
+# --------------------------------------------------------------------------- #
+#
+# §5.2's finding was found by walking §5's table by hand, not by any analysis.
+# This is that table, mechanised: an enumeration of every way a fiber can wait
+# on something another component owns, each with a verdict naming what covers
+# it, and two totality guards that fail when the language grows a wait
+# primitive nobody has classified.
+
+# The verdict vocabulary, verbatim from the design note. "OPEN" is the one that
+# must never appear: a row with no verdict is a real hole, and the guard below
+# refuses it.
+VERDICTS = {
+    "g3":       "the edge is a `requires` edge; a cycle is refused by `_link`",
+    "scoped":   "the waited-for thing cannot leave one activation",
+    "owned":    "the wait relation is a tree rooted at an owner (spawn)",
+    "deadline": "bounded at runtime by a seam deadline (item 54)",
+    "diverges": "a G3-invisible call edge that provably cannot suspend",
+    "process":  "a process-graph edge; a cycle is refused by item 171's gate",
+    "host":     "inside an opaque host body: residual R1, out of reach in principle",
+    "OPEN":     "none of the above - a real hole",
+}
+
+# id -> (verdict, what waits on what, the evidence).
+# `evidence` names a test in THIS file, or a `docs/`/`src/` location the design
+# note argues from. The guard below checks that a named test actually exists,
+# so a row cannot cite a test that was renamed away.
+WAIT_EDGES: dict[str, tuple[str, str, str]] = {
+    "activation_prereq": (
+        "g3",
+        "an activation waits for the component that provides a key it injects",
+        "test_mutual_wait_is_already_a_g3_refusal_naming_the_cycle"),
+    "emit_injected_key": (
+        "g3",
+        "`emit svc.method()` on an injected key blocks on that provider",
+        "test_an_emit_call_cycle_is_a_requires_cycle"),
+    "emit_routed_key": (
+        "g3",
+        "`emit` across a routed multi-realm key waits on each routed leg",
+        "lower.py `_link` adds one edge per routed realm (design note §5)"),
+    "emit_spawn_handle": (
+        "owned",
+        "`emit` through a spawn handle waits on the spawned instance",
+        "test_a_spawned_instances_provisions_do_not_enter_the_link_table"),
+    "cross_process_seam": (
+        "process",
+        "a seam call waits on the providing PROCESS, not just the component",
+        "test_the_crosswise_placement_is_refused_and_the_refusal_names_the_cycle"),
+    "seam_call_runtime": (
+        "deadline",
+        "a live-but-wedged provider holds its caller inside a seam call",
+        "test_every_seam_carries_a_finite_deadline_by_default"),
+    "arrow_across_service": (
+        "diverges",
+        "an arrow crossing a service boundary re-enters its owner (`C -> P -> "
+        "C's closure -> P`), which G3 cannot see",
+        "test_an_arrow_cannot_reach_an_async_operation"),
+    "subscription_next": (
+        "scoped",
+        "`<sub>.next()` waits for the stream's producer",
+        "test_a_stream_cannot_cross_a_component_boundary"),
+    "stream_backpressure": (
+        "scoped",
+        "a `block`-policy provider suspends until its consumer drains",
+        "test_a_stream_cannot_cross_a_component_boundary"),
+    "divert_await": (
+        "scoped",
+        "`await <expr>` / `await Job.run(..)` suspends at a divert boundary",
+        "test_there_is_no_future_or_task_value_to_await_across_a_boundary"),
+    "approval_await": (
+        "scoped",
+        "`await approval[C] { .. }` reads as a wait but is a ledger lookup "
+        "that fails closed - it never suspends",
+        "lower.py `_lower_approval` (design note §5)"),
+    "parallel_rejoin": (
+        "scoped",
+        "a parallel emission fan-out rejoins its branches",
+        "parallel.py refuses a partition whose branches are not independent "
+        "(item 259 §2.2)"),
+    "pool_job": (
+        "scoped",
+        "a pooled connection or a `Job` could block on capacity",
+        "test_the_host_frontier_has_no_blocking_primitive"),
+    "teardown_lifo": (
+        "g3",
+        "teardown runs the reverse of a valid topological order, so one "
+        "component's `undo` holds the next one's",
+        "test_a_teardown_inverse_cannot_suspend"),
+    "management_lease": (
+        "deadline",
+        "a management lease (item 61) holds the management plane",
+        "mcp/leases.py: a lease is TTL-bound and the component keeps serving "
+        "every call throughout (design note §5)"),
+    "host_body": (
+        "host",
+        "a `@py { .. }` body may hold a lock, an unbounded read or a "
+        "subprocess wait - one verbatim token to the compiler",
+        "residual R1: the trust boundary G4, G8, item 414 and item 256 "
+        "already rest on (design note §5.3)"),
+}
+
+# Totality guard one: every KEYWORD in the surface grammar is classified,
+# either as introducing one of the wait edges above or as introducing none.
+# Adding a keyword reds this until somebody decides which, which is the whole
+# mechanism: a `lock`/`channel`/`join` keyword cannot arrive unnoticed.
+KEYWORD_WAIT_EDGE: dict[str, str | None] = {
+    # the wait-introducing surface
+    "requires": "activation_prereq",
+    "provides": "activation_prereq",
+    "provide": "cross_process_seam",
+    "emit": "emit_injected_key",
+    "emission": "emit_injected_key",
+    "isolate": "emit_routed_key",
+    "realm": "emit_routed_key",
+    "spawn": "emit_spawn_handle",
+    "subscribe": "subscription_next",
+    "await": "divert_await",
+    "async": "divert_await",
+    "effect": "divert_await",
+    "undo": "teardown_lifo",
+    "compensate": "teardown_lifo",
+    "extern": "host_body",
+    "acquire": "host_body",
+    # everything else introduces no suspension. Grouped by why:
+    #   declaration/structure  service component config type use pub test
+    #   pure computation       fn let var return if else while for of match
+    #                          assert true false null as in hole
+    #   loop control           break continue
+    #   effect classification  pure verified commutative idempotent
+    #   non-suspending effects intercept handoff with every after fail
+    "service": None, "component": None, "config": None, "type": None,
+    "use": None, "pub": None, "test": None,
+    "fn": None, "let": None, "var": None, "return": None, "if": None,
+    "else": None, "while": None, "for": None, "of": None, "match": None,
+    "assert": None, "true": None, "false": None, "null": None, "as": None,
+    "in": None, "hole": None,
+    "break": None, "continue": None,
+    "pure": None, "verified": None, "commutative": None, "idempotent": None,
+    # `intercept`/`handoff`/`with` rewrite or hand over a provision without
+    # suspending; `every`/`after` acquire a revertible schedule (the timer
+    # fires later, it does not hold the activation); `fail` is an L-Raise.
+    "intercept": None, "handoff": None, "with": None,
+    "every": None, "after": None, "fail": None,
+}
+
+# Totality guard two: every HOST VERB on the frontier is classified the same
+# way. `_HOST_ARG_SIG` is the complete host surface an admitted program can
+# name, so a blocking verb (`Pool.acquire`, `Chan.recv`) cannot be added
+# without a verdict either.
+HOST_VERB_WAIT_EDGE: dict[str, str | None] = {
+    "Map.new": None, "Map.drop": None, "Map.insert": None,
+    "Map.insert_if_absent": None, "Map.remove": None, "Map.get": None,
+    "Pool.open": "pool_job", "Pool.close": "pool_job",
+    "Pool.query": "pool_job", "Pool.execute": "pool_job",
+    "Job.run": "divert_await",
+    "Stream.source": "stream_backpressure", "Stream.close": None,
+    "Subscription.next": "subscription_next", "Subscription.close": None,
+}
+
+# Names a synchronisation primitive would have to wear. The design note's row
+# "any mutex, semaphore, channel or queue" says no such surface exists; these
+# two guards are what keep that true rather than remembered.
+SYNC_PRIMITIVE_NAMES = frozenset({
+    "lock", "unlock", "mutex", "semaphore", "channel", "chan", "queue",
+    "join", "yield", "sleep", "wait", "notify", "signal", "barrier",
+    "recv", "acquire_lock", "release",
+})
+
+# The host frontier bans one more name than the grammar does: `acquire`. As a
+# revl KEYWORD it classifies an extern (`extern acquire fn open() -> H`), which
+# is a bracket, not a wait. As a HOST VERB (`Pool.acquire`) it would be a
+# borrow-until-available - the blocking checkout the design note's `pool_job`
+# row rests on NOT existing ("a pool connection is borrowed for one call, and
+# exhaustion RAISES rather than blocking").
+BLOCKING_HOST_VERB_NAMES = SYNC_PRIMITIVE_NAMES | {"acquire"}
+
+
+def test_every_wait_edge_carries_a_legal_verdict_and_none_is_open():
+    """The table's own shape. An "OPEN" row is a real hole, so it fails here
+    rather than sitting in a doc nobody rereads."""
+    assert WAIT_EDGES, "the inventory must not be empty"
+    for wid, (verdict, waits_on, evidence) in WAIT_EDGES.items():
+        assert verdict in VERDICTS, (wid, verdict)
+        assert verdict != "OPEN", (
+            f"wait edge {wid!r} has no verdict: {waits_on}. An OPEN row is a "
+            "liveness hole, not a TODO - close it or refuse the shape.")
+        assert waits_on and evidence, wid
+
+
+def test_every_verdict_in_the_vocabulary_is_used_by_some_row():
+    """Except "OPEN", which is used by none - that is the invariant above."""
+    used = {verdict for verdict, _, _ in WAIT_EDGES.values()}
+    assert used == set(VERDICTS) - {"OPEN"}
+
+
+def test_every_cited_test_exists():
+    """A row may cite a test in this file instead of restating its evidence.
+    That citation is only worth anything if the test is still here."""
+    here = set(globals())
+    for wid, (_, _, evidence) in WAIT_EDGES.items():
+        if evidence.startswith("test_"):
+            assert evidence in here, (wid, evidence)
+
+
+def test_every_keyword_is_classified_against_the_inventory():
+    """The guard the design note asks for: a new wait primitive cannot be
+    added without a verdict.
+
+    `KEYWORDS` is the lexer's own enumeration of the surface, so this cannot
+    drift from the language. A keyword added to `revl.lexer` reds this test
+    until somebody says whether it suspends, and if it does, which row covers
+    it.
+    """
+    unclassified = KEYWORDS - set(KEYWORD_WAIT_EDGE)
+    assert not unclassified, (
+        f"new surface keyword(s) {sorted(unclassified)} with no wait verdict. "
+        "Decide: does this construct let one component wait on something "
+        "another owns? If so add a WAIT_EDGES row; if not, map it to None.")
+    stale = set(KEYWORD_WAIT_EDGE) - KEYWORDS
+    assert not stale, f"classified keyword(s) no longer in the lexer: {sorted(stale)}"
+    for kw, wid in KEYWORD_WAIT_EDGE.items():
+        assert wid is None or wid in WAIT_EDGES, (kw, wid)
+
+
+def test_every_host_verb_is_classified_against_the_inventory():
+    """The same guard over the host frontier. `_HOST_ARG_SIG` is the complete
+    set of host verbs an admitted program can name (design note §5), so a
+    blocking one cannot arrive unclassified."""
+    unclassified = set(_HOST_ARG_SIG) - set(HOST_VERB_WAIT_EDGE)
+    assert not unclassified, (
+        f"new host verb(s) {sorted(unclassified)} with no wait verdict")
+    stale = set(HOST_VERB_WAIT_EDGE) - set(_HOST_ARG_SIG)
+    assert not stale, f"classified host verb(s) no longer on the frontier: {sorted(stale)}"
+    for verb, wid in HOST_VERB_WAIT_EDGE.items():
+        assert wid is None or wid in WAIT_EDGES, (verb, wid)
+
+
+def test_the_host_frontier_has_no_blocking_primitive():
+    """The `pool_job` row's evidence, and the "no mutex, semaphore, channel or
+    queue" row of §5 made mechanical.
+
+    `_HOST_ARG_SIG` is the complete host frontier; a pool connection is
+    borrowed for one call and exhaustion RAISES rather than blocking, so there
+    is no `acquire`/`release` pair and nothing to hold. A verb wearing one of
+    the synchronisation names would be a genuinely new wait primitive with a
+    genuinely new cycle question, and it reds here.
+    """
+    for verb in _HOST_ARG_SIG:
+        method = verb.split(".")[-1]
+        assert method not in BLOCKING_HOST_VERB_NAMES, (
+            f"host verb `{verb}` is a synchronisation primitive - it can block "
+            "a fiber on a resource another component holds, which is a wait "
+            "edge with no row in WAIT_EDGES")
+
+
+def test_the_surface_grammar_has_no_synchronisation_keyword():
+    """The same claim one level up: nothing in the language spells a lock."""
+    assert not (KEYWORDS & SYNC_PRIMITIVE_NAMES)
+
+
+# --- the executable evidence the rows cite -------------------------------- #
+
+EMIT_CALL_CYCLE = """
+service Ledger { emission fn balance(k: Str) -> Int }
+service Audit  { emission fn record(k: Str) -> Int }
+
+component LedgerSvc requires audit: Audit provides ledger: Ledger {
+  provide ledger {
+    fn balance(k) {
+      emit audit.record(k)
+    }
+  }
+}
+
+component AuditSvc requires ledger: Ledger provides audit: Audit {
+  provide audit {
+    fn record(k) {
+      emit ledger.balance(k)
+    }
+  }
+}
+"""
+
+SPAWNABLE = """
+service Store { fn put(v: Str) -> Str }
+
+component Shard provides store: Store {
+  provide store { fn put(v) = v }
+}
+
+component Router provides store: Store {
+  let s = effect spawn Shard undo s.dispose()
+  provide store { fn put(v) = s.store.put(v) }
+}
+"""
+
+
+def test_an_emit_call_cycle_is_a_requires_cycle():
+    """`emit_injected_key`'s row. A call on an injected key follows a
+    `requires` edge, so a call cycle IS a `requires` cycle and G3 names it -
+    there is no separate call graph to walk."""
+    with pytest.raises(RevlError) as exc:
+        compile_source(EMIT_CALL_CYCLE, "callcycle.rvl")
+    message = str(exc.value)
+    assert "dependency cycle" in message and "(G3)" in message
+
+
+def test_a_spawned_instances_provisions_do_not_enter_the_link_table():
+    """`emit_spawn_handle`'s row. A spawned instance's provisions go into a
+    fresh local realm nobody else can name, so no other component's `inject`
+    can reach them: the wait relation over spawned instances is a tree rooted
+    at the spawning activation, and a tree has no cycle.
+
+    Mechanically: `Router` spawns `Shard`, both are DECLARED components, and
+    the linked manifest carries only `Router`. `Shard`'s `store` provision is
+    nowhere in the link table, so no other component's `inject` can name it -
+    which is also why `Router` can provide `store` itself without a G2
+    conflict. The spawn handle is `Router`'s own binding, not an injected key,
+    so `Router` waits on nobody.
+    """
+    ir = compile_source(SPAWNABLE, "spawn.rvl")
+    assert {c["name"] for c in ir["components"]} == {"Shard", "Router"}
+    entries = ir["manifest"]["components"]
+    assert [e["name"] for e in entries] == ["Router"]
+    assert ir["manifest"]["loadOrder"] == ["Router"]
+    router = entries[0]
+    assert not (router.get("inject") or [])
+
+
+def test_every_seam_carries_a_finite_deadline_by_default():
+    """`seam_call_runtime`'s row. The waits that can wedge a RUNNING system are
+    below the composition IR; item 54's answer is that every seam call carries
+    a deadline, and placement always stamps a finite default "because a placed
+    composition is exactly where an unbounded cross-process wait is
+    unacceptable"."""
+    assert _placement.DEFAULT_SEAM_DEADLINE is not None
+    assert float(_placement.DEFAULT_SEAM_DEADLINE) > 0
+
+
+def test_an_arrow_cannot_reach_an_async_operation():
+    """`arrow_across_service`'s row. The re-entrant edge an arrow opens
+    (`C -> P -> C's closure -> P`) is invisible to G3, and it does not need to
+    be visible: an arrow reaching an async operation is refused (A1), so the
+    worst case is divergence, not deadlock."""
+    source = (ROOT / "examples" / "rejections" / "a1_async_arrow_sync_type.rvl")
+    with pytest.raises(RevlError) as exc:
+        compile_source(source.read_text(encoding="utf-8"), source.name)
+    assert "(A1)" in str(exc.value)
+
+
+def test_a_teardown_inverse_cannot_suspend():
+    """`teardown_lifo`'s row. Teardown is sequential over the reverse of a
+    valid topological order, and a suspension in an `undo` is statically
+    refused - so the LIFO cannot wait on anything G3 did not order."""
+    source = (ROOT / "examples" / "rejections" / "a1_async_undo_suspends.rvl")
+    with pytest.raises(RevlError) as exc:
+        compile_source(source.read_text(encoding="utf-8"), source.name)
+    message = str(exc.value)
+    assert "teardown is synchronous on every tier" in message
+
+
+def test_there_is_no_future_or_task_value_to_await_across_a_boundary():
+    """`divert_await`'s row. `Async[T]` is position-restricted and is not a
+    value type: nothing one component awaits can be completed by another,
+    because there is no future, promise or task value to hand over."""
+    source = (ROOT / "examples" / "rejections" / "a1_await_in_method.rvl")
+    with pytest.raises(RevlError) as exc:
+        compile_source(source.read_text(encoding="utf-8"), source.name)
+    assert "(A1)" in str(exc.value)

@@ -381,11 +381,12 @@ processes and false of a cycle. The failure is bounded rather than eternal -
 about five seconds instead of hanging. It is still a composition that admits
 and cannot run.
 
-**Nothing checks it.** `placement.py` derives each process's `proxies` from
+**Nothing checked it** (fixed by issue 171; §8.1 has the landed surface).
+`placement.py` derived each process's `proxies` from
 `requires[pname]` minus `provides[pname]` with `owner.get(key)` naming the
-target process (`placement.py:2216-2221`), and it refuses a key no process
-provides. It never builds the process-to-process edge relation, and there is no
-cycle detection over it anywhere in `placement.py` or `distribute.py`. The spec
+target process, and refused a key no process provides. It never built the
+process-to-process edge relation, and there was no cycle detection over it
+anywhere in `placement.py` or `distribute.py`. The spec
 comment says cross-process edges "are already resolved as proxies before local
 activation, so they are (correctly) absent" from `depends` - which is the
 assumption that connect ordering does not matter.
@@ -527,6 +528,12 @@ item's own worked example real.
 Two things, both small, and neither is a net.
 
 ### 8.1 G3 over the process graph, at plan time (the one that finds a bug)
+
+**Status: landed (issue 171).** `placement.process_cycle_refusal`, called from
+`run_placement` once `owner` and `remote_specs` are known and before any TLS
+material is minted or any child is spawned. Tests: §5's two compositions and
+the message shape in `tests/test_438_liveness_shapes.py`. The rest of this
+section is the specification it was built to.
 
 `placement.py` already computes, per process, the set of keys it proxies and
 which process owns each (`placement.py:2216-2221`). One node per process, one
