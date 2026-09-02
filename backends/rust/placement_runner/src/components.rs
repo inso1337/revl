@@ -11,40 +11,13 @@ pub trait Database: Send + Sync {
     fn execute(&self, sql: String) -> i64;
 }
 
-pub trait Cache: Send + Sync {
-    fn get(&self, key: String) -> Option<String>;
-    /// emission: crosses the system boundary (DESIGN.md §3.5)
-    fn put(&self, key: String, value: String) -> ();
-}
-
-/// revl host object: a small thread-safe map with String keys.
-/// The value type is generic — each site's `Map.new()` pins `V`
-/// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).
-pub struct Map<V> {
-    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, V>>>,
-}
-impl<V> Map<V> {
-    pub fn new() -> Self {
-        Self {
-            inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        }
-    }
-    pub fn drop_(&self) {
-        self.inner.lock().unwrap().clear();
-    }
-    pub fn insert(&self, key: String, value: V) {
-        self.inner.lock().unwrap().insert(key, value);
-    }
-    pub fn remove(&self, key: &String) {
-        self.inner.lock().unwrap().remove(key);
-    }
-}
-impl<V: Clone> Map<V> {
-    // The key is borrowed, not moved: a component that reads then
-    // writes the same key (the session ledger) keeps owning it.
-    pub fn get(&self, key: &String) -> Option<V> {
-        self.inner.lock().unwrap().get(key).cloned()
-    }
+/// R1 live-resource counter (lifecycle `assert no_residue`).
+/// Thread-local because `cargo test` runs tests on parallel
+/// threads: each test must observe only its own acquisitions.
+thread_local! {
+    static REVL_LIVE_HOST_RESOURCES: std::cell::Cell<i64> = const {
+        std::cell::Cell::new(0)
+    };
 }
 
 /// revl host object: a bounded connection pool over a deterministic
@@ -68,6 +41,7 @@ impl Pool {
         if size < 1 {
             panic!("pool size must be an integer >= 1 (got {})", size);
         }
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));
         Self {
             url,
             size,
@@ -159,6 +133,7 @@ impl Pool {
         if already_closed {
             panic!("pool.close after close/drop — use-after-free");
         }
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));
     }
     pub fn query(&self, _sql: String) -> Vec<Value> {
         let conn = self.borrow_conn("query");
@@ -175,14 +150,12 @@ impl Pool {
 #[derive(Clone)]
 struct PgDatabaseConfig {
     url: String,
-    pool_size: i64,
 }
 
 impl Default for PgDatabaseConfig {
     fn default() -> Self {
         Self {
-            url: String::new(),
-            pool_size: 10i64,
+            url: String::from("postgres://localhost/app"),
         }
     }
 }
@@ -191,8 +164,8 @@ struct PgDatabaseDb {
     pool: Arc<Pool>,
 }
 impl Database for PgDatabaseDb {
-    fn query(&self, sql: String) -> Vec<Value> { self.pool.query(sql) }
-    fn execute(&self, sql: String) -> i64 { self.pool.execute(sql) }
+    fn query(&self, sql: String) -> Vec<Value> { self.pool.query(sql.clone()) }
+    fn execute(&self, sql: String) -> i64 { self.pool.execute(sql.clone()) }
 }
 
 pub fn pg_database() -> cordis::PluginHandle {
@@ -202,49 +175,14 @@ pub fn pg_database() -> cordis::PluginHandle {
         |ctx, config| {
             let config = PgDatabaseConfig {
                 url: config.url.clone(),
-                pool_size: config.pool_size.clone(),
                 ..Default::default()
             };
-            let pool = Arc::new(Pool::open(config.url.clone(), config.pool_size.clone()));
+            let pool = Arc::new(Pool::open(config.url.clone(), 4i64));
             let pool_undo = pool.clone();
             ctx.effect("PgDatabase.pool.undo", move || { pool_undo.close(); Ok(()) })?;
+            return Err(cordis::CordisError::with_message(cordis::ErrorCode::Plugin, String::from("fault test \"sweep PgDatabase @ step 1\": injected failure")));
             let db_box: Box<dyn Database> = Box::new(PgDatabaseDb { pool: pool.clone() });
             ctx.provide("db", db_box)?;
-            Ok(cordis::PluginOutput::none())
-        },
-    )
-}
-
-struct UserCacheCache {
-    store: Arc<Map<String>>,
-    db: Arc<Box<dyn Database>>,
-    ctx: Arc<cordis::Context>,
-}
-impl Cache for UserCacheCache {
-    fn get(&self, key: String) -> Option<String> { self.store.get(&key) }
-    fn put(&self, key: String, value: String) -> () {
-        let store_undo = self.store.clone();
-        let db_undo = self.db.clone();
-        let key_undo = key.clone();
-        let value_undo = value.clone();
-        let _ = self.store.insert(key.clone(), value.clone());
-        let _ = self.ctx.effect("UserCache.put.effect.0", move || { store_undo.remove(&key_undo); Ok(()) });
-        let _ = self.db.execute(format!("INSERT INTO cache_log VALUES ({0})", key.clone()));
-    }
-}
-
-pub fn user_cache() -> cordis::PluginHandle {
-    cordis::plugin_sync::<(), _>(
-        "UserCache",
-        cordis::Inject::new(["db"]),
-        |ctx, config| {
-            let db = ctx.require::<Box<dyn Database>>("db")?;
-            let store = Arc::new(Map::<String>::new());
-            let store_undo = store.clone();
-            let db_undo = db.clone();
-            ctx.effect("UserCache.store.undo", move || { store_undo.drop_(); Ok(()) })?;
-            let cache_box: Box<dyn Cache> = Box::new(UserCacheCache { store: store.clone(), db: db.clone(), ctx: Arc::new(ctx.clone()) });
-            ctx.provide("cache", cache_box)?;
             Ok(cordis::PluginOutput::none())
         },
     )
@@ -297,29 +235,9 @@ fn _revl_dispatch_database(svc: &dyn Database, method: &str, args: &[serde_json:
     }
 }
 
-pub struct CacheProxy { pub socket: String, pub key: String }
-impl Cache for CacheProxy {
-    fn get(&self, key: String) -> Option<String> {
-        let _v = _revl_rpc(&self.socket, &self.key, "get", vec![serde_json::json!(key)]);
-        _v.as_str().map(|s| s.to_string())
-    }
-    fn put(&self, key: String, value: String) -> () {
-        let _v = _revl_rpc(&self.socket, &self.key, "put", vec![serde_json::json!(key), serde_json::json!(value)]);
-        { let _ = _v; }
-    }
-}
-fn _revl_dispatch_cache(svc: &dyn Cache, method: &str, args: &[serde_json::Value]) -> serde_json::Value {
-    match method {
-        "get" => serde_json::json!(svc.get(args[0].as_str().unwrap_or("").to_string())),
-        "put" => { svc.put(args[0].as_str().unwrap_or("").to_string(), args[1].as_str().unwrap_or("").to_string()); serde_json::Value::Null },
-        _ => serde_json::Value::Null,
-    }
-}
-
 pub fn _revl_service_of(key: &str) -> Option<&'static str> {
     match key {
         "db" => Some("Database"),
-        "cache" => Some("Cache"),
         _ => None,
     }
 }
@@ -336,15 +254,6 @@ pub fn _revl_proxy_plugin(key: &str, service: &str, socket: String) -> Option<co
                 Ok(cordis::PluginOutput::none())
             },
         )),
-        "Cache" => Some(cordis::plugin_sync::<(), _>(
-            "CacheProxy",
-            cordis::Inject::none(),
-            move |ctx, _config| {
-                let proxy: Box<dyn Cache> = Box::new(CacheProxy { socket: socket.clone(), key: key_string.clone() });
-                ctx.provide(key_string.as_str(), proxy)?;
-                Ok(cordis::PluginOutput::none())
-            },
-        )),
         _ => None,
     }
 }
@@ -355,10 +264,6 @@ pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serd
             Ok(svc) => _revl_dispatch_database(&**svc, method, args),
             Err(_) => serde_json::Value::Null,
         },
-        "cache" => match ctx.require::<Box<dyn Cache>>("cache") {
-            Ok(svc) => _revl_dispatch_cache(&**svc, method, args),
-            Err(_) => serde_json::Value::Null,
-        },
         _ => serde_json::Value::Null,
     }
 }
@@ -366,7 +271,6 @@ pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serd
 pub fn plugin_by_name(name: &str) -> Option<cordis::PluginHandle> {
     match name {
         "pg_database" => Some(pg_database()),
-        "user_cache" => Some(user_cache()),
         _ => None,
     }
 }
@@ -383,13 +287,8 @@ pub fn _revl_load(ctx: &cordis::Context, name: &str, config: &serde_json::Value)
             let ctx = _revl_isolate_ctx(ctx, "pg_database");
             let _c = config.get("PgDatabase").cloned().unwrap_or(serde_json::Value::Null);
             Some(ctx.plugin(pg_database(), PgDatabaseConfig {
-                url: _c.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| String::new()),
-                pool_size: _c.get("pool_size").and_then(|v| v.as_i64()).unwrap_or(10i64),
+                url: _c.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| String::from("postgres://localhost/app")),
             }))
-        },
-        "user_cache" => {
-            let ctx = _revl_isolate_ctx(ctx, "user_cache");
-            Some(ctx.plugin(user_cache(), ()))
         },
         _ => None,
     }
