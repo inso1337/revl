@@ -1,0 +1,19 @@
+// The functional trio (roadmap item 383). `xs.map(f)` desugars to
+// stdlib/list.rvl's `list_map`, which is itself a push loop.
+use "stdlib/list.rvl" { list_map, list_filter, list_reduce }
+
+fn doubled(xs: List[Int]) -> List[Int] {
+  return xs.map((v: Int) => v * 2)
+}
+
+fn evens(xs: List[Int]) -> List[Int] {
+  return xs.filter((v: Int) => v % 2 == 0)
+}
+
+fn total_reduce(xs: List[Int]) -> Int {
+  return xs.reduce(0, (a: Int, v: Int) => a + v)
+}
+
+fn pipeline(xs: List[Int]) -> Int {
+  return xs.map((v: Int) => v + 1).filter((v: Int) => v > 2).reduce(0, (a: Int, v: Int) => a + v)
+}
