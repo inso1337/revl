@@ -93,7 +93,7 @@ than inheriting a host rule:
 
 All eight identities in `tests/test_cross_tier_execution.py`
 (`INTEGER_ARITHMETIC`) are asserted by **executing** the emitted code, not by
-comparing emitter output — python and go on every run, TypeScript wherever
+comparing emitter output: python and go on every run, TypeScript wherever
 `backends/typescript/node_modules` is installed, rust and java behind
 `REVL_CROSS_TIER_SLOW=1`, and the wasm helpers verified on real `wasmtime`.
 
