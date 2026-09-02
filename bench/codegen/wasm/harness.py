@@ -301,8 +301,21 @@ LIFT_MEMCOPY = """  (func $__canon_lift_str (param $ptr i32) (param $len i32) (r
     (local.get $s))"""
 
 
+#: Findings (a), (c) and (f) LANDED in ``backends/wasm/canonical.py``, so
+#: against a current emitter the baseline already IS what those three variants
+#: stood in for. The emitter marks each one in the WAT it writes; the variant
+#: then becomes a checked no-op, which keeps ``run.py`` reporting the same
+#: variant/program pairs and keeps gating every one of them on returning
+#: exactly what the baseline returns, while the rewrites stay usable against a
+#: checkout of the pre-fix emitter.
+def _landed(core_wat: str, marker: str) -> bool:
+    return marker in core_wat
+
+
 def variant_memcopy_lift(core_wat: str) -> str:
     if LIFT_LOOP not in core_wat:
+        if _landed(core_wat, ";; item 432(a)"):
+            return core_wat       # the emitter no longer copies the bytes at all
         raise RuntimeError("lift loop not found -- emitter shape changed")
     return core_wat.replace(LIFT_LOOP, LIFT_MEMCOPY)
 
@@ -322,6 +335,8 @@ ZEROCOPY_LIFT = """  (func $__canon_lift_str (param $ptr i32) (param $len i32) (
 
 def variant_zerocopy_lift(core_wat: str) -> str:
     if "    (call $alloc (local.get $new_size)))" not in core_wat:
+        if _landed(core_wat, ";; item 432(a)"):
+            return core_wat       # cabi_realloc already reserves the headroom
         raise RuntimeError("cabi_realloc not found -- emitter shape changed")
     out = core_wat.replace("    (call $alloc (local.get $new_size)))",
                            ZEROCOPY_REALLOC, 1)
@@ -349,6 +364,8 @@ def variant_static_return_area(core_wat: str) -> str:
     The component host reads the return area before the next call into the
     instance, so one static cell is enough for a single-threaded instance.
     """
+    if _landed(core_wat, ";; item 432(f)"):
+        return core_wat           # the emitter already serves one static cell
     m = re.search(r"\(global \$__hp \(mut i32\) \(i32\.const (\d+)\)\)", core_wat)
     if m is None:
         raise RuntimeError("heap global not found -- emitter shape changed")
@@ -448,6 +465,8 @@ def variant_list_bulk(core_wat: str) -> str:
     """`List[Int]` across the boundary with bulk memory instead of a
     per-element loop, and with the lowered side aliasing the already-
     canonical internal body instead of allocating and refilling a copy."""
+    if _landed(core_wat, ";; item 432(c)"):
+        return core_wat           # the emitter already crosses lists in bulk
     out = _replace_func(core_wat, "$__canon_lift_list_Int", LIST_INT_MEMCOPY)
     return _replace_func(out, "$__canon_lower_list_Int", LIST_INT_ALIAS_LOWER)
 

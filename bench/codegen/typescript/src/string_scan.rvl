@@ -1,0 +1,22 @@
+// Benchmark: a character scan over a string. Exercises the emitted
+// `revlLen` / `revlCharAt` / `revlCharCodeAt` / `revlSlice` helpers, each of
+// which materialises the whole code-point array on every call.
+pub fn count_digits(s: Str) -> Int {
+  var n = 0
+  var i = 0
+  while (i < s.length()) {
+    if (s.charAt(i).is_digit()) { n = n + 1 }
+    i = i + 1
+  }
+  return n
+}
+
+pub fn checksum(s: Str) -> Int {
+  var acc = 0
+  var i = 0
+  while (i < s.length()) {
+    acc = (acc + s.charCodeAt(i)).mod(65536)
+    i = i + 1
+  }
+  return acc
+}

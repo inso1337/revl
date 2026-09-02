@@ -1,0 +1,8 @@
+// F2: a config extern. The java emitter rebuilds the required-field array,
+// the defaults map and a HashMap copy of both on EVERY call, from data that
+// is fully known at emit time.
+extern pure fn author(body: Str) -> Str
+  config { model: Str = "opus", retries: Int = 3 }
+  = @java { return (String) _revl_config.get("model"); }
+
+fn go(x: Str) -> Str { return author(x) }

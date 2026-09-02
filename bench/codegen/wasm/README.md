@@ -50,15 +50,23 @@ for the same semantics.
 the baseline returns for the same argument before its numbers are reported. A
 faster wrong module is not a finding.
 
-| variant | stands in for |
-|---|---|
-| `zerocopy_lift` | `cabi_realloc` reserves the length header, so lifting a `Str` is one store instead of a copy |
-| `memcopy_lift` | the conservative version: `$__canon_lift_str` uses `memory.copy` instead of a byte loop |
-| `list_bulk` | `List[Int]` crosses by `memory.copy`, and the lowered side aliases the already-canonical body |
-| `fused_concat` | one k-ary concat per template literal instead of a k-1 deep pairwise chain |
-| `prune_dead` | the helper prelude is gated on use, the way `$str_split` already is |
-| `static_return_area` | one module-level canonical return area instead of one bump allocation per call |
-| `combined` | all of the above, which is how they would ship |
+| variant | stands in for | status |
+|---|---|---|
+| `zerocopy_lift` | `cabi_realloc` reserves the length header, so lifting a `Str` is one store instead of a copy | landed, 432(a) |
+| `memcopy_lift` | the conservative version: `$__canon_lift_str` uses `memory.copy` instead of a byte loop | superseded by 432(a) |
+| `list_bulk` | `List[Int]` crosses by `memory.copy`, and the lowered side aliases the already-canonical body | landed, 432(c) |
+| `fused_concat` | one k-ary concat per template literal instead of a k-1 deep pairwise chain | open, 432(d) |
+| `prune_dead` | the helper prelude is gated on use, the way `$str_split` already is | open, 432(b) |
+| `static_return_area` | one module-level canonical return area instead of one bump allocation per call | landed, 432(f) |
+| `combined` | all of the above, which is how they would ship | |
+
+Findings (a), (c) and (f) are now in `backends/wasm/canonical.py`, so the
+**baseline** already is what those three variants stood in for. Each rewrite
+recognises the emitter's own marker comment (`;; item 432(a)` and friends) and
+becomes a no-op rather than failing, so `run.py`'s agreement gate still covers
+the same variant/program pairs and the rewrites still apply to a checkout of
+the pre-fix emitter. Their `saved` rows therefore read 0 against a current
+emitter: the win moved into the **baseline** row.
 
 ## Reading the numbers
 
