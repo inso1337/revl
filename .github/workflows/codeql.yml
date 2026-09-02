@@ -9,8 +9,14 @@ on:
     - cron: '40 14 * * 0'
 
 concurrency:
-  group: codeql-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # The group carries the SHA on push, so a push to main is unique per commit
+  # and has nothing to cancel. A pull_request keeps a stable per-ref group, so a
+  # new push to the PR cancels the superseded run. Encoding the distinction in
+  # the GROUP rather than in cancel-in-progress is deliberate: the expression
+  # form cancelled main's runs anyway, which cost three merge commits their
+  # verdict.
+  group: codeql-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: true
 
 jobs:
   analyze:
