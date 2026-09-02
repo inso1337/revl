@@ -56,6 +56,21 @@ _QUALIFIER = "Secret["
 # receiver, which is where a short secret actually crosses.
 _MIN_MARKABLE = 4
 
+# The placeholder a CALLER'S OWN ARGUMENT is rendered as when it turns up inside
+# free-form host text that is about to cross a trust boundary (item 421 F5). It
+# is distinct from `REDACTED` on purpose: `REDACTED` says "a declared `Secret[T]`
+# was here", this says "a value the caller passed in was here", and a reader of a
+# seam error reply should be able to tell the two apart.
+REDACTED_ARG = "<redacted:arg>"
+
+# An argument value has to be this long before it is matched as a substring of
+# host text. Below it, a match is a coin flip against ordinary English ("id",
+# "on", "a") and blanket-replacing it would shred the diagnostic for no
+# confidentiality gain. Deliberately lower than `_MIN_MARKABLE`: an argument is
+# the caller's data by construction, whereas a remembered secret value is matched
+# everywhere and needs the wider margin.
+_MIN_MATCHABLE_ARG = 3
+
 _secret_values: set = set()
 
 
@@ -184,6 +199,27 @@ def register_secret_value(value: Any) -> None:
         _secret_values.add(value)
 
 
+def register_secret_tree(value: Any) -> None:
+    """Remember every string leaf of a value a declared marking identified as
+    confidential, containers included.
+
+    A `Secret[T]` where T is a record or a list is confidential WHOLE, so each
+    leaf that could later be interpolated into a trace line or a host error is
+    registered. Scalars go straight to :func:`register_secret_value`, which keeps
+    the same minimum-length rule; nothing else changes."""
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            register_secret_tree(item)
+        return
+    if isinstance(value, dict):
+        # Values only: a record's KEYS are field names the author wrote, and
+        # registering them would redact the field name out of every later trace.
+        for item in value.values():
+            register_secret_tree(item)
+        return
+    register_secret_value(value)
+
+
 def is_secret_value(value: Any) -> bool:
     """Whether `value` is a value some declared marking already redacted."""
     if not _secret_values or not isinstance(value, (str, bytes)):
@@ -251,3 +287,110 @@ def redact_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(k): redact_value(v) for k, v in value.items()}
     return repr(value)
+
+
+# ---------------------------------------------------------------------------
+# redaction of ALREADY-RENDERED text (item 421 F5/F6)
+# ---------------------------------------------------------------------------
+#
+# `redact_value` funnels a value before it is rendered. Two sinks cannot use it,
+# because by the time revl sees them the value is already inside a string it did
+# not build:
+#
+#   * the host trace (`runtime.py` `_record`), whose events are f-strings the
+#     runtime interpolates a key / sql / item into. Redacting at each `_record`
+#     call site would be "at each printer", the discipline this module exists to
+#     avoid, and would miss the next site added;
+#   * a host exception's message crossing the seam (`bridge.py`), which is free
+#     text produced by code revl did not write. A plain `data[key]` lookup raises
+#     `KeyError: '<the key>'` with no author interpolation at all.
+#
+# So both go through a text funnel instead, and the match stays EXACT: a
+# registered secret value, or one of this call's own argument values. Nothing is
+# pattern-matched, so ordinary trace and ordinary diagnostics are untouched.
+
+
+def _needles(value: Any, into: set, minimum: int) -> None:
+    """Collect the string forms `value` can take inside host text.
+
+    Bools and None are skipped: their renderings ("True", "None") are ordinary
+    English in a diagnostic, and replacing them would corrupt messages that have
+    nothing to do with the caller's data."""
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, str):
+        if len(value) >= minimum:
+            into.add(value)
+        return
+    if isinstance(value, bytes):
+        for form in (value.decode("utf-8", "replace"), repr(value)):
+            if len(form) >= minimum:
+                into.add(form)
+        return
+    if isinstance(value, (int, float)):
+        form = str(value)
+        if len(form) >= minimum:
+            into.add(form)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _needles(item, into, minimum)
+        return
+    if isinstance(value, dict):
+        # Values only. A record's KEYS are field names the author wrote, not the
+        # caller's data, and redacting them would erase the diagnostic's shape.
+        for item in value.values():
+            _needles(item, into, minimum)
+        return
+    members = getattr(value, "__dict__", None)
+    if isinstance(members, dict):
+        for item in members.values():
+            _needles(item, into, minimum)
+
+
+def _replace_all(text: str, needles: Iterable, placeholder: str) -> str:
+    """Replace each needle with `placeholder`, LONGEST FIRST so a needle that
+    contains another does not leave the shorter one's tail behind."""
+    for needle in sorted(set(needles), key=len, reverse=True):
+        if needle and needle in text:
+            text = text.replace(needle, placeholder)
+    return text
+
+
+def redact_text(text: Any) -> Any:
+    """Scrub every already-registered secret value out of a rendered string.
+
+    The funnel for a sink that receives TEXT rather than a value: the host
+    trace the operator console prints (item 421 F6). Costs nothing when the
+    composition registered no secret: the common case returns immediately."""
+    if not _secret_values or not isinstance(text, str) or not text:
+        return text
+    needles: set = set()
+    for secret in _secret_values:
+        _needles(secret, needles, _MIN_MARKABLE)
+    return _replace_all(text, needles, REDACTED)
+
+
+def redact_call_text(text: Any, args: Any = ()) -> Any:
+    """Scrub one call's own argument values, then every registered secret, out of
+    free-form host text (item 421 F5).
+
+    A failure crossing a seam must not hand the consumer back the values it was
+    called with: the consumer is on the other side of a trust boundary, and the
+    forward crossing into a declared `Secret[T]` receiver authorises disclosure
+    TO THE RECEIVER, never a reverse crossing on the error channel. The message's
+    SHAPE survives (the exception type, the sentence, the surrounding text), so
+    the reply is still worth reading; only the caller's own bytes are gone.
+
+    Bounded honestly: a value shorter than `_MIN_MATCHABLE_ARG` is left alone
+    (see the constant), and a value the host reformats before printing it (a
+    truncation, a case fold, a `%.2f`) is not matched, because the match is exact
+    rather than a pattern."""
+    if not isinstance(text, str) or not text:
+        return text
+    needles: set = set()
+    _needles(list(args) if isinstance(args, (list, tuple)) else args,
+             needles, _MIN_MATCHABLE_ARG)
+    if needles:
+        text = _replace_all(text, needles, REDACTED_ARG)
+    return redact_text(text)

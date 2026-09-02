@@ -83,6 +83,8 @@ _IMPORT_ALIAS = {
     "SessionOwner": "_revl_SessionOwner",
     "set_session_owner": "_revl_set_session_owner",
     "clear_session_owner": "_revl_clear_session_owner",
+    "mark_secret": "_revl_mark_secret",
+    "secret_result": "_revl_secret_result",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
 
@@ -1747,9 +1749,29 @@ class _ComponentEmitter:
             indent,
             f"{'async ' if method_is_async else ''}def {name}(self{''.join(', ' + p for p in params)}):",
         )
+        # item 421 F6: a parameter the service declared `Secret[T]` is a declared
+        # DISCLOSURE RECEIVER. The qualifier itself is stripped in `taint.py`, so
+        # `params[i]["secret"]` is the only surviving record that this position is
+        # confidential, read here exactly as `confidential.SecretIndex` reads it
+        # in the recorder. Registering the value at the head of the receiver is
+        # what lets `runtime._record` scrub it out of the operator console trace
+        # when the body goes on to use it as a `Map` key (the shipped
+        # `demo/components/user_cache.rvl` idiom), a `pool.query`, or a stream
+        # item. Emitted ONLY for a method that actually declares one, so every
+        # other emitted module is byte-identical.
+        secret_params = [
+            p for index, p in enumerate(params)
+            if isinstance((spec.get("params") or [])[index], dict)
+            and (spec.get("params") or [])[index].get("secret")
+        ]
+        if secret_params:
+            self.uses.add("mark_secret")
+            out.add(indent + 1,
+                    f"{_runtime_ref('mark_secret')}({', '.join(secret_params)})")
         body = method.get("body") or []
         if not body:
-            out.add(indent + 1, "pass")
+            if not secret_params:
+                out.add(indent + 1, "pass")
             return
         prev_async = self._in_async
         self._in_async = method_is_async
@@ -2725,6 +2747,17 @@ def _emit_externs(externs: list) -> "_Lines":
         params = ", ".join(_ident(p["name"], "extern parameter name") for p in ext["params"])
         bodies = ext.get("bodies") or {}
         refs = ext.get("refs") or {}
+        # item 421 F6: the extern's declared return carried `Secret[T]`, so its
+        # result is where a confidential value ENTERS the value world (item 256
+        # §7a). A decorator marks it there, the narrowest place: one wrapper per
+        # declaration rather than one per call site, so a sink further down with
+        # no positional marking of its own (the host trace `_record` prints to
+        # the operator console) can scrub it. It wraps whichever `def` follows,
+        # the inline body and the `@py ref` thunk alike, and never touches the
+        # verbatim body. Emitted ONLY for a `Secret[T]`-returning extern, so every
+        # other module is byte-identical.
+        if ext.get("secret_return"):
+            out.add(0, f"@{_runtime_ref('secret_result')}")
         # item 396 option B: a `@py ref sym from "module.py"` extern emits a LAZY
         # import THUNK — never a body — that imports the host symbol at the
         # extern's FIRST CALL, inside the extern frame, and caches it. A module-
@@ -3571,6 +3604,12 @@ def emit(ir: dict) -> str:
         # item 167: a routed require resolves its worker realms by label, so the
         # emitted router needs the runtime's realm-label registry.
         | ({"realm_label"} if any(c.get("routes") for c in components) else set())
+        # item 421 F6: a `Secret[T]`-returning extern is decorated so its result
+        # is registered at its origin (`_emit_externs`). The externs are rendered
+        # outside any component emitter, so the import is gated here rather than
+        # through `emitter.uses`.
+        | ({"secret_result"} if any(ext.get("secret_return") for ext in externs)
+           else set())
     )
 
     # Delivery semantics (item 44): the reference runtime driver may auto-retry
