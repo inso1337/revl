@@ -218,32 +218,6 @@ fn scan_quoted(source: Str, i: Int, q: Int) -> Scan {
 
 // Plain string body after the opening quote; out is the text, j is the
 // index AFTER the closing quote. Unterminated / newline -> j = -1.
-fn scan_string(source: Str, i: Int) -> Scan {
-  var j = i
-  let n = source.length()
-  var out = ""
-  while (j < n) {
-    // j < n, so the code point exists: read it directly (item 276). `c` is
-    // kept for the out.concat below.
-    let c = source.charAt(j)
-    let cc = source.codepoint_at(j)
-    if (cc == 34) {
-      let jj = j
-      let text = out
-      return { j: jj + 1, out: text, nl: 0 }
-    }
-    if (cc == 10) {
-      let text2 = out
-      return { j: 0 - 1, out: text2, nl: 0 }
-    }
-    if (cc != 34 && cc != 10) {
-      out = out.concat(c)
-      j += 1
-    }
-  }
-  let text3 = out
-  return { j: 0 - 1, out: text3, nl: 0 }
-}
 
 // Three consecutive `"` (code point 34) at j. The `"""` delimiter cannot be
 // written as a plain literal (no escapes) nor a triple literal (it would
@@ -320,6 +294,51 @@ fn trim(s: Str) -> Str {
 // source between the braces, nl = newlines consumed. j = -1 if unbalanced.
 // Raw capture is what the reference lexer does: the parser re-parses the
 // body as a full expression, so `${a + b}` and `${r.count}` are legal.
+// --- string-aware raw-brace balancing (reference lexer's `_skip_trivia`) ---
+//
+// Two constructs capture a run of raw source bounded by BALANCED braces: a
+// backtick template's `${ ... }` and an `@backend { ... }` host body. Counting
+// braces naively miscounts one that sits inside a string — `@ts { if (c ===
+// "{") ... }` closes at the string's brace and the rest of the host source
+// then lexes as revl garbage. PORTED HERE: the `"` span, escape-aware, which
+// every host language and revl itself share, plus (for a revl interpolation,
+// which is real revl source) the backtick and the `//` line comment. NOT yet
+// ported: the per-backend trivia the reference also skips — `'` char/rune
+// literals (go/java/rust), `'` strings (py/ts), `/* */` and wasm `(; ;)` block
+// comments, and Python triple quotes (`_HOST_TRIVIA`).
+
+// Index just past a `"`-delimited string opening at `j` (`source[j]` is `"`),
+// honouring the `\"`/`\\` escapes. An unterminated string consumes to the end.
+fn skip_dquote(source: Str, j: Int, n: Int) -> Int {
+  var k = j + 1
+  while (k < n) {
+    let cc = source.codepoint_at(k)
+    if (cc == 92) { k += 2 } else {
+      if (cc == 34) { return k + 1 }
+      k += 1
+    }
+  }
+  return n
+}
+
+// Index just past a backtick-delimited raw span opening at `j`.
+fn skip_backtick(source: Str, j: Int, n: Int) -> Int {
+  var k = j + 1
+  while (k < n) {
+    if (source.codepoint_at(k) == 96) { return k + 1 }
+    k += 1
+  }
+  return n
+}
+
+// Index just past a `//` line comment opening at `j` (the newline is left in
+// place so the caller still counts the line).
+fn skip_line_comment(source: Str, j: Int, n: Int) -> Int {
+  var k = j + 2
+  while (k < n && source.codepoint_at(k) != 10) { k += 1 }
+  return k
+}
+
 fn scan_interp(source: Str, i: Int) -> Scan {
   var j = i
   let n = source.length()
@@ -327,17 +346,26 @@ fn scan_interp(source: Str, i: Int) -> Scan {
   var nl = 0
   while (j < n) {
     let cc = source.codepoint_at(j)
-    if (cc == 123) { depth += 1 }
-    if (cc == 125) {
-      depth -= 1
-      if (depth == 0) {
-        let jj = j
-        let lines = nl
-        return { j: jj, out: source.slice(i, jj), nl: lines }
+    // `${ ... }` is real revl source, so its trivia is revl's (`_REVL_TRIVIA`):
+    // a `"` string, a nested backtick template and a `//` line comment can each
+    // carry a brace that must not move the depth.
+    if (cc == 34) { j = skip_dquote(source, j, n) } else {
+    if (cc == 96) { j = skip_backtick(source, j, n) } else {
+    if (cc == 47 && j + 1 < n && source.codepoint_at(j + 1) == 47) {
+      j = skip_line_comment(source, j, n)
+    } else {
+      if (cc == 123) { depth += 1 }
+      if (cc == 125) {
+        depth -= 1
+        if (depth == 0) {
+          let jj = j
+          let lines = nl
+          return { j: jj, out: source.slice(i, jj), nl: lines }
+        }
       }
-    }
-    if (cc == 10) { nl += 1 }
-    j += 1
+      if (cc == 10) { nl += 1 }
+      j += 1
+    }}}
   }
   let lines2 = nl
   return { j: 0 - 1, out: "", nl: lines2 }
@@ -428,15 +456,22 @@ fn scan_host_body(source: Str, k: Int) -> Scan {
   var depth = 1
   while (j < n) {
     let cc = source.codepoint_at(j)
-    if (cc == 123) { depth += 1 }
-    if (cc == 125) {
-      depth -= 1
-      if (depth == 0) {
-        let jj = j
-        return { j: jj + 1, out: source.slice(k + 1, jj), nl: 0 }
+    // a `"` string is the one trivia form EVERY host language shares, and it
+    // is the one that actually bites: `@ts { if (c === "{") ... }` used to
+    // close at the string's brace. Line comments are deliberately NOT skipped
+    // here — the reference leaves them in for host bodies (the importers emit
+    // `@ts { // ... }` with the terminator on the comment's own line).
+    if (cc == 34) { j = skip_dquote(source, j, n) } else {
+      if (cc == 123) { depth += 1 }
+      if (cc == 125) {
+        depth -= 1
+        if (depth == 0) {
+          let jj = j
+          return { j: jj + 1, out: source.slice(k + 1, jj), nl: 0 }
+        }
       }
+      j += 1
     }
-    j += 1
   }
   return { j: 0 - 1, out: "", nl: 0 }
 }
@@ -476,7 +511,14 @@ fn step(source: Str, i: Int, line: Int) -> Step {
       return { i: ts.j, line: line + ts.nl,
                tok: { kind: "string", text: ts.out, line: line } }
     }
-    let ss = scan_string(source, i + 1)
+    // item 183/382: the `"` spelling takes the SAME `\\"`/`\\\\` escape set as the
+    // `'` spelling (reference `_lex_string`, whose `quote` parameter is the
+    // only difference between them). It used to run its own escape-BLIND
+    // scanner, so `"a\\"b"` closed at the escaped quote and the rest of the
+    // file lexed as garbage — which is why the self-host lexer could not lex
+    // most of the self-host's OWN sources (every emitter builds JSON with
+    // `\\"`). One scanner now serves both spellings.
+    let ss = scan_quoted(source, i + 1, 34)
     if (ss.j == 0 - 1) {
       return { i: source.length(), line: line,
                tok: { kind: "error", text: "unterminated string", line: line } }
@@ -664,4 +706,32 @@ component Lexer provides tokens: TokenStream {
   provide tokens {
     fn lex(source) = lex_src(source)
   }
+}
+
+test "a `\"` escape does not close the string (item 183)" {
+  // this is what made the self-host lexer unable to lex the self-host's own
+  // emitters, every one of which builds JSON with `\"`.
+  let toks = lex_src("let a = \"x\\\"y\"")
+  assert toks[3].kind == "string"
+  assert toks[3].text == "x\"y"
+  assert toks[4].kind == "eof"
+}
+
+test "a `\\\\` escape yields one backslash, and no other escape is processed" {
+  let toks = lex_src("let a = \"a\\\\b\"")
+  assert toks[3].text == "a\\b"
+  let raw = lex_src("let a = \"tab\\there\"")
+  assert raw[3].text == "tab\\there"
+}
+
+test "a host body's braces are balanced past a \"...\" string" {
+  let toks = lex_src("@ts { if (c === \"{\") return 1; }")
+  assert toks[0].kind == "hostbody"
+  assert toks[1].kind == "eof"
+}
+
+test "an interpolation's braces are balanced past a string and a comment" {
+  let toks = lex_src("let s = `v=${m.get(\"}\")}`")
+  assert toks[3].kind == "template"
+  assert toks[4].kind == "eof"
 }
