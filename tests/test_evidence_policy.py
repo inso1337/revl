@@ -74,6 +74,13 @@ def _caps():
     return {"kind": "revl.capabilities", "boundary": {}}
 
 
+def _solo_gate():
+    """The gate run the attestation records (item 127: signing needs a verdict
+    from a real frontend run over this exact composition)."""
+    return attest.run_gate(source=SOLO, filename="component.rvl",
+                           normalize=reg._normalize_ir_for_attest)
+
+
 def _solo_ir():
     return reg._normalize_ir_for_attest(compile_source(SOLO, "component.rvl"))
 
@@ -90,7 +97,8 @@ def _bundle(*, sweep, attest_bindings=True, forged_sweep=False,
     if attest_bindings:
         bindings = {"fault-sweep": reg._facet_hash(honest_sweep),
                     "capabilities": reg._facet_hash(caps)}
-    att = (attest.make_attestation(ir, KEY, now=NOW, evidence_bindings=bindings)
+    att = (attest.make_attestation(ir, KEY, verdict=_solo_gate(), now=NOW,
+                                   evidence_bindings=bindings)
            if with_attest else None)
     carried = honest_sweep
     if forged_sweep:
