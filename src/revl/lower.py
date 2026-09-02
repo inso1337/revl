@@ -3462,6 +3462,14 @@ def _lower_externs(program: Program, filename: str, types: dict,
             # so every existing extern's IR is byte-identical.
             **({"secret_return": True} if getattr(decl, "secret_return", False)
                else {}),
+            # ...and the narrower witness-position flag. A witnessed extern's
+            # durable discharge-descriptor records the Ok witness as the
+            # inverse's referent argument, so a tier WAL writer reads THIS — not
+            # `secret_return`, which is also set when only the error arm is
+            # confidential — to decide whether that referent may be written out
+            # verbatim. Absent unless the author put `Secret[...]` in the Ok arm.
+            **({"secret_witness": True} if getattr(decl, "secret_witness", False)
+               else {}),
             **({"undo_idempotent": True} if decl.undo_idempotent else {}),
             # item 440: `undo pure` — the READ tier of the re-dispatch register.
             # Absent unless the author wrote it, so every existing extern's IR is
