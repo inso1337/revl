@@ -358,42 +358,39 @@ def test_unknown_tier_is_reported(compile_to):
     assert compile_to("fn id(x: Int) -> Int { return x }", "wasm") == "UNKNOWN_TIER|wasm"
 
 
-# ------------------------------------------- the frontend's `Secret[T]` hole
+# -------------------------------------- the declared `Secret[T]` marking, native
 
-# Found while wiring the ts tier (roadmap item 146, gap 2), by checking the
-# self-host SOURCE rather than an oracle (item 429's standing rule).
-#
 # `src/revl/taint.py` is the reference pass that strips the `Secret[...]`
-# qualifier and leaves the three stamps every backend redacts from
-# (`externs[i].secret_return`, a service `params[i].secret`, a config
-# `fields[i].secret`). There is NO counterpart anywhere in the self-host frontend:
-# `grep -ci secret selfhost/{lexer,parser,checker,lower}.rvl` is 0 in all four.
+# qualifier off every declared type and leaves the stamps a backend redacts from
+# (`externs[i].secret_return` / `secret_witness`, a `params[i].secret` on an
+# extern, a module fn and a service operation, and a config `fields[i].secret`).
 #
-# So the native `lower_to_ir` produces an IR with the qualifier still on the type
-# and none of the stamps set, and `compile_to` emits a module with the whole
-# declared-`Secret[T]` marking MISSING — no `_revl_secret_result` / `mark_secret`
-# on py, no `host.secretResult` / `host.markSecret` / `secret: true` on ts — while
-# `revl compile --backend <tier>` emits all of it. This is NOT an emitter gap: both
-# native emitters were ported (py by item 429(d), ts here) and are byte-exact on
-# their own `secrets.rvl` corpus document when fed the REFERENCE IR.
+# It had NO counterpart anywhere in the self-host frontend — `grep -ci secret
+# selfhost/{lexer,parser,checker,lower}.rvl` was 0 in all four — so `lower_to_ir`
+# produced an IR with the qualifier still standing as a TYPE NAME and none of the
+# stamps set, and `compile_to` emitted a module with the whole declared marking
+# MISSING (no `_revl_secret_result` / `mark_secret` on py, no `host.secretResult`
+# / `host.markSecret` / `secret: true` on ts) while `revl compile --backend
+# <tier>` emitted all of it. Not an emitter gap: both native emitters were ported
+# (py by item 429(d), ts by item 146 gap 2) and were byte-exact on their own
+# `secrets.rvl` document when fed the REFERENCE IR — an emitter that knows how to
+# redact cannot act on a marking the frontend never produced.
 #
-# It predates this slice and is not ts-specific — py has been wired since item 230
-# with the same hole. No oracle saw it because no compile-corpus document declared
-# a `Secret[T]`; this test is that document. STRICT xfail: when the self-host
-# frontend gains the taint pass this test XPASSes, which FAILS, forcing whoever
-# closes the gap to delete the marker and update the file headers.
+# `selfhost/lower.rvl` now carries the declaration-side marking (the qualifier
+# surgery plus the four stamps), so this test is no longer a recorded gap but the
+# END-TO-END statement of it: the fully-native compile of a `Secret[T]` document
+# is byte-identical to the reference compile, on both wired tiers. Note the SCOPE
+# — what landed is the declaration marking, not the reference's flow analysis
+# (origins, `confidential`, the G9 refusals), which the self-host still does not
+# have.
 _SECRET_DOCS = [("py", "emit_py_corpus"), ("ts", "emit_ts_corpus")]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "the self-host frontend has no taint pass: lower_to_ir never strips "
-    "`Secret[T]` nor sets secret_return / params[i].secret / fields[i].secret, "
-    "so the fully-native compile drops the entire declared-Secret marking"))
 @pytest.mark.parametrize("tier,subdir", _SECRET_DOCS, ids=[t for t, _ in _SECRET_DOCS])
 def test_native_compile_carries_the_declared_secret_marking(
         compile_to, reference_emit, tier, subdir):
-    """A program declaring `Secret[T]` must compile natively to the same bytes the
-    reference compile produces — markings included. It does not today."""
+    """A program declaring `Secret[T]` compiles natively to the same bytes the
+    reference compile produces — markings included."""
     path = _fixture_path(subdir, "secrets.rvl")
     source = path.read_text(encoding="utf-8")
     got = compile_to(source, tier)
