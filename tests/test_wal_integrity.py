@@ -256,10 +256,38 @@ def test_default_wal_dir_prefers_xdg_state_home(tmp_path, monkeypatch):
 
 def test_session_default_wal_uses_durable_helper():
     """The MCP session's auto-opened approval WAL routes through the durable
-    helper, not the old tempdir literal (item 413.4 wiring guard)."""
+    helper, not the old tempdir literal (item 413.4 wiring guard).
+
+    `_configure_owner_approvals` used to inline the open; it now delegates to
+    `_ensure_wal_open`, the session's single opener (load and the typed-approval
+    path both call it), so the guard follows the opener rather than pinning the
+    caller. Both are read, so wherever the call lives the tempdir literal stays
+    out and the durable helper stays in."""
     import inspect
 
     from revl.mcp.session import Session
-    src = inspect.getsource(Session._configure_owner_approvals)
+    src = (inspect.getsource(Session._configure_owner_approvals)
+           + inspect.getsource(Session._ensure_wal_open))
     assert "default_wal_path" in src
     assert "gettempdir" not in src
+
+
+def test_session_default_wal_lands_in_the_durable_dir(monkeypatch, tmp_path):
+    """The behavioural half of the same guard, immune to a refactor: a policy
+    session that names no `wal_path` opens its approval WAL UNDER the durable
+    per-user state directory."""
+    monkeypatch.setenv("REVL_WAL_DIR", str(tmp_path / "state"))
+    from revl.compiler import compile_source
+    from revl.mcp.session import Session
+    source = (
+        "extern emission fn announce(msg: Str) = @py { return }\n"
+        "service Ops { emission fn shout(msg: Str) }\n"
+        "component Agent provides ops: Ops {\n"
+        "  provide ops { fn shout(msg) { emit announce(msg) } }\n"
+        "}\n"
+    )
+    session = Session()
+    session.approval_policy = "auto"
+    session.load(compile_source(source, "wal-dir.rvl"), record=True)
+    assert session.recorder.wal is not None
+    assert session.recorder.wal.path.startswith(str(tmp_path / "state"))
