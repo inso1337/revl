@@ -514,7 +514,7 @@ def test_java_declared_value_types_carry_a_structural_equals():
     for name in ("Point", "Seg", "Weight", "Circle", "Dot"):
         assert name in classes, f"{name} was not emitted as a class"
     for name, body in classes.items():
-        assert "public boolean equals(Object o) {" in body, (
+        assert "public boolean equals(Object __revl_o) {" in body, (
             f"{name} inherits Object.equals, which is reference identity; "
             "revl equality is structural (docs/syntax-2.0.md §3.4)")
         assert "public int hashCode() {" in body, (
@@ -559,10 +559,15 @@ def test_java_nested_record_equals_recurses_structurally():
 def test_java_nullary_variant_cases_are_not_all_one_value():
     """A nullary case has no component, so its `equals` is the `instanceof`
     alone, but its `hashCode` must still separate it from a sibling case, or
-    `Circle` and `Dot` collide in every hash container for no reason."""
+    `Circle` and `Dot` collide in every hash container for no reason.
+
+    The parameter is `__revl_o`: a record may declare a field named `o`, and
+    the canonical spelling would shadow it. Nothing here reads a field
+    unqualified today, so `o` would still compile; with no javac in the
+    default test run, the safe name is the one that cannot start failing."""
     emitted = _emit("java", PROBES["declared value types compare structurally"])
     classes = _java_value_classes(emitted)
-    assert "return o instanceof Dot;" in classes["Dot"]
+    assert "return __revl_o instanceof Dot;" in classes["Dot"]
     assert 'return "Shape.Dot".hashCode();' in classes["Dot"]
     assert 'int h = "Shape.Circle".hashCode();' in classes["Circle"]
 
