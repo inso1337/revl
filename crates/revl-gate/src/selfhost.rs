@@ -60,6 +60,13 @@ pub struct ProvKey {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Route {
+    key: String,
+    rlms: Vec<String>,
+    strat: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompD {
     name: String,
     provKeys: Vec<ProvKey>,
@@ -67,6 +74,7 @@ pub struct CompD {
     reqMap: Vec<Bind>,
     setup: Vec<Stmt>,
     iso: Vec<ProvKey>,
+    routes: Vec<Route>,
     refuse: String,
 }
 
@@ -115,7 +123,16 @@ pub struct ProvR {
     provs: Vec<Provide>,
     setup: Vec<Stmt>,
     iso: Vec<ProvKey>,
+    routes: Vec<Route>,
     refuse: String,
+    i: i64,
+    ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RouteP {
+    rlms: Vec<String>,
+    strat: String,
     i: i64,
     ok: bool,
 }
@@ -713,8 +730,8 @@ fn mk_msig(nm: String, em: bool, cs: Vec<String>, asy: bool) -> MSig {
     return MSig { name: nm.clone(), isEm: em, caps: cs.clone(), isAsync: asy };
 }
 
-fn mk_compd(nm: String, pks: Vec<ProvKey>, pvs: Vec<Provide>, rq: Vec<Bind>, su: Vec<Stmt>, iso: Vec<ProvKey>, refuse: String) -> CompD {
-    return CompD { name: nm.clone(), provKeys: pks.clone(), provs: pvs.clone(), reqMap: rq.clone(), setup: su.clone(), iso: iso.clone(), refuse: refuse.clone() };
+fn mk_compd(nm: String, pks: Vec<ProvKey>, pvs: Vec<Provide>, rq: Vec<Bind>, su: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, refuse: String) -> CompD {
+    return CompD { name: nm.clone(), provKeys: pks.clone(), provs: pvs.clone(), reqMap: rq.clone(), setup: su.clone(), iso: iso.clone(), routes: rts.clone(), refuse: refuse.clone() };
 }
 
 fn mk_provkey(k: String, r: String) -> ProvKey {
@@ -956,6 +973,102 @@ fn body_callees(ss: Vec<Stmt>, i: i64, acc: Vec<String>) -> Vec<String> {
     return body_callees(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), calls_in((ss)[(i) as usize].clone().e, acc.clone()));
 }
 
+fn acalls_slots(slots: std::collections::HashMap<String, Vec<i64>>, n: String) -> Vec<i64> {
+    return match slots.get(&n).cloned() {
+    Some(v) => v,
+    None => vec![],
+    _ => unreachable!(),
+};
+}
+
+fn is_arrow(e: Expr) -> bool {
+    return match e {
+    Expr::Arrow(a) => { let a = *a; true },
+    _ => false,
+};
+}
+
+fn aexprs_calls(xs: Vec<Expr>, i: i64, sl: std::collections::HashMap<String, Vec<i64>>, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return aexprs_calls(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), sl.clone(), acalls_in((xs)[(i) as usize].clone(), sl.clone(), acc.clone()));
+}
+
+fn ainits_calls(xs: Vec<InitN>, i: i64, sl: std::collections::HashMap<String, Vec<i64>>, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return ainits_calls(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), sl.clone(), acalls_in((xs)[(i) as usize].clone().value, sl.clone(), acc.clone()));
+}
+
+fn aarms_calls(xs: Vec<ArmN>, i: i64, sl: std::collections::HashMap<String, Vec<i64>>, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return aarms_calls(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), sl.clone(), acalls_in((xs)[(i) as usize].clone().body, sl.clone(), acc.clone()));
+}
+
+fn aparts_calls(xs: Vec<PartN>, i: i64, sl: std::collections::HashMap<String, Vec<i64>>, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return aparts_calls(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), sl.clone(), acalls_in((xs)[(i) as usize].clone().e, sl.clone(), acc.clone()));
+}
+
+fn aargs_calls(xs: Vec<Expr>, i: i64, asl: Vec<i64>, sl: std::collections::HashMap<String, Vec<i64>>, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    if (contains_int(asl.clone(), i) && is_arrow((xs)[(i) as usize].clone())) {
+        return aargs_calls(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), asl.clone(), sl.clone(), acc.clone());
+    }
+    return aargs_calls(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), asl.clone(), sl.clone(), acalls_in((xs)[(i) as usize].clone(), sl.clone(), acc.clone()));
+}
+
+fn acall_calls(tg: Expr, args: Vec<Expr>, sl: std::collections::HashMap<String, Vec<i64>>, acc: Vec<String>) -> Vec<String> {
+    let cn = callee_name(tg.clone());
+    if (cn != String::from("")) {
+        return aargs_calls(args.clone(), 0i64, acalls_slots(sl.clone(), cn.clone()), sl.clone(), acc.revl_push(cn.clone()));
+    }
+    return aexprs_calls(args.clone(), 0i64, sl.clone(), acalls_in(tg.clone(), sl.clone(), acc.clone()));
+}
+
+fn acalls_in(e: Expr, sl: std::collections::HashMap<String, Vec<i64>>, acc: Vec<String>) -> Vec<String> {
+    return match e {
+    Expr::IntLit(_) => acc,
+    Expr::FloatLit(_) => acc,
+    Expr::StrLit(_) => acc,
+    Expr::BoolLit(_) => acc,
+    Expr::NullLit => acc,
+    Expr::Var(_) => acc,
+    Expr::Hole(_) => acc,
+    Expr::Bad(_) => acc,
+    Expr::Bin(b) => { let b = *b; acalls_in(b.r.clone(), sl.clone(), acalls_in(b.l.clone(), sl.clone(), acc.clone())) },
+    Expr::Un(u) => { let u = *u; acalls_in(u.e.clone(), sl.clone(), acc.clone()) },
+    Expr::Emit(u) => { let u = *u; acalls_in(u.e.clone(), sl.clone(), acc.clone()) },
+    Expr::Call(c) => { let c = *c; acall_calls(c.target.clone(), c.args.clone(), sl.clone(), acc.clone()) },
+    Expr::Field(f) => { let f = *f; acalls_in(f.target.clone(), sl.clone(), acc.clone()) },
+    Expr::OptField(f) => { let f = *f; acalls_in(f.target.clone(), sl.clone(), acc.clone()) },
+    Expr::OptCall(c) => { let c = *c; aexprs_calls(c.args.clone(), 0i64, sl.clone(), acalls_in(c.target.clone(), sl.clone(), acc.clone())) },
+    Expr::Index(x) => { let x = *x; acalls_in(x.idx.clone(), sl.clone(), acalls_in(x.target.clone(), sl.clone(), acc.clone())) },
+    Expr::If(x) => { let x = *x; acalls_in(x.els.clone(), sl.clone(), acalls_in(x.then_.clone(), sl.clone(), acalls_in(x.cond.clone(), sl.clone(), acc.clone()))) },
+    Expr::Rec(r) => ainits_calls(r.fields, 0i64, sl.clone(), acc.clone()),
+    Expr::Lst(l) => aexprs_calls(l.items, 0i64, sl.clone(), acc.clone()),
+    Expr::Arrow(a) => { let a = *a; acalls_in(a.body, sl.clone(), acc.clone()) },
+    Expr::Match(m) => { let m = *m; aarms_calls(m.arms.clone(), 0i64, sl.clone(), acalls_in(m.scrut.clone(), sl.clone(), acc.clone())) },
+    Expr::Templ(t) => aparts_calls(t.parts, 0i64, sl.clone(), acc.clone()),
+    _ => unreachable!(),
+};
+}
+
+fn abody_callees(ss: Vec<Stmt>, i: i64, sl: std::collections::HashMap<String, Vec<i64>>, acc: Vec<String>) -> Vec<String> {
+    if (i >= ss.revl_length()) {
+        return acc;
+    }
+    return abody_callees(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), sl.clone(), acalls_in((ss)[(i) as usize].clone().e, sl.clone(), acc.clone()));
+}
+
 fn ret_at(ts: Vec<Token>, i: i64) -> i64 {
     if atk(ts.clone(), i, &String::from("arrow")) {
         return type_at(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow")).i;
@@ -1128,8 +1241,8 @@ fn bind_has(env: Vec<Bind>, n: &str) -> bool {
     return (bind_lookup(env.clone(), n, 0i64) != String::from(""));
 }
 
-fn mk_provr(pv: Vec<Provide>, su: Vec<Stmt>, iso: Vec<ProvKey>, refuse: String, i: i64, ok: bool) -> ProvR {
-    return ProvR { provs: pv.clone(), setup: su.clone(), iso: iso.clone(), refuse: refuse.clone(), i: i, ok: ok };
+fn mk_provr(pv: Vec<Provide>, su: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, refuse: String, i: i64, ok: bool) -> ProvR {
+    return ProvR { provs: pv.clone(), setup: su.clone(), iso: iso.clone(), routes: rts.clone(), refuse: refuse.clone(), i: i, ok: ok };
 }
 
 fn prelude_msg(kw: &str) -> String {
@@ -1165,6 +1278,94 @@ fn iso_has(iso: Vec<ProvKey>, key: &str, i: i64) -> bool {
     return iso_has(iso.clone(), key, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
+fn route_prelude_msg() -> String {
+    return String::from("`isolate ... in realms(...)` must precede every effect, emit, await, and provide statement");
+}
+
+fn route_provision_msg(key: &str, cname: &str) -> String {
+    return ((String::from("`isolate ... in realms(...)` routes a *required* key — `").revl_concat(&key)).revl_concat(&String::from("` is a provision of "))).revl_concat(&cname);
+}
+
+fn route_undeclared_msg(key: &str, cname: &str) -> String {
+    return ((String::from("`").revl_concat(&key)).revl_concat(&String::from("` is not a declared requirement of "))).revl_concat(&cname);
+}
+
+fn route_pinned_msg(key: &str, cname: &str) -> String {
+    return (((String::from("key `").revl_concat(&key)).revl_concat(&String::from("` is already isolated to a single realm in "))).revl_concat(&cname)).revl_concat(&String::from(" — it cannot also be routed across `realms(...)`"));
+}
+
+fn route_twice_msg(key: &str, cname: &str) -> String {
+    return ((String::from("key `").revl_concat(&key)).revl_concat(&String::from("` is routed twice in "))).revl_concat(&cname);
+}
+
+fn known_strategies() -> Vec<String> {
+    return vec![String::from("least_loaded"), String::from("random"), String::from("round_robin"), String::from("sticky")];
+}
+
+fn route_strategy_msg(strat: &str, key: &str, cname: &str) -> String {
+    return ((((String::from("unknown routing strategy `").revl_concat(&strat)).revl_concat(&String::from("` for `"))).revl_concat(&key)).revl_concat(&String::from("` in "))).revl_concat(&cname);
+}
+
+fn routes_has(rs: Vec<Route>, key: &str, i: i64) -> bool {
+    if (i >= rs.revl_length()) {
+        return false;
+    }
+    if ((rs)[(i) as usize].clone().key == key) {
+        return true;
+    }
+    return routes_has(rs.clone(), key, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn route_of(rs: Vec<Route>, key: &str, i: i64) -> Route {
+    if (i >= rs.revl_length()) {
+        return Route { key: String::from(""), rlms: vec![], strat: String::from("") };
+    }
+    if ((rs)[(i) as usize].clone().key == key) {
+        return (rs)[(i) as usize].clone();
+    }
+    return route_of(rs.clone(), key, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn ati(ts: Vec<Token>, i: i64, w: &str) -> bool {
+    let t = tkc(ts.clone(), i);
+    return ((t.kind == String::from("ident")) && (t.text == w));
+}
+
+fn p_realm_labels(ts: Vec<Token>, i: i64, acc: Vec<String>) -> RouteP {
+    if (!atk(ts.clone(), i, &String::from("string"))) {
+        return RouteP { rlms: acc.clone(), strat: String::from(""), i: i, ok: false };
+    }
+    let label = tkc(ts.clone(), i).text;
+    if ((label == String::from("")) || contains(acc.clone(), &label)) {
+        return RouteP { rlms: acc.clone(), strat: String::from(""), i: i, ok: false };
+    }
+    let xs = acc.revl_push(label.clone());
+    if atk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), &String::from(",")) {
+        if atk(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"), &String::from(")")) {
+            return RouteP { rlms: xs.clone(), strat: String::from(""), i: (i).checked_add(3i64).expect("revl: Int overflow"), ok: true };
+        }
+        return p_realm_labels(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"), xs.clone());
+    }
+    if atk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), &String::from(")")) {
+        return RouteP { rlms: xs.clone(), strat: String::from(""), i: (i).checked_add(2i64).expect("revl: Int overflow"), ok: true };
+    }
+    return RouteP { rlms: xs.clone(), strat: String::from(""), i: (i).checked_add(1i64).expect("revl: Int overflow"), ok: false };
+}
+
+fn p_route_clause(ts: Vec<Token>, i: i64) -> RouteP {
+    if ((!ati(ts.clone(), i, &String::from("realms"))) || (!atk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), &String::from("(")))) {
+        return RouteP { rlms: vec![], strat: String::from(""), i: i, ok: false };
+    }
+    let r = p_realm_labels(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"), vec![]);
+    if (!r.ok) {
+        return r;
+    }
+    if (((ati(ts.clone(), r.i, &String::from("strategy")) && atk(ts.clone(), (r.i).checked_add(1i64).expect("revl: Int overflow"), &String::from("("))) && atk(ts.clone(), (r.i).checked_add(2i64).expect("revl: Int overflow"), &String::from("ident"))) && atk(ts.clone(), (r.i).checked_add(3i64).expect("revl: Int overflow"), &String::from(")"))) {
+        return RouteP { rlms: r.rlms.clone(), strat: tkc(ts.clone(), (r.i).checked_add(2i64).expect("revl: Int overflow")).text, i: (r.i).checked_add(4i64).expect("revl: Int overflow"), ok: true };
+    }
+    return r;
+}
+
 fn handoff_target_msg(key: &str, cname: &str) -> String {
     return ((String::from("`").revl_concat(&key)).revl_concat(&String::from("` is not a declared provision of "))).revl_concat(&cname);
 }
@@ -1173,65 +1374,69 @@ fn handoff_twice_msg(cname: &str) -> String {
     return (cname.revl_concat(&String::from(" declares more than one `handoff` — a component has one "))).revl_concat(&String::from("activation frame, so it hands off one state shape"));
 }
 
-fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bind>, cname: &str, provs: Vec<Provide>, setup: Vec<Stmt>, iso: Vec<ProvKey>, icept: Vec<String>, hoff: bool, action: bool) -> ProvR {
+fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bind>, cname: &str, provs: Vec<Provide>, setup: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, icept: Vec<String>, hoff: bool, action: bool) -> ProvR {
     if ((i >= end) || atk(ts.clone(), i, &String::from("}"))) {
-        return mk_provr(provs.clone(), setup.clone(), iso.clone(), String::from(""), i, true);
+        return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), i, true);
     }
     if atw(ts.clone(), i, &String::from("provide")) {
         let key = tkc(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow")).text;
         if (!atk(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"), &String::from("{"))) {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), String::from(""), (i).checked_add(2i64).expect("revl: Int overflow"), false);
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), (i).checked_add(2i64).expect("revl: Int overflow"), false);
         }
         let pend = close_brace(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"));
         if (pend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), String::from(""), ts.revl_length(), false);
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), ts.revl_length(), false);
         }
         let ms = p_prov_methods(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), (pend).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
         if (!ms.ok) {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), String::from(""), pend, false);
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), pend, false);
         }
-        return p_comp_body(ts.clone(), pend, end, provh.clone(), reqh.clone(), cname, provs.revl_push(Provide { key: key.clone(), svcName: bind_lookup(provh.clone(), &key, 0i64), methods: ms.xs.clone() }), setup.clone(), iso.clone(), icept.clone(), hoff, true);
+        return p_comp_body(ts.clone(), pend, end, provh.clone(), reqh.clone(), cname, provs.revl_push(Provide { key: key.clone(), svcName: bind_lookup(provh.clone(), &key, 0i64), methods: ms.xs.clone() }), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff, true);
     }
     if atw(ts.clone(), i, &String::from("isolate")) {
+        if (atw(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"), &String::from("in")) && ati(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), &String::from("realms"))) {
+            return p_route_stmt(ts.clone(), i, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff, action);
+        }
         if action {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), tagged(&String::from("PRELUDE"), &prelude_msg(&String::from("isolate"))), skip_line(ts.clone(), i), true);
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("PRELUDE"), &prelude_msg(&String::from("isolate"))), skip_line(ts.clone(), i), true);
         }
         let key = tkc(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow")).text;
         if (((atw(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"), &String::from("in")) && atw(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), &String::from("realm"))) && atk(ts.clone(), (i).checked_add(4i64).expect("revl: Int overflow"), &String::from("("))) && atk(ts.clone(), (i).checked_add(5i64).expect("revl: Int overflow"), &String::from("string"))) {
             if ((!bind_has(reqh.clone(), &key)) && (!bind_has(provh.clone(), &key))) {
-                return mk_provr(provs.clone(), setup.clone(), iso.clone(), tagged(&String::from("G1"), &isolate_target_msg(&key, cname)), skip_line(ts.clone(), i), true);
+                return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("G1"), &isolate_target_msg(&key, cname)), skip_line(ts.clone(), i), true);
             }
             if iso_has(iso.clone(), &key, 0i64) {
-                return mk_provr(provs.clone(), setup.clone(), iso.clone(), tagged(&String::from("G1"), &isolate_twice_msg(&key, cname)), skip_line(ts.clone(), i), true);
+                return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("G1"), &isolate_twice_msg(&key, cname)), skip_line(ts.clone(), i), true);
             }
             let rlm = tkc(ts.clone(), (i).checked_add(5i64).expect("revl: Int overflow")).text;
-            return p_comp_body(ts.clone(), skip_line(ts.clone(), i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.revl_push(mk_provkey(key.clone(), rlm.clone())), icept.clone(), hoff, action);
+            let nx = if atk(ts.clone(), (i).checked_add(6i64).expect("revl: Int overflow"), &String::from(")")) { (i).checked_add(7i64).expect("revl: Int overflow") } else { skip_line(ts.clone(), i) };
+            return p_comp_body(ts.clone(), nx.clone(), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.revl_push(mk_provkey(key.clone(), rlm.clone())), rts.clone(), icept.clone(), hoff, action);
         }
-        return p_comp_body(ts.clone(), skip_line(ts.clone(), i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), icept.clone(), hoff, action);
+        return p_comp_body(ts.clone(), skip_line(ts.clone(), i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff, action);
     }
     if atw(ts.clone(), i, &String::from("handoff")) {
         if action {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), tagged(&String::from("PRELUDE"), &prelude_msg(&String::from("handoff"))), skip_line(ts.clone(), i), true);
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("PRELUDE"), &prelude_msg(&String::from("handoff"))), skip_line(ts.clone(), i), true);
         }
         let key = tkc(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow")).text;
         if (!bind_has(provh.clone(), &key)) {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), tagged(&String::from("HANDOFF"), &handoff_target_msg(&key, cname)), skip_line(ts.clone(), i), true);
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("HANDOFF"), &handoff_target_msg(&key, cname)), skip_line(ts.clone(), i), true);
         }
         if hoff {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), tagged(&String::from("HANDOFF"), &handoff_twice_msg(cname)), skip_line(ts.clone(), i), true);
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("HANDOFF"), &handoff_twice_msg(cname)), skip_line(ts.clone(), i), true);
         }
-        return p_comp_body(ts.clone(), skip_line(ts.clone(), i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), icept.clone(), true, action);
+        return p_comp_body(ts.clone(), skip_line(ts.clone(), i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), true, action);
     }
     if atw(ts.clone(), i, &String::from("intercept")) {
         if action {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), tagged(&String::from("PRELUDE"), &prelude_msg(&String::from("intercept"))), skip_line(ts.clone(), i), true);
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("PRELUDE"), &prelude_msg(&String::from("intercept"))), skip_line(ts.clone(), i), true);
         }
         let key = tkc(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow")).text;
         if (!bind_has(reqh.clone(), &key)) {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), tagged(&String::from("G1"), &intercept_target_msg(&key, cname, bind_has(provh.clone(), &key))), skip_line(ts.clone(), i), true);
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("G1"), &intercept_target_msg(&key, cname, bind_has(provh.clone(), &key))), skip_line(ts.clone(), i), true);
         }
         if contains(icept.clone(), &key) {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), tagged(&String::from("G1"), &intercept_twice_msg(&key, cname)), skip_line(ts.clone(), i), true);
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("G1"), &intercept_twice_msg(&key, cname)), skip_line(ts.clone(), i), true);
         }
         let mut k = (i).checked_add(1i64).expect("revl: Int overflow");
         while ((k < end) && (!atk(ts.clone(), k.clone(), &String::from("{")))) {
@@ -1240,21 +1445,48 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
         if atk(ts.clone(), k.clone(), &String::from("{")) {
             let ce = close_brace(ts.clone(), k.clone());
             if (ce != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return p_comp_body(ts.clone(), ce, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), icept.revl_push(key.clone()), hoff, action);
+                return p_comp_body(ts.clone(), ce, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.revl_push(key.clone()), hoff, action);
             }
         }
-        return p_comp_body(ts.clone(), skip_line(ts.clone(), i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), icept.revl_push(key.clone()), hoff, action);
+        return p_comp_body(ts.clone(), skip_line(ts.clone(), i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.revl_push(key.clone()), hoff, action);
     }
     if (atw(ts.clone(), i, &String::from("config")) && atk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), &String::from("{"))) {
         let ce = close_brace(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
         if (ce != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return p_comp_body(ts.clone(), ce, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), icept.clone(), hoff, action);
+            return p_comp_body(ts.clone(), ce, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff, action);
         }
     }
     let le = line_end(ts.clone(), i, end);
     let r = p_stmt_run(ts.clone(), i, le);
     let nx = if (r.i > i) { r.i } else { le };
-    return p_comp_body(ts.clone(), nx, end, provh.clone(), reqh.clone(), cname, provs.clone(), append_stmts(setup.clone(), r.ss.clone()), iso.clone(), icept.clone(), hoff, true);
+    return p_comp_body(ts.clone(), nx.clone(), end, provh.clone(), reqh.clone(), cname, provs.clone(), append_stmts(setup.clone(), r.ss.clone()), iso.clone(), rts.clone(), icept.clone(), hoff, true);
+}
+
+fn p_route_stmt(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bind>, cname: &str, provs: Vec<Provide>, setup: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, icept: Vec<String>, hoff: bool, action: bool) -> ProvR {
+    if action {
+        return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("PRELUDE"), &route_prelude_msg()), skip_line(ts.clone(), i), true);
+    }
+    let key = tkc(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow")).text;
+    if (!bind_has(reqh.clone(), &key)) {
+        if bind_has(provh.clone(), &key) {
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("ROUTE"), &route_provision_msg(&key, cname)), skip_line(ts.clone(), i), true);
+        }
+        return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("G1"), &route_undeclared_msg(&key, cname)), skip_line(ts.clone(), i), true);
+    }
+    if iso_has(iso.clone(), &key, 0i64) {
+        return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("ROUTE"), &route_pinned_msg(&key, cname)), skip_line(ts.clone(), i), true);
+    }
+    if routes_has(rts.clone(), &key, 0i64) {
+        return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("ROUTE"), &route_twice_msg(&key, cname)), skip_line(ts.clone(), i), true);
+    }
+    let rc = p_route_clause(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"));
+    if (!rc.ok) {
+        return p_comp_body(ts.clone(), skip_line(ts.clone(), i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff, action);
+    }
+    if ((rc.strat != String::from("")) && (!contains(known_strategies(), &rc.strat))) {
+        return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged(&String::from("ROUTE"), &route_strategy_msg(&rc.strat, &key, cname)), skip_line(ts.clone(), i), true);
+    }
+    return p_comp_body(ts.clone(), rc.i, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.revl_push(Route { key: key.clone(), rlms: rc.rlms.clone(), strat: rc.strat.clone() }), icept.clone(), hoff, action);
 }
 
 fn realm_of(iso: Vec<ProvKey>, key: &str, i: i64) -> String {
@@ -1297,7 +1529,7 @@ fn p_component(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return PStep { pg: bad_prog(pg.clone(), String::from("unbalanced braces in component")), i: ts.revl_length() };
     }
-    let body = p_comp_body(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow"), provh.clone(), reqs.clone(), &nm, vec![], vec![], vec![], vec![], false, false);
+    let body = p_comp_body(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow"), provh.clone(), reqs.clone(), &nm, vec![], vec![], vec![], vec![], vec![], false, false);
     if (!body.ok) {
         return PStep { pg: bad_prog(pg.clone(), String::from("bad provide block in component ").revl_concat(&nm)), i: end };
     }
@@ -1308,7 +1540,7 @@ fn p_component(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
         pks.push(mk_provkey((pkeys)[(pi) as usize].clone(), realm_of(body.iso.clone(), &(pkeys)[(pi) as usize].clone(), 0i64)));
         pi = (pi).checked_add(1i64).expect("revl: Int overflow");
     }
-    return mk_step(push_comp(pg.clone(), mk_compd(nm.clone(), pks.clone(), body.provs.clone(), reqs.clone(), body.setup.clone(), body.iso.clone(), body.refuse.clone())), end);
+    return mk_step(push_comp(pg.clone(), mk_compd(nm.clone(), pks.clone(), body.provs.clone(), reqs.clone(), body.setup.clone(), body.iso.clone(), body.routes.clone(), body.refuse.clone())), end);
 }
 
 fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
@@ -1393,13 +1625,27 @@ fn emit_caps(fs: Vec<FnD>) -> std::collections::HashMap<String, Vec<String>> {
     return caps;
 }
 
-fn async_colored(fs: Vec<FnD>) -> Vec<String> {
+fn async_slots_map(fs: Vec<FnD>) -> std::collections::HashMap<String, Vec<i64>> {
+    let mut m = std::collections::HashMap::new();
+    let mut i = 0i64;
+    while (i < fs.revl_length()) {
+        if ((fs)[(i) as usize].clone().asyncSlots.revl_length() > 0i64) {
+            m.insert((fs)[(i) as usize].clone().name, (fs)[(i) as usize].clone().asyncSlots);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return m;
+}
+
+fn async_colored(fs: Vec<FnD>, slots: std::collections::HashMap<String, Vec<i64>>) -> Vec<String> {
     let mut colored: Vec<String> = vec![];
+    let mut reach: Vec<Vec<String>> = vec![];
     let mut i = 0i64;
     while (i < fs.revl_length()) {
         if (fs)[(i) as usize].clone().isAsyncExtern {
             colored.push((fs)[(i) as usize].clone().name);
         }
+        reach.push(abody_callees((fs)[(i) as usize].clone().body, 0i64, slots.clone(), vec![]));
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     let mut changed = true;
@@ -1409,7 +1655,7 @@ fn async_colored(fs: Vec<FnD>) -> Vec<String> {
         while (i < fs.revl_length()) {
             let f = (fs)[(i) as usize].clone();
             if (!contains(colored.clone(), &f.name)) {
-                if (any_in(f.callees.clone(), colored.clone()) || any_in(f.callees.clone(), f.asyncParams.clone())) {
+                if (any_in((reach)[(i) as usize].clone(), colored.clone()) || any_in((reach)[(i) as usize].clone(), f.asyncParams.clone())) {
                     colored.push(f.name.clone());
                     changed = true;
                 }
@@ -1743,10 +1989,10 @@ fn build_maps(pg: Prog) -> Ctx {
         si = (si).checked_add(1i64).expect("revl: Int overflow");
     }
     let caps = emit_caps(pg.fns.clone());
-    let colored = async_colored(pg.fns.clone());
+    let slots = async_slots_map(pg.fns.clone());
+    let colored = async_colored(pg.fns.clone(), slots.clone());
     let mut emitting: Vec<String> = vec![];
     let mut ai: Vec<String> = vec![];
-    let mut slots = std::collections::HashMap::new();
     let mut fi = 0i64;
     while (fi < pg.fns.revl_length()) {
         let f = (pg.fns)[(fi) as usize].clone();
@@ -1755,9 +2001,6 @@ fn build_maps(pg: Prog) -> Ctx {
         }
         if f.isAsyncExtern {
             ai.push(f.name.clone());
-        }
-        if (f.asyncSlots.revl_length() > 0i64) {
-            slots.insert(f.name.clone(), f.asyncSlots.clone());
         }
         fi = (fi).checked_add(1i64).expect("revl: Int overflow");
     }
@@ -1922,13 +2165,27 @@ fn reach_reqcall(v: String, meth: &str, args: Vec<Expr>, cx: Ctx, cr: bool, a: R
     return reach_exprs(args.clone(), 0i64, cx.clone(), cr, a2.clone());
 }
 
+fn reach_args(args: Vec<Expr>, i: i64, asl: Vec<i64>, cx: Ctx, cr: bool, a: ReachAcc) -> ReachAcc {
+    if (i >= args.revl_length()) {
+        return a;
+    }
+    if (contains_int(asl.clone(), i) && is_arrow((args)[(i) as usize].clone())) {
+        return reach_args(args.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), asl.clone(), cx.clone(), cr, a.clone());
+    }
+    return reach_args(args.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), asl.clone(), cx.clone(), cr, reach_scan((args)[(i) as usize].clone(), cx.clone(), cr, a.clone()));
+}
+
 fn reach_call(tg: Expr, args: Vec<Expr>, cx: Ctx, cr: bool, a: ReachAcc) -> ReachAcc {
     return match tg.clone() {
     Expr::Field(fl) => { let fl = *fl; match fl.target.clone() {
-    Expr::Var(v) => reach_reqcall(v, &fl.name, args.clone(), cx.clone(), cr, a.clone()),
+    Expr::Var(v) => reach_reqcall(v.clone(), &fl.name, args.clone(), cx.clone(), cr, a.clone()),
     _ => reach_exprs(args.clone(), 0i64, cx.clone(), cr, reach_scan(tg.clone(), cx.clone(), cr, a.clone())),
 } },
-    Expr::Var(n) => reach_exprs(args.clone(), 0i64, cx.clone(), cr, if contains(cx.colored.clone(), &n) { reach_add_name(a.clone(), n.clone()) } else { a.clone() }),
+    Expr::Var(n) => reach_args(args.clone(), 0i64, match cx.fnAsyncSlots.get(&n).cloned() {
+    Some(v) => v,
+    None => vec![],
+    _ => unreachable!(),
+}, cx.clone(), cr, if contains(cx.colored.clone(), &n) { reach_add_name(a.clone(), n.clone()) } else { a.clone() }),
     _ => reach_exprs(args.clone(), 0i64, cx.clone(), cr, reach_scan(tg.clone(), cx.clone(), cr, a.clone())),
 };
 }
@@ -2646,11 +2903,25 @@ fn add_edge(succ: std::collections::HashMap<String, Vec<String>>, src: String, d
     return { let mut c = succ.clone(); c.insert(src.clone(), succ_of(succ.clone(), src.clone()).revl_push(dst)); c };
 }
 
+fn route_edges(rlms: Vec<String>, ri: i64, key: &str, cname: String, provs: Vec<Prov3>, succ: std::collections::HashMap<String, Vec<String>>) -> std::collections::HashMap<String, Vec<String>> {
+    if (ri >= rlms.revl_length()) {
+        return succ;
+    }
+    let provider = find_provider(provs.clone(), key, &(rlms)[(ri) as usize].clone(), 0i64);
+    if ((provider == String::from("")) || (provider == cname)) {
+        return route_edges(rlms.clone(), (ri).checked_add(1i64).expect("revl: Int overflow"), key, cname.clone(), provs.clone(), succ.clone());
+    }
+    return route_edges(rlms.clone(), (ri).checked_add(1i64).expect("revl: Int overflow"), key, cname.clone(), provs.clone(), add_edge(succ.clone(), provider.clone(), cname.clone()));
+}
+
 fn scan_reqs(comp: CompD, provs: Vec<Prov3>, keys: Vec<String>, ki: i64, succ: std::collections::HashMap<String, Vec<String>>) -> EdgeR {
     if (ki >= keys.revl_length()) {
         return EdgeR { succ: succ.clone(), msg: String::from("") };
     }
     let key = (keys)[(ki) as usize].clone();
+    if routes_has(comp.routes.clone(), &key, 0i64) {
+        return scan_reqs(comp.clone(), provs.clone(), keys.clone(), (ki).checked_add(1i64).expect("revl: Int overflow"), route_edges(route_of(comp.routes.clone(), &key, 0i64).rlms, 0i64, &key, comp.name.clone(), provs.clone(), succ.clone()));
+    }
     let provider = find_provider(provs.clone(), &key, &realm_of(comp.iso.clone(), &key, 0i64), 0i64);
     if (provider == comp.name) {
         return EdgeR { succ: succ.clone(), msg: (((String::from("component ").revl_concat(&comp.name)).revl_concat(&String::from(" requires a key it provides itself (`"))).revl_concat(&key)).revl_concat(&String::from("`) (G3)")) };
@@ -2741,11 +3012,51 @@ fn arrow_join(xs: Vec<String>) -> String {
     return out;
 }
 
+fn route_missing_msg(key: &str, cname: &str, rlm: &str) -> String {
+    return (((((((((String::from("multi-realm bind of `").revl_concat(&key)).revl_concat(&String::from("` in "))).revl_concat(&cname)).revl_concat(&String::from(" names realm `"))).revl_concat(&rlm)).revl_concat(&String::from("`, but no component provides `"))).revl_concat(&key)).revl_concat(&String::from("` in realm `"))).revl_concat(&rlm)).revl_concat(&String::from("` (item 162: every routed realm needs a provider)"));
+}
+
+fn route_realm_scan(rlms: Vec<String>, ri: i64, key: &str, cname: &str, provs: Vec<Prov3>) -> String {
+    if (ri >= rlms.revl_length()) {
+        return String::from("");
+    }
+    if (find_provider(provs.clone(), key, &(rlms)[(ri) as usize].clone(), 0i64) == String::from("")) {
+        return route_missing_msg(key, cname, &(rlms)[(ri) as usize].clone());
+    }
+    return route_realm_scan(rlms.clone(), (ri).checked_add(1i64).expect("revl: Int overflow"), key, cname, provs.clone());
+}
+
+fn route_comp_scan(rts: Vec<Route>, i: i64, cname: &str, provs: Vec<Prov3>) -> String {
+    if (i >= rts.revl_length()) {
+        return String::from("");
+    }
+    let r = route_realm_scan((rts)[(i) as usize].clone().rlms, 0i64, &(rts)[(i) as usize].clone().key, cname, provs.clone());
+    if (r != String::from("")) {
+        return r;
+    }
+    return route_comp_scan(rts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), cname, provs.clone());
+}
+
+fn route_scan(comps: Vec<CompD>, ci: i64, provs: Vec<Prov3>) -> String {
+    if (ci >= comps.revl_length()) {
+        return String::from("");
+    }
+    let r = route_comp_scan((comps)[(ci) as usize].clone().routes, 0i64, &(comps)[(ci) as usize].clone().name, provs.clone());
+    if (r != String::from("")) {
+        return r;
+    }
+    return route_scan(comps.clone(), (ci).checked_add(1i64).expect("revl: Int overflow"), provs.clone());
+}
+
 fn link_g2_g3(pg: Prog) -> String {
     let live = non_template_comps(pg.comps.clone(), spawn_templates(pg.comps.clone()));
     let g2 = g2_scan(live.clone(), 0i64, vec![]);
     if (g2.msg != String::from("")) {
         return tagged(&String::from("G2"), &g2.msg);
+    }
+    let rv = route_scan(live.clone(), 0i64, g2.provs.clone());
+    if (rv != String::from("")) {
+        return tagged(&String::from("ROUTE"), &rv);
     }
     let edges = build_edges(live.clone(), 0i64, g2.provs.clone(), std::collections::HashMap::new());
     if (edges.msg != String::from("")) {
@@ -6655,6 +6966,63 @@ fn isolate_on_an_undeclared_key_is_refused__g1_() {
 fn a_key_isolated_twice_is_refused__g1_() {
     let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C requires kv: Kv {\n  isolate kv in realm(\"r1\")\n  isolate kv in realm(\"r2\")\n  let v = effect kv.get(\"x\") undo kv.get(\"x\")\n}"));
     assert!((v == String::from("G1|key `kv` is isolated twice in C")));
+}
+
+#[test]
+fn a_multi_realm_bind_whose_realms_all_have_providers_composes() {
+    assert!((admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent StoreB provides kv: Kv {\n  isolate kv in realm(\"r2\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r2\") strategy(round_robin)\n  provide api { fn go(k) { return kv.get(k) } }\n}")) == String::from("")));
+}
+
+#[test]
+fn a_routed_realm_with_no_provider_is_refused__route_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r9\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == String::from("ROUTE|multi-realm bind of `kv` in Router names realm `r9`, but no component provides `kv` in realm `r9` (item 162: every routed realm needs a provider)")));
+}
+
+#[test]
+fn an_unknown_routing_strategy_is_refused__route_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\") strategy(round_robbin)\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == String::from("ROUTE|unknown routing strategy `round_robbin` for `kv` in Router")));
+}
+
+#[test]
+fn routing_a_provision_is_refused__route_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate api in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == String::from("ROUTE|`isolate ... in realms(...)` routes a *required* key — `api` is a provision of Router")));
+}
+
+#[test]
+fn routing_an_undeclared_key_is_refused__g1_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate nope in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == String::from("G1|`nope` is not a declared requirement of Router")));
+}
+
+#[test]
+fn a_key_both_pinned_and_routed_is_refused__route_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realm(\"r1\")\n  isolate kv in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == String::from("ROUTE|key `kv` is already isolated to a single realm in Router — it cannot also be routed across `realms(...)`")));
+}
+
+#[test]
+fn a_key_routed_twice_is_refused__route_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\")\n  isolate kv in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == String::from("ROUTE|key `kv` is routed twice in Router")));
+}
+
+#[test]
+fn a_route_after_a_provide_block_is_refused__prelude_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  provide api { fn go(k) { return kv.get(k) } }\n  isolate kv in realms(\"r1\")\n}"));
+    assert!((v == String::from("PRELUDE|`isolate ... in realms(...)` must precede every effect, emit, await, and provide statement")));
+}
+
+#[test]
+fn a_coerced_arrow_nested_in_a_sync_arrow_does_not_leak__admits_() {
+    assert!((admit_src(String::from("extern emission async fn tick(n: Str) -> Str = @py { return n }\nfn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }\nfn plain(f: (Str) -> Str) -> Str { return f(\"a\") }\nservice S { emission async fn go(y: Str) -> Str }\ncomponent C provides s: S {\n  provide s { async fn go(y) { let r = plain(w => wrap(z => tick(z), w))   return r } }\n}")) == String::from("")));
+}
+
+#[test]
+fn a_fn_whose_only_async_reach_is_a_coerced_arrow_stays_sync__admits_() {
+    assert!((admit_src(String::from("extern emission async fn tick(n: Str) -> Str = @py { return n }\nfn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }\nfn h(y: Str) -> Str { return wrap(z => tick(z), y) }\nservice S { emission fn go(y: Str) -> Str }\ncomponent C provides s: S {\n  provide s { fn go(y) { let r = emit h(y)   return r } }\n}")) == String::from("")));
 }
 
 #[test]
