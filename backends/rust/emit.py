@@ -90,7 +90,23 @@ _METHOD_RENAMES = {"drop": "drop_"}
 
 
 def _mname(name: str) -> str:
-    return _METHOD_RENAMES.get(name, name)
+    """The Rust method name for a revl method, injectively.
+
+    `_METHOD_RENAMES.get(name, name)` sent both `drop` and the equally legal
+    revl method name `drop_` to `drop_`, so a component declaring both emitted
+    one Rust method twice and the second silently won. Same ladder rule as
+    `_mangle`: find the first root reachable by dropping trailing `_` that the
+    table renames, then re-append the `_`s that were dropped, so `drop` ->
+    `drop_` and `drop_` -> `drop__` stay distinct. A name with no renamed root
+    is returned unchanged."""
+    root = name
+    while root:
+        if root in _METHOD_RENAMES:
+            return _METHOD_RENAMES[root] + "_" * (len(name) - len(root))
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return name
 
 
 class EmitError(ValueError):
@@ -680,11 +696,28 @@ def _mangle(name: str) -> str:
     crashing at emit (roadmap item 165).
 
     The scheme is the A3 append-`_` rename `src/revl/lower.py::_safe_name` (and
-    `backends/java/emit.py::_fn_name`) already use for revl keywords: append `_`
-    until the name is free. It is a pure function of the name, so the
-    declaration site and every use site agree without a table. A non-reserved
-    name is returned unchanged, so no existing program — none of which can name
-    a Rust keyword, those crash today — changes its emitted output.
+    `backends/java/emit.py::_fn_name`) already use for revl keywords. It is a
+    pure function of the name, so the declaration site and every use site agree
+    without a table, and it must ALSO be INJECTIVE: two distinct revl
+    identifiers may never land on one Rust identifier.
+
+    The naive "append `_` while the name is reserved" loop is pure but not
+    injective: it sends `match` to `match_` and leaves the equally legal revl
+    identifier `match_` alone, so both reach `match_`. Here that breaks loudly
+    (rustc rejects the duplicate binding or the shadowed field), but the python
+    tier silently CAPTURES on the same shape, so the rule is fixed identically
+    on every tier rather than left to a downstream compiler CI does not run.
+
+    The injective rule: escape a name iff the name OR any name reachable from
+    it by dropping trailing `_` is reserved, and escape it by exactly ONE `_`.
+    Names whose underscore-stripped root is reserved shift up one rung of the
+    `kw`/`kw_`/`kw__` ladder (`match` -> `match_`, `match_` -> `match__`),
+    which is injective; every other name is returned unchanged and can never
+    equal a shifted name, because a shifted name's root is reserved and an
+    unchanged name's root is not. The output is never itself reserved: no
+    member of `_RUST_RESERVED` or `_EMITTER_RESERVED` ends in `_`. Only a name
+    whose root is reserved can change, so no existing program that does not
+    name a Rust keyword changes its emitted output.
 
     The same rename also covers `_EMITTER_RESERVED` (`ctx`/`config`/`root`/
     `plugin`, roadmap item 269): those names are reserved because the emitter's
@@ -694,8 +727,13 @@ def _mangle(name: str) -> str:
     `ctx_`, which the emitter never emits raw, moves it clear of the scaffolding
     rather than refusing the program, and keeps the reservation: the emitter's
     internal `ctx` still owns the bare `ctx` token."""
-    while name in _RUST_RESERVED or name in _EMITTER_RESERVED:
-        name += "_"
+    root = name
+    while root:
+        if root in _RUST_RESERVED or root in _EMITTER_RESERVED:
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
     return name
 
 
