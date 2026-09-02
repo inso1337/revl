@@ -215,6 +215,8 @@ compile unprofiled, the way an embedder's own sources do.
 | `--provider MODULE.rvl` | operator-written host code the untrusted agent may compose the SERVICES of — item 334's granted-providers map. Reaching its externs directly is still refused |
 | `--grant SERVICE` | turn on the item-329 reach allowlist. With no grants the allowlist is off: there is no honest default for which of a running system's services an agent may reach |
 | `--root DIR` | a directory the agent's path arguments may name. Defaults to the directory the server was started in |
+| `--approval-record-values bound` (default) | an approved crossing's caller-supplied resource target (`host=`, `path=`, `table=`) is recorded in the durable approval log, so a distilled rule can name the destination (item 251 N1) |
+| `--approval-record-values withheld` | it is recorded as UNRECORDED instead, keeping caller values out of the cross-session log. The cost is that such approvals no longer fold into a distilled rule; author-written literal targets are recorded either way |
 
 The path jail is the other half. Unjailed, `files` accepted absolute paths and
 `../` traversal, which made every path on the machine an oracle (does it exist,
@@ -224,6 +226,15 @@ argument — `files`, `candidateFiles`, `baselineFiles`, `traceFile`, `registry`
 and the ones nested inside a snapshot — is resolved with `realpath` and refused
 if it lands outside a sanctioned root. The refusal runs before anything is
 opened or stat-ed, so it cannot report existence either.
+
+A `use` path written inside transport-carried source is the same path argument
+by another carrier: the compile follows it and reads the file, so an unconfined
+one was that oracle again. Source sent over this transport may not `use` an
+absolute path or traverse upward. It may name a module supplied in the same
+call's `modules` map (resolved in memory, no filesystem involved), a path under
+the sanctioned directory, or an installed module by its search-path spelling
+(`use "stdlib/str.rvl"`). A `.rvl` file already on disk inside a sanctioned root
+is the operator's own composition layout and resolves its imports unchanged.
 
 The composable shape, then: the operator writes the host bodies, the agent
 writes the wiring.
