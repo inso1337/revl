@@ -19,8 +19,20 @@ the FULL gate, never fails open. Concretely:
     core module cannot silently fall through to a narrow selection.
   * A changed file matching NO mapping rule -> FULL.
   * Structural changes (Makefile, tools/pre_merge.sh, CI config, tests/conftest.py,
-    shared test helpers/fixtures, the reference IR, or a test file added/deleted)
-    -> FULL.
+    shared test helpers/fixtures, the reference IR, or a test file DELETED) -> FULL.
+  * A test file ADDED is read rather than assumed (issue #162, see
+    `_test_add_delete_override`): it is always run, and it escalates to FULL only
+    when it cannot be mapped to something the same diff touched.
+
+WHY DELETE STILL ESCALATES BUT ADD NO LONGER DOES. A deleted test file can break
+a SURVIVING test: tests in this repo do import one another (test_gate_crate_admit,
+test_gate_wasm_vector and test_inprocess_gate_rust all `import test_selfhost_lower
+as oracle`, and test_274_navigable_slice2 imports test_evidence_policy), so the
+removal is not self-contained and the selector cannot see the blast radius without
+resolving the whole cross-import graph. An ADDED file cannot be imported by an
+existing test — nothing could name a file that did not exist — so the only thing
+its arrival changes is that it must itself run. Escalating for it bought nothing
+that running it does not buy, and it fired on nearly every PR (issue #162).
 
 `--affected` is the INNER-LOOP gate only. The full `make pre-merge` stays the
 pre-release / CI gate; this never replaces it.
@@ -394,46 +406,200 @@ def _merge_base(root: Path) -> str:
 
 
 def changed_files(root: Path, base: str | None):
-    """Union of committed-since-base, staged, unstaged, and untracked changes,
-    plus the set added/deleted (so the caller can force FULL on test add/delete)."""
+    """Union of committed-since-base, staged, unstaged, and untracked changes.
+
+    Returns (names, added, deleted, base). Additions and deletions are kept
+    APART, not merged into one set: since issue #162 the two decide different
+    things (a deleted test file escalates to FULL, an added one does not), so
+    collapsing them would re-create the bug.
+    """
     if base is None:
         base = _merge_base(root)
     names: set[str] = set()
-    added_deleted: set[str] = set()
+    added: set[str] = set()
+    deleted: set[str] = set()
+
+    def _record(line: str) -> None:
+        parts = line.split("\t")
+        if len(parts) < 2:
+            return
+        status, path = parts[0], parts[-1]
+        names.add(path)
+        if not status:
+            return
+        # `R`/`C` name TWO paths; parts[-1] is the destination, which is the
+        # one that now exists, so it counts as an addition.
+        if status[0] in ("A", "R", "C"):
+            added.add(path)
+        elif status[0] == "D":
+            deleted.add(path)
+        if status[0] in ("R", "C") and len(parts) >= 3:
+            names.add(parts[1])
+            deleted.add(parts[1])
 
     # committed range (name-status to learn add/delete)
     for line in _git(root, "diff", "--name-status", f"{base}...HEAD").splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            status, path = parts[0], parts[-1]
-            names.add(path)
-            if status and status[0] in ("A", "D"):
-                added_deleted.add(path)
+        _record(line)
     # working tree (staged + unstaged) vs HEAD
     for line in _git(root, "diff", "--name-status", "HEAD").splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            status, path = parts[0], parts[-1]
-            names.add(path)
-            if status and status[0] in ("A", "D"):
-                added_deleted.add(path)
+        _record(line)
     # untracked (brand-new files)
     for path in _git(root, "ls-files", "--others", "--exclude-standard").splitlines():
         if path.strip():
             names.add(path.strip())
-            added_deleted.add(path.strip())
+            added.add(path.strip())
 
-    return sorted(names), added_deleted, base
+    # A path that is both (a rename's two halves, or a delete then re-add) is
+    # treated as deleted: that is the escalating side, so the ambiguity resolves
+    # toward running more.
+    added -= deleted
+    return sorted(names), added, deleted, base
 
 
-def _apply_add_delete_full(changed, added_deleted):
-    """A test file added or deleted changes what the suite collects -> FULL."""
-    for f in changed:
-        f = _norm(f)
-        if f in added_deleted and f.startswith("tests/") \
-                and Path(f).name.startswith("test_") and f.endswith(".py"):
-            return _full(f"test file {f} added/deleted -> full")
-    return None
+def _is_frontend_test(f: str) -> bool:
+    return (f.startswith("tests/") and Path(f).name.startswith("test_")
+            and f.endswith(".py"))
+
+
+def _added_test_imports(root: Path, f: str) -> set[str] | None:
+    """Top-level `revl.<mod>` modules an added test file imports.
+
+    Returns None when the file cannot be read or parsed — the caller escalates,
+    because "I could not read the new test" is exactly the ambiguity FULL is for.
+    Covers `import revl.x`, `from revl.x import ...` and `from revl import x`.
+    """
+    p = root / f
+    try:
+        tree = ast.parse(p.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return None
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                parts = a.name.split(".")
+                if parts[0] == "revl" and len(parts) > 1:
+                    out.add(parts[1])
+        elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+            parts = n.module.split(".")
+            if parts[0] != "revl":
+                continue
+            if len(parts) > 1:
+                out.add(parts[1])
+            else:
+                # `from revl import x` — x is a module only if src/revl has it
+                for a in n.names:
+                    if (root / "src" / "revl" / f"{a.name}.py").is_file() \
+                            or (root / "src" / "revl" / a.name).is_dir():
+                        out.add(a.name)
+    return out
+
+
+def _touched_targets(changed) -> tuple[set[str], set[str], set[str]]:
+    """(src/revl top-level modules, backend tiers, stdlib modules) the diff touches."""
+    mods: set[str] = set()
+    tiers: set[str] = set()
+    stdlib: set[str] = set()
+    for f in map(_norm, changed):
+        if f.startswith("src/revl/") and f.endswith(".py"):
+            top = f[len("src/revl/"):].split("/")[0]
+            mods.add(top[:-3] if top.endswith(".py") else top)
+        elif f.startswith("backends/"):
+            parts = f.split("/")
+            if len(parts) > 1 and parts[1] in BACKEND_TIERS:
+                tiers.add(parts[1])
+        elif f.startswith("stdlib/") and f.endswith(".rvl"):
+            stdlib.add(Path(f).stem)
+    return mods, tiers, stdlib
+
+
+def _test_add_delete_override(changed, added, deleted, root):
+    """Decide the selection when the diff adds or deletes a frontend test file.
+
+    Returns a result dict to use INSTEAD of `select(changed, root)`, or None to
+    let the normal selection stand.
+
+    DELETE -> FULL. See the module docstring: tests here import one another, so
+    removing one can red a survivor and the blast radius is not visible from the
+    path alone.
+
+    ADD -> read it (issue #162). The file itself always runs. It escalates to
+    FULL only when the selector cannot connect it to anything the same diff
+    touched, which is the "a new test could test anything" case the blanket
+    escalation was standing in for. Connected means any of:
+      * the rest of the diff's own selection already names it (the module /
+        tier / stdlib mapping rules scan tests/ by content, so a new test for a
+        touched leaf module or tier is picked up there for free); or
+      * it imports a `revl.<mod>` the diff touched; or
+      * it names a backend tier or stdlib module the diff touched.
+    A diff that adds ONLY test files is narrow by definition: nothing else
+    changed, so nothing but the new tests can newly fail.
+    """
+    root = Path(root)
+    changed = [_norm(f) for f in changed]
+    added = {_norm(f) for f in added}
+    deleted = {_norm(f) for f in deleted}
+
+    for f in sorted(deleted):
+        if _is_frontend_test(f):
+            return _full(f"test file {f} deleted -> full "
+                         "(surviving tests may import it)")
+
+    new_tests = sorted(f for f in changed if f in added and _is_frontend_test(f))
+    if not new_tests:
+        return None
+
+    rest = [f for f in changed if f not in set(new_tests)]
+    if not rest:
+        return {
+            "full": False,
+            "reason": ("only new test file(s) added: "
+                       + " ".join(new_tests) + " -> targeted"),
+            "pytest": new_tests,
+            "backends": [],
+            "gates": ["ruff"],
+        }
+
+    base = select(rest, root)
+    if base["full"]:
+        return base
+
+    mods, tiers, stdlib_mods = _touched_targets(rest)
+    subjects = mods | tiers | stdlib_mods
+    for f in new_tests:
+        # 1. the rest of the diff's own selection already names it. The tier /
+        #    leaf-module / stdlib rules scan tests/ by content, so a new test
+        #    for a touched subject is usually picked up here for free.
+        if f in base["pytest"]:
+            continue
+        # 2. it names a touched subject — in its filename (tokenised on the
+        #    underscores a test name is built from, so `test_wasm_newthing.py`
+        #    yields `wasm`) or in its body (the same word-boundary match
+        #    `_word_tests` and `_tier_tests` use).
+        if subjects & set(re.split(r"[^A-Za-z0-9]+", Path(f).name)):
+            continue
+        body = _read(root / f)
+        if any(re.search(rf"(?<![A-Za-z0-9_]){re.escape(s)}(?![A-Za-z0-9_])", body)
+               for s in subjects):
+            continue
+        # 3. it IMPORTS a touched `revl.<mod>` without naming it. Reading the
+        #    file is the point of issue #162; failing to read it is the
+        #    ambiguity FULL exists for.
+        imports = _added_test_imports(root, f)
+        if imports is None:
+            return _full(f"added test file {f} could not be read -> full")
+        if imports & mods:
+            continue
+        return _full(f"added test file {f} maps to no touched module -> full")
+
+    return {
+        "full": False,
+        "reason": base["reason"] + "; + added test file(s) "
+                  + " ".join(new_tests),
+        "pytest": sorted(set(base["pytest"]) | set(new_tests)),
+        "backends": base["backends"],
+        "gates": base["gates"],
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -478,8 +644,9 @@ def main(argv=None) -> int:
         top = _git(Path.cwd(), "rev-parse", "--show-toplevel").strip()
         root = Path(top) if top else Path.cwd()
 
-    changed, added_deleted, base = changed_files(root, args.base)
-    result = _apply_add_delete_full(changed, added_deleted) or select(changed, root)
+    changed, added, deleted, base = changed_files(root, args.base)
+    result = (_test_add_delete_override(changed, added, deleted, root)
+              or select(changed, root))
     print(_emit(result, base, args.format))
     return 0
 
