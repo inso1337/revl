@@ -1311,9 +1311,82 @@ def run_component(component_path: pathlib.Path, invoke: str) -> str:
     return result.stdout.strip()
 
 
+#: The largest string `run_component_str` will put in an argv entry. Linux's
+#: `MAX_ARG_STRLEN` is 131072; the margin leaves room for the `func("` / `")`
+#: wrapper and for a host whose limit is lower.
+ARGV_STR_LIMIT = 100_000
+
+
 def run_component_str(component_path: pathlib.Path, func: str, arg: str) -> str:
-    """`func(arg)` for a ``string``-returning export — unquotes the WAVE result."""
+    """`func(arg)` for a ``string``-returning export — unquotes the WAVE result.
+
+    The argument rides in ONE argv entry (`--invoke 'func("...")'`), and Linux
+    caps a single argv string at 32 pages — `MAX_ARG_STRLEN`, 128 KiB — so a
+    payload past that raises `OSError: [Errno 7] Argument list too long` before
+    wasmtime is even exec'd. That is a limit of the TRANSPORT, not of the
+    guest; `ARGV_STR_LIMIT` names it and `call_str_export_in_memory` below is
+    the way past it. Refuse here rather than let the OS error be read as a
+    codegen failure, which is exactly how it was read once (issue #183: both
+    over-a-page heap tests had never run in CI, and reported `Errno 7` on the
+    first Linux run of a suite that was green on macOS, where only the TOTAL
+    `ARG_MAX` of 1 MiB applies)."""
+    if len(arg) > ARGV_STR_LIMIT:
+        raise EmitError(
+            f"argument of {len(arg)} bytes exceeds what one argv entry can "
+            f"carry ({ARGV_STR_LIMIT}); drive it through "
+            f"call_str_export_in_memory() instead of the wasmtime CLI")
     out = run_component(component_path, f'{func}("{arg}")')
     if len(out) >= 2 and out[0] == '"' and out[-1] == '"':
         return out[1:-1]
     return out
+
+
+def call_str_export_in_memory(core_wat: str, func: str, arg: str) -> tuple[str, int]:
+    """Drive one ``(string) -> string`` canonical export IN PROCESS, doing what
+    a component host does at the ABI: `cabi_realloc` for the argument, write the
+    bytes straight into the instance's linear memory, call the canonical export,
+    read the lowered ``(ptr, len)`` back out of the static return area.
+
+    The payload therefore never touches argv, which is the only reason this
+    exists: a `Str` larger than `ARGV_STR_LIMIT` cannot be handed to the
+    wasmtime CLI at all (see `run_component_str`). Everything the guest does is
+    unchanged — same emitted core module, same allocator, same lift and lower —
+    so this is a different way IN, not a weaker assertion.
+
+    What it does NOT cover, and why the CLI path is kept for every size that
+    fits in argv: wasmtime's own canonical-ABI validation of the wrapped
+    component (the `realloc return: beyond end of memory` refusal that item
+    432(e) was bisected against) lives on the component path, not here.
+
+    Returns ``(answer, pages)`` — `pages` being the instance's memory size in
+    64 KiB pages when the call returned, so a caller can assert the heap
+    actually GREW rather than trusting that a large answer implies it.
+    """
+    try:
+        import wasmtime  # noqa: PLC0415 - optional, and only this path needs it
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise EmitError(
+            "the wasmtime Python package is required to drive a canonical "
+            "export in process (pip install wasmtime)") from exc
+    import struct  # noqa: PLC0415 - only this path reads the return area
+
+    engine = wasmtime.Engine()
+    module = wasmtime.Module(engine, wasmtime.wat2wasm(core_wat))
+    store = wasmtime.Store(engine)
+    exports = wasmtime.Instance(store, module, []).exports(store)
+    # the canonical export is `<pkg>/<iface>#<func>`; match on the func suffix
+    # rather than reconstructing the package name, and fail LOUDLY when the
+    # spelling moves instead of silently measuring some other export.
+    names = [name for name in exports if name.endswith(f"#{func}")]
+    if len(names) != 1:
+        raise EmitError(
+            f"expected exactly one canonical export ending in `#{func}`, "
+            f"found {names or 'none'}")
+    memory, realloc, entry = exports["memory"], exports["cabi_realloc"], exports[names[0]]
+    payload = arg.encode("utf-8")
+    ptr = realloc(store, 0, 0, 1, len(payload))
+    memory.write(store, payload, ptr)
+    area = entry(store, ptr, len(payload))
+    out_ptr, out_len = struct.unpack("<ii", bytes(memory.read(store, area, area + 8)))
+    answer = bytes(memory.read(store, out_ptr, out_ptr + out_len)).decode("utf-8")
+    return answer, memory.size(store)

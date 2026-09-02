@@ -97,6 +97,22 @@ def _toolchain_or_skip(canonical):
                     "(set REVL_REQUIRE_WASMTIME=1 to make this a failure)")
 
 
+def _in_memory_driver_or_skip():
+    """The payloads argv cannot carry are driven through the wasmtime PYTHON
+    package (a different artifact from the CLI tarball), so its absence is its
+    own gate — fatal under REVL_REQUIRE_WASMTIME, a named skip otherwise, never
+    a silent pass."""
+    if importlib.util.find_spec("wasmtime") is not None:
+        return
+    if _REQUIRE:
+        pytest.fail(
+            "the wasmtime Python package is absent, so a string larger than "
+            "one argv entry cannot be driven at all. REVL_REQUIRE_WASMTIME is "
+            "set (CI), so this fails instead of skipping.", pytrace=False)
+    pytest.skip("wasmtime Python package not installed (pip install wasmtime; "
+                "set REVL_REQUIRE_WASMTIME=1 to make this a failure)")
+
+
 def _core_module(canonical, core_wat: str, out: pathlib.Path,
                  memory: str | None = None) -> pathlib.Path:
     """Compile the emitted core WAT, with the heap driver spliced in, to a
@@ -168,15 +184,35 @@ def test_a_string_argument_larger_than_one_page_round_trips(tmp_path):
     """Proof 1, re-bisected on the (a)/(c)/(f) base: 65520 was the largest
     argument that worked and 65521 was refused by wasmtime's own canonical
     check. 200000 and 1000000 are far past any single-page story, so they can
-    only pass by the memory actually growing."""
+    only pass by the memory actually growing.
+
+    TWO TRANSPORTS, ONE PROPERTY. `wasmtime run --invoke` carries the argument
+    in a single argv entry, and Linux caps one argv string at 128 KiB
+    (`MAX_ARG_STRLEN`), so 200000 and 1000000 cannot be exec'd there at all —
+    `OSError: [Errno 7] Argument list too long`, raised before wasmtime even
+    starts. macOS applies only the 1 MiB TOTAL `ARG_MAX`, which is why this
+    passed on the machine it was written on and reddened the first time CI ran
+    it (issue #183: this file had never executed in CI). Every size argv can
+    carry still goes through the real component under the CLI, so wasmtime's
+    own canonical checks keep seeing them; the two that cannot go through the
+    guest's own memory instead, which is what a component host does anyway."""
     canonical = _canonical()
     _toolchain_or_skip(canonical)
+    _in_memory_driver_or_skip()
     res = _emit()
     component = canonical.build_component(
         res["core_wat"], res["wit"], tmp_path, res["world"], name="echoer")
     for size in (16384, 40000, 65520, 65521, 65536, 200000, 1000000):
         arg = "a" * size
-        assert canonical.run_component_str(component, "echo", arg) == arg
+        if size <= canonical.ARGV_STR_LIMIT:
+            assert canonical.run_component_str(component, "echo", arg) == arg
+            continue
+        answer, pages = canonical.call_str_export_in_memory(
+            res["core_wat"], "echo", arg)
+        assert answer == arg
+        # and it answered because the memory GREW, not because the argument
+        # quietly fitted after all: one page is 65536 bytes.
+        assert pages > 1, f"{size} bytes answered from {pages} page(s)"
 
 
 def test_sustained_calls_do_not_exhaust_an_instance(tmp_path):
