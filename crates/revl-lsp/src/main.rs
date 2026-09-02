@@ -3,11 +3,14 @@
 //!
 //! An editor launches this and speaks LSP on its stdin/stdout, exactly as it
 //! would launch `python -m revl.lsp`. The protocol, the document lifecycle and
-//! the capability negotiation are rust; the diagnostics, hover and definition
-//! ANSWERS are the reference front end's, forwarded verbatim (see `engine` for
-//! why, and for the slice-1 distribution caveat).
+//! the capability negotiation are rust. Slice 2 answers NAVIGATION in rust too,
+//! from the self-host front end (`revl_gate::symbols`, see `native`);
+//! diagnostics, explain-hover and code actions are still the reference front
+//! end's, forwarded verbatim (see `engine` for why, and for the distribution
+//! caveat).
 
 mod engine;
+mod native;
 mod protocol;
 mod pyjson;
 mod server;
@@ -27,6 +30,9 @@ usage:
 environment:
   REVL_LSP_PYTHON         interpreter used to run the reference front end
                           (default: python3; it must be able to `import revl`)
+  REVL_LSP_NATIVE_ONLY    do not fall back to the reference for hover and
+                          definition, so the native answers are observable on
+                          their own (the agreement oracle uses this)
 ";
 
 fn main() {
