@@ -54,3 +54,9 @@ it("bool works", () => {
     const t = true
     expect(t).toBeTruthy()
 })
+
+it("assert temp does not collide with a user r binding (item 110/143)", () => {
+    const r = "hello from revl"
+    { const $revl_l = r, $revl_r = "hello from revl";
+      expect(revlEq($revl_l, $revl_r), "r == \"hello from revl\"" + "\n  left  = " + revlShow($revl_l) + "\n  right = " + revlShow($revl_r)).toBe(true) }
+})
