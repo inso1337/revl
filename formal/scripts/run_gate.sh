@@ -1,10 +1,17 @@
 #!/bin/sh
 # The formal gate (make formal, ci.yml — see formal/STATUS.md).
 #
-# 1. lake build over the Lean package;
-# 2. CheckAxioms.lean's `#print axioms` output through the axioms gate
+# 1. the L0/L1/L2 import layering (formal/scripts/layering_gate.py);
+# 2. the non-vacuity registry (formal/scripts/nonvacuity_gate.py);
+# 3. lake build over the Lean package;
+# 4. CheckAxioms.lean's `#print axioms` output through the axioms gate
 #    (no sorryAx, no project-defined axioms, no missing theorem);
-# 3. the harness census (formal/harness/diff_corpus.py).
+# 5. the harness census (formal/harness/diff_corpus.py).
+#
+# Steps 1 and 2 need no toolchain and always run. Item 418 step 8: the
+# axioms gate cannot tell a load-bearing theorem from a vacuous one, and
+# the layering STATUS.md called "enforced by imports" was enforced by
+# nothing.
 #
 # A missing elan/lake skips LOUDLY — never a false green — matching the
 # pre-merge discipline in the Makefile. This lives in a script, not
@@ -12,6 +19,11 @@
 # `exit 0` skip-guard inside the Makefile cannot stop the target.
 set -e
 cd "$(dirname "$0")/.." # formal/
+
+# These two need no toolchain, so they run before the elan guard: a
+# machine without lake still gets the layering and non-vacuity verdicts.
+python3 scripts/layering_gate.py
+python3 scripts/nonvacuity_gate.py
 
 if ! command -v lake >/dev/null 2>&1; then
   echo "SKIP (loud): elan/lake not installed — the formal proofs were NOT checked"
@@ -38,10 +50,27 @@ python3 scripts/axioms_gate.py \
   RevL.G4.inverse_or_emit \
   RevL.G5.teardown_registers_nothing \
   RevL.G6.confinement \
-  RevL.G7.teardown_replays_all \
-  RevL.G7.teardown_only_witnessed \
-  RevL.G7.teardown_eq_reversed_inverses \
+  RevL.Semantics.replays_or_discharges \
+  RevL.Semantics.phase_lengths_add \
   RevL.Semantics.teardown_length \
+  RevL.G7.replay_table \
+  RevL.G7.replayed_complete \
+  RevL.G7.teardown_replays_all \
+  RevL.G7.replayed_sound \
+  RevL.G7.teardown_only_witnessed \
+  RevL.G7.commit_discharges_transactional \
+  RevL.G7.commit_discharges_compensation \
+  RevL.G7.commit_replays_only_brackets \
+  RevL.G7.abort_replays_every_transactional \
+  RevL.G7.bracket_replays_under_every_verdict \
+  RevL.G7.teardown_eq_reversed_inverses \
+  RevL.G7.compensations_drain_after_the_proof_pass \
+  RevL.G7.phase1_is_lifo \
+  RevL.G7.phase2_is_lifo \
+  RevL.G7.commit_runs_the_bracket_only \
+  RevL.G7.abort_runs_the_proof_pass_then_the_drain \
+  RevL.G7.verdict_is_load_bearing \
+  RevL.G7.commit_discharge_is_not_vacuous \
   RevL.G8.boundary_enumerates_emissions \
   RevL.G8.boundary_only_declared \
   RevL.CrossTier.cross_tier_agreement \
@@ -144,5 +173,17 @@ python3 scripts/axioms_gate.py \
   RevL.G8Classified.surface_agrees_with_an_honest_marker \
   RevL.G8Classified.raw_leak_is_on_the_surface \
   RevL.G8Classified.g8_surface_is_not_universal \
-  RevL.G8Classified.witness_surface_traces_to_its_declaration < .axioms.out
+  RevL.G8Classified.witness_surface_traces_to_its_declaration \
+  RevL.G1.g1_not_vacuous \
+  RevL.G3.g3_not_vacuous \
+  RevL.G4.g4_shape_not_vacuous \
+  RevL.G5.registrations_ignores_its_argument \
+  RevL.G6.g6_not_vacuous \
+  RevL.G8.g8_marker_level_not_vacuous \
+  RevL.CrossTier.conformance_hypotheses_are_inhabited \
+  RevL.CapCeilings.capceilings_hypotheses_are_inhabited \
+  RevL.CapCeilings.ceiling_lineage_is_inhabited \
+  RevL.G9.g9_context_hypotheses_are_inhabited \
+  RevL.R4.r4_side_conditions_are_inhabited \
+  RevL.A8.a8_hypotheses_are_inhabited < .axioms.out
 python3 harness/diff_corpus.py

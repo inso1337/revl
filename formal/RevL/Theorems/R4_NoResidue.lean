@@ -187,4 +187,21 @@ from the replay set and moves it to the residue surface rather than
 pretending a dead closure ran. -/
 theorem emission_is_not_replayed : (2 : Seq) ∉ rollbackReplay emitLog := by decide
 
+
+/-- **Non-vacuity for the side conditions** (roadmap item 418, step 8).
+Every R4 theorem carries `hfresh` (the trace's seqs are new to the world
+it started in) and `hdisj` (nothing is both emitted and witnessed). Both
+hold at the two runs above, so the theorems are not stated over an
+unreachable pair of hypotheses; and the emitted set is empty on one run
+and non-empty on the other, which is what makes
+`abort_leaves_no_residue`'s `hno` a real dividing line rather than a
+condition every trace meets. -/
+theorem r4_side_conditions_are_inhabited :
+    (∀ s ∈ logSeqs txnLog, s ∉ ([] : World)) ∧
+    (∀ s ∈ emittedSeqs txnLog, s ∉ witnessedSeqs txnLog) ∧
+    emittedSeqs txnLog = [] ∧
+    (∀ s ∈ logSeqs emitLog, s ∉ ([] : World)) ∧
+    (∀ s ∈ emittedSeqs emitLog, s ∉ witnessedSeqs emitLog) ∧
+    emittedSeqs emitLog ≠ [] := by decide
+
 end RevL.R4
