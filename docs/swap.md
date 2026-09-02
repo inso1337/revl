@@ -38,6 +38,54 @@ cutover.
 
 Swap back at any time by swapping the same component `--to` its original tier.
 
+## What the successor's spec carries
+
+The successor is a new placement process, so it gets a new spec rather than a
+copy of the predecessor's. The rule for what goes in it:
+
+> **A spec key that carries a security property must either be carried across
+> the swap, or the swap must refuse.**
+
+A swap is ordinary use, not an edge case. A property that holds at boot and
+stops holding at the first swap is not a property, and the failure is silent:
+the swap reports success either way. Both halves of the rule are in use today.
+
+*Carried.* The successor's spec is key-for-key the per-process boot spec, built
+for the one component the successor hosts:
+
+- the **correlation guard** (`serve.correlation`), so the seam stays guarded
+  after the cutover rather than admitting anybody. Carried only onto a tier
+  that can run the guard, which is the same rule the boot path applies;
+- the **host-module pins** (`refs`, `refRoot`, `stdlibRefRoot`), so the node
+  runner's `@ts ref` deploy-contract hash check still runs before the
+  successor imports any host code. The pins are scoped to the successor's own
+  slice and read off the running composition's IR, which is the same document
+  the successor's tier artifact is emitted from, so they describe the bytes the
+  process is about to load;
+- the **§46 intra-process dependency edges** (`depends`), computed for the
+  successor's component set.
+
+*Refused instead.* Where carrying a key correctly is not possible, the swap
+refuses up front and leaves the running composition untouched. A **sandboxed
+component** is the standing example: moving it across an isolation boundary
+changes the running system's security posture, so `revl swap` names the gap and
+declines (item 411) rather than booting a successor whose sandbox envelope it
+would have to invent.
+
+One key is neither carried nor refused, and that is deliberate: `probe`. A
+process runs the probes its own `[processes.<name>]` entry declares, and the
+successor is a synthesized process the placement file does not name, so its
+probe list is empty by the same rule the boot path applies. Probes are one-shot
+boot smoke calls that invoke real service methods; re-firing the predecessor's
+on a cutover would perform operator-authored side effects at a moment no
+operator asked for, and the swap already carries its own verification (the
+admission gate, the repoint acknowledgement, and the drain plus residue proof).
+
+`tests/test_swap_ref_pins.py` holds the guard for the rule: it reads both spec
+literals out of `src/revl/placement.py` and fails when a key exists in one and
+not the other, so the next key added to the per-process spec cannot go missing
+from the successor.
+
 ## The re-point: reconnect-to-successor, not withdraw
 
 The per-proxy monitor thread (`backends/python/bridge.py`, `_Client.watch`)
