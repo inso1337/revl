@@ -22,6 +22,7 @@
 package ab
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -94,6 +95,42 @@ func TestHandMatchesEmitted(t *testing.T) {
 	if got, want := hand.Build(words(16), ","), loops.Build(words(16), ","); got != want {
 		t.Errorf("Build: hand %q, emitted %q", got, want)
 	}
+	// The scan-loop rewrite of item 434 (c) stage two: a `return` out of the
+	// loop, a `break` with the index read afterwards, and an index that
+	// advances by 2 and so must NOT be rewritten. invalidText is in the list
+	// because `range` and the charCodeAt helper must agree on U+FFFD.
+	for _, s := range []string{"", "a", asciiText, mixedText, astralText, invalidText} {
+		for _, c := range []int64{int64('a'), int64(' '), int64('t'), 0xFFFD, 0x1F600, -1} {
+			if got, want := hand.FirstAt(s, c), loops.FirstAt(s, c); got != want {
+				t.Errorf("FirstAt(%q, %d): hand %v, emitted %v", s, c, got, want)
+			}
+			if got, want := hand.RunLen(s, c), loops.RunLen(s, c); got != want {
+				t.Errorf("RunLen(%q, %d): hand %v, emitted %v", s, c, got, want)
+			}
+		}
+		if got, want := hand.Step2(s), loops.Step2(s); got != want {
+			t.Errorf("Step2(%q): hand %v, emitted %v", s, got, want)
+		}
+		// against []rune directly, the lowering the rewrite replaced
+		r := []rune(s)
+		var acc int64
+		for _, c := range r {
+			acc += int64(c)
+		}
+		if got := loops.Scan(s); got != acc {
+			t.Errorf("Scan(%q): emitted %d, []rune %d", s, got, acc)
+		}
+		var runLen int64
+		for _, c := range r {
+			if c != 'a' {
+				break
+			}
+			runLen++
+		}
+		if got := loops.RunLen(s, int64('a')); got != runLen {
+			t.Errorf("RunLen(%q, 'a'): emitted %d, []rune %d", s, got, runLen)
+		}
+	}
 	for _, n := range []int64{0, 1, -1, 42, 9223372036854775807, -9223372036854775808} {
 		if got, want := hand.Label("x", n), loops.Label("x", n); got != want {
 			t.Errorf("Label(_, %d): hand %q, emitted %q", n, got, want)
@@ -114,8 +151,8 @@ func TestHandMatchesEmitted(t *testing.T) {
 }
 
 func TestHandMatchesEmittedStrings(t *testing.T) {
-	for _, s := range []string{"", "a", asciiText, mixedText, astralText} {
-		for _, sub := range []string{"", "a", "é", "quick", "zzz", "\U0001F600", s} {
+	for _, s := range []string{"", "a", asciiText, mixedText, astralText, invalidText} {
+		for _, sub := range []string{"", "a", "é", "quick", "zzz", "\U0001F600", "\uFFFD", s} {
 			if got, want := hand.IndexOf(s, sub), values.IndexOf(s, sub); got != want {
 				t.Errorf("IndexOf(%q, %q): hand %v, emitted %v", s, sub, got, want)
 			}
@@ -126,7 +163,83 @@ func TestHandMatchesEmittedStrings(t *testing.T) {
 				t.Errorf("Take(%q, %d, %d): hand %q, emitted %q", s, ab[0], ab[1], got, want)
 			}
 		}
+		if got, want := hand.Chars(s), values.Chars(s); !slices.Equal(got, want) {
+			t.Errorf("Chars(%q): hand %q, emitted %q", s, got, want)
+		}
 	}
+}
+
+// TestStrSliceIsRuneIndexed pins the byte-walking revlStrSlice and
+// revlStrIndexOf of item 434 (g) against the `[]rune(s)` forms they replaced,
+// over every fixture and every index, so the rewrite is provably behaviour
+// preserving rather than merely benchmark-clean.
+func TestStrSliceIsRuneIndexed(t *testing.T) {
+	for _, s := range []string{"", "a", asciiText, mixedText, astralText, invalidText} {
+		r := []rune(s)
+		n := int64(len(r))
+		for a := int64(-3); a <= n+2; a++ {
+			for b := int64(-3); b <= n+2; b++ {
+				if got, want := values.Take(s, a, b), runeTake(r, a, b); got != want {
+					t.Errorf("Take(%q, %d, %d): emitted %q, []rune %q", s, a, b, got, want)
+				}
+			}
+		}
+		for _, sub := range []string{"", "a", "é", "\uFFFD", "\xff", "\U0001F600", s} {
+			if got, want := values.IndexOf(s, sub), runeIndexOf(s, sub); got != want {
+				t.Errorf("IndexOf(%q, %q): emitted %d, []rune %d", s, sub, got, want)
+			}
+		}
+		chars := make([]string, len(r))
+		for i, c := range r {
+			chars[i] = string(c)
+		}
+		if got := values.Chars(s); !slices.Equal(got, chars) {
+			t.Errorf("Chars(%q): emitted %q, []rune %q", s, got, chars)
+		}
+	}
+}
+
+// runeTake is revlStrSlice's pre-(g) body, kept as the oracle.
+func runeTake(r []rune, a, b int64) string {
+	n := int64(len(r))
+	if a < 0 {
+		a = 0
+	}
+	if a > n {
+		a = n
+	}
+	if b > n {
+		b = n
+	}
+	if b < a {
+		b = a
+	}
+	return string(r[a:b])
+}
+
+// runeIndexOf is revlStrIndexOf's pre-(g) body, kept as the oracle.
+func runeIndexOf(s, sub string) int64 {
+	rs := []rune(s)
+	rn := []rune(sub)
+	if len(rn) == 0 {
+		return 0
+	}
+	if len(rn) > len(rs) {
+		return -1
+	}
+	for i := 0; i+len(rn) <= len(rs); i++ {
+		ok := true
+		for j := range rn {
+			if rs[i+j] != rn[j] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return int64(i)
+		}
+	}
+	return -1
 }
 
 // TestCharCodeAtIsRuneIndexed walks every code-point index of every fixture and
@@ -388,6 +501,20 @@ func BenchmarkTakeHand(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		sinkStr = hand.Take(asciiText, 4, 9)
+	}
+}
+
+func BenchmarkCharsEmitted(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkStrs = values.Chars(asciiText)
+	}
+}
+
+func BenchmarkCharsHand(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkStrs = hand.Chars(asciiText)
 	}
 }
 

@@ -88,3 +88,35 @@ check the issue is not already assigned or already closed.
 
 Security findings do not get public issues. They go to private security
 advisories.
+
+## Goldens
+
+Six backends carry checked-in emitter output, and so does `crates/revl-gate`.
+They are **snapshot tests, not a freeze**: the invariant is "emitter output
+never changes unreviewed", never "output never changes". Regenerating a golden
+and reviewing its diff is always an acceptable resolution. Bending an emitter
+back to keep old bytes is not.
+
+One command covers every tier:
+
+```
+python3 tools/regen_goldens.py             # list every target and the files it owns
+python3 tools/regen_goldens.py --check     # which goldens drifted, and the fix for each
+python3 tools/regen_goldens.py <target>    # regenerate: python typescript rust java wasm go gate-crate
+```
+
+Rules:
+
+1. If you change an emitter, regenerate its goldens **in the same commit** and
+   review the diff. A separate follow-up commit means main is red in between.
+2. `crates/revl-gate` embeds emitted rust. Any change to `backends/rust/emit.py`
+   or to `selfhost/*.rvl` rewrites about 1900 lines of it, and a PR that skips
+   the regeneration goes red on drift alone. `python3 tools/regen_goldens.py
+   gate-crate` fixes it.
+3. A red golden test names the exact command that resolves it. Run that command,
+   read the diff, and keep it only if the new bytes are what you meant.
+4. Adding a golden means adding it to `tools/regen_goldens.py`. A generated file
+   nothing can reproduce is a file nothing can check.
+
+The policy and its two declared exceptions live in
+[conformance.md](conformance.md), "Golden policy: snapshot, not freeze".

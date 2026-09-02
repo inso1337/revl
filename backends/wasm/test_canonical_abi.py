@@ -39,7 +39,9 @@ _REQUIRE = os.environ.get("REVL_REQUIRE_WASMTIME", "").strip().lower() not in (
     "", "0", "false", "no")
 
 # The fixed sources and their goldens are the single source of truth; regenerate
-# with `python3 backends/wasm/golden/regen_canonical.py`.
+# with `python3 tools/regen_goldens.py wasm` (docs/conformance.md, "Golden
+# policy": these are snapshots, so regenerating and reviewing the diff is always
+# an acceptable resolution).
 _SRC = (GOLDEN / "canonical_echoer.revl").read_text(encoding="utf-8")
 _SERVICE = "Echoer"
 _AGG_SRC = (GOLDEN / "canonical_aggregates.revl").read_text(encoding="utf-8")

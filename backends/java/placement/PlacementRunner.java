@@ -195,7 +195,26 @@ public final class PlacementRunner {
         return cls.getDeclaredConstructor().newInstance();
     }
 
+    // item 433 F7: the target method used to be resolved reflectively on EVERY
+    // bridge request. `Class.getMethods()` and `Method.getParameterTypes()`
+    // each return a defensive JDK CLONE, so a request allocated two arrays and
+    // ran an O(public methods) linear scan for an answer that cannot change
+    // for the life of the process. Both are memoized here. The maps are keyed
+    // by the Class object rather than its name, so two interfaces of the same
+    // name under different loaders stay distinct, and they are concurrent
+    // because `serveConn` runs each connection on its own thread.
+    private static final Map<Class<?>, Map<String, Method>> METHOD_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Map<Method, Class<?>[]> PARAM_TYPE_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     static Method findMethod(Class<?> iface, String name, int arity) {
+        return METHOD_CACHE
+                .computeIfAbsent(iface, k -> new java.util.concurrent.ConcurrentHashMap<>())
+                .computeIfAbsent(name + "/" + arity, k -> resolveMethod(iface, name, arity));
+    }
+
+    static Method resolveMethod(Class<?> iface, String name, int arity) {
         for (Method m : iface.getMethods()) {
             if (m.getName().equals(name) && m.getParameterCount() == arity) return m;
         }
@@ -203,7 +222,7 @@ public final class PlacementRunner {
     }
 
     static Object[] coerceArgs(Method m, List<Object> args) {
-        Class<?>[] types = m.getParameterTypes();
+        Class<?>[] types = PARAM_TYPE_CACHE.computeIfAbsent(m, Method::getParameterTypes);
         Object[] out = new Object[args.size()];
         for (int i = 0; i < args.size(); i++) out[i] = coerce(args.get(i), types[i]);
         return out;

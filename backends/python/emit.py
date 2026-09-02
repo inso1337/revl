@@ -263,6 +263,31 @@ def _transactional_register_kwargs(ext: dict) -> str:
     return (", " + ", ".join(parts)) if parts else ""
 
 
+def _deferred_register_kwargs(ext: dict, args: list) -> str:
+    """item 440 §(b): the extra `.enqueue_deferred(...)` kwargs that put a
+    deferred emission's idempotency register — and the key's VALUE at this call
+    site — onto the WAL descriptor, or `""` when the extern declares none.
+
+    Emitted ONLY when the author declared `idempotent`/`idempotent(key: p)`, so a
+    pre-440 deferred emission's emitted code is byte-identical. The KEY VALUE (not
+    the parameter name) is what rides the log: a fresh-process re-issue must send
+    the remote the same key it saw the first time, which is the argument at the
+    key parameter's position, read off the descriptor. Without these, recover has
+    no evidence about the emission and leaves it human-finish."""
+    register = ext.get("register")
+    if not register:
+        return ""
+    parts = [f"register={register!r}"]
+    key = ext.get("idempotency_key")
+    if key:
+        names = [p.get("name") for p in ext.get("params") or []]
+        if key in names:
+            index = names.index(key)
+            if index < len(args):
+                parts.append(f"idempotency={args[index]}")
+    return ", " + ", ".join(parts)
+
+
 def _mangle(name: str) -> str:
     """Rename a syntactically-valid identifier that collides with a *Python*
     reserved word, so a valid revl identifier that happens to be a Python
@@ -1610,7 +1635,8 @@ class _ComponentEmitter:
         fire = self._expr(expr, where)
         out.add(indent,
                 f"_revl_frame.enqueue_deferred({method!r}, {method!r}, "
-                f"[{', '.join(args)}], lambda: {fire})")
+                f"[{', '.join(args)}], lambda: {fire}"
+                f"{_deferred_register_kwargs(ext, args)})")
 
     def _witnessed_extern(self, acquire: Any) -> Optional[dict]:
         """The witnessed extern descriptor a step's acquisition calls, or None.

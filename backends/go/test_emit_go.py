@@ -92,11 +92,11 @@ def test_advance_generated_test_file_is_current():
     formatted = _gofmt(fresh)
     if formatted is not None:
         assert formatted == committed, (
-            "advance/gen_advance_test.go is stale — run backends/go/regen.sh")
+            "advance/gen_advance_test.go is stale — run `python3 tools/regen_goldens.py go`")
         return
     norm = lambda s: " ".join(s.split())
     assert norm(fresh) == norm(committed), (
-        "advance/gen_advance_test.go is stale — run backends/go/regen.sh")
+        "advance/gen_advance_test.go is stale — run `python3 tools/regen_goldens.py go`")
 
 
 def test_user_cache_shapes():
@@ -360,9 +360,9 @@ def test_v3_checked_in_generated_is_current(ir_path, pkg, rel):
     committed = (HERE / rel).read_text(encoding="utf-8")
     if formatted is None:  # no gofmt: fall back to a whitespace-insensitive check
         assert _ws(emit.emit(_load(ir_path), package=pkg)) == _ws(committed), (
-            f"{rel} is stale — run backends/go/regen.sh")
+            f"{rel} is stale — run `python3 tools/regen_goldens.py go`")
         return
-    assert formatted == committed, f"{rel} is stale — run backends/go/regen.sh"
+    assert formatted == committed, f"{rel} is stale — run `python3 tools/regen_goldens.py go`"
 
 
 MEMKV = HERE / "scenarios" / "emitted" / "memkv" / "memkv.ir.json"
@@ -391,11 +391,11 @@ def test_checked_in_generated_is_current(ir_path, pkg):
     formatted = _gofmt(fresh)
     if formatted is not None:
         assert formatted == committed, (
-            f"{pkg}/gen.go is stale — run backends/go/regen.sh")
+            f"{pkg}/gen.go is stale — run `python3 tools/regen_goldens.py go`")
         return
     norm = lambda s: " ".join(s.split())
     assert norm(fresh) == norm(committed), (
-        f"{pkg}/gen.go is stale — run backends/go/regen.sh")
+        f"{pkg}/gen.go is stale — run `python3 tools/regen_goldens.py go`")
 
 
 # --- scenarios/emitted freshness gate --------------------------------------
@@ -450,11 +450,11 @@ def test_scenario_checked_in_generated_is_current(ir_path, pkg, rel):
     formatted = _gofmt(fresh)
     if formatted is not None:  # gofmt present: compare gofmt-to-committed
         assert formatted == committed, (
-            f"scenarios/emitted/{rel} is stale — run backends/go/regen.sh")
+            f"scenarios/emitted/{rel} is stale — run `python3 tools/regen_goldens.py go`")
         return
     # no gofmt: fall back to a whitespace-insensitive check
     assert _ws(fresh) == _ws(committed), (
-        f"scenarios/emitted/{rel} is stale — run backends/go/regen.sh")
+        f"scenarios/emitted/{rel} is stale — run `python3 tools/regen_goldens.py go`")
 
 
 # host `Map.new()` iteration surface — `keys()` / `size()` (roadmap item 88).
@@ -1020,3 +1020,136 @@ fn capped(xs: List[Str]) -> Str {
 """))
     assert "strings.Builder" not in src
     _has(src, "out = (out + xs[i])")
+
+
+# ---------------------------------------------------------------------------
+# Roadmap item 434 (c) stage two: the code-point scan lowering.
+#
+# Stage one made ONE `s.charCodeAt(i)` allocation-free, but each read still
+# walks to index i, so the scan idiom stayed quadratic in time: the harness
+# measures the emitted 78-code-point scan at ~9.9 us and the 780-code-point one
+# at ~853 us, an 86x cost for a 10x input, against a hand-written
+# `for _, r := range s` growing 10.5x. Stage two recognises the loop shape and
+# emits `range`, which is the same loop and hands the rune over. The rewrite is
+# equivalent only for the exact shape, so these tests pin both halves.
+
+
+def test_scan_loop_lowers_to_range_over_the_string():
+    src = emit.emit(_compile("""
+fn scan(s: Str) -> Int {
+  var i = 0
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    i += 1
+  }
+  return acc
+}
+fn first_at(s: Str, c: Int) -> Int {
+  var i = 0
+  while (i < s.length()) {
+    if (s.charAt(i) == "x") { return i }
+    if (s.codepoint_at(i) == c) { return i }
+    i += 1
+  }
+  return 0 - 1
+}
+"""))
+    _has(src, "for _, _revlR0 := range s {")
+    _has(src, "acc = revlAdd(acc, int64(_revlR0))")
+    # the bound may be written inline; `range` runs exactly revlStrLen(s) times
+    _has(src, 'string(_revlR0) == "x"')
+    _has(src, "int64(_revlR0) == c")
+    assert "revlStrCharCodeAt(s, i)" not in src
+    assert "revlStrCharAt(s, i)" not in src
+
+
+def test_scan_loop_refused_for_every_shape_that_is_not_a_scan():
+    """Each function reads a code point at an index in a `while`, and each
+    breaks one of the facts the `range` rewrite rests on: the index must be 0
+    on entry, must advance by exactly 1 per iteration at the end of the body,
+    must not be skipped by a `continue`, and the bound must be the length of
+    the string being read. Break any one and the loop keeps the helper."""
+    src = emit.emit(_compile("""
+fn step2(s: Str) -> Int {
+  var i = 0
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    i += 2
+  }
+  return acc
+}
+fn from_one(s: Str) -> Int {
+  var i = 1
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    i += 1
+  }
+  return acc
+}
+fn skipping(s: Str) -> Int {
+  var i = 0
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    if (s.charCodeAt(i) == 32) { i += 1; continue }
+    acc += s.charCodeAt(i)
+    i += 1
+  }
+  return acc
+}
+fn other_bound(s: Str, t: Str) -> Int {
+  var i = 0
+  var acc = 0
+  var n = t.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    i += 1
+  }
+  return acc
+}
+fn rebound(t: Str, u: Str) -> Int {
+  var s = t
+  var i = 0
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    s = u
+    i += 1
+  }
+  return acc
+}
+"""))
+    assert "range s {" not in src
+    assert src.count("revlStrCharCodeAt(s, i)") == 6
+
+
+# ---------------------------------------------------------------------------
+# Roadmap item 434 (g): Str.indexOf / Str.slice / Str.split without []rune.
+
+
+def test_str_helpers_do_not_materialize_the_whole_string():
+    src = emit.emit(_compile(
+        'pub fn probe(s: Str, sub: Str) -> Int { return s.indexOf(sub) }\n'
+        'pub fn take(s: Str, a: Int, b: Int) -> Str { return s.slice(a, b) }\n'
+        'pub fn chars(s: Str) -> List[Str] { return s.split("") }\n'))
+    # indexOf: the standard library's search plus one rune count over the
+    # matched prefix, instead of two []rune copies and a naive O(n*m) scan
+    _has(src, "\tb := strings.Index(s, sub)")
+    _has(src, "\t\treturn int64(utf8.RuneCountInString(s[:b]))")
+    # slice: a byte walk returning a substring, which shares s's bytes
+    _has(src, "\tlo, hi, i := len(s), len(s), int64(0)")
+    _has(src, "\treturn s[lo:hi]")
+    # split(""): substrings, not one fresh string per code point
+    _has(src, "\t\t\t\tout = append(out, s[off:off+w])")
+    # the []rune forms survive only as the invalid-UTF-8 fallbacks, where
+    # `[]rune` substitutes U+FFFD and a byte walk cannot
+    _has(src, "\t\t\treturn string([]rune(s)[a:b])")
+    _has(src, "\t\trs := []rune(s)")
+    assert "[]rune" not in src.split("func revlStrSplit")[1].split("\n}")[0]
