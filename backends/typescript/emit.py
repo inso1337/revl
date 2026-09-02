@@ -1008,6 +1008,18 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             raise EmitError(f"bad instance-get key {key!r}")
         return f"{target}.get({_string(key)})"
 
+    if kind in ("subscribe", "stream-merge"):
+        # item 130: a stream subscription suspends a fiber. Slice 1 shipped the
+        # py reference and Slice 3 the go/rust blocking erasure; the ts tier
+        # takes the same `async function*` shape as py (design §4.6) but has not
+        # been written or run, so refuse honestly rather than emit a
+        # subscription whose queue-vs-cancel race has never been exercised.
+        raise EmitError(
+            "a stream subscription suspends a fiber; the ts lowering (the same "
+            "queue-vs-cancel race the py reference runs) is not implemented — "
+            "streams run on py, go and rust (item 130 §4.6); try `--backend py`"
+        )
+
     raise EmitError(f"unsupported expression kind {kind!r}")
 
 

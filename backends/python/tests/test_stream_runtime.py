@@ -590,3 +590,145 @@ async def test_closing_a_paused_subscription_leaves_no_armed_window():
     source.close()
     assert runtime_mod.Clock.pending() == 0
     assert runtime_mod.Stream.pending() == 0
+
+
+# ---------------------------------------------------------------------------
+# Slice 3 — `merge` on the reference tier (design §1)
+#
+# The fan-in is a DERIVED stream OWNED by the subscription, not a bracket of its
+# own: `sub.close()` closes the merge, and closing the merge detaches it from
+# both sources, which keep their own brackets. So multi-source teardown is the
+# same single LIFO stack Slice 1 proved. These pin the two terminal rules that
+# make a parked `next` on a fan-in always terminable.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_merge_delivers_from_either_source_and_tears_down_as_one_stack():
+    runtime_mod.Stream.reset()
+    a = runtime_mod.Stream.source()
+    b = runtime_mod.Stream.source()
+    merged = runtime_mod.Stream.merge(a, b)
+    sub = runtime_mod.Stream.subscribe(merged, "error")
+
+    a.emit("from-a")
+    b.emit("from-b")
+    assert await sub.next() == "from-a"
+    assert await sub.next() == "from-b"
+
+    # ONE close unwinds the subscription and the fan-in it owns; the sources are
+    # left to their own brackets.
+    assert sub.close() is True
+    assert merged.state == "closed"
+    assert a.state == "open" and b.state == "open"
+    a.close()
+    b.close()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_merge_closed_only_after_every_source_is_done():
+    """One source's close must not strand the consumer on the other; the LAST
+    source's close must terminate it (never a parked-forever fan-in)."""
+    runtime_mod.Stream.reset()
+    a = runtime_mod.Stream.source()
+    b = runtime_mod.Stream.source()
+    sub = runtime_mod.Stream.subscribe(runtime_mod.Stream.merge(a, b), "error")
+
+    a.close()
+    b.emit("still-live")
+    assert await sub.next() == "still-live"
+
+    b.close()
+    assert await sub.next() is runtime_mod.STREAM_CLOSED
+    sub.close()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_merge_propagates_a_source_fault_immediately():
+    """A fan-in source's abort reaches the consumer at once — no silent loss, no
+    waiting on the sibling source that is still live (§4.3)."""
+    runtime_mod.Stream.reset()
+    a = runtime_mod.Stream.source()
+    b = runtime_mod.Stream.source()
+    sub = runtime_mod.Stream.subscribe(runtime_mod.Stream.merge(a, b), "error")
+
+    a.fault("kafka gone")
+    with pytest.raises(runtime_mod.StreamFaulted) as excinfo:
+        await sub.next()
+    assert "kafka gone" in str(excinfo.value)
+
+    sub.close()
+    a.close()
+    b.close()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_merge_nests_and_one_close_unwinds_the_chain():
+    runtime_mod.Stream.reset()
+    a = runtime_mod.Stream.source()
+    b = runtime_mod.Stream.source()
+    c = runtime_mod.Stream.source()
+    inner = runtime_mod.Stream.merge(a, b)
+    outer = runtime_mod.Stream.merge(inner, c)
+    sub = runtime_mod.Stream.subscribe(outer, "error")
+
+    a.emit("deep")
+    assert await sub.next() == "deep"
+
+    sub.close()
+    assert outer.state == "closed" and inner.state == "closed"
+    a.close()
+    b.close()
+    c.close()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_merge_composes_with_the_slice_2_combinator_chain():
+    """A fan-in IS a stream, so the Slice 2 chain applies to it unchanged:
+    `subscribe merge(a, b).map(f).filter(p)`. The composition is where either
+    slice could quietly break the other, so it is pinned here — items from
+    either source traverse every link, ONE close unwinds stage -> stage -> merge
+    while leaving both providers to their own brackets, and a source's fault
+    reaches the consumer through the whole derived chain."""
+    runtime_mod.Stream.reset()
+    a = runtime_mod.Stream.source()
+    b = runtime_mod.Stream.source()
+    sub = runtime_mod.Stream.subscribe(
+        runtime_mod.Stream.merge(a, b), "error",
+        stages=[("map", lambda x: x.upper()), ("filter", lambda x: x != "SKIP")])
+
+    a.emit("one")
+    b.emit("skip")          # transformed, then filtered out
+    b.emit("two")
+    assert await sub.next() == "ONE"
+    assert await sub.next() == "TWO"
+
+    sub.close()
+    # the derived chain unwound; the PROVIDERS are left to their own brackets
+    assert a.state == "open" and b.state == "open"
+    a.close()
+    b.close()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_fan_in_fault_traverses_the_combinator_chain():
+    runtime_mod.Stream.reset()
+    a = runtime_mod.Stream.source()
+    b = runtime_mod.Stream.source()
+    sub = runtime_mod.Stream.subscribe(
+        runtime_mod.Stream.merge(a, b), "error",
+        stages=[("map", lambda x: x)])
+
+    a.fault("boom")
+    with pytest.raises(runtime_mod.StreamFaulted) as excinfo:
+        await sub.next()
+    assert "boom" in str(excinfo.value)
+
+    sub.close()
+    a.close()
+    b.close()
+    assert runtime_mod.Stream.pending() == 0

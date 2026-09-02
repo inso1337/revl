@@ -469,3 +469,214 @@ def test_wasm_still_refuses_the_slice_2_surface():
             emit.emit(compile_source(src, "s.rvl"))
         msg = str(excinfo.value)
         assert "suspends a fiber" in msg and "backend py" in msg
+
+
+# ---------------------------------------------------------------------------
+# Slice 3 — `merge` (design §1) and the blocking-tier lowerings (§4.6)
+# ---------------------------------------------------------------------------
+
+_FANIN = """
+component C {
+  let a = effect Stream.source() undo a.close()
+  let b = effect Stream.source() undo b.close()
+  let sub = subscribe merge(a, b) undo sub.close()
+  await sub.next()
+}
+"""
+
+
+def test_merge_lowers_inside_the_subscription_acquisition():
+    """`merge(a, b)` is a DERIVED stream the subscription owns, not a bracket of
+    its own: the fan-in lowers into the `subscribe` acquire, so the whole thing
+    tears down on the ONE bracket the subscribe registers (design §1)."""
+    body = compile_source(_FANIN, "s.rvl")["components"][0]["body"]
+    sub = next(s for s in body if s.get("subscribe"))
+    head = sub["acquire"]["stream"]
+    assert head["kind"] == "stream-merge"
+    assert head["sources"] == [{"kind": "name", "id": "a"},
+                               {"kind": "name", "id": "b"}]
+    # exactly three brackets: one per source, one for the subscription
+    assert len([s for s in body if s.get("step") == "let-effect"]) == 3
+    assert sub["undo"] == {"kind": "call",
+                           "target": {"kind": "name", "id": "sub"},
+                           "method": "close", "args": []}
+
+
+def test_merge_adds_no_host_verb():
+    """The fan-in is parsed in the `subscribe` head, the one position the
+    surface already controls — the same call Slice 2 makes for the combinator
+    chain. A `<src>.merge(..)` method spelling would grow the shared host-verb
+    namespace, so the exact-set pin in tests/test_map_value_type.py stays
+    untouched by this slice."""
+    from revl.typecheck import _HOST_FAMILIES  # noqa: PLC0415
+    verbs = {m for methods in _HOST_FAMILIES.values() for m in methods}
+    assert "merge" not in verbs
+
+
+def test_merge_refuses_a_source_that_can_vanish_without_a_terminal():
+    """Rule 3.6 applied POINTWISE: a fan-in is only as sound as its weakest
+    source, so one silent provider poisons the whole thing (§9 Part B)."""
+    msg = _refusal("""
+    component C {
+      let other = effect Pool.open("u", 1) undo other.close()
+      let a = effect Stream.source() undo a.close()
+      let b = effect Stream.source() undo other.close()
+      let sub = subscribe merge(a, b) undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "vanish without delivering a terminal" in msg and "`b`" in msg
+
+
+def test_merge_refuses_an_already_consumed_source():
+    """Rule 3.1: merging CONSUMES a source, so a stream cannot be both
+    subscribed and merged."""
+    msg = _refusal("""
+    component C {
+      let a = effect Stream.source() undo a.close()
+      let b = effect Stream.source() undo b.close()
+      let first = subscribe a undo first.close()
+      let sub = subscribe merge(a, b) undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "already subscribed" in msg and "single-consumer" in msg
+
+
+def test_a_merged_source_cannot_be_subscribed_again():
+    """The mirror: a source consumed by a merge is not available to a later
+    subscription either."""
+    msg = _refusal("""
+    component C {
+      let a = effect Stream.source() undo a.close()
+      let b = effect Stream.source() undo b.close()
+      let sub = subscribe merge(a, b) undo sub.close()
+      let second = subscribe a undo second.close()
+      await sub.next()
+    }
+    """)
+    assert "already subscribed" in msg
+
+
+def test_merge_refuses_the_same_source_twice():
+    msg = _refusal("""
+    component C {
+      let a = effect Stream.source() undo a.close()
+      let sub = subscribe merge(a, a) undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "same stream source twice" in msg
+
+
+def test_merge_is_binary():
+    msg = _refusal("""
+    component C {
+      let a = effect Stream.source() undo a.close()
+      let b = effect Stream.source() undo b.close()
+      let c = effect Stream.source() undo c.close()
+      let sub = subscribe merge(a, b, c) undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "exactly 2 streams" in msg
+
+
+def test_merge_nests():
+    """A merged stream is itself a stream, so a fan-in of three is a nested
+    merge — with no new machinery and still one bracket."""
+    body = compile_source("""
+    component C {
+      let a = effect Stream.source() undo a.close()
+      let b = effect Stream.source() undo b.close()
+      let c = effect Stream.source() undo c.close()
+      let sub = subscribe merge(merge(a, b), c) undo sub.close()
+      await sub.next()
+    }
+    """, "s.rvl")["components"][0]["body"]
+    head = next(s for s in body if s.get("subscribe"))["acquire"]["stream"]
+    assert head["kind"] == "stream-merge"
+    assert head["sources"][0]["kind"] == "stream-merge"
+    assert head["sources"][1] == {"kind": "name", "id": "c"}
+
+
+def test_python_emits_the_fan_in_inside_the_subscription():
+    code = _tier_emit("python").emit(compile_source(_FANIN, "s.rvl"))
+    assert "sub = Stream.subscribe(Stream.merge(a, b), 'error', _revl_ctx)" in code
+    assert "yield lambda: sub.close()" in code
+
+
+def test_go_and_rust_lower_the_blocking_tier(tmp_path):
+    """Slice 3's two implemented blocking tiers (§4.6). Both erase the async
+    color: the fan-in opens inside the subscription's acquisition, and the
+    bracket inverse is the subscription's `close`, which trips the cancel
+    signal."""
+    ir = compile_source(_FANIN, "s.rvl")
+    go = _tier_emit("go").emit(ir)
+    assert 'StreamSubscribe(StreamMerge(a, b), "error", 0)' in go
+    assert "return func() error { sub.Close(); return nil }" in go
+    rust = _tier_emit("rust").emit(ir)
+    assert 'Stream::subscribe(&Stream::merge(&a, &b), "error", 0usize)' in rust
+    assert "sub_undo.close(); Ok(())" in rust
+
+
+@pytest.mark.parametrize("tier", ["java", "typescript"])
+def test_unimplemented_tiers_refuse_honestly(tier):
+    """A tier Slice 3 did NOT lower must refuse the stream IR kind by name, not
+    fall through to the generic `unsupported expression kind` — a half-wired
+    tier that emits something whose bracket inverse was never proven reachable
+    is worse than an honest refusal."""
+    emit = _tier_emit(tier)
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_FANIN, "s.rvl"))
+    msg = str(excinfo.value)
+    assert "unsupported" not in msg
+    assert "suspends a fiber" in msg
+    assert "py, go and rust" in msg
+
+
+def test_wasm_still_refuses_the_fan_in():
+    emit = _tier_emit("wasm")
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_FANIN, "s.rvl"))
+    assert "suspends a fiber" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("tier", ["go", "rust"])
+@pytest.mark.parametrize(("head", "want"), [
+    ("subscribe a.map(x => x) undo sub.close()", "combinator chain"),
+    ("subscribe a policy drop_oldest undo sub.close()", "drop_oldest"),
+    ("subscribe a policy block drain 5s undo sub.close()", "block"),
+])
+def test_blocking_tiers_refuse_the_slice_2_surface_they_do_not_lower(tier, head, want):
+    """Slice 2's combinator chain and its three non-default backpressure
+    policies run on the py reference tier only. A blocking tier that emitted a
+    subscription while SILENTLY dropping the chain, the lossy policy or the
+    drain window would run and quietly disagree with the reference — the worst
+    outcome available. Both refuse by name instead."""
+    emit = _tier_emit(tier)
+    ir = compile_source(
+        "component C {\n"
+        "  let a = effect Stream.source() undo a.close()\n"
+        f"  let sub = {head}\n"
+        "  await sub.next()\n"
+        "}\n", "s.rvl")
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(ir)
+    msg = str(excinfo.value)
+    assert want in msg
+    assert "not lowered" in msg and "backend py" in msg
+
+
+@pytest.mark.parametrize("tier", ["go", "rust"])
+def test_blocking_tiers_honour_a_declared_buffer(tier):
+    """`buffer n` IS lowered on both blocking tiers: every buffer is bounded
+    either way (§4.4), so honouring the declared capacity costs nothing and
+    refusing it would be a spurious limitation."""
+    src = _tier_emit(tier).emit(compile_source(
+        "component C {\n"
+        "  let a = effect Stream.source() undo a.close()\n"
+        "  let sub = subscribe a buffer 3 undo sub.close()\n"
+        "  await sub.next()\n"
+        "}\n", "s.rvl"))
+    assert ('"error", 3)' in src) or ('"error", 3usize)' in src)

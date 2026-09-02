@@ -172,6 +172,28 @@ class LetEffect:
 
 
 @dataclass
+class StreamMergeExpr:
+    """`merge(a, b)` — the multi-source fan-in a `subscribe` may acquire
+    (item 130 Slice 3, docs/design/130-stream-reactive-types.md §1).
+
+    One consumer, two sources. The merged stream is a DERIVED stream owned by
+    the subscription, not a bracket of its own: the subscription's `close`
+    closes it, and closing it detaches it from both sources — which are left to
+    their own brackets. So multi-source teardown is still the ONE LIFO stack
+    Slice 1 proved, and there is no path where a source keeps feeding, or
+    holding a reference to, a fan-in whose owner is gone.
+
+    Parsed in the `subscribe` head, exactly as Slice 2 parses its combinator
+    chain as `StreamStage`s and for the same reason: a `<src>.merge(..)` method
+    spelling would grow the shared host-verb namespace docs/stdlib-2.0.md
+    promises is disjoint from the value-method table. A fan-in composes with
+    that chain — `subscribe merge(a, b).map(f)` — because a merged stream is
+    itself a stream."""
+    sources: list
+    line: int
+
+
+@dataclass
 class StreamStage:
     """One link of a derived-stream combinator chain (item 130 Slice 2,
     docs/design/130-stream-reactive-types.md §1).
@@ -2818,8 +2840,9 @@ class Parser:
                     dot.line,
                     f"`.{found}` is not a stream combinator",
                     hint="the v1 combinators are `map(f)`, `filter(p)` and "
-                         "`take(n)`, each a pure derived stream; `merge(a, b)` "
-                         "is a later slice (item 130 §1)")
+                         "`take(n)`, each a pure derived stream; the multi-source "
+                         "`merge(a, b)` is spelled in the `subscribe` head, not "
+                         "as a link in this chain (item 130 §1)")
             self.next()                      # '.'
             kind = self.next().value         # the combinator name
             self.expect("(")
@@ -2898,12 +2921,60 @@ class Parser:
                      "immediately (item 130 §4.4, §8)")
         return policy or "error", buffer, drain_ms
 
+    def _at_stream_merge(self) -> bool:
+        """True at the head of a `merge(` fan-in (item 130 Slice 3)."""
+        nxt = self.toks[self.pos + 1] if self.pos + 1 < len(self.toks) else None
+        return self.at("ident", "merge") and nxt is not None and nxt.kind == "("
+
+    def _stream_merge(self):
+        """`merge(a, b)` — the multi-source fan-in a `subscribe` may acquire
+        (item 130 Slice 3, §1).
+
+        Parsed HERE, in the `subscribe` head, for exactly the reason Slice 2
+        parses its combinator chain as stages (`StreamStage`): a
+        `<src>.merge(..)` method spelling would grow the shared host-verb
+        namespace docs/stdlib-2.0.md promises is disjoint from the value-method
+        table, so this adds zero host verbs and the exact-set pin in
+        tests/test_map_value_type.py needs no change.
+
+        Recursive: a merged stream is itself a stream, so `merge(merge(a, b), c)`
+        is the three-source fan-in with no extra machinery. An operand is a bare
+        stream name or a nested `merge`; a per-operand combinator chain is not
+        admitted, since the chain applies to the subscription as a whole."""
+        mline = self.peek().line
+        self.next()                       # `merge`
+        self.expect("(")
+        sources = [self._stream_operand()]
+        while self.at(","):
+            self.next()
+            sources.append(self._stream_operand())
+        self.expect(")")
+        if len(sources) != 2:
+            raise self.err(
+                mline,
+                f"`merge` takes exactly 2 streams, got {len(sources)}",
+                hint="v1 `merge` is the two-source fan-in (item 130 §1); a merged "
+                     "stream is itself a stream, so nest for more: "
+                     "`subscribe merge(merge(a, b), c) undo sub.close()`",
+            )
+        return StreamMergeExpr(sources, mline)
+
+    def _stream_operand(self):
+        """One source of a fan-in: a bare stream name, or a nested `merge`."""
+        if self._at_stream_merge():
+            return self._stream_merge()
+        if self.at("ident"):
+            tok = self.next()
+            return Postfix(tok.value, [], tok.line)
+        return self.pure_expr()
+
     def subscribe_form(self, line: int, bind: str):
         """`subscribe <stream>[.<combinator>…] [policy P] [buffer N]
         [drain <dur>] undo <close>` (item 130).
 
-        The stream is a pure expression naming the `Stream[T]` capability,
-        optionally wrapped in a derived-stream combinator chain (Slice 2); the
+        The stream is a pure expression naming the `Stream[T]` capability (or
+        the Slice 3 `merge(a, b)` fan-in), optionally wrapped in a derived-stream
+        combinator chain (Slice 2); the
         `undo` is required (rule 3.2 — a held subscription with no inverse has no
         place on the accumulator, the same G4 reason plain `let` is refused in an
         activation body). Returns `(stream, stages, policy, buffer, drain_ms,
@@ -2914,7 +2985,12 @@ class Parser:
         # shape falls through to the ordinary pure expression, which the
         # admission pass then refuses for not naming a stream source.
         stages: list = []
-        if self.at("ident"):
+        if self._at_stream_merge():
+            # Slice 3: the multi-source fan-in. A merged stream IS a stream, so
+            # the Slice 2 combinator chain applies to it unchanged.
+            stream = self._stream_merge()
+            stages = self._stream_chain()
+        elif self.at("ident"):
             tok = self.next()
             stream = Postfix(tok.value, [], tok.line)
             stages = self._stream_chain()
