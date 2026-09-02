@@ -1,0 +1,1 @@
+fn echo(s: Str) -> Str { return s }
