@@ -1429,6 +1429,20 @@ def _expr(
     if kind == "instance-get":
         return _v3_instance_get(node, ctx, rename, env)
 
+    if kind in ("subscribe", "stream-merge"):
+        # item 130: a stream subscription suspends a fiber. Slice 3 lowered the
+        # cancel-channel `select` on go and rust; the java erasure (a
+        # `BlockingQueue.poll` interruptible by the cancel signal, design §4.6)
+        # is NOT written yet, and this tier's emitter cannot be verified here —
+        # no JDK. Refuse honestly rather than emit a subscription whose bracket
+        # inverse has never been proven reachable off the teardown thread.
+        raise EmitError(
+            "a stream subscription suspends a fiber; the java blocking-tier "
+            "lowering (a `BlockingQueue.poll` interruptible by the cancel "
+            "signal) is not implemented — streams run on py, go and rust "
+            "(item 130 §4.6); try `--backend py`"
+        )
+
     raise EmitError(f"unsupported v3 expression kind {kind!r}")
 
 

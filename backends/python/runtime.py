@@ -3203,19 +3203,38 @@ class StreamSource:
     items explicitly; `close()` is the terminal-delivering inverse the
     subscription's core guarantee rests on (§0), and `fault(reason)` models a
     provider abort. Registered on `Stream._sources` so a harness can drive it,
-    exactly as `Job._handles` exposes in-flight jobs."""
+    exactly as `Job._handles` exposes in-flight jobs.
+
+    Slice 3 makes the SAME object the derived stream behind `subscribe
+    merge(a, b)` (design §1): a merged stream is a provider whose items come
+    from its upstreams instead of a host, so a merge composes — it can be
+    subscribed, or merged again — with no second class of stream."""
 
     DEFAULT_CAPACITY = 8
 
-    def __init__(self) -> None:
+    def __init__(self, kind: str = "source", up: "list | None" = None) -> None:
         self._subs: list = []
         self._state = "open"          # open | closed | faulted
+        self._kind = kind             # source | merge
+        self._up: list = list(up or [])       # sources feeding a merged stream
+        self._down: list = []                 # merged streams fed by this one
+        self._pending = len(self._up)         # upstreams not yet terminal
+        self._reason: Optional[str] = None
         Stream._sources.append(self)
-        _record("stream.source open")
+        _record(f"stream.{kind} open")
 
     @property
     def state(self) -> str:
         return self._state
+
+    @property
+    def _derived(self) -> bool:
+        """Whether this stream is OWNED by the subscription below it rather than
+        by a bracket of its own (item 130). A `Stream.source()` provider is not:
+        it has its own `effect … undo …`. A `merge(a, b)` fan-in is, exactly as a
+        Slice 2 combinator link is, so one bracket inverse unwinds the whole
+        derived chain and stops at the providers."""
+        return self._kind != "source"
 
     def emit(self, item: Any) -> bool:
         """Deliver one item to the single consumer. A no-op once terminal.
@@ -3227,24 +3246,55 @@ class StreamSource:
         discard instead."""
         if self._state != "open":
             return False
-        accepted = True
-        for sub in list(self._subs):
-            if not sub._deliver(item):
-                accepted = False
+        accepted = self._forward(item)
         _record(f"stream.emit {item}" if accepted
                 else f"stream.emit {item} refused")
         return accepted
 
-    def close(self) -> bool:
-        """Orderly provider teardown: deliver `Closed` to every subscription and
-        release. The terminal that rule 3.6 requires (§9 Part B)."""
+    def _forward(self, item: Any) -> bool:
+        """Carry one item to this stream's consumer, and into any merged stream
+        fed by it (the Slice 3 fan-in path; identical for a source and a merge).
+
+        Returns downstream ACCEPTANCE, exactly as a combinator link does: a
+        `block` pause or an `error` overflow anywhere below reaches the provider
+        through the fan-in rather than being swallowed by it, so a refusal is
+        never a silent loss (§4.4)."""
         if self._state != "open":
             return False
-        self._state = "closed"
+        accepted = True
         for sub in list(self._subs):
-            sub._terminate("closed", None)
-        _record("stream.source close")
-        return True
+            if not sub._deliver(item):
+                accepted = False
+        for down in list(self._down):
+            if not down._forward(item):
+                accepted = False
+        return accepted
+
+    def close(self) -> bool:
+        """Orderly provider teardown: deliver `Closed` to every subscription and
+        release. The terminal that rule 3.6 requires (§9 Part B).
+
+        For a merged stream this is also the DETACH from both upstreams, so no
+        source keeps feeding — or holding a reference to — a fan-in whose owner
+        is gone. Multi-source teardown is then plain LIFO on one stack."""
+        first = self._state == "open"
+        if first:
+            self._state = "closed"
+            for sub in list(self._subs):
+                sub._terminate("closed", None)
+            for down in list(self._down):
+                down._upstream_terminal("closed", None)
+        ups, self._up = list(self._up), []
+        # A merged stream leaves its upstreams on the way out. A DERIVED
+        # upstream (a nested `merge`) is owned by this one, so it closes with
+        # it; a plain source is left to its own bracket.
+        for up in ups:
+            up._detach_down(self)
+            if up._derived:
+                up.close()
+        if first:
+            _record(f"stream.{self._kind} close")
+        return first
 
     def fault(self, reason: str = "provider fault") -> bool:
         """Provider abort: deliver `Faulted(reason)` to every subscription's
@@ -3252,14 +3302,50 @@ class StreamSource:
         if self._state != "open":
             return False
         self._state = "faulted"
+        self._reason = reason
+        _record(f"stream.{self._kind} fault {reason}")
         for sub in list(self._subs):
             sub._terminate("faulted", reason)
-        _record(f"stream.source fault {reason}")
+        for down in list(self._down):
+            down._upstream_terminal("faulted", reason)
         return True
 
     def _detach(self, sub: "Subscription") -> None:
         if sub in self._subs:
             self._subs.remove(sub)
+
+    def _attach_down(self, merged: "StreamSource") -> None:
+        if self._state != "open":
+            merged._upstream_terminal(self._state, self._reason)
+            return
+        self._down.append(merged)
+
+    def _detach_down(self, merged: "StreamSource") -> None:
+        if merged in self._down:
+            self._down.remove(merged)
+
+    def _upstream_terminal(self, kind: str, reason: Optional[str]) -> None:
+        """How a merged stream learns one of its sources is done (item 130
+        Slice 3). A FAULT propagates at once — no silent loss. An orderly CLOSE
+        only counts down: the fan-in stays live while any source is, so one
+        source's death never strands a consumer the other can still feed, and
+        when the LAST source closes the merged stream delivers its own `Closed`
+        — so a parked `next` is terminated, never left on a dead fan-in."""
+        if self._state != "open":
+            return
+        if kind == "faulted":
+            self._state = "faulted"
+            self._reason = reason
+        else:
+            self._pending -= 1
+            if self._pending > 0:
+                return
+            self._state = "closed"
+            kind = "closed"
+        for sub in list(self._subs):
+            sub._terminate(kind, reason)
+        for down in list(self._down):
+            down._upstream_terminal(kind, reason)
 
 
 class StreamStage:
@@ -3281,6 +3367,10 @@ class StreamStage:
     never introduces an effect, a suspension, or a failure path of its own."""
 
     __slots__ = ("_upstream", "_kind", "_arg", "_subs", "_state", "_remaining")
+
+    # a combinator link is always owned by the subscription below it, never by a
+    # bracket of its own (see `StreamSource._derived`)
+    _derived = True
 
     def __init__(self, upstream: Any, kind: str, arg: Any) -> None:
         if kind not in ("map", "filter", "take"):  # pragma: no cover — emitter invariant
@@ -3351,7 +3441,10 @@ class StreamStage:
         self._state = "closed"
         self._upstream._detach(self)
         _record(f"stream.stage close {self._kind}")
-        if isinstance(self._upstream, StreamStage):
+        # the upstream closes with this link when it is DERIVED — another
+        # combinator link, or a Slice 3 `merge(a, b)` fan-in. A provider is left
+        # to its own bracket.
+        if self._upstream._derived:
             self._upstream.close()
         return True
 
@@ -3552,19 +3645,20 @@ class Subscription:
         host listener, and resolve any parked `next` as `Closed`. Infallible and
         idempotent (a no-op once closed) — teardown never suspends (G5).
 
-        Through a combinator chain (Slice 2) the inverse cascades: this
-        subscription detaches from its upstream link and closes it, and each link
-        closes the one above, so the ONE bracket the `subscribe` registered
-        unwinds the whole derived chain. The provider itself is untouched — it is
-        closed by its own bracket, which keeps the LIFO close order the core
-        guarantee is pinned on."""
+        The inverse cascades through every DERIVED upstream — a Slice 2
+        combinator link, or a Slice 3 `merge(a, b)` fan-in. A derived stream is
+        owned by this subscription rather than by a bracket of its own, so
+        closing here closes it, each link closes the one above, and closing a
+        merge is what detaches it from both sources. The PROVIDERS are untouched:
+        each is closed by its own bracket, which keeps the LIFO close order the
+        core guarantee is pinned on."""
         if self._closed:
             return False
         self._closed = True
         self._cancel_drain()
         self._source._detach(self)
         _record("stream.close")
-        if isinstance(self._source, StreamStage):
+        if self._source._derived:
             self._source.close()
         return True
 
@@ -3582,6 +3676,22 @@ class Stream:
     @classmethod
     def source(cls) -> StreamSource:
         return StreamSource()
+
+    @classmethod
+    def merge(cls, a: StreamSource, b: StreamSource) -> StreamSource:
+        """The fan-in behind `subscribe merge(a, b)` — one derived stream from
+        two (item 130 Slice 3, design §1).
+
+        Not a bracket of its own: the merged stream is OWNED by the subscription
+        the emitter opens on it, so multi-source teardown rides the ONE bracket
+        the `subscribe` registers. `sub.close()` closes the merge, closing the
+        merge detaches it from both sources, and each source is left to its own
+        bracket — one LIFO stack, no orphaned fan-in, no source left feeding a
+        stream whose owner is gone."""
+        merged = StreamSource("merge", up=[a, b])
+        a._attach_down(merged)
+        b._attach_down(merged)
+        return merged
 
     @classmethod
     def subscribe(cls, source: StreamSource, policy: str = "error",

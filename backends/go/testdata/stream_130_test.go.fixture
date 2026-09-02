@@ -1,0 +1,518 @@
+package stream130
+
+// Executes the EMITTED stream components (from testdata/stream_130.rvl, lowered
+// by backends/go/emit.py) against the REAL stc-go runtime. This is item 130
+// Slice 3's exit proof on the go tier — docs/design/130-stream-reactive-types.md
+// §4.6 (the go row), §9 Parts A and B, §10.2/§10.4/§10.5.
+//
+// White-box (same package) so it can drive the emitted host runtime's provider
+// handles the way a harness drives a test provider (design §8: "a test provider
+// `emit`s items explicitly").
+
+import (
+	stdctx "context"
+	"strings"
+	"testing"
+	"time"
+
+	stc "github.com/0xdenny218/stc-go"
+)
+
+func bg() stdctx.Context { return stdctx.Background() }
+
+func reset() {
+	HostReset()
+	StreamReset()
+}
+
+func marksIndex(marks []string, want string) int {
+	for i, m := range marks {
+		if m == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// waitFor spins until cond holds or the budget runs out. Used only to observe
+// another goroutine reaching its park; never to make a race "probably" pass —
+// every assertion below is on a state that is stable once reached.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// -------------------------------------------------------------------------
+// §10.2 — THE CORE GUARANTEE: unloading the owner CLOSES the stream, LIFO.
+// -------------------------------------------------------------------------
+
+func TestEmitted_UnloadClosesTheStream_LIFO(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	f := LoadConsumer(root)
+	if err := f.Ready(bg()); err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	if n := StreamLiveSubscriptions(); n != 1 {
+		t.Fatalf("live subscriptions after activation = %d, want 1", n)
+	}
+
+	f.Dispose()
+	if err := f.Gone(bg()); err != nil {
+		t.Fatalf("Gone: %v", err)
+	}
+
+	marks := HostMarks()
+	subClose := marksIndex(marks, "stream.close")
+	srcClose := marksIndex(marks, "stream.source close")
+	poolClose := marksIndex(marks, "pool.close")
+	if subClose < 0 || srcClose < 0 || poolClose < 0 {
+		t.Fatalf("teardown did not run every inverse: %v", marks)
+	}
+	// LIFO: the subscription (acquired last) closes first, then the source it
+	// listens to, then the pool acquired before either.
+	if !(subClose < srcClose && srcClose < poolClose) {
+		t.Fatalf("teardown was not LIFO: %v", marks)
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("stream residue after unload = %d, want 0", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources after unload = %d, want 0 (R1)", n)
+	}
+}
+
+// -------------------------------------------------------------------------
+// §9 Part A — a parked `next` is ALWAYS terminated by the owner's own
+// teardown. The closure driven here is byte-for-byte the bracket inverse the
+// emitter yields (`return func() error { sub.Close(); return nil }`, pinned in
+// backends/go/test_stream_exec_130.py), run from a DIFFERENT goroutine — which
+// is where the teardown loop runs it.
+// -------------------------------------------------------------------------
+
+func TestParkedNext_IsTerminatedByTheOwnersClose(t *testing.T) {
+	reset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "error", 0)
+
+	type outcome struct {
+		v   any
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		v, err := sub.Next()
+		done <- outcome{v, err}
+	}()
+	// The consumer is parked: the provider never emits and never terminates.
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case got := <-done:
+		t.Fatalf("Next resolved with no item and no terminal: %+v", got)
+	default:
+	}
+
+	// Teardown: the bracket inverse. It must return IMMEDIATELY — it never
+	// waits for the parked Next to drain — and it must resolve that park.
+	started := time.Now()
+	inverse := func() error { sub.Close(); return nil }
+	if err := inverse(); err != nil {
+		t.Fatalf("the bracket inverse must be infallible, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("close waited on the parked next (%v) — delivery-behind, not "+
+			"cancellation-first", elapsed)
+	}
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("owner teardown must resolve the park as Closed, got %v", got.err)
+		}
+		if !IsStreamClosed(got.v) {
+			t.Fatalf("park resolved as %#v, want the Closed terminal", got.v)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the parked Next outlived its owner's close — the cancel case " +
+			"of the select never fired")
+	}
+
+	// Idempotent, and the listener is released exactly once.
+	if sub.Close() {
+		t.Fatal("close must be idempotent")
+	}
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// A `close` that races a buffered item still wins: cancellation-first means the
+// cancel channel is probed BEFORE the buffer, so a withdrawn owner never
+// observes one more item after its teardown began.
+func TestClose_WinsOverABufferedItem(t *testing.T) {
+	reset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "error", 0)
+	src.Emit("buffered")
+	sub.Close()
+	v, err := sub.Next()
+	if err != nil {
+		t.Fatalf("Next after close: %v", err)
+	}
+	if !IsStreamClosed(v) {
+		t.Fatalf("Next after close = %#v, want the Closed terminal", v)
+	}
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// -------------------------------------------------------------------------
+// §9 Part B — provider death is a terminal, never silence, and it reaches an
+// outstanding `next` end-to-end through a real activation.
+// -------------------------------------------------------------------------
+
+func TestEmitted_ProviderFault_TerminatesAParkedNext_AndClosesTheBracket(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	errc := make(chan error, 1)
+	go func() {
+		f := LoadParked(root)
+		errc <- f.Ready(bg())
+	}()
+
+	// The activation body is parked in the cancel-channel select.
+	waitFor(t, "the activation to park in next", func() bool {
+		return StreamLiveSubscriptions() == 1
+	})
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case err := <-errc:
+		t.Fatalf("activation completed without an item or a terminal: %v", err)
+	default:
+	}
+
+	// The provider aborts. Its terminal must reach the parked `next`.
+	providers := StreamProviders()
+	if len(providers) != 1 {
+		t.Fatalf("providers = %d, want 1", len(providers))
+	}
+	providers[0].Fault("provider gone")
+
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("a Faulted terminal must fail the activation")
+		}
+		if !strings.Contains(err.Error(), "provider gone") {
+			t.Fatalf("activation error = %v, want the fault reason", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the parked next was never terminated by the provider's fault")
+	}
+
+	// The failed activation reverted its prefix LIFO, so the subscription
+	// bracket closed — a fault never leaves a subscription active.
+	marks := HostMarks()
+	if marksIndex(marks, "stream.close") < 0 {
+		t.Fatalf("the failed activation did not close the subscription: %v", marks)
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("stream residue after the fault = %d, want 0", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources after the fault = %d, want 0 (R1)", n)
+	}
+}
+
+// The orderly twin: the provider emits, the parked activation carries on, and
+// the ordinary unload path closes the stream.
+func TestEmitted_ParkedNext_ResumesOnAnItem(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	type loaded struct {
+		f   *stc.Fiber
+		err error
+	}
+	done := make(chan loaded, 1)
+	go func() {
+		f := LoadParked(root)
+		done <- loaded{f, f.Ready(bg())}
+	}()
+	waitFor(t, "the activation to park in next", func() bool {
+		return StreamLiveSubscriptions() == 1
+	})
+	StreamProviders()[0].Emit("order-1")
+
+	var got loaded
+	select {
+	case got = <-done:
+		if got.err != nil {
+			t.Fatalf("activation: %v", got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an emitted item never unparked the activation")
+	}
+
+	got.f.Dispose()
+	if err := got.f.Gone(bg()); err != nil {
+		t.Fatalf("Gone: %v", err)
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue after unload = %d, want 0", n)
+	}
+}
+
+// -------------------------------------------------------------------------
+// `merge` — multi-source teardown, and the two fan-in terminal rules.
+// -------------------------------------------------------------------------
+
+func TestEmitted_Merge_MultiSourceTeardownIsOneLIFOStack(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	type loaded struct {
+		f   *stc.Fiber
+		err error
+	}
+	done := make(chan loaded, 1)
+	go func() {
+		f := LoadFanin(root)
+		done <- loaded{f, f.Ready(bg())}
+	}()
+	waitFor(t, "the fan-in consumer to park", func() bool {
+		return StreamLiveSubscriptions() == 1
+	})
+	// An item from EITHER source reaches the one consumer.
+	providers := StreamProviders()
+	if len(providers) != 3 {
+		t.Fatalf("providers = %d, want 3 (two sources + the merge)", len(providers))
+	}
+	providers[1].Emit("from-b")
+
+	var got loaded
+	select {
+	case got = <-done:
+		if got.err != nil {
+			t.Fatalf("activation: %v", got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an item from the second source never reached the merged consumer")
+	}
+
+	got.f.Dispose()
+	if err := got.f.Gone(bg()); err != nil {
+		t.Fatalf("Gone: %v", err)
+	}
+
+	marks := HostMarks()
+	subClose := marksIndex(marks, "stream.close")
+	mergeClose := marksIndex(marks, "stream.merge close")
+	if subClose < 0 || mergeClose < 0 {
+		t.Fatalf("fan-in teardown incomplete: %v", marks)
+	}
+	// LIFO: subscription, then the merge, then the two sources. Neither source
+	// is left holding the merged stream, and no subscription outlives its owner.
+	if subClose > mergeClose {
+		t.Fatalf("the merge closed before its subscriber: %v", marks)
+	}
+	sourceCloses := 0
+	for i, m := range marks {
+		if m == "stream.source close" {
+			sourceCloses++
+			if i < mergeClose {
+				t.Fatalf("a source closed before the merge detached from it: %v", marks)
+			}
+		}
+	}
+	if sourceCloses != 2 {
+		t.Fatalf("source closes = %d, want 2: %v", sourceCloses, marks)
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("fan-in residue after unload = %d, want 0", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources after unload = %d, want 0 (R1)", n)
+	}
+}
+
+// One source closing does NOT strand the consumer on the other, and the LAST
+// source closing does deliver the merged `Closed` — so a parked next on a
+// fan-in is always terminated.
+func TestMerge_ClosedIsDeliveredOnlyWhenEverySourceIsDone(t *testing.T) {
+	reset()
+	a := StreamSource()
+	b := StreamSource()
+	m := StreamMerge(a, b)
+	sub := StreamSubscribe(m, "error", 0)
+
+	type outcome struct {
+		v   any
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		v, err := sub.Next()
+		done <- outcome{v, err}
+	}()
+
+	a.Close() // one source gone; `b` can still feed the consumer
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case got := <-done:
+		t.Fatalf("one source's close ended the fan-in early: %+v", got)
+	default:
+	}
+
+	b.Close() // the last source: now the merged stream is done
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("want the Closed terminal, got %v", got.err)
+		}
+		if !IsStreamClosed(got.v) {
+			t.Fatalf("fan-in terminal = %#v, want Closed", got.v)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the last source's close never terminated the parked next")
+	}
+
+	// The subscription OWNS the fan-in: one Close tears the merge down with it.
+	sub.Close()
+	a.Close()
+	b.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// A fan-in source's FAULT propagates at once: no silent loss, and no waiting on
+// the sibling source that is still live.
+func TestMerge_AFaultPropagatesImmediately(t *testing.T) {
+	reset()
+	a := StreamSource()
+	b := StreamSource()
+	m := StreamMerge(a, b)
+	sub := StreamSubscribe(m, "error", 0)
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := sub.Next()
+		errc <- err
+	}()
+	a.Fault("kafka gone")
+
+	select {
+	case err := <-errc:
+		if err == nil || !strings.Contains(err.Error(), "kafka gone") {
+			t.Fatalf("fan-in fault = %v, want the reason to reach the consumer", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a source's fault never reached the merged consumer")
+	}
+
+	sub.Close()
+	a.Close()
+	b.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources = %d, want 0 (R1)", n)
+	}
+}
+
+// Merging composes: a merged stream is itself a terminal-delivering provider,
+// so it can feed another merge with no second class of stream.
+func TestMerge_Nests(t *testing.T) {
+	reset()
+	a := StreamSource()
+	b := StreamSource()
+	c := StreamSource()
+	inner := StreamMerge(a, b)
+	outer := StreamMerge(inner, c)
+	sub := StreamSubscribe(outer, "error", 0)
+
+	a.Emit("deep")
+	v, err := sub.Next()
+	if err != nil {
+		t.Fatalf("nested merge: %v", err)
+	}
+	if v != "deep" {
+		t.Fatalf("nested merge delivered %#v, want \"deep\"", v)
+	}
+	// One Close on the subscription unwinds the whole derived chain: the outer
+	// merge, then the inner merge it owns. Only the plain sources are left to
+	// their own brackets.
+	sub.Close()
+	a.Close()
+	b.Close()
+	c.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// -------------------------------------------------------------------------
+// Backpressure: the default `error` policy faults on overflow — no silent loss.
+// -------------------------------------------------------------------------
+
+func TestBackpressureError_FaultsOnOverflow(t *testing.T) {
+	reset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "error", 0)
+	for i := 0; i < StreamBufferCapacity+1; i++ {
+		src.Emit("x")
+	}
+	// The buffered prefix is delivered first, then the overflow terminal.
+	for i := 0; i < StreamBufferCapacity; i++ {
+		if _, err := sub.Next(); err != nil {
+			t.Fatalf("buffered item %d: %v", i, err)
+		}
+	}
+	_, err := sub.Next()
+	if err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("overflow under the `error` policy = %v, want Faulted(overflow)", err)
+	}
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// Subscribing to an already-terminal provider terminates at once, so the first
+// `next` cannot park on a provider that is already gone.
+func TestSubscribeAfterProviderClose_TerminatesImmediately(t *testing.T) {
+	reset()
+	src := StreamSource()
+	src.Close()
+	sub := StreamSubscribe(src, "error", 0)
+	v, err := sub.Next()
+	if err != nil {
+		t.Fatalf("next on a dead provider: %v", err)
+	}
+	if !IsStreamClosed(v) {
+		t.Fatalf("next on a dead provider = %#v, want Closed", v)
+	}
+	sub.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}

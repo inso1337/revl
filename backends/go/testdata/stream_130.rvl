@@ -1,0 +1,35 @@
+// item 130 Slice 3 — the blocking-tier (`go`) stream lowering.
+// docs/design/130-stream-reactive-types.md §4.6 (the go row), §9.
+//
+// Three components, one per property the go tier owes:
+//
+//   Consumer — the CORE GUARANTEE (§0, exit test §10.2): a sync resource, then
+//     a subscription bracket. Unloading the owner runs the inverses LIFO, so
+//     `close` runs before the pool's inverse and no listener outlives the owner.
+//   Parked   — a blocking `next` (§4.6): the activation occupies its goroutine
+//     in the cancel-channel select until the provider emits, then carries on.
+//     Faulting the provider instead terminates that park as `Faulted`, fails the
+//     activation, and reverts the prefix — closing the subscription (§9 Part B).
+//   Fanin    — `merge` (§1): two sources fanned into one DERIVED stream owned by
+//     the subscription. Multi-source teardown rides the one bracket the
+//     subscribe registers: `close` closes the merge, which detaches it from both
+//     sources, and each source is left to its own bracket.
+
+component Consumer {
+  let pool = effect Pool.open("orders", 2) undo pool.close()
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+}
+
+component Parked {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  await sub.next()
+}
+
+component Fanin {
+  let a = effect Stream.source() undo a.close()
+  let b = effect Stream.source() undo b.close()
+  let sub = subscribe merge(a, b) undo sub.close()
+  await sub.next()
+}
