@@ -837,6 +837,10 @@ class Session:
         # the value. Empty unless a running provider declared a hand-off, so a
         # stateless swap is byte-identical to before.
         handoff_pre = self._capture_provider_state(old_ir)
+        # item 334 (EDGE 1): the keys gen N ACTUALLY served, captured before
+        # teardown while its providers are still live. The health gate below
+        # holds the successor to these — see `_assert_successor_activated`.
+        pre_resolved = set(driver.resolved_keys())
         saved_previous, saved_previous_origin = self.previous, self.previous_origin
         self.previous = self.ir
         self.previous_origin = self.origin
@@ -864,7 +868,7 @@ class Session:
             # opposite of the revert guarantee. So assert the successor activated
             # CLEANLY and, if not, raise into the `_activation_error` branch below,
             # which routes to `_abort_swap` (revert to gen N, keep serving gen N).
-            self._assert_successor_activated(ir)
+            self._assert_successor_activated(ir, pre_resolved)
         except _activation_error() as exc:
             # item 372: the successor's activation did not complete — roll the
             # whole swap back to the predecessor (which activated cleanly) so the
@@ -1037,7 +1041,8 @@ class Session:
                     except Exception:  # pragma: no cover — defensive
                         pass
 
-    def _assert_successor_activated(self, ir: dict) -> None:
+    def _assert_successor_activated(self, ir: dict,
+                                    pre_resolved: set | None = None) -> None:
         """The item-334 post-activation health gate (EDGE 1).
 
         `driver._load` returns cleanly even when the successor did not truly come
@@ -1047,18 +1052,38 @@ class Session:
         So assert, after the load, that the successor is HEALTHY:
 
           * no successor fiber is left FAILED or PENDING, and
-          * every key ROOT is responsible for providing resolves to a live
-            provider (`driver.resolved_keys()`, run.py:807).
+          * every key the successor is RESPONSIBLE for providing resolves to a
+            live provider (`driver.resolved_keys()`, run.py:878).
 
-        Part 2 is scoped to ROOT-provided keys and EXCLUDES keys provided by
-        TEMPLATE components (`manifest.templates`, roadmap item 10): a template's
-        provisions come up PER-INSTANCE through the dynamic instance layer during
-        `_reconcile_instances`, which `swap` runs AFTER this gate — so a
-        template-provided key is legitimately absent from `driver.resolved_keys()`
-        here and is not a ROOT provision this gate can judge. (A template
-        component gets no top-level fiber of its own, so Part 1 never sees it; a
-        genuinely broken instance migration is caught by the state-compat gate in
-        `_reconcile_instances`, not here.)
+        Part 2's responsibility set has two halves.
+
+        ROOT provisions — every key declared by a NON-template component. A
+        template component's key is excluded here (`manifest.templates`, roadmap
+        item 10): a template's provisions come up PER-INSTANCE through the
+        dynamic instance layer, reached through the spawn handle, never at ROOT,
+        so requiring ROOT resolution for them would reject every legitimate
+        instance composition (tests/test_instance_migration.py). A template
+        component also gets no top-level fiber of its own, so Part 1 never sees
+        it, and a genuinely broken instance migration is caught by the
+        state-compat gate in `_reconcile_instances`, not here.
+
+        INHERITED provisions — every key gen N ACTUALLY SERVED (`pre_resolved`,
+        captured in `swap` before teardown) that the successor still DECLARES.
+        This half exists because `manifest.templates` is derived from the
+        candidate's own `spawn` targets (lower.py) and is therefore CANDIDATE-
+        CONTROLLED: naming its own provider in a `spawn` lifts that provider out
+        of the static composition AND, under a templates-only exclusion, out of
+        the gate — so a successor could declare `greeter`, provide it nowhere a
+        caller can reach, and still be installed over a live gen N that was
+        serving `greeter`. The exclusion may say "this key comes up
+        per-instance"; it may not say "this key may stop existing while the
+        composition keeps claiming it". Holding the successor to the keys its
+        predecessor genuinely served closes that without judging keys the
+        predecessor never provided: a composition may introduce a brand-new
+        template-provided key (legitimately absent from ROOT), and may drop a
+        key outright (the successor then no longer declares it, and `state()`
+        and `Gate.propose` both report the smaller set honestly). What it may
+        not do is claim a key it inherited and deliver nothing.
 
         On any failure, raise `ActivationError` so the enclosing `swap` catches it
         in its `_activation_error()` branch and routes to `_abort_swap` — reverting
@@ -1082,22 +1107,36 @@ class Session:
                     f"activate (FAILED) or has an unmet requirement (PENDING). "
                     f"item 372 makes both non-raising, so item 334's health gate "
                     f"rejects them here")
-        # 2) every ROOT-provided key must resolve to a live provider. Skip
-        #    template components — their provisions resolve per-instance in
-        #    `_reconcile_instances` (which runs after this gate), never at ROOT.
+        # 2) every key the successor is responsible for must resolve to a live
+        #    provider: the ROOT provisions (non-template declarations) plus the
+        #    INHERITED ones (keys gen N actually served that the successor still
+        #    declares — including through a component the candidate's own
+        #    `manifest.templates` names, which is why the exclusion cannot be
+        #    taken on the candidate's word alone).
         templates = set((ir.get("manifest") or {}).get("templates") or [])
-        declared: set[str] = set()
+        declared_root: set[str] = set()
+        declared_all: set[str] = set()
         for comp in (ir.get("components") or []):
-            if comp.get("name") in templates:
-                continue
-            declared.update((comp.get("provides") or {}).keys())
-        missing = sorted(declared - driver.resolved_keys())
+            keys = set((comp.get("provides") or {}).keys())
+            declared_all |= keys
+            if comp.get("name") not in templates:
+                declared_root |= keys
+        inherited = declared_all & set(pre_resolved or ())
+        resolved = driver.resolved_keys()
+        missing = sorted((declared_root | inherited) - resolved)
         if missing:
+            demoted = sorted((inherited - declared_root) - resolved)
+            detail = (
+                f" Key(s) {demoted} were served by the previous generation and "
+                f"are still declared by the successor, but its composition puts "
+                f"them out of ROOT's reach — a swap may not retire a live "
+                f"provision while still claiming it."
+                if demoted else "")
             raise ActivationError(
                 "<successor>", missing,
                 "declared provided key(s) did not resolve to a live provider "
                 "after the swap load — the successor composition would report "
-                "loaded while ROOT lacks the provision (item 334 health gate)")
+                f"loaded while ROOT lacks the provision (item 334 health gate).{detail}")
 
     # -- provider state hand-off (roadmap item 53) -------------------------
 

@@ -3338,8 +3338,30 @@ class Job:
 #     subscription's outstanding `next`, so a `next` is always terminated by
 #     exactly one of owner-teardown or a provider terminal.
 #
-# Slice 1 backpressure is `error` only: a full bounded buffer faults the
-# subscription with `Faulted(overflow)` and closes it — no silent loss.
+# Slice 2 adds the rest of §4.4's declared policies and the §1 pure combinators
+# without touching either property. Every subscription's buffer is BOUNDED —
+# there are no unbounded buffers — and the overflow policy is declared at
+# `subscribe`:
+#
+#   error (default)  terminal `Faulted(overflow)`; the subscription closes
+#   drop_newest      discard the incoming item, RECORDED (never silent)
+#   drop_oldest      evict the buffer head, RECORDED (never silent)
+#   block            refuse the delivery and PAUSE the provider (the `Paused`
+#                    state index) until the consumer drains
+#
+# `block`'s resume is the item's one time-windowed behavior, and it fires on the
+# deterministic test clock (§8): a `drain <n><unit>` window arms an `after`
+# schedule whose firing re-checks the buffer, so a paused provider resumes on
+# `Clock.advance(ms)` — a step in the timeline, never a wall-clock sleep. With no
+# window declared the resume is eager, at the `next` that drains the buffer.
+#
+# The combinators (`map`/`filter`/`take`) are DERIVED STREAMS: `StreamStage`
+# links sit between the source and the subscription, and a link's `close` closes
+# its upstream link, so the chain rides the ONE bracket the `subscribe`
+# registers. Both review-critical properties survive the chain by construction —
+# cancellation is the consumer-end `_closed` flag plus the owner-withdrawal poll
+# (neither of which a stage can intercept), and a terminal pushed at the source
+# propagates through every link to the consumer's outstanding `next`.
 
 
 class StreamFaulted(RuntimeError):
@@ -3385,13 +3407,22 @@ class StreamSource:
         return self._state
 
     def emit(self, item: Any) -> bool:
-        """Deliver one item to the single consumer. A no-op once terminal."""
+        """Deliver one item to the single consumer. A no-op once terminal.
+
+        Returns whether the item was ACCEPTED. A `False` is backpressure the
+        provider can see (a `block`-policy pause, an `error`-policy overflow, an
+        exhausted `take`) — the provider is told, so a refusal is never a silent
+        loss (§4.4). The `drop_*` policies accept the delivery and record the
+        discard instead."""
         if self._state != "open":
             return False
+        accepted = True
         for sub in list(self._subs):
-            sub._deliver(item)
-        _record(f"stream.emit {item}")
-        return True
+            if not sub._deliver(item):
+                accepted = False
+        _record(f"stream.emit {item}" if accepted
+                else f"stream.emit {item} refused")
+        return accepted
 
     def close(self) -> bool:
         """Orderly provider teardown: deliver `Closed` to every subscription and
@@ -3418,6 +3449,103 @@ class StreamSource:
     def _detach(self, sub: "Subscription") -> None:
         if sub in self._subs:
             self._subs.remove(sub)
+
+
+class StreamStage:
+    """One link of a derived-stream combinator chain — `map(f)`, `filter(p)` or
+    `take(n)` (design §1, Slice 2).
+
+    A stage is BOTH a subscriber of its upstream (it exposes `_deliver` /
+    `_terminate` / `_detach`) and an upstream of the next link (it exposes
+    `_subs`), so a chain is `StreamSource -> stage -> … -> Subscription` and
+    nothing in the source or the subscription needs to know the chain exists.
+
+    Teardown stays ONE LIFO stack: `close` detaches this link from its upstream
+    and then closes that upstream when it is itself a stage, so the consumer's
+    single bracket inverse unwinds the whole chain down to (but not including)
+    the provider — the provider is closed by its OWN bracket, which is what keeps
+    the Slice 1 close-order proof intact.
+
+    The transforms are G6-pure (rule 3.5), enforced at admission, so a stage
+    never introduces an effect, a suspension, or a failure path of its own."""
+
+    __slots__ = ("_upstream", "_kind", "_arg", "_subs", "_state", "_remaining")
+
+    def __init__(self, upstream: Any, kind: str, arg: Any) -> None:
+        if kind not in ("map", "filter", "take"):  # pragma: no cover — emitter invariant
+            raise ValueError(f"unknown stream combinator {kind!r}")
+        self._upstream = upstream
+        self._kind = kind
+        self._arg = arg
+        self._subs: list = []
+        self._state = "open"          # open | closed
+        self._remaining = int(arg) if kind == "take" else None
+        upstream._subs.append(self)
+        Stream._stages.append(self)
+        _record(f"stream.stage {kind}")
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    # upstream -> this link -> downstream ---------------------------------------
+    def _deliver(self, item: Any) -> bool:
+        """Transform and forward one item. Returns downstream acceptance, so
+        `block` backpressure at the consumer end reaches the provider THROUGH the
+        chain rather than being swallowed by a link."""
+        if self._state != "open":
+            return False
+        if self._kind == "map":
+            item = self._arg(item)
+        elif self._kind == "filter":
+            if not self._arg(item):
+                # a predicate rejection is not backpressure: the provider's emit
+                # succeeded, this derived stream simply has nothing to forward.
+                return True
+        else:  # take
+            if self._remaining <= 0:
+                return False
+        accepted = True
+        for sub in list(self._subs):
+            if not sub._deliver(item):
+                accepted = False
+        if self._kind == "take" and accepted:
+            self._remaining -= 1
+            if self._remaining == 0:
+                # `take(n)` is exhausted: the derived stream ends with a `Closed`
+                # TERMINAL pushed downstream (never silence, §4.3), and this link
+                # detaches from its upstream so the provider stops feeding it.
+                _record("stream.take exhausted")
+                self._upstream._detach(self)
+                for sub in list(self._subs):
+                    sub._terminate("closed", None)
+        return accepted
+
+    def _terminate(self, kind: str, reason: Optional[str]) -> None:
+        """Forward a provider terminal downstream. This is what makes §9 Part B
+        hold END TO END through a chain: a `Closed`/`Faulted` pushed at the
+        source reaches the consumer's outstanding `next` through every link."""
+        for sub in list(self._subs):
+            sub._terminate(kind, reason)
+
+    def _detach(self, sub: Any) -> None:
+        if sub in self._subs:
+            self._subs.remove(sub)
+
+    def close(self) -> bool:
+        """The chained inverse: release this link and its upstream chain.
+        Idempotent and infallible (G5) — teardown never suspends."""
+        if self._state != "open":
+            return False
+        self._state = "closed"
+        self._upstream._detach(self)
+        _record(f"stream.stage close {self._kind}")
+        if isinstance(self._upstream, StreamStage):
+            self._upstream.close()
+        return True
+
+    def __repr__(self) -> str:  # pragma: no cover — debugging aid
+        return f"<stream stage {self._kind} {self._state}>"
 
 
 def _fiber_withdrawn(ctx: Any) -> bool:
@@ -3454,31 +3582,131 @@ class Subscription:
     `close`/`fault` all resolve a parked `next` at the next scheduler turn,
     without ever waiting for the provider. Determinism, not wall-clock."""
 
-    def __init__(self, source: StreamSource, policy: str = "error",
+    POLICIES = ("error", "drop_newest", "drop_oldest", "block")
+
+    def __init__(self, source: Any, policy: str = "error",
                  ctx: Any = None,
-                 capacity: int = StreamSource.DEFAULT_CAPACITY) -> None:
+                 capacity: int = StreamSource.DEFAULT_CAPACITY,
+                 drain_ms: Optional[int] = None) -> None:
+        if policy not in self.POLICIES:  # pragma: no cover — checker invariant
+            raise ValueError(f"unknown backpressure policy {policy!r}")
+        # the IMMEDIATE upstream: the provider, or the last link of a combinator
+        # chain (Slice 2). Closing this subscription unwinds the chain.
         self._source = source
-        self._policy = policy            # Slice 1: "error" only
+        self._policy = policy
         self._capacity = capacity
         self._ctx = ctx                  # the owning activation's context, or None
         self._buffer: list = []
         self._terminal: Optional[tuple] = None   # ("closed", None) | ("faulted", reason)
         self._closed = False             # the cancel token, tripped by close()
+        # `block`-policy backpressure (§4.4): `_paused` IS the `Paused` state
+        # index, and `_drain_ms`/`_drain` are the clock-driven drain window (§8).
+        self._paused = False
+        self._drain_ms = drain_ms
+        self._drain: Any = None
         source._subs.append(self)
         Stream._subs.append(self)
         _record("stream.subscribe")
 
+    @property
+    def state(self) -> str:
+        """The design's state index (§1) as the runtime sees it: `Closed` once
+        the cancel token is tripped or a terminal is drained, `Paused` while a
+        `block`-policy buffer is full, `Active` otherwise."""
+        if self._closed:
+            return "closed"
+        if self._paused:
+            return "paused"
+        return "active"
+
     # provider -> subscription -------------------------------------------------
-    def _deliver(self, item: Any) -> None:
+    def _deliver(self, item: Any) -> bool:
+        """Buffer one item under the declared overflow policy (§4.4). Returns
+        whether the delivery was ACCEPTED — a `False` is backpressure the
+        provider sees, never a silent drop."""
         if self._closed or self._terminal is not None:
+            return False
+        if self._paused:
+            # `block`: the provider is SUSPENDED, and stays suspended until the
+            # subscription resumes — draining alone does not un-block it when a
+            # drain window is declared (§8). Refusing here rather than at the
+            # capacity check is what makes the window observable at all.
+            return False
+        if len(self._buffer) < self._capacity:
+            self._buffer.append(item)
+            return True
+        if self._policy == "drop_newest":
+            # lossy-tolerant telemetry: discard the incoming item. Explicitly
+            # opted into at `subscribe`, and RECORDED — loss is never silent.
+            _record(f"stream.drop_newest {item}")
+            return True
+        if self._policy == "drop_oldest":
+            # latest-wins gauges: evict the buffer head, keep the newest item.
+            evicted = self._buffer.pop(0)
+            self._buffer.append(item)
+            _record(f"stream.drop_oldest {evicted}")
+            return True
+        if self._policy == "block":
+            # the provider suspends until the consumer drains: the delivery is
+            # REFUSED (so `emit` returns False and the provider knows) and the
+            # subscription enters the reserved `Paused` state. No implicit retry —
+            # the provider re-emits once the subscription is Active again.
+            self._pause()
+            return False
+        # backpressure `error` (default, §4.4): a full buffer is a terminal
+        # `Faulted(overflow)` — deterministic, no silent loss.
+        self._terminal = ("faulted", "overflow")
+        _record("stream.overflow")
+        return False
+
+    # `block` backpressure: pause / drain window / resume (§4.4, §8) ------------
+    def _pause(self) -> None:
+        if self._paused or self._closed:
+            return
+        self._paused = True
+        _record("stream.paused")
+        if self._drain_ms is not None:
+            self._arm_drain()
+
+    def _arm_drain(self) -> None:
+        """Arm the drain window against the deterministic test clock. The window
+        is a revertible schedule like any timer, so it has an inverse (`close`
+        cancels it) and leaves no residue (§8)."""
+        if self._drain is None:
+            self._drain = schedule_after(self._drain_ms, self._drain_fire)
+
+    def _drain_fire(self) -> None:
+        """One drain-window firing, driven by `Clock.advance` — a step in the
+        timeline, not a wall-clock wake-up. Resumes the provider if the consumer
+        has made room; otherwise re-arms for the next window."""
+        self._drain = None
+        if self._closed or not self._paused:
+            return
+        if len(self._buffer) < self._capacity:
+            self._resume()
+        else:
+            self._arm_drain()
+
+    def _cancel_drain(self) -> None:
+        if self._drain is not None:
+            self._drain.cancel()
+            self._drain = None
+
+    def _resume(self) -> None:
+        self._paused = False
+        self._cancel_drain()
+        _record("stream.resume")
+
+    def _maybe_resume(self) -> None:
+        """Called when the consumer drains an item. With no drain window the
+        resume is eager; with one, only a clock `advance` past the window may
+        resume the provider (§8)."""
+        if not self._paused or self._closed:
             return
         if len(self._buffer) >= self._capacity:
-            # backpressure `error` (default, §4.4): a full buffer is a terminal
-            # `Faulted(overflow)` — deterministic, no silent loss.
-            self._terminal = ("faulted", "overflow")
-            _record("stream.overflow")
             return
-        self._buffer.append(item)
+        if self._drain_ms is None:
+            self._resume()
 
     def _terminate(self, kind: str, reason: Optional[str]) -> None:
         if self._closed or self._terminal is not None:
@@ -3497,7 +3725,10 @@ class Subscription:
             if self._closed or _fiber_withdrawn(self._ctx):
                 return STREAM_CLOSED
             if self._buffer:
-                return self._buffer.pop(0)
+                item = self._buffer.pop(0)
+                # draining may release a `block`-paused provider (§4.4)
+                self._maybe_resume()
+                return item
             if self._terminal is not None:
                 kind, reason = self._terminal
                 if kind == "faulted":
@@ -3508,12 +3739,22 @@ class Subscription:
     def close(self) -> bool:
         """The bracket inverse: trip the cancel token synchronously, release the
         host listener, and resolve any parked `next` as `Closed`. Infallible and
-        idempotent (a no-op once closed) — teardown never suspends (G5)."""
+        idempotent (a no-op once closed) — teardown never suspends (G5).
+
+        Through a combinator chain (Slice 2) the inverse cascades: this
+        subscription detaches from its upstream link and closes it, and each link
+        closes the one above, so the ONE bracket the `subscribe` registered
+        unwinds the whole derived chain. The provider itself is untouched — it is
+        closed by its own bracket, which keeps the LIFO close order the core
+        guarantee is pinned on."""
         if self._closed:
             return False
         self._closed = True
+        self._cancel_drain()
         self._source._detach(self)
         _record("stream.close")
+        if isinstance(self._source, StreamStage):
+            self._source.close()
         return True
 
 
@@ -3525,6 +3766,7 @@ class Stream:
 
     _sources: list = []
     _subs: list = []
+    _stages: list = []
 
     @classmethod
     def source(cls) -> StreamSource:
@@ -3532,15 +3774,28 @@ class Stream:
 
     @classmethod
     def subscribe(cls, source: StreamSource, policy: str = "error",
-                  ctx: Any = None) -> Subscription:
-        return Subscription(source, policy, ctx)
+                  ctx: Any = None, *, stages: Optional[list] = None,
+                  capacity: int = StreamSource.DEFAULT_CAPACITY,
+                  drain_ms: Optional[int] = None) -> Subscription:
+        """Open a single-consumer subscription, optionally through a derived
+        combinator chain (Slice 2). `stages` is the emitted `[(kind, arg), …]`
+        list — `('map', fn)`, `('filter', pred)`, `('take', n)` — applied
+        left to right, so the LAST link is the subscription's immediate
+        upstream and the chain closes downstream-first on the bracket inverse."""
+        upstream: Any = source
+        for kind, arg in stages or []:
+            upstream = StreamStage(upstream, kind, arg)
+        return Subscription(upstream, policy, ctx, capacity, drain_ms)
 
     @classmethod
     def pending(cls) -> int:
-        """Residue: open sources + live (un-closed) subscriptions. Zero after a
-        clean unload proves the bracket inverse ran (no dangling listener)."""
+        """Residue: open sources + live (un-closed) subscriptions + live
+        combinator links. Zero after a clean unload proves the bracket inverse
+        ran and unwound the WHOLE chain (no dangling listener, no orphaned
+        derived stream)."""
         return (sum(1 for s in cls._sources if s._state == "open")
-                + sum(1 for s in cls._subs if not s._closed))
+                + sum(1 for s in cls._subs if not s._closed)
+                + sum(1 for s in cls._stages if s._state == "open"))
 
     @classmethod
     def sources(cls) -> list:
@@ -3551,9 +3806,14 @@ class Stream:
         return cls._sources[-1] if cls._sources else None
 
     @classmethod
+    def stages(cls) -> list:
+        return list(cls._stages)
+
+    @classmethod
     def reset(cls) -> None:
         cls._sources.clear()
         cls._subs.clear()
+        cls._stages.clear()
 
 
 # ---------------------------------------------------------------------------

@@ -19,13 +19,52 @@ Tools
 Transport is newline-delimited JSON-RPC on stdin/stdout (the MCP stdio
 convention); no third-party dependency, consistent with the rest of the
 toolchain.
+
+Who authors what
+----------------
+The driving agent is NOT a trusted host-code author. That is a decision, and it
+is written down here because the code used to decide the opposite by accident:
+`_compile` passed no `AdmissionProfile`, so an inline `@py` body handed to
+`revl_load`/`revl_check`/`revl_swap` compiled, loaded and RAN arbitrary host
+Python (`run.py`'s `exec(compile(source, ...))`) with no operator in the loop.
+The item-246 approval policy did not close it either: its classifier reads
+DECLARED extern facts, so a body declared `pure` crossed nothing, and an
+`emission[notify]` body that also read a `.env` produced a ticket naming only
+`notify` — an operator approving a notification while arbitrary I/O rode along.
+
+So the authoring verbs now compile agent-supplied source under the item-329
+untrusted-author profile (`admit_profile.AdmissionProfile`), the same defense
+`Gate.propose` (item 334) already applies to agent-authored components:
+
+  * the agent may COMPOSE services; it may not DECLARE an `extern`/host block,
+    nor REACH one through an imported module (`check_no_extern`,
+    `check_no_host_extern_reach`), nor mint its own declassifier;
+  * the host code an admitted turn is allowed to use is the OPERATOR's:
+    `--provider PATH` modules, exactly `Gate.propose`'s granted-providers map;
+  * `--grant SERVICE` turns on the item-329 reach allowlist when the operator
+    wants reach bounded too.
+
+Trust is an explicit operator decision that DEFAULTS CLOSED (`AuthoringTrust`
+below, `revl mcp serve --author-trust`), never an accident of which verb was
+called. An operator who genuinely wants the agent authoring host code passes
+`--author-trust trusted`; that mode is honest rather than silent — every
+class-(c) ticket raised by a composition carrying agent-authored host bodies
+says so, so nobody approves `notify` believing that is all that will run.
+
+`files` arguments are jailed to the operator-sanctioned root(s) (see
+`_jail_refusal`): unjailed, they were a filesystem oracle (existence, first
+token, line numbers) over every path on the machine, and `revl_restore` +
+`revl_snapshot` was a full arbitrary-file READ.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
+from dataclasses import dataclass, replace
 
+from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source
 from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
@@ -49,7 +88,261 @@ PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
 
 
+# -------------------------------------------------------- authoring trust
+#
+# How much this server trusts the AGENT on the other end of the transport, as an
+# AUTHOR. Operator-controlled, default closed. See the module docstring for why
+# this exists; the mechanism is item 329's `AdmissionProfile`, wired the way
+# item 334's `Gate.propose` wires it, not a second one invented here.
+
+@dataclass(frozen=True)
+class AuthoringTrust:
+    """The operator's answer to "may the agent driving this server author host
+    code?", plus the filesystem the agent may name.
+
+    `host_code`   — False (the default, closed): agent-supplied `source`/`files`
+                    /`modules` are compiled under the untrusted-author profile,
+                    so the turn may compose granted services but may neither
+                    declare nor reach an `extern`/host block. True: the operator
+                    has explicitly declared the agent a trusted host-code author
+                    (`--author-trust trusted`); the compile is then byte-
+                    identical to before this existed, and every class-(c) ticket
+                    the resulting composition raises SAYS the candidate carries
+                    unreviewed host code (`_approval_required`).
+    `granted`     — the item-329 reach allowlist: the service names an admitted
+                    turn may reach. `None` (default) leaves the allowlist OFF —
+                    there is no honest default for "which of the running
+                    system's services this agent may reach", so the operator
+                    declares it with `--grant` or it is not enforced. A set —
+                    even empty — turns it on.
+    `providers`   — `{path: source}` of OPERATOR-sanctioned host-code modules,
+                    merged under the agent's own `modules` so an untrusted turn
+                    can COMPOSE host-backed services without authoring them.
+                    This is `Gate.propose`'s granted-providers map, same shape,
+                    same rule: reaching their externs directly is still refused
+                    by `check_no_host_extern_reach`; only their SERVICES compose.
+    `roots`       — the directories a caller-supplied path argument may name.
+                    Empty means "the directory the operator started the server
+                    in" (see `_file_roots`).
+    """
+
+    host_code: bool = False
+    granted: frozenset[str] | None = None
+    providers: dict[str, str] | None = None
+    roots: tuple[str, ...] = ()
+
+    def profile(self) -> AdmissionProfile | None:
+        """The admission profile agent-authored source compiles under, or `None`
+        when the operator has declared the agent trusted (byte-identical to a
+        human's `revl compile`)."""
+        if self.host_code:
+            return None
+        if self.granted is not None:
+            return AdmissionProfile.untrusted_author(self.granted)
+        # the host-code half of the untrusted-author profile with the reach
+        # allowlist left off: `no_extern` (+ its transitive reach sweep) and
+        # `no_declassify` need no operator input to be correct, the allowlist
+        # does. `taint_strict` rides with them for the same reason it rides in
+        # `untrusted_author`: a model-authored turn annotates nothing.
+        return replace(AdmissionProfile.untrusted_author(()), granted=None)
+
+
+# The live trust level. `revl mcp serve` sets it from its flags; a test or an
+# embedder sets it with `set_authoring_trust`. Module-global for the same reason
+# `SESSION` is: this server serves one agent over one stdio pipe.
+AUTHORING = AuthoringTrust()
+
+
+def set_authoring_trust(**fields) -> AuthoringTrust:
+    """Replace the live `AuthoringTrust` (operator-side wiring; the agent has no
+    verb that reaches this). Returns the new value."""
+    global AUTHORING
+    if fields.get("granted") is not None:
+        fields["granted"] = frozenset(fields["granted"])
+    if "roots" in fields:
+        roots = fields.pop("roots")
+        if roots is not None:
+            fields["roots"] = tuple(os.path.realpath(os.path.abspath(r))
+                                    for r in roots)
+    AUTHORING = replace(AUTHORING, **fields)
+    return AUTHORING
+
+
+# ------------------------------------------------------------- the path jail
+#
+# Every caller-supplied path argument is confined to the operator-sanctioned
+# root(s). Unjailed, `files` was an ORACLE over the whole filesystem: a syntax
+# error names the file and its first token, a missing file says so, and any path
+# that happens to be valid revl gives back its full compiled structure — and
+# `revl_restore` + `revl_snapshot` handed back a file's entire CONTENT.
+
+_PATH_ARGUMENTS = frozenset({"files", "candidateFiles", "baselineFiles",
+                             "traceFile", "registry"})
+
+
+def _file_roots() -> tuple[str, ...]:
+    """The sanctioned roots. Explicit `--root` wins; otherwise the directory the
+    operator started the server in — the one directory the operator did sanction
+    by launching here. Never empty, and never `/` by default."""
+    if AUTHORING.roots:
+        return AUTHORING.roots
+    return (os.path.realpath(os.getcwd()),)
+
+
+def _within_roots(path: str, roots: tuple[str, ...]) -> bool:
+    """Whether `path` resolves inside one of `roots`. Resolved with `realpath`
+    BEFORE the comparison, so `../` traversal and a symlink pointing out of the
+    root are both caught, and resolved without stat-ing for existence, so the
+    check itself is not the oracle it is closing."""
+    real = os.path.realpath(os.path.abspath(path))
+    for root in roots:
+        if real == root or real.startswith(root + os.sep):
+            return True
+    return False
+
+
+def _collect_path_arguments(node, out: list) -> None:
+    """Every caller-supplied path anywhere in a tool's arguments, including the
+    ones nested inside a `revl_restore` snapshot document (`sources.files`)."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _PATH_ARGUMENTS:
+                if isinstance(value, str):
+                    out.append(value)
+                elif isinstance(value, list):
+                    out.extend(v for v in value if isinstance(v, str))
+            else:
+                _collect_path_arguments(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_path_arguments(item, out)
+
+
+def _jail_refusal(arguments: dict) -> dict | None:
+    """The refusal payload when a tool call names a path outside the sanctioned
+    roots, or `None` when every path is inside. Fails CLOSED: refused before the
+    handler runs, so nothing is opened, stat-ed or compiled, and the message
+    discloses only what the caller already sent."""
+    paths: list = []
+    _collect_path_arguments(arguments, paths)
+    if not paths:
+        return None
+    roots = _file_roots()
+    escaped = [p for p in paths if not _within_roots(p, roots)]
+    if not escaped:
+        return None
+    named = ", ".join(f"`{p}`" for p in sorted(set(escaped)))
+    allowed = ", ".join(f"`{r}`" for r in roots)
+    return {"ok": False, "diagnostics": [{
+        "severity": "error", "code": "REVL", "category": "admission",
+        "message": (f"refused: {named} is outside the operator-sanctioned "
+                    f"root(s) [{allowed}] — a path argument may not leave them"),
+        "hint": ("a path argument is confined to what the operator sanctioned "
+                 "when starting this server (`revl mcp serve --root DIR`); "
+                 "without the jail, `files` reports whether any path on the "
+                 "machine exists, what its first token is and where it fails, "
+                 "and a snapshot round-trip returns its content. Send the "
+                 "candidate as inline `source`, or ask the operator to sanction "
+                 "the directory"),
+    }], "note": "nothing was read, compiled or loaded"}
+
+
+# ------------------------------------------------ the pre-dispatch source gate
+#
+# `_compile` carries the FULL untrusted-author profile (declare + transitive
+# reach + declassify + the granted allowlist) for the verbs that route through
+# it. But it is not the only door into the compiler: `revl_gauntlet`,
+# `revl_quarantine`, `revl_repair`, `revl_canary` and `revl_edit` each compile
+# through their own module, and `revl_restore` compiles a snapshot's sources. So
+# the STRUCTURAL half of the profile — the half that closes the exploit, a
+# declared `@py`/`@ts` host body in agent-authored source — runs once, here, over
+# every source string in a tool call's arguments, before any handler is
+# dispatched. Structural (the parsed AST only), so nothing is lowered or run.
+#
+# The transitive `check_no_host_extern_reach` half needs the merged module
+# closure and therefore still lives in the compiler, on the `_compile` verbs.
+
+_SOURCE_ARGUMENTS = frozenset({"source", "candidate", "baseline", "replacement"})
+_SOURCE_MAP_ARGUMENTS = frozenset({"modules", "files_content"})
+
+
+def _collect_sources(node, out: list) -> None:
+    """Every agent-supplied revl source string anywhere in a tool call's
+    arguments, including the ones nested in a `revl_restore` snapshot."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _SOURCE_ARGUMENTS and isinstance(value, str):
+                out.append(value)
+            elif key in _SOURCE_MAP_ARGUMENTS and isinstance(value, dict):
+                out.extend(v for v in value.values() if isinstance(v, str))
+            else:
+                _collect_sources(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_sources(item, out)
+
+
+def _authoring_refusal(arguments: dict) -> dict | None:
+    """The refusal payload when agent-authored source declares host code (or
+    mints its own declassifier) under a closed authoring trust, else `None`.
+
+    Parses each source and runs `admit_profile.enforce_source` — the same
+    structural check `Gate.propose`'s decision compile runs, before lowering, so
+    a host body is refused before it could ever be `exec`'d. Source the parser
+    rejects is NOT refused here: a syntax error is the handler's own diagnostic
+    to report, and pre-empting it would only make that error message worse."""
+    profile = AUTHORING.profile()
+    if profile is None:
+        return None
+    from ..admit_profile import enforce_source  # noqa: PLC0415
+    from ..parser import Parser  # noqa: PLC0415
+
+    sources: list = []
+    _collect_sources(arguments, sources)
+    for text in sources:
+        try:
+            program = Parser(text, "<candidate>.rvl").parse()
+        except Exception:  # noqa: BLE001 — not parseable: the handler reports it
+            continue
+        try:
+            enforce_source([program], profile)
+        except RevlError as error:
+            payload = report(error)
+            payload["authoringTrust"] = "untrusted"
+            payload["note"] = ("nothing was compiled, loaded or run — this "
+                               "session's authoring trust is closed, so the "
+                               "agent may compose granted services but may not "
+                               "author host code (`revl mcp serve "
+                               "--author-trust`, --provider, --grant)")
+            return payload
+    return None
+
+
 # ---------------------------------------------------------------- helpers
+
+# The host bodies the most recent agent-authored compile carried, and the ones
+# the RUNNING composition carries. Only ever non-empty under
+# `--author-trust trusted` (the untrusted profile refuses the source outright),
+# and read by `_approval_required` so a class-(c) ticket cannot understate what
+# a yes lets run.
+_AUTHORED_HOST_BODIES: list = []
+_LIVE_HOST_BODIES: list = []
+
+
+def _host_bodies(ir: dict) -> list:
+    """Every extern in `ir` that carries a verbatim host body, as
+    `{extern, classification, backends}`. This is the surface G8 does not check
+    inside (item 24) and the item-246 classifier never looks at."""
+    out = []
+    for extern in ir.get("externs") or []:
+        bodies = extern.get("bodies") or {}
+        if not bodies:
+            continue
+        out.append({"extern": extern.get("name"),
+                    "classification": extern.get("class"),
+                    "backends": sorted(bodies)})
+    return sorted(out, key=lambda e: str(e["extern"]))
+
 
 def _compile(source: str | None, files: list[str] | None,
              manifest: dict | None = None, modules: dict | None = None,
@@ -59,13 +352,81 @@ def _compile(source: str | None, files: list[str] | None,
 
     Inline source never touches the disk: `compile_source` carries the
     ambient manifest and any in-memory `use` modules itself.
+
+    What the CLI does NOT carry is a trust level: a human running `revl compile`
+    IS the author. Here the author is the agent on the other end of the
+    transport, so source that ARRIVED over the transport compiles under
+    `AUTHORING.profile()` — the item-329 untrusted-author profile unless the
+    operator has said otherwise. A refusal is a `RevlError` like any other
+    admission refusal, so every caller's `except RevlError: return report(error)`
+    already reports it correctly.
+
+    `files` are the exception, and the path jail is what earns it: a `.rvl` file
+    inside an operator-sanctioned root was not written by the agent — no MCP verb
+    writes to disk, so the only way bytes reach a jailed path is a human putting
+    them there. Those compile unprofiled, exactly as `Gate._compile_base` (the
+    embedder's own sources) does while `Gate.propose` (the agent's source) does
+    not. Inline `source` and `modules` always carry the profile: they arrived
+    over the transport, whatever path they claim to sit at.
+
+    With operator-sanctioned `providers` this is item 334's two-compile shape,
+    not one compile with a flag, and for `Gate.propose`'s reasons:
+
+      1. the DECISION compile runs the agent's source ALONE under the profile,
+         with the providers in scope as `use` modules — so the candidate may
+         compose their SERVICES while a direct reach into their host externs is
+         still refused across the whole transitive closure;
+      2. the COMPOSITION compile then builds what actually loads: the admitted
+         candidate plus the providers as CO-ROOTS (a `use`-imported module
+         contributes no components), unprofiled, because the candidate already
+         passed (1) and the providers are the operator's own trusted host code.
+
+    With no providers configured — the default — there is one compile, the
+    decision compile, and its document is what loads.
     """
-    if source is not None:
-        return compile_source(source, "<candidate>.rvl", manifest=manifest,
-                              replacing=replacing, modules=modules)
-    if not files:
+    # jailed `files` with no transport-carried text are operator-authored.
+    over_the_transport = source is not None or bool(modules)
+    profile = AUTHORING.profile() if over_the_transport else None
+    providers = dict(AUTHORING.providers or {})
+    # operator-sanctioned modules ride UNDER the agent's own `modules`: an
+    # agent-supplied entry can never displace a provider the operator granted.
+    merged = dict(providers)
+    if modules:
+        merged.update({k: v for k, v in modules.items() if k not in merged})
+
+    def _compile_once(prof, co_roots: dict) -> dict:
+        if co_roots:
+            virtual = {os.path.abspath(p): text for p, text in co_roots.items()}
+            paths = list(virtual)
+            if source is not None:
+                candidate = os.path.abspath("<candidate>.rvl")
+                virtual[candidate] = source
+                paths.insert(0, candidate)
+            elif files:
+                paths = list(files) + paths
+            else:
+                raise ValueError("provide `source` or `files`")
+            return compile_files(paths, manifest=manifest, replacing=replacing,
+                                 sources=virtual, profile=prof)
+        if source is not None:
+            return compile_source(source, "<candidate>.rvl", manifest=manifest,
+                                  replacing=replacing, modules=merged or None,
+                                  profile=prof)
+        if files:
+            return compile_files(list(files), manifest=manifest,
+                                 replacing=replacing, profile=prof)
         raise ValueError("provide `source` or `files`")
-    return compile_files(list(files), manifest=manifest, replacing=replacing)
+
+    if providers and profile is not None:
+        _compile_once(profile, {})              # 1. the decision
+        ir = _compile_once(None, providers)     # 2. what loads
+    else:
+        ir = _compile_once(profile, providers)
+    global _AUTHORED_HOST_BODIES
+    _AUTHORED_HOST_BODIES = (_host_bodies(ir)
+                             if over_the_transport and AUTHORING.host_code
+                             else [])
+    return ir
 
 
 def _summary(ir: dict) -> dict:
@@ -239,6 +600,20 @@ def _origin(arguments: dict) -> dict:
     return origin
 
 
+def _remember_live_host_bodies() -> None:
+    """Re-read the host bodies the LIVE composition carries, so a later
+    class-(c) ticket can name them. Called after every completed tool call, so
+    load / swap / edit / restore / undo / rollback / unload are all covered by
+    one line rather than five that could drift apart. Empty under a closed
+    authoring trust: the profile refused every agent-authored host body, so the
+    only bodies that can be live came from the operator's own jailed files and
+    there is nothing to warn about."""
+    global _LIVE_HOST_BODIES
+    ir = getattr(SESSION, "ir", None)
+    _LIVE_HOST_BODIES = (_host_bodies(ir)
+                         if ir and AUTHORING.host_code else [])
+
+
 def _tool_load(arguments: dict) -> dict:
     """Boot a composition in memory (nothing is written to disk)."""
     try:
@@ -264,6 +639,12 @@ def _tool_call(arguments: dict) -> dict:
         return {"ok": True, **SESSION.call(key, method, arguments.get("args") or [])}
     except SessionError as error:
         return _session_error(str(error))
+    except ApprovalRequired:
+        # item 246: the class-(c) ticket two-step is a RESULT, shaped by
+        # `handle`. Re-raised past the catch-all below, which used to swallow it
+        # into an opaque "ApprovalRequired: ..." internal-fault string — the
+        # operator never saw the ticket at all over this verb.
+        raise
     except Exception as exc:  # the callee raised — that is a result, not a crash
         return _session_error(f"{type(exc).__name__}: {exc}", raised=True,
                               trace=SESSION.state().get("trace", []))
@@ -492,7 +873,32 @@ def _approval_required(exc: ApprovalRequired) -> dict:
     """Shape a class-(c) refusal into the ticket two-step response (item 246).
     The call/load/swap did NOT fire: the ticket names what a yes would mean, and
     `revl_approve(hash)` mints the standing approval that lets the identical
-    re-issue fire once."""
+    re-issue fire once.
+
+    Under `--author-trust trusted` the ticket also has to stop lying. Its
+    `capabilities` / `classCCapabilities` are derived from DECLARED extern facts
+    (`approval.ClassMap._classify_direct`) and say nothing about what the host
+    BODY does — an `emission[notify]` body that also reads a `.env` yields a
+    ticket naming `notify` and nothing else. So when the running (or
+    just-compiled) composition carries agent-authored host bodies, the ticket
+    carries `unreviewedHostCode` naming them and a warning saying the declared
+    capabilities are not a bound on what a yes lets run. The ticket `hash` is
+    untouched (the fields land on a COPY, after the hash the outstanding-ticket
+    table is keyed by), so approve/consume is byte-identical."""
+    ticket = exc.ticket
+    bodies = _LIVE_HOST_BODIES or _AUTHORED_HOST_BODIES
+    if bodies:
+        ticket = dict(ticket)
+        ticket["unreviewedHostCode"] = bodies
+        ticket["unreviewedHostCodeWarning"] = (
+            f"this composition carries {len(bodies)} agent-authored host "
+            f"{'body' if len(bodies) == 1 else 'bodies'} that the gate did not "
+            f"review (G8, item 24: the gate does not sandbox host code). The "
+            f"capabilities above are DECLARED facts, not a bound on what the "
+            f"bodies do — approving this crossing also lets that code run "
+            f"whatever it contains. This server is running "
+            f"`--author-trust trusted`; the default refuses agent-authored "
+            f"host code outright.")
     return {
         "ok": False,
         "approvalRequired": True,
@@ -500,7 +906,7 @@ def _approval_required(exc: ApprovalRequired) -> dict:
                 "inverse) needs a human yes — nothing fired. Relay the ticket, "
                 "then call revl_approve with its `hash`; the identical re-issue "
                 "then fires once and consumes the approval.",
-        "ticket": exc.ticket,
+        "ticket": ticket,
     }
 
 
@@ -674,15 +1080,59 @@ def _tool_snapshot(_arguments: dict) -> dict:
         return _session_error(str(error))
 
 
+def _restore_authoring_refusal(snap) -> dict | None:
+    """The full decision compile for a `revl_restore`, or `None` when the
+    snapshot's sources admit under the session's authoring trust. Mirrors
+    `persist._recompile`'s inputs exactly (virtual file contents included) so the
+    decision is taken over the same text the restore will compile, and adds the
+    profile `persist` deliberately does not carry (its other caller is the
+    operator's own `--restore`)."""
+    profile = AUTHORING.profile()
+    if profile is None or not isinstance(snap, dict):
+        return None
+    sources = snap.get("sources") or {}
+    if not isinstance(sources, dict):
+        return None
+    try:
+        source = sources.get("source")
+        if source is not None:
+            compile_source(source, "<snapshot>.rvl",
+                           modules=sources.get("modules") or None, profile=profile)
+        elif sources.get("files"):
+            virtual = {os.path.abspath(path): text for path, text
+                       in (sources.get("files_content") or {}).items()}
+            compile_files(list(sources["files"]), sources=virtual or None,
+                          profile=profile)
+    except RevlError as error:
+        payload = report(error)
+        payload["restored"] = False
+        payload["reAdmitted"] = False
+        payload["authoringTrust"] = "untrusted"
+        payload["note"] = ("nothing was restored — a snapshot is agent-supplied "
+                           "source and admits under the same authoring trust "
+                           "`revl_load` does")
+        return payload
+    return None
+
+
 def _tool_restore(arguments: dict) -> dict:
     """Re-admit a snapshot into an empty session by replaying admission.
 
     A component the *current* checker rejects fails the restore loudly with
     its diagnostic — a snapshot cannot smuggle a now-rejected component past a
-    newer checker. The running system is untouched on failure."""
+    newer checker. The running system is untouched on failure.
+
+    The snapshot document is AGENT-SUPPLIED over the transport, so it is
+    authored source like any other and gets the same decision compile
+    `Gate.propose` runs before it swaps: a snapshot may no more smuggle a host
+    body past the authoring trust than `revl_load` may. (The operator's own
+    `revl mcp serve --restore` path is not agent-supplied and is unaffected.)"""
     snap = arguments.get("snapshot")
     if snap is None:
         return _session_error("`snapshot` (a document from revl_snapshot) is required")
+    refusal = _restore_authoring_refusal(snap)
+    if refusal is not None:
+        return refusal
     try:
         return {"ok": True, **SESSION.restore(snap)}
     except RestoreError as error:
@@ -1026,15 +1476,28 @@ def _tool_resolve(arguments: dict) -> dict:
                                 "set `registry` or $REVL_REGISTRY"]}
     verify_required = bool(arguments.get("verifyRequired"))
     trusted_publishers = tuple(arguments.get("trustedPublishers") or ())
+    from ..attest import resolve_key  # noqa: PLC0415
+
     key = None
     if verify_required:
         # a verify-required resolve needs the signer secret to cryptographically
-        # check the attestations it gates on.
-        from ..attest import resolve_key  # noqa: PLC0415
+        # check the attestations it gates on: no key is a hard error.
         try:
             key = resolve_key(None)
         except RevlError as error:
             return report(error)
+    else:
+        # `verifyRequired` stays off by default: most environments configure no
+        # signing key, and an agent-facing resolve that errored out without one
+        # would be unusable. But whenever a key IS configured, USE it. An
+        # attestation nobody checked vouches for nothing, so passing the key is
+        # what lets a candidate's evidence count for anything at all; absent, the
+        # resolve still runs and the evidence ranks as the unverified claim it
+        # is, rather than being read as proof.
+        try:
+            key = resolve_key(None)
+        except RevlError:
+            key = None
     try:
         registry = Registry.from_dir(registry_dir)
         return registry_resolve(registry, need,
@@ -2255,15 +2718,25 @@ def handle(message: dict) -> dict | None:
         if handler is None:
             return _error(request_id, -32602, f"unknown tool: {name}")
         arguments = params.get("arguments") or {}
+        # the path jail and the authoring gate run BEFORE the operator gate and
+        # before any handler: a refusal here has read nothing, compiled nothing
+        # and run nothing, so neither can be used as an oracle.
+        payload = _jail_refusal(arguments) or _authoring_refusal(arguments)
         # operator capabilities (roadmap item 55): gate a mutating management
         # verb against the session's bound operator before it can run. No
-        # profile bound -> ungated, today's behaviour unchanged.
-        decision = _operator.decide(SESSION, name, arguments)
-        if decision.gated and not decision.allowed:
+        # profile bound -> ungated, today's behaviour unchanged. Skipped when the
+        # call is already refused, so a refused path is never even resolved
+        # against an operator's grants.
+        decision = None if payload is not None \
+            else _operator.decide(SESSION, name, arguments)
+        if payload is not None:
+            pass                    # refused above; the handler never runs
+        elif decision.gated and not decision.allowed:
             payload = _refused_by_operator(decision)
         else:
             try:
                 payload = handler(arguments)
+                _remember_live_host_bodies()
             except ApprovalRequired as exc:
                 # item 246: a class-(c) crossing the decision inside Session.call
                 # (or the activation gate in load/swap) refused. This is a result,

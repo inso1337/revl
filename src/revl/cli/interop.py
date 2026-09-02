@@ -95,6 +95,28 @@ def _run_mcp(args) -> int:
     from ..mcp.server import serve
 
     if args.mcp_command == "serve":
+        # authoring trust: the operator's answer to "may the agent driving this
+        # server author host code, and what filesystem may it name?". Default
+        # closed; the server refuses an agent-authored `extern`/host block and
+        # confines every path argument to the sanctioned roots.
+        from ..mcp.server import set_authoring_trust
+
+        providers: dict = {}
+        for path in getattr(args, "provider", None) or []:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    providers[path] = handle.read()
+            except OSError as error:
+                print(f"error: cannot read provider module {path}: {error}",
+                      file=sys.stderr)
+                return 1
+        grants = getattr(args, "grant", None) or []
+        set_authoring_trust(
+            host_code=getattr(args, "author_trust", "untrusted") == "trusted",
+            granted=frozenset(grants) if grants else None,
+            providers=providers or None,
+            roots=tuple(getattr(args, "root", None) or ()) or None,
+        )
         # operator capabilities (docs/operator-capabilities.md, item 55): bind
         # the served session to one operator identity, so its management verbs
         # are scoped by that operator's grants. No profile => ungated (today's

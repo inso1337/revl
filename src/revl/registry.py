@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .compiler import compile_files
@@ -92,9 +92,15 @@ class RegistryEntry:
     service_shapes: dict              # {ServiceName: shape} for each PROVIDED service
     capabilities: tuple               # sorted emission-capability labels ("*" = unscoped)
     emissions: int                    # how many boundary crossings the entry declares
-    source_hash: str
+    source_hash: str                  # sha256 of `source` as it is ON DISK
     manifest_hash: str
     evidence_bundle: "EvidenceBundle" = None  # the item-293 evidence bundle
+    # What `index.json` CLAIMED for this entry, and every place that claim
+    # disagreed with the entry's own `component.rvl` when it was recompiled at
+    # load time. A non-empty tuple means the index is lying about (or is stale
+    # for) this entry; `resolve` refuses such an entry rather than ranking it.
+    recorded_source_hash: str = ""
+    index_problems: tuple = ()
 
     @property
     def evidence(self) -> str:
@@ -114,11 +120,29 @@ class RegistryEntry:
 # Per-facet quality rank: 0 sorts first (best). A missing facet is `unavailable`
 # - always below any present-and-valid one, never silently valid; a tampered
 # attestation is `invalid`, the single worst rank a facet can carry.
-_ATTESTATION_RANK = {"valid": 0, "present": 1, "unavailable": 2, "invalid": 3}
-_SWEEP_RANK = {"full": 0, "partial": 1, "unavailable": 2}
-_INVERSE_RANK = {"pass": 0, "fail": 1, "unavailable": 2}
-_GAUNTLET_RANK = {"admissible": 0, "present": 1, "unavailable": 2}
-_PUBLISHER_RANK = {"trusted": 0, "present": 1, "unavailable": 2}
+#
+# The rank an *unverified* claim carries is the same rank as no claim at all
+# (`_UNRANKED`), never better. Every dossier in a registry entry is a file the
+# PUBLISHER wrote: on its own it is an assertion, not evidence. If merely
+# attaching one lifted a candidate, the cheapest way to rank first would be to
+# fabricate the strongest bundle in the registry - so a positive grade only buys
+# rank when something outside the publisher stands behind it (see
+# `_vouched_facets`: a cryptographically valid attestation binding the dossier's
+# hash, or, for the publisher facet, the CALLER's own trust set). An unverified
+# claim is still reported honestly - it is simply weightless.
+_UNRANKED = 2
+_ATTESTATION_RANK = {"valid": 0, "present": _UNRANKED,
+                     "unavailable": _UNRANKED, "invalid": 3}
+_SWEEP_RANK = {"full": 0, "partial": 1, "unavailable": _UNRANKED}
+_INVERSE_RANK = {"pass": 0, "fail": 1, "unavailable": _UNRANKED}
+_GAUNTLET_RANK = {"admissible": 0, "present": 1, "unavailable": _UNRANKED}
+_PUBLISHER_RANK = {"trusted": 0, "present": _UNRANKED,
+                   "unavailable": _UNRANKED}
+
+# The facets whose positive grade is only worth rank when a valid attestation
+# binds the dossier (item 290, §6.2). Mapped to the status an unvouched claim is
+# RANKED as - the reported status stays the honest grade.
+_VOUCH_GATED = ("fault-sweep", "inverse-roundtrip", "gauntlet")
 
 
 @dataclass(frozen=True)
@@ -157,28 +181,38 @@ class EvidenceAssessment:
 
     `rank_key` sorts better evidence first (lower is better); `facets` is the
     human/agent-readable status of each facet, surfaced in the resolve result so
-    the chosen candidate can say *why* it won.
+    the chosen candidate can say *why* it won. `verified` says, per facet,
+    whether anything outside the publisher stood behind that status - the
+    summary marks an unverified claim as such, so the `why` an agent reads never
+    asserts a self-written file as established fact.
     """
     facets: dict          # {facet: status}
     rank_key: tuple       # deterministic, lower sorts first
     sweep_coverage: tuple | None   # (passed, steps) when a fault sweep is present
+    verified: dict = field(default_factory=dict)   # {facet: bool}
+
+    def _mark(self, facet: str, text: str) -> str:
+        """`text` as-is when the facet is independently verified, tagged
+        `(self-reported, unverified)` when it is the publisher's own say-so."""
+        return text if self.verified.get(facet) else f"{text} (self-reported, unverified)"
 
     def summary(self) -> str:
         """A compact one-line evidence summary, e.g.
         `fault sweep 12/12, attestation valid, gauntlet admissible`."""
         parts: list[str] = []
         if self.sweep_coverage is not None:
-            parts.append(f"fault sweep {self.sweep_coverage[0]}/"
-                         f"{self.sweep_coverage[1]}")
+            parts.append(self._mark(
+                "fault-sweep",
+                f"fault sweep {self.sweep_coverage[0]}/{self.sweep_coverage[1]}"))
         elif self.facets.get("fault-sweep") == "unavailable":
             parts.append("fault sweep unavailable")
         att = self.facets.get("attestation")
         if att and att != "unavailable":
-            parts.append(f"attestation {att}")
+            parts.append(self._mark("attestation", f"attestation {att}"))
         if self.facets.get("inverse-roundtrip") == "pass":
-            parts.append("inverse round-trip pass")
+            parts.append(self._mark("inverse-roundtrip", "inverse round-trip pass"))
         if self.facets.get("gauntlet") == "admissible":
-            parts.append("gauntlet admissible")
+            parts.append(self._mark("gauntlet", "gauntlet admissible"))
         if self.facets.get("publisher") == "trusted":
             parts.append("trusted publisher")
         return ", ".join(parts) if parts else "no evidence"
@@ -263,6 +297,28 @@ def _publisher_status(provenance: dict | None,
     return "present"
 
 
+def _vouched_facets(bundle: EvidenceBundle, attestation_status: str) -> frozenset:
+    """The facets something OUTSIDE the publisher stands behind.
+
+    A dossier in a registry entry is a file its publisher wrote; reading it as
+    proof is reading the claim as the check. The one thing in the bundle that
+    binds a dossier to an independent verification is a cryptographically
+    **valid** attestation carrying that dossier's hash in its signed payload
+    (item 290, §6.2) - and `_attestation_status` already grades an attestation
+    `invalid` when any binding fails, so a `valid` grade means every bound
+    dossier is byte-for-byte what was signed. Anything else - a bundle with no
+    attestation, an attestation nobody had a key to check, an attestation that
+    binds nothing - vouches for nothing, and ranks accordingly.
+    """
+    if attestation_status != "valid":
+        return frozenset()
+    att = bundle.attestation if isinstance(bundle.attestation, dict) else {}
+    bindings = att.get("evidence_bindings")
+    if not isinstance(bindings, dict):
+        return frozenset()
+    return frozenset(bindings) & frozenset(_BOUND_FACETS)
+
+
 def assess_evidence(bundle: EvidenceBundle, *, key: bytes | None = None,
                     ir: dict | None = None,
                     trusted_publishers: frozenset = frozenset()
@@ -274,6 +330,12 @@ def assess_evidence(bundle: EvidenceBundle, *, key: bytes | None = None,
     an inverse-roundtrip pass, a gauntlet admission - then finer sweep coverage.
     Interface compatibility is decided elsewhere and stays a hard filter; this
     only ranks the already-compatible set.
+
+    A facet's positive grade only earns rank when it is *verified* - bound by a
+    valid attestation, or (for the publisher facet) named in the caller's own
+    trust set. An unverified claim is reported at its honest grade and ranked at
+    `_UNRANKED`, exactly level with having published nothing: fabricating
+    evidence can never lift a candidate above an honest one.
     """
     sweep, coverage = _sweep_status(bundle.fault_sweep)
     attestation = _attestation_status(bundle.attestation, key=key, ir=ir,
@@ -290,19 +352,33 @@ def assess_evidence(bundle: EvidenceBundle, *, key: bytes | None = None,
         "capabilities": "present" if bundle.capabilities is not None
                         else "unavailable",
     }
-    passed = coverage[0] if coverage else 0
+    vouched = _vouched_facets(bundle, attestation)
+    verified = {facet: facet in vouched for facet in _BOUND_FACETS}
+    # a malformed attestation is `invalid` on inspection alone; `valid`/`invalid`
+    # with a key is a real cryptographic verdict. `present` is the one that was
+    # never checked.
+    verified["attestation"] = attestation in ("valid", "invalid")
+    # trust in a publisher is supplied by the resolve, never self-asserted.
+    verified["publisher"] = publisher == "trusted"
+
+    # the ranked spelling of each vouch-gated facet: unverified reads as
+    # `unavailable` for ranking only - the reported status above is untouched.
+    ranked = {f: (facets[f] if verified.get(f) else "unavailable")
+              for f in _VOUCH_GATED}
+    passed = coverage[0] if (coverage and verified.get("fault-sweep")) else 0
     rank_key = (
-        _SWEEP_RANK[sweep],
+        _SWEEP_RANK[ranked["fault-sweep"]],
         _ATTESTATION_RANK[attestation],
         _PUBLISHER_RANK[publisher],
-        _INVERSE_RANK[inverse],
-        _GAUNTLET_RANK[gauntlet],
+        _INVERSE_RANK[ranked["inverse-roundtrip"]],
+        _GAUNTLET_RANK[ranked["gauntlet"]],
         -passed,                       # more swept steps proven is stronger
     )
     return EvidenceAssessment(
         facets=facets, rank_key=rank_key,
         sweep_coverage=coverage if sweep in ("full", "partial")
-        and coverage and coverage[1] > 0 else None)
+        and coverage and coverage[1] > 0 else None,
+        verified=verified)
 
 
 # --------------------------------------------------------------- hashing / io
@@ -595,7 +671,16 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
         name = entry_dir.name
         source_path = entry_dir / "component.rvl"
         source = _read(source_path)
-        ir = compile_files([str(source_path)])
+        # ONE frontend run, kept as a verdict rather than discarded: the
+        # attestation below records what this run measured (item 127 F2). A
+        # refusal is re-raised verbatim, so publishing an inadmissible component
+        # fails with the compiler's own diagnostic, as before.
+        from .attest import run_gate  # noqa: PLC0415
+        gate_verdict = run_gate(paths=[str(source_path)],
+                                normalize=_normalize_ir_for_attest)
+        if gate_verdict.error is not None:
+            raise gate_verdict.error
+        ir = gate_verdict.ir
         manifest = _audit_document(ir)
         manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         facets: list[str] = []
@@ -643,6 +728,7 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
         if key is not None:
             from .attest import make_attestation  # noqa: PLC0415
             att = make_attestation(_normalize_ir_for_attest(ir), bytes(key),
+                                   verdict=gate_verdict,
                                    now=now, signer=signer,
                                    evidence_bindings=bindings or None)
             _write_evidence_file(entry_dir, EVIDENCE_ATTESTATION, att,
@@ -651,6 +737,64 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
 
         produced[name] = sorted(facets)
     return produced
+
+
+# --------------------------------------------------------------- read-time verify
+
+# The index fields that carry AUTHORITY - what a resolve ranks and filters on.
+# Every one of them is derivable from `component.rvl` by the compiler, so every
+# one of them can be checked rather than believed.
+_AUTHORITY_FIELDS = ("provides", "requires", "services", "capabilities",
+                     "emissions", "sourceHash", "manifestHash")
+
+
+def _normalized_claim(fieldname: str, value):
+    """One index-row field in a shape that compares cleanly against the
+    recompiled value (an absent map is `{}`, an absent list is `[]`)."""
+    if fieldname in ("provides", "requires", "services"):
+        return value or {}
+    if fieldname == "capabilities":
+        return list(value or [])
+    if fieldname == "emissions":
+        return int(value or 0)
+    return value or ""
+
+
+def _verified_facts(name: str, source_path: Path, source: str, row: dict,
+                    recorded_manifest_text: str, recorded_manifest: dict
+                    ) -> tuple[dict, dict, list[str]]:
+    """Recompile one entry and return `(facts, manifest, problems)`.
+
+    `facts` is the index row the current compiler DERIVES from the entry's own
+    `component.rvl` - the authority a resolve is entitled to act on. `problems`
+    names every field where the committed `index.json` claimed something else,
+    plus a `manifest.json` that is not byte-reproducible from the source. A
+    source that no longer compiles is itself a problem: nothing can vouch for
+    what the gate would refuse anyway.
+    """
+    try:
+        ir = compile_files([str(source_path)])
+    except RevlError as error:
+        return dict(row), recorded_manifest, [
+            f"component.rvl does not compile, so nothing in its index row can "
+            f"be verified: {error.message}"]
+    manifest = _audit_document(ir)
+    manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    facts = _entry_index_row(name, ir, source, manifest, manifest_text)
+
+    problems: list[str] = []
+    for fieldname in _AUTHORITY_FIELDS:
+        claimed = _normalized_claim(fieldname, row.get(fieldname))
+        actual = _normalized_claim(fieldname, facts.get(fieldname))
+        if claimed != actual:
+            problems.append(
+                f"index.json claims {fieldname}="
+                f"{json.dumps(claimed, sort_keys=True)} but component.rvl "
+                f"compiles to {json.dumps(actual, sort_keys=True)}")
+    if recorded_manifest_text and recorded_manifest_text != manifest_text:
+        problems.append("manifest.json is not reproducible from component.rvl "
+                        "by the current compiler")
+    return facts, manifest, problems
 
 
 # --------------------------------------------------------------- the registry
@@ -664,11 +808,31 @@ class Registry:
     (docs/registry.md §4).
     """
 
-    def __init__(self, entries: list[RegistryEntry]) -> None:
+    def __init__(self, entries: list[RegistryEntry], *,
+                 verified: bool = True) -> None:
         self.entries = entries
+        # True when every entry's index row was cross-checked against its own
+        # `component.rvl` at load time (the default).
+        self.verified = verified
 
     @classmethod
-    def from_dir(cls, registry_dir: str | os.PathLike) -> "Registry":
+    def from_dir(cls, registry_dir: str | os.PathLike, *,
+                 verify_entries: bool = True) -> "Registry":
+        """Load a registry from disk.
+
+        `index.json` is a DISCOVERY list, not an authority. With
+        `verify_entries` (the default) every row is cross-checked against the
+        entry's own `component.rvl` by recompiling it, and the RECOMPILED facts
+        - provides/requires/service shapes/capabilities/emissions - are what the
+        entry carries; the index's claims are only compared, never believed. An
+        index that says a component reaches no capability while its source
+        reaches `*` therefore cannot rank as least-authority: the disagreement
+        lands in `index_problems` and `resolve` refuses the entry outright.
+
+        This is `verify`'s regenerate-or-red discipline applied at READ time.
+        `verify` is a CI job; a resolve that trusted the index would be the one
+        place in the system where the index is believed without being checked.
+        """
         registry_dir = Path(registry_dir)
         index_path = registry_dir / INDEX_FILENAME
         rows = (json.loads(_read(index_path)).get("components") or {}
@@ -677,26 +841,46 @@ class Registry:
         entries: list[RegistryEntry] = []
         for name, row in sorted(rows.items()):
             entry_dir = comps / name
-            source = _read(entry_dir / "component.rvl")
-            manifest = json.loads(_read(entry_dir / "manifest.json"))
+            source_path = entry_dir / "component.rvl"
+            source = _read(source_path)
+            manifest_path = entry_dir / "manifest.json"
+            recorded_manifest_text = (_read(manifest_path)
+                                      if manifest_path.exists() else "")
+            manifest = json.loads(recorded_manifest_text) \
+                if recorded_manifest_text else {}
             dossier_path = entry_dir / "dossier.json"
             dossier = (json.loads(_read(dossier_path))
                        if dossier_path.exists() else None)
+
+            facts = dict(row)
+            problems: list[str] = []
+            if verify_entries:
+                facts, manifest, problems = _verified_facts(
+                    name, source_path, source, row, recorded_manifest_text,
+                    manifest)
+            else:
+                problems = [
+                    "index rows were not cross-checked against component.rvl "
+                    "(from_dir was called with verify_entries=False)"]
+
             entries.append(RegistryEntry(
                 name=name,
                 source=source,
                 manifest=manifest,
                 dossier=dossier,
-                provides=row.get("provides") or {},
-                requires=row.get("requires") or {},
-                service_shapes=row.get("services") or {},
-                capabilities=tuple(row.get("capabilities") or ()),
-                emissions=int(row.get("emissions") or 0),
-                source_hash=row.get("sourceHash") or _sha256(source),
-                manifest_hash=row.get("manifestHash") or "",
+                provides=facts.get("provides") or {},
+                requires=facts.get("requires") or {},
+                service_shapes=facts.get("services") or {},
+                capabilities=tuple(facts.get("capabilities") or ()),
+                emissions=int(facts.get("emissions") or 0),
+                # the truth, always recomputed from the bytes on disk.
+                source_hash=_sha256(source),
+                manifest_hash=facts.get("manifestHash") or "",
                 evidence_bundle=load_evidence_bundle(entry_dir),
+                recorded_source_hash=row.get("sourceHash") or "",
+                index_problems=tuple(problems),
             ))
-        return cls(entries)
+        return cls(entries, verified=verify_entries)
 
     def resolve(self, need, manifest: dict | None = None,
                 limit: int = 5, *, verify_required: bool = False,
@@ -961,6 +1145,12 @@ def resolve(registry, need, manifest: dict | None = None,
     a tampered attestation - which grades `invalid` - never survives. Without
     `verify_required` a missing or unverifiable attestation only ranks a
     candidate lower; it is never silently treated as valid.
+
+    Two things here are checked rather than trusted, always: an entry whose
+    `index.json` row disagrees with its own `component.rvl` is REFUSED (it is
+    listed in `refused` with the reason, never ranked), and evidence only earns
+    rank when something outside the publisher vouches for it. A registry entry
+    cannot improve its standing by writing files about itself.
     """
     if not isinstance(registry, Registry):
         registry = Registry.from_dir(registry)
@@ -976,7 +1166,17 @@ def resolve(registry, need, manifest: dict | None = None,
 
     ir_cache: dict = {}
     graded: list[tuple[_Match, EvidenceAssessment]] = []
+    refused: list[dict] = []
     for entry in registry.entries:
+        if entry.index_problems:
+            # the index disagrees with the entry's own source. Ranking it would
+            # mean ranking the publisher's claim about its authority instead of
+            # its authority - refuse it, and say so, rather than quietly
+            # demoting it: a stale index and a lying one look identical here,
+            # and both are fixed the same way (regenerate and commit).
+            refused.append({"name": entry.name,
+                            "reasons": list(entry.index_problems)})
+            continue
         match = _match_entry(entry, needs)
         if match is None:
             continue  # interface-incompatible: the hard filter, never ranked in
@@ -1004,6 +1204,26 @@ def resolve(registry, need, manifest: dict | None = None,
         "among interface-compatible candidates the ranking is by evidence "
         "quality (fault-sweep coverage, valid attestation, trusted publisher, "
         "inverse-roundtrip pass); a missing facet is unavailable, never valid")
+    if getattr(registry, "verified", False):
+        assumptions.append(
+            "every index row was cross-checked against its own component.rvl "
+            "by recompiling it; the compiled facts rank, the index's claims "
+            "only get compared")
+    else:
+        assumptions.append(
+            "index rows were NOT cross-checked against the component sources: "
+            "provides/requires/capabilities/emissions are the publisher's claim")
+    assumptions.append(
+        "evidence is only worth rank when it is verified - a dossier bound by a "
+        "cryptographically valid attestation, or a publisher in the caller's "
+        "trust set; an unverified claim ranks level with no claim at all"
+        + ("" if key_bytes is not None else
+           " (no signing key was supplied, so no attestation could be verified)"))
+    if refused:
+        assumptions.append(
+            f"{len(refused)} entr{'y was' if len(refused) == 1 else 'ies were'} "
+            "refused outright: the index row disagrees with the entry's own "
+            "component.rvl (see `refused`)")
     if manifest:
         assumptions.append(
             "candidates are additionally admissible against the supplied "
@@ -1024,6 +1244,7 @@ def resolve(registry, need, manifest: dict | None = None,
             "evidence": {
                 "summary": assessment.summary(),
                 "facets": assessment.facets,
+                "verified": assessment.verified,
                 "present": list((entry.evidence_bundle or EvidenceBundle())
                                 .present()),
             },
@@ -1042,6 +1263,7 @@ def resolve(registry, need, manifest: dict | None = None,
         "precision": "exact",
         "assumptions": assumptions,
         "candidates": candidates,
+        "refused": refused,
     }
 
 

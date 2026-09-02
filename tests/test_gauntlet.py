@@ -55,6 +55,20 @@ def _gauntlet(**arguments) -> dict:
     return _call("revl_gauntlet", arguments)
 
 
+@pytest.fixture
+def trusted_authoring():
+    """A candidate that DECLARES a `@py` host body is agent-authored host code,
+    which the MCP server refuses under its default (closed) authoring trust
+    before any handler runs. A test whose subject is the dossier, not the trust
+    level, states the trusted-author premise it always relied on
+    (`server.AuthoringTrust`, `revl mcp serve --author-trust trusted`)."""
+    from revl.mcp import server as server_mod
+    before = server_mod.AUTHORING
+    server_mod.set_authoring_trust(host_code=True)
+    yield
+    server_mod.AUTHORING = before
+
+
 needs_runtime = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,
     reason="the lifecycle battery needs the cordis-py runtime — install it "
@@ -105,7 +119,10 @@ def test_a_clean_candidate_is_graded_admissible_with_every_section():
     assert boundary["count"] == 0
 
 
-def test_the_claimed_boundary_enumerates_reached_host_code():
+def test_the_claimed_boundary_enumerates_reached_host_code(trusted_authoring):
+    """`WITH_EXTERN` DECLARES a `@py` host body, so the default authoring trust
+    refuses it before the gauntlet runs; the dossier's claimed-boundary
+    reporting is the subject here, not the trust level."""
     d = _gauntlet(source=WITH_EXTERN)
     assert d["verdict"] == "admissible"
     boundary = d["claimed"]["boundary"]

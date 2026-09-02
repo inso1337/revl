@@ -69,3 +69,22 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["F"]
+
+# roadmap item 419a: `backends/python/pytest.ini` (asyncio_mode = auto) is
+# only picked up when pytest's rootdir search lands INSIDE backends/python —
+# e.g. `cd backends/python && pytest`, or `pytest backends/python/tests/`
+# given alone. pytest resolves exactly one inifile per session from the
+# common ancestor of the given args; combine backends/python/tests/ with a
+# sibling like backends/wasm/ (`pytest backends/wasm/ backends/python/tests/`)
+# and the common ancestor climbs to the repo root, where this file — until
+# now with no [tool.pytest.ini_options] — won, silently discarding
+# backends/python/pytest.ini's asyncio_mode and reddening every unmarked
+# `async def` test with "async def functions are not natively supported".
+# Mirror the same setting here so a combined run stays covered regardless of
+# which inifile pytest happens to pick. This is a no-op for every OTHER
+# pytest invocation in the repo (`pytest tests/ -q`,
+# `pytest backends/wasm/... -q`, ...): none of those trees define any
+# `async def test_*` for asyncio_mode to touch.
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

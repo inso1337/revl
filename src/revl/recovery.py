@@ -548,6 +548,19 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
             world.seed(referent, record.get("label"))
             seeded[id(record)] = referent
 
+    # item 309 §3a extended to the reconstructible legacy-boundary family (the
+    # `record_boundary` acquire path): the durable per-inverse fences a prior
+    # apply path wrote before applying an UNDECLARED inverse. A seq named here
+    # has already spent its at-most-once attempt, so this run does NOT
+    # re-apply it — the same invariant the transactional family already gets
+    # below, extended to this family instead of a parallel mechanism. `seq` is
+    # drawn from the WAL's single shared counter (`WriteAheadLog._seq`), so an
+    # effect record's seq and a discharge-descriptor's seq share one namespace
+    # and this set is read once for both families.
+    fenced_seqs: set = {r.get("seq") for r in wal["records"]
+                        if r.get("record") == "replay-fence"}
+    fenced_deferred: list = []
+
     outstanding: list = []
     ran, moot, unreconstructible = [], [], []
     # newest-first: an L-Raise teardown runs inverses in reverse commit order
@@ -570,8 +583,46 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
                                 "its inverse is a no-op after restart"})
             continue
         if inverse.get("reconstructible"):
-            world.apply_inverse(inverse["op"])
-            ran.append({**entry, "op": inverse["op"]})
+            seq = record.get("seq")
+            declared_idempotent = bool(inverse.get("undo_idempotent"))
+            op = inverse["op"]
+            if not declared_idempotent and seq in fenced_seqs:
+                # item 309 §3a, extended: this undeclared inverse's single
+                # at-most-once attempt was already spent on an earlier
+                # `recover` pass (there is no in-process abort for this family
+                # — `record_boundary` is a standalone WAL write, not wired to
+                # the runtime's transactional disposer — so the ONLY prior
+                # apply path that can have fenced this seq is a previous
+                # recovery run). The fence proves an attempt was ABOUT to
+                # start, never that it ran, so a second attempt is refused and
+                # handed to a human, exactly like the transactional family.
+                fenced_deferred.append({"seq": seq, "referent": referent})
+                outstanding.append(_record(
+                    "fenced-residue",
+                    crossing=_crossing_of_effect(record),
+                    attempted={"call": op.get("method"),
+                               "args": list(op.get("args") or []), "phase": None},
+                    error={"type": "fenced-before-attempt",
+                           "message": "fenced-before-attempt, outcome unknown, "
+                                      "will not re-run — an earlier recovery "
+                                      "run fenced this undeclared inverse; a "
+                                      "second attempt cannot be proven safe"},
+                    attempted_flag=False, outcome="unknown", referent=referent,
+                    hint="declare the boundary inverse idempotent (free "
+                         "replay) or finish this inverse by hand — its "
+                         "at-most-once attempt is already spent (item 309)"))
+                continue
+            # A DECLARED-idempotent inverse replays FREELY on every recovery
+            # run (no fence, no bookkeeping). An UNDECLARED one takes its
+            # single fenced attempt: the fence is fsync'd BEFORE the apply so
+            # a crash between them leaves a fence and no double-apply (§3a,
+            # consume-before-fire).
+            if not declared_idempotent and wal_path is not None and seq is not None:
+                _append_replay_fence(wal_path, seq)
+                fenced_seqs.add(seq)
+            world.apply_inverse(op)
+            ran.append({**entry, "op": op,
+                        "replay": "free" if declared_idempotent else "fenced"})
         else:
             # a boundary inverse we could only find as a closure: it cannot be
             # re-issued in a fresh process. Say so — do not pretend it ran.
@@ -602,22 +653,19 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
     transactional = [d for d in descriptors if d.get("entry") == "transactional"]
     compensations = [d for d in descriptors if d.get("entry") == "compensation"]
     transactional_rolled_back, discharged_skipped, restore_residue = [], [], []
-    # item 309 §3a: the durable per-inverse fences a prior apply path (the
-    # in-process abort's Phase 1, or an earlier recovery run) wrote before
-    # applying an UNDECLARED inverse. A seq named here has already spent its
-    # at-most-once attempt, so this run does NOT re-apply it — that is what makes
-    # at-most-once hold across abort-then-crash and any number of recovery runs.
-    fenced_seqs: set = {r.get("seq") for r in wal["records"]
-                        if r.get("record") == "replay-fence"}
-    # item 309 follow-up: the in-process abort's COMPLETION record. A fence means
-    # "fenced-before-attempt, outcome UNKNOWN" only when the process died mid-abort
-    # (no `aborted` record). When the `aborted` completion record IS present, the
-    # in-process abort ran Phase 1 to completion, so every fenced inverse's apply
-    # DID run — the outcome is KNOWN (clean), not unknown. The report surfaces this
-    # same signal as `abortCompleted`.
+    # `fenced_seqs`/`fenced_deferred` were computed above, before the legacy
+    # `effect` loop, and are shared across both record families (one WAL seq
+    # namespace). item 309 follow-up: the in-process abort's COMPLETION record.
+    # A fence means "fenced-before-attempt, outcome UNKNOWN" only when the
+    # process died mid-abort (no `aborted` record). When the `aborted`
+    # completion record IS present, the in-process abort ran Phase 1 to
+    # completion, so every fenced inverse's apply DID run — the outcome is
+    # KNOWN (clean), not unknown. The report surfaces this same signal as
+    # `abortCompleted`. This only applies to the transactional family below —
+    # the legacy `record_boundary` family has no in-process abort wired to it,
+    # so no `aborted` record can ever explain one of its fences.
     abort_completed: bool = any(r.get("record") == "aborted"
                                 for r in wal["records"])
-    fenced_deferred: list = []
     # Phase 1: transactional inverses, reverse-seq, skipping discharged seqs.
     for d in sorted(transactional, key=lambda x: x.get("seq", 0), reverse=True):
         call = d.get("call") or {}

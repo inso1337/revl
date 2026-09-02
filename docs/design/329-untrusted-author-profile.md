@@ -35,8 +35,22 @@ from declaring its own escape hatch.
 
 - **`granted`** — an allowlist of the service NAMES the admitted program may
   reach. A service a component `requires` must be in the granted set, unless the
-  turn also provides it internally. Bounds an admitted turn to a subset of a
-  running composition's ambient services instead of all of them (R2, tightened).
+  requirement BINDS to the turn's own provision. Bounds an admitted turn to a
+  subset of a running composition's ambient services instead of all of them
+  (R2, tightened).
+
+  The internal-provision exemption is resolved by provision KEY, the way the
+  link phase resolves a `requires`, not by service name. Keying it on the name
+  was a full bypass: a candidate declared one throwaway component providing the
+  same service under an unused key, which made the service count as "internal",
+  and its real `requires <live-key>: <Service>` was then never checked at all.
+  At wiring time it bound to the ambient, host-backed provider that owns that
+  key, so `granted` was decorative. A requirement is exempt only when every
+  component it binds to is one of the candidate's own and provides that key with
+  the same service. The check fails closed: an indeterminate binding (no
+  manifest, no provider of the key, a dangling routed leg, a requiring component
+  that takes no place in the static table) is not exempt and must be granted
+  like any other reach.
 
 Threaded through `compile_source`/`compile_files` (`profile=`). `None` = trusted
 author, byte-identical to before.

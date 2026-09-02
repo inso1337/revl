@@ -77,6 +77,21 @@ def _fresh_session():
         server_mod.SESSION.unload()
 
 
+@pytest.fixture
+def trusted_authoring():
+    """`WIDENING_REPAIR` DECLARES a new `@py` host body, so it is agent-authored
+    host code, which the MCP server refuses under its default (closed) authoring
+    trust — before the widening-ack ever runs. Acknowledging a new CROSSING is
+    not the same authority as trusting the agent to write the BODY behind it, so
+    the widening tests state the trusted-author premise they always relied on
+    (`server.AuthoringTrust`, `revl mcp serve --author-trust trusted`)."""
+    from revl.mcp import server as server_mod
+    before = server_mod.AUTHORING
+    server_mod.set_authoring_trust(host_code=True)
+    yield
+    server_mod.AUTHORING = before
+
+
 def _call(tool: str, arguments: dict) -> dict:
     response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": {"name": tool, "arguments": arguments}})
@@ -187,7 +202,7 @@ def test_a_candidate_that_fails_admission_is_rejected_not_thrown():
     assert d["remediation"]["applied"] is False
 
 
-def test_may_touch_bound_refuses_a_repair_that_reaches_too_far():
+def test_may_touch_bound_refuses_a_repair_that_reaches_too_far(trusted_authoring):
     # eligible, admissible, but the repair reaches `now_ms` and the policy caps
     # the repair to `kv` — a refusal (not an ack): the bound is absolute.
     d = _call("revl_repair", {
@@ -273,7 +288,7 @@ def test_injected_fault_repaired_unattended():
 
 
 @needs_runtime
-def test_a_widening_repair_pauses_for_a_human_ack():
+def test_a_widening_repair_pauses_for_a_human_ack(trusted_authoring):
     """The human-ack interrupt (item 21): a candidate that would WIDEN the
     composition's outward reach stops the loop instead of auto-swapping."""
     _call("revl_load", {"source": DEMO, "record": True})
@@ -298,7 +313,7 @@ def test_a_widening_repair_pauses_for_a_human_ack():
 
 
 @needs_runtime
-def test_acknowledging_the_widening_lets_the_swap_proceed():
+def test_acknowledging_the_widening_lets_the_swap_proceed(trusted_authoring):
     """The same widening repair, with the crossing acknowledged, swaps — the ack
     is the human input the awaiting-ack status was waiting for."""
     _call("revl_load", {"source": DEMO, "record": True})
