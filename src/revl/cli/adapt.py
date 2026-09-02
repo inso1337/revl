@@ -7,18 +7,24 @@ Proposed, NOT silent (design section 3): `--check` reports whether the pair is
 section-4 artifact) that the author commits and the compiler re-admits through
 the ordinary gate. Synthesis is never auto-applied.
 
-TODO(296-slice3): fold this into `revl resolve` so a candidate that fails the
-direct `_service_compatible` filter is reported inline as compatible-with-
-adapter, ranked below direct-compatible at equal authority.
+Slice 3 landed the resolver half: `registry.resolve` probes a candidate the
+direct `_service_compatible` filter refused and reports it inline as
+compatible-with-adapter, ranked below direct-compatible at equal authority, with
+the chain depth and the outcome-merge evidence discount. Both surfaces derive
+the SAME adapter identity for the same pair (`adapt.service_surface` plus the
+candidate source's sha). TODO(296-slice3, remaining): chain FLATTENING here -
+`--check` over a candidate that is itself an adapter should re-display the
+composite plan end to end (design section 6.4).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
-from ..adapt import (bridge_plan, derivation_hash, navigate_for_refusals,
-                     render_adapter)
+from ..adapt import (bridge_plan, chain_depth_for, derivation_hash,
+                     navigate_for_refusals, render_adapter, service_surface)
 from ..admission import _service_from_ir
 from ..compiler import compile_source
 
@@ -93,6 +99,20 @@ def _run_adapt(args) -> int:
             for mp in res.methods],
     }
     if args.emit:
+        # The derivation pins the two SURFACES (not the two IR documents they
+        # arrived in) plus the candidate source's sha, so `revl adapt` and
+        # `registry.resolve` name the same adapter for the same pair. Hashing
+        # the candidate PATH here, as an earlier spelling did, made the identity
+        # depend on where the file happened to sit - the opposite of the
+        # byte-stable identity section 4 asks for.
+        cand_text = Path(args.candidate).read_text()
+        derivation = derivation_hash(
+            service_surface(req), service_surface(prov),
+            hashlib.sha256(cand_text.encode("utf-8")).hexdigest(),
+            json.dumps(opt_ins, sort_keys=True))
+        # a `--check` against a candidate that is ITSELF a committed adapter
+        # stacks (design section 6.4): the marking on its source says so.
+        depth = chain_depth_for(cand_text)
         # the alias carries the consumer-facing tokens: the union of the
         # required service's declared capability tokens (item 296, S2).
         carried: list[str] = []
@@ -105,11 +125,10 @@ def _run_adapt(args) -> int:
             provide_key=args.provide_key or rs.lower(),
             require_key=args.require_key,
             carried_tokens=tuple(carried),
-            prov_types=prov_types)
-        plan["derivation"] = derivation_hash(
-            json.dumps(need_ir["services"][rs], sort_keys=True),
-            json.dumps(cand_ir["services"][ps], sort_keys=True),
-            args.candidate, json.dumps(opt_ins, sort_keys=True))
+            prov_types=prov_types,
+            derivation=derivation, chain_depth=depth)
+        plan["derivation"] = derivation
+        plan["chainDepth"] = depth
         plan["source"] = source
     print(json.dumps(plan, indent=2))
     return 0

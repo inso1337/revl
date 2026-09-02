@@ -217,6 +217,14 @@ def _has(src, needle):
     assert _ws(needle) in _ws(src), f"missing (ws-insensitive): {needle!r}"
 
 
+def _body(src, name):
+    """One emitted function, so an assertion about a lowering cannot be
+    satisfied (or defeated) by an identically-spelled line in a runtime helper
+    — `revlListPush`'s own body is `out = append(out, x)`."""
+    start = src.index(f"func {name}(")
+    return src[start:src.index("\n}\n", start)]
+
+
 def test_v3_tests_emit_shapes():
     src = emit.emit(_load(V3_TESTS), package="tests")
     assert "ir_version 3" in src
@@ -917,9 +925,14 @@ fn drop(words: List[Str]) -> Int {
 
 def test_self_rebind_refused_when_the_old_value_can_be_observed():
     """Each function here writes the binding exactly as `collect` does, and
-    each adds one way for the previous value to survive the rebind. None may
-    lower in place: `append` would write into a slice a second name still
-    holds, and `m[k] = v` is visible through every reference to the map."""
+    each adds one way for the previous value to survive the rebind. The write
+    THAT ESCAPE CAN REACH may not lower in place: `append` would write into a
+    slice a second name still holds.
+
+    Item 445 made the question per-write instead of per-name, so the write
+    BEFORE each escape is still owned and still lowers in place — nothing holds
+    the value yet at that point. The copying `revlListPush` then rebinds `out`
+    to a brand-new slice, which is why the escape does not leak past it."""
     src = emit.emit(_compile("""
 fn size_of(xs: List[Int]) -> Int { return xs.length() }
 fn aliased(n: Int) -> List[Int] {
@@ -929,11 +942,6 @@ fn aliased(n: Int) -> List[Int] {
   out = out.push(n)
   return snap
 }
-fn passed(n: Int) -> Int {
-  var out: List[Int] = []
-  out = out.push(n)
-  return size_of(out)
-}
 fn nested(n: Int) -> List[List[Int]] {
   var out: List[Int] = []
   var rows: List[List[Int]] = []
@@ -942,12 +950,67 @@ fn nested(n: Int) -> List[List[Int]] {
   out = out.push(n)
   return rows
 }
+fn loopwise(xs: List[Int]) -> List[List[Int]] {
+  var out: List[Int] = []
+  var rows: List[List[Int]] = []
+  for (x of xs) {
+    rows = rows.push(out)
+    out = out.push(x)
+  }
+  return rows
+}
 """))
-    assert src.count("revlListPush(out, n)") == 5
+    # one refused write per function: the one the escape above it reaches
+    assert _body(src, "aliased").count("out = revlListPush(out, n)") == 1
+    assert _body(src, "aliased").count("out = append(out, n)") == 1
+    assert _body(src, "nested").count("out = revlListPush(out, n)") == 1
+    assert _body(src, "nested").count("out = append(out, n)") == 1
+    # the escape is a loop-carried one in `loopwise`: the fixpoint over the back
+    # edge carries `rows = rows.push(out)` round to the push below it, so unlike
+    # the straight-line pairs above there is no owned write left in that body
+    assert "out = append(out, x)" not in _body(src, "loopwise")
     # `rows` is written from `rows.push(out)`, a self-rebind, but `out` is an
     # ARGUMENT there, which is what disqualifies `out`, not `rows`. `rows` is
     # never aliased, so it still lowers in place.
     _has(src, "rows = append(rows, out)")
+
+
+def test_a_retaining_call_disqualifies_the_write_after_it():
+    """The rule closes over calls, but on the whole-program summary item 445 (b)
+    added rather than on "every call retains". `echo` hands its parameter back,
+    so the caller's next `append` would be visible through what came back and
+    the copying helper stays. `size_of` walks its argument and answers an Int,
+    so it keeps nothing and the write is still owned — which is what takes
+    `stdlib/list.rvl`'s `list_dedup` off its emitted quadratic.
+
+    A `slice` header is exactly the alias this is protecting: `append` into a
+    slice a second name still holds writes through both."""
+    src = emit.emit(_compile("""
+fn size_of(xs: List[Int]) -> Int { return xs.length() }
+fn echo(xs: List[Int]) -> List[Int] { return xs }
+fn measured(xs: List[Int]) -> Int {
+  var out: List[Int] = []
+  var seen = 0
+  for (x of xs) {
+    seen = seen + size_of(out)
+    out = out.push(x)
+  }
+  return seen
+}
+fn handed_back(xs: List[Int]) -> Int {
+  var out: List[Int] = []
+  var snap: List[Int] = []
+  for (x of xs) {
+    snap = echo(out)
+    out = out.push(x)
+  }
+  return snap.length()
+}
+"""))
+    assert "out = append(out, x)" in _body(src, "measured")
+    assert "revlListPush" not in _body(src, "measured")
+    assert "out = revlListPush(out, x)" in _body(src, "handed_back")
+    assert "out = append(out, x)" not in _body(src, "handed_back")
 
 
 # ---------------------------------------------------------------------------
@@ -1020,3 +1083,136 @@ fn capped(xs: List[Str]) -> Str {
 """))
     assert "strings.Builder" not in src
     _has(src, "out = (out + xs[i])")
+
+
+# ---------------------------------------------------------------------------
+# Roadmap item 434 (c) stage two: the code-point scan lowering.
+#
+# Stage one made ONE `s.charCodeAt(i)` allocation-free, but each read still
+# walks to index i, so the scan idiom stayed quadratic in time: the harness
+# measures the emitted 78-code-point scan at ~9.9 us and the 780-code-point one
+# at ~853 us, an 86x cost for a 10x input, against a hand-written
+# `for _, r := range s` growing 10.5x. Stage two recognises the loop shape and
+# emits `range`, which is the same loop and hands the rune over. The rewrite is
+# equivalent only for the exact shape, so these tests pin both halves.
+
+
+def test_scan_loop_lowers_to_range_over_the_string():
+    src = emit.emit(_compile("""
+fn scan(s: Str) -> Int {
+  var i = 0
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    i += 1
+  }
+  return acc
+}
+fn first_at(s: Str, c: Int) -> Int {
+  var i = 0
+  while (i < s.length()) {
+    if (s.charAt(i) == "x") { return i }
+    if (s.codepoint_at(i) == c) { return i }
+    i += 1
+  }
+  return 0 - 1
+}
+"""))
+    _has(src, "for _, _revlR0 := range s {")
+    _has(src, "acc = revlAdd(acc, int64(_revlR0))")
+    # the bound may be written inline; `range` runs exactly revlStrLen(s) times
+    _has(src, 'string(_revlR0) == "x"')
+    _has(src, "int64(_revlR0) == c")
+    assert "revlStrCharCodeAt(s, i)" not in src
+    assert "revlStrCharAt(s, i)" not in src
+
+
+def test_scan_loop_refused_for_every_shape_that_is_not_a_scan():
+    """Each function reads a code point at an index in a `while`, and each
+    breaks one of the facts the `range` rewrite rests on: the index must be 0
+    on entry, must advance by exactly 1 per iteration at the end of the body,
+    must not be skipped by a `continue`, and the bound must be the length of
+    the string being read. Break any one and the loop keeps the helper."""
+    src = emit.emit(_compile("""
+fn step2(s: Str) -> Int {
+  var i = 0
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    i += 2
+  }
+  return acc
+}
+fn from_one(s: Str) -> Int {
+  var i = 1
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    i += 1
+  }
+  return acc
+}
+fn skipping(s: Str) -> Int {
+  var i = 0
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    if (s.charCodeAt(i) == 32) { i += 1; continue }
+    acc += s.charCodeAt(i)
+    i += 1
+  }
+  return acc
+}
+fn other_bound(s: Str, t: Str) -> Int {
+  var i = 0
+  var acc = 0
+  var n = t.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    i += 1
+  }
+  return acc
+}
+fn rebound(t: Str, u: Str) -> Int {
+  var s = t
+  var i = 0
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    s = u
+    i += 1
+  }
+  return acc
+}
+"""))
+    assert "range s {" not in src
+    assert src.count("revlStrCharCodeAt(s, i)") == 6
+
+
+# ---------------------------------------------------------------------------
+# Roadmap item 434 (g): Str.indexOf / Str.slice / Str.split without []rune.
+
+
+def test_str_helpers_do_not_materialize_the_whole_string():
+    src = emit.emit(_compile(
+        'pub fn probe(s: Str, sub: Str) -> Int { return s.indexOf(sub) }\n'
+        'pub fn take(s: Str, a: Int, b: Int) -> Str { return s.slice(a, b) }\n'
+        'pub fn chars(s: Str) -> List[Str] { return s.split("") }\n'))
+    # indexOf: the standard library's search plus one rune count over the
+    # matched prefix, instead of two []rune copies and a naive O(n*m) scan
+    _has(src, "\tb := strings.Index(s, sub)")
+    _has(src, "\t\treturn int64(utf8.RuneCountInString(s[:b]))")
+    # slice: a byte walk returning a substring, which shares s's bytes
+    _has(src, "\tlo, hi, i := len(s), len(s), int64(0)")
+    _has(src, "\treturn s[lo:hi]")
+    # split(""): substrings, not one fresh string per code point
+    _has(src, "\t\t\t\tout = append(out, s[off:off+w])")
+    # the []rune forms survive only as the invalid-UTF-8 fallbacks, where
+    # `[]rune` substitutes U+FFFD and a byte walk cannot
+    _has(src, "\t\t\treturn string([]rune(s)[a:b])")
+    _has(src, "\t\trs := []rune(s)")
+    assert "[]rune" not in src.split("func revlStrSplit")[1].split("\n}")[0]
