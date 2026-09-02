@@ -216,7 +216,9 @@ def test_non_witnessed_effect_missing_undo_in_a_method_body_still_refused():
     # the relaxation is scoped to witnessed externs: a PLAIN effect with no
     # site undo in a provide-method body is still a G4 refusal (an ordinary
     # non-pure crossing needs a spelled inverse; only a witnessed extern's
-    # inverse is accumulator-owned).
+    # inverse is accumulator-owned). Item 420(d): `grab` DECLARES `undo
+    # unstash(result)`, so the refusal names the rule that discards it rather
+    # than claiming there is no `undo` at all.
     with pytest.raises(RevlError) as ei:
         compile_source(_EXTERNS + (
             "extern acquire fn grab() -> Stash undo unstash(result) = @py {\n"
@@ -231,7 +233,8 @@ def test_non_witnessed_effect_missing_undo_in_a_method_body_still_refused():
             "  }\n"
             "}\n"
         ), "t.rvl")
-    assert "no `undo`" in str(ei.value)
+    assert "no site `undo`" in str(ei.value)
+    assert "declares `undo unstash(...)`" in str(ei.value)
 
 
 def test_bare_witnessed_call_outside_effect_position_still_refused():

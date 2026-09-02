@@ -286,3 +286,75 @@ def test_the_extern_slot_arity_is_still_checked():
                    "extern acquire fn secret_put(v: Str) -> SecretHandle"
                    " undo secret_release(result, result) = @py { return 1 }\n")
     assert "`secret_release` takes 1 argument(s), 2 given" in msg
+
+
+# -- item 420(d): the refusal may not deny a declared `undo` ----------------
+#
+# `extern acquire fn secret_put(v: Str) -> SecretHandle undo
+# secret_release(result)` DECLARES an inverse. A bare `effect secret_put("v")`
+# is still refused, and must be: a non-`witnessed` extern's declared inverse
+# is never replayed by either tier (`ext["undo"]` is read only by the item-243
+# witnessed emitters), so the teardown that actually runs on abort is the site
+# undo and there isn't one. What was wrong was the REASON. "effect has no
+# `undo`" denies the existence of a declaration the author wrote one line up
+# and sends them to add what is already there, instead of to the rule that
+# discarded it (item 274: a refusal names a fix the author can enact).
+
+
+def test_a_declared_undo_is_not_denied():
+    msg = _refusal(_VAULT + 'component C {\n  let s = effect secret_put("v")\n}\n')
+    assert "effect has no `undo` and" not in msg
+    assert "declares `undo secret_release(...)`" in msg
+    assert "an `acquire` extern's declared inverse is never replayed" in msg
+
+
+def test_the_refusal_names_both_enactable_fixes():
+    msg = _refusal(_VAULT + 'component C {\n  let s = effect secret_put("v")\n}\n')
+    # fix 1: spell the inverse at the site.
+    assert "undo secret_release(<the acquired handle>)" in msg
+    # fix 2: make the DECLARED inverse the one that replays.
+    assert "classify `secret_put` `witnessed`" in msg
+    # NOT `emit`: an `acquire` extern cannot be emitted, so the generic
+    # wording's third escape is unactionable here.
+    assert "`emit`" not in msg
+
+
+def test_both_named_fixes_actually_compile():
+    _compile(_VAULT + 'component C {\n'
+             '  let s = effect secret_put("v") undo secret_release(s)\n}\n')
+    _compile("type SecretHandle = Opaque\n"
+             "extern witnessed fn secret_put(v: Str) -> Result[SecretHandle, Error]"
+             " undo secret_release(result) = @py { return 1 }\n"
+             "extern pure fn secret_release(h: SecretHandle) -> Unit = @py { return }\n"
+             'component C {\n  let s = effect secret_put("v")\n}\n')
+
+
+def test_the_unbound_form_is_refused_the_same_way():
+    msg = _refusal(_VAULT + "service Vault { emission fn stash(v: Str) -> Str }\n"
+                   "component C provides vault: Vault {\n"
+                   "  provide vault {\n"
+                   "    fn stash(v) -> Str {\n"
+                   "      effect secret_put(v)\n"
+                   '      return "ok"\n'
+                   "    }\n"
+                   "  }\n"
+                   "}\n")
+    assert "declares `undo secret_release(...)`" in msg
+
+
+def test_a_bare_name_without_parens_gets_the_same_judgment():
+    # the parser used to refuse `effect secret_put` on its own, with its own
+    # copy of the generic wording and no extern table to consult. It defers
+    # both bare spellings now, so ONE position decides.
+    msg = _refusal(_VAULT + "component C {\n  let s = effect secret_put\n}\n")
+    assert "declares `undo secret_release(...)`" in msg
+
+
+def test_an_acquisition_with_no_declared_inverse_keeps_the_generic_wording():
+    # the parser's remaining domain: a dotted path can never be a declared
+    # extern, so nothing was rejected and "has no `undo`" is the truth.
+    msg = _refusal("component C {\n  config { url: Str }\n"
+                   "  let pool = effect Pool.open(config.url)\n}\n")
+    assert "effect has no `undo` and `Pool.open` is not pure" in msg
+    # ... and the spelling it offers is no longer double-backticked.
+    assert "write `effect Pool.open(...) undo <expr>`" in msg
