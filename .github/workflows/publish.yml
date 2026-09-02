@@ -56,6 +56,11 @@ jobs:
       name: pypi
       url: https://pypi.org/project/revl/
     permissions:
+      # A job-level block REPLACES the workflow-level one rather than adding to
+      # it, so every scope this job needs has to be named here — without the
+      # line below `contents` would be `none` and the checkout step could not
+      # read the tag it is publishing.
+      contents: read
       # OIDC token for PyPI Trusted Publishing — no long-lived secret needed.
       id-token: write
     steps:
@@ -89,4 +94,4 @@ jobs:
       #     with:
       #       password: ${{ secrets.PYPI_API_TOKEN }}
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1 (v1.14.2)
