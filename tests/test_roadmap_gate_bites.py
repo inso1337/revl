@@ -289,3 +289,116 @@ def test_d_ignores_a_word_used_in_another_sense():
 brace.
 """
     assert gate.tier_parity_findings(text, BACKENDS) == []
+
+
+# --------------------------------------------------------------------------
+# (B), the disavowal bound. Once 425 F3 and 427 F5 were REWORDED to say the
+# marker was wrong, the sentence still contained the phrase and the target,
+# and (B) went on reporting the correction it had itself asked for. The bound
+# is two-part on purpose: quoted AND disowned. Either half alone is still a
+# delegation.
+# --------------------------------------------------------------------------
+_B_DISOWNED = SECTION + """416. ✅ **MCP ARGUMENT LEAK AUDIT.** Landed 2026-09-01.
+
+425. **MCP SERVER AUDIT (2026-09-02).** Findings below.
+
+**F3 MEDIUM, ✅ RESOLVED, AND THE MARKER `folded into the item-416c fix` WAS
+WRONG.** The 416c fix redacts a dimension declared `Secret[T]`, which is the
+half this finding says is NOT sufficient. Closed on `fix/425-mcp-tail`.
+"""
+
+
+def test_b_does_not_read_a_disowned_quoted_marker_as_a_delegation():
+    """The roadmap correcting a bad delegation is not a delegation."""
+    assert gate.delegation_findings(_B_DISOWNED, DIRS, NAMESPACES, HEADS) == []
+
+
+def test_b_still_bites_a_quoted_marker_nobody_disowns():
+    """Backticks alone are not the escape hatch: the prose has to disown it."""
+    text = _B_DISOWNED.replace("` WAS\nWRONG.**", "`.** It is closed.**")
+    found = gate.delegation_findings(text, DIRS, NAMESPACES, HEADS)
+    assert len(found) == 1, _labels(found)
+    assert "delegates its closure to item 416c" in found[0]
+
+
+def test_b_still_bites_the_same_disavowal_without_the_quote():
+    """And the disavowal alone is not it either: an UNQUOTED phrase still
+    reads as the delegation being made."""
+    text = _B_DISOWNED.replace("`folded into the item-416c fix`",
+                               "folded into the item-416c fix")
+    found = gate.delegation_findings(text, DIRS, NAMESPACES, HEADS)
+    assert len(found) == 1, _labels(found)
+
+
+# --------------------------------------------------------------------------
+# (E) DUPLICATE ITEM HEADER. Three shapes, all three on the file on
+# 2026-09-02: item 106's merge residue from `bd0f4d19`, items 100-103 carrying
+# a done block and an in-progress block each, and the two different items that
+# were both numbered 445. The carve-out is cross-section reuse, which is the
+# documented convention: item numbers restart per section.
+# --------------------------------------------------------------------------
+_E_RESIDUE = SECTION + """106. \U0001f6a7 **The rust emitter's `\\u{...}` non-ASCII escape collides with
+106. ✅ **The rust emitter's `\\u{...}` non-ASCII escape collides with
+    `format!()` placeholders in assert/format strings.** Fixed on `38c84207`;
+    the emitter now writes the escape without a brace.
+"""
+
+_E_CONFLICT = SECTION + """100. ✅ **`_tool_admit` compiles before honoring `replacing`.** Landed.
+
+100. \U0001f6a7 **The `advance` lifecycle statement is py/ts-only; go and rust
+    lifecycle emitters fail hard on it.** Being worked.
+"""
+
+_E_COLLISION = SECTION + """445. **THE UNIQUE-OWNERSHIP ANALYSIS IS WRITTEN TWICE.** Findings below.
+
+445. **THE CROSS-TIER MATRIX NEVER RAN THE SLOW LANE.** Findings below.
+"""
+
+
+def test_e_merge_residue_bites():
+    """Item 106 exactly: a truncated copy of the header with no body, kept by
+    a conflict resolution, and the only reason a landed item read as open."""
+    found = gate.duplicate_header_findings(_E_RESIDUE)
+    assert len(found) == 1, _labels(found)
+    assert "MERGE RESIDUE" in found[0]
+    assert "Delete the residue line" in found[0]
+
+
+def test_e_residue_passes_once_the_stale_line_is_gone():
+    text = "\n".join(line for line in _E_RESIDUE.splitlines()
+                     if not line.startswith("106. \U0001f6a7"))
+    assert gate.duplicate_header_findings(text) == []
+
+
+def test_e_conflicting_statuses_bite():
+    found = gate.duplicate_header_findings(_E_CONFLICT)
+    assert len(found) == 1, _labels(found)
+    assert "CONFLICTING statuses" in found[0]
+
+
+def test_e_conflict_passes_once_one_block_is_renumbered():
+    text = _E_CONFLICT.replace("100. \U0001f6a7", "447. \U0001f6a7")
+    assert gate.duplicate_header_findings(text) == []
+
+
+def test_e_two_different_items_sharing_a_number_bite():
+    """The 445 collision, which had no status disagreement to give it away."""
+    found = gate.duplicate_header_findings(_E_COLLISION)
+    assert len(found) == 1, _labels(found)
+    assert "DIFFERENT items sharing one number" in found[0]
+
+
+def test_e_leaves_the_same_number_in_another_section_alone():
+    """Numbers restart per section by design: item 1 exists five times in the
+    real file. Reporting that would bury the three shapes that matter."""
+    text = ("## Done (dependency order as built)\n\n"
+            "106. ✅ **Lexer.** Multi-char operators.\n\n"
+            + _E_RESIDUE.replace("106. \U0001f6a7 **The rust emitter's "
+                                 "`\\u{...}` non-ASCII escape collides with\n",
+                                 ""))
+    assert gate.duplicate_header_findings(text) == []
+
+
+def test_e_leaves_a_number_with_one_block_alone():
+    assert gate.duplicate_header_findings(
+        SECTION + "428. **SUPPLY-CHAIN AUDIT.** Findings below.\n") == []

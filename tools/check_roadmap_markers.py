@@ -49,10 +49,10 @@ keeping the reasoning, evidence and cross-references. This flag is what makes
 that stick. It cannot be turned on until the migration happens, so it ships
 disabled. See CONTRIBUTING.md, "Tracking work".
 
-FOUR MORE GATES, each OFF by default and each with its own flag, added
-2026-09-02 after four real fall-throughs that the git oracle above is
+FIVE MORE GATES, each OFF by default and each with its own flag, added
+2026-09-02 after five real fall-throughs that the git oracle above is
 structurally blind to. Git can only answer questions about branches and shas.
-These four answer questions about the roadmap's prose against ITSELF and
+These five answer questions about the roadmap's prose against ITSELF and
 against the tree, which is where the remaining decay lives.
 
   --check-contradiction   (A) SELF-CONTRADICTION. Item 422's header read
@@ -84,6 +84,18 @@ against the tree, which is where the remaining decay lives.
       live, not that anyone is closing it. It is available now, before the
       issue migration lands.
 
+  --check-duplicate-headers  (E) DUPLICATE ITEM HEADER. Merge `bd0f4d19`
+      resolved a roadmap hunk by keeping BOTH sides, so item 106 carried a
+      truncated copy of its own header, marked in progress, one line above
+      the done entry that had replaced it. The stale line had no body and was
+      the ONLY reason a landed item read as open; nothing caught it because
+      the staleness gate above validates markers that NAME A BRANCH and this
+      one named nothing. Fails when one item NUMBER carries more than one
+      block inside one section, and says which of the three shapes it is:
+      merge residue, conflicting statuses, or two different items sharing a
+      number. Numbers restart per section by design, so cross-section reuse
+      is never reported. See duplicate_header_findings.
+
   --check-tier-parity     (D) CROSS-TIER PARITY, the shape only. Three
       defects were fixed on the python tier on 2026-09-02 and left live
       everywhere else: item 422's confinement guard (python at `1602cc94`,
@@ -99,7 +111,7 @@ against the tree, which is where the remaining decay lives.
       outside it. See TIER_SUBJECTS and tier_parity_findings for the exact
       bound and all three blind spots.
 
-None of the four decides whether a fix is CORRECT, and none of them rewrites
+None of the five decides whether a fix is CORRECT, and none of them rewrites
 anything, for the same reason the staleness gate does not: a gate that edits
 the thing it checks launders stale claims into fresh-looking ones.
 
@@ -111,6 +123,7 @@ Usage:
     python3 tools/check_roadmap_markers.py --check-delegation
     python3 tools/check_roadmap_markers.py --check-orphan
     python3 tools/check_roadmap_markers.py --check-tier-parity
+    python3 tools/check_roadmap_markers.py --check-duplicate-headers
     python3 tools/check_roadmap_markers.py --base <ref>  # default origin/main
     python3 tools/check_roadmap_markers.py --no-fetch    # offline; may be stale
     python3 tools/check_roadmap_markers.py --roadmap <path>
@@ -121,6 +134,7 @@ Exit status is 0 when every marker agrees with git, 1 when any does not, and
 from __future__ import annotations
 
 import argparse
+import difflib
 import re
 import subprocess
 import sys
@@ -704,6 +718,26 @@ DELEGATION_RE = re.compile(
 DELEGATION_WINDOW = 60
 DELEGATION_STOP_RE = re.compile(r"\*\*|\)|\.\s+[A-Z(]|;\s")
 
+# A delegation phrase the roadmap is QUOTING in order to disown it. Item 425
+# F3 and item 427 F5 both read "AND THE MARKER `folded into the item-416c fix`
+# WAS WRONG": the phrase is inside backticks because it is the marker being
+# corrected, and the sentence around it says so. Reporting that as a live
+# delegation punishes the correction this very check asked for, and it is the
+# one shape where the delegation is provably not being made. The bound is
+# deliberately two-part -- the phrase must sit INSIDE a backticked span AND be
+# disowned within DISAVOWAL_WINDOW characters of that span's closing backtick.
+# An unquoted "folded into the item-416c fix" is still a delegation, and so is
+# a quoted one nobody disowns.
+DISAVOWAL_RE = re.compile(
+    r"""\A\W{0,4}(?:
+          (?:was|were|is|are)\s+(?:wrong|incorrect|stale|mistaken)
+        | (?:was|were|is|are)\s+(?:never\s+|not\s+)true
+        | never\s+held
+    )\b""",
+    re.IGNORECASE | re.VERBOSE,
+)
+DISAVOWAL_WINDOW = 40
+
 # "item-416c", "item 416", "item 427 F3", "items 245/246". The word "item" is
 # required: bare three-digit numbers in this file are line numbers and byte
 # counts far more often than they are item references.
@@ -969,10 +1003,26 @@ def contradiction_findings(text: str) -> list[str]:
     return findings
 
 
+def _is_disowned_quote(text: str, match: re.Match,
+                       quoted: list[tuple[int, int]]) -> bool:
+    """True when this delegation phrase is a QUOTED marker the prose disowns.
+
+    See DISAVOWAL_RE. Both halves are required: inside a backticked span, and
+    disowned right after that span closes.
+    """
+    for start, end in quoted:
+        if start < match.start() and match.end() <= end:
+            return DISAVOWAL_RE.match(text[end: end + DISAVOWAL_WINDOW]) is not None
+    return False
+
+
 def _delegation_targets(text: str) -> list[dict]:
     """Every delegation phrase in a block, with the target it names."""
     out = []
+    quoted = [(m.start(), m.end()) for m in re.finditer(r"`[^`\n]+`", text)]
     for m in DELEGATION_RE.finditer(text):
+        if _is_disowned_quote(text, m, quoted):
+            continue
         window = text[m.end(): m.end() + DELEGATION_WINDOW]
         stop = DELEGATION_STOP_RE.search(window)
         if stop is not None:
@@ -1208,6 +1258,131 @@ def orphan_findings(text: str, dirs: set[str], namespaces: set[str],
     return findings
 
 
+# (E). How alike two headers under one number have to read before they are the
+# same item written twice rather than two items that collided. Measured on the
+# file: item 106's residue scores 1.0 against the entry that replaced it (it is
+# a truncated copy of the same line), and the four real collisions in "Open, in
+# rough priority order" score 0.06 to 0.28 against their namesakes. Nothing on
+# the file lands between 0.28 and 1.0, so the threshold is not load-bearing;
+# it only decides which SENTENCE the finding prints.
+NEAR_IDENTICAL = 0.85
+
+# The shortest prefix worth comparing. Item 106's residue is 60 characters, so
+# a bound above that would classify the exact case this check exists for as a
+# collision.
+MIN_COMPARE = 32
+
+
+def _header_text(it: dict) -> str:
+    """An item's header line with its status glyph and whitespace normalised
+    away, so two blocks differing ONLY in their marker compare as equal."""
+    text = re.sub(r"\s+", " ", it["text"]).strip()
+    for glyph in DONE_GLYPHS + PARTIAL_GLYPHS + INFLIGHT_GLYPHS + DROPPED_GLYPHS:
+        text = text.replace(glyph, " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _has_no_body(it: dict) -> bool:
+    """The block is a header line and nothing else."""
+    return not any(line.strip() for line in it["body"].splitlines()[1:])
+
+
+def _near_identical(a: str, b: str) -> bool:
+    """Do these two headers say the same thing, as far as the shorter one runs?
+
+    Compared over the SHORTER header's length on purpose. Merge residue is a
+    TRUNCATED copy: item 106's stale line stops mid-sentence at "collides
+    with", and comparing full strings would score it 0.55 against the 3.6 kB
+    entry it duplicates and read as a collision.
+    """
+    n = min(len(a), len(b))
+    if n < MIN_COMPARE:
+        return False
+    return difflib.SequenceMatcher(None, a[:n], b[:n]).ratio() >= NEAR_IDENTICAL
+
+
+def duplicate_header_findings(text: str) -> list[str]:
+    """(E) One item number carrying more than one block inside one section.
+
+    Item numbers RESTART per section by design -- item 1 exists five times in
+    this file, once per section -- so the question is only ever asked WITHIN a
+    section. Cross-section reuse is the documented convention and is never a
+    finding here; that carve-out is what keeps a legitimate second life of a
+    number out of the report.
+
+    Inside one section it is always a defect, and it comes in three shapes,
+    all three measured on the file on 2026-09-02:
+
+      1. MERGE RESIDUE. Item 106 carried a truncated copy of its own header,
+         one line above the entry that replaced it and identical to it apart
+         from the marker: `38c84207` flipped the glyph from in-progress to
+         done and the merge `bd0f4d19` resolved the hunk by keeping BOTH
+         sides. The stale line had no body of its own and was the only reason
+         a landed item still read as in progress. Nothing else in the repo
+         could see it, because the staleness gate only validates markers that
+         NAME A BRANCH and this one named nothing.
+
+      2. CONFLICTING STATUS. The same number carrying done in one block and
+         in-progress in another. A reader who meets the in-progress block
+         first re-does work that landed, which is the cost this whole file
+         exists to avoid.
+
+      3. COLLISION. Two DIFFERENT items filed under one number, which makes
+         every "item 100" reference in the tree ambiguous -- and there are
+         nineteen of those in src/, tests/ and docs/ for items 100-103 alone.
+
+    Like every other check here it does not rewrite anything, and it cannot
+    decide WHICH block should keep the number. That is a reading job.
+    """
+    findings: list[str] = []
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for it in items(text):
+        groups.setdefault((it["section"], it["number"]), []).append(it)
+    for (section, number), blocks in groups.items():
+        if len(blocks) < 2:
+            continue
+        heads = [_header_text(b) for b in blocks]
+        residue = [b for b, h in zip(blocks, heads)
+                   if _has_no_body(b)
+                   and any(other is not b and _near_identical(h, oh)
+                           for other, oh in zip(blocks, heads))]
+        statuses = {b["status"] for b in blocks}
+        alike = all(_near_identical(heads[0], h) for h in heads[1:])
+        where = ", ".join(f"L{b['line']} ({b['status']})" for b in blocks)
+        if residue:
+            shape = (
+                f"one of them is MERGE RESIDUE: L{residue[0]['line']} repeats "
+                f"the header it sits beside and carries no body of its own.\n"
+                f"    Delete the residue line. It is a conflict resolution "
+                f"that kept both sides, and while it stands it is the item's "
+                f"status.")
+        elif len(statuses) > 1:
+            shape = (
+                f"they carry CONFLICTING statuses ({'/'.join(sorted(statuses))}"
+                f"), so the item reads open and closed at once.\n"
+                f"    Decide which block owns the number, then renumber or "
+                f"close the other. Do not leave both.")
+        elif alike:
+            shape = (
+                "they are the SAME item written twice under one number.\n"
+                "    Fold them into one block, keeping the evidence from "
+                "both.")
+        else:
+            shape = (
+                "they are DIFFERENT items sharing one number, so every "
+                "reference to it is ambiguous.\n"
+                "    Renumber one of them and fix the references that meant "
+                "it.")
+        findings.append(
+            f"L{blocks[0]['line']}: item {number} has {len(blocks)} blocks in "
+            f"section {section!r} -- {where}.\n"
+            f"    {shape}\n"
+            f"    Item numbers restart per SECTION in this file, so this is "
+            f"only ever asked inside one section; the same number in another "
+            f"section is the documented convention and is not reported.")
+    return findings
+
+
 def _tiers_named(text: str) -> set[str]:
     """Every tier this block names, by path or by prose alias."""
     named = set(TIER_PATH_RE.findall(text))
@@ -1337,8 +1512,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="(D) ALSO fail when a closed finding about a "
                          "language-wide guarantee cites exactly one "
                          "backends/<tier>/ path and never names another tier.")
+    ap.add_argument("--check-duplicate-headers", action="store_true",
+                    help="(E) ALSO fail when one item NUMBER carries more than "
+                         "one block inside one section: merge residue, "
+                         "conflicting statuses, or two different items sharing "
+                         "a number. The item 106 shape.")
     ap.add_argument("--check-all", action="store_true",
-                    help="turn on A, B, C and D. Does NOT turn on "
+                    help="turn on A, B, C, D and E. Does NOT turn on "
                          "--require-issue, which waits on the issue migration.")
     args = ap.parse_args(argv)
     if args.check_all:
@@ -1346,6 +1526,7 @@ def main(argv: list[str] | None = None) -> int:
         args.check_delegation = True
         args.check_orphan = True
         args.check_tier_parity = True
+        args.check_duplicate_headers = True
 
     roadmap = args.roadmap
     if not roadmap.is_file():
@@ -1384,6 +1565,8 @@ def main(argv: list[str] | None = None) -> int:
          lambda: delegation_findings(text, dirs, namespaces, heads)),
         (args.check_orphan, "--check-orphan",
          lambda: orphan_findings(text, dirs, namespaces, heads)),
+        (args.check_duplicate_headers, "--check-duplicate-headers",
+         lambda: duplicate_header_findings(text)),
         (args.check_tier_parity, "--check-tier-parity",
          lambda: tier_parity_findings(
              text, {p.name for p in (ROOT / "backends").iterdir() if p.is_dir()}

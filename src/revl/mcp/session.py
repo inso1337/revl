@@ -288,13 +288,26 @@ class Session:
         self.approval_policy = None
         # roadmap 425 F3 / 427 F5: whether a CALLER-SUPPLIED resource valuation
         # may be written into the durable, cross-session approval WAL when a
-        # crossing is approved. "bound" (the default, and what shipped) records
-        # it — item 251's N1, what lets a distilled rule name a target. "withheld"
-        # records it as UNRECORDED instead, closing the durable disclosure at the
-        # cost of the distiller's fold over caller-argument targets. Author-written
-        # literals are recorded under both. Set at serve time (`revl mcp serve
-        # --approval-record-values`); see `_distillation_ledger_fields`.
-        self.approval_record_values = "bound"
+        # crossing is approved. "withheld" (the DEFAULT) records it as UNRECORDED
+        # — the resource-bearing-but-unrecorded shape `distill._project_resource`
+        # already fails closed on. "bound" records it verbatim, which is what lets
+        # a distilled rule name the target it crossed (item 251's N1).
+        #
+        # The default is `withheld` because the two mistakes are not symmetric.
+        # Recording is IRREVERSIBLE and SILENT: the value lands in a cross-session
+        # plaintext log on disk, it belongs to the caller rather than the operator
+        # who said yes, and which values land there is decided by whether a
+        # parameter happens to be NAMED `path`/`host`/`table`. Withholding is
+        # neither: its only cost is that approvals whose target came from a caller
+        # argument no longer fold into a distilled rule, the operator is TOLD when
+        # that bites (`distill.Reason.RESOURCE_SCOPE_UNRECORDED` names this flag),
+        # and `--approval-record-values bound` gets the fold back. Everywhere else
+        # in this machinery the unset default is the fail-closed one; this is that
+        # rule applied here. Author-written LITERAL targets are recorded under both
+        # modes, so a composition that names its destinations in source pays
+        # nothing. Set at serve time (`revl mcp serve --approval-record-values`);
+        # see `_distillation_ledger_fields`.
+        self.approval_record_values = "withheld"
         # the per-generation class map (item 246, Decision 2): rebuilt atomically
         # at every load/swap so a call decided against a stale map is impossible.
         # None when nothing is loaded or the policy is off.
@@ -395,6 +408,13 @@ class Session:
         # the operator/test before load to control the location.
         self._wal_path: str | None = None
         self._clock_ms = None   # injectable ms clock (invariant 3); None = wall
+        # roadmap 427 F8: the session clock is MONOTONIC-ANCHORED and RATCHETED.
+        # `_clock_anchor` is the (wall_ms, monotonic_ns) pair `_now_ms` measures
+        # elapsed time from, taken once on first read; `_clock_floor_ms` is the
+        # high-water mark no later read may fall below. An expiry that a wall-clock
+        # step backwards can un-expire is not an expiry. See `_now_ms`.
+        self._clock_anchor: tuple[int, int] | None = None
+        self._clock_floor_ms: int = 0
         # roadmap item 330: per-turn sources admitted THROUGH the in-language
         # crossing while a call is driving the loop, queued for wiring the moment
         # that call returns (a turn is never wired mid-call, exactly as the
@@ -412,6 +432,11 @@ class Session:
         # hash-bound rewound span here, and `fork_confirm` re-derives the hash and
         # refuses on any drift, exactly as the 245 commit binds its manifest hash.
         self._fork_pending: dict | None = None
+        # item 443 (E-Stop): once an operator halts this session it is DEAD, not
+        # paused. Every state-changing verb refuses (`_refuse_if_halted`);
+        # `unload` and `estop_report` still work, and the way back is
+        # `revl recover`, never a resume.
+        self._halted = False
 
     # -- plumbing ----------------------------------------------------------
 
@@ -442,6 +467,7 @@ class Session:
 
     def load(self, ir: dict, config: dict | None = None,
              record: bool = False, origin: dict | None = None) -> dict:
+        self._refuse_if_halted("load")   # item 443
         if self._driver is not None:
             raise SessionError("a composition is already loaded — swap or unload it")
         # booting is admission: a draft with open obligations is checkable but
@@ -490,7 +516,10 @@ class Session:
         # names no `auto-approve` rule, so an off-distillation load is byte-identical.
         self._install_auto_approve_rules()
         # item 310: the seam-method cache index, rebuilt atomically with the class
-        # map so a call is never decided against a stale cache contract.
+        # map so a call is never decided against a stale cache contract. Surface H
+        # runs first: the applicability fold over the PROVIDER closure, which only
+        # a linked composition knows, refuses an uncacheable reach before boot.
+        self._check_cache_applicability(ir, self._class_map)
         self._install_cache_index(ir)
         self._enforce_activation_gate(ir)
         # item 294 Slice 2: the capability-lease gate, alongside the activation
@@ -870,6 +899,7 @@ class Session:
         Composition-level (static) state is unaffected either way; this only
         reconciles the dynamic instance layer the static swap never saw."""
         driver = self._require()
+        self._refuse_if_halted("swap")   # item 443
         self._enforce_sandbox(ir)
         self._enforce_evidence(ir)
         # item 246: classify the candidate and gate its activation reach BEFORE
@@ -881,6 +911,11 @@ class Session:
         # so a call mid-swap is impossible.
         new_map = self._build_class_map(ir)
         self._enforce_activation_gate(ir, class_map=new_map)
+        # item 310, surface H: the successor's cache declarations are folded over
+        # the SUCCESSOR's provider closure, here — before any teardown — so a swap
+        # that moves a cached method onto an uncacheable reach refuses with the
+        # running composition untouched.
+        self._check_cache_applicability(ir, new_map)
         old_ir = self.ir
         # capture BEFORE teardown — while the old instances are still live and
         # their state still exists (Q2). Empty unless something spawned, so a
@@ -1779,6 +1814,7 @@ class Session:
         the confirm is REFUSED with a fresh manifest — what fires is exactly what
         was approved, never a superset."""
         driver = self._require()
+        self._refuse_if_halted("commit_confirm")   # item 443
         owner = self._owner
         if owner is None:
             raise SessionError("no session owner is registered — nothing to commit")
@@ -1808,6 +1844,7 @@ class Session:
         A session that only ever used classes (a) and (b) aborts to a provably
         clean world."""
         driver = self._require()
+        self._refuse_if_halted("abort")   # item 443
         owner = self._owner
         if owner is None:
             raise SessionError("no session owner is registered — nothing to abort")
@@ -1823,6 +1860,65 @@ class Session:
         return {"aborted": True, "replayed": result["replayed"],
                 "droppedDeferred": dropped, "prompts": prompts,
                 "compensationResidue": residue, **report}
+
+    def estop(self, reason: str = "operator halt",
+              operator: str | None = None) -> dict:
+        """E-STOP the session (item 443, docs/design/443-estop.md).
+
+        This is NOT `abort` with a shorter name. `abort` is a verdict on the
+        work: it drops the queue, replays every witnessed inverse LIFO in two
+        phases, and proves a clean world — a cooperative unwind whose cost is
+        the whole teardown. `estop` is the operator's emergency: it stops
+        dispatching NEW crossings immediately, runs NOTHING, and reports what
+        was in flight.
+
+        Its cost is a latch flip plus a walk of the live frames. It does not
+        unwind, so it does not wait for two hundred brackets, a hung
+        compensation or a Phase-2 budget. The price is stated rather than
+        hidden: every registered entry is left STRANDED (owed, not discharged)
+        and every acquired handle stays held until the process exits or
+        `revl recover` runs. That trade is what the button is for.
+
+        The session is dead afterwards. `call`, `swap`, `commit`,
+        `commit_confirm`, `abort` and `load` refuse; `unload` still works and
+        strands rather than unwinds (the process still has to drop its
+        fibers); `estop_report` reads the inventory back."""
+        driver = self._require()
+        halt = driver.runtime.estop(reason, operator=operator or "unknown")
+        self._halted = True
+        return {"halted": True, **halt}
+
+    def estop_report(self) -> dict:
+        """The halt inventory, without touching the world (item 443).
+
+        Two halves, both real: what the halt could NAME at the instant it
+        engaged (witnessed mutations, compensations, acquired resources), and
+        what the unwind has stranded since (an emitted bracket inverse is a
+        bare closure in the disposer list, reachable only as it is handed
+        over). Read it before deciding how to reconcile."""
+        driver = self._require()
+        halt = driver.runtime.estop_state()
+        if halt is None:
+            return {"halted": False, "residue": [], "clean": True}
+        residue = driver.runtime.estop_residue()
+        return {"halted": True, **halt, "residue": residue,
+                # an E-Stop is NEVER clean. R4 is a property of the abort path;
+                # the halt violates it by design and says so.
+                "clean": False}
+
+    def _refuse_if_halted(self, verb: str) -> None:
+        """Every state-changing verb after an E-Stop refuses (item 443, open
+        question 3: the instance is dead and recovery is the only path back).
+
+        Resuming would re-enter a body that was cut mid-step, whose in-flight
+        crossing may or may not have landed — exactly the "pretend it did not
+        happen" the honest semantics forbids."""
+        if getattr(self, "_halted", False):
+            raise SessionError(
+                f"`{verb}` is refused: this session was E-STOPPED and the "
+                "instance is dead (item 443). There is no resume — reconcile "
+                "with `revl recover --wal <file>`, or `unload` (which strands "
+                "rather than unwinds) and start a fresh session")
 
     # -- session branching (roadmap item 250) ------------------------------
 
@@ -1986,6 +2082,71 @@ class Session:
         return any(r.get("record") in ("flushed", "commit-approved")
                    for r in doc["records"])
 
+    #: item 250, Slice 2: the provenance the item asks a branch to preserve that
+    #: this runtime does NOT record, each with the reason. The branch report and
+    #: the durable `fork-branch` record carry it verbatim, so a consumer reading
+    #: either is told what does not carry over instead of inferring from silence
+    #: that everything did. Removing an entry from here is a claim: it means the
+    #: WAL now records that axis and a branch really can reproduce it.
+    _BRANCH_NOT_PRESERVED = (
+        {"axis": "providerVersions",
+         "why": "the WAL records no provider or runtime version per step, so the "
+                "branch cannot claim the parent's provider set was pinned"},
+        {"axis": "seedsAndClock",
+         "why": "no RNG seed or clock reading is recorded, so a branch is a "
+                "divergent continuation, not a bit-reproducible replay"},
+        {"axis": "modelDecisions",
+         "why": "the LLM-aware WAL (item 250's deferred replay-modes slice, "
+                "overlapping item 121) is not written, so the model and tool "
+                "calls above the fork point are not on the branch's record and "
+                "no counterfactual replay mode can be honest yet"},
+    )
+
+    def _branch_provenance(self, at: int) -> dict:
+        """What a branch minted at step `at` actually inherits, and what it does
+        not (item 250, Slice 2).
+
+        The roadmap item asks the branch to preserve component generation, source
+        hash, provider versions, capability surface, LLM/tool calls, seeds and
+        clock state, WAL position and inverse witnesses. Four of those are
+        recorded today and are stated as facts; the rest are not recorded at all,
+        and are enumerated in `notPreserved` rather than quietly omitted — the
+        same honest-partition discipline the fork report itself follows."""
+        import json  # noqa: PLC0415 — stdlib
+        ir = self.ir or {}
+        caps = sorted({token
+                       for extern in ir.get("externs") or []
+                       for token in extern.get("capabilities") or []})
+        digest = hashlib.sha256(
+            json.dumps(ir, sort_keys=True).encode("utf-8")).hexdigest()
+        source = (self.origin or {}).get("source")
+        preserved = {
+            "at": at,
+            "composition": sorted(self._component_names(ir)),
+            "generation": self._generation,
+            "irDigest": digest,
+            "capabilities": caps,
+            "walPosition": self._wal_position(),
+        }
+        if isinstance(source, str):
+            preserved["sourceDigest"] = hashlib.sha256(
+                source.encode("utf-8")).hexdigest()
+        return {"preserved": preserved,
+                "notPreserved": [dict(e) for e in self._BRANCH_NOT_PRESERVED]}
+
+    def _wal_position(self) -> int | None:
+        """How many records this session's WAL held when the branch diverged — the
+        durable position the branch's history continues from. `None` when no WAL
+        is open (nothing durable to position against)."""
+        wal = self.recorder.wal if self.recorder is not None else None
+        if wal is None:
+            return None
+        from ..wal import read_wal  # noqa: PLC0415 — tier-agnostic core, lazy
+        try:
+            return len(read_wal(wal.path)["records"])
+        except OSError:
+            return None
+
     def _ensure_wal_open(self) -> None:
         """Open this session's durable WAL if none is open (item 250): the fork
         bracket (`fork-begin`/`fork-complete`/`fork-frozen`) must be durable, the
@@ -2084,6 +2245,24 @@ class Session:
         branch._ensure_wal_open()          # a distinct branch WAL
         branch_id = branch._session_id
 
+        # 6b. the branch side of the lineage (item 250, Slice 2). Slice 1 wrote
+        # the edge only on the parent (`fork-complete {branch}`), so a branch WAL
+        # read on its own — the artifact a post-mortem tool is handed first —
+        # could not say it was a branch, name its parent, or name the step it
+        # diverged at. It carries what the branch inherits AND, explicitly, what
+        # it does not.
+        import os.path  # noqa: PLC0415 — stdlib
+        provenance = self._branch_provenance(at)
+        branch_wal = branch.recorder.wal if branch.recorder is not None else None
+        if branch_wal is not None:
+            branch_wal.record_fork_branch(
+                branch=branch_id, parent=parent_id, at=at,
+                parent_wal=(os.path.abspath(self._wal_path)
+                            if self._wal_path else None),
+                preserved=provenance["preserved"],
+                not_preserved=provenance["notPreserved"],
+                crossed=crossed, would_cross=would)
+
         # 7. close the bracket on the parent WAL and retire the parent.
         if wal is not None:
             wal.record_fork_frozen(parent=parent_id, at=at)
@@ -2098,6 +2277,7 @@ class Session:
             "forked": True,
             "parent": parent_id,
             "branch": branch_id,
+            "lineage": provenance,
             "rewound": {
                 "inversesRan": rewind["inversesRan"],
                 "provisionsWithdrawn": rewind["provisionsWithdrawn"],
@@ -2208,6 +2388,11 @@ class Session:
         self._frozen = False
         self._fork_at = None
         self._fork_pending = None
+        # item 443: the halt is dropped with the session it killed, so a REUSED
+        # Session object starts callable again. The runtime latch is NOT cleared
+        # here — a halt is process-global and only an operator (or a fresh
+        # process) lifts it, which is why `unload` under a halt still strands.
+        self._halted = False
 
     # -- the per-turn admit+run crossing (roadmap item 330) ----------------
 
@@ -2325,6 +2510,10 @@ class Session:
         # item 246, Fix 1: the turn's ACTIVATION body answers for its class-(c)
         # crossings before it runs, exactly as a loaded/swapped generation does.
         self._enforce_activation_gate(merged, new_map, components=turn_names)
+        # item 310, surface H: a turn widens the composition, so a cached method
+        # the turn newly resolves (or newly reaches) is folded against the MERGED
+        # closure before anything is plugged.
+        self._check_cache_applicability(merged, new_map)
 
         module = self._prepare_module(turn_doc)
 
@@ -2412,6 +2601,7 @@ class Session:
         """Invoke a provided service operation on the running composition —
         how an agent actually *tests* what it just loaded."""
         driver = self._require()
+        self._refuse_if_halted("call")   # item 443
         namespace = driver._namespace()
         if key not in namespace:
             raise SessionError(f"no provided key {key!r} "
@@ -2541,8 +2731,7 @@ class Session:
                 continue
             if g.get("consumed") or g.get("revoked"):
                 return False
-            exp = g.get("expiresAt")
-            if exp is not None and now > exp:
+            if self._expired(g, now):
                 return False
             return True
         return False
@@ -2558,11 +2747,12 @@ class Session:
         if entry["generation"] != self._generation:
             return False
         now = self._now_ms()
-        exp = entry.get("expiresAt")
-        if exp is not None and now > exp:
+        if self._expired(entry, now):
             return False
-        aexp = entry.get("approvalExpiresAt")
-        if aexp is not None and now > aexp:
+        # the covering approval's deadline is a SECOND, independent one on the
+        # same dict, so it latches under its own key (roadmap 427 F8).
+        if self._expired(entry, now, field="approvalExpiresAt",
+                         latch="approvalExpiredAt"):
             return False
         for token, epoch in (entry.get("invalEpochs") or {}).items():
             if self._cache_inval_epoch.get(token, 0) != epoch:
@@ -2698,6 +2888,32 @@ class Session:
 
         walk(ir.get("components") or [])
         return index
+
+    def _check_cache_applicability(self, ir: dict, class_map) -> None:
+        """Surface H (item 310): refuse a `cache`-declaring seam method whose
+        PROVIDER CLOSURE is not cacheable, BEFORE the generation is committed.
+
+        The compile-time admission checks see only the declaring method's
+        declared reach shape; the clause is an interface contract every provider
+        inherits, so what the cached reach actually crosses is a fact about the
+        linked composition. Called from `load` (pre-boot), `swap` (pre-teardown,
+        next to the activation gate) and `_wire_turn` (pre-plug) — never after a
+        generation is committed, so a refusal never leaves a half-installed
+        index. Inert for a composition that declares no `cache`."""
+        index = self._build_cache_index(ir)
+        if not index:
+            return
+        from .approval import (ClassMap,  # noqa: PLC0415
+                               cache_applicability_refusal)
+        # the class map is None when no approval policy is configured, but the
+        # fold is not a policy gate: `cache pure` memoizes in every session (the
+        # no-policy inertness rule covers the ENTRY STORE, not applicability), so
+        # an uncacheable reach must refuse off-policy too. Built here, only for a
+        # composition that actually declares `cache`.
+        problem = cache_applicability_refusal(
+            class_map if class_map is not None else ClassMap(ir), index)
+        if problem is not None:
+            raise SessionError(problem)
 
     def _install_cache_index(self, ir: dict) -> None:
         """Rebuild the per-generation cache index and drop every entry from the
@@ -2843,20 +3059,82 @@ class Session:
                 continue  # candidate-invalidates: the closure changed under it
             if entry["component"] != ticket["component"]:
                 continue  # non-replayable: minted for another component
-            exp = entry.get("expiresAt")
-            if exp is not None and self._now_ms() > exp:
+            if self._expired(entry):
                 continue  # expiring: checked at the crossing, not at mint (inv. 3)
             return entry
         return None
 
     def _now_ms(self) -> int:
-        """The session clock in ms (item 246, invariant 3). Injectable so expiry
-        is testable without sleeping; defaults to the wall clock."""
+        """The session clock in ms (item 246, invariant 3; roadmap 427 F8).
+
+        Epoch-milliseconds, but NOT a bare `time.time()` read. Two properties the
+        expiry checks depend on:
+
+        * MONOTONIC-ANCHORED. The wall clock is sampled ONCE (the anchor); every
+          later reading is that sample plus the elapsed `time.monotonic_ns()`,
+          which is immune to a settimeofday, an NTP step and a DST/timezone
+          change. So the ms a grant's `expiresAt` was computed against and the ms
+          it is checked against advance at the same rate no matter what the
+          machine's notion of "now" does in between.
+        * RATCHETED. The reading is clamped to a high-water floor, so it never
+          decreases — including through the INJECTED clock, which stays injectable
+          for tests but cannot be used to wind time back. An injectable clock that
+          can rewind is a grant-resurrection primitive; every test that has ever
+          used it only ever advanced.
+
+        The floor is the second half of the fix, not the whole of it: it stops a
+        REREAD from going backwards, while `_expired`'s dead latch stops an
+        already-observed expiry from being reopened at all. Both are needed —
+        without the latch a grant checked before its expiry and again after a
+        rewind-plus-genuine-advance would still be live in the window between.
+        """
+        anchor = getattr(self, "_clock_anchor", None)
         clock = getattr(self, "_clock_ms", None)
         if clock is not None:
-            return clock()
-        import time  # noqa: PLC0415
-        return int(time.time() * 1000)
+            reading = int(clock())
+        else:
+            import time  # noqa: PLC0415
+            if anchor is None:
+                anchor = (int(time.time() * 1000), time.monotonic_ns())
+                self._clock_anchor = anchor
+            wall_ms, mono_ns = anchor
+            reading = wall_ms + (time.monotonic_ns() - mono_ns) // 1_000_000
+        floor = getattr(self, "_clock_floor_ms", 0)
+        if reading < floor:
+            return floor          # a rewind reads as "no time passed", never less
+        self._clock_floor_ms = reading
+        return reading
+
+    # roadmap 427 F8: the dead latch. Every expiry site goes through here.
+    def _expired(self, record: dict, now: int | None = None, *,
+                 field: str = "expiresAt", latch: str = "expiredAt") -> bool:
+        """Whether `record` is past `field`, LATCHING the answer the first time it
+        is yes (roadmap 427 F8).
+
+        A bare `now > exp` test is a re-derivation: it asks the clock again on
+        every crossing, so anything that moves the clock below `exp` makes a dead
+        grant live again for its remaining uses. Death is not a function of the
+        current time — it is an event, and this records it. Once the record
+        carries `expiredAt` no later reading of any clock, injected or not,
+        revives it: the check short-circuits on the latch before it ever looks at
+        `now`. `field`/`latch` are parameters only because a cache entry carries
+        two independent deadlines (its own ttl and its covering approval's).
+
+        The latch is in-memory, which is exactly its scope: grants, ledger entries
+        and distilled rules are session-scoped (invariant 5) and none of them
+        survives a restart, so there is no expired record for a later process to
+        resurrect."""
+        if record.get(latch) is not None:
+            return True
+        exp = record.get(field)
+        if exp is None:
+            return False
+        if now is None:
+            now = self._now_ms()
+        if now > exp:
+            record[latch] = now
+            return True
+        return False
 
     def _consume_approval(self, entry: dict) -> None:
         """Spend the token durably BEFORE the crossing fires (Decision 3,
@@ -2923,7 +3201,8 @@ class Session:
             return
         # class (c): a standing approval, or a fresh ticket.
         from .approval import ApprovalRequired  # noqa: PLC0415
-        ticket = self._class_map.build_ticket(reach, args)
+        ticket = self._class_map.build_ticket(
+            reach, args, record_values=self.approval_record_values)
         standing = self._find_standing_approval(ticket)
         if standing is not None:
             self._consume_approval(standing)   # durable spend before the fire
@@ -2982,7 +3261,8 @@ class Session:
                 continue
             if components is not None and reach.get("component") not in components:
                 continue
-            ticket = cm.build_ticket(reach)
+            ticket = cm.build_ticket(
+                reach, record_values=self.approval_record_values)
             standing = self._find_standing_approval(ticket)
             if standing is not None:
                 self._consume_approval(standing)
@@ -3297,8 +3577,7 @@ class Session:
                 continue                 # invariant 4: the closure changed under it
             if g["session"] != self._session_id:
                 continue                 # invariant 5: cross-session replay
-            exp = g.get("expiresAt")
-            if exp is not None and now > exp:
+            if self._expired(g, now):
                 continue                 # invariant 3: expired at the crossing
             remaining = g.get("remainingUses")
             if remaining is not None and remaining <= 0:
@@ -3442,8 +3721,7 @@ class Session:
         floor. Liveness (uses/expiry) and the H1 suspend are checked here too."""
         if entry["consumed"]:
             return False
-        exp = entry.get("expiresAt")
-        if exp is not None and now > exp:
+        if self._expired(entry, now):
             return False
         remaining = entry.get("remainingUses")
         if remaining is not None and remaining <= 0:

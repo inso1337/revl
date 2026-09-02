@@ -177,20 +177,30 @@ def test_missing_registry_row_is_a_clean_error(registry):
     assert "not in this registry" in excinfo.value.message
 
 
-def test_a_requested_version_that_cannot_be_checked_refuses(registry):
-    """Roadmap 428 F12. The registry index carries no per-component version, so
-    `@version` is not a pin. It used to report the tier `cannot verify`, and an
-    unverifiable tier contributes no MISMATCH, so
+def _unversion(registry: Path) -> None:
+    """Strip the entry's declared version and re-record the index row, i.e. an
+    entry published by a registry that declares no versions at all."""
+    from revl.registry import ENTRY_VERSION_FILENAME, build_index
+
+    (_entry(registry) / ENTRY_VERSION_FILENAME).unlink()
+    build_index(registry)
+
+
+def test_a_requested_version_no_registry_records_refuses(registry):
+    """Roadmap 428 F12, the original shape: against a registry that records no
+    per-component version, `@version` has nothing to be checked against.
+
+    It used to report the tier `cannot verify`, and an unverifiable tier
+    contributes no MISMATCH, so
     `truc reproduce name@99.99.99-totally-different` reproduced whatever `name`
     is TODAY and answered `ok=True`: an honest report line under a dishonest
     verdict, because the caller asked about one version and was answered about
-    another.
-
-    This test previously pinned that behaviour as correct.
+    another. This test previously pinned that behaviour as correct.
     """
+    _unversion(registry)
     report = R.reproduce(f"{COMPONENT}@99.99.99-totally-different",
                          registry=str(registry))
-    version_check = _tier(report, "version")
+    version_check = _tier(report, R.TIER_VERSION)
     assert version_check is not None
     assert version_check.status == R.MISMATCH
     assert "is not a pin" in version_check.detail
@@ -199,12 +209,97 @@ def test_a_requested_version_that_cannot_be_checked_refuses(registry):
     assert report.verdict == "not reproduced"
 
 
-def test_an_unversioned_request_still_reproduces(registry):
-    """The refusal is scoped to a version that was ASKED FOR and cannot be
-    checked. Asking for the component itself is unchanged."""
-    report = R.reproduce(COMPONENT, registry=str(registry))
-    assert _tier(report, "version") is None
+def test_a_recorded_version_that_matches_is_a_live_pin(registry):
+    """428 F12, the residual half: `@version` now PINS. The registry records a
+    per-component version, so a request that names it is checked and the tier
+    is OK with both values surfaced — the first time this tier verifies
+    anything rather than degrading."""
+    report = R.reproduce(f"{COMPONENT}@1.0.0", registry=str(registry))
+    check = _tier(report, R.TIER_VERSION)
+    assert check.status == R.OK
+    assert check.recorded == "1.0.0" and check.rebuilt == "1.0.0"
     assert report.ok
+
+
+def test_a_recorded_version_that_disagrees_refuses_the_resolution(registry):
+    """A pin the registry cannot honour is not reproduced under a warning: the
+    resolution itself refuses, because rebuilding a different release under the
+    name that was asked for answers a different question."""
+    from revl.errors import RevlError
+
+    with pytest.raises(RevlError) as excinfo:
+        R.reproduce(f"{COMPONENT}@2.0.0", registry=str(registry))
+    assert "is not published here" in excinfo.value.message
+    assert "1.0.0" in excinfo.value.message
+
+
+def test_an_unversioned_request_is_not_fully_reproduced(registry):
+    """Asking for no version is answered with no pin, not with a silent pass.
+
+    A rebuild that named no release reproduced "whatever this registry serves
+    right now", which is a real but much weaker claim than reproducing a named
+    release, so the version tier is `cannot verify` and the run can never be
+    *fully* reproduced. It is not a failure: no tier diverged, so `ok` holds,
+    the same honest-degradation rule every other tier follows. The detail names
+    the version that WOULD pin it."""
+    report = R.reproduce(COMPONENT, registry=str(registry))
+    check = _tier(report, R.TIER_VERSION)
+    assert check.status == R.UNVERIFIED
+    assert "no release was pinned" in check.detail
+    assert f"truc reproduce {COMPONENT}@1.0.0" in check.detail
+    assert report.ok
+    assert not report.fully_verified
+
+
+def test_an_unversioned_registry_cannot_pin_at_all(registry):
+    """An entry that declares no version is honestly unversioned: nothing is
+    invented for it, the tier says there is no release identity to pin, and the
+    run is at best partially reproduced."""
+    _unversion(registry)
+    report = R.reproduce(COMPONENT, registry=str(registry))
+    check = _tier(report, R.TIER_VERSION)
+    assert check.status == R.UNVERIFIED
+    assert "records none" in check.detail
+    assert report.ok and not report.fully_verified
+
+
+def test_a_malformed_declared_version_refuses_to_publish(registry):
+    """Fail-closed at the publish end. A `version` file that is present but
+    unusable is a refusal, never a silently unversioned entry: a publisher who
+    meant to declare a version must not ship one a consumer can never pin."""
+    from revl.errors import RevlError
+    from revl.registry import ENTRY_VERSION_FILENAME, build_index
+
+    (_entry(registry) / ENTRY_VERSION_FILENAME).write_text("not a version\n")
+    with pytest.raises(RevlError) as excinfo:
+        build_index(registry)
+    assert "must be one token" in excinfo.value.message
+
+
+def test_a_relabelled_release_is_caught_by_the_independent_pin(tmp_path, registry):
+    """The registry-as-adversary case for the version, one tier over. A project
+    that locked `name` at one version sees the registry serving the same name at
+    another — even with the bytes untouched, so no hash tier moves — because the
+    lock row carries the version the project admitted and the registry cannot
+    mint that copy."""
+    from revl.registry import _sha256
+
+    source = (_entry(registry) / "component.rvl").read_text()
+    project = tmp_path / "proj"
+    (project / "trucs" / COMPONENT).mkdir(parents=True)
+    (project / "trucs" / COMPONENT / "component.rvl").write_text(source)
+    (project / "truc.lock").write_text(json.dumps({
+        "lockVersion": 0,
+        "trucs": [{"name": COMPONENT, "version": "0.9.0",
+                   "sourceHash": _sha256(source)}]}))
+
+    report = R.reproduce(COMPONENT, project_dir=str(project),
+                         registry=str(registry))
+    anchor = _tier(report, R.TIER_ANCHOR)
+    assert anchor.status == R.MISMATCH
+    assert "relabelled" in anchor.detail
+    assert anchor.recorded == "0.9.0" and anchor.rebuilt == "1.0.0"
+    assert not report.ok
 
 
 # ------------------------------------------------------------- attestation tier

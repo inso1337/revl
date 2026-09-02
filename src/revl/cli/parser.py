@@ -119,6 +119,24 @@ def build_parser() -> argparse.ArgumentParser:
                           help="print the skeleton, its obligations, and each hole's fill spec "
                                "as one JSON document")
 
+    # item 426 S1: the row table of a declared composition.
+    composition = sub.add_parser(
+        "composition",
+        help="resolve a composition document's ROW TABLE (labels, claims, "
+             "config), header-only")
+    composition.add_argument("file", help="the .rvl document declaring the composition")
+    composition.add_argument(
+        "--json", action="store_true",
+        help="print the row table as JSON instead of the ROWS/WIRING panels")
+    composition.add_argument(
+        "--admit", action="store_true",
+        help="also COMPILE the rows the table names and print the resulting "
+             "load order (resolution alone lowers no component body)")
+    composition.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="the project root row provenance and origins are recorded "
+             "against (default: the working directory)")
+
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
@@ -575,21 +593,23 @@ def build_parser() -> argparse.ArgumentParser:
                                 "(today's behaviour)")
     # roadmap 425 F3 / 427 F5: whether an approved crossing's CALLER-SUPPLIED
     # resource value (`host=`, `path=`, `table=`) is written into the durable
-    # cross-session approval WAL. Defaults to `bound` — item 251's N1, and what
-    # shipped; `withheld` closes the durable disclosure and gives up the
-    # distiller's fold over caller-argument targets. The ticket discloses that a
-    # target is caller-supplied either way, so the operator's yes is informed.
-    mcp_serve.add_argument("--approval-record-values", default="bound",
+    # cross-session approval WAL. Defaults to `withheld` — an operator who never
+    # reads this flag does not silently persist somebody else's values in
+    # plaintext; `bound` opts into recording them, which is what lets the
+    # distiller fold a series of approvals into a rule that NAMES the target
+    # (item 251's N1). The ticket discloses that a target is caller-supplied
+    # under both, so the operator's yes is informed either way.
+    mcp_serve.add_argument("--approval-record-values", default="withheld",
                            choices=("bound", "withheld"),
                            help="whether an approved class-(c) crossing's "
                                 "caller-supplied resource value is recorded in "
-                                "the durable approval log. `bound` (default) "
-                                "records it, so a distilled rule can name the "
-                                "target (item 251 N1). `withheld` records it as "
-                                "UNRECORDED, keeping caller values out of the "
-                                "cross-session WAL at the cost of that fold. An "
-                                "author-written literal target is recorded under "
-                                "both")
+                                "the durable approval log. `withheld` (default) "
+                                "records it as UNRECORDED, keeping caller values "
+                                "out of the cross-session WAL; the cost is that "
+                                "such approvals no longer fold into a distilled "
+                                "rule. `bound` records it verbatim so a rule can "
+                                "name the target (item 251 N1). An author-written "
+                                "literal target is recorded under both")
     # authoring trust: whether the AGENT driving this server may author host
     # code, and what filesystem it may name. Defaults CLOSED — an inline `@py`
     # body sent to revl_load/check/swap used to compile and RUN as host Python
@@ -680,24 +700,39 @@ def build_parser() -> argparse.ArgumentParser:
              "Repeatable")
     imp_api.add_argument(
         "--compensate", action="append", default=[], metavar="OP",
-        help="item 254 (Slice 1): promote a `PUT` to a COMPENSATE-grade network "
-             "effect — attach a best-effort, audit-surface reversal (PUT the GET "
-             "preimage back on abort) to its emission. Honoured on `PUT` only "
-             "(hard error on POST/PATCH). Pair with `--preimage OP=GETOP`. "
-             "Repeatable")
+        help="item 254: promote a write to a COMPENSATE-grade network effect — "
+             "attach a best-effort, audit-surface reversal to its emission. The "
+             "verb picks the route: `PUT` restores the GET preimage, `DELETE` "
+             "recreates from it, `POST` deletes what it created. Hard error on "
+             "`PATCH`. Pair with `--preimage`/`--undo`/`--undo-key`. Repeatable")
     imp_api.add_argument(
         "--preimage", action="append", default=[], metavar="OP=GETOP",
-        help="item 254: name the safe `GET` operation a compensate-grade `PUT` "
-             "reads its preimage from. Repeatable")
+        help="item 254: name the safe `GET` operation a compensate-grade `PUT` or "
+             "`DELETE` reads its preimage from. Repeatable")
     imp_api.add_argument(
-        "--undo", action="append", default=[], metavar="OP=PUTOP",
-        help="item 254: name the operation that writes the preimage back "
-             "(defaults to the `PUT` itself). Repeatable")
+        "--undo", action="append", default=[], metavar="OP=UNDOOP",
+        help="item 254: name the operation the reversal issues — the `PUT` that "
+             "writes the preimage back (the default for a `PUT`), the create a "
+             "`DELETE` recreates through, or the delete that removes what a "
+             "`POST` created. Repeatable")
+    imp_api.add_argument(
+        "--undo-key", action="append", default=[], metavar="OP=FIELD",
+        dest="undo_key",
+        help="item 254: for a compensate-grade `POST`, the REQUIRED response "
+             "field naming the resource it created, which the reversal delete is "
+             "addressed by. Without it the compensation is unkeyed and refused. "
+             "Repeatable")
     imp_api.add_argument(
         "--if-match", action="append", default=[], metavar="OP", dest="if_match",
         help="item 254: assert a compensate-grade endpoint exposes a version/ETag "
-             "token, so the reversal PUTs with `If-Match` and fails loudly on a "
-             "racing writer (else it is best-effort-may-clobber). Repeatable")
+             "token, so the reversal issues under `If-Match` (`If-None-Match: *` "
+             "for a recreate) and fails loudly on a racing writer (else it is "
+             "best-effort-may-clobber). Repeatable")
+    imp_api.add_argument(
+        "--require-if-match", action="store_true", dest="require_if_match",
+        help="item 254: refuse a compensate-grade promotion on any endpoint that "
+             "claims no version/ETag token, instead of emitting a "
+             "best-effort-may-clobber reversal for it")
     imp_api.add_argument("-o", "--output", default=None,
                          help="output path (default: stdout)")
     imp_api.add_argument("--json-diagnostics", action="store_true",
@@ -797,6 +832,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--record", action="store_true",
                      help="record the effect accumulator so the REPL can step "
                           "backwards over it (`:timeline`, `:back k`) — see docs/replay.md")
+    run.add_argument("--estop-latch", default=None, metavar="FILE",
+                     help="watch FILE for an operator E-Stop (item 443). While "
+                          "armed, every boundary-crossing seam checks the latch, "
+                          "so `revl estop --latch FILE` from another terminal "
+                          "halts this run immediately — no unwind, an honest "
+                          "in-flight inventory instead. Equivalent to the "
+                          "REVL_ESTOP_LATCH environment variable")
     run.add_argument("--wal", default=None, metavar="FILE",
                      help="persist the effect accumulator as a durable write-ahead "
                           "log (implies --record). On restart, `revl recover --wal "
@@ -848,10 +890,80 @@ def build_parser() -> argparse.ArgumentParser:
                               "of firing unprompted. Required when the snapshot "
                               "records an approval policy")
     recover.add_argument("--policy", default=None, metavar="POLICY",
-                         help="on --restore, re-bind the boundary-policy file (item "
-                              "33) the snapshot was taken under, so its `requires "
-                              "approval` gate re-arms on recovery")
+                         help="the boundary-policy file (item 33). On --restore it "
+                              "re-binds the posture the snapshot was taken under so "
+                              "the `requires approval` gate re-arms; a `recovery may "
+                              "re-issue owed emissions` rule additionally turns on "
+                              "the item-440 re-issue seam (off by default)")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
+
+    estop = sub.add_parser(
+        "estop",
+        help="E-STOP (item 443): the operator's emergency halt. Arm the latch a "
+             "running composition watches, so it stops dispatching NEW boundary "
+             "crossings immediately and reports what was in flight — instead of "
+             "the graceful two-phase LIFO unwind every other stop performs "
+             "(docs/design/443-estop.md)")
+    estop.add_argument("--latch", default=None, metavar="FILE",
+                       help="the latch file the running process watches "
+                            "(`revl run --estop-latch FILE`, or the ambient "
+                            "REVL_ESTOP_LATCH). Required unless --wal is given, "
+                            "which derives FILE.estop")
+    estop.add_argument("--wal", default=None, metavar="FILE",
+                       help="the running session's write-ahead log. Derives the "
+                            "latch as FILE.estop when --latch is omitted, and "
+                            "names the log `revl recover` reconciles from")
+    estop.add_argument("--reason", default="operator halt", metavar="TEXT",
+                       help="why the button was hit. Carried into the halt "
+                            "record and into every residue record it produces")
+    estop.add_argument("--operator", default=None, metavar="TOKEN",
+                       help="the operator token accountable for the halt. An "
+                            "E-Stop is an operator authority (item 55's `estop` "
+                            "verb): it is never something a composition or an "
+                            "agent may invoke on itself")
+    estop.add_argument("--report", action="store_true",
+                       help="read the latch back and print what was halted, "
+                            "WITHOUT arming anything or touching the world")
+    estop.add_argument("--clear", action="store_true",
+                       help="remove the latch so a FRESH process may boot. This "
+                            "is not a resume: the halted instance stays dead and "
+                            "its stranded entries stay owed until `revl recover` "
+                            "reconciles them (item 443, open question 3)")
+    estop.add_argument("--json", action="store_true",
+                       help="machine-readable output")
+    branch_cmd = sub.add_parser(
+        "branch",
+        help="session branch lineage over durable write-ahead logs (item 250): "
+             "what a WAL is (a branch, a parent frozen at k, or neither), the "
+             "branch tree across several WALs, and — with --at — the fork "
+             "partition of a recorded tail "
+             "(docs/design/250-session-branching.md)")
+    branch_cmd.add_argument(
+        "--wal", required=True, action="append", metavar="FILE",
+        help="a write-ahead log; repeat it to reconstruct the branch tree across "
+             "a parent and its branches")
+    branch_cmd.add_argument(
+        "--at", type=int, default=None, metavar="SEQ",
+        help="instead of the lineage, enumerate the fork partition of the tail "
+             "above this WAL position: what a fork here would put back, what "
+             "already crossed and cannot be undone, and what it would refuse. "
+             "-1 is the whole recorded tail. Requires a single --wal; runs "
+             "nothing and rewinds nothing")
+    branch_cmd.add_argument("--json", action="store_true",
+                            help="machine-readable output")
+
+    compare_cmd = sub.add_parser(
+        "compare",
+        help="compare two recorded session histories that share a fork point "
+             "(item 250): what each did after diverging, and what a comparison "
+             "of durable logs cannot yet say "
+             "(docs/design/250-session-branching.md)")
+    compare_cmd.add_argument("left", metavar="LEFT.wal",
+                             help="one session's write-ahead log")
+    compare_cmd.add_argument("right", metavar="RIGHT.wal",
+                             help="the other session's write-ahead log")
+    compare_cmd.add_argument("--json", action="store_true",
+                             help="machine-readable output")
 
     why = sub.add_parser(
         "why",

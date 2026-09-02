@@ -3,8 +3,10 @@
 Roadmap item 432(e) FIXED the growth half: `$alloc` now calls `$__heap_grow`
 when the bump crosses the current memory limit, so both facts below now come
 back green and the probe reads as a regression witness rather than a defect
-report. Nothing is reclaimed yet, so fact 2's heap still rises with the call
-count; it just no longer ends the instance. The two facts as they stood:
+report. The reclaim half is fixed too, and fact 3 is its proof: a canonical
+export rewinds `$__hp` to the arena floor on the way out, so the heap
+high-water mark no longer depends on the call count at all. The three facts
+as they stood:
 
 1. A single canonical call with a `Str` argument larger than the page
    fails. The emitter writes `(memory (export "memory") 1)` and neither
@@ -26,6 +28,17 @@ count; it just no longer ends the instance. The two facts as they stood:
    trapped. (a)/(c)/(f) shrank what a call allocates, so this moved from
    63 calls to 65; it did not remove the cliff, because nothing frees.
 
+3. Nothing was ever reclaimed, so growth turned "dies at call 65" into
+   "grows without bound". Facts 1 and 2 both replay the per-call
+   ALLOCATION rather than the call, which cannot see a rewind that lives
+   in the export wrapper, so fact 3 drives the REAL canonical export the
+   way a component host does -- one `cabi_realloc` for the argument, then
+   the export -- and reports both where `$__hp` ended up and how far
+   `memory.size` ever got. Before the reclaim fix: 1040 B after 1 call,
+   66056 after 64, 67633160 B (1033 pages) after 65536, for a workload
+   whose live set is one 1 KiB string. After it: the arena floor and one
+   page, at every call count.
+
     PYTHONPATH=<repo>/src python bench/codegen/wasm/probe_heap.py
 """
 
@@ -46,7 +59,7 @@ import harness  # noqa: E402
 #: item 432(a)'s header headroom, and the lift then copies nothing into a
 #: second one. Item 432(f) made the return area static, so there is no
 #: per-call bump for it either. What is left is exactly one allocation per
-#: call, and it is still never reclaimed, which is the point of the probe.
+#: call. Fact 3's driver, below, is the one that can see it being reclaimed.
 DRIVER = """  (func (export "drive") (param $n i32) (param $len i32) (result i32)
     (local $i i32) (local $p i32)
     (block $done
@@ -60,6 +73,43 @@ DRIVER = """  (func (export "drive") (param $n i32) (param $len i32) (result i32
         (br $go)))
     (global.get $__hp))
 """
+
+
+#: Fact 3. Drives the canonical export itself, so the per-call arena rewind in
+#: the wrapper is inside what is measured. `drive_calls` reports where the bump
+#: pointer ENDED; `drive_pages` reports how far `memory.size` ever got, which
+#: only ever rises and is therefore the true high-water mark of the whole run.
+CALL_DRIVER = """  (func $drive_calls (export "drive_calls")
+      (param $n i32) (param $len i32) (result i32)
+    (local $i i32) (local $p i32)
+    (block $done
+      (loop $go
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $p (call $__cabi_realloc
+          (i32.const 0) (i32.const 0) (i32.const 1) (local.get $len)))
+        (drop (call $__export_echo (local.get $p) (local.get $len)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $go)))
+    (global.get $__hp))
+  (func (export "drive_pages") (param $n i32) (param $len i32) (result i32)
+    (drop (call $drive_calls (local.get $n) (local.get $len)))
+    (memory.size))
+"""
+
+_ECHO_EXPORT = "revl:exported/echoer#echo"
+
+
+def _with_call_driver(core_wat: str) -> str:
+    """`core_wat` with `CALL_DRIVER` spliced in, and the two functions it calls
+    given symbols (both are emitted as anonymous exported funcs)."""
+    wat = core_wat.replace('(func (export "cabi_realloc")',
+                           '(func $__cabi_realloc (export "cabi_realloc")', 1)
+    wat = wat.replace(f'(func (export "{_ECHO_EXPORT}")',
+                      f'(func $__export_echo (export "{_ECHO_EXPORT}")', 1)
+    if "$__cabi_realloc" not in wat or "$__export_echo" not in wat:
+        raise SystemExit("probe: the call-driver splice points moved")
+    body = wat.rstrip()
+    return body[:-1].rstrip("\n") + "\n" + CALL_DRIVER + ")\n"
 
 
 def _core_wasm(wat: str, out: pathlib.Path) -> pathlib.Path:
@@ -118,6 +168,28 @@ def main() -> int:
                          (res.stderr + res.stdout).splitlines()
                          if "wasm trap" in ln or "memory fault" in ln), "failed")
             print(f"   {calls:4d} calls x 1024 B -> TRAP  {line}")
+
+    print("\n== 3. repeated calls THROUGH the canonical export (the arena) ==")
+    call_core = _core_wasm(_with_call_driver(emitted["core_wat"]),
+                           tmp / "callcore")
+    for calls in (1, 8, 64, 1024, 65536):
+        hp = subprocess.run(
+            [wasmtime, "run", "--invoke", "drive_calls", str(call_core),
+             str(calls), "1024"],
+            capture_output=True, text=True, timeout=600)
+        pages = subprocess.run(
+            [wasmtime, "run", "--invoke", "drive_pages", str(call_core),
+             str(calls), "1024"],
+            capture_output=True, text=True, timeout=600)
+        if hp.returncode == 0 and pages.returncode == 0:
+            print(f"   {calls:5d} calls x 1024 B -> $__hp {int(hp.stdout):9d} B, "
+                  f"high-water {int(pages.stdout):4d} page"
+                  f"{'' if int(pages.stdout) == 1 else 's'}")
+        else:
+            line = next((ln.strip() for ln in
+                         (hp.stderr + hp.stdout + pages.stderr).splitlines()
+                         if "wasm trap" in ln or "memory fault" in ln), "failed")
+            print(f"   {calls:5d} calls x 1024 B -> TRAP  {line}")
     return 0
 
 

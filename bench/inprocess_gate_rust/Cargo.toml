@@ -1,0 +1,19 @@
+# The rust twin of `bench/inprocess_gate_harness.py` (roadmap item 333, Slice 2).
+#
+# A STANDALONE consumer crate: its only dependency is `crates/revl-gate`, by
+# path. No revl source, no Python, nothing else on the graph — an agent
+# framework that `cargo add`s the gate gets exactly this much and no more, and
+# building the harness proves that much is enough.
+[package]
+name = "inprocess_gate_rust"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "In-process admission gate harness for an agent framework (rust twin of bench/inprocess_gate_harness.py)"
+
+# An explicit empty workspace table: no Cargo.toml above this directory may
+# adopt the harness and change what gets built.
+[workspace]
+
+[dependencies]
+revl-gate = { path = "../../crates/revl-gate" }

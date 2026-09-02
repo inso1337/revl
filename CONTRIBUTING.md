@@ -344,8 +344,8 @@ in the `lint` CI job) now fails when a marker contradicts git. Four rules:
 
 3. **Say what is still open in the same breath as what is closed, and say
    which tiers.** Git can only answer questions about branches and shas, and
-   four failures on 2026-09-02 were invisible to it. Four more checks exist
-   for them, each behind its own flag, all four under `make roadmap-check-all`.
+   five failures on 2026-09-02 were invisible to it. Five more checks exist
+   for them, each behind its own flag, all five under `make roadmap-check-all`.
    What they ask of a writer:
 
    - A header that claims closure must not have open findings under it, and a
@@ -361,6 +361,12 @@ in the `lint` CI job) now fails when a marker contradicts git. Four rules:
    - An open finding names a branch, an issue, an owner, or the sha that fixed
      it. The sha you re-verified it on does not count: that records that the
      finding is still live, not that anybody is closing it.
+   - One item NUMBER carries one block per section. Numbers restart per
+     section by design, but two blocks under one number inside a section is
+     always a defect: merge `bd0f4d19` kept both sides of a hunk and left a
+     stale `106. 🚧` header above the `106. ✅` entry that had
+     replaced it, and that one line was the only reason a landed item read as
+     open.
    - A fix that touches one `backends/<tier>/` path says which other tiers it
      does not cover. Three defects were fixed on the python tier on 2026-09-02
      and left live everywhere else. No gate can decide semantic parity;

@@ -72,6 +72,22 @@ import RevL
 #print axioms RevL.G7.verdict_is_load_bearing
 #print axioms RevL.G7.commit_discharge_is_not_vacuous
 
+-- item 443: the E-Stop verdict (docs/design/443-estop.md) — the third
+-- column of the teardown contract's table, and the halt's total accounting.
+#print axioms RevL.Semantics.disposition_trichotomy
+#print axioms RevL.Semantics.halted_strands_every_kind
+#print axioms RevL.Semantics.replayed_length
+#print axioms RevL.Semantics.book_lengths_add
+#print axioms RevL.G7.estop_replays_nothing
+#print axioms RevL.G7.estop_discharges_nothing
+#print axioms RevL.G7.estop_strands_everything
+#print axioms RevL.G7.estop_strands_the_bracket
+#print axioms RevL.G7.halt_inventory_is_total
+#print axioms RevL.G7.halt_ambiguity_is_at_most_one
+#print axioms RevL.G7.halt_books_are_total
+#print axioms RevL.G7.estop_is_load_bearing
+#print axioms RevL.G7.mid_abort_halt_cut_is_not_vacuous
+
 -- G8: the boundary surface is enumerable (completeness + soundness).
 #print axioms RevL.G8.boundary_enumerates_emissions
 #print axioms RevL.G8.boundary_only_declared
