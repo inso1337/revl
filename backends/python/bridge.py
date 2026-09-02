@@ -432,7 +432,30 @@ async def _invoke(ctx, exports: dict, req: dict, module=None) -> dict:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-async def serve(ctx, exports, endpoint, module=None):
+def peer_identity(writer) -> str | None:
+    """The identity the TRANSPORT authenticated for this connection, or None.
+
+    On a network seam that is the peer certificate's commonName — the item-55
+    per-process identity the certificate was minted for, proven by the mTLS
+    handshake rather than asserted in a request. On a local UDS seam there is no
+    transport-level identity (a 0700-dir socket is bound to one host by
+    construction), so this is None and a correlation guard authenticates the
+    peer by its own per-process secret alone (item 118, docs/deploy.md).
+    """
+    ssl_object = writer.get_extra_info("ssl_object")
+    if ssl_object is None:
+        return None
+    cert = ssl_object.getpeercert()
+    if not cert:
+        return None
+    for field in cert.get("subject") or ():
+        for name, value in field:
+            if name == "commonName":
+                return value
+    return None
+
+
+async def serve(ctx, exports, endpoint, module=None, correlation=None):
     """Listen on `endpoint` and answer calls against `ctx` for the exported
     surface.
 
@@ -449,12 +472,27 @@ async def serve(ctx, exports, endpoint, module=None):
     `module` is the emitted module (its case classes rebuild ADT/Result args a
     consumer encodes across the seam, symmetric with `proxy_component`'s
     `module` on the return path). Optional: with no module a tagged argument
-    stays a plain dict, exactly the legacy behaviour. Returns the asyncio
-    server; the caller keeps it (and the process) alive."""
+    stays a plain dict, exactly the legacy behaviour.
+
+    `correlation` (item 118, docs/deploy.md) is an optional guard —
+    `revl.deploy.CorrelationGuard` — run on EVERY request before dispatch. With
+    one set, a request must carry a `correlation` envelope that authenticates
+    against the peer identity (its own per-process secret, and, on a network
+    seam, the identity the mTLS handshake proved), and that is not a replay of
+    an envelope already seen for that `(peer_identity, composition_id,
+    generation, idempotency_key)` scope. A request that fails either check is
+    answered with an error and NEVER dispatched. Absent (the default) nothing
+    changes: the wire and the dispatch are byte-identical to the pre-118 seam.
+
+    Returns the asyncio server; the caller keeps it (and the process) alive."""
     ep = _as_endpoint(endpoint)
     table = _export_table(exports)
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Resolved once per connection: the transport-level identity does not
+        # change mid-session, and re-reading the peer cert per request would
+        # invite a check that drifts from the session it is supposed to bind.
+        identity = peer_identity(writer) if correlation is not None else None
         try:
             while True:
                 line = await reader.readline()
@@ -464,6 +502,16 @@ async def serve(ctx, exports, endpoint, module=None):
                     req = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if correlation is not None:
+                    ok, reason = correlation.admit(req.get("correlation"),
+                                                   transport_identity=identity)
+                    if not ok:
+                        writer.write((json.dumps({
+                            "ok": False,
+                            "error": f"correlation refused: {reason}",
+                            "correlation_refused": reason}) + "\n").encode())
+                        await writer.drain()
+                        continue
                 reply = await _invoke(ctx, table, req, module)
                 writer.write((json.dumps(reply) + "\n").encode())
                 await writer.drain()
@@ -509,8 +557,14 @@ class _Client:
     provider is torn down) is recognised as an expected cutover, not a death.
     """
 
-    def __init__(self, endpoint, module=None, deadline=None, deadlines=None) -> None:
+    def __init__(self, endpoint, module=None, deadline=None, deadlines=None,
+                 correlation=None) -> None:
         self._lock = threading.RLock()
+        # item 118 §1.4: the sealed correlation envelope this consumer stamps on
+        # every crossing. A callable is invoked per call (so `effect_id` and the
+        # idempotency key can vary); a mapping is sent verbatim. None keeps the
+        # request line byte-identical to the pre-118 wire.
+        self._correlation = correlation
         self._endpoint = _as_endpoint(endpoint)
         self.rpc = _connect_endpoint(self._endpoint)
         self._io = self.rpc.makefile("rwb")
@@ -545,10 +599,15 @@ class _Client:
         # instead of the raw `json.dumps` degrading it to a bare TypeError deep
         # in the encoder. Args and returns now both fail closed.
         encoded_args = _encode_value(list(args))
+        request = {"key": key, "method": method, "args": encoded_args}
+        if self._correlation is not None:
+            envelope = self._correlation
+            request["correlation"] = (envelope(key, method)
+                                      if callable(envelope) else envelope)
         with self._lock:
             io = self._io
             rpc = self.rpc
-            io.write((json.dumps({"key": key, "method": method, "args": encoded_args}) + "\n").encode())
+            io.write((json.dumps(request) + "\n").encode())
             io.flush()
             # Bound the blocking read on the reply. A wedged provider sends
             # nothing, so the recv times out at `seconds`; we surface that as
@@ -720,7 +779,8 @@ def _require_network_contract(key: str, endpoint: Endpoint, deadline) -> None:
 
 
 def proxy_component(key: str, methods, endpoint, module=None,
-                    deadline=None, deadlines=None, async_methods=None) -> dict:
+                    deadline=None, deadlines=None, async_methods=None,
+                    correlation=None) -> dict:
     """A cordis component that provides `key` via a proxy forwarding to the
     stub at `endpoint` (a UDS path string, or an `Endpoint` — a local UDS or a
     network TCP+mTLS seam). `module` (the emitted module) lets the proxy rebuild
@@ -735,11 +795,17 @@ def proxy_component(key: str, methods, endpoint, module=None,
     runtime unwinds like any other seam failure (A8: revert LIFO, no residue).
     Placement (`src/revl/placement.py`) reads these off the seam spec. A
     **network** seam is refused here unless it carries both an identity and a
-    deadline — a seam without either is malpractice across a machine boundary."""
+    deadline — a seam without either is malpractice across a machine boundary.
+
+    `correlation` (item 118 §1.4) is the sealed effect-correlation envelope this
+    consumer stamps on every crossing, or a callable `(key, method) -> envelope`
+    when the identity varies per call. The provider authenticates it against the
+    peer identity before dispatch (`serve`'s `correlation` guard)."""
     ep = _as_endpoint(endpoint)
     if ep.is_network:
         _require_network_contract(key, ep, deadline)
-    client = _Client(ep, module, deadline=deadline, deadlines=deadlines)
+    client = _Client(ep, module, deadline=deadline, deadlines=deadlines,
+                     correlation=correlation)
 
     def apply(ctx, config=None):
         proxy = _Proxy(client, key, methods, async_methods or ())
