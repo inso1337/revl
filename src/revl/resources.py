@@ -90,7 +90,10 @@ def resource_in(type_str: str | None, resources: set[str]) -> str | None:
     nested `Opt[Sock]` / `List[Sock]` / `Conn[Sock]`), or None."""
     if not type_str:
         return None
-    for resource in resources:
+    # sorted, not set order: the answer is reported in diagnostics and in the
+    # F10 audit surface, so a type naming two resources must not name a
+    # different one run to run.
+    for resource in sorted(resources):
         if re.search(rf"\b{re.escape(resource)}\b", type_str):
             return resource
     return None
@@ -152,3 +155,84 @@ def closing_ops(externs: list | None) -> set[str]:
             if name:
                 ops.add(name)
     return ops
+
+
+# ---------------------------------------------------------------------------
+# F10: the retaining-extern audit (item 308, design §B1 "The honest limitation:
+# retaining externs").
+# ---------------------------------------------------------------------------
+#
+# B1's flow walk sees revl positions only. An `emission fn register(c: Conn)`
+# that keeps the handle host-side, or a service whose implementation lives
+# across a bridge, escapes through a surface no clause can refuse: the
+# declaration does not say "retains", and the type system cannot know host
+# semantics. That is the same declaration-is-the-proof-surface line O1 draws
+# for an out-of-band close, and the design's named mitigation is REPORT-ONLY.
+#
+# So this is deliberately not a check. It enumerates the FRONTIER — every
+# declared position at which a resource handle leaves revl's sight — so a human
+# reviewing a composition can see the whole retention surface at once instead
+# of rediscovering it one extern at a time.
+#
+# It is declaration-derived and whole-program: a row exists because a signature
+# names a resource-carrying type in a parameter, not because some body was
+# walked. That makes the surface stable (it moves only when a declaration
+# moves), enumerable, and diffable — the properties `revl audit --diff` needs.
+#
+# WHAT IS EXCLUDED, and why. A declared inverse (`closing_ops`) is the SANCTIONED
+# close: teardown calls it with the handle exactly once, so its resource-typed
+# parameter is the contract working, not a retention hazard. Everything else
+# that can be handed a handle is listed, including an `acquire` extern that
+# takes one (a pool checkout) — that IS a retention question, just a defensible
+# one.
+#
+# WHAT THIS FACT IS NOT. Every row is a MAY-retain. Nothing here proves a host
+# body keeps anything, and nothing here proves one does not; a reader who wants
+# "does not retain" needs a declaration surface revl has not got (see the
+# design's deferred list). Consumers must not read an absent row as a
+# non-retention proof — absence only means no resource-typed parameter is
+# DECLARED, which is exactly what the checker already assumes everywhere.
+
+
+def retention_surface(externs: list | None, types: dict | None,
+                      services: dict | None = None) -> list:
+    """F10: every declared position where a resource handle leaves revl's sight.
+
+    One row per resource-carrying parameter of a non-inverse extern or of a
+    service method (a service reached across a bridge is implemented host-side,
+    so its parameters are the same frontier). Sorted, so the surface is stable
+    across runs and diffable; `[]` for a composition that declares no resource
+    type at all, which keeps the audit document byte-identical for it.
+    """
+    taint = resource_taint(externs, types)
+    if not taint:
+        return []
+    inverses = closing_ops(externs)
+    rows: list = []
+    for ext in externs or []:
+        if ext.get("name") in inverses:
+            continue
+        for index, param in enumerate(ext.get("params") or []):
+            carried = resource_in(param.get("type"), taint)
+            if carried is None:
+                continue
+            rows.append({
+                "kind": "extern", "callee": ext.get("name"),
+                "class": ext.get("class"), "param": param.get("name"),
+                "index": index, "type": param.get("type"),
+                "resource": carried,
+            })
+    for service, spec in sorted((services or {}).items()):
+        for method, decl in sorted((spec.get("methods") or {}).items()):
+            for index, param in enumerate(decl.get("params") or []):
+                carried = resource_in(param.get("type"), taint)
+                if carried is None:
+                    continue
+                rows.append({
+                    "kind": "service-method", "callee": f"{service}.{method}",
+                    "class": "emission" if decl.get("emission") else "plain",
+                    "param": param.get("name"), "index": index,
+                    "type": param.get("type"), "resource": carried,
+                })
+    rows.sort(key=lambda row: (row["kind"], row["callee"] or "", row["index"]))
+    return rows

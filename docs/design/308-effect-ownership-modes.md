@@ -367,9 +367,9 @@ with `result` bound to what the acquisition returned. That is precisely
 "release exactly the handle that was acquired", on the frame whose
 teardown is the right one, on the `Ok` branch only. Making `result`
 available in a site `undo`, or admitting a general method-scope acquire
-binding (the deferred F9 surface), would each be a second, weaker copy of
-that mechanism; a handle-carrying form would be a third. The refusals
-point at `witnessed` rather than inventing one.
+binding (the F9 surface, DECIDED below and not built), would each be a
+second, weaker copy of that mechanism; a handle-carrying form would be a
+third. The refusals point at `witnessed` rather than inventing one.
 
 ### B1: a borrow does not escape its scope
 
@@ -487,6 +487,127 @@ mitigation, worth shipping with slice 2: `revl audit` lists every
 resource-typed argument reaching a non-inverse extern or a
 bridge-implemented service, so a human can review the retention surface
 even though the checker cannot refuse it.
+
+**F10, SHIPPED (`src/revl/resources.py: retention_surface`).** One row per
+resource-carrying parameter of a non-inverse extern or of a service
+method, in `revl audit` and in its `--json` document under `retention`.
+Declaration-derived and whole-program: a row exists because a signature
+names a resource-carrying type, not because a body was walked, which is
+what makes the surface stable (it moves only when a declaration moves),
+enumerable, and diffable. A declared inverse is EXCLUDED: teardown calling
+it with the handle exactly once is the contract working, not a retention
+hazard. Present only when there is a row, so a handle-free composition's
+audit document is byte-identical to before, the same conditional-presence
+discipline `parallel_plan` and `secrets` hold to.
+
+Every row is a MAY-retain, and the honesty runs in both directions. A row
+does not prove a host body keeps the handle, and an ABSENT row does not
+prove one does not: absence means only that no resource-typed parameter is
+DECLARED. That is worth stating flatly because it bounds what a consumer
+may do with this fact. `src/revl/ownership.py`'s whole-program retention
+summary (item 445b) currently assumes every callee without a summary
+retains everything, externs included, and it would be a real precision win
+to narrow that. This surface CANNOT narrow it: a may-retain set is exactly
+the assumption already in force. What it does is make the frontier
+enumerable, which is the input a future `retains` / `borrows` declaration
+marker would key on. Narrowing waits for that marker; nothing here is
+licence to assume a non-retention that was never declared.
+
+### F9, decided: method-scope early release
+
+**The count came back zero, and that is not the whole answer.** The
+decision procedure was a corpus count of method-scope acquire forms.
+Parsing all 873 `.rvl` files with the real front end and walking every
+`provide` method body finds FOUR method-scope acquisition sites, all four
+`witnessed` mutation steps with no site `undo`
+(`backends/go/scenarios/provide_method_witnessed.rvl:89,92`,
+`backends/go/scenarios/method_compensate.rvl:52`,
+`backends/java/scenarios/method_witnessed.rvl:56`), against 107
+activation-scope acquisitions. GENERAL method-scope acquires: zero. Not
+zero by accident either — `_lower_provide` refuses the form outright
+(`src/revl/lower.py`, "only `spawn` may be acquired inside a
+provide-method body"), so option B of the original decision ("v1 refuses
+method-scope acquires with a diagnostic naming the restructure") was
+already true before this item was written, and is now pinned by a test so
+it cannot regress quietly.
+
+So the open question narrows to what CAN be acquired at method scope, and
+that is two forms:
+
+1. a result-declared host verb (item 397, today exactly
+   `insert_if_absent`), which binds a checked `Bool`. No handle, no
+   lifetime, nothing for F9 to decide.
+2. `spawn`. This one yields a live instance — and it is already the one
+   acquisition in the language with an early release.
+
+**The surface exists, spelled in the grammar revl already had.** A spawn
+is a CHILD FIBER (`docs/design-v2-instances.md`, item zero): its own
+nested teardown scope. `w.dispose()` unloads it now, mid-method, written
+`effect w.dispose() undo w.dispose()`. There is no explicit-release
+surface owed, and building the general `release conn` form would be a
+third weaker copy of a mechanism that already works — the same judgment
+the provide-method seam paragraph reaches about `witnessed`.
+
+**Why that does not disturb teardown**, which is the reason a general
+release surface was deferred in the first place. Early release here
+releases a SCOPE; it does not DISCHARGE AN ENTRY. The frame-adopted safety
+net (`Frame.acquire`'s `lambda w: w.dispose()`) stays registered on the
+enclosing activation's LIFO for its whole life, and `SpawnHandle.dispose`
+is idempotent on its `_disposed` flag. The entry set G7 walks is exactly
+what it was, so LIFO-completeness needs no re-argument.
+
+**What a fault mid-scope does**, stated explicitly, proven at runtime in
+`tests/test_ownership_f9_runtime_308.py`:
+
+* **fault BEFORE the release.** The entry is registered and unrun. A
+  provide-method fault is NOT an activation abort (`Frame._aborting` stays
+  clear; only `Frame.abort()` or a session abort sets it), so it
+  propagates to the caller and leaves the entry alone, and the entry runs
+  at activation teardown in LIFO position, guarded. NOTHING IS MISSED.
+* **fault AFTER the release.** The entry is registered and runs; the
+  second dispose is a no-op. NOTHING RUNS TWICE.
+* **E-Stop mid-scope (item 443's `halted`).** The entry is STRANDED either
+  way: registered, not run, not dropped, kept for `revl recover`. Where
+  the release already happened the stranded record names one entry whose
+  replay is a no-op, so the halt OVER-reports by one. That is the R4-safe
+  direction — residue is never under-reported — and it is precisely why
+  early release must not discharge: a discharge would drop the descriptor
+  the halt is required to keep, and THAT would contradict
+  `RevL.G7.estop_strands_everything`. Stranding acts on ENTRIES, early
+  release acts on the EFFECT; the two ideas are adjacent and do not meet.
+
+**What F9 therefore ADDS**, since the release surface needed nothing. The
+nested scope's promise — "a request-scoped instance is reclaimed when the
+request ends" — was UNENFORCED. An `Instance[C]` is not an `extern
+acquire` return, so it is not in the resource-taint base and no B1 clause
+ever bound it: a provide method could return the handle, park it in
+activation state, alias it, seat it in a carrier, or close over it, and
+the instance then outlived the request it was scoped to while its
+safety-net entry sat on the activation frame. F9 is B1's does-not-escape
+rule applied to the one handle B1 could not see
+(`_f9_instance_scope_scan`, `src/revl/lower.py`).
+
+It keys on the BINDING, not on a type. `spawn` is syntactically evident at
+the acquiring step, and putting `Instance[C]` in the taint base would also
+bind the ACTIVATION-scope owner pool that the owner carve-out deliberately
+admits. The admitted positions are a whitelist, not a blacklist: the
+handle is read and not retained as the receiver of a host method call
+(`w.dispose()`) and as the base of a provision read (`w.task.run(..)`),
+which are the two things the instance surface is for. Everything else is
+refused. Inside an arrow body even those two stop counting, because an
+arrow's type erases what it closes over — B1 clause 2's reasoning, applied
+for B1 clause 2's reason.
+
+**Additivity.** The corpus contains one method-scope spawn, in
+`examples/rejections/g4_unmarked_handle_emission.rvl` (a rejection fixture
+that returns an `Int`, not the handle); every other spawn is
+activation-scope and stays admitted under the owner carve-out. A sweep of
+all 258 compilable corpus files produces zero new refusals.
+
+**What stays open.** `shared` and `transfer` remain deferred to item 294's
+leases; a general explicit-release surface for an ACTIVATION-scope handle
+is still not in the language, and O1's hint still says so honestly. F9
+does not change either.
 
 ### S1: shared teardown, exactly once at last release (deferred with shared)
 
@@ -623,25 +744,24 @@ The minimal cut that pays for itself immediately:
 3. B1: borrow does-not-escape (the seven clauses, with the owner
    carve-out as bounded above).
 4. Mode-named diagnostics, including upgrading the seam refusal's message.
-5. The retention audit: `revl audit` lists resource-typed arguments
-   reaching non-inverse externs and bridge services (report-only, the B1
-   limitation's mitigation).
-6. The method-scope acquire decision, driven by the slice-0 corpus count
-   (see the staged plan): either the early-release surface lands with
-   slice 1, or v1 refuses method-scope acquires with a diagnostic naming
-   the restructure. Not deciding is not an option: O1 plus
-   activation-lifetime brackets makes a method-scope acquire
-   leak-until-unload with no recourse, which is a worse behavior than
-   either explicit choice.
+5. The retention audit (F10, SHIPPED): `revl audit` lists resource-typed
+   arguments reaching non-inverse externs and bridge services
+   (report-only, the B1 limitation's mitigation).
+6. The method-scope acquire decision (F9, DECIDED — see "F9, decided"):
+   the count is zero because the general form is already refused, the one
+   handle-yielding method-scope acquisition (`spawn`) already has its
+   early release (`w.dispose()`, a nested teardown scope), and what F9
+   adds is B1's does-not-escape rule extended to that handle. No new
+   surface, no new grammar, no discharge.
 
 Deferred, each with its landing place named: `shared` (a 294 lease
 binding; spec S1 above, crash-path executor owed), explicit `transfer`
 and realm-crossing moves (new source marker, WAL migration; also the only
-honest future for handoff of resource-carrying state, per clause 7),
-early release IF the slice-0 count comes back zero (an explicit-release
-surface that discharges the bracket; interacts with 245 session commit),
-remote borrows (a service, not a proxy, is the answer until proven
-otherwise).
+honest future for handoff of resource-carrying state, per clause 7), an
+explicit-release surface for an ACTIVATION-scope handle (F9 resolved the
+method-scope half without one; this half still interacts with 245 session
+commit and stays unbuilt), remote borrows (a service, not a proxy, is the
+answer until proven otherwise).
 
 **Migration risk, stated.** B1 is conservative and could refuse an
 existing admitted program that parks a received handle in activation
@@ -682,6 +802,10 @@ per-backend goldens byte-identical (checker-only until the shared slice).
   distribute/placement tests unchanged; durable_log admitted under its
   migrated handle type; sweep output reviewed and carve-outs (if any)
   amended here; the method-scope decision recorded in this doc.
+  COUNT RECORDED: four method-scope acquisition sites, all `witnessed`
+  mutation steps, against 107 activation-scope acquisitions; ZERO general
+  method-scope acquires, because the form is already refused. See "F9,
+  decided" for what that resolves and what it leaves.
 - **Slice 1: O1.** Exit tests:
   - owner closes ok: the standard bracket program unchanged, inverse runs
     once at teardown (existing TCK behavior re-pinned, goldens
@@ -731,17 +855,15 @@ per-backend goldens byte-identical (checker-only until the shared slice).
 
 ## Open questions (left deliberately)
 
-1. **Early release: no longer open-ended, decided by the slice-0 count.**
-   O1 refuses mid-session close with a hint pointing at a surface that
-   does not exist, and O1 plus activation-lifetime brackets makes a
-   method-scope acquire leak-until-unload with no recourse. The decision
-   procedure: slice 0 counts method-scope acquire forms in the corpus. If
-   the count is nonzero, either the explicit-release surface (`release
-   conn`: run the inverse now, discharge the bracket entry; interacts
-   with 245's session escrow) is sequenced WITH slice 1, or v1 refuses
-   method-scope acquires with a diagnostic naming the restructure (hoist
-   the acquire to activation scope). If zero, early release defers as a
-   follow-up item and the hint stands.
+1. **Early release: CLOSED (F9). See "F9, decided".** The count is zero
+   general method-scope acquires; the form is already refused, so option
+   B was already in force. The one handle-yielding method-scope
+   acquisition, `spawn`, already releases early through its own nested
+   teardown scope, and doing so releases a SCOPE without DISCHARGING AN
+   ENTRY, which is what keeps G7 and the `halted` verdict consistent with
+   it. What was actually missing was enforcement of the scope's promise,
+   and that is what F9 shipped. An explicit-release surface for an
+   ACTIVATION-scope handle is still absent and O1's hint still says so.
 2. **Borrow-across-await.** An async provide method holding a borrow
    across an `await` extends the borrow's real duration without widening
    its scope. B1 admits it; whether the schedule-testing work (295) can

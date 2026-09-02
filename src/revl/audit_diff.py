@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from .cardinality import cardinality
 from .distribute import distributability
+from .resources import retention_surface
 
 
 def audit_report(ir: dict) -> dict:
@@ -102,6 +103,17 @@ def audit_report(ir: dict) -> dict:
         # `secret:<capability>:<name>` crossing the drift gate flags as a widening
         # (see `crossings`); removing a binding is a narrowing.
         **_secrets_surface(ir),
+        # item 308 F10 (docs/design/308-effect-ownership-modes.md, "The honest
+        # limitation: retaining externs"): the REPORT-ONLY retention surface -
+        # every declared position at which a resource handle leaves revl's
+        # sight, so a human can review what B1's flow walk provably cannot see.
+        # ADDITIVE and PRESENT ONLY when the composition declares a resource
+        # type reaching one, so a handle-free composition's audit surface is
+        # byte-identical to before (the same conditional-presence discipline as
+        # `parallel_plan` and `secrets` above). A row is a MAY-retain, never a
+        # proof of retention, and an ABSENT row is never a proof of the
+        # opposite - see `resources.retention_surface`.
+        **_retention_surface(ir),
     }
 
 
@@ -121,6 +133,15 @@ def _secrets_surface(ir: dict) -> dict:
     (the same conditional-presence discipline as `_parallel_plan_surface`)."""
     table = _secrets_table(ir)
     return {"secrets": table} if table else {}
+
+
+def _retention_surface(ir: dict) -> dict:
+    """The additive `retention` audit key (item 308 F10), or `{}` when the
+    composition declares no resource handle reaching a non-inverse callee - so a
+    handle-free composition renders byte-identically to before."""
+    rows = retention_surface(ir.get("externs"), ir.get("types"),
+                             ir.get("services"))
+    return {"retention": rows} if rows else {}
 
 
 def _parallel_plan_surface(ir: dict) -> dict:

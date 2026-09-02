@@ -56,6 +56,7 @@ host bootstrap it needs are [composition-bootstrap.md](composition-bootstrap.md)
 | `boundary` | the **reaches** half, per component: `emissions` (irreversible call sites), `capabilities` (the scope each emission's declaration carries — `["*"]` means it promises nothing), `compensated`, `awaits`, and `externs` (host code reached transitively, a first-class dispatch shown as name `"*"`). |
 | `externs` | every declared host-code extern — the trust surface a proof cannot cover. |
 | `distributability` | per service, whether it may cross a process seam (`transport-safe` / `address-space-bound`) and why (interop-bridge §4). |
+| `retention` | optional (item 308 F10). The report-only retention surface: one row per resource-carrying parameter of a non-inverse extern or of a service method — every declared position at which a resource handle leaves revl's sight. Present only when there is one, so a handle-free composition omits the key. Each row is a MAY-retain: it does not prove a host body keeps the handle, and an absent row does not prove one does not. A declared inverse is excluded (teardown closing a handle is the contract working). |
 
 Provides / requires / reaches — the three things another admission harness
 needs — are `manifest.components[].provides`, `manifest.components[].inject`,

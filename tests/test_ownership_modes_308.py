@@ -272,3 +272,204 @@ def test_pass_a_borrow_down_a_call_chain_admits():
         "component P provides s: S {\n"
         "  provide s { fn touch(c) { return touchit(c) } }\n"
         "}\n")
+
+
+# ---------------------------------------------------------------------------
+# F9 — method-scope early release (the decision, and what enforces it)
+# ---------------------------------------------------------------------------
+#
+# The design left F9 open behind a corpus count: if any program acquires at
+# method scope, either an explicit-release surface lands or the form is refused.
+# The count is ZERO general method-scope acquires — the language already refuses
+# them — so the surface that matters is the one method-scope acquisition that
+# yields a live handle, `spawn`, and it already releases early: the instance is
+# a child fiber with its own nested teardown scope and `w.dispose()` unloads it
+# now, with no new grammar. These tests pin the decision's three legs: the
+# general form stays refused, the early release stays admitted, and the
+# request-scoped handle may not outlive the request that spawned it.
+
+_WORKER = (
+    "service T { fn run() -> Int }\n"
+    "component Worker provides task: T {\n"
+    "  provide task { fn run() = 7 }\n"
+    "}\n"
+)
+
+
+def _sup(body: str, *, activation: str = "", returns: str = "Int") -> str:
+    return (_WORKER + f"service S {{ fn go() -> {returns} }}\n"
+            "component Sup provides s: S {\n" + activation
+            + "  provide s {\n    fn go() {\n" + body + "    }\n  }\n}\n")
+
+
+_SPAWN = "      let w = effect spawn Worker with { } undo w.dispose()\n"
+
+
+def test_f9_general_method_scope_acquire_stays_refused():
+    """The F9 decision's first leg: a general acquire at method scope is
+    refused, with a diagnostic naming the restructure. This is what makes the
+    corpus count zero, and what keeps `spawn` the only handle-yielding
+    method-scope acquisition F9 has to reason about."""
+    msg = _refuse(_BASE + _sup(
+        "      let h = effect open_sock() undo close_sock(h)\n"
+        "      return 1\n"))
+    assert "only `spawn` may be acquired inside a provide-method body" in msg
+    assert "activation body" in msg
+
+
+def test_f9_method_scope_spawn_admits():
+    """The baseline: a request-scoped instance used inside its own method."""
+    _admit(_sup(_SPAWN + "      return w.task.run()\n"))
+
+
+def test_f9_explicit_early_release_admits():
+    """The early-release surface itself, spelled with the grammar revl already
+    had: `effect w.dispose() undo w.dispose()` unloads the child fiber NOW.
+    Nothing new is needed for it, which is the F9 decision."""
+    _admit(_sup(_SPAWN
+                + "      let r = w.task.run()\n"
+                + "      effect w.dispose() undo w.dispose()\n"
+                + "      return r\n"))
+
+
+def test_f9_instance_handle_returned_refused():
+    msg = _refuse(_sup(_SPAWN + "      return w\n", returns="Instance[Worker]"))
+    assert "request-scoped instance handle `w`" in msg
+    assert "308" in msg and "F9" in msg
+
+
+def test_f9_instance_handle_stored_into_activation_state_refused():
+    msg = _refuse(_sup(
+        _SPAWN + '      effect cells.insert("k", w) undo cells.remove("k")\n'
+                 "      return 1\n",
+        activation="  let cells = effect Map.new() undo cells.drop()\n"))
+    assert "request-scoped instance handle `w`" in msg
+
+
+def test_f9_instance_handle_closure_capture_refused():
+    """An arrow's type erases what it closes over, so a closure reading the
+    instance carries it across any signature — B1 clause 2's reasoning, applied
+    to the handle B1 cannot see."""
+    msg = _refuse(_sup(_SPAWN + "      let f = () => w.task.run()\n"
+                              "      return f()\n"))
+    assert "request-scoped instance handle `w`" in msg
+
+
+def test_f9_instance_handle_in_carrier_refused():
+    msg = _refuse(_sup(_SPAWN + "      let rec = { inst: w }\n"
+                              "      return 1\n"))
+    assert "request-scoped instance handle `w`" in msg
+
+
+def test_f9_instance_handle_aliased_to_another_local_refused():
+    """A plain alias is the cheapest escape of all: `alias` outlives nothing on
+    its own, but the walk is a whitelist, so anything that is not one of the two
+    read-only slots is refused rather than reasoned about."""
+    msg = _refuse(_sup(_SPAWN + "      let alias = w\n"
+                              "      return alias.task.run()\n"))
+    assert "request-scoped instance handle `w`" in msg
+
+
+def test_f9_instance_handle_in_a_list_literal_refused():
+    msg = _refuse(_sup(_SPAWN + "      let xs = [w]\n      return 1\n"))
+    assert "request-scoped instance handle `w`" in msg
+
+
+def test_f9_activation_scope_spawn_owner_pool_admits():
+    """The owner carve-out is untouched: a spawn at ACTIVATION scope is the
+    component's own instance for its whole life, stored and lent per call."""
+    _admit(_WORKER + "service S { fn go() -> Int }\n"
+           "component Sup provides s: S {\n"
+           "  let w = effect spawn Worker with { } undo w.dispose()\n"
+           "  provide s { fn go() = w.task.run() }\n"
+           "}\n")
+
+
+def test_f9_refusal_is_navigable_with_two_author_moves():
+    """item 274: the refusal names fixes the author can enact where they stand
+    — hand out a value, or hoist the spawn to activation scope."""
+    with pytest.raises(RevlError) as ei:
+        compile_source(_sup(_SPAWN + "      return w\n",
+                            returns="Instance[Worker]"), "t.rvl")
+    nav = ei.value.navigate
+    assert nav["family"] == "ownership" and nav["refused"]["kind"] == "f9"
+    actions = " ".join(alt["action"] for alt in nav["alternatives"])
+    assert "VALUE" in actions and "ACTIVATION scope" in actions
+
+
+# ---------------------------------------------------------------------------
+# F10 — the retaining-extern audit (report-only)
+# ---------------------------------------------------------------------------
+
+from revl.audit_diff import audit_report  # noqa: E402
+from revl.resources import retention_surface  # noqa: E402
+
+
+def _surface(src: str) -> list:
+    ir = compile_source(src, "t.rvl")
+    return retention_surface(ir.get("externs"), ir.get("types"),
+                             ir.get("services"))
+
+
+_USE = "extern pure fn use_sock(h: Sock) -> Int = @py { return 1 }\n"
+
+
+def test_f10_lists_a_resource_typed_parameter_of_a_non_inverse_extern():
+    rows = _surface(_BASE + _USE)
+    assert rows == [{"kind": "extern", "callee": "use_sock", "class": "pure",
+                     "param": "h", "index": 0, "type": "Sock",
+                     "resource": "Sock"}]
+
+
+def test_f10_excludes_the_declared_inverse():
+    """`close_sock` takes a `Sock` too, but teardown calling it with the handle
+    exactly once is the contract working, not a retention hazard."""
+    assert [r["callee"] for r in _surface(_BASE + _USE)] == ["use_sock"]
+
+
+def test_f10_follows_the_taint_closure_through_a_carrier_type():
+    rows = _surface(_BASE + "type Session = { conn: Sock, tag: Str }\n"
+                    "extern emission[net] fn register(s: Session) -> Int"
+                    " = @py { return 1 }\n")
+    assert rows == [{"kind": "extern", "callee": "register", "class": "emission",
+                     "param": "s", "index": 0, "type": "Session",
+                     "resource": "Session"}]
+
+
+def test_f10_lists_a_service_method_parameter():
+    """A service implemented across a bridge runs host-side, so its declared
+    parameters are the same frontier an extern's are."""
+    rows = _surface(_BASE + "service Keep { fn hold(h: Sock) -> Int }\n")
+    assert rows == [{"kind": "service-method", "callee": "Keep.hold",
+                     "class": "plain", "param": "h", "index": 0,
+                     "type": "Sock", "resource": "Sock"}]
+
+
+def test_f10_absent_from_the_audit_of_a_handle_free_composition():
+    """Conditional presence: a composition that declares no resource type has a
+    byte-identical audit document."""
+    ir = compile_source(
+        "service S { fn go() -> Int }\n"
+        "component C provides s: S { provide s { fn go() = 1 } }\n", "t.rvl")
+    assert "retention" not in audit_report(ir)
+
+
+def test_f10_present_in_the_audit_when_a_handle_reaches_a_non_inverse():
+    ir = compile_source(
+        _BASE + _USE + "service S { fn go() -> Int }\n"
+        "component C provides s: S {\n"
+        "  let h = effect open_sock() undo close_sock(h)\n"
+        "  provide s { fn go() = use_sock(h) }\n"
+        "}\n", "t.rvl")
+    assert [r["callee"] for r in audit_report(ir)["retention"]] == ["use_sock"]
+
+
+def test_f10_is_report_only_and_refuses_nothing():
+    """The whole point: a retaining extern is NOT refusable — the declaration
+    does not say "retains" — so every row above is a listed hazard, never a
+    rejected program."""
+    _admit(_BASE + _USE + "service S { fn go() -> Int }\n"
+           "component C provides s: S {\n"
+           "  let h = effect open_sock() undo close_sock(h)\n"
+           "  provide s { fn go() = use_sock(h) }\n"
+           "}\n")
