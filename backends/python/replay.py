@@ -1646,6 +1646,18 @@ def inverse_descriptor(step: "Step", ir: Optional[dict] = None) -> dict:
 
 def _wal_record(step: "Step", component: str, seq: int,
                 ir: Optional[dict] = None) -> dict:
+    """The durable record for one committed step.
+
+    Item 250 Slice 2 makes the fork's three CLASSIFICATION INPUTS durable — the
+    recorded capability ``scope``, whether an emission carries a ``compensated``
+    offset, and the declared ``undoIdempotent`` register entry. Slice 1 keyed the
+    scope-gated rewind (Decision 2) and the two hazard refusals (Decision 3/5) on
+    live in-process :class:`Step` attributes, which die with the process, so a
+    post-mortem reader could not reproduce the partition it is asked to trust and
+    an offline branch surface had no honest input. All three are ABSENT BY
+    DEFAULT — written only when the step actually declares them — so every record
+    a pre-250 composition writes stays byte-identical and no WAL golden moves.
+    """
     return {
         "record": "effect",
         "seq": seq,
@@ -1658,6 +1670,10 @@ def _wal_record(step: "Step", component: str, seq: int,
         "origin": step.origin or {},
         "boundary": boundary_of(step, ir),
         "inverse": inverse_descriptor(step, ir),
+        **({"scope": step.scope} if step.scope is not None else {}),
+        **({"compensated": True} if step.compensation is not None else {}),
+        **({"undoIdempotent": step.undo_idempotent}
+           if step.undo_idempotent is not None else {}),
     }
 
 
@@ -2101,6 +2117,38 @@ class WriteAheadLog:
         reads this and treats the parent as retired at k, never re-admitting it as
         a live continuation (the freeze `fork_confirm` performed, made durable)."""
         record = {"record": "fork-frozen", "parent": parent, "at": at}
+        self._write(record)
+        return record
+
+    def record_fork_branch(self, *, branch: str, parent: str, at: int,
+                           parent_wal: Optional[str] = None,
+                           preserved: Optional[dict] = None,
+                           not_preserved: Optional[list] = None,
+                           crossed: Optional[list] = None,
+                           would_cross: Optional[list] = None) -> dict:
+        """Append ``fork-branch`` to the BRANCH WAL as its FIRST record (item 250,
+        Slice 2). It is the branch side of the lineage Slice 1 recorded only on
+        the parent: Slice 1 wrote ``fork-complete {branch}`` into the parent WAL,
+        so a branch WAL read on its own could not say it was a branch, name its
+        parent, or name the step it diverged at — the lineage was one-directional
+        and unreadable from the artifact a post-mortem tool is handed first.
+
+        It carries the provenance the branch actually inherits (``preserved``)
+        and, explicitly, the provenance it does NOT (``not_preserved``) — the
+        honest partition applied to lineage, so nothing is claimed to carry over
+        that does not. It also re-states the inherited residue: the emissions that
+        crossed above k and the inverses whose scope crossed and were therefore
+        never fired. Both are already durable in the parent's ``fork-begin``; a
+        branch explored without its parent's WAL to hand must still be able to say
+        what it is standing on. It names the branch's OWN session id too, so a
+        branch WAL identifies itself without the reader inferring an identity from
+        a filename. Consumes no seq — it names a lineage fact, not an effect."""
+        record = {"record": "fork-branch", "branch": branch, "parent": parent,
+                  "at": at, "parentWal": parent_wal,
+                  "preserved": dict(preserved or {}),
+                  "notPreserved": list(not_preserved or []),
+                  "crossed": list(crossed or []),
+                  "wouldCross": list(would_cross or [])}
         self._write(record)
         return record
 
