@@ -125,10 +125,24 @@ oversold:
   process that cannot even name a path outside the root is a wasm-tier property
   eventually. On this tier the guard holds only for ops that go through these
   bodies; it is not a sandbox around the whole process.
-* **The ts tier has not had this pass.** `backends/typescript/revl_fs_ts.ts`
-  still mirrors the pre-fix py shape (unchecked inverse sources, joined-not-
-  resolved sidecar directories, path-based syscalls). It is a peer of the py
-  slice, not a second enforcement point, and it needs the same treatment.
+* **The ts tier has had this pass, with one thing node cannot express.**
+  `backends/typescript/revl_fs_ts.ts` now carries the same four path families,
+  the same `PATH_FAMILIES` enumeration, the same table-driven totality wrapper,
+  the same sidecar-restricted inverse sources, the same `EMULTILINK` hardlink
+  refusal, the same `(dev, ino)` landing check, and the same guard scan
+  (`backends/typescript/tests/fs_confinement_families.test.ts`). What it cannot
+  carry is the directory-fd walk: node's `fs` exposes no `*at()` syscall at all
+  (no `openat`, `renameat`, `unlinkat`, `mkdirat`, `fstatat`), so a mutation
+  cannot be performed relative to a verified directory fd. In its place the ts
+  guard `lstat`-walks every component down from the root immediately before each
+  syscall, opens the write leaf `O_NOFOLLOW`, re-checks the opened fd's
+  `(dev, ino)` against the name, and writes only through that fd. That closes
+  the leaf swap, which is the escape that was reproduced, and narrows without
+  closing an intermediate-directory swap around a `renameSync`. A ts tier with
+  the py tier's guarantee needs an `*at()` binding. The APFS `fclonefileat`
+  snapshot is the other casualty: node's only clone is by name, and reopening
+  the target by name is the race the fd exists to avoid, so the ts preimage is
+  a copy through the fd rather than an O(1) clone.
 
 ## How it runs, and the one surface that is deferred
 
