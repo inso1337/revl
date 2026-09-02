@@ -1,0 +1,12 @@
+// F1: a template literal in a provide-method body. The v1/v2 component
+// lowering turns `${..}` into a `format` IR node, and the java emitter
+// renders that as `String.format`, per call, in the request path.
+fn seed() -> Int { return 0 }
+
+service Logger { fn log(msg: Str, n: Int) -> Str }
+
+component L provides logger: Logger {
+  provide logger {
+    fn log(msg, n) = `[req] ${msg} #${n} end`
+  }
+}

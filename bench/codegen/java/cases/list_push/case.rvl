@@ -1,0 +1,8 @@
+// F5: `push` in a loop. The java stdlib helper renders a one-element append
+// as a two-way `Stream.concat(..).toList()`.
+fn build(n: Int) -> List[Int] {
+  var out: List[Int] = []
+  var i = 0
+  while (i < n) { out = out.push(i); i += 1 }
+  return out
+}
