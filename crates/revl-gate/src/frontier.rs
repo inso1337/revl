@@ -17,7 +17,7 @@
 
 /// The identifier `gate_version().frontier` reports. Two gates with different
 /// ids cover different surfaces and their agreement means nothing.
-pub const FRONTIER_ID: &str = "selfhost-admit:cc71206fad638a57";
+pub const FRONTIER_ID: &str = "selfhost-admit:c66b4444a5eebc11";
 
 /// Sources above this many bytes are refused rather than decided: the emitted
 /// parser/checker are deeply recursive and a stack exhaustion ABORTS, which no
@@ -37,16 +37,7 @@ pub(crate) const EXCLUDED_KEYWORDS: &[&str] = &[];
 /// selfhost/lower.rvl::is_builtin_method`. A call to one of these lowers
 /// differently in the two compilers, so the crate refuses to decide the
 /// program at all rather than risk deciding it wrongly.
-pub(crate) const EXCLUDED_BUILTINS: &[&str] = &[
-    "codepoint_at",
-    "field",
-    "is_alnum",
-    "is_alpha",
-    "is_digit",
-    "is_space",
-    "list",
-    "str",
-];
+pub(crate) const EXCLUDED_BUILTINS: &[&str] = &[];
 
 
 /// A word-and-member scan over `source` with string literals and `//` comments
