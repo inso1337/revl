@@ -190,6 +190,14 @@ def _operator_identities(profile_path: str) -> set[str]:
 
     return set(load_profile(profile_path).operators)
 
+# Tiers whose consumer bridge can SEAL an item-118 correlation envelope. Only
+# the python bridge implements it; `typescript/bridge.ts`, the go bridge and
+# `PlacementRunner.java` take no `correlation` parameter at all, so a consumer
+# on those tiers cannot produce one. A provider is only guarded when every one
+# of its local consumers is listed here (roadmap 421 F8). Add a tier here in the
+# same change that teaches its bridge to seal, never before.
+_CORRELATION_SEALING_TIERS = frozenset({"py"})
+
 _BACKENDS_DIR = backends_root()
 _TS_DIR = _BACKENDS_DIR / "typescript"
 _RUST_RUNNER = _BACKENDS_DIR / "rust" / "placement_runner"
@@ -2247,8 +2255,20 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 # `entry["socket"]` branch). Never built for a network provider,
                 # which may also answer an item-151 remote consumer this table
                 # cannot enumerate.
+                # A guard is installed ONLY when every local consumer of this
+                # provider runs on a tier that actually SEALS a correlation.
+                # Sealing is implemented in the python bridge alone today; the
+                # ts, go and java bridges have no `correlation` parameter at
+                # all, so a consumer on one of those tiers sends a pre-118
+                # envelope and the guard refuses it as `malformed-envelope`.
+                # Installing the guard in front of a caller that cannot satisfy
+                # it does not harden the seam, it breaks it: that regressed the
+                # py-java placement smoke. Same rule as the network case above,
+                # namely never build a guard on an assumption that does not hold
+                # for every caller it will judge.
                 peers = uds_consumers.get(pname) or set()
-                if peers:
+                if peers and all(backends.get(q) in _CORRELATION_SEALING_TIERS
+                                 for q in peers):
                     serve_spec["correlation"] = {
                         "composition_id": composition_id,
                         "peers": {correlation_identity[q]: correlation_secret[q].hex()
@@ -2577,6 +2597,23 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 "methods": {k: methods.get(provides[old][k], []) for k in serve_keys},
             },
         }
+        # roadmap 421 F8: carry the predecessor's correlation guard onto the
+        # successor. Without this a swap SILENTLY DISARMS the seam, because the
+        # successor's serve spec is built fresh from socket/keys/methods and a
+        # guard that is never installed refuses nobody. "Guarded" would mean
+        # "guarded until the first swap", and `revl swap` is ordinary use, not
+        # an edge case. The peer table stays valid across a swap because a swap
+        # re-points EXISTING consumers at a successor socket and never attaches
+        # a new one, so who may call is unchanged; only where they call moves.
+        # Carried only when the successor tier can actually RUN the guard: the
+        # guard is built in `_process_runner.py`, so a swap onto a non-python
+        # tier drops it, the same rule the boot path applies.
+        _old_corr = old_serve.get("correlation")
+        if _old_corr and to_backend in _CORRELATION_SEALING_TIERS:
+            succ_spec["serve"]["correlation"] = {
+                "composition_id": _old_corr["composition_id"],
+                "peers": dict(_old_corr["peers"]),
+            }
         adapt_spec(succ_spec, to_backend)
         print(f"swap: booting {component} on the {to_backend} tier ({succ}) ...", flush=True)
         spawn(succ, to_backend, succ_spec)
