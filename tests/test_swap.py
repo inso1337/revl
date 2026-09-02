@@ -21,6 +21,7 @@ runtime and is exercised where that runtime is present.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import shutil
@@ -772,3 +773,104 @@ def test_legit_repoint_still_admitted_and_repoints(tmp_path):
     assert accepted is True
     assert stub.repoints == ["successor.sock"]
     assert stub.target == "successor.sock"
+
+
+# ---------------------------------------------------------------------------
+# item 337 Seam 2: boot-time bridge re-admission. Same seam as above, moved one
+# event earlier: before a consumer process wires its INITIAL proxy to a
+# provider served by another process, it re-admits that provider against its
+# own running manifest (`_boot_wiring_decision` / `_apply_boot_wiring`),
+# exactly the `swap_admission` call the repoint seam runs at cutover.
+# placement.py stamps the provider's admissible identity (`component`,
+# `backend`) onto every same-composition proxy entry so the selector is
+# already in the spec the consumer already trusts — no new transport.
+# ---------------------------------------------------------------------------
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_boot_wiring_refused_at_seam_when_provider_fails_admission(tmp_path):
+    """A boot-time proxy whose named provider FAILS admission against the
+    running manifest is refused AT THE SEAM: `wire` is never invoked, so the
+    proxy is never wired at all — not merely that admission complains."""
+    src = _write(tmp_path, "bound.rvl", _BOUND_CACHE_RVL)
+    running = compile_files([src])
+    # MemCache's `cache` service is sync (address-space-bound) — the consumer
+    # re-admitting it onto the `rust` tier it is actually served from fails,
+    # exactly like the repoint seam's refusal above.
+    info = {"socket": "provider.sock", "methods": ["get"], "service": "Cache",
+           "component": "MemCache", "backend": "rust"}
+    wired = []
+
+    async def wire():
+        wired.append(info["socket"])
+
+    ok, reason = _pr._boot_wiring_decision([src], running, info)
+    assert ok is False
+    assert reason and ("address-space-bound" in reason or "transport" in reason)
+
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire))
+    assert accepted is False
+    assert wired == []   # the wire callback was never invoked -- never wired
+
+
+def test_boot_wiring_fail_closed_when_no_admissible_reference(tmp_path):
+    """A proxy entry carrying no component/backend (a stripped or malformed
+    selector) cannot be admitted, so boot wiring refuses it fail-closed --
+    never silently wired -- mirroring the repoint seam's legacy-command case."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    info = {"socket": "provider.sock", "methods": ["get"], "service": "Cache"}
+    wired = []
+
+    async def wire():
+        wired.append(info["socket"])
+
+    ok, reason = _pr._boot_wiring_decision([src], running, info)
+    assert ok is False
+    assert reason and "fail-closed" in reason
+
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire))
+    assert accepted is False
+    assert wired == []
+
+
+def test_legit_boot_wiring_still_admitted_and_wires(tmp_path):
+    """A faithful boot-time proxy (provider passes admission against the
+    running manifest) is admitted and actually wired."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    info = {"socket": "provider.sock", "methods": ["get", "put"], "service": "Cache",
+           "component": "MemCache", "backend": "rust"}
+    wired = []
+
+    async def wire():
+        wired.append(info["socket"])
+
+    ok, reason = _pr._boot_wiring_decision([src], running, info)
+    assert ok is True and reason is None
+
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire))
+    assert accepted is True
+    assert wired == ["provider.sock"]
+
+
+def test_remote_boot_proxy_is_not_seam2_gated(tmp_path):
+    """A remote seam (item 151: a separate composition, no component/backend
+    at all) is out of Seam 2's scope and always wires -- gating it would
+    refuse every legitimate remote proxy, since the remote component is not a
+    member of this composition's running manifest at all."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    info = {"endpoint": {"host": "10.0.0.9", "port": 4000}, "methods": ["get"],
+           "service": "Cache", "remote": True}
+    wired = []
+
+    async def wire():
+        wired.append("remote")
+
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire))
+    assert accepted is True
+    assert wired == ["remote"]
