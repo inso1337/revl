@@ -11,6 +11,12 @@ import emit
 from conftest import BACKEND, load_module, reference_ir_path
 
 GOLDEN = BACKEND / "golden" / "user_cache.py"
+# A red golden is a REVIEW prompt, not a wall: the goldens are snapshot tests
+# (docs/conformance.md, "Golden policy: snapshot, not freeze"), so regenerating
+# and reviewing the diff is always an acceptable resolution. Every golden
+# assertion says which command regenerates it.
+_TAIL = ("If the change is intended: python3 tools/regen_goldens.py {t}, then review "
+         "the diff. Goldens are snapshots, not a freeze (docs/conformance.md).")
 
 
 def test_accepts_reference_ir_verbatim(reference_ir):
@@ -26,7 +32,9 @@ def test_accepts_reference_ir_verbatim(reference_ir):
 
 def test_golden_file_regenerates_identically(reference_ir):
     """The checked-in golden file is exactly what the emitter produces."""
-    assert GOLDEN.read_text(encoding="utf-8") == emit.emit(reference_ir)
+    assert GOLDEN.read_text(encoding="utf-8") == emit.emit(reference_ir), (
+        "backends/python/golden/user_cache.py drifted from the emitter. "
+        + _TAIL.format(t="python"))
 
 
 def test_emit_is_deterministic(reference_ir):

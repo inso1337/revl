@@ -26,6 +26,12 @@ _spec = importlib.util.spec_from_file_location("revl_java_emit", Path(__file__).
 emit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(emit)
 from revl import compile_files, compile_source  # noqa: E402
+# A red golden is a REVIEW prompt, not a wall: the goldens are snapshot tests
+# (docs/conformance.md, "Golden policy: snapshot, not freeze"), so regenerating
+# and reviewing the diff is always an acceptable resolution. Every golden
+# assertion says which command regenerates it.
+_TAIL = ("If the change is intended: python3 tools/regen_goldens.py {t}, then review "
+         "the diff. Goldens are snapshots, not a freeze (docs/conformance.md).")
 
 HERE = Path(__file__).resolve().parent
 STUB_SOURCES = sorted((HERE / "stubs").rglob("*.java"))
@@ -271,7 +277,9 @@ def test_version_gate_accepts_ir_1_2_3():
 def test_user_cache_golden_byte_equality():
     src = emit.emit(_ir("user_cache"))
     golden = (Path(__file__).resolve().parent / "golden" / "user_cache.java").read_text()
-    assert src == golden
+    assert src == golden, (
+        "backends/java/golden/user_cache.java drifted from the emitter. "
+        + _TAIL.format(t="java"))
 
 
 def test_host_objects_are_real_java_runtime_classes():

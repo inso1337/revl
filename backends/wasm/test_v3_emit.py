@@ -149,27 +149,16 @@ def test_v3_str_list_record_functions_emit():
 
 
 def test_v3_functions_golden_is_byte_identical():
+    """The golden is a SNAPSHOT, not a freeze (docs/conformance.md, "Golden
+    policy"). Its source is committed beside it so the emit recipe is not
+    private to this test."""
     emit = _emitter()
-    ir = compile_source(
-        """
-        type Row = { id: Int, name: Str }
-        type Outcome = Ok(Row) | NotFound | Invalid(Str)
-
-        fn add(a: Int, b: Int) -> Int { return a + b }
-        fn negate(b: Bool) -> Bool { return !b }
-        fn name(row: Row) -> Str { return row.name }
-        fn first(xs: List[Int]) -> Int { return xs[0] }
-        fn greet() -> Str { return "hi" }
-        fn make_row(id: Int, name: Str) -> Row { return { id: id, name: name } }
-        fn classify(n: Int) -> Str {
-          if (n < 0) return "neg"
-          return "pos"
-        }
-        """
-    )
+    ir = compile_source((BACKEND / "golden" / "functions.revl").read_text(encoding="utf-8"))
     wat = emit.emit(ir)["functions"]
     golden = (BACKEND / "golden" / "functions.wat").read_text()
-    assert wat == golden
+    assert wat == golden, (
+        "backends/wasm/golden/functions.wat drifted from the emitter. If the change "
+        "is intended: python3 tools/regen_goldens.py wasm, then review the diff.")
 
 
 def test_diverging_if_else_body_validates_and_runs(tmp_path):

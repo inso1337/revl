@@ -1,0 +1,13 @@
+type Row = { id: Int, name: Str }
+type Outcome = Ok(Row) | NotFound | Invalid(Str)
+
+fn add(a: Int, b: Int) -> Int { return a + b }
+fn negate(b: Bool) -> Bool { return !b }
+fn name(row: Row) -> Str { return row.name }
+fn first(xs: List[Int]) -> Int { return xs[0] }
+fn greet() -> Str { return "hi" }
+fn make_row(id: Int, name: Str) -> Row { return { id: id, name: name } }
+fn classify(n: Int) -> Str {
+  if (n < 0) return "neg"
+  return "pos"
+}

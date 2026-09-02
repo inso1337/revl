@@ -13,6 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files, compile_source  # noqa: E402
+# A red golden is a REVIEW prompt, not a wall: the goldens are snapshot tests
+# (docs/conformance.md, "Golden policy: snapshot, not freeze"), so regenerating
+# and reviewing the diff is always an acceptable resolution. Every golden
+# assertion says which command regenerates it.
+_TAIL = ("If the change is intended: python3 tools/regen_goldens.py {t}, then review "
+         "the diff. Goldens are snapshots, not a freeze (docs/conformance.md).")
 
 CORDIS_WASM_PY = Path.home() / "Projects" / "cordis-wasm" / ".venv" / "bin" / "python"
 
@@ -32,7 +38,9 @@ def test_beacon_emits_goldens():
     modules = _emitter().emit(ir)
     for name in ("Beacon", "Auditor"):
         golden = (ROOT / "backends" / "wasm" / "golden" / f"{name}.wat").read_text()
-        assert modules[name] == golden
+        assert modules[name] == golden, (
+            f"backends/wasm/golden/{name}.wat drifted from the emitter. "
+            + _TAIL.format(t="wasm"))
 
 
 def test_pulse_await_lowering():
@@ -41,7 +49,9 @@ def test_pulse_await_lowering():
     ir = compile_files([str(ROOT / "examples" / "pulse.rvl")])
     pulse = _emitter().emit(ir)["Pulse"]
     golden = (ROOT / "backends" / "wasm" / "golden" / "Pulse.wat").read_text()
-    assert pulse == golden
+    assert pulse == golden, (
+        "backends/wasm/golden/Pulse.wat drifted from the emitter. "
+        + _TAIL.format(t="wasm"))
     assert '(import "host" "job_run"' in pulse
     # the job name is interned at compile time (the host op is i32-only), so
     # the first distinct name in the module is id 1

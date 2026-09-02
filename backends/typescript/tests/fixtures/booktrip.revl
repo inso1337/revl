@@ -1,0 +1,8 @@
+service Flights { emission fn reserve(itinerary: Str) -> Str
+                  emission fn cancel(key: Str) -> Str }
+service Payments { emission fn charge(card: Str, total: Int) -> Str
+                   emission fn refund(card: Str, total: Int) -> Str }
+component BookTrip requires flights: Flights, payments: Payments {
+  emit flights.reserve("ABC") compensate flights.cancel("ABC")
+  emit payments.charge("visa", 100) compensate payments.refund("visa", 100)
+}
