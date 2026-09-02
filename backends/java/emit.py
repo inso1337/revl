@@ -1536,7 +1536,15 @@ def _v3_match_expr(
         some_arm = next((a for a in arms if a.get("pattern") == "Some"), None)
         none_arm = next((a for a in arms if a.get("pattern") == "None"), None)
         wild = next((a for a in arms if a.get("pattern") == "_"), None)
-        some_bind = _ident(some_arm.get("bind"), "match bind") if some_arm and some_arm.get("bind") else "__revl_v"
+        # `bind == "_"` (`Some(_) => ..`) has no name to hold the value: it is
+        # treated the same as an absent bind (the synthetic `__revl_v` lambda
+        # param, unused in the body) rather than emitted as a literal `_`
+        # lambda parameter, which `javac --release 21` refuses (`_` is a
+        # reserved identifier outside the --enable-preview unnamed-variable
+        # feature, JEP 443/456).
+        some_bind = (_ident(some_arm.get("bind"), "match bind")
+                     if some_arm and some_arm.get("bind") and some_arm.get("bind") != "_"
+                     else "__revl_v")
         some_body = _expr((some_arm or wild).get("body"), ctx, rename, env)
         none_body = _expr((none_arm or wild).get("body"), ctx, rename, env)
         return (f"({scrutinee}).map({some_bind} -> ({some_body}))"
@@ -1556,7 +1564,11 @@ def _v3_match_expr(
             var = ctx.new_match_ignored()
             lines.append(f"            case RevlResult.{pattern}<?, ?> {var} -> {{")
             bind = arm.get("bind")
-            if bind:
+            # `bind == "_"` (`Ok(_) => ..`) has no name to hold the value;
+            # skip the cast-and-bind entirely, same as an absent bind — a
+            # literal `_` local (`final var _ = ..;`) is a reserved
+            # identifier at `--release 21` without --enable-preview.
+            if bind and bind != "_":
                 bind = _ident(bind, "match bind")
                 ptype = _java_v3_type(arm.get("payload_type"), boxed=True)
                 lines.append(f"                final var {bind} = ({ptype}) {var}.value();")
@@ -1579,7 +1591,11 @@ def _v3_match_expr(
         case = _ident(pattern, "case name")
         qualified = f"{_ident(ctx.case_owners[case], 'type name')}.{case}" if case in ctx.case_owners else case
         bind = arm.get("bind")
-        if bind:
+        # `bind == "_"` (`Case(_) => ..`) has no name to hold the value: fall
+        # through to the no-bind branch below (an ignored pattern variable),
+        # rather than emitting a literal `_` local — a reserved identifier at
+        # `--release 21` without --enable-preview (JEP 443/456).
+        if bind and bind != "_":
             bind = _ident(bind, "match bind")
             case_var = f"__revl_case_{ctx._match_counter + 1}"
             ctx._match_counter += 1
