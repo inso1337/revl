@@ -2,9 +2,10 @@
 
 Rules of the layering (enforced by imports, not by hope):
 
-- **L0** (`RevL.Syntax`, `RevL.Typing`, `RevL.Semantics`) is
-  architect-owned and frozen. Worker sessions do not edit it; a needed L0
-  change blocks on the architect.
+- **L0** (`RevL.Syntax`, `RevL.Typing`, `RevL.Semantics`,
+  `RevL.Manifest`, `RevL.Boundary` — the last two say so in their own
+  headers) is architect-owned and frozen. Worker sessions do not edit it;
+  a needed L0 change blocks on the architect.
 - **L1** (`RevL.Lemmas.*`) is the lemma farm. Farm files import L0 only
   (ideally core only) and never each other.
 - **L2** (`RevL.Theorems.G*`) is one file per guarantee, one session per
@@ -21,10 +22,19 @@ Rules of the layering (enforced by imports, not by hope):
 
 | Theorem | Guarantee (DESIGN.md §4) | Status | Axioms | Notes |
 |---|---|---|---|---|
-| `RevL.G2.linkOK_provision_disjoint` | G2 — provision disjointness (Def. 43) | **proved** | `propext, Quot.sound` | from the incremental `LinkOK` judgment |
-| `RevL.G2.linkOK_requires_closed` | G2/G1 — requirement closure | **proved** | `propext` | every requirement provided in-composition |
+| `RevL.G1.declared_only_access` | G1 — declared access (component level) | **proved** | `propext, Quot.sound` | undeclared access cannot be written |
+| `RevL.G2.linkOK_provision_disjoint` | G2 — provision disjointness (Def. 43) | **proved** | `propext, Quot.sound` | from the incremental `LinkOK` judgment; the unit is the `(key, realm)` slot |
+| `RevL.G2.linkOK_requires_closed` | G2/G1 — requirement closure | **proved** | `propext` | every consumed slot provided in-composition |
+| `RevL.G2.realm_separation_admitted` | G2 — non-vacuity | **proved** | `propext, Quot.sound` | `examples/tenants.rvl`: one key, two realms, links |
+| `RevL.G2.same_realm_conflict_refused` | G2 — non-vacuity | **proved** | `propext, Quot.sound` | drop the realms and the same pair cannot link |
 | `RevL.G3.depPath_rank_lt` | G3 — cycles rejected (§6.5) | **proved** | none | ranks strictly decrease along dep paths |
 | `RevL.G3.no_dependency_cycles` | G3 | **proved** | none | a layering certificate excludes cycles |
+| `RevL.G3.linkOK_layeredBy_rankOf` | G3 — the layering construction | **proved** | `propext, Quot.sound` | the admission order is a layering: `rankOf` |
+| `RevL.G3.linkOK_layered` | G3 — the bridge | **proved** | `propext, Quot.sound` | `LinkOK comps → ∃ rank, LayeredBy comps rank` |
+| `RevL.G3.linkOK_no_cycles` | G3 — as the linker states it | **proved** | `propext, Quot.sound` | admitted composition ⇒ no cycle, nothing assumed |
+| `RevL.G3.self_provision_refused` | G3 — non-vacuity | **proved** | `propext` | `Ouroboros` (requires a key it provides) cannot link |
+| `RevL.G3.mutual_cycle_refused` | G3 — non-vacuity | **proved** | `propext` | `g3_dependency_cycle.rvl` refused in both orderings |
+| `RevL.G3.layering_exists_for_admitted` | G3 — non-vacuity | **proved** | `propext, Quot.sound` | the certificate is reachable, not just refutable |
 | `RevL.G4.inverse_or_emit` | G4 — inverse-or-emit (Def. 8) | **proved** | none | content is the shape of `Typed` |
 | `RevL.G5.teardown_registers_nothing` | G5 — teardown registers nothing | **proved** | none | undo bodies are a separate constructor set |
 | `RevL.G6.confinement` | G6 — confinement (Def. 48) | **proved** | `propext, Quot.sound` | content is the shape of `TypedIn`/`ReachIn` |
@@ -59,6 +69,36 @@ Rules of the layering (enforced by imports, not by hope):
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
+### G2/G3 restated over `(key, realm)` slots (roadmap item 418, step 1)
+
+`RevL.Manifest` used to model G2 as `Nodup (flatMap provides)` over bare
+keys and let a component satisfy its own requirement. Both were wrong
+against the compiler:
+
+- revl's G2 is per `(key, realm)` — `diagnostics.GUARANTEES["G2"]` reads
+  "one provider per key (per realm)" and the linker's `provider_of` table
+  is keyed on the pair, with the realm read from the component's
+  `isolate` clauses. The model refused `examples/tenants.rvl`, which the
+  compiler accepts and whose own header states the real rule. `LComponent`
+  now carries a `realm : String → String` field (defaulting to
+  `sharedRealm`, so a realm-free component literal is unchanged), and
+  `slots`/`needs`/`DependsOn`/`DepPath`/`LayeredBy`/`ProvidesDisjoint`/
+  `RequiresClosed`/`LinkOK` are all stated over slots. Lifting the
+  *dependency* relation too is forced, not cosmetic: with two realms of
+  one key, no key-indexed rank function can be a layering.
+- `LinkOK` now requires each component's consumed slots to be provided
+  **strictly deeper** in the list, not in `c :: comps`. That is the
+  linker's "component N requires a key it provides itself (`k`) (G3)"
+  refusal, and transitively its cycle refusal: `LinkOK comps` says
+  `comps` is a valid reverse-`loadOrder` presentation, and a program
+  links iff *some* ordering derives it.
+
+The point of the second change is `RevL.G3.linkOK_layered`, the bridge
+`LinkOK comps → ∃ rank, LayeredBy comps rank`. Before it,
+`no_dependency_cycles`' layering hypothesis was not establishable from
+anything the model admitted, so "cycles rejected" had no proof path;
+`RevL.G3.linkOK_no_cycles` now states G3 with no layering assumed.
+
 ## Item 133 — cross-tier agreement (`RevL.Theorems.CrossTier`)
 
 `RevL.CrossTier` models each of the six backends by its *observable
@@ -83,14 +123,30 @@ matrix's empirical obligation, not a Lean theorem; and map values are
 modelled one level deep (nested maps are a mechanical extension of
 `entries_agree`).
 
-## Differential oracle (wired)
+## Differential oracle (two re-statements, not the model)
 
 `harness/diff_corpus.py` + `harness/Oracle.lean`: parse every corpus
 `.rvl` with revl's real parser, export one TSV row per *fact*, then run
-the Lean oracle (`RevL.Manifest` plus the G4-family judgments, coded
-independently) over the same TSV and diff against a plain-Python
-reference of the same semantics. A mismatch is definitional drift between
-the model and the spec/extraction, and it fails `make formal`.
+`harness/Oracle.lean` over the same TSV and diff its verdicts against a
+plain-Python reference of the same semantics. A mismatch fails
+`make formal`.
+
+**What this checks, and what it does not (roadmap item 418, C4).** The
+oracle is *not* wired to the proved model. `Oracle.lean` imports
+`RevL.Manifest` but uses no definition from it: every verdict comes from
+its own unproved Lean (`disjointOK`, `closedOK`, `g4OK`, `capCovers`,
+`attenOK`), and `diff_corpus.reference_from_tsv` is a third independent
+re-implementation rather than a call into `src/revl/cap_order.py`. So the
+harness compares two hand-written re-statements of the rules against each
+other. That catches an extraction or transcription drift between them; it
+cannot catch a definitional error in L0. Step 1 of item 418 demonstrated
+this by accident: `ProvidesDisjoint` and `LinkOK` were restated over
+`(key, realm)` slots — a change to what the model *decides* — and the
+oracle's output was bit-identical, 343 of 343 agreeing before and after.
+Making the verdicts compute from `RevL.Manifest` and the proved `Covers`,
+and the Python reference call `src/revl/cap_order.py`, is item 418 step 6.
+Until then, "the differential oracle agrees" is a claim about the
+harness, not about the theorems.
 
 Facts exported: component manifests (M), require-binding resolutions (R),
 provide-key resolutions (C), per-statement classifications (T), call
@@ -105,8 +161,14 @@ activation-body spawn edges (S), and the spawn handles (H) through which
 Verdicts:
 
 - **V rows (per file, G2/G3)**: provision disjointness + requirement
-  closure over the whole composition (a component's requirements need not
-  be its own provisions).
+  closure. Two rules here are known to be wrong, and are step 6's work
+  rather than descriptions of revl. Disjointness is computed over bare
+  keys, where revl's G2 is per `(key, realm)` — `RevL.Manifest` now
+  models the real rule, but the exporter's `M` row carries no realm
+  column, so the oracle cannot yet see one. Closure is computed *within
+  a single file*, where revl closes requirements over the linked
+  composition. Between them these two account for every one of the 36
+  `formal-strict` files below.
 - **G rows (per component, G4-shaped)**: marker presence must equal the
   interface's declaration — a plain call to a declared emission method,
   or an `emit`'d call to a non-emission method, is refused. Receivers
@@ -123,20 +185,20 @@ Verdicts:
   `lower._activation_spawn_sites`: a provide-method spawn is already
   bounded by that method's `emission[...]` clause.
 
-Current status over the corpus: **289 files → 179 components → 400
-statements → 127 manifest-bearing files → 337 verdicts compared
-(127 files + 179 components + 25 provide methods + 6 spawn edges), 337
-agree, 0 mismatches** (28 parse-error skips, loud).
-A mismatch is definitional drift between the model and the
-spec/extraction — this is the gate that keeps parallel edits to the
-formal model honest.
+Current status over the corpus: **292 files → 182 components → 403
+statements → 130 manifest-bearing files → 343 verdicts compared
+(130 files + 182 components + 25 provide methods + 6 spawn edges), 343
+agree, 0 mismatches** (28 parse-error skips, loud). A mismatch is drift
+between the oracle and the reference — read the paragraph above for what
+that does and does not cover.
 
-Checker alignment (informational, not a gate): each parsed file is also
-compiled with the real checker and its refusal code is compared against
-the formal verdicts. Current buckets: 50 agree-accept, 2 agree-G2, 6
-agree-G4, 36 formal-strict (the checker *accepts* the file but the shaped
-model does not — the model is stricter than the fragment it covers), 12
-formal-found-other, 21 out-of-fragment. **0 missed-G4**: the five
+Checker alignment (informational, not a gate — promoting
+`formal-strict` / `missed-G4` / `missed-G2` to gate failures is item 418
+step 7): each parsed file is also compiled with the real checker and its
+refusal code is compared against the formal verdicts. Current buckets: 52
+agree-accept, 2 agree-G2, 6 agree-G4, 36 formal-strict (the checker
+*accepts* the file but the oracle does not), 13 formal-found-other, 21
+out-of-fragment. **0 missed-G4**: the five
 previously missed files are now modeled, each by the verdict row its
 rejection comment names —
 `g4_emission_not_declared` and `g4_capability_not_declared` by a P row
@@ -157,8 +219,19 @@ Known fidelity limits of the shaped model, deliberately not papered over:
   separately; the model compares whole canonical capabilities. The corpus
   carries no integer-valued capability parameter today, so the two agree
   on it vacuously — this is TODO 2's work, not a live divergence.
-- The 36 `formal-strict` files are unchanged and remain the standing
-  finding: the shaped model refuses files the real checker accepts.
+- The 36 `formal-strict` files are **not** "the model being stricter than
+  the fragment it covers". Every one of them is one of the two wrong
+  rules in the oracle's V row, and the split is exactly: **32** files
+  `V(ok, fail)` from the intra-file closure rule; **3** files
+  `V(fail, ok)` from the bare-key disjointness rule
+  (`examples/tenants.rvl`, `tests/fixtures/canary_tenants.rvl`,
+  `tests/fixtures/erase_realms.rvl`); and **1**,
+  `examples/tenant_attenuation.rvl`, tripping both. No file in the bucket
+  is refused by a G, P or W row. Fixing the two rules in the oracle
+  (step 6) should empty the bucket. The L0 side of the realm rule is
+  already fixed — `RevL.Manifest.ProvidesDisjoint` admits all four of
+  those files — but that alone moves nothing here, because the oracle
+  does not read `RevL.Manifest` and the exporter emits no realm.
 
 ## TODO (in dependency order)
 
