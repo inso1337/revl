@@ -128,6 +128,7 @@ from .parser import (
     RouteStmt,
     ServiceDecl,
     SpawnExpr,
+    SubscribeExpr,
     TestDecl,
     TimerStmt,
     TypeDecl,
@@ -574,6 +575,14 @@ class Env:
         # a pass-through that only fails at the host runtime (item 401, the
         # item-84 crash shape).
         self.host_locals: dict[str, str] = {}
+        # item 130: stream lifecycle tracking. `terminal_stream_sources` holds
+        # the safe names of stream sources (`let s = effect Stream.source() undo
+        # s.close()`) whose inverse CLOSES the source — the terminal-delivering
+        # providers rule 3.6 admits a subscription against. `subscribed_sources`
+        # holds the sources already `subscribe`d, so a second subscription on one
+        # source is refused (rule 3.1, single-consumer).
+        self.terminal_stream_sources: set[str] = set()
+        self.subscribed_sources: set[str] = set()
 
     def bind_local(self, name: str, line: int) -> str:
         if name in self.locals or name in self.requires or name in self.params:
@@ -604,8 +613,11 @@ class Env:
 _BUILTIN_NONRECORD = {"Str", "Int", "Int32", "Bool", "Float", "Bytes", "Unit",
                       "List", "Map", "Opt", "Result"}
 
-# host roots a pure fn may call without an explicit binding (DESIGN §7 builtins)
-_HOST_CALLABLES = {"Map", "Pool", "Job"}
+# host roots a pure fn may call without an explicit binding (DESIGN §7 builtins).
+# `Stream` (item 130) is the reference stream provider host: `Stream.source()`
+# opens a provider whose `close`/`fault`/`emit` verbs drive a single-consumer
+# stream (docs/design/130-stream-reactive-types.md §4.6).
+_HOST_CALLABLES = {"Map", "Pool", "Job", "Stream"}
 
 # The host-Map iteration surface (items 84/86/88, docs/stdlib-2.0.md §Map).
 # `size`/`keys` are backed by EVERY tier's host Map runtime (py runtime.py
@@ -6292,6 +6304,35 @@ def _reached_async_req_ops(node, env, acc: list) -> None:
             _reached_async_req_ops(value, env, acc)
 
 
+def _reaches_stream_next(node, env) -> str | None:
+    """The first `<sub>.next()` on a live subscription a lowered expression
+    reaches, named for a diagnostic, or None (item 130).
+
+    `next` is a suspension source (it awaits the next item raced against the
+    subscription's cancel token, §4.6), so it is admitted only where a suspension
+    is legal — never in a teardown slot (`undo`/`compensate`), where the two-phase
+    abort loop is synchronous and a park could hang or silently no-op (rule 3.4:
+    `close`, the inverse, must not itself `next`). A subscription is a host-local
+    of the reserved `Subscription` family (set at the `subscribe` bracket)."""
+    host_locals = getattr(env, "host_locals", None) or {}
+    if isinstance(node, dict):
+        target = node.get("target")
+        if node.get("kind") == "call" and node.get("method") == "next" \
+                and isinstance(target, dict) and target.get("kind") == "name" \
+                and host_locals.get(target.get("id")) == "Subscription":
+            return "next"
+        for value in node.values():
+            hit = _reaches_stream_next(value, env)
+            if hit is not None:
+                return hit
+    elif isinstance(node, list):
+        for value in node:
+            hit = _reaches_stream_next(value, env)
+            if hit is not None:
+                return hit
+    return None
+
+
 def _first_suspension(node, env) -> str | None:
     """The first suspension source a lowered ACTIVATION-body expression reaches,
     named for a diagnostic, or None (item 131). A suspension source is either a
@@ -6304,12 +6345,19 @@ def _first_suspension(node, env) -> str | None:
     It looks past the name-based `_async_reached_outside_provide` walk precisely
     where that walk is blind — a req-target async op — closing the two silent
     `effect`/`emit` leaks and the two silent teardown leaks the probe table
-    named."""
+    named.
+
+    Item 130 folds a stream `<sub>.next()` in here as a fourth suspension source,
+    so the same teardown gate that refuses an awaited `undo` also refuses a
+    `next` in a teardown slot (rule 3.4)."""
     reached: list = []
     _reached_async_req_ops(node, env, reached)
     if reached:
         req_name, method, _op = reached[0]
         return f"{req_name}.{method}"
+    stream_next = _reaches_stream_next(node, env)
+    if stream_next is not None:
+        return stream_next
     called: set = set()
     _calls_in(node, called, stop_async_arrows=True)
     hit = sorted(called & (getattr(env, "async_callables", None) or set()))
@@ -6898,6 +6946,85 @@ def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
     elif isinstance(node, list):
         for value in node:
             _refuse_leaky_pure_arrow(value, async_colored, decl, filename)
+
+
+def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
+    """Build the `let-effect` IR step for a `subscribe <stream> undo sub.close()`
+    bracket (item 130, docs/design/130-stream-reactive-types.md §5).
+
+    The step is an ordinary `let-effect` bracket carrying `subscribe: true` and
+    the backpressure `policy`, so the emitters render `sub = <acquire>` then
+    `yield lambda: <undo>` verbatim (the bracket whose handle is a live listener,
+    §0) and wasm refuses the whole shape. Admission enforces:
+
+    * rule 3.6 — the subscribed stream must be a terminal-delivering source
+      (`effect Stream.source() undo s.close()`), so a provider that could vanish
+      while a `next` is outstanding, without delivering a terminal, is refused
+      (the no-silent-vanish rule the core guarantee rests on, §9 Part B);
+    * rule 3.1 — a source is subscribed at most once (single-consumer);
+    * rule 3.4 — the `undo` (`close`) must not itself suspend (`close` is the
+      synchronous, non-suspending bracket inverse; a `next` in it is refused)."""
+    sub_expr: SubscribeExpr = stmt.acquire
+    stream_ir = _lower_expr(sub_expr.stream, env, mode="setup")
+    # The stream must resolve to a host-local stream source (family `Stream`).
+    src_name = stream_ir.get("id") if isinstance(stream_ir, dict) \
+        and stream_ir.get("kind") == "name" else None
+    if src_name is None or env.host_locals.get(src_name) != "Stream":
+        raise RevlError(
+            filename, stmt.line,
+            "`subscribe` needs a stream source — the operand does not name one",
+            hint="acquire a source first: `let src = effect Stream.source() undo "
+                 "src.close()`, then `let sub = subscribe src undo sub.close()` "
+                 "(item 130). A required `Stream[T]` capability is a later slice.",
+            code="lifecycle", category="lifecycle")
+    if src_name not in env.terminal_stream_sources:
+        # rule 3.6 — the §9 Part B refusal, the one the core guarantee rests on.
+        raise RevlError(
+            filename, stmt.line,
+            "`subscribe` refuses a provider that can vanish without delivering a "
+            "terminal — this stream source's inverse does not `close` it",
+            hint="a subscription's outstanding `next` must be terminated by "
+                 "exactly one of owner-teardown or a provider terminal, never a "
+                 "silent third state; give the source `undo <src>.close()` so its "
+                 "teardown delivers `Closed`/`Faulted` to the consumer "
+                 "(item 130 §3.6, §9 Part B)",
+            code="lifecycle", category="lifecycle")
+    if src_name in env.subscribed_sources:
+        # rule 3.1 — single-consumer: a stream is subscribed at most once.
+        raise RevlError(
+            filename, stmt.line,
+            "a stream source is already subscribed — a subscription is "
+            "single-consumer (rule 3.1)",
+            hint="multicast is a later item; compose fan-out from an explicit "
+                 "bridge, one bracket per consumer (item 130 §4.1)",
+            code="lifecycle", category="lifecycle")
+    safe = env.bind_local(stmt.bind, stmt.line)
+    # the subscription is a host-local of the reserved `Subscription` family, so
+    # `sub.next()` / `sub.close()` are checked against that verb surface (item
+    # 401) and `next` is recognised as a suspension in a teardown slot (§3.4).
+    env.host_locals[safe] = "Subscription"
+    undo = _lower_expr(stmt.undo, env, mode="undo")
+    acquire = {"kind": "subscribe", "stream": stream_ir, "policy": sub_expr.policy}
+    step = {
+        "step": "let-effect",
+        "subscribe": True,
+        "policy": sub_expr.policy,
+        "acquire": acquire,
+        "undo": undo,
+        "bind": safe,
+    }
+    undo_reach = _first_suspension(step["undo"], env)
+    if undo_reach is not None:
+        raise RevlError(
+            filename, stmt.line,
+            f"`undo` reaches suspension `{undo_reach}`, but `close` is the "
+            "synchronous, non-suspending bracket inverse (rule 3.4)",
+            hint="teardown never suspends (docs/design/teardown-contract.md, the "
+                 "bound rule) — the inverse of a subscription is `sub.close()`, "
+                 "which trips the cancel token and returns; it must not `next`",
+            code="lifecycle", category="lifecycle")
+    env.subscribed_sources.add(src_name)
+    return step
 
 
 def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line: int,
@@ -7554,6 +7681,15 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # reuse the grant's expiresAt/remainingUses; nothing here mints — the
             # grant is minted from the approved ticket, never self-minted.
             body.append(_lower_lease_step(stmt, env, filename))
+        elif isinstance(stmt, LetEffect) and getattr(stmt, "subscribe", False):
+            # item 130: `let sub = subscribe <stream> undo sub.close()`. A
+            # subscription is a single-consumer acquisition bracket; unloading
+            # the owner runs `close`, so the stream is CLOSED before the owner
+            # disappears (the core guarantee, G7 applied to a bracket whose handle
+            # is a live listener). Lowers to a `let-effect` step carrying
+            # `subscribe: true` so the emitters render the bracket verbatim and
+            # wasm can refuse the whole shape (design §5).
+            body.append(_lower_subscribe_step(stmt, env, filename))
         elif isinstance(stmt, LetEffect):
             if stmt.setup:
                 saved_locals = dict(env.locals)
@@ -7613,6 +7749,19 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                                 clause="undo", borrows_only=True)
             _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
             _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
+            # item 130 (rule 3.6): a stream source whose inverse CLOSES it is a
+            # terminal-delivering provider — the only shape a subscription may be
+            # admitted against. `Stream.source() undo s.close()` records `s`; a
+            # source acquired with a non-closing inverse (or none) is NOT recorded,
+            # so a later `subscribe s` is refused (§9 Part B, the no-silent-vanish
+            # rule the core guarantee rests on).
+            if acquire.get("kind") == "host" and acquire.get("fn") == "Stream.source":
+                u = step.get("undo") or {}
+                ut = u.get("target") if isinstance(u, dict) else None
+                if isinstance(u, dict) and u.get("kind") == "call" \
+                        and u.get("method") == "close" and isinstance(ut, dict) \
+                        and ut.get("kind") == "name" and ut.get("id") == safe:
+                    env.terminal_stream_sources.add(safe)
             body.append(step)
         elif isinstance(stmt, EffectStmt):
             if stmt.setup:

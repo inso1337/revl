@@ -156,6 +156,35 @@ class LetEffect:
     # admission pass (lower.py) proves the acquire actually reaches a suspension
     # source; the emitters prefix the acquisition with the tier's await marker.
     is_async: bool = False
+    # item 130: the surface spelled `subscribe <stream> undo <close>`. A
+    # subscription IS an acquisition (an `effect`-position bracket), spelled its
+    # own way so the checker can carry the state-indexed `Stream[T, Active]` type
+    # and the single-consumer/admission rules (docs/design/130-...md §3). The
+    # `acquire` field holds a `SubscribeExpr`; the bracket lowers exactly like an
+    # effect (a `let-effect` step carrying `subscribe: true`).
+    subscribe: bool = False
+
+
+@dataclass
+class SubscribeExpr:
+    """`subscribe <stream>` — the acquisition head of a subscription bracket
+    (item 130, docs/design/130-stream-reactive-types.md §1).
+
+    `stream` is the expression naming the `Stream[T]` capability (a required
+    stream binding, or a host-acquired stream source on the reference tier). The
+    subscription is single-consumer; `policy` is the backpressure policy declared
+    at `subscribe` — Slice 1 supports only `error` (a full bounded buffer faults
+    the subscription with `Faulted(overflow)` and closes; no silent loss)."""
+    stream: object
+    policy: str
+    line: int
+
+
+# item 130: the state index of `Stream[T, State]`. `subscribe` yields `Active`;
+# `close` yields `Closed`; `Paused` is reserved for `block`-policy backpressure
+# (Slice 2) and is not producible in Slice 1; `Created` is the pre-subscribe
+# state (docs/design/130-stream-reactive-types.md §1).
+_STREAM_STATES = frozenset({"Created", "Active", "Paused", "Closed"})
 
 
 @dataclass
@@ -2146,6 +2175,26 @@ class Parser:
                 self.next()
                 inner.append(self.type_())
             self.expect("]")
+            # item 130: `Stream[T]` / `Stream[T, State]`. The optional second
+            # argument is the state index, `State ∈ {Created, Active, Paused,
+            # Closed}` (docs/design/130-stream-reactive-types.md §1). The checker
+            # uses the index for linearity and use-after-close; a stray arity or a
+            # non-state second argument is a type-formation error caught here.
+            if base == "Stream":
+                if len(inner) not in (1, 2):
+                    raise self.err(
+                        self.peek().line,
+                        f"`Stream` takes 1 or 2 type arguments, got {len(inner)}",
+                        hint="a stream is `Stream[T]` or the state-indexed "
+                             "`Stream[T, State]` with `State ∈ {Created, Active, "
+                             "Paused, Closed}` (item 130)")
+                if len(inner) == 2 and inner[1] not in _STREAM_STATES:
+                    raise self.err(
+                        self.peek().line,
+                        f"`Stream`'s second argument must be a state, got "
+                        f"`{inner[1]}`",
+                        hint="the state index is one of `Created`, `Active`, "
+                             "`Paused`, `Closed` (item 130 §1)")
             rendered = f"{base}[{', '.join(inner)}]"
         else:
             rendered = base
@@ -2329,6 +2378,25 @@ class Parser:
                 acquire, undo, line, setup, is_async = self.effect_form(tok.line)
                 return LetEffect(bind, acquire, undo, line, setup, verified_effect,
                                  is_async)
+            # item 130: `let sub = subscribe <stream> undo sub.close()` — a
+            # subscription bracket. It is deliberately the `effect … undo …`
+            # shape (a subscription IS an acquisition), so the bracket
+            # registration and the teardown-reachability argument fall out of the
+            # existing lowering (design §1). An acquisition binding is never
+            # annotated (it holds a host-valued subscription on the frontier).
+            if not mutable and self.at("kw", "subscribe"):
+                if declared is not None:
+                    raise self.err(
+                        tok.line,
+                        f"`let {bind}: {declared} = subscribe …` — a subscription "
+                        "binding cannot be annotated",
+                        hint="`subscribe` binds a `Stream[T, Active]` subscription "
+                             "whose state index the checker tracks; drop the "
+                             "annotation (item 130)",
+                    )
+                stream, undo, line = self.subscribe_form(tok.line, bind)
+                return LetEffect(bind, SubscribeExpr(stream, "error", line), undo,
+                                 line, subscribe=True)
             # item 246: `let a = await approval[C] { fields }` — an acquisition-
             # shaped suspension that yields an `Approval[C]`. Allowed in the
             # activation body exactly where `let x = effect …` is (both bind a
@@ -2388,6 +2456,17 @@ class Parser:
         if tok.kind == "kw" and tok.value == "effect":
             acquire, undo, line, setup, is_async = self.effect_form(tok.line)
             return EffectStmt(acquire, undo, line, setup, is_async=is_async)
+        if tok.kind == "kw" and tok.value == "subscribe":
+            # item 130: a subscription must be bound — its inverse `close` names
+            # the subscription handle, so a bare `subscribe orders undo …` has no
+            # name for the teardown to close (the same reason `spawn` must bind).
+            raise self.err(
+                tok.line,
+                "a `subscribe` must be bound to a subscription handle: "
+                "`let sub = subscribe <stream> undo sub.close()`",
+                hint="the subscription is a single-consumer acquisition whose "
+                     "inverse `close` needs a name; bind it with `let` (item 130)",
+            )
         if tok.kind == "kw" and tok.value in ("every", "after"):
             if in_method:
                 raise self.err(
@@ -2653,6 +2732,28 @@ class Parser:
         self.next()
         undo = self.pure_expr()
         return acquire, undo, line, setup, is_async
+
+    def subscribe_form(self, line: int, bind: str):
+        """`subscribe <stream> undo <close>` (item 130).
+
+        The stream is a pure expression naming the `Stream[T]` capability; the
+        `undo` is required (rule 3.2 — a held subscription with no inverse has no
+        place on the accumulator, the same G4 reason plain `let` is refused in an
+        activation body). Returns `(stream, undo, line)`."""
+        self.expect("kw", "subscribe")
+        stream = self.pure_expr()
+        if not self.at("kw", "undo"):
+            raise self.err(
+                line,
+                f"`subscribe` needs `undo {bind}.close()` (rule 3.2)",
+                hint="a subscription is an acquisition whose inverse closes the "
+                     f"stream; write `let {bind} = subscribe <stream> undo "
+                     f"{bind}.close()`. Unloading the owner then CLOSES the stream "
+                     "by the same LIFO teardown any bracket rides (item 130 §0)",
+            )
+        self.next()
+        undo = self.pure_expr()
+        return stream, undo, line
 
     def _lease_acquire(self, line: int) -> "LeaseAcquire":
         """`<cap> [ttl <n><unit>] [uses <n>]` after `effect lease` (item 294).

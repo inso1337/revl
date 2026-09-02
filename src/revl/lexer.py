@@ -21,6 +21,11 @@ KEYWORDS = {
     # time as a coeffect (docs/time-coeffect.md, roadmap item 57): `every`/
     # `after` acquire a revertible schedule whose inverse is cancellation.
     "every", "after",
+    # Stream[T] reactive types (docs/design/130-stream-reactive-types.md, item
+    # 130): `subscribe <stream> undo <close>` acquires a single-consumer
+    # subscription, an `effect`-position acquisition that registers a bracket.
+    # `next`/`close` stay ordinary method calls (they need no keyword).
+    "subscribe",
     # v2.0 full-language (docs/syntax-2.0.md)
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail",
