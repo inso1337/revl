@@ -77,6 +77,16 @@ but not seen. Every instance was closed. Representative fixes:
   so a lost race cannot delete the winner's entry.
 - A witnessed inverse that reaches an emission through a plain function wrapper
   is refused, keeping teardown emission-free.
+- The witnessed-fs workspace jail routes every path family through the guard,
+  not only the ones that already did. An inverse's SOURCE endpoint is confined
+  and restricted to a sidecar the workspace itself produced (a rename removes
+  what it names, so an unchecked source stole outside files rather than merely
+  overwriting them); the sidecar directories are resolved and refused when a
+  symlink is planted under their name; a hardlinked target is refused rather
+  than written through; and every mutation runs through directory fds walked
+  down from the root with `O_NOFOLLOW`, closing the check-to-syscall window.
+  The families are enumerated in the guard and scanned in the `@py` bodies, so
+  a fifth cannot be added silently.
 - The distribution seam refuses a resource crossing on same-tier as well as
   cross-tier process boundaries, and the wire encoder fails closed on any value
   that is not scalar, list, dict, or a declared record or ADT.
