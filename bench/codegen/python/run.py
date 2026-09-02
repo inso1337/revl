@@ -408,9 +408,15 @@ COPY_PROGRAM = {
 def shape_metrics(src: str) -> dict:
     """Emitted-code shape: counts that do not move with machine load."""
     return {
+        # a function object built where an expression would do — the shape
+        # item 436 F3/F6/F8 removed everywhere but the match PAYLOAD bind
         "lambda-in-expression": src.count("(lambda "),
-        "_revl_i64(": src.count("_revl_i64("),
-        "_revl_field(": src.count("_revl_field("),
+        # the bound check as a CALL. Item 436 F5 inlines the in-range answer,
+        # so what is left here is the trapping tail and the division helpers.
+        "_revl_i64( call": src.count("_revl_i64("),
+        # the inline forms that replaced them: a bounded op, a field read
+        "inline bound `_bi :=`": src.count("(_bi := "),
+        "inline field `_fv :=`": src.count("(_fv := "),
         "persistent-push `+ [`": src.count(" + ["),
         "dict-spread `{**`": src.count("{**"),
     }
