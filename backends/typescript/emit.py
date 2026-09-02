@@ -1971,7 +1971,20 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     apply_kw = "async apply" if is_async else "apply"
 
     if fields:
-        lines.append(f"  {apply_kw}(ctx: Context, rawConfig: {name}Config) {{")
+        # issue #223: cordis derives the arity of `ctx.plugin(C)` from this
+        # parameter — `Spread<T> = undefined extends T ? [config?: T] : [config: T]`
+        # — so a required `rawConfig` makes the config argument MANDATORY at
+        # every call site. That is only true when some field has no default:
+        # `host.applyConfigDefaults` takes `object | undefined` and throws only
+        # for a `required` field, so a component whose every field defaults is
+        # loadable as `ctx.plugin(C)` and ran that way in the suite while the
+        # emitted signature said it could not. Optional here iff optional there.
+        all_defaulted = all(f.get("default") is not None for f in fields)
+        config_param = (
+            f"rawConfig?: {name}Config" if all_defaulted
+            else f"rawConfig: {name}Config"
+        )
+        lines.append(f"  {apply_kw}(ctx: Context, {config_param}) {{")
         spec_parts = []
         for field in fields:
             fname = field["name"]
