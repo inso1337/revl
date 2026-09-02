@@ -586,8 +586,12 @@ def test_a_document_with_no_title_asks_for_the_service_name():
 def test_an_unknown_backend_is_refused_and_explains_the_missing_one():
     with pytest.raises(RevlError) as excinfo:
         import_openapi(_one("get"), filename="p.json", backend="wasm")
-    assert "the cordis-wasm tier is i32-only, so it cannot hold an HTTP client" in \
-        str(excinfo.value)
+    # WHY the flag is missing, not a pinned sentence: the tier has no host
+    # network seam. It is emphatically NOT a value width — `Int` is an i64
+    # there and rich values cross as canonical-ABI pointers (#218), and
+    # tests/test_importer_wasm_tier_claims.py checks that against the emitter.
+    assert "cannot hold an HTTP client" in str(excinfo.value)
+    assert "i32" not in str(excinfo.value)
 
 
 def test_a_refusal_points_at_a_line_in_the_source_text():

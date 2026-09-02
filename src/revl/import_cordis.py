@@ -1454,8 +1454,10 @@ def import_cordis(source: str, *, filename: str = "<cordis>", backend: str = "ts
     if backend not in _BACKEND_COMMENT:
         raise RevlError(filename, 0, f"unknown host backend {backend!r}",
                         hint=f"known: {', '.join(sorted(_BACKEND_COMMENT))}. "
-                             "There is deliberately no `wasm`: the cordis-wasm "
-                             "tier is i32-only, so it cannot host a TS plugin")
+                             "There is deliberately no `wasm`: a cordis-wasm "
+                             "component cannot host a node/TypeScript plugin at "
+                             "all, so the tag would name a boundary with nothing "
+                             "on the other side")
     plugin = _Scanner(source, filename).scan()
     return _Generator(plugin, filename, backend, service, set(pure or ()),
                       mark_unrecovered, source=source).emit()

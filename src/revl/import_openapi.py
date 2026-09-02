@@ -170,7 +170,9 @@ _BUILTIN_TYPES = {"Str", "Int", "Float", "Bool", "Bytes", "Unit",
 _BUILTIN_CASES = {"Ok", "Err", "Some", "None"}
 
 #: host-block comment marker per backend. `wasm` is deliberately absent: an
-#: HTTP client has no meaning on the i32-only cordis-wasm tier.
+#: HTTP client has no meaning on the cordis-wasm tier, which has no host
+#: network seam — not a value-width limit (`Int` is an i64 there, and rich
+#: values cross as canonical-ABI pointers).
 _BACKEND_COMMENT = {"ts": "//", "py": "#", "rust": "//"}
 
 _REF_PREFIX = "#/components/schemas/"
@@ -1926,7 +1928,8 @@ def import_openapi(document: object, *, filename: str = "<openapi>",
         raise RevlError(filename, 0, f"unknown host backend {backend!r}",
                         hint=f"known: {', '.join(sorted(_BACKEND_COMMENT))}. "
                              "There is deliberately no `wasm`: the cordis-wasm "
-                             "tier is i32-only, so it cannot hold an HTTP client")
+                             "tier has no host network seam, so it cannot hold "
+                             "an HTTP client")
     if not isinstance(document, dict):
         raise RevlError(filename, 0,
                         f"the OpenAPI document is not an object (found "
