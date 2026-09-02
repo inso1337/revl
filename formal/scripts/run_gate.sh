@@ -46,5 +46,17 @@ python3 scripts/axioms_gate.py \
   RevL.CapCeilings.confinement_within_ceiling \
   RevL.CapCeilings.no_star_amplification \
   RevL.CapCeilings.parameter_widening_refused \
-  RevL.CapCeilings.ceiling_check_not_subsumed < .axioms.out
+  RevL.CapCeilings.ceiling_check_not_subsumed \
+  RevL.CapCeilings.derived_held_tokens_are_declared_keys \
+  RevL.CapCeilings.derived_reach_is_emit_surface \
+  RevL.CapCeilings.unnameable_receiver_is_star \
+  RevL.CapCeilings.derived_lineage \
+  RevL.CapCeilings.derived_attenuation_monotone \
+  RevL.CapCeilings.derived_lineage_ceiling_le \
+  RevL.CapCeilings.derived_budget_never_exceeds_root_ceiling \
+  RevL.CapCeilings.derived_confinement_within_ceiling \
+  RevL.CapCeilings.derived_no_star_amplification \
+  RevL.CapCeilings.derivation_non_vacuous \
+  RevL.CapCeilings.derivation_refuses_unnameable \
+  RevL.CapCeilings.derived_ceiling_check_not_subsumed < .axioms.out
 python3 harness/diff_corpus.py

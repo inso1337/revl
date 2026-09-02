@@ -43,6 +43,18 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.CapCeilings.no_star_amplification` | item 66 — the host boundary | **proved** | `propext` | `*` is covered only by `*`, so it is never manufactured |
 | `RevL.CapCeilings.parameter_widening_refused` | item 294 — non-vacuity | **proved** | `propext` | tracks `examples/rejections/g4_spawn_widens_parameter.rvl` |
 | `RevL.CapCeilings.ceiling_check_not_subsumed` | item 260 — non-vacuity | **proved** | `propext` | the resource fold is ceiling-blind; the budget check is not |
+| `RevL.CapCeilings.derived_held_tokens_are_declared_keys` | TODO 2(a) — the `capKeys` bridge | **proved** | `propext, Quot.sound` | derived held tokens are exactly the declared wiring keys |
+| `RevL.CapCeilings.derived_reach_is_emit_surface` | TODO 2(a) — `_collect_emit_caps_pairs` | **proved** | `propext, Quot.sound` | only `emit` contributes; an `emit` contributes its key's cone |
+| `RevL.CapCeilings.unnameable_receiver_is_star` | TODO 2(a) — the named residue | **proved** | `propext` | handle / head-less receivers derive exactly `[*]` |
+| `RevL.CapCeilings.derived_lineage` | TODO 2(a) — text to `Lineage` | **proved** | `propext` | an admitted activation spawn edge is a lineage edge |
+| `RevL.CapCeilings.derived_attenuation_monotone` | TODO 2(a) — items 66/294 | **proved** | `propext, Quot.sound` | `attenuation_monotone` over derived sets; the closure carries the subtree |
+| `RevL.CapCeilings.derived_lineage_ceiling_le` | TODO 2(a) — item 260 | **proved** | `propext, Quot.sound` | `lineage_ceiling_le` with its `Lineage` hypothesis discharged |
+| `RevL.CapCeilings.derived_budget_never_exceeds_root_ceiling` | TODO 2(a) — item 260 | **proved** | `propext, Quot.sound` | the end-to-end budget claim, rooted in a component shape |
+| `RevL.CapCeilings.derived_confinement_within_ceiling` | TODO 2(a) + G6 | **proved** | `propext, Quot.sound` | `TypedIn (capKeys Γ)` discharged from `TypedIn (reqKeys c)` |
+| `RevL.CapCeilings.derived_no_star_amplification` | TODO 2(a) — item 66 | **proved** | `propext, Quot.sound` | the `*`-free side condition is itself derived |
+| `RevL.CapCeilings.derivation_non_vacuous` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | derived sets carry valuations; `g4_spawn_widens_parameter` refused from the text |
+| `RevL.CapCeilings.derivation_refuses_unnameable` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | a handle emission derives `*` and is not folded into the held key |
+| `RevL.CapCeilings.derived_ceiling_check_not_subsumed` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | both relations still load-bearing once the sets are derived |
 
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
@@ -167,13 +179,46 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    downward along a lineage of admitted spawns, budgets only shrink, the
    runtime counter is not overdrawn, and the whole thing composes with
    G6's confinement through the key-to-token bridge (`capKeys`).
-   **What is left**, two halves:
-   (a) *theorem side* — the model takes a component's *held* and
-   *reached* capability sets as given, where `lower.py` derives them from
-   the syntax (`_collect_emit_caps`, `_held_capabilities_pairs`,
-   `_spawn_surface_closure`). TODO 1 has now built that spawn/arrow
-   reachability in the EXPORT, so the remaining work is deriving the same
-   sets inside the L0 statement fragment. Also not modelled: parse-time
+   **What is left**, two halves, of which (a) has landed:
+   (a) ~~*theorem side*~~ — **done**. `held` and `reach` are now
+   FUNCTIONS of a component shape, not given lists:
+   `stmtCaps`/`bodyReach` track `_collect_emit_caps_pairs` (emit steps
+   only; a `req` receiver resolves to its wiring key's cone through
+   `_cap_keyed`, anything else to `*`), `heldCaps` tracks
+   `_held_capabilities_pairs`, `reachIn` tracks `_spawn_surface_closure`
+   as a fuel-indexed unfolding, and `SpawnsAdmitted` tracks
+   `_check_spawn_attenuation` over activation-body spawns only
+   (`_activation_spawn_sites`). The `capKeys` bridge stops being an
+   assumption: `derived_held_tokens_are_declared_keys` proves the derived
+   held set's tokens are exactly the component's declared `requires`
+   keys. Five of the nine theorems are re-stated with their `Lineage` (and
+   for confinement, `TypedIn (capKeys Γ)`) hypotheses discharged from the
+   program text — `derived_attenuation_monotone`,
+   `derived_lineage_ceiling_le`,
+   `derived_budget_never_exceeds_root_ceiling`,
+   `derived_confinement_within_ceiling`,
+   `derived_no_star_amplification`. The other four
+   (`cap_order_partial`, `spend_within_budget`,
+   `parameter_widening_refused`, `ceiling_check_not_subsumed`) never had a
+   held/reached hypothesis to discharge; the last of them gains a derived
+   twin anyway (`derived_ceiling_check_not_subsumed`).
+
+   Named residue, stated rather than assumed away. L0 has no constructor
+   for a spawn handle, an emission extern, a named function, a spawn
+   site, or a manifest, so `Comp` carries `handles`, `spawns` and
+   `requires` alongside the `body` (the reference reads the last two from
+   the spawn registry and the manifest too), and an `emit` with no call
+   head is the fragment's stand-in for the extern / emitting-function
+   receivers. Every emission through one of those derives the unnameable
+   `*`, exactly as the checker's `else caps.add("*")` does;
+   `NameableEmission` is the hypothesis this forces, carried explicitly on
+   `derived_no_star_amplification` and on half of
+   `derived_confinement_within_ceiling`, and
+   `derivation_refuses_unnameable` is the concrete price of dropping it.
+   One precision loss: an L0 call head is the receiver ROOT, so a key's
+   cone unions over the service's emission methods where the reference
+   picks the method being called — the derived gate is therefore at least
+   as strict as the checker, never looser. Still not modelled: parse-time
    canonicalization (upstream of the order), and `cap_order.disjoint`'s
    deferred (D2) same-token clause.
    (b) *oracle side* — teach the oracle the checker's ceiling-blind
