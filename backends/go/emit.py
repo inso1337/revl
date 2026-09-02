@@ -3473,6 +3473,12 @@ class _V3GoCtx:
         # `{name: "List"|"Map"}` for the current function's uniquely-owned
         # collection locals; see `_v3_self_rebind_locals` (item 434 (a)/(b)).
         self.linear_locals: dict = {}
+        # `{name: builder}` for the Str accumulators of the loops currently
+        # being rendered, and a per-function counter that keeps two sequential
+        # loops from declaring the same builder twice in one Go scope;
+        # see `_v3_str_accumulators` (item 434 (e)).
+        self.str_builders: dict = {}
+        self.str_builder_seq = 0
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple, str | None] = {}
@@ -3490,6 +3496,9 @@ class _V3GoCtx:
         # Int -> Str through strconv.FormatInt rather than fmt.Sprintf("%d"):
         # `%d` takes ...any and boxes the operand (item 434 (f)).
         self.needs_strconv = False
+        # a strings.Builder for a loop accumulator (item 434 (e)); needs
+        # `strings` WITHOUT the rest of the stdlib preamble `used_stdlib` pulls
+        self.needs_strings = False
         # Stdlib packages an extern @go body asked to be hoisted into the
         # module's import block via a `//revl:import <path>` directive
         # (see _emit_v3_go_externs). A verbatim extern body cannot carry its
@@ -4597,6 +4606,107 @@ def _v3_self_rebind_locals(fn_node: dict) -> dict:
             if name not in disqualified and name in seeded and name in rebound}
 
 
+# ---------------------------------------------------------------------------
+# The string-accumulator lowering, roadmap item 434 (e).
+#
+# `out = out + x + sep` in a loop lowers verbatim, so building n pieces
+# allocates n whole intermediate strings: 1001 allocs / 3,717,392 B at n=1000
+# against a strings.Builder's 1 / 8,192. A Go string cannot be mutated, so
+# unlike (a)/(b) there is no destructive form; the accumulation has to move
+# into a Builder that spans the loop.
+#
+# The rewrite applies to a loop only when, over the WHOLE loop (its condition
+# or iterable included), every assignment to the accumulator is a `+`/`concat`
+# chain whose leftmost operand is the accumulator itself, the accumulator
+# appears nowhere else, and the loop body contains no `return`. Those three
+# together mean no one can observe the accumulator between the loop's first
+# and last write, which is exactly what lets the value live in the Builder for
+# the loop's extent and be materialized once, after it.
+
+
+def _v3_str_concat_pieces(value, name: str):
+    """`(root, [piece, ...])` for `name + p1 + p2 …`, else None.
+
+    The chain is left-nested, so this walks the left spine down to what must be
+    a read of `name` itself. `Int`/`Int32`/`Float` `+` is arithmetic, not
+    concatenation, and never matches.
+    """
+    pieces: list = []
+    node = value
+    while isinstance(node, dict):
+        kind = node.get("kind")
+        if (kind == "bin" and node.get("op") == "+"
+                and node.get("operands") not in ("Int", "Int32", "Float")):
+            pieces.append(node.get("right"))
+            node = node.get("left")
+            continue
+        if kind == "builtin" and node.get("method") == "concat":
+            args = node.get("args") or []
+            if len(args) != 1:
+                return None
+            pieces.append(args[0])
+            node = node.get("target")
+            continue
+        break
+    if not (pieces and isinstance(node, dict) and node.get("kind") == "var"
+            and node.get("name") == name):
+        return None
+    pieces.reverse()
+    return node, pieces
+
+
+def _v3_str_accumulators(loop: dict, ctx: _V3GoCtx) -> list:
+    """The `Str` locals this loop accumulates into and nothing else touches."""
+    body = loop.get("body") or []
+    if any(n.get("step") == "return" for n in _v3_walk_nodes(body)):
+        # the accumulator is materialized after the loop, which a return skips
+        return []
+    permitted: set = set()
+    found: list = []
+    disqualified: set = set()
+    for stmt in _v3_walk_nodes(body):
+        if stmt.get("step") not in ("let", "assign"):
+            continue
+        name = stmt.get("name")
+        parsed = (_v3_str_concat_pieces(stmt.get("value"), name)
+                  if stmt.get("step") == "assign" else None)
+        if parsed is None or ctx.var_types.get(name) != "Str":
+            # a `let` re-declares the name inside the loop, and any other
+            # assignment writes a value the Builder would not hold
+            disqualified.add(name)
+            continue
+        if name not in found:
+            found.append(name)
+        permitted.add(id(parsed[0]))
+    for node in _v3_walk_nodes(loop):
+        if node.get("kind") == "var" and id(node) not in permitted:
+            disqualified.add(node.get("name"))
+    return [name for name in found
+            if name not in disqualified and name not in ctx.str_builders]
+
+
+def _go_v3_open_builders(loop: dict, ctx: _V3GoCtx, out: list, pad: str) -> list:
+    """Declare a strings.Builder per accumulator, seeded with its current value."""
+    opened = []
+    for name in _v3_str_accumulators(loop, ctx):
+        ident = _v3_ident(name, "binding")
+        builder = f"_revlSB{ctx.str_builder_seq}"
+        ctx.str_builder_seq += 1
+        ctx.str_builders[name] = builder
+        ctx.needs_strings = True
+        out.append(f"{pad}var {builder} strings.Builder")
+        out.append(f"{pad}{builder}.WriteString({ident})")
+        opened.append((name, ident, builder))
+    return opened
+
+
+def _go_v3_close_builders(opened: list, ctx: _V3GoCtx, out: list, pad: str) -> None:
+    """Materialize each accumulator once, immediately after the loop."""
+    for name, ident, builder in opened:
+        out.append(f"{pad}{ident} = {builder}.String()")
+        del ctx.str_builders[name]
+
+
 def _go_v3_self_rebind(node: dict, ctx: _V3GoCtx, name: str):
     """The destructive Go statement for a qualifying self-rebind, else None.
 
@@ -4650,6 +4760,15 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
     elif step == "assign":
         raw = node.get("name")
         name = _v3_ident(raw, "binding")
+        builder = ctx.str_builders.get(raw)
+        parsed = (_v3_str_concat_pieces(node.get("value"), raw)
+                  if builder else None)
+        if parsed is not None:
+            # inside the loop the accumulator lives in the Builder, so the
+            # rebind is just what this step appends (item 434 (e))
+            for piece in parsed[1]:
+                out.append(f"{pad}{builder}.WriteString({_go_v3_expr(piece, ctx)})")
+            return
         destructive = _go_v3_self_rebind(node, ctx, name)
         if destructive is not None:
             out.append(f"{pad}{destructive}")
@@ -4672,10 +4791,12 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         out.append(f"{pad}}}")
     elif step == "while":
         _guard_frame_neutral_loop(node.get("body"))
+        opened = _go_v3_open_builders(node, ctx, out, pad)
         out.append(f"{pad}for {_go_v3_expr(node['cond'], ctx)} {{")
         for child in node.get("body") or []:
             _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
         out.append(f"{pad}}}")
+        _go_v3_close_builders(opened, ctx, out, pad)
     elif step == "for":
         _guard_frame_neutral_loop(node.get("body"))
         bind = _v3_ident(node.get("bind"), "loop binding")
@@ -4683,11 +4804,13 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         it_t = _go_v3_infer_type(it_node, ctx)
         if isinstance(it_t, str) and it_t.startswith("List[") and it_t.endswith("]"):
             ctx.var_types[node.get("bind")] = it_t[5:-1]
+        opened = _go_v3_open_builders(node, ctx, out, pad)
         out.append(f"{pad}for _, {bind} := range {_go_v3_expr(it_node, ctx)} {{")
         out.append(f"{pad}\t_ = {bind}")
         for child in node.get("body") or []:
             _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
         out.append(f"{pad}}}")
+        _go_v3_close_builders(opened, ctx, out, pad)
     elif step == "break":
         out.append(f"{pad}break")
     elif step == "continue":
@@ -4918,6 +5041,8 @@ def _emit_v3_go_functions(functions: list, ctx: _V3GoCtx) -> list[str]:
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         ctx.ret_type = fn.get("returns")
         ctx.linear_locals = _v3_self_rebind_locals(fn)
+        ctx.str_builders = {}
+        ctx.str_builder_seq = 0
         params = ", ".join(
             f"{_v3_ident(p.get('name'), 'parameter')} {_go_v3_type(p.get('type'), ctx.types)}"
             for p in fn.get("params") or []
@@ -4940,6 +5065,8 @@ def _emit_v3_go_tests(tests: list, ctx: _V3GoCtx) -> list[str]:
         ctx.var_types = {}
         ctx.ret_type = None
         ctx.linear_locals = _v3_self_rebind_locals(test)
+        ctx.str_builders = {}
+        ctx.str_builder_seq = 0
         # `revlT` (not `t`) so a user binding named `t` can't shadow it.
         out.append(f"func {tname}(revlT *testing.T) {{")
         for stmt in test.get("body") or []:
@@ -6564,6 +6691,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         imports.append('\t"strings"')
     if ctx.needs_strconv:
         imports.append('\t"strconv"')
+    if ctx.needs_strings:
+        imports.append('\t"strings"')
     # _V3_MAP_PREAMBLE's revlMapKeys sorts with slices.Sort (item 434 (h)).
     if used_map:
         imports.append('\t"slices"')
@@ -7628,6 +7757,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         imports.append('\t"strings"')
     if ctx.needs_strconv or _COMP_NEEDS_STRCONV:
         imports.append('\t"strconv"')
+    if ctx.needs_strings:
+        imports.append('\t"strings"')
     # The host runtime's Map.Keys and _V3_MAP_PREAMBLE's revlMapKeys both sort
     # with slices.Sort (item 434 (h)); the host runtime is unconditional on
     # this tier, so the import is too.
