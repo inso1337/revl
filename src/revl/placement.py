@@ -2890,6 +2890,39 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                   f"security posture and is not automated in v1 (a sandbox swap is "
                   f"a follow-on). Running composition untouched.", flush=True)
             return
+        # item 56 / 151: a NETWORK provider's address is part of the placement
+        # contract other machines hold, and a swap cannot unilaterally change
+        # it. The successor is booted on a fresh local UDS under `tmp` and the
+        # re-point loop below reaches only the consumers THIS conductor runs;
+        # an item-56 network consumer in another process on another host, or an
+        # item-151 `[remotes]` consumer in a wholly separate composition, is
+        # never enumerated here and would keep dialling the TCP+mTLS address of
+        # a provider this swap is about to tear down. Refusing is the honest
+        # answer: serving the successor on the SAME endpoint needs an address
+        # handover (cert + `peers` material carried across, and a story for the
+        # window where both processes bind the port), which is a feature, not a
+        # gap to paper over with a fresh socket. Refuse before anything builds
+        # or boots, exactly like the sandbox gate above.
+        if old in addresses:
+            _nhost, _nport, _ = addresses[old]
+            _remote_keys = ", ".join(sorted(provides[old])) or "(none)"
+            print(f"swap refused (item 56): {component!r} is hosted in process "
+                  f"{old!r}, which is a NETWORK provider — it declares "
+                  f"[processes.{old}.address] and serves {_remote_keys} over "
+                  f"TCP+mTLS on {_nhost}:{_nport}, not a local socket. That "
+                  f"address is part of the placement contract consumers on "
+                  f"OTHER machines hold (an item-56 network consumer, or an "
+                  f"item-151 [remotes] consumer in a separate composition), and "
+                  f"this conductor cannot enumerate them, let alone re-point "
+                  f"them. A swap boots the successor on a fresh local socket, "
+                  f"so it would silently cut every remote caller off the seam "
+                  f"while reporting success. Re-tier a network provider by "
+                  f"bringing the composition down and re-placing it with "
+                  f"[processes.{old}] backend = {to_backend!r}, which keeps the "
+                  f"address (and its TLS material) declared in one place. "
+                  f"Running composition untouched.", flush=True)
+            return
+
         housemates = [c for c, p in placed.items() if p == old]
         if housemates != [component]:
             others = ", ".join(c for c in housemates if c != component)
@@ -2961,6 +2994,11 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             "provides": list(provides[old]),
             "proxies": {k: dict(v) for k, v in (specs[old].get("proxies") or {}).items()},
             "probe": [],
+            # The successor always serves on a LOCAL socket: a network
+            # provider is refused above, so `old` is a UDS provider by
+            # construction here and no network-only serve key (`endpoint`, and
+            # the mTLS peer allowlist that rides with it) can be silently
+            # dropped on the way across.
             "serve": {
                 "socket": new_sock,
                 "keys": serve_keys,
