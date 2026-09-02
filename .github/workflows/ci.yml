@@ -41,12 +41,27 @@ jobs:
       # pass closed the seven landed-branch markers, and the three that survived
       # it (items 392 and 406 naming deleted branches, item 425 F3 citing a sha
       # only on an unmerged branch) were reworded in this same commit.
-      # --check-contradiction is on because it is GREEN on main today. The
-      # other three new checks are RED on main as of 2026-09-02 and every
-      # finding is a real unowned finding, so they stay off in THIS line only:
-      # turn each on here as its findings are dispatched. Never add `|| true`.
-      # `make roadmap-check-all` runs all four locally.
-      - run: python3 tools/check_roadmap_markers.py --check-contradiction
+      # A, B and E are on because they are GREEN on main. B and E went green
+      # in the same commit that turned them on: every dangling delegation was
+      # resolved against the target's diff, and item 106's merge-residue
+      # header was deleted.
+      #
+      # C (--check-orphan) is ONE finding from green and is deliberately not
+      # here yet: item 427 F8 has no branch, no issue, no fix sha and no
+      # owner, because the issue migration created issues for items 73-445
+      # but skipped 5, 10, 416, 421, 422, 425, 427 and 428. File a GitHub
+      # issue for item 427, cite it in that finding, and add --check-orphan
+      # to the line below in the same commit.
+      #
+      # D (--check-tier-parity) has two real findings on main (items 421 F6
+      # and 422 F6, both python-only fixes to a language-wide guarantee).
+      #
+      # Never add `|| true`. `make roadmap-check-all` runs all five locally.
+      - run: |
+          python3 tools/check_roadmap_markers.py \
+            --check-contradiction \
+            --check-delegation \
+            --check-duplicate-headers
 
   frontend:
     runs-on: ubuntu-latest
