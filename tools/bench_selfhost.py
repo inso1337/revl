@@ -245,9 +245,16 @@ def _render(n) -> str:
     if isinstance(n, P.ExprList):
         return f"(list {_seq(n.items)})"
     if isinstance(n, P.ExprArrow):
+        # the *written* annotations, exactly as tests/test_selfhost_parser.py
+        # renders them. This renders a freshly PARSED AST, and since item 75(a)
+        # `param_types` is the CHECKER's resolved field — `None` until the
+        # checker runs, which it never does here, so reading it raised
+        # `TypeError: 'NoneType' object is not iterable` and took the whole
+        # table down with it (roadmap item 139; the same harness-versus-
+        # reference drift as item 271).
         params = " ".join(
             f"(p {name} {ty if ty else '_'})"
-            for name, ty in zip(n.params, n.param_types))
+            for name, ty in zip(n.params, n.written_param_types))
         return f"(arrow {params} {_render(n.body)})"
     if isinstance(n, P.ExprMatch):
         arms = " ".join(

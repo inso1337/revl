@@ -460,8 +460,10 @@ fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
 // keyword, so no user binding collides with the walrus target, and a nested
 // match inside an arm body may reuse the name — the outer chain has finished
 // reading `match` before any body runs. A leading wildcard arm (or no arm at
-// all) has no test to carry the bind, so those keep the `(<bind>, <body>)[1]`
-// tuple the awaited path uses.
+// all) has no test to carry the bind, so those bind the SCRUTINEE with a
+// `((match := …), <chain>)[1]` tuple instead. That walrus is safe where a
+// payload bind's is not: its target is the revl keyword `match`, which no user
+// binding can be named (item 163).
 fn match_folds(arms: List[Any]) -> Bool {
   if (arms.length() == 0) { return false }
   return value_str(value_field(arms[0], "pattern")) != "_"

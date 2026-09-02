@@ -762,6 +762,19 @@ def _bounded(operation: str, width: int) -> str:
 # nested read has finished with the name before the outer read rebinds it.
 _FIELD_TMP = "_fv"
 
+# Every name the expression renderer may spell as a walrus target of its own:
+# the bounded-arithmetic temp, the field-read temp, the char-class temp, and
+# the `?.`/`??` chain temps (`_ov<height>`). `_match_expr` needs the set because
+# python refuses an assignment expression that rebinds the iteration variable of
+# the comprehension it sits in, so a payload bound under one of these names has
+# to keep the older walrus binder.
+_WALRUS_TEMPS = frozenset({_BOUNDED_TMP, _FIELD_TMP, "_rc"})
+_OPT_TMP_RE = re.compile(r"_ov\d+\Z")
+
+
+def _walrus_temp(name: str) -> bool:
+    return name in _WALRUS_TEMPS or _OPT_TMP_RE.match(name) is not None
+
 
 def _field_read(target: str, name: str, opt: bool = False,
                 rereadable: bool = False) -> str:
@@ -2431,10 +2444,23 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
     is a SYNC frame: an arm body that crosses an async
     boundary renders an `await`, and `await` inside a lambda is a py
     `SyntaxError` (item 263 — the arm helper hoisted out of an async body must
-    inherit its color). When `awaited` is set the payload binder switches to a
-    walrus assignment carried by a `(<bind>, <body>)[1]` tuple instead, so every
-    `await` lands directly in the enclosing `async def` and none is trapped in
-    a lambda. The two forms are otherwise byte-identical.
+    inherit its color). So the awaited payload bind needs a binder that is not
+    a lambda but is still a SCOPE.
+
+    A walrus is not (roadmap item 163): `(v := match.value)` assigns in the
+    ENCLOSING frame, so an arm bind named after a local of the function holding
+    the match silently clobbers it — `let v = 5; let r = match o { Some(v) =>
+    await f(v), … }; r + v` read the payload back as `v`. A nested match
+    rebinding the name and an arrow in the arm body capturing it went wrong the
+    same way, and every non-awaited spelling of those three was already correct
+    because the lambda gave the bind a scope of its own.
+
+    A comprehension is a scope and admits `await` (PEP 530), so the awaited
+    binder is `[<body> for <bind> in (<payload>,)][0]`: the bind is arm-local
+    exactly as the lambda's parameter is, an arrow in the body closes over the
+    comprehension's cell, and every `await` still lands directly in the
+    enclosing `async def`. The payload is evaluated once, before the body, in
+    both forms.
     """
     # `match` is a revl keyword, so it can never be a user binding in the
     # revl source. Python 3.10+ treats it as a soft keyword, which is still
@@ -2443,10 +2469,19 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
 
     def bind_payload(bind: str, body: str, payload: str) -> str:
         # `await`-free arm -> the classic one-shot lambda; an awaited arm ->
-        # a walrus bind so the body (which carries the `await`) stays at the
-        # frame's top level rather than inside a lambda.
+        # a one-element comprehension, whose iteration variable is a scope the
+        # `await` in the body can still be spelled inside.
         if awaited:
-            return f"(({bind} := {payload}), {body})[1]"
+            if _walrus_temp(bind):
+                # Python refuses a walrus that rebinds a comprehension's
+                # iteration variable, and a body reaching one of the emitter's
+                # own walrus temps (`_bi` and friends) does exactly that when
+                # the payload is bound under that name. Such a bind is already
+                # clobbered by the scaffolding that owns the name, with or
+                # without a match, so keep the pre-item-163 spelling rather
+                # than turn a wrong value into a `SyntaxError`.
+                return f"(({bind} := {payload}), {body})[1]"
+            return f"[{body} for {bind} in ({payload},)][0]"
         return f"(lambda {bind}: {body})({payload})"
 
     def branch(arm: dict, rest: str | None, head: str) -> str:
@@ -2483,7 +2518,9 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
     # and a nested match inside an arm body may reuse the name freely — the
     # outer chain has finished reading `match` before any body is evaluated.
     # A leading wildcard arm (or no arm at all) has no test to carry the bind,
-    # so those keep the `(<bind>, <body>)[1]` tuple the awaited path uses.
+    # so those bind the SCRUTINEE with a `((match := …), <chain>)[1]` tuple
+    # instead. That walrus is safe where a payload bind's is not: its target is
+    # the revl keyword `match`, which no user binding can be named.
     folds = bool(arms) and arms[0].get("pattern") != "_"
     result = None
     for i, arm in reversed(list(enumerate(arms))):
