@@ -155,6 +155,32 @@ def _corpus_params(gap: dict[str, str]):
 
 CORPUS_TAINT_AWARE = _corpus_params(TAINT_QUALIFIED_GAP)
 
+# item 445: the reference frontend now proves UNIQUE OWNERSHIP of an
+# accumulation local once (`src/revl/ownership.py`) and stamps the answer on the
+# IR — `"unique"` on a self-rebinding `assign`, `"unique_birth"` on the `let`
+# that would need the defensive copy — instead of each emitter re-deriving the
+# same aliasing rule (the go and python tiers had written it twice). The
+# self-host lowering gate has no such stage: `selfhost/lower.rvl` streams tokens
+# straight to IR JSON in one pass, and the analysis is a FORWARD DATAFLOW with a
+# fixpoint over each loop back edge, which needs the statement tree the streaming
+# producer never builds. So the native IR carries no marker and diverges from the
+# reference on any document with an in-place accumulation loop — one in this
+# corpus, `transforms.rvl`'s `list_map` / `list_filter`.
+#
+# Marked strict-xfail rather than dropped, on the taint gap's terms: it is red
+# for a NAMED reason and will XPASS loudly the day the pass is ported. The
+# emit_py port item 445 DID land is unaffected and stays green — `emit_py.rvl`
+# now READS the two markers where it used to carry ~130 lines of its own copy of
+# the analysis, and the emitters consume the REFERENCE IR, which carries them.
+UNIQUE_MARKER_GAP = {
+    "transforms.rvl": (
+        "item 445: selfhost/lower.rvl has no unique-ownership stage, so the "
+        "native IR carries neither `unique` nor `unique_birth`"
+    ),
+}
+
+CORPUS_UNIQUE_AWARE = _corpus_params(UNIQUE_MARKER_GAP)
+
 
 # ---------------------------------------------------------------- harness
 
@@ -309,7 +335,7 @@ def test_native_component_and_extern_ir_is_emitter_ready(lower_to_ir):
             del sys.modules["runtime"]
 
 
-@pytest.mark.parametrize("rel", CORPUS)
+@pytest.mark.parametrize("rel", CORPUS_UNIQUE_AWARE)
 def test_native_ir_matches_reference_functions(lower_to_ir, rel):
     """The `functions` section — every module `fn` with its full lowered body
     (statements + the typed-expression tree) — is byte-identical to the
