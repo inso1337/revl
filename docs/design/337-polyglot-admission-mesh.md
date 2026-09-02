@@ -250,6 +250,37 @@ Seam 2 at all, so no job ever ran the code path. The smoke script now carries
 `tests/test_seam2_same_tier_readmission.py` boots a real py consumer over a
 real seam.
 
+#### The two amendments are one decision, in this order
+
+This amendment and "a selector is not an authorization" were found separately
+and land on the same function, so the order they compose in is worth stating
+once. `_boot_wiring_decision` asks, in sequence:
+
+1. is there a selector at all (`component` + `backend`)? No selector, refuse.
+2. **binding** - does this receiver's OWN manifest name that component as the
+   provider of THIS key (`_selector_binding`)? An unrelated component is not an
+   admission token.
+3. **address** - does this receiver sanction the address the proxy would
+   actually be pointed at (`_sanction_address`), against anchors it holds
+   itself: the placement directory from `argv[1]`, or its own mTLS identity?
+4. **admission** - `seam_readmission`, the conductor's own plan-time question,
+   asked in place.
+
+Steps 2 and 3 come first because they are the cheap, purely receiver-derived
+half and neither compiles anything; step 4 is the expensive one, and it is the
+only step whose question differs between this seam and the repoint seam (which
+asks `swap_admission`, correctly, because a cutover really does relocate).
+Scope sits outside all four, in `_apply_boot_wiring`: whether the gate runs at
+all is read off `_providers_of`, never off the entry's `remote` flag.
+
+The two amendments pull in opposite directions - one refuses more, one refuses
+less - and they do not overlap. Relaxing step 4 to the in-place question does
+not relax steps 2 and 3: a legitimate same-tier sync seam still has to be bound
+to its key and carry an address inside this process's own placement directory.
+Conversely a refusal from step 2 or 3 is exactly as fatal as one from step 4,
+because the consequence is identical - an unwired dependency - and `run()` does
+not distinguish them.
+
 ### Seam 3: the remote handoff (frontier: needs a per-tier native gate + a trust anchor)
 
 Network placement (item 56) spans machines that need not share a filesystem or a
