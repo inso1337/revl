@@ -672,6 +672,47 @@ it already applies to every origin), and rejects `endorse[secret]` unconditional
 downgrade, the typed `Secret[T]` value has an audited one, and they carry disjoint
 origins so no declassifier can confuse them.
 
+### 7d. What `Secret[T]` does NOT cover: a config field with a literal default
+
+`Secret[T]` is a statement about where a value may GO, not about where it IS.
+Everything in 7a-7c fences the value's onward flow, and the runtime redaction
+(the `<name>.config` trace line, WAL records, seam failure text, MCP approval
+tickets) covers a value that arrives at load time. None of it applies to a
+literal the author typed into the source:
+
+```revl
+config { api_key: Secret[Str] = "sk-live-..." }
+```
+
+That default is source. It lowers into the IR's config entry
+(`lower._ir_config_field`) and into the emitted `ConfigSchema` verbatim, with
+the `secret` marking sitting *beside* the plaintext rather than in place of
+it, and from there it reaches every build artifact that carries the IR or the
+emitted backend source: `revl compile -o`, a bundle's `ir/ir.json` and
+`emitted/<backend>/`, and a component published through `truc` (whose registry
+copy is the `.rvl` source itself). The lock file and the attestation carry only
+digests, and the site wheel vendors the compiler rather than any user program,
+so it stops there — but "in every build artifact" is already further than a
+reader who trusted the qualifier would guess.
+
+This is deliberate and stays legal: the repo's own leak canaries put a real
+value in place precisely so a test can detect it downstream
+(`tests/test_secret_externalization.py`). So the frontend WARNS rather than
+refusing — `taint.LiteralSecretDefaultWarning`, raised once per field where
+`mentions_secret(field.type)` holds and the default is not `null`. The warning
+names the form that has no value to leak, which is 1a's bound secret:
+
+```revl
+secret api_key for payments.charge
+```
+
+`parser.SecretDecl` carries `name`, `capability` and `line` and has no value
+field at all (§1b), so nothing about the value exists in the AST or the IR to
+be bundled, published or digested. Use that when the value must be absent from
+the artifact; use a plain `Secret[T]` field with the value supplied at load
+time when it must merely be redacted at the boundaries; and use a literal
+default only where a test needs one, knowing what it costs.
+
 ## 8. Adversarial self-review
 
 The second review's two CRITICALs and the HIGH are folded into the design above
