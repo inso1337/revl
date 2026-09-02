@@ -82,6 +82,20 @@ jobs:
       - run: sh backends/python/setup.sh
       - run: cd backends/python && .venv/bin/pytest -q
       - run: cd backends/python && .venv/bin/python demo.py
+      # roadmap item 419a guard: backends/wasm/ and backends/python/tests/
+      # each ship a same-named emit.py; combining the two roots in ONE
+      # pytest process used to poison sys.modules['emit'] via a sys.path
+      # insertion race (backend-python and backend-wasm above never combine
+      # them, which is exactly how this stayed hidden). setup.sh installs
+      # this venv editable against the checkout, so it already carries both
+      # revl and the cordis-py runtime — run both roots together here so a
+      # regression of the conftest.py pin (see backends/python/tests/
+      # conftest.py's _load_and_pin, and test_bare_import_pin.py) reds CI
+      # immediately instead of silently reappearing. wasmtime is not
+      # installed in this job, so the runtime-execution wasm tests skip here
+      # (backend-wasm below is what gates those); that is fine, this step
+      # exists only to catch the cross-root collision.
+      - run: cd backends/python && .venv/bin/pytest ../wasm/ tests/ -q
 
   backend-typescript:
     runs-on: ubuntu-latest
