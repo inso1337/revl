@@ -94,12 +94,60 @@ def test_empty_changeset_is_full():
     assert sel()["full"] is True
 
 
-# --- added/deleted test file forces FULL ----------------------------------- #
-def test_added_or_deleted_test_file_is_full():
-    r = at._apply_add_delete_full(
-        ["tests/test_newthing.py"], {"tests/test_newthing.py"}
+# --- added / deleted test files (issue #162) -------------------------------- #
+def _override(changed, added=(), deleted=()):
+    return at._test_add_delete_override(
+        list(changed), set(added), set(deleted), ROOT
+    )
+
+
+def test_deleted_test_file_is_still_full():
+    # A survivor may import it (test_selfhost_lower is imported by three other
+    # test modules), so the blast radius is not visible from the path alone.
+    r = _override(["tests/test_newthing.py"], deleted={"tests/test_newthing.py"})
+    assert r is not None and r["full"] is True
+
+
+def test_added_test_file_alone_is_not_full():
+    # Nothing else changed, so nothing but the new test can newly fail.
+    r = _override(["tests/test_newthing.py"], added={"tests/test_newthing.py"})
+    assert r is not None and r["full"] is False
+    assert r["pytest"] == ["tests/test_newthing.py"]
+    assert r["backends"] == []
+
+
+def test_added_test_file_beside_its_subject_is_not_full():
+    # The regression issue #162 names: a tier change plus the test that covers
+    # it must stay narrow, not escalate to the whole tree.
+    r = _override(
+        ["backends/wasm/emit.py", "tests/test_wasm_newthing.py"],
+        added={"tests/test_wasm_newthing.py"},
+    )
+    assert r is not None and r["full"] is False
+    assert "tests/test_wasm_newthing.py" in r["pytest"]
+    assert set(r["backends"]) == {"wasm"}
+
+
+def test_added_test_file_with_no_touched_subject_is_full():
+    # The fallback must survive: a new test that maps to nothing the diff
+    # touched is the ambiguity the blanket escalation was standing in for.
+    r = _override(
+        ["docs/guide-humans.md", "tests/test_unrelated_newthing.py"],
+        added={"tests/test_unrelated_newthing.py"},
     )
     assert r is not None and r["full"] is True
+
+
+def test_added_test_file_beside_a_core_change_is_still_full():
+    r = _override(
+        ["src/revl/parser.py", "tests/test_parser_newthing.py"],
+        added={"tests/test_parser_newthing.py"},
+    )
+    assert r is not None and r["full"] is True
+
+
+def test_no_added_or_deleted_test_file_defers_to_select():
+    assert _override(["backends/wasm/emit.py"]) is None
 
 
 # --- selector self-change runs its own unit test --------------------------- #
