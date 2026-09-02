@@ -20,37 +20,40 @@ the tier's own corpus, the self-host port under the same corpus, and — to pric
 the fix — the reference under EVERY `.rvl` in the tree:
 
     tier  docs  ref stmts  ref cov   port stmts  port cov   whole tree
-    py      20       2103    56.2%         1990     73.2%        79.1%
-    ts      31       1811    64.9%         2056     77.4%        83.0%
-    go       9       3977    24.2%         1410     67.7%        74.6%
-    java    22       2301    57.4%         2423     72.9%        80.9%
-    rust    19       2968    52.1%         1865     79.8%        85.2%
-    wasm    11       2530    42.8%         1346     78.9%        84.2%
-    TOTAL  112      15690    46.3%        11090     75.0%        80.7%
+    py      20       2151    56.4%         1990     73.2%        78.9%
+    ts      32       1811    65.9%         2084     77.8%        83.5%
+    go      10       3984    25.2%         1509     67.9%        74.5%
+    java    22       2403    55.7%         2423     72.9%        81.5%
+    rust    19       3154    49.8%         1865     79.8%        85.9%
+    wasm    11       2534    42.8%         1346     78.9%        84.1%
+    TOTAL  114      16037    46.2%        11217     75.1%        80.9%
 
 **MORE THAN HALF of the reference emitter statements the byte-agreement oracles
-run against are never executed by the corpus those oracles use: 8421 of 15690,
-53.7%.** The construct gate says 19% blind. It is optimistic by nearly three
+run against are never executed by the corpus those oracles use: 8633 of 16037,
+53.8%.** The construct gate says 19% blind. It is optimistic by nearly three
 times, in the direction that matters, which is the same failure mode item 429 is
 about, one level up.
 
 WHERE THE UNCOVERED MASS SITS, and why a construct table cannot see it:
 
-    3834 statements in 250 functions no corpus document CALLS AT ALL
-    2921 statements in 315 functions the corpus DOES call and leaves unrun
-    1666 statements on declared exclusions and named open gaps
+    3899 statements in 263 functions no corpus document CALLS AT ALL
+    2994 statements in 318 functions the corpus DOES call and leaves unrun
+    1740 statements on declared exclusions and named open gaps
 
 That middle row is the point. The dispatch arm is reached, so the construct
 counts as covered, while the branch, error arm or fallback below it never runs.
 
 AUTHOR CASES, OR POINT THE ORACLE AT MORE INPUTS? Measured, because the two
-answers cost very differently. Of 867 `.rvl` documents in the tree, 619 compile;
-running all six ports over them gives ~2950 (tier, document) pairs the reference
-emits, of which **1136 ALREADY AGREE byte-for-byte and the rest DIVERGE**.
-Adopting every agreeing document — a tenfold corpus, 1136 documents, zero
-authoring — moves reference coverage from 46.3% to only **51.0%**. The whole
-tree reaches 80.7%, so the remaining ~30 points live ENTIRELY on the diverging
-pairs.
+answers cost very differently. The one-off agreement survey behind this
+paragraph was taken when the tree held 867 `.rvl` documents of which 619
+compiled (it now holds 1023 of which 766 compile, and the whole-tree column
+above is re-taken; the agreement split below is not, so read it as the shape,
+not as today's count). Running all six ports over them gave ~2950 (tier,
+document) pairs the reference emits, of which **1136 ALREADY AGREE
+byte-for-byte and the rest DIVERGE**. Adopting every agreeing document — a
+tenfold corpus, 1136 documents, zero authoring — moved reference coverage from
+46.3% to only **51.0%**. The whole tree reaches 80.9%, so the remaining ~30
+points live ENTIRELY on the diverging pairs.
 
 The binding constraint is therefore neither corpus size nor authoring: it is
 TRIAGE of those divergences, each of which is either a real self-host gap to
@@ -112,9 +115,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LEDGER = ROOT / "tests" / "fixtures" / "selfhost_uncovered_lines.json"
 
-# tier -> (reference emitter package, the self-host module's entry function)
-ENTRY = {"py": "emit_py_src", "rust": "emit_rust_src", "ts": "emit_src",
-         "go": "emit_src", "java": "emit_src", "wasm": "emit_src"}
+
+# The self-host module's entry function, per tier. Two spellings are in use:
+# `emit_<tier>_src` where the port has been wired into selfhost/compile.rvl
+# (py, rust, and ts since item 146 gap 2 landed in #209), plain `emit_src`
+# where it has not. Tiers move from the second spelling to the first as that
+# wiring lands, so resolve in that order rather than pinning a table that the
+# next wired tier reds on the rename alone. It still fails LOUDLY — never
+# silently measuring nothing — when neither name is present.
+def _entry(module, tier: str):
+    for name in (f"emit_{tier}_src", "emit_src"):
+        found = getattr(module, name, None)
+        if found is not None:
+            return found
+    raise AttributeError(
+        f"the emitted selfhost/emit_{tier}.rvl declares neither "
+        f"`emit_{tier}_src` nor `emit_src`: the port's entry point was renamed "
+        f"and tools/selfhost_line_coverage.py has to be told which function to "
+        f"drive, or this gate measures nothing")
+
 
 TIERS = {
     "py": "python",
@@ -354,7 +373,7 @@ def measure_selfhost() -> dict:
             try:
                 exec(compile(emitted, str(module_path), "exec"), module.__dict__)
                 for document in corpus_documents(tier):
-                    getattr(module, ENTRY[tier])(compile_files([str(document)]))
+                    _entry(module, tier)(compile_files([str(document)]))
             finally:
                 cov.stop()
                 sys.modules.pop(name, None)

@@ -89,8 +89,8 @@ grow silently, both run by `tests/test_selfhost_coverage.py`:
 
 * `tools/selfhost_line_coverage.py --check` — which STATEMENTS of the mirrored
   emitters no corpus document executes, on both sides. This is the one the
-  surface rests on. Measured today: the corpus runs 46.3% of the reference
-  emitter statements and 75.0% of the ported ones.
+  surface rests on. Measured today: the corpus runs 46.2% of the reference
+  emitter statements and 75.1% of the ported ones.
 * `tools/selfhost_coverage.py --check` — the cheap construct-level check over
   dispatch arms. Kept because it is fast and names constructs rather than
   functions, but it is a proxy: it reports 19% blind where statements say 54%.
