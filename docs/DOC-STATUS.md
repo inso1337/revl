@@ -111,6 +111,7 @@ owners; this pass only links to them.
 | guide-ai-agents.md | stale-fixed | 0 |  |
 | guide-humans.md | stale-fixed | 0 | yes |
 | holes.md | needs-work | 29 |  |
+| import-a2a.md | current | 1 |  |
 | import-cordis.md | needs-work | 58 |  |
 | import-openapi.md | needs-work | 39 |  |
 | import-wit.md | needs-work | 28 |  |

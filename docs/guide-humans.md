@@ -284,7 +284,7 @@ below; the exhaustive per-command flag reference is
 | `revl mcp serve` | the compiler itself as an MCP server (`--files` default composition, `--restore SNAPSHOT.json`) | [mcp-bridge.md](mcp-bridge.md) |
 | `revl mcp schema FILES` | project provided services to MCP tool definitions | [mcp-bridge.md](mcp-bridge.md) |
 | `revl mcp import MANIFEST` | turn an MCP `tools/list` manifest into revl source | [mcp-bridge.md](mcp-bridge.md) |
-| `revl import wit\|openapi\|cordis FILE` | import an external interface definition as typed revl source | [import-wit.md](import-wit.md) · [import-openapi.md](import-openapi.md) · [import-cordis.md](import-cordis.md) |
+| `revl import wit\|openapi\|cordis\|a2a FILE` | import an external interface definition as typed revl source | [import-wit.md](import-wit.md) · [import-openapi.md](import-openapi.md) · [import-cordis.md](import-cordis.md) · [import-a2a.md](import-a2a.md) |
 | `revl export wit FILES --service N\|--composition` | generate the standard WIT interface for a revl service/composition | [wit-bridge.md](wit-bridge.md) |
 | `revl truc VERB …` | the component manager namespaced under the compiler, `add`/`rm`/`assemble`/`ship`/`reproduce`, tail passed through unchanged | [truc.md](truc.md) |
 

@@ -1,0 +1,9 @@
+{
+  "protocolVersion": "1.0.0",
+  "name": "Scratch Agent",
+  "url": "http://127.0.0.1:9999/a2a",
+  "capabilities": {},
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [{"id": "echo", "name": "Echo"}]
+}
