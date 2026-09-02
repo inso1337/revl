@@ -33,7 +33,15 @@ print("py3.11 clean")
 PY
 
 echo "== roadmap markers =="
-python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan || fail=1
+# --head-branch is the cheap half of the PR-context check: a marker saying work
+# is IN FLIGHT on the branch you are about to open the PR from goes stale the
+# moment that PR merges, because the merge deletes the branch. Catching it here
+# costs nothing, catching it in CI costs a round-trip, and not catching it at
+# all reddens main plus every open PR whose merge-ref carries the new text.
+# A detached HEAD reports "HEAD", which names no branch and leaves it off.
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+[ "$branch" = "HEAD" ] && branch=""
+python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --head-branch "$branch" || fail=1
 
 # The frontend suite runs tests/test_gate_crate_drift.py on every PR, so a
 # stale crate is a hard red. crates/revl-gate embeds emitted rust, which means
