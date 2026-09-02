@@ -136,6 +136,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--root", default=None, metavar="DIR",
         help="the project root row provenance and origins are recorded "
              "against (default: the working directory)")
+    composition.add_argument(
+        "--set", action="append", default=[], metavar="@ROW.FIELD=VALUE",
+        dest="overrides",
+        help="item 426 S2, the INVOCATION OVERLAY (the last level): override "
+             "one config value of one row. Values only, never structure — it "
+             "cannot add, remove or replace a row — and the value is typed "
+             "against the component's declared `config` exactly like every "
+             "other one (repeatable)")
+
+    # item 426 S2: layers and the fold.
+    layer = sub.add_parser(
+        "layer",
+        help="composition LAYERS (docs/composition-layers.md): fold a "
+             "composition's declared stack and site layers into its row table, "
+             "header-only")
+    layer_sub = layer.add_subparsers(dest="layer_command", required=True)
+    layer_check = layer_sub.add_parser(
+        "check",
+        help="resolve every row id and render the folded table with each row's "
+             "layer provenance, without lowering any component body")
+    layer_check.add_argument(
+        "file", help="the .rvl document declaring the base composition")
+    layer_check.add_argument(
+        "--json", action="store_true",
+        help="the folded row table as JSON, provenance included")
+    layer_check.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="the project root provenance and origins are recorded against")
+    layer_check.add_argument(
+        "--set", action="append", default=[], metavar="@ROW.FIELD=VALUE",
+        dest="overrides", help="the invocation overlay (see `revl composition`)")
 
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
