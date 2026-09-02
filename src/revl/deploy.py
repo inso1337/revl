@@ -1451,6 +1451,11 @@ FEDERATION_ABORTED = "federation-abort-decided"
 #: Why a plan is refused admission into a federation update.
 REFUSE_IRREVERSIBLE = "non-deferrable-irreversible-crossing"
 REFUSE_CONTRACT = "contract-break"
+#: A pinned contract naming a provider this update does not carry. It used to
+#: be SKIPPED, in a function whose whole posture is refuse-as-one-unit: a pin
+#: the federation cannot check is not a pin the federation satisfied (roadmap
+#: 428 F13).
+REFUSE_UNKNOWN_PROVIDER = "contract-provider-not-in-update"
 
 
 def reached_emissions(ir: dict) -> list[dict]:
@@ -1547,7 +1552,10 @@ def federation_admission(plans: Mapping[str, dict], *,
     optional sequence of `(consumer_surface_doc, provider_composition_id)`
     pairs; each is checked with `federation.check` against the provider's NEW
     IR, so a federation update that would break a pinned consumer surface is
-    refused as one unit rather than deployed composition by composition.
+    refused as one unit rather than deployed composition by composition. A
+    contract naming a provider `plans` does not carry is REFUSED, not skipped:
+    it cannot be checked, and a pin that could not be checked is not a pin the
+    update satisfied.
 
     The refusal that matters is the second CRITICAL's: **a plan that
     necessarily crosses a non-deferrable irreversible effect is REFUSED
@@ -1600,6 +1608,23 @@ def federation_admission(plans: Mapping[str, dict], *,
     for consumer_doc, provider_id in (contracts or ()):
         provider_ir = plans.get(provider_id)
         if provider_ir is None:
+            # Fail CLOSED. This used to `continue`, so a contract naming a
+            # provider outside `plans` — a typo, a composition dropped from the
+            # update, a rename on one side only — was checked against nothing
+            # and the federation admitted. A pin that could not be checked is
+            # not a pin that was satisfied, and "all or nothing" cannot mean
+            # "all of the ones we happened to be able to look at".
+            named = ", ".join(sorted(plans)) or "(none)"
+            refusals.append({
+                "kind": REFUSE_UNKNOWN_PROVIDER,
+                "composition": provider_id,
+                "reason": (
+                    f"a pinned consumer surface names `{provider_id}` as its "
+                    "provider, but this federation update carries no plan for "
+                    f"it (updating: {named}); the pin cannot be checked, so it "
+                    "is refused rather than skipped. An all-or-nothing update "
+                    "refuses as one unit."),
+            })
             continue
         from .federation import check  # noqa: PLC0415 — lazy, avoids a cycle
         verdict = check(consumer_doc, provider_ir)

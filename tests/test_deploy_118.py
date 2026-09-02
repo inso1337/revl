@@ -1370,6 +1370,28 @@ def test_a_contract_break_refuses_the_whole_federation_update(tmp_path):
     assert broken["refusals"][0]["kind"] == deploy.REFUSE_CONTRACT
 
 
+def test_a_contract_naming_a_provider_outside_the_update_is_refused(tmp_path):
+    """428 F13. It used to be SKIPPED, so a typo'd or dropped provider left the
+    pin checked against nothing and the federation admitted, in a function
+    whose whole posture is refuse-as-one-unit."""
+    from revl.compiler import compile_source
+    from revl.federation import consumer_surface
+
+    provider_v1 = compile_source(PROVIDER_V1, str(tmp_path / "p1.rvl"))
+    surface = consumer_surface(
+        compile_source(CONSUMER, str(tmp_path / "c.rvl")), consumer="app")
+
+    verdict = deploy.federation_admission({"db": provider_v1},
+                                          contracts=[(surface, "typo-db")])
+    assert verdict["admitted"] is False
+    refusal = verdict["refusals"][0]
+    assert refusal["kind"] == deploy.REFUSE_UNKNOWN_PROVIDER
+    assert refusal["composition"] == "typo-db"
+    assert "carries no plan for it" in refusal["reason"]
+    # the refusal names what IS being updated, so the author can see the typo
+    assert "updating: db" in refusal["reason"]
+
+
 # --- roadmap 419b: the two shapes `reached_emissions` used to walk past ------
 
 _MEDIATED = """\
