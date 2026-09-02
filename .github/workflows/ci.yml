@@ -361,6 +361,15 @@ jobs:
       # cold it FAILS with the command to run, rather than checking zero files
       # and reporting success.
       - run: cd backends/typescript && node scripts/typecheck-generated.mjs
+      # issue #223: the step above covers EMITTED output. The tier's
+      # hand-written TypeScript — the vitest suites, `bridge.ts` (the seam),
+      # `revl_fs_ts.ts` (the confinement surface) and the rest — was in no
+      # tsconfig at all, and probing it found 9 real type errors. Same
+      # one-program-per-file shape and the same ordering requirement: the
+      # suites import `tests/generated/`, so this runs after `vitest run`. It
+      # also fails if ANY `.ts` in the tier is matched by no tsconfig, which is
+      # what keeps the gap from reopening one file at a time.
+      - run: cd backends/typescript && node scripts/typecheck-handwritten.mjs
       - run: cd backends/typescript && npx tsc --noEmit
       # the tier's acceptance demo (R1-R4 self-checks, exit code reflects them).
       # `tsc --noEmit` above type-checks demo.ts but never RUNS it, so its

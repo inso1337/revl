@@ -139,7 +139,7 @@ export const Guarded = {
   name: "Guarded",
   inject: ["store"],
   provide: ["calc"],
-  apply(ctx: Context, rawConfig: GuardedConfig) {
+  apply(ctx: Context, rawConfig?: GuardedConfig) {
     const config = host.applyConfigDefaults("Guarded", rawConfig, { limit: { default: 10n } }) as Required<GuardedConfig>
     ctx.effect(function* () {
       if ((config.limit < 1n)) {

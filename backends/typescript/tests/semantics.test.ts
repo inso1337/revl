@@ -1,12 +1,21 @@
-// R1–R5 semantics tests (docs/backend-ir.md §Required semantics), run against
-// the checked-in golden module plus an emitted fixture whose undo uses `req`.
+// R1, R2, R4 and R5 semantics tests (docs/backend-ir.md §Required semantics),
+// run against the checked-in golden module.
+//
+// R3 lives next door in `semantics_r3.test.ts`, and the split is load-bearing
+// rather than cosmetic (issue #223). Its fixture `r3_migrator.ir.json` also
+// provides `db`, and every emitted module declares its provisions by
+// augmenting cordis' GLOBAL `Context` — so a file importing both this golden
+// and that fixture merges two different `Database` types onto `Context.db`,
+// and `ctx.db` in it resolves to whichever won. That is TS2717, and it is not
+// an emitter defect: it is what the augmentation shape costs. One provider of
+// a given service name per test file keeps every `ctx.<key>` here honest.
 import { beforeEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { Context, FiberState } from 'cordis'
 import { PgDatabase, UserCache } from '../golden/user_cache.ts'
-import { Migrator, PgDatabase as R3Provider } from './generated/r3_migrator.ts'
 import {
   assertNoResidue,
+  fiberStateName,
   hostLog,
   liveResources,
   resetHost,
@@ -51,7 +60,7 @@ describe('R2 — reactive resolution', () => {
     const transitions: string[] = []
     ctx.on('internal/status', (fiber: any, oldState: number) => {
       if (fiber.name !== 'UserCache') return
-      transitions.push(`${FiberState[oldState]}->${FiberState[fiber.state]}`)
+      transitions.push(`${fiberStateName(oldState)}->${fiberStateName(fiber.state)}`)
     })
 
     const cache = ctx.plugin(UserCache)
@@ -81,38 +90,6 @@ describe('R2 — reactive resolution', () => {
 
     await cache.dispose()
     await db2.dispose()
-  })
-})
-
-describe('R3 — withdrawal ordering', () => {
-  it('dependents fully deactivate before the provider reverts its own effects, and undos may use req', async () => {
-    const ctx = new Context()
-    const db = await ctx.plugin(R3Provider, { url: 'pg://r3' })
-    await ctx.plugin(Migrator)
-    expect(hostLog).toContain('pool#1(pg://r3).execute(SELECT pg_advisory_lock(42))')
-
-    const start = hostLog.length
-    await db.dispose()
-
-    // The Migrator's undo calls `req db` (committed view) — it must observe a
-    // still-functional provider: unlock strictly before pool.close.
-    expect(hostLog.slice(start)).toEqual([
-      'pool#1(pg://r3).execute(SELECT pg_advisory_unlock(42))',
-      'pool#1(pg://r3).close',
-    ])
-  })
-
-  it('a dependent can call its required service during its own direct unload', async () => {
-    const ctx = new Context()
-    const db = await ctx.plugin(R3Provider, { url: 'pg://r3b' })
-    const mig = await ctx.plugin(Migrator)
-
-    const start = hostLog.length
-    await mig.dispose() // provider stays up; committed view must still resolve
-    expect(hostLog.slice(start)).toEqual([
-      'pool#1(pg://r3b).execute(SELECT pg_advisory_unlock(42))',
-    ])
-    await db.dispose()
   })
 })
 
