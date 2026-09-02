@@ -578,8 +578,8 @@ _DIV_ZERO_MSG = "revl: division by zero"
 
 # The receiver type a builtin reached through `?.` has: the `optcall` IR node
 # carries no `recv` tag (unlike a `builtin` node, which lowering annotates for
-# exactly this reason), so the one lowering that dispatches on it — `to_int`,
-# whose Int32 row is the identity and whose Str row parses — decides at
+# exactly this reason), so the one lowering that dispatches on it (`to_int`,
+# whose Int32 row is the identity and whose Str row parses) decides at
 # runtime instead.
 _RECV_VIA_OPT = "?"
 
@@ -1231,7 +1231,7 @@ class _ComponentEmitter:
             if expr.get("op") == "??":
                 # `x ?? d`: `Opt[T]` is represented as `T | None` at runtime
                 # (matching the TS backend's `T | undefined` shape). The left
-                # operand is evaluated ONCE — see `_opt_bind`.
+                # operand is evaluated ONCE; see `_opt_bind`.
                 left = expr.get("left")
                 rhs = self._expr(expr.get("right"), where)
                 binder, reader = _opt_bind(expr, left, self._expr(left, where))
@@ -1303,7 +1303,7 @@ class _ComponentEmitter:
             if not isinstance(method, str) or not method.isidentifier():
                 raise EmitError(f"{where}: bad optional method name {method!r}")
             # the method is a stdlib builtin, rendered by the same table a
-            # plain `.m(..)` uses — see the fn-body `optcall` branch.
+            # plain `.m(..)` uses; see the fn-body `optcall` branch.
             binder, reader = _opt_bind(
                 expr, expr.get("target"), self._expr(expr.get("target"), where))
             args = [self._expr(a, where) for a in expr.get("args") or []]
@@ -2524,9 +2524,9 @@ def _expr(node: dict) -> str:
         binder, reader = _opt_bind(node, node["target"], _expr(node["target"]))
         return f"(None if {binder} is None else _revl_field({reader}, {node['name']!r}))"
     if kind == "optcall":
-        # `?.m(..)`: the method is a STDLIB builtin — the checker types an
+        # `?.m(..)`: the method is a STDLIB builtin (the checker types an
         # optcall through `builtin_check`, so there is no host-method row to
-        # reach — and it must be rendered by the same table a plain `.m(..)`
+        # reach), and it must be rendered by the same table a plain `.m(..)`
         # goes through. Emitting `payload.m(..)` instead put a method python
         # values do not have on the receiver (`'str' object has no attribute
         # 'length'`), which item 436 caught executing what the byte-agreement
@@ -2598,27 +2598,27 @@ def _guard_frame_neutral_loop(body) -> None:
 # `List.push`, `Map.set`, `Map.remove` and a functional record update are
 # PERSISTENT: each renders a whole copy of its receiver with one entry changed
 # (`(xs + [v])`, `{**m, k: v}`, `{**p, 'x': v}`). In the ordinary accumulation
-# loop — `var out = []; for (..) { out = out.push(..) }` — that is one full
+# loop, `var out = []; for (..) { out = out.push(..) }`, that is one full
 # container copy per step, so a loop the developer wrote as O(n) is EMITTED as
 # O(n^2). No opcode or profile counter can see it: `xs + [v]` is one bytecode
 # instruction that copies `len(xs)` pointers in C, and the audit measured this
 # exact loop at 0.96x in ops against 500x in elements copied at n=1000. It is
-# not a synthetic shape either — `stdlib/list.rvl` writes `list_map`,
+# not a synthetic shape either: `stdlib/list.rvl` writes `list_map`,
 # `list_filter` and `list_dedup` as push loops, so `xs.map(f)` carries it.
 #
 # The rewrite is `out.append(v)`; all of its difficulty is proving the copy
 # unobservable. That proof is a UNIQUE-OWNERSHIP analysis over one fn body, and
 # NOT a per-builtin special case: a local may be written in place exactly when
 # the object it names is reachable through no other name, so no reader can hold
-# the pre-image. The rule is stated over the IR and holds on every tier — the go
+# the pre-image. The rule is stated over the IR and holds on every tier: the go
 # backend's `_v3_self_rebind_locals` (item 434) is the same analysis written
 # again for that emitter, which is the argument for eventually lifting it to a
 # frontend `unique` marker instead of a seventh copy.
 #
 # Two clauses carry the whole proof:
 #
-#   BIRTH. The name must be introduced by a `let` whose value allocates here —
-#   a list/map/record literal — or by a `let` off another name, which is then
+#   BIRTH. The name must be introduced by a `let` whose value allocates here
+#   (a list/map/record literal), or by a `let` off another name, which is then
 #   materialised as a DEFENSIVE COPY (`out = dict(m)`), one copy where the
 #   persistent form made one per step. A parameter is never a birth: it is the
 #   caller's object, and writing through it would destructively update a
@@ -2661,7 +2661,7 @@ _PY_NON_RETAINING_SLOTS = {
 
 
 def _py_self_rebind(name: str, value: Any) -> bool:
-    """Is `value` a persistent copy of `name` with one entry changed — the
+    """Is `value` a persistent copy of `name` with one entry changed, the
     `out = out.push(v)` shape whose result rebinds its own receiver?"""
     if not isinstance(value, dict):
         return False
@@ -2733,8 +2733,8 @@ def _py_inplace_locals(fn: dict) -> dict:
     `birth` is None when the name is born from a fresh literal (its `let` emits
     unchanged), and `(source_node, "list"|"dict")` when it is born off another
     name and needs the defensive copy. The container is named by the methods
-    that rebind the local — `push` is List-only, `set`/`remove` and a record
-    update are dict-shaped — so no receiver type has to be recovered.
+    that rebind the local (`push` is List-only, `set`/`remove` and a record
+    update are dict-shaped), so no receiver type has to be recovered.
     """
     body = fn.get("body") or []
     spoiled: set[str] = {p.get("name") for p in fn.get("params") or []}
@@ -2807,7 +2807,7 @@ def _py_inplace_stmts(name: str, value: dict) -> list[str]:
     if method == "push":
         return [f"{recv}.append({_expr(args[0])})"]
     if method == "remove":
-        # `Map.remove` is TOTAL — an absent key is not an error — so `pop` with
+        # `Map.remove` is TOTAL (an absent key is not an error), so `pop` with
         # a default, never `del`
         return [f"{recv}.pop({_expr(args[0])}, None)"]
     # `set`: the spread evaluated receiver, then key, then value; a subscript

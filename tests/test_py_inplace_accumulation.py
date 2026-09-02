@@ -115,7 +115,7 @@ fn doubled(xs: List[Int]) -> List[Int] { return xs.map(x => x * 2) }
 
 def test_local_born_off_a_name_takes_one_defensive_copy():
     """`var out = m` then `out = out.remove(k)`: the caller's binding must NOT
-    be written through, so the local is materialised ONCE at birth — one copy
+    be written through, so the local is materialised ONCE at birth: one copy
     where the persistent form made one per removal."""
     source = """
 fn without(m: Map[Str, Int], ks: List[Str]) -> Map[Str, Int] {
@@ -133,8 +133,8 @@ fn without(m: Map[Str, Int], ks: List[Str]) -> Map[Str, Int] {
 
 
 def test_list_born_off_a_name_copies_as_a_list():
-    """The container is named by the methods that rebind the local — `push` is
-    List-only — so no receiver type has to be recovered."""
+    """The container is named by the methods that rebind the local (`push` is
+    List-only), so no receiver type has to be recovered."""
     source = """
 fn extend(xs: List[Int], n: Int) -> List[Int] {
   var out = xs
