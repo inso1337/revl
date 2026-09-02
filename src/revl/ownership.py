@@ -192,11 +192,12 @@ def _rebind_receiver(value: dict) -> dict:
 
 # ------------------------------------------------------------- the gen walk
 
-def _gen(node: Any, state: dict, retains: bool, skip: Any = None) -> None:
+def _gen(node: Any, state: dict, retains: bool, summary: dict,
+         skip: Any = None) -> None:
     """Drop from `state` every name `node` may leave a second holder of."""
     if isinstance(node, list):
         for item in node:
-            _gen(item, state, retains, skip)
+            _gen(item, state, retains, summary, skip)
         return
     if not isinstance(node, dict) or node is skip:
         return
@@ -214,7 +215,16 @@ def _gen(node: Any, state: dict, retains: bool, skip: Any = None) -> None:
                 if isinstance(name, str):
                     state.pop(name, None)
         for child in node.values():
-            _gen(child, state, True, skip)
+            _gen(child, state, True, summary, skip)
+        return
+    if kind == "call":
+        keeps = _arg_retention(node, summary)
+        for key, child in node.items():
+            if key == "args":
+                for arg, retained in zip(child or [], keeps):
+                    _gen(arg, state, retained, summary, skip)
+            else:
+                _gen(child, state, True, summary, skip)
         return
     if kind == "match":
         for arm in node.get("arms") or []:
@@ -227,12 +237,13 @@ def _gen(node: Any, state: dict, retains: bool, skip: Any = None) -> None:
     elif kind == "bin" and node.get("op") == "??":
         safe = ()  # `a ?? b` YIELDS `a`, so that operand IS retained
     for key, child in node.items():
-        _gen(child, state, key not in safe, skip)
+        _gen(child, state, key not in safe, summary, skip)
 
 
 def _kill_subtree(node: Any, state: dict) -> None:
     """The fallback for a statement shape this walker does not model: forget
-    every name reachable from it, bound or read."""
+    every name reachable from it, bound or read. Deliberately blind to the
+    retention summary — an unmodelled shape gets no benefit of the doubt."""
     if isinstance(node, list):
         for item in node:
             _kill_subtree(item, state)
@@ -245,7 +256,7 @@ def _kill_subtree(node: Any, state: dict) -> None:
     for name in node.get("names") or []:
         if isinstance(name, str):
             state.pop(name, None)
-    _gen(node, state, True)
+    _gen(node, state, True, {})
     for child in node.values():
         _kill_subtree(child, state)
 
@@ -273,7 +284,8 @@ class _Walk:
     write, never only added to, so the last (fixpoint) iteration's answer is the
     one that survives an optimistic earlier one."""
 
-    def __init__(self) -> None:
+    def __init__(self, summary: dict) -> None:
+        self.summary = summary
         self.marks: dict[int, int] = {}
         self.breaks: list = []
         self.conts: list = []
@@ -299,7 +311,7 @@ class _Walk:
     def _step_let(self, node: dict, state: dict) -> dict:
         name = node.get("name")
         value = node.get("value")
-        _gen(value, state, True)
+        _gen(value, state, True, self.summary)
         if not isinstance(name, str):
             return state
         kind = value.get("kind") if isinstance(value, dict) else None
@@ -318,7 +330,7 @@ class _Walk:
         value = node.get("value")
         shape = _write_shape(name, value) if isinstance(name, str) else None
         if shape is None:
-            _gen(value, state, True)
+            _gen(value, state, True, self.summary)
             if isinstance(name, str):
                 kind = value.get("kind") if isinstance(value, dict) else None
                 # a fresh literal is a birth on an `assign` exactly as on a `let`
@@ -329,7 +341,7 @@ class _Walk:
             return state
         # the receiver `var` is the write, not a second reader; every other
         # operand is evaluated BEFORE the write and gens normally
-        _gen(value, state, True, skip=_rebind_receiver(value))
+        _gen(value, state, True, self.summary, skip=_rebind_receiver(value))
         level = state.get(name)
         self.marks[id(node)] = level
         # whichever form the backend picks, the name owns its object afterwards:
@@ -339,14 +351,14 @@ class _Walk:
         return state
 
     def _step_let_pattern(self, node: dict, state: dict) -> dict:
-        _gen(node.get("value"), state, True)
+        _gen(node.get("value"), state, True, self.summary)
         for bind in list(node.get("names") or []) + [node.get("rest")]:
             if isinstance(bind, str):
                 state.pop(bind, None)
         return state
 
     def _step_if(self, node: dict, state: dict) -> dict | None:
-        _gen(node.get("cond"), state, True)
+        _gen(node.get("cond"), state, True, self.summary)
         then_out = self.stmts(node.get("then"), dict(state))
         else_out = self.stmts(node.get("else"), dict(state))
         return _join([then_out, else_out])
@@ -365,7 +377,7 @@ class _Walk:
     def _step_for(self, node: dict, state: dict) -> dict:
         # the iterable is held for the loop's whole extent, so an in-place write
         # to it inside the body would change what the loop is walking
-        _gen(node.get("iterable"), state, True)
+        _gen(node.get("iterable"), state, True, self.summary)
         bind = node.get("bind")
         if isinstance(bind, str):
             state.pop(bind, None)
@@ -385,7 +397,7 @@ class _Walk:
         for _ in range(2 * len(entry) + 3):
             self.breaks, self.conts = [], []
             top = dict(head)
-            _gen(cond, top, True)
+            _gen(cond, top, True, self.summary)
             body_out = self.stmts(body, dict(top))
             merged = _join([head, body_out] + self.conts)
             assert merged is not None  # `head` is reachable by construction
@@ -396,7 +408,7 @@ class _Walk:
             head = {}
             self.breaks, self.conts = [], []
             top = dict(head)
-            _gen(cond, top, True)
+            _gen(cond, top, True, self.summary)
             self.stmts(body, dict(top))
         exits = [top] + self.breaks
         self.breaks, self.conts = outer_breaks, outer_conts
@@ -452,18 +464,126 @@ def _stamp_births(node: Any, copies: dict[str, str]) -> None:
         _stamp_births(child, copies)
 
 
+# --------------------------------------------------- the retention summary
+# Item 445 (b). An intraprocedural analysis must assume a call KEEPS what it is
+# handed, and that assumption is what left `stdlib/list.rvl`'s `list_dedup`
+# quadratic: `if (!list_contains(out, x)) { out = out.push(x) }` hands `out` to
+# a call one statement before the write, and `list_contains` demonstrably keeps
+# nothing — it walks the list and answers a Bool.
+#
+# So one whole-program question is answered first: DOES THIS FUNCTION RETAIN
+# PARAMETER i — can the object the caller passed still be reached through
+# anything, once the call has returned? A parameter that reaches only slots the
+# object cannot outlive does not. The rules are the same `_NON_RETAINING` slots,
+# with two differences that follow from asking about the CALLER's object rather
+# than about a local:
+#
+#   * `return e` RETAINS. A local's return needs no rule (nothing runs after it
+#     in that function), but a returned parameter is handed straight back to the
+#     caller, which is an alias by any definition.
+#   * a `for` ITERABLE does not retain. The iterator dies with the call, so
+#     iterating a parameter leaves the caller nothing new — where inside ONE
+#     body the same iterable is held for the loop's whole extent and a write to
+#     it would change what the loop is walking.
+#
+# The fixpoint starts optimistic (nothing retains) and only ever ADDS retention,
+# so it is a least fixpoint of a may-property and mutual recursion converges to
+# the truth rather than under-approximating it: passing a parameter along a
+# cycle retains nothing unless some function in that cycle puts it in a slot
+# that keeps it, and that slot is what the iteration finds.
+#
+# EVERYTHING UNRESOLVED RETAINS. A callee that is not a module `fn` of this
+# program — an extern, a host root, a service method, a call through a function
+# VALUE — has no summary, so every argument to it retains. So does any call
+# whose argument count does not match the callee's parameter count (a default
+# argument the call site did not expand), and every argument of a callee named
+# by anything but a plain `var`.
+
+# Statement slots in which a bare `var` is read and not retained ACROSS THE CALL.
+_STEP_NON_RETAINING = {"for": ("iterable",)}
+
+
+def _arg_retention(call: dict, summary: dict) -> tuple:
+    """Per-argument "does the callee keep this", defaulting to yes."""
+    args = call.get("args") or []
+    callee = call.get("callee")
+    if isinstance(callee, dict) and callee.get("kind") == "var":
+        keeps = summary.get(callee.get("name"))
+        if keeps is not None and len(keeps) == len(args):
+            return keeps
+    return (True,) * len(args)
+
+
+def _is_stmt_list(value: Any) -> bool:
+    return (isinstance(value, list) and bool(value)
+            and all(isinstance(item, dict) and "step" in item for item in value))
+
+
+def _summary_walk(node: Any, state: dict, summary: dict) -> None:
+    """Drop from `state` every parameter this body may hand to something that
+    outlives the call."""
+    if isinstance(node, list):
+        for item in node:
+            _summary_walk(item, state, summary)
+        return
+    if not isinstance(node, dict):
+        return
+    if "step" not in node:
+        _gen(node, state, True, summary)
+        return
+    safe = _STEP_NON_RETAINING.get(node["step"], ())
+    for key, child in node.items():
+        if _is_stmt_list(child):
+            _summary_walk(child, state, summary)
+        elif key not in safe:
+            _gen(child, state, True, summary)
+
+
+def retention_summary(functions: Any) -> dict:
+    """`{fn name: (retains param 0, retains param 1, ...)}` over one program."""
+    bodies: dict = {}
+    for fn in functions or []:
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        params = [p.get("name") for p in fn.get("params") or []]
+        if isinstance(name, str) and name not in bodies and all(
+                isinstance(p, str) for p in params):
+            bodies[name] = (fn.get("body"), params)
+    summary = {name: (False,) * len(params) for name, (_, params) in bodies.items()}
+    # each round can only turn a False into a True, and there are finitely many
+    for _ in range(sum(len(p) for _, p in bodies.values()) + 2):
+        changed = False
+        for name, (body, params) in bodies.items():
+            state = {param: _FRESH for param in params}
+            _summary_walk(body, state, summary)
+            keeps = tuple(
+                held or param not in state
+                for held, param in zip(summary[name], params))
+            if keeps != summary[name]:
+                summary[name] = keeps
+                changed = True
+        if not changed:
+            return summary
+    # unreachable: the chain is bounded by the number of parameters. Fall back
+    # to "everything retains", which is the pre-summary behaviour.
+    return {name: (True,) * len(params)  # pragma: no cover
+            for name, (_, params) in bodies.items()}
+
+
 # -------------------------------------------------------------------- entry
 
-def annotate(fn_like: dict) -> None:
+def annotate(fn_like: dict, summary: dict | None = None) -> None:
     """Stamp `unique` / `unique_birth` on one function, test or method body.
 
     A parameter is never owned: it is the CALLER's object, and writing through
-    it would destructively update a binding this function does not own.
+    it would destructively update a binding this function does not own. Absent a
+    `summary`, every call retains every argument it is given.
     """
     body = fn_like.get("body")
     if not body:
         return
-    walk = _Walk()
+    walk = _Walk(summary or {})
     state: dict = {}
     walk.stmts(body, state)
     _apply(body, walk.marks)
@@ -471,7 +591,8 @@ def annotate(fn_like: dict) -> None:
 
 def annotate_ir(ir: dict) -> None:
     """Stamp every function-shaped body in a lowered IR document."""
+    summary = retention_summary(ir.get("functions"))
     for key in ("functions", "tests", "fault_tests", "prop_tests"):
         for entry in ir.get(key) or []:
             if isinstance(entry, dict):
-                annotate(entry)
+                annotate(entry, summary)

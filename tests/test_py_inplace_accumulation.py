@@ -174,24 +174,20 @@ fn aliased(n: Int) -> Int {
         (5,), 2,
     ),
     (
-        # the accumulator is handed to a call, which may retain it
+        # the accumulator is handed to a call that RETURNS it, so the caller's
+        # next write would be visible through what came back
         "observed",
         """
-fn sizeof(xs: List[Int]) -> Int {
-  var t = 0
-  for (x of xs) { t = t + 1 + x - x }
-  if (t < 0) { return 0 }
-  return t
-}
+fn echo(xs: List[Int]) -> List[Int] { return xs }
 fn observed(n: Int) -> Int {
   var out: List[Int] = []
-  var seen = 0
+  var snap: List[Int] = []
   var i = 0
-  while (i < n) { out = out.push(i) seen = seen + sizeof(out) i += 1 }
-  return seen
+  while (i < n) { out = out.push(i) snap = echo(out) i += 1 }
+  return snap.length()
 }
 """,
-        (4,), 10,
+        (4,), 4,
     ),
     (
         # the accumulator is stored inside another container
@@ -238,6 +234,78 @@ def test_escaping_accumulator_keeps_the_copy(name, source, call, want):
     assert "out.append(" not in src, f"{name}: the accumulator escapes, so the copy must stay"
     assert "(out + [i])" in src
     assert run(source)[name](*call) == want
+
+
+def test_a_non_retaining_call_no_longer_disqualifies_the_write():
+    """Roadmap item 445 (b). `sizeof` walks its argument and answers an Int; it
+    keeps nothing, so handing the accumulator to it leaves no second holder.
+    An intraprocedural rule could not know that and had to assume every call
+    retains — which is exactly what kept `stdlib/list.rvl`'s `list_dedup`
+    quadratic, since its `if (!list_contains(out, x))` hands `out` to a call one
+    statement before the write. The whole-program summary answers it."""
+    source = """
+fn sizeof(xs: List[Int]) -> Int {
+  var t = 0
+  for (x of xs) { t = t + 1 + x - x }
+  if (t < 0) { return 0 }
+  return t
+}
+fn observed(n: Int) -> Int {
+  var out: List[Int] = []
+  var seen = 0
+  var i = 0
+  while (i < n) { out = out.push(i) seen = seen + sizeof(out) i += 1 }
+  return seen
+}
+"""
+    src = emit_py(source)
+    assert "out.append(i)" in src
+    assert "(out + [i])" not in src
+    assert run(source)["observed"](4) == 10
+
+
+def test_the_retention_summary_is_conservative_about_storing():
+    """A parameter put into a CONTAINER is retained by the summary even when
+    that container is itself local and dies with the call. Proving otherwise is
+    a second analysis; the fallback here is the copying form, which is right."""
+    source = """
+fn stash(xs: List[Int]) -> Int {
+  var keep: List[List[Int]] = []
+  keep = keep.push(xs)
+  return keep.length()
+}
+fn observed(n: Int) -> Int {
+  var out: List[Int] = []
+  var seen = 0
+  var i = 0
+  while (i < n) { out = out.push(i) seen = seen + stash(out) i += 1 }
+  return seen
+}
+"""
+    src = emit_py(source)
+    assert "out.append(i)" not in src
+    assert "(out + [i])" in src
+    assert run(source)["observed"](4) == 4
+
+
+def test_an_extern_call_always_retains():
+    """An extern has no body to summarise, so every argument to one retains and
+    the write it reaches keeps the copying form."""
+    source = """
+extern pure fn note(xs: List[Int]) -> Int = @py {
+  return len(xs)
+}
+fn observed(n: Int) -> Int {
+  var out: List[Int] = []
+  var seen = 0
+  var i = 0
+  while (i < n) { out = out.push(i) seen = seen + note(out) i += 1 }
+  return seen
+}
+"""
+    src = emit_py(source)
+    assert "out.append(i)" not in src
+    assert "(out + [i])" in src
 
 
 def test_a_parameter_is_never_written_through():
