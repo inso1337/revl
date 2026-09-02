@@ -63,16 +63,16 @@ export function decode(resp: string): Step {
 
 export async function classify(p: string): Promise<string> {
     const resp = (await fetch_one(p))
-    return (await (async ($revl_match_1) => {
+    return (($revl_match_1) => {
   switch ($revl_match_1.kind) {
     case "Final":
-      return (await (async (a) => (a))($revl_match_1.value))
+      return ((a) => (a))($revl_match_1.value)
     case "NeedTool":
-      return (await (async (t) => (t))($revl_match_1.value))
+      return ((t) => (t))($revl_match_1.value)
     case "Retry":
       return ("retry")
     default:
       throw new TypeError("non-exhaustive match")
   }
-})(decode(resp)))
+})(decode(resp))
 }

@@ -96,6 +96,20 @@ but not seen. Every instance was closed. Representative fixes:
   down from the root with `O_NOFOLLOW`, closing the check-to-syscall window.
   The families are enumerated in the guard and scanned in the `@py` bodies, so
   a fifth cannot be added silently.
+- The ts tier's fs host carries the same pass. `backends/typescript/revl_fs_ts.ts`
+  had held every one of those escapes untouched while the py fix shipped: an
+  unconfined inverse source that stole and destroyed outside files, sidecar
+  directories a planted symlink could redirect outside the root, no link-count
+  check, and a name-based write a concurrent writer could divert. It now states
+  the same `PATH_FAMILIES` enumeration, restricts an inverse's source to a
+  sidecar this workspace produced, refuses a symlinked sidecar directory by
+  type, refuses a multiply-linked target, writes only through a verified fd, and
+  refuses a write whose name has parted from the inode that was written. The
+  enumeration is scanned with the TypeScript compiler API, the ts peer of the
+  `@py` body scan. One difference is stated rather than papered over: node
+  exposes no `*at()` syscall, so the check-to-syscall window is narrowed with an
+  `lstat` component walk plus `O_NOFOLLOW` and an fd-identity check, not closed
+  the way the directory-fd walk closes it on py.
 - The distribution seam refuses a resource crossing on same-tier as well as
   cross-tier process boundaries, and the wire encoder fails closed on any value
   that is not scalar, list, dict, or a declared record or ADT.

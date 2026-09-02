@@ -49,6 +49,11 @@
 // the syscall itself, which every body reaches only through a `_ws.*_confined`
 // helper. No `@py` body below performs a raw filesystem mutation; that is
 // checked by tests/test_fs_confinement_families.py, which scans these bodies.
+// The ts tier states the SAME enumeration in backends/typescript/revl_fs_ts.ts
+// and scans its per-extern entry points the same way, in
+// backends/typescript/tests/fs_confinement_families.test.ts. Its one stated
+// difference: node has no `*at()` syscall, so the check-to-syscall window is
+// narrowed there rather than closed, which that module's docstring names.
 //
 // --------------------------------------------------------------- honest caveats
 // * Reversal does not undo OBSERVATION. A concurrent process that read the
@@ -72,8 +77,9 @@
 // peer (item 369) — semantically mirroring the
 // persist-on-commit / revert-residue-free-on-abort through the same witnessed
 // transactional frame (backends/typescript/runtime.ts `Frame.transactional`),
-// with LIFO abort replay proven in ts_witnessed_fs.test.ts. rs / go / java /
-// wasm bodies remain Slice 2b.
+// with LIFO abort replay proven in ts_witnessed_fs.test.ts. BOTH tiers now carry
+// the item-422 confinement pass (F1-F4), the ts one with the residual named in
+// its module docstring. rs / go / java / wasm bodies remain Slice 2b.
 //
 // Import the mutations with a named `use` (the inverses are auto-registered by
 // the accumulator — a consumer never names them):

@@ -105,6 +105,14 @@ ATTESTATION_NAME = "attestation.json"
 GAUNTLET_NAME = "gauntlet.json"
 TOPOLOGY_NAME = "topology.json"
 
+#: The member `build_bundle` stamps into the staged gauntlet dossier naming the
+#: composition it was graded over, and the member `verify` and `deploy.admit`
+#: check it against. A dossier without it names no composition, so it cannot be
+#: shown to be evidence about the artifact in hand (roadmap 428 F8).
+GAUNTLET_IDENTITY = "compositionHash"
+#: The one gauntlet verdict that is evidence of admissibility.
+GAUNTLET_ADMISSIBLE = "admissible"
+
 # Backend directory names (under backends/), the emitter package name is the
 # canonical label the bundle records emitted artifacts under.
 DEFAULT_BACKENDS = ("python", "typescript", "rust", "java", "go", "wasm")
@@ -429,10 +437,19 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
         attested = True
 
     # gauntlet.json, the item-31 graded dossier (evidence it is admissible).
+    #
+    # The staged dossier is stamped with the composition it was graded over.
+    # Without it the record names no composition, so a real `admissible`
+    # dossier produced for a DIFFERENT artifact hashes correctly into the
+    # deploy chain and rides along under an honest signature (roadmap 428 F8).
+    # With it, `verify` here and `deploy.admit` on the receiving side can both
+    # require that the evidence is evidence about the artifact in hand.
     dossier = _gauntlet_dossier(combined_source)
     gauntlet_verdict = None
     if dossier is not None:
         gauntlet_verdict = str(dossier.get("verdict") or "")
+        dossier = dict(dossier)
+        dossier[GAUNTLET_IDENTITY] = composition_hash
         (out_dir / GAUNTLET_NAME).write_text(
             json.dumps(dossier, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -733,10 +750,14 @@ def _check_attestation(bundle: Path, norm_ir: dict, env) -> Check:
                  att.get("composition_hash", ""), attest.canonical_hash(norm_ir))
 
 
-def _check_gauntlet(bundle: Path) -> Check:
-    """The item-31 gauntlet evidence is present and records an `admissible`
-    verdict. A missing dossier is `cannot verify`; a recorded `rejected` verdict
-    is a MISMATCH (the bundle carries evidence it should not have been built)."""
+def _check_gauntlet(bundle: Path, norm_ir: dict) -> Check:
+    """The item-31 gauntlet evidence is present, records an `admissible`
+    verdict, and was graded over THIS composition. A missing dossier is `cannot
+    verify`; a recorded `rejected` verdict is a MISMATCH (the bundle carries
+    evidence it should not have been built); a dossier naming another
+    composition, or naming none at all, is a MISMATCH too, since a real
+    `admissible` record for a different artifact is not evidence about this
+    one (roadmap 428 F8)."""
     path = bundle / GAUNTLET_NAME
     if not path.exists():
         return Check("gauntlet", UNVERIFIED, "no gauntlet dossier recorded")
@@ -745,10 +766,23 @@ def _check_gauntlet(bundle: Path) -> Check:
     except RevlError as error:
         return Check("gauntlet", MISMATCH, f"gauntlet dossier is unreadable: {error.message}")
     verdict = str(dossier.get("verdict") or "")
-    if verdict != "admissible":
+    if verdict != GAUNTLET_ADMISSIBLE:
         return Check("gauntlet", MISMATCH,
                      f"the recorded gauntlet verdict is '{verdict or '(none)'}', not admissible")
-    return Check("gauntlet", OK, "admissible")
+    from . import attest  # noqa: PLC0415
+
+    expected = attest.canonical_hash(norm_ir)
+    graded = dossier.get(GAUNTLET_IDENTITY)
+    if not isinstance(graded, str) or not graded:
+        return Check("gauntlet", MISMATCH,
+                     f"the gauntlet dossier carries no `{GAUNTLET_IDENTITY}`, so "
+                     "it names no composition and is not evidence about this one",
+                     "", expected)
+    if graded != expected:
+        return Check("gauntlet", MISMATCH,
+                     "the gauntlet dossier was graded over another composition",
+                     graded, expected)
+    return Check("gauntlet", OK, "admissible; graded over this composition")
 
 
 def _check_topology(bundle: Path, manifest: dict) -> Check:
@@ -822,7 +856,7 @@ def verify_bundle(path: str, *, env=None) -> "VerifyReport":
     report.checks.extend(_check_emitted(bundle, norm_ir, manifest))
     report.checks.append(_check_backend_version(manifest))
     report.checks.append(_check_attestation(bundle, norm_ir, env))
-    report.checks.append(_check_gauntlet(bundle))
+    report.checks.append(_check_gauntlet(bundle, norm_ir))
     report.checks.append(_check_topology(bundle, manifest))
 
     # reproducible, the aggregate: no reproducible tier diverged. A mismatch on

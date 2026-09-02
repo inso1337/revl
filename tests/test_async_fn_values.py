@@ -170,8 +170,14 @@ def test_ts_emits_async_loop_awaiting_the_callback():
     assert ("export async function agent_loop(current: string, "
             "complete: ((a0: string) => Promise<string>)): Promise<string> {") in ts
     assert "const resp = (await complete(current))" in ts
-    # the callback arrow renders async, and its call site is awaited
-    assert "(async (msgs: any) =>" in ts
+    # item 435(b): this arrow's body IS the un-awaited emission Promise, so an
+    # `async` would only add a resolution hop over a Promise the body already
+    # returns (2 excess microtask turns and 2 excess Promise allocations per
+    # operation call). It renders plain, with the identical TS type
+    # `(p) => Promise<T>`, so it stays assignable to `complete`. The sibling
+    # test below pins the other half of the rule.
+    assert "((msgs: any) => (ctx.model.complete(msgs)))" in ts
+    assert "(async (msgs: any) =>" not in ts
     assert "(await agent_loop(prompt," in ts
 
 
@@ -179,7 +185,9 @@ def test_ts_no_promise_leak_sync_arrow_coercion():
     ts = _emit("typescript", compile_source(
         _program(ASYNC_CB, 'msgs => "mock"'), "t.rvl"))
     # a sync-bodied arrow coerced into the async slot still renders async (a
-    # no-op await in JS); the loop awaits it uniformly.
+    # no-op await in JS); the loop awaits it uniformly. Item 435(b) deliberately
+    # does NOT de-colour this one: the body is a plain value, so a plain arrow
+    # would be typed `(p) => T` where the slot says `(p) => Promise<T>`.
     assert "(async (msgs: any) =>" in ts
 
 

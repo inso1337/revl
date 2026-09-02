@@ -109,7 +109,12 @@
 //     externs + colored fns) or an async-value parameter (`async_locals`, the
 //     item-92 `(…) -> Async[T]` slot) is awaited (`(await …)`);
 //   * the async `match` shape (Opt IIFE + tagged switch, arm-arrows + inner calls
-//     awaited) and the async ARROW (`async (…) => …`).
+//     awaited) and the async ARROW (`async (…) => …`). Item 435 made both of
+//     those colours PER-EXPRESSION rather than per-function: an arm-arrow and
+//     the IIFE go `async` only when the RENDERED body carries an `await`
+//     (`renders_await`), and an arrow whose body is nothing but the un-awaited
+//     emission Promise (`emission_call_node`) sheds its `async` too, since the
+//     keyword only added a resolution hop over a Promise already in hand.
 //   * `assert` statements and `let_pattern` (destructuring): the reference names
 //     an assert temp `$revl_l`/`$revl_r` and renders via `revlShow` — implementable
 //     but not exercised by the function corpus, so deferred to keep the slice
@@ -625,13 +630,52 @@ fn optcall_result_is_int(method: Str) -> Bool {
   return method == "length" || method == "indexOf" || method == "charCodeAt"
 }
 
+// `_renders_await`: does a RENDERED fragment carry an `await` operator? Item
+// 435(a)/(b) makes the async colour follow the rendered text instead of the
+// enclosing function, and this is the whole predicate. The reference tests the
+// literal `"await "` rather than a word-boundary regex for exactly this
+// reason: every `await` either emitter writes is followed by a space, and
+// this port has no regex engine. It errs only towards KEEPING `async` (a
+// stray `await ` inside a string literal, or one inside a nested async arrow
+// that flattens its own Promise), which is the pre-435 shape.
+fn renders_await(text: Str) -> Bool { return text.indexOf("await ") >= 0 }
+
+// `_v3_emission_call_node`: is this node a call to an ASYNC service operation
+// through a `req`? That is the one expression either emitter renders as a
+// bare, un-awaited Promise. `render_call`'s await-seed is suppressed inside an
+// arrow (`in_async && !in_arrow`). Item 435(b) needs to tell it apart from a
+// body that evaluates to a plain value, because dropping `async` from an arrow
+// is only type-preserving when the body already IS the Promise the arrow was
+// going to return. The reference resolves `scope.requires[name]` against its
+// doc-level `async_ops`; here `acx.ops` is that set already pre-resolved to
+// `"<reqKey>#<op>"` keys, so the membership test is the same question.
+fn emission_call_node(node: Any, acx: ACx) -> Bool {
+  if (node_kind(node) != "call") { return false }
+  if (!value_has(node, "target")) { return false }
+  let target = value_field(node, "target")
+  if (node_kind(target) != "req") { return false }
+  let key = async_op_key(value_str(value_field(target, "name")), value_str(value_field(node, "method")))
+  return list_contains(acx.ops, key)
+}
+
 // `_v3_match_expr`: the match lowering. Opt (Some/None) discriminates on
-// `undefined`; a tagged ADT switches on `.kind`. In an async body (item 219's
-// module-fn extension, slice 5) an arm may `await` an async callable, so the
-// IIFE and each binding arm-arrow go `async` and the whole invocation is
-// awaited — `pre`/`a`/`post_tail` mirror the reference's `(await (async (…) =>
-// {…})(<scrut>))` shape. In a sync body they collapse to `""`, leaving the
-// slice-1..4 output byte-identical.
+// `undefined`; a tagged ADT switches on `.kind`.
+//
+// Item 435(a): the async colour is per-EXPRESSION, not per-function.
+// `acx.in_async` is true for the whole body of an async-coloured fn, so
+// colouring by it alone wrapped a match whose every arm is a bound variable or
+// a literal in a Promise that was allocated, resolved and awaited around a
+// value already in hand (measured at 2 excess microtask turns and 4 excess
+// Promise allocations per evaluation). A binding arm-arrow is now `async` only
+// when THAT arm's rendered body carries an `await`, and the IIFE only when the
+// assembled body does; `pre`/`post_tail` follow the same decision. In a sync
+// body they all collapse to `""`, leaving the slice-1..4 output byte-identical.
+//
+// `colour_by_text` is false inside an ARROW, where the unconditional colour
+// stays: the await-seed is deliberately suppressed there (`in_async &&
+// !in_arrow` in `render_call`), so an arm body can be an un-awaited Promise
+// with no `await` in its text and the arm arrow's own `async`/`await` pair is
+// what resolves it. Mirrors the reference exactly.
 fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
   let c0 = counter + 1
   let tmp = `$revl_match_${c0}`
@@ -643,17 +687,9 @@ fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
     let p = value_str(value_field(arm, "pattern"))
     if (p == "Some" || p == "None") { is_opt = true }
   }
-  var a = ""
-  var pre = "("
-  var post_tail = ""
-  if (acx.in_async) {
-    a = "async "
-    pre = "(await ("
-    post_tail = ")"
-  }
+  let colour_by_text = acx.in_async && !acx.in_arrow
   var lines = []
   if (is_opt) {
-    lines = lines.push(`${pre}${a}($revl_match_${c0}) => {`)
     var wildcard = ""
     var has_wild = false
     for (arm of arms) {
@@ -671,8 +707,8 @@ fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
           let bind = value_str(value_field(arm, "bind"))
           if (bind != "") {
             let b = ident(bind)
-            if (acx.in_async) {
-              lines = lines.push(`  if (${tmp} !== undefined) return (await (${a}(${b}) => (${body}))(${tmp}))`)
+            if (arm_is_async(body, acx, colour_by_text)) {
+              lines = lines.push(`  if (${tmp} !== undefined) return (await (async (${b}) => (${body}))(${tmp}))`)
             } else {
               lines = lines.push(`  if (${tmp} !== undefined) return ((${b}) => (${body}))(${tmp})`)
             }
@@ -684,10 +720,8 @@ fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
     }
     if (has_wild) { lines = lines.push(wildcard) }
     else { lines = lines.push(`  throw new TypeError("non-exhaustive match")`) }
-    lines = lines.push(`})(${sr.text})${post_tail}`)
-    return { text: lines.join(newline()), counter: c }
+    return { text: wrap_match(lines, tmp, sr.text, acx, colour_by_text), counter: c }
   }
-  lines = lines.push(`${pre}${a}($revl_match_${c0}) => {`)
   lines = lines.push(`  switch (${tmp}.kind) {`)
   var wildcard = ""
   var has_wild = false
@@ -705,8 +739,8 @@ fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
       let bind = value_str(value_field(arm, "bind"))
       if (bind != "") {
         let b = ident(bind)
-        if (acx.in_async) {
-          lines = lines.push(`      return (await (${a}(${b}) => (${body}))(${tmp}.value))`)
+        if (arm_is_async(body, acx, colour_by_text)) {
+          lines = lines.push(`      return (await (async (${b}) => (${body}))(${tmp}.value))`)
         } else {
           lines = lines.push(`      return ((${b}) => (${body}))(${tmp}.value)`)
         }
@@ -723,8 +757,35 @@ fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
     lines = lines.push(`      throw new TypeError("non-exhaustive match")`)
   }
   lines = lines.push(`  }`)
-  lines = lines.push(`})(${sr.text})${post_tail}`)
-  return { text: lines.join(newline()), counter: c }
+  return { text: wrap_match(lines, tmp, sr.text, acx, colour_by_text), counter: c }
+}
+
+// One binding arm-arrow's colour (item 435(a)): async only when the arm's own
+// rendered body carries an `await`, except inside an arrow where the colour
+// stays unconditional.
+fn arm_is_async(body: Str, acx: ACx, colour_by_text: Bool) -> Bool {
+  if (!acx.in_async) { return false }
+  return !colour_by_text || renders_await(body)
+}
+
+// The IIFE around the assembled arm lines. `(await ( <fn> )( <scrut> ))` when
+// async: the await wraps the whole INVOCATION, not the function object. Else
+// the plain `( <fn> )( <scrut> )`.
+fn wrap_match(lines: List[Str], tmp: Str, scrutinee: Str, acx: ACx, colour_by_text: Bool) -> Str {
+  var outer = false
+  if (acx.in_async) { outer = !colour_by_text || renders_await(lines.join(newline())) }
+  var a = ""
+  var pre = "("
+  var post_tail = ""
+  if (outer) {
+    a = "async "
+    pre = "(await ("
+    post_tail = ")"
+  }
+  var out = [`${pre}${a}(${tmp}) => {`]
+  for (l of lines) { out = out.push(l) }
+  out = out.push(`})(${scrutinee})${post_tail}`)
+  return out.join(newline())
 }
 
 // `_expr`'s `bin` branch.
@@ -833,9 +894,7 @@ fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
     i += 1
   }
   let params = parts.join(", ")
-  var prefix = ""
-  let is_async = value_bool(value_field(node, "async"))
-  if (is_async) { prefix = "async " }
+  var is_async = value_bool(value_field(node, "async"))
   // An arrow body renders in its OWN async context: `in_async` = the arrow's
   // color (NOT the enclosing body's — inheriting it would let an `await` land in
   // a sync arrow, a tsc error), and `in_arrow` becomes true so the await-seed
@@ -844,6 +903,20 @@ fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
   // async callable invoked inside an async arrow is still awaited.
   let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals }
   let br = expr(value_field(node, "body"), counter, body_acx)
+  // Item 435(b): the `async` followed the DECLARED type, so `(msgs) =>
+  // model.complete(msgs)` rendered `async (msgs: any) =>
+  // (ctx.model.complete(msgs))`, a resolution hop over a Promise the body
+  // already returns (2 excess microtask turns and 2 excess Promise allocations
+  // per operation call). Drop the keyword when the body renders no `await` AND
+  // the body IS that un-awaited emission Promise: `async (p) => e` and `(p) =>
+  // e` then carry the identical TS type `(p) => Promise<T>`, so the arrow stays
+  // assignable wherever it was. Any other body keeps `async`, because an arrow
+  // over a plain value would return `T` where the slot's type says `Promise<T>`.
+  if (is_async && !renders_await(br.text) && emission_call_node(value_field(node, "body"), body_acx)) {
+    is_async = false
+  }
+  var prefix = ""
+  if (is_async) { prefix = "async " }
   let captures = value_list(value_field(node, "captures"))
   if (captures.length() > 0) {
     var bound = []

@@ -164,8 +164,17 @@ typed session capability; for the py H1 slice it is one env var.
 The root itself is opened by name once per operation; it is the trust anchor
 the session configures, not attacker-supplied input, and everything below it is
 reached only through fds. A root that is itself moved or replaced mid-session
-is out of scope for this guard, as is the ts tier (`revl_fs_ts.ts`), which
-still carries the pre-fix shape and gets its own pass with Slice 2b.
+is out of scope for this guard.
+
+The ts tier (`backends/typescript/revl_fs_ts.ts`) carries this same shape now:
+the same `PATH_FAMILIES` enumeration, the same table-driven totality wrapper,
+the same sidecar-restricted inverse sources, the same `EMULTILINK` refusal and
+the same `(st_dev, st_ino)` landing check, with its own guard scan in
+`backends/typescript/tests/fs_confinement_families.test.ts`. The one thing it
+cannot carry is THIS module's directory-fd walk: node's `fs` exposes no `*at()`
+syscall, so the ts guard `lstat`-walks the components immediately before each
+syscall and leans on `O_NOFOLLOW` plus an fd-identity check instead. That is
+stated as a narrowing rather than an equivalence in its module docstring.
 """
 
 from __future__ import annotations
