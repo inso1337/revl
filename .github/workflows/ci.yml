@@ -368,7 +368,14 @@ jobs:
           find /tmp/cordis4j/cordis4j-core/src/main/java -name '*.java' ! -name 'module-info.java' > /tmp/core-sources.txt
           mkdir -p /tmp/cordis4j-classes
           javac --release 21 -d /tmp/cordis4j-classes @/tmp/core-sources.txt
-      - run: pytest backends/java/test_emit_java.py -q
+      # THE ROOT, not one named file. This job used to run test_emit_java.py
+      # alone, so backends/java/test_router_emit.py — the file asserting on the
+      # very scenario whose emitted unit did not compile — had never executed in
+      # CI (issue #183). Every file here now compiles what it emits through
+      # backends/java/javac_gate.py, which is a no-op without the JDK installed
+      # above; tests/test_java_javac_gate_runs_in_ci.py fails if either half of
+      # that (the JDK, or this target) goes away.
+      - run: pytest backends/java/ -q
         env:
           REVL_CORDIS4J_CLASSES: /tmp/cordis4j-classes
 

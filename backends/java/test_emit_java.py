@@ -8,7 +8,6 @@ blocks) when a working JDK is present.
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -35,63 +34,34 @@ _TAIL = ("If the change is intended: python3 tools/regen_goldens.py {t}, then re
          "the diff. Goldens are snapshots, not a freeze (docs/conformance.md).")
 
 HERE = Path(__file__).resolve().parent
-STUB_SOURCES = sorted((HERE / "stubs").rglob("*.java"))
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+import javac_gate  # noqa: E402
+
+JAVAC = javac_gate.JAVAC
+JAVA = javac_gate.JAVA
+STUB_SOURCES = javac_gate.STUB_SOURCES
+NO_JDK = javac_gate.NO_JDK
+_javac_compile = javac_gate.compile_unit
 
 
-def _tool(name: str) -> str | None:
-    """A toolchain binary that actually works (macOS ships a `javac` shim
-    that errors when no JDK is installed).
+def _emit(ir, *args, **kwargs) -> str:
+    """Emit, and prove the emitted unit is a valid Java program.
 
-    For `javac` "works" also means it accepts ``--release 21``: every compile
-    below targets 21 because the emitter lowers `match` to Java 21 pattern
-    switches (FR-10 / item 77(e)), so an older JDK responds to ``-version``
-    and then fails the compile with "release version 21 not supported". That
-    is an environment gap like a missing JDK and must read as a SKIP with a
-    reason, not a red suite — on a contributor's machine as much as in a CI
-    job that pins no JDK.
+    Issue #154: every assertion below used to be a substring match on emitted
+    text, which proves the emitter wrote what we expected and says nothing
+    about whether the result compiles. Two uncompilable-output defects shipped
+    under exactly that green suite. Routing emission through here makes each
+    text assertion a claim about a program javac has already accepted, at the
+    cost of one cached javac run per distinct emitted unit.
+
+    Use `emit.emit` directly only where the unit is deliberately NOT a
+    standalone program (an `@java` extern body whose helper class lives in the
+    host application) or where the test's subject is the raising, not the
+    output.
     """
-    exe = shutil.which(name)
-    if exe is None:
-        return None
-    try:
-        probe = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if probe.returncode != 0:
-        return None
-    if name != "javac":
-        return exe
-    try:
-        release = subprocess.run([exe, "--release", "21", "-version"],
-                                 capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return exe if release.returncode == 0 else None
-
-
-JAVAC = _tool("javac")
-JAVA = _tool("java")
-
-# One reason string for both halves of the gate, so a skip says which one bit.
-NO_JDK = "no working JDK >= 21 (javac/java that respond, and javac --release 21)"
-
-
-def _javac_compile(tmp_path: Path, source: str) -> Path:
-    """Compile emitted Components.java against the cordis4j stubs; returns
-    the classes dir."""
-    pkg = tmp_path / "revl"
-    pkg.mkdir()
-    (pkg / "Components.java").write_text(source, encoding="utf-8")
-    out = tmp_path / "out"
-    out.mkdir()
-    result = subprocess.run(
-        [JAVAC, "--release", "21", "-d", str(out)]
-        + [str(s) for s in STUB_SOURCES]
-        + [str(pkg / "Components.java")],
-        capture_output=True, text=True, timeout=600,
-    )
-    assert result.returncode == 0, result.stderr
-    return out
+    return javac_gate.compile_check(emit.emit(ir, *args, **kwargs))
 
 
 def _ir(name: str = "user_cache") -> dict:
@@ -99,7 +69,7 @@ def _ir(name: str = "user_cache") -> dict:
 
 
 def test_user_cache_emits_java_structure():
-    src = emit.emit(_ir("user_cache"))
+    src = _emit(_ir("user_cache"))
     assert "package revl;" in src
     assert "import io.cordis4j.core.ServiceKey;" in src
     assert "public interface Database" in src
@@ -122,13 +92,17 @@ def test_format_emits_a_concatenation_chain():
         "services": {"Bus": {"methods": {"send": {
             "params": [{"name": "msg", "type": "Str"}], "returns": None, "emission": True}}}},
         "components": [{
-            "name": "Notifier", "requires": {"bus": "Bus"}, "provides": {}, "config": [],
+            # `x` is a config field, not a free name: this IR is hand-written,
+            # and the javac gate (#154) will not accept an emitted unit whose
+            # only binding for `x` is the test author's imagination.
+            "name": "Notifier", "requires": {"bus": "Bus"}, "provides": {},
+            "config": [{"name": "x", "type": "Str", "default": None}],
             "body": [{"step": "emit", "expr": {
                 "kind": "call", "target": {"kind": "req", "name": "bus"}, "method": "send",
                 "args": [{"kind": "format", "template": "hi $0", "args": [{"kind": "name", "id": "x"}]}]}}],
         }],
     }
-    src = emit.emit(ir)
+    src = _emit(ir)
     # item 433 F1: a `format` node is a concatenation chain, not String.format.
     # The only conversion this emitter ever produced was `%s`, which is
     # `String.valueOf` for every non-Formattable argument (and no revl value is
@@ -159,7 +133,7 @@ def test_emit_with_compensate_keeps_the_compensation():
         "  provide s { fn f(x) = x }\n"
         "}\n"
     )
-    out = emit.emit(compile_source(src)).replace(" ", "")
+    out = _emit(compile_source(src)).replace(" ", "")
     assert "send(1" in out, "emission missing"
     assert "send(0" in out, "compensation dropped — G7 residue on the java tier"
 
@@ -178,7 +152,7 @@ def test_compensate_routes_through_revl_frame_two_phase_loop():
         "  provide s { fn f(x) = x }\n"
         "}\n"
     )
-    out = emit.emit(compile_source(src))
+    out = _emit(compile_source(src))
     assert "private static final class RevlFrame" in out
     assert 'frame.compensation("send", "send", () -> bus.send(0L))' in out
     assert "frame.commit();" in out
@@ -207,7 +181,7 @@ def test_bracket_only_component_has_no_revl_frame():
         "  }\n"
         "}\n"
     )
-    out = emit.emit(compile_source(src))
+    out = _emit(compile_source(src))
     assert "RevlFrame" not in out
     assert "Disposables.of(() -> store.drop())" in out
 
@@ -227,7 +201,7 @@ def test_witnessed_effect_routes_through_revl_frame_transactional():
         "  effect stash()\n"
         "}\n"
     )
-    out = emit.emit(compile_source(src))
+    out = _emit(compile_source(src))
     assert "private static final class RevlFrame" in out
     assert "instanceof RevlResult.Ok<?, ?>" in out
     assert 'frame.transactional("stash", "unstash", () -> unstash(result))' in out
@@ -243,7 +217,7 @@ def test_method_body_witnessed_routes_through_transactional_method():
     (`this.fx`/`this.frame`), so it outlives the method call and is disposed by
     the component's own unload, not at method-return."""
     ir = compile_files([str(HERE / "scenarios" / "method_witnessed.rvl")])
-    out = emit.emit(ir)
+    out = _emit(ir)
     # the method routes through transactionalMethod, Ok-conditional, no bracket
     assert 'frame.transactionalMethod("stash_path", "unstash", () -> unstash(result))' in out
     assert "instanceof RevlResult.Ok<?, ?>" in out
@@ -268,7 +242,7 @@ def test_method_body_witnessed_does_not_perturb_non_witnessed_output():
         "  provide ops { fn ping() { return 1 } }\n"
         "}\n"
     )
-    out = emit.emit(compile_source(src))
+    out = _emit(compile_source(src))
     assert "RevlFrame" not in out
     assert "RevlActivation" not in out
     assert "transactionalMethod" not in out
@@ -280,8 +254,8 @@ def test_version_gate_accepts_ir_1_2_3():
         "services": {},
         "components": [{"name": "X", "requires": {}, "provides": {}, "config": [], "body": []}],
     }
-    assert "ir_version 1" in emit.emit(v1)
-    assert "ir_version 2" in emit.emit({**v1, "ir_version": 2})
+    assert "ir_version 1" in _emit(v1)
+    assert "ir_version 2" in _emit({**v1, "ir_version": 2})
     v3 = {
         "ir_version": 3,
         "functions": [{
@@ -291,13 +265,13 @@ def test_version_gate_accepts_ir_1_2_3():
             "body": [{"step": "return", "expr": {"kind": "lit", "value": 42}}],
         }],
     }
-    assert "ir_version 3" in emit.emit(v3)
+    assert "ir_version 3" in _emit(v3)
     with pytest.raises(emit.EmitError, match="ir_version"):
         emit.emit({**v1, "ir_version": 4})
 
 
 def test_user_cache_golden_byte_equality():
-    src = emit.emit(_ir("user_cache"))
+    src = _emit(_ir("user_cache"))
     golden = (Path(__file__).resolve().parent / "golden" / "user_cache.java").read_text()
     assert src == golden, (
         "backends/java/golden/user_cache.java drifted from the emitter. "
@@ -305,7 +279,7 @@ def test_user_cache_golden_byte_equality():
 
 
 def test_host_objects_are_real_java_runtime_classes():
-    src = emit.emit(_ir("user_cache"))
+    src = _emit(_ir("user_cache"))
     assert "UnsupportedOperationException" not in src
     # FR-4: the host Map is generic over its value type (learned per site).
     # item 397: the backing map is a thread-safe ConcurrentHashMap.
@@ -328,7 +302,7 @@ def test_host_objects_are_real_java_runtime_classes():
 
 
 def test_config_defaults_emit_no_arg_constructor():
-    src = emit.emit(_ir("user_cache"))
+    src = _emit(_ir("user_cache"))
     assert "public PgDatabasePlugin(String url, long pool_size)" in src
     assert "public PgDatabasePlugin()" in src
     assert "this.url = null;" in src
@@ -336,7 +310,7 @@ def test_config_defaults_emit_no_arg_constructor():
 
 
 def test_await_lowers_to_async_plugin():
-    src = emit.emit(_ir("migrator"))
+    src = _emit(_ir("migrator"))
     assert "import io.cordis4j.core.AsyncPlugin;" in src
     assert "public static final class MigratorPlugin implements AsyncPlugin" in src
     assert "public Disposable apply(Context ctx) throws Exception" in src
@@ -354,7 +328,7 @@ def test_await_joins_the_job_handle_it_starts():
     step lowers to `.await`; Java has no await operator, so the join has to be
     emitted.
     """
-    src = emit.emit(_ir("migrator"))
+    src = _emit(_ir("migrator"))
     assert 'Job.run("migrations");' not in src, "the handle is dropped, not awaited"
     assert 'Job.run("migrations").await();' in src
     # ...and there has to be a handle to join in the first place.
@@ -378,7 +352,7 @@ def test_component_if_setup_and_fail_emit_real_java():
         }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "import io.cordis4j.core.CordisException;" in src
     assert "Map<String> scratch = Map.create();" in src
     assert "if ((replicas < 1L))" in src
@@ -391,7 +365,7 @@ def test_component_if_setup_and_fail_emit_real_java():
 def test_v2_realms_emit_isolate_and_intercept():
     ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
     assert ir["ir_version"] == 2
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "// Generated by the revl cordis4j backend (ir_version 2)" in src
     assert 'ctx = ctx.isolate(Kv.class, "tenant_a");' in src
     assert 'ctx = ctx.isolate(Kv.class, "tenant_b");' in src
@@ -416,7 +390,7 @@ def test_v3_types_functions_match_emit_java_switch():
         """
     )
     assert ir["ir_version"] == 3
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "// Generated by the revl cordis4j backend (ir_version 3)" in src
     assert "public static final class Row" in src
     assert "public sealed interface Outcome" in src
@@ -437,7 +411,7 @@ def test_v3_extern_requires_java_body():
           = @java { return java.util.HexFormat.of().formatHex(data); }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "public static String sha256(byte[] data)" in src
     assert "return java.util.HexFormat.of().formatHex(data);" in src
 
@@ -463,7 +437,7 @@ def test_percent_in_template_needs_no_escaping():
         }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert '"SELECT 100% of " + m' in src
     assert "100%%" not in src
 
@@ -479,7 +453,7 @@ def test_stdlib_builtins_use_typed_overloads():
         pub fn find(s: Str, sub: Str) -> Int { return s.indexOf(sub) }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "revlSlice(s, 0L, 1L)" in src
     assert "revlConcat(xs, ys)" in src
     assert "revlIndexOf(s, sub)" in src
@@ -504,7 +478,7 @@ def test_host_call_in_a_top_level_function_is_a_method_call():
         }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "Pool.open(url, 3L)" in src
     assert 'p.execute("INSERT")' in src
     assert ".apply(" not in src, "a host method call must not lower to `.apply(..)`"
@@ -635,7 +609,7 @@ component MemKV provides kv: KV {
 def test_host_map_backs_keys_and_size():
     """The generated `Map<V>` runtime carries `size`/`keys`, and the provide
     body lowers them as method calls on the store."""
-    src = emit.emit(compile_source(_HOST_MAP_ITER_SRC, "memkv.rvl"))
+    src = _emit(compile_source(_HOST_MAP_ITER_SRC, "memkv.rvl"))
     # runtime methods exist, with value-Map semantics: Int -> long count, and
     # keys in canonical (code-point) order.
     assert "public long size() {" in src
@@ -1277,7 +1251,7 @@ def test_lifecycle_free_document_carries_no_r1_counter():
     test to answer: without one the host runtimes emit exactly what they always
     did, which is what keeps this tier's goldens byte-identical."""
     ir = compile_files([str(ROOT / "examples" / "user_cache.rvl")])
-    assert "REVL_LIVE_HOST_RESOURCES" not in emit.emit(ir)
+    assert "REVL_LIVE_HOST_RESOURCES" not in _emit(ir)
 
 
 # --------------------------------------------------------------------------
@@ -1297,7 +1271,7 @@ def test_nullish_lowers_to_or_else_get():
         fn pick(a: Opt[Int]) -> Int { return a ?? side(7) }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "a.orElseGet(() -> side(7L))" in src
     assert ".orElse(" not in src  # eager form would evaluate `side(7)` always
 
@@ -1312,7 +1286,7 @@ def test_nullish_lowers_in_component_method_bodies():
         }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "this.bus.maybe(x).orElseGet(() -> 0L)" in src
 
 
@@ -1325,7 +1299,7 @@ def test_bare_return_lowers_for_void_service_operations():
         component C provides s: S { provide s { fn f(x) { return } } }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "public void f(long x) { return; }" in src
 
 
@@ -1339,7 +1313,7 @@ def test_keyword_named_function_is_renamed_not_rejected():
         component C provides s: S { provide s { fn f(x) = double(x) } }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "public static long double_(long n)" in src
     assert "return double_(x);" in src
     # the un-renamed keyword must not survive anywhere as an identifier
@@ -1353,7 +1327,7 @@ def test_keyword_named_extern_is_renamed_at_declaration_and_call():
         fn use_it(n: Int) -> Int { return native(n) }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "public static long native_(long n)" in src
     assert "return native_(n);" in src
 
@@ -1375,7 +1349,7 @@ def test_renaming_collision_is_no_longer_lossy():
         fn use_both(n: Int) -> Int { return double(n) + double_(n) }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert src.count("long double_(long n)") == 1
     assert src.count("long double__(long n)") == 1
     assert "return Math.addExact(double_(n), double__(n));" in src
@@ -1396,7 +1370,7 @@ def test_match_in_a_component_method_body():
         }
         """
     )
-    src = emit.emit(ir)
+    src = _emit(ir)
     assert "Outcome.Found" in src
     assert "Outcome.Missing" in src
 
@@ -1424,7 +1398,7 @@ def test_adt_binding_is_declared_with_the_sealed_interface():
     the java binding at `Outcome.Found` — and then the `Missing` arm of the
     switch is a pattern the selector can never match ("incompatible types:
     Found cannot be converted to Missing")."""
-    src = emit.emit(compile_source(_ADT_MATCH_SRC))
+    src = _emit(compile_source(_ADT_MATCH_SRC))
     assert "Outcome o = new Outcome.Found(x);" in src
     assert "var o = new Outcome.Found" not in src
 
@@ -1432,14 +1406,14 @@ def test_adt_binding_is_declared_with_the_sealed_interface():
 def test_a_total_switch_gets_no_default_label():
     """Arms covering every case of a sealed ADT are already exhaustive to
     javac, which then rejects the extra `default` outright."""
-    src = emit.emit(compile_source(_ADT_MATCH_SRC))
+    src = _emit(compile_source(_ADT_MATCH_SRC))
     assert "case Outcome.Found" in src
     assert "case Outcome.Missing" in src
     assert "non-exhaustive match" not in src
 
 
 def test_a_partial_switch_keeps_its_guard():
-    src = emit.emit(compile_source(
+    src = _emit(compile_source(
         "type Outcome = Found(Int) | Missing | Broken\n"
         "fn f(o: Outcome) -> Int { return match o { Found(v) => v, _ => 0 } }"
     ))
@@ -1462,7 +1436,7 @@ def test_local_arrows_are_beta_reduced_at_the_call_site():
     so there is no functional interface to declare the binding with and no
     `g(n)` call syntax for a lambda-valued local. The call is inlined instead,
     which is also the only lowering that does not invent a parameter type."""
-    src = emit.emit(compile_source(_ARROW_SRC))
+    src = _emit(compile_source(_ARROW_SRC))
     assert "-> (" not in src, "an arrow must not be emitted as a java lambda"
     assert "return ((((3L) * 2L)) + (((10L) * 2L)));" in src  # inlined twice
     # by-value capture (syntax-2.0 §3.5): snapshot at the binding, not the call
@@ -1509,7 +1483,7 @@ fn firstRes(x: Result[Int, Str]) -> Bool { return match x { Ok(_) => true, Err(_
 
 
 def test_wildcard_payload_arm_does_not_declare_a_literal_underscore():
-    src = emit.emit(compile_source(_WILDCARD_PAYLOAD_SRC))
+    src = _emit(compile_source(_WILDCARD_PAYLOAD_SRC))
     assert "case Outcome.Found" in src
     # the malformed constructs this regression guards against, verbatim.
     assert "final var _ " not in src
@@ -1536,7 +1510,7 @@ pub fn member(m: Map[Str, Int], k: Str) -> Bool { return m.has(k) }
 def test_map_value_type_lowers_to_persistent_hashmaps():
     """Text-level: set goes through the copying static (never `m.put`), and
     lookup answers the tier's Optional."""
-    src = emit.emit(compile_source(MAP_SRC))
+    src = _emit(compile_source(MAP_SRC))
     assert "revlMapSet(m, k, v)" in src
     assert "revlMapGet(m, k)" in src
     assert "revlMapHas(m, k)" in src
@@ -1638,7 +1612,7 @@ def test_ledger_shape_carries_the_map_value_type():
     """The session-ledger shape: the emitted provider field and constructor
     pin `Map<java.util.List<Msg>>` (FR-4), the host Map class is generic, and
     the historical hardcoding is gone."""
-    src = emit.emit(compile_source(LEDGER_SRC))
+    src = _emit(compile_source(LEDGER_SRC))
     assert "public static final class Map<V>" in src
     assert "private final java.util.concurrent.ConcurrentHashMap<String, V> values" in src
     assert "public void insert(String key, V value)" in src
@@ -1650,14 +1624,14 @@ def test_ledger_shape_carries_the_map_value_type():
 
 
 def test_int_and_list_map_values_reach_the_emitted_types():
-    src = emit.emit(compile_source(HOST_MAP_TYPES_SRC))
+    src = _emit(compile_source(HOST_MAP_TYPES_SRC))
     assert "private final Map<java.lang.Long> store;" in src
     assert "private final Map<java.util.List<String>> store;" in src
     assert "private final Map<java.lang.Boolean> store;" in src
     assert "Map<java.lang.Long> store = Map.create();" in src
     assert "Map<java.util.List<String>> store = Map.create();" in src
     assert "Map<java.lang.Boolean> store = Map.create();" in src
-    src = emit.emit(compile_source(RECORD_VALUE_SRC))
+    src = _emit(compile_source(RECORD_VALUE_SRC))
     assert "private final Map<Profile> store;" in src
     assert "Map<Profile> store = Map.create();" in src
 
@@ -1781,7 +1755,7 @@ def _emitted_gensym_indices(java: str) -> list[int]:
 
 
 def test_destructure_temporaries_are_indexed_by_emission_order():
-    java = emit.emit(compile_source(_DESTRUCTURE_SRC))
+    java = _emit(compile_source(_DESTRUCTURE_SRC))
     names = sorted(set(re.findall(r"__revl_destructure_\d+", java)))
     assert names == ["__revl_destructure_1", "__revl_destructure_2",
                      "__revl_destructure_3"], (

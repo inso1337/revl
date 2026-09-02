@@ -1,13 +1,21 @@
 """Multi-realm routing (item 173) on the cordis4j tier — emitter assertions.
 
-cordis4j is UPSTREAM (github.com/1na-ko/cordis4j) and no real runtime + JRE is
-reachable here, so this tier lands via fork + PR (forks/cordis4j/REVL-FORK.md):
-the runtime primitive is a patch/PR-spec, and only the emitter is exercised
-here. These are pure-Python assertions — the emitter lowers a routed require
-into a router class that consumes the strict single-realm read
-`ctx.serviceInRealm(...)`, excludes the routed key from `ctx.get`, and leaves a
-routes-less program byte-identical. Building/running against a real cordis4j +
-JRE is the upstream PR's job (see the fork README).
+cordis4j is UPSTREAM (github.com/1na-ko/cordis4j), so the routing PRIMITIVE
+(`ctx.serviceInRealm` with a liveness check) lands via fork + PR
+(forks/cordis4j/REVL-FORK.md) and running a routed composition on the real
+runtime is that PR's job. What IS this suite's job is the emitter: a routed
+require lowers to a router class that consumes the strict single-realm read,
+excludes the routed key from `ctx.get`, and leaves a routes-less program
+byte-identical.
+
+Those used to be substring matches and nothing else, and that is precisely how
+issue #154's first defect shipped: the router class throws `CordisException`
+while `_core_imports` added that import only for a `fail` step, so this very
+scenario emitted 6119 bytes javac rejects while every assertion here stayed
+green. So the emitted unit is COMPILED (against the in-repo cordis4j API stubs,
+which carry `serviceInRealm`), and each assertion below is a claim about a
+program javac has already accepted. See `javac_gate` for how the JDK is found
+and why the gate cannot quietly stop running in CI.
 """
 
 from __future__ import annotations
@@ -19,17 +27,36 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parent
 ROOT = BACKEND.parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
 
+import javac_gate  # noqa: E402
 from revl import compile_source  # noqa: E402
 
 SCENARIO = (BACKEND / "scenarios" / "router.rvl").read_text()
 
 
 def _emit(source: str) -> str:
+    """Emit, and prove the emitted unit compiles before asserting on its text."""
     spec = importlib.util.spec_from_file_location("revl_java_emit", BACKEND / "emit.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.emit(compile_source(source))
+    return javac_gate.compile_check(module.emit(compile_source(source)),
+                                    "routed require")
+
+
+def test_the_routed_unit_carries_every_import_it_throws():
+    """The regression gate for issue #154's first defect, stated directly.
+
+    `compile_check` above already refuses an uncompilable unit, so this test is
+    the named record of WHICH omission broke it: the router's failover exhaust
+    throws `CordisException`, and that import used to be added only for a
+    `fail` step. Asserting the import and the throw together means a future
+    edit that drops one has to explain the other.
+    """
+    java = _emit(SCENARIO)
+    assert "throw new CordisException(" in java
+    assert "import io.cordis4j.core.CordisException;" in java
 
 
 def test_emit_router_class_and_strict_read():

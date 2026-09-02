@@ -8,9 +8,13 @@ site, so the emitted class is valid Java.
 `fn f(class: Str) -> Str { return class }` type-checks and lowers, then used to
 die here with `parameter name identifier collides with Java/reserved name`.
 
-The string assertions run everywhere; the javac/java gate compiles and EXECUTES
-the emitted class, proving decl and use agree on the JVM (skips cleanly when no
-JDK is installed, mirroring the rest of this suite).
+Every emission here goes through the javac gate (`javac_gate.compile_check`,
+issue #154), so a string assertion is a claim about a program javac accepted —
+which matters more here than anywhere else in the tier: the rename rule's real
+failure mode is a COLLISION (`double` and the equally legal `double_` both
+landing on `double_`), and a substring match on `final var double_ =` cannot
+tell one declaration from two. javac rejects the duplicate local outright. One
+test goes further and EXECUTES the class, proving decl and use agree on the JVM.
 """
 
 import importlib.util
@@ -26,12 +30,23 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
 
-# reuse the sibling suite's toolchain probe + stub-compile helper
-from test_emit_java import JAVA, JAVAC, NO_JDK, STUB_SOURCES  # noqa: E402
+# the tier's one toolchain resolver + stub-compile helper
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import javac_gate  # noqa: E402
+
+JAVA, JAVAC = javac_gate.JAVA, javac_gate.JAVAC
+NO_JDK, STUB_SOURCES = javac_gate.NO_JDK, javac_gate.STUB_SOURCES
 
 _spec = importlib.util.spec_from_file_location("revl_java_emit_rw", HERE / "emit.py")
 emit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(emit)
+
+
+def _emit(source: str) -> str:
+    """Emit, and prove the emitted class compiles before asserting on it."""
+    return javac_gate.compile_check(emit.emit(compile_source(source)),
+                                    "reserved-word rename")
 
 
 PROGRAM = """
@@ -53,7 +68,7 @@ def test_mangle_is_pure_and_free():
 
 
 def test_keyword_decls_and_uses_are_consistent():
-    out = emit.emit(compile_source(PROGRAM))
+    out = _emit(PROGRAM)
     # record fields (declaration + constructor params)
     assert "public final String class_;" in out
     assert "public final String default_;" in out
@@ -126,13 +141,13 @@ def test_renames_are_injective_over_the_reserved_ladder():
 
 
 def test_keyword_local_does_not_collide_with_its_underscore_twin():
-    out = emit.emit(compile_source(
+    out = _emit(
         'pub fn probe() -> Str {\n'
         '  let double = "PUBLIC-VALUE"\n'
         '  let double_ = "SEKRIT-CANARY-416"\n'
         '  return double\n'
         '}\n'
-    ))
+    )
     assert 'final var double_ = "PUBLIC-VALUE";' in out
     assert 'final var double__ = "SEKRIT-CANARY-416";' in out
     assert "return double_;" in out
@@ -140,21 +155,21 @@ def test_keyword_local_does_not_collide_with_its_underscore_twin():
 
 
 def test_top_level_fn_pair_stays_two_methods():
-    out = emit.emit(compile_source(
+    out = _emit(
         'pub fn double() -> Str { return "PUBLIC-VALUE" }\n'
         'pub fn double_() -> Str { return "SEKRIT-CANARY-416" }\n'
-    ))
+    )
     assert out.count("String double_()") == 1
     assert out.count("String double__()") == 1
 
 
 def test_record_field_pair_stays_two_fields():
-    out = emit.emit(compile_source(
+    out = _emit(
         "type Box = { double: Str, double_: Str }\n"
         "fn mk(a: Str, b: Str) -> Box { return { double: a, double_: b } }\n"
         "fn r1(b: Box) -> Str { return b.double }\n"
         "fn r2(b: Box) -> Str { return b.double_ }\n"
-    ))
+    )
     assert "public final String double_;" in out
     assert "public final String double__;" in out
     assert "return b.double_;" in out
@@ -163,16 +178,16 @@ def test_record_field_pair_stays_two_fields():
 
 def test_ordinary_reserved_rename_is_unchanged():
     """False-positive guard: one `_`, not two, when there is no twin."""
-    out = emit.emit(compile_source(
-        "pub fn f(class: Str) -> Str { let new = class\n  return new }"))
+    out = _emit(
+        "pub fn f(class: Str) -> Str { let new = class\n  return new }")
     assert "String class_" in out
     assert "final var new_ = class_;" in out
     assert "class__" not in out and "new__" not in out
 
 
 def test_non_reserved_underscore_names_are_untouched():
-    out = emit.emit(compile_source(
-        "pub fn g(value_: Str) -> Str { let out_ = value_\n  return out_ }"))
+    out = _emit(
+        "pub fn g(value_: Str) -> Str { let out_ = value_\n  return out_ }")
     assert "String value_" in out
     assert "final var out_ = value_;" in out
     assert "value__" not in out and "out__" not in out
