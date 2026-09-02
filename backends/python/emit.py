@@ -762,6 +762,19 @@ def _bounded(operation: str, width: int) -> str:
 # nested read has finished with the name before the outer read rebinds it.
 _FIELD_TMP = "_fv"
 
+# Every name the expression renderer may spell as a walrus target of its own:
+# the bounded-arithmetic temp, the field-read temp, the char-class temp, and
+# the `?.`/`??` chain temps (`_ov<height>`). `_match_expr` needs the set because
+# python refuses an assignment expression that rebinds the iteration variable of
+# the comprehension it sits in, so a payload bound under one of these names has
+# to keep the older walrus binder.
+_WALRUS_TEMPS = frozenset({_BOUNDED_TMP, _FIELD_TMP, "_rc"})
+_OPT_TMP_RE = re.compile(r"_ov\d+\Z")
+
+
+def _walrus_temp(name: str) -> bool:
+    return name in _WALRUS_TEMPS or _OPT_TMP_RE.match(name) is not None
+
 
 def _field_read(target: str, name: str, opt: bool = False,
                 rereadable: bool = False) -> str:
@@ -1626,6 +1639,8 @@ class _ComponentEmitter:
             # skips every later step instead of running to the next yield
             out.add(indent, f"await {self._expr(step.get('expr'), where)}")
             out.add(indent, "yield None  # iteration boundary (A1)")
+        elif kind == "stream-iter":
+            self._stream_iter(out, indent, step, where)
         elif kind == "timer":
             self._timer(out, indent, step, where)
         elif kind == "provide":
@@ -1850,6 +1865,57 @@ class _ComponentEmitter:
                 f"_revl_frame.transactional_method((lambda result: {undo}), {tmp}.value)")
         if bind is not None:
             out.add(indent, f"{bind} = {tmp}")
+
+    def _stream_iter(self, out: _Lines, indent: int, step: dict,
+                     where: str) -> None:
+        """A `stream-iter` body step (item 130 Slice 4): `every <x> in <sub>
+        { … }`, the async-iteration form.
+
+        The whole form is defined by the three operations Slice 1 shipped, so it
+        adds no runtime primitive and no new teardown accounting:
+
+            while True:
+                <x> = await <sub>.next()
+                yield None            # iteration boundary (A1)
+                if Stream.is_closed(<x>):
+                    break
+                <body>
+
+        Three properties are load-bearing and each is a line above:
+
+        * the `yield` sits immediately after the await, exactly as the plain
+          `await` step emits it — the await LANDS (inertia, paper §4.3.3) and the
+          yield closes the iteration, so a divert while the consumer is parked
+          abandons the loop instead of running one more body turn. This is what
+          keeps the bracket inverse reachable off the teardown path: `close`
+          (or owner withdrawal) trips the cancel token, the parked `next`
+          resolves as `Closed`, and teardown never waits on the provider (§9
+          Part A);
+        * a `Closed` terminal ENDS the loop rather than entering the body — the
+          terminal is not an item, and running the effectful callback on it would
+          be the silent-data invention the design forbids;
+        * a `Faulted` terminal is NOT tested for, because `next` RAISES it
+          (`StreamFaulted`). The exception propagates out of the loop and out of
+          the body generator, the activation fails, and the accumulated prefix —
+          subscription bracket included — reverts LIFO, which CLOSES the
+          subscription (A8, §4.7). That is the "a failed handler does not leave a
+          subscription active" obligation, and it is delivered by not catching
+          anything here.
+
+        A `fail` in the body raises the same way, for the same reason."""
+        self.uses.add("Stream")
+        item = _mangle(_ident(step.get("bind"), f"{where}: stream item"))
+        subject = self._expr(step.get("subject"), where)
+        out.add(indent, "while True:")
+        out.add(indent + 1, f"{item} = await {subject}.next()")
+        out.add(indent + 1, "yield None  # iteration boundary (A1)")
+        out.add(indent + 1, f"if Stream.is_closed({item}):")
+        out.add(indent + 2, "break")
+        body = step.get("body") or []
+        if not body:  # pragma: no cover — the parser rejects an empty body
+            raise EmitError(f"{where}: an `every … in` body is empty")
+        for inner in body:
+            self._body_step(out, indent + 1, inner, where)
 
     def _timer(self, out: _Lines, indent: int, step: dict, where: str) -> None:
         """A `timer` body step (item 57): a revertible schedule.
@@ -2131,8 +2197,11 @@ class _ComponentEmitter:
         # forces the `async def` generator. Timer steps are excluded: a timer's
         # `async` flag (item 170) colors its OWN runtime-awaited firing, not the
         # activation body generator, so it must not flip the body to async here.
+        # item 130 Slice 4: a `stream-iter` step awaits `<sub>.next()` once per
+        # delivered item, so it is a suspension in the body exactly as an
+        # `await` step is, and it forces the `async def` generator the same way.
         is_async = any(
-            step.get("step") == "await"
+            step.get("step") in ("await", "stream-iter")
             or (step.get("step") in ("effect", "let-effect", "emit")
                 and step.get("async"))
             for step in self.ir.get("body") or [])
@@ -2431,10 +2500,23 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
     is a SYNC frame: an arm body that crosses an async
     boundary renders an `await`, and `await` inside a lambda is a py
     `SyntaxError` (item 263 — the arm helper hoisted out of an async body must
-    inherit its color). When `awaited` is set the payload binder switches to a
-    walrus assignment carried by a `(<bind>, <body>)[1]` tuple instead, so every
-    `await` lands directly in the enclosing `async def` and none is trapped in
-    a lambda. The two forms are otherwise byte-identical.
+    inherit its color). So the awaited payload bind needs a binder that is not
+    a lambda but is still a SCOPE.
+
+    A walrus is not (roadmap item 163): `(v := match.value)` assigns in the
+    ENCLOSING frame, so an arm bind named after a local of the function holding
+    the match silently clobbers it — `let v = 5; let r = match o { Some(v) =>
+    await f(v), … }; r + v` read the payload back as `v`. A nested match
+    rebinding the name and an arrow in the arm body capturing it went wrong the
+    same way, and every non-awaited spelling of those three was already correct
+    because the lambda gave the bind a scope of its own.
+
+    A comprehension is a scope and admits `await` (PEP 530), so the awaited
+    binder is `[<body> for <bind> in (<payload>,)][0]`: the bind is arm-local
+    exactly as the lambda's parameter is, an arrow in the body closes over the
+    comprehension's cell, and every `await` still lands directly in the
+    enclosing `async def`. The payload is evaluated once, before the body, in
+    both forms.
     """
     # `match` is a revl keyword, so it can never be a user binding in the
     # revl source. Python 3.10+ treats it as a soft keyword, which is still
@@ -2443,10 +2525,19 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
 
     def bind_payload(bind: str, body: str, payload: str) -> str:
         # `await`-free arm -> the classic one-shot lambda; an awaited arm ->
-        # a walrus bind so the body (which carries the `await`) stays at the
-        # frame's top level rather than inside a lambda.
+        # a one-element comprehension, whose iteration variable is a scope the
+        # `await` in the body can still be spelled inside.
         if awaited:
-            return f"(({bind} := {payload}), {body})[1]"
+            if _walrus_temp(bind):
+                # Python refuses a walrus that rebinds a comprehension's
+                # iteration variable, and a body reaching one of the emitter's
+                # own walrus temps (`_bi` and friends) does exactly that when
+                # the payload is bound under that name. Such a bind is already
+                # clobbered by the scaffolding that owns the name, with or
+                # without a match, so keep the pre-item-163 spelling rather
+                # than turn a wrong value into a `SyntaxError`.
+                return f"(({bind} := {payload}), {body})[1]"
+            return f"[{body} for {bind} in ({payload},)][0]"
         return f"(lambda {bind}: {body})({payload})"
 
     def branch(arm: dict, rest: str | None, head: str) -> str:
@@ -2483,7 +2574,9 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
     # and a nested match inside an arm body may reuse the name freely — the
     # outer chain has finished reading `match` before any body is evaluated.
     # A leading wildcard arm (or no arm at all) has no test to carry the bind,
-    # so those keep the `(<bind>, <body>)[1]` tuple the awaited path uses.
+    # so those bind the SCRUTINEE with a `((match := …), <chain>)[1]` tuple
+    # instead. That walrus is safe where a payload bind's is not: its target is
+    # the revl keyword `match`, which no user binding can be named.
     folds = bool(arms) and arms[0].get("pattern") != "_"
     result = None
     for i, arm in reversed(list(enumerate(arms))):

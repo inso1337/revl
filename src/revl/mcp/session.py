@@ -318,6 +318,18 @@ class Session:
         # Replaced atomically with the class map at swap (a ticket from a previous
         # generation is gone, not stale).
         self._tickets: dict = {}
+        # the ANSWER ROUND each ticket is currently on, keyed by its hash. A
+        # ticket hash is the deterministic identity of a QUESTION (component +
+        # reach-closure candidate hash + kind + args digest), so the SAME
+        # class-(c) crossing asked a second time — a repeated `esc.go`, an
+        # activation gate re-run after a load that did not commit — carries the
+        # SAME hash. The round is what separates "this question, asked again"
+        # (a new yes is owed) from "the same answer, delivered twice" (an
+        # idempotent no-op): it advances when the gate raises a ticket that has
+        # no spendable approval standing behind it, and `approve_ticket` mints at
+        # most one approval PER ROUND. See `_issue_ticket` / `approve_ticket`.
+        # Lives and dies with `_ledger` — the rounds index it.
+        self._ticket_rounds: dict = {}
         # the approval ledger (item 246, Decision 3): granted class-(c) approvals,
         # each bound to its ticket hash and the reach-closure candidate hash,
         # single-use. Persists across swaps (the candidate-hash check invalidates a
@@ -2365,6 +2377,7 @@ class Session:
         # deliberately NOT reset here.
         self._class_map = None
         self._tickets = {}
+        self._ticket_rounds = {}   # indexes `_ledger`; dies with it
         self._ledger = []
         self._grants = []
         self._grants_consumed = 0
@@ -3232,10 +3245,7 @@ class Session:
             if record is not None:
                 record["scope"] = ("auto", auto["requestId"])
             return
-        self._tickets[ticket["hash"]] = ticket
-        if self._owner is not None:
-            self._owner.prompts["perCall"] += 1
-        self._count_posture("c")
+        self._issue_ticket(ticket)
         raise ApprovalRequired(ticket)
 
     def _enforce_activation_gate(self, ir: dict, class_map=None,
@@ -3276,10 +3286,7 @@ class Session:
             if auto is not None:
                 self._consume_auto_rule(auto)
                 continue
-            self._tickets[ticket["hash"]] = ticket
-            if self._owner is not None:
-                self._owner.prompts["perCall"] += 1
-            self._count_posture("c")
+            self._issue_ticket(ticket)
             raise ApprovalRequired(ticket)
 
     # -- item 294 Slice 2: the capability-lease gate ------------------------
@@ -3323,10 +3330,7 @@ class Session:
             if self._live_lease_grant(component, cap) is not None:
                 continue  # already minted from an approved ticket (retry / pre-mint)
             ticket = self._build_lease_ticket(lz)
-            self._tickets[ticket["hash"]] = ticket
-            if self._owner is not None:
-                self._owner.prompts["perCall"] += 1
-            self._count_posture("c")
+            self._issue_ticket(ticket)
             raise ApprovalRequired(ticket)
 
     def _build_lease_ticket(self, lz: dict) -> dict:
@@ -3440,15 +3444,68 @@ class Session:
                 ttls.append(rule.ttl_ms)
         return min(ttls) if ttls else None
 
-    def _ledger_entry_for_ticket(self, ticket_hash: str) -> dict | None:
-        """The ledger entry already minted for this ticket hash, if any (F5: one
-        ticket mints AT MOST one approval). Returns it regardless of `consumed` —
-        `approve_ticket`'s idempotent-resend path needs to recognize a ticket
-        that already minted, whether or not that mint has fired yet, not only a
-        still-spendable one (that is `_find_standing_approval`'s job, at the
-        crossing)."""
+    def _spendable_entry_for_ticket(self, ticket_hash: str) -> dict | None:
+        """A ledger entry for this ticket hash that could still be spent at a
+        crossing: minted, not yet consumed, not expired. Deliberately WEAKER than
+        `_find_standing_approval` (which also pins the component and the live
+        candidate hash before letting a token fire) — this one only asks whether
+        an unanswered yes is still standing for the question, which is what the
+        round bookkeeping below turns on."""
         for entry in self._ledger:
-            if entry["hash"] == ticket_hash:
+            if entry["hash"] != ticket_hash:
+                continue
+            if entry["consumed"]:
+                continue
+            if self._expired(entry):
+                continue
+            return entry
+        return None
+
+    def _issue_ticket(self, ticket: dict) -> dict:
+        """Put `ticket` on the outstanding-ticket table and open the answer ROUND
+        the operator's yes will be minted into. Every gate that raises an
+        `ApprovalRequired` goes through here.
+
+        A ticket hash names a QUESTION, not one asking of it: it is derived from
+        the component, the reach-closure candidate hash, the ticket kind and the
+        args digest, all of which are stable across repeats. So the identical
+        class-(c) crossing attempted twice, and an activation gate re-run after a
+        load that raised and never committed, both re-raise a hash the server has
+        issued before. Those are new questions and each is owed its own yes.
+
+        The round advances only when nothing spendable is standing for the hash.
+        While a minted approval is still unconsumed, re-raising does NOT open a
+        new round, so a duplicate `approve_ticket` for it stays the idempotent
+        no-op it must be (item 427 F5, `approve_ticket`). Once that approval has
+        been spent at its one crossing, the next raise opens the next round and
+        the operator can answer again — which is the whole two-step, and what
+        makes a repeated crossing approvable at all."""
+        h = ticket["hash"]
+        self._tickets[h] = ticket
+        if self._spendable_entry_for_ticket(h) is None:
+            self._ticket_rounds[h] = self._ticket_rounds.get(h, 0) + 1
+        if self._owner is not None:
+            self._owner.prompts["perCall"] += 1
+        self._count_posture("c")
+        return ticket
+
+    def _ledger_entry_for_ticket(self, ticket_hash: str) -> dict | None:
+        """The entry already minted for the ticket's CURRENT answer round, if any
+        (F5: one ticket round mints AT MOST one approval). Returns it regardless
+        of `consumed` — `approve_ticket`'s idempotent-resend path has to
+        recognize a round that already minted whether or not that mint has fired
+        yet, not only a still-spendable one (that is `_find_standing_approval`'s
+        job, at the crossing).
+
+        Scoped to the round rather than to the hash for all time: a ticket hash
+        is stable across repeats of the same crossing, so a hash-wide match would
+        make the SECOND asking of a question permanently unanswerable — the
+        operator says yes, `approve_ticket` reports the spent entry back as
+        already-approved, and the re-issued call raises the same ticket again
+        forever."""
+        round_ = self._ticket_rounds.get(ticket_hash, 1)
+        for entry in self._ledger:
+            if entry["hash"] == ticket_hash and entry.get("round", 1) == round_:
                 return entry
         return None
 
@@ -3460,22 +3517,33 @@ class Session:
         candidate hash, the component, and the session; a `approval-granted` WAL
         record makes it durable.
 
-        F5: one ticket mints AT MOST one approval. A duplicate `approve_ticket`
-        call against a still-outstanding ticket — the identical action re-sent by
-        a UI, a retried RPC — is an IDEMPOTENT NO-OP: it returns the SAME entry
-        already minted rather than appending a second unconsumed ledger entry.
-        Idempotent, not a refusal, because a legitimate re-send names a ticket
-        hash it did not forge — the server itself issued it, and asking the same
-        question twice should not read as an error to a caller that cannot tell
-        its first request landed. It is still safe against the adversarial
-        replay this closes: the second call mints nothing new (no new
-        `expiresAt`, no second WAL record, no second fireable ledger row), so a
-        human's one yes still authorizes exactly one crossing — the per-entry
-        single-use guarantee (`_find_standing_approval`/`_consume_approval`)
-        becomes a per-TICKET guarantee too. The ticket stays in `self._tickets`
-        (never retired) precisely so this idempotent path keeps recognizing it;
-        retiring it would turn a benign resend into a confusing "unknown ticket
-        hash" refusal instead."""
+        F5: one ticket ROUND mints AT MOST one approval. A duplicate
+        `approve_ticket` call against the round it already answered — the
+        identical action re-sent by a UI, a retried RPC — is an IDEMPOTENT NO-OP:
+        it returns the SAME entry already minted rather than appending a second
+        unconsumed ledger entry. Idempotent, not a refusal, because a legitimate
+        re-send names a ticket hash it did not forge — the server itself issued
+        it, and asking the same question twice should not read as an error to a
+        caller that cannot tell its first request landed. The second call mints
+        nothing new (no new `expiresAt`, no second WAL record, no second fireable
+        ledger row), so a human's one yes still authorizes exactly one crossing:
+        the per-entry single-use guarantee
+        (`_find_standing_approval`/`_consume_approval`) becomes a per-ROUND
+        guarantee too. The ticket stays in `self._tickets` (never retired)
+        precisely so this idempotent path keeps recognizing it; retiring it would
+        turn a benign resend into a confusing "unknown ticket hash" refusal
+        instead.
+
+        The round, not the hash for all time, is the unit — see `_issue_ticket`.
+        A ticket hash is the identity of a QUESTION and repeats verbatim whenever
+        the same crossing is attempted again with the same arguments, so scoping
+        idempotency to the hash forever would make the second asking of any
+        question unanswerable: the yes would come back as already-approved
+        against an approval that was already spent, and the re-issued call would
+        keep raising the same ticket with nothing left to consume. A new round
+        opens only when the previous answer has been used up, so a resend that
+        overlaps the answer it duplicates still lands on that answer's round and
+        still mints nothing."""
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
@@ -3494,8 +3562,18 @@ class Session:
         # capabilities. The tightest (min) ttl over the covered required
         # capabilities bounds the token; None = session-end at the latest.
         ttl_ms = self._ticket_ttl_ms(ticket)
+        # the round this yes answers, and a `requestId` distinct per round. The
+        # audit joins `approval-granted` -> `approval-consumed` -> the emission on
+        # `requestId`, so two yeses to the same repeated question have to be two
+        # ids or the join cannot say which spend belongs to which decision. Round
+        # 1 keeps the bare ticket hash, so the id every existing session and WAL
+        # carries is unchanged.
+        round_ = self._ticket_rounds.get(ticket_hash, 1)
+        request_id = ticket["hash"] if round_ <= 1 \
+            else f"{ticket['hash']}#r{round_}"
         entry = {
-            "requestId": ticket["hash"],
+            "requestId": request_id,
+            "round": round_,
             "hash": ticket["hash"],
             "candidateHash": ticket["candidateHash"],
             "component": ticket["component"],

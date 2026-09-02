@@ -730,6 +730,22 @@ subcommands.
 - `-o`, `--output PATH` - output path (default: stdout).
 - `--json-diagnostics` - structured diagnostic on rejection.
 
+`revl import a2a FILE` - an A2A 1.0.0 Agent Card's skill surface
+([import-a2a.md](import-a2a.md), roadmap item 439 slice 1).
+
+- `file` - an A2A 1.0.0 Agent Card `.json` (required).
+- `--backend {ts, py}` - host block backend (default: `ts`). Unlike its
+  siblings the bodies are real: a JSON-RPC 2.0 `message/send` crossing.
+- `--service NAME` - generated service name (default: from the card's `name`).
+- `--allow-plaintext` - import a card whose `url` is plaintext `http`; refused
+  without it, and the generated header records that the flag was used.
+- `-o`, `--output PATH` - output path (default: stdout).
+- `--json-diagnostics` - structured diagnostic on rejection.
+
+Every result is `Untrusted[Str]`, the reach is derived from the endpoint's host
+alone, and no inverse is ever synthesized: a remote call cannot participate in
+G7 teardown. See [import-a2a.md](import-a2a.md) §2.
+
 ### `revl export`
 
 The reverse of `revl import`. One subcommand today.

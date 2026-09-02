@@ -768,6 +768,31 @@ def build_parser() -> argparse.ArgumentParser:
                             help="on rejection, print a structured diagnostic "
                                  "instead of the human rendering")
 
+    # `revl import a2a` — an A2A 1.0.0 Agent Card's skill surface
+    # (docs/import-a2a.md, roadmap item 439 slice 1). Own additive block.
+    imp_a2a = imp_sub.add_parser(
+        "a2a",
+        help="turn an A2A 1.0.0 Agent Card into revl source (docs/import-a2a.md)")
+    imp_a2a.add_argument("file", help="an A2A 1.0.0 Agent Card (.json)")
+    imp_a2a.add_argument("--backend", default="ts", choices=("ts", "py"),
+                         help="host block backend for the generated externs "
+                              "(default: ts)")
+    imp_a2a.add_argument("--service", default=None,
+                         help="generated service name (default: from the card's "
+                              "`name`)")
+    imp_a2a.add_argument(
+        "--allow-plaintext", action="store_true", dest="allow_plaintext",
+        help="import a card whose `url` is plaintext `http` (a loopback "
+             "development agent, say). Refused without this, because an A2A "
+             "peer sits outside the composition's trust boundary and everything "
+             "crossing to it is authority leaving the process. The generated "
+             "header records that the flag was used")
+    imp_a2a.add_argument("-o", "--output", default=None,
+                         help="output path (default: stdout)")
+    imp_a2a.add_argument("--json-diagnostics", action="store_true",
+                         help="on rejection, print a structured diagnostic "
+                              "instead of the human rendering")
+
     # `revl export wit` — the reverse of `revl import wit` (docs/wit-bridge.md).
     # Additive: its own `export` group, mirroring the `import` family's shape.
     exp_cmd = sub.add_parser(

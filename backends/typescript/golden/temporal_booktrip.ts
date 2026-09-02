@@ -6,12 +6,28 @@
 import { proxyActivities, ApplicationFailure, setHandler, defineQuery } from "@temporalio/workflow"
 import type * as activities from './activities'
 
-// Slice 1: every activity and compensation is at-most-once (maximumAttempts: 1).
-// FAITHFUL to revl — the TS runtime does not auto-retry forward emissions
-// either. Evidence-derived retries are Slice 2 (docs/design/253-temporal-target.md §3).
+// item 253 §3: RETRY POLICIES ARE DERIVED, NEVER AUTHORED. Every
+// activity below sits in the class the item-309/440 idempotency ledger
+// put it in, and `at-most-once` is the fall-through: a crossing whose
+// evidence does not PROVE re-delivery is safe keeps revl's own
+// at-most-once semantics, because a Temporal retry fires on every
+// transient failure and would turn an unproven claim into a
+// double-apply. Raising one of these by hand defeats the derivation.
+const AT_MOST_ONCE = { maximumAttempts: 1 }
+// A crossing whose declaration carries `idempotent(key: <param>)`:
+// dedup-safe BY CONSTRUCTION (item 309's `keyed` register, the
+// forward half of item 440's REDISPATCH_FREE set), so a redelivery
+// is the remote's dedup, not a second effect. BOUNDED on purpose —
+// an unbounded forward retry never reaches the catch, so the
+// compensation phase would never run and the saga could not abort.
+const DEDUP_SAFE_RETRY = { initialInterval: "1 second", backoffCoefficient: 2, maximumInterval: "30 seconds", maximumAttempts: 5 }
 const { flightsCancel, flightsReserve, paymentsCharge, paymentsRefund, recordResidue } = proxyActivities<typeof activities>({
   startToCloseTimeout: "1 minute",  // revl perCallMs — per-call, Temporal-honoured (HIGH 1)
-  retry: { maximumAttempts: 1 },
+  retry: AT_MOST_ONCE,
+})
+const { settle } = proxyActivities<typeof activities>({
+  startToCloseTimeout: "1 minute",  // revl perCallMs — per-call, Temporal-honoured (HIGH 1)
+  retry: DEDUP_SAFE_RETRY,
 })
 
 // revl budgetMs (runtime.ts:880): a SINGLE Phase-2 total budget, checked
@@ -80,6 +96,7 @@ export async function BookTrip(): Promise<void> {
     await flightsReserve("ABC")
     saga.push({ name: "payments.refund", run: () => paymentsRefund("visa", 100n), args: () => [] })  // write-ahead: registered before the forward await
     await paymentsCharge("visa", 100n)
+    await settle("visa", 100n)
     // clean completion: the saga stack is discharged, never run.
   } catch (err) {
     // ABORT. Phase 2: pop LIFO, continue-and-record, honour the
@@ -113,4 +130,5 @@ export interface RevlActivities {
   paymentsCharge(card: string, total: bigint): Promise<string>
   paymentsRefund(card: string, total: bigint): Promise<string>
   recordResidue(report: SagaReport): Promise<void>
+  settle(card: string, total: bigint): Promise<string>
 }

@@ -305,8 +305,9 @@ def _run_serve(args) -> int:
 
 
 def _run_import(args) -> int:
-    """`revl import {wit,openapi,cordis}` — the import codegen family
-    (docs/import-wit.md, docs/import-openapi.md, docs/import-cordis.md)."""
+    """`revl import {wit,openapi,cordis,a2a}` — the import codegen family
+    (docs/import-wit.md, docs/import-openapi.md, docs/import-cordis.md,
+    docs/import-a2a.md)."""
     try:
         if args.import_command == "openapi":
             from ..import_openapi import import_openapi_file
@@ -323,6 +324,11 @@ def _run_import(args) -> int:
             source = import_cordis_file(args.file, backend=args.backend,
                                         service=args.service, pure=args.pure,
                                         mark_unrecovered=args.mark_unrecovered)
+        elif args.import_command == "a2a":
+            from ..import_a2a import import_a2a_file
+            source = import_a2a_file(args.file, backend=args.backend,
+                                     service=args.service,
+                                     allow_plaintext=args.allow_plaintext)
         else:
             from ..import_wit import import_wit_file
             source = import_wit_file(args.file, backend=args.backend, pure=args.pure)

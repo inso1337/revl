@@ -2656,6 +2656,20 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
                    (pad, _key_var(pname), _camel(svc), _camel(pname)))
         out.append("%sreturn nil, err" % inner)
         out.append("%s}" % pad)
+    elif s == "stream-iter":
+        # item 130 Slice 4: `every <x> in <sub> { … }`. This tier lowers the
+        # Slice 1/3 protocol (subscribe / next / close and the `merge` fan-in) as
+        # a blocking cancel-channel select, but not the ITERATION form: the loop
+        # binds each delivered item and runs an effectful body per item, and the
+        # go emitter's activation-body walk has no per-item scope to bind it in.
+        # Refuse by name rather than emit a subscription whose body silently
+        # never runs — the same call `_refuse_unlowered_stream_surface` makes for
+        # the Slice 2 surface this tier does not lower.
+        raise EmitError(
+            "the `every … in` stream iteration form is not lowered on the go "
+            "tier; this tier lowers subscribe / next / close and `merge` "
+            "(item 130 Slices 1 and 3) while the iteration form runs on the py "
+            "reference tier (Slice 4) — try `--backend py`")
     elif s == "intercept":
         # handled at load site (metadata); no-op in Apply
         pass
