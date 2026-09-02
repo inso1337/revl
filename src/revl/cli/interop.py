@@ -178,6 +178,14 @@ def _run_mcp(args) -> int:
                       "advisory, not a gate — bind --operator-profile that grants "
                       "`approve` only to the human's identity (item 246, "
                       "Decision 4)", file=sys.stderr)
+        # roadmap 425 F3 / 427 F5: the durability posture for an approved
+        # crossing's caller-supplied resource value. Read unconditionally (it has
+        # a default), so it applies whether or not the approval policy is on.
+        values = getattr(args, "approval_record_values", None)
+        if values:
+            from ..mcp.server import SESSION
+
+            SESSION.approval_record_values = values
         # composition persistence (docs/persistence.md): a snapshot passed on
         # the command line is re-admitted through the same gate a live restore
         # runs — a component the current checker rejects aborts the boot loudly

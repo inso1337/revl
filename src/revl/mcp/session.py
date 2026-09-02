@@ -286,6 +286,15 @@ class Session:
         # call via the ticket two-step. Set at serve time
         # (`revl mcp serve --approval-policy auto`).
         self.approval_policy = None
+        # roadmap 425 F3 / 427 F5: whether a CALLER-SUPPLIED resource valuation
+        # may be written into the durable, cross-session approval WAL when a
+        # crossing is approved. "bound" (the default, and what shipped) records
+        # it — item 251's N1, what lets a distilled rule name a target. "withheld"
+        # records it as UNRECORDED instead, closing the durable disclosure at the
+        # cost of the distiller's fold over caller-argument targets. Author-written
+        # literals are recorded under both. Set at serve time (`revl mcp serve
+        # --approval-record-values`); see `_distillation_ledger_fields`.
+        self.approval_record_values = "bound"
         # the per-generation class map (item 246, Decision 2): rebuilt atomically
         # at every load/swap so a call decided against a stale map is impossible.
         # None when nothing is loaded or the policy is off.
@@ -2027,6 +2036,10 @@ class Session:
         # 6. mint the branch identity over the (now rewound) shared workspace.
         branch = Session()
         branch.approval_policy = self.approval_policy
+        # the durability posture rides with the policy: a fork must not become a
+        # session where an approved caller value is recorded that the parent's
+        # operator had withheld.
+        branch.approval_record_values = self.approval_record_values
         branch.sandbox = self.sandbox
         branch.restore(snap)               # fresh session_id + owner; no approval carry
         if self._wal_path:
@@ -2722,17 +2735,63 @@ class Session:
         fix binds at ticket time), the resource-bound `classCCapabilities`, the
         recorded post-endorsement `taintOrigins`, and the attributed operator. Only
         present-on-the-ticket fields are copied, so a bare crossing records exactly
-        as before plus the realm and operator."""
+        as before plus the realm and operator.
+
+        Roadmap 425 F3 / 427 F5 — the DURABILITY boundary, and the one knob over
+        it. This record is the only sink in the approval path that OUTLIVES the
+        decision: `record_approval_granted` appends it to a cross-session WAL file
+        in the user's state directory, plaintext at rest, read back later by the
+        distiller and by another session. The ticket is ephemeral by comparison,
+        and it keeps the real value either way — an operator cannot answer a prompt
+        that hides the target, and on a fresh call the value is the caller's own,
+        just sent.
+
+        `approval_record_values` is the operator's answer to "may an approved
+        crossing's CALLER-SUPPLIED resource value be written down forever?":
+
+          * `bound` (the default, and what shipped): yes. This is item 251's N1 —
+            the ledger records the destination that actually crossed, which is what
+            lets a distilled rule name a target instead of comparing an opaque
+            `argsDigest`. Flipping this default would silently disable N1 for the
+            common case, since most resource targets ARE caller arguments.
+          * `withheld`: no. A valuation the ticket marked caller-supplied
+            (`resourceScopesFromCallerArgs`) records as `None` — the
+            "resource-bearing but UNRECORDED" shape `distill._project_resource`
+            already understands and already FAILS CLOSED on — and its bound
+            spelling drops back to the bare token in `classCCapabilities`. The cost
+            is exact and worth stating: a series of approvals whose target came
+            from a caller argument can no longer fold into a distilled standing
+            rule. Author-written string LITERALS are never withheld — a literal is
+            in the source already and discloses nothing about the caller — so a
+            literal-targeted crossing distills identically under both modes.
+
+        What is NOT on offer is recording a placeholder. That would be worse than
+        the leak: every distinct target would fold to one shape and a rule minted
+        over it would cover all of them, the over-authorization
+        `mint_standing_grant` already refuses a placeholder-scoped grant for.
+        """
         fields: dict = {"realm": ticket.get("realm", ""),
                         "operator": self._operator_token(),
                         # item 251 Slice 3: the grant's session (invariant 5) so
                         # the WAL, read back across sessions sharing a path, groups
                         # the per-session prompt series the time axis folds (§4).
                         "session": self._session_id}
+        from_caller = (set(ticket.get("resourceScopesFromCallerArgs") or ())
+                       if self.approval_record_values == "withheld" else set())
+        scopes = ticket.get("resourceScopes") or {}
+        # the spellings that carry a caller value, so the bound form is dropped
+        # from BOTH channels: `_project_resource` reads an inline-parameterised
+        # `classCCapabilities` entry in preference to the `resourceScopes` map,
+        # so redacting only the map would leave the value in the other one.
+        withheld = {scopes[t] for t in from_caller if t in scopes}
         if ticket.get("classCCapabilities"):
-            fields["classCCapabilities"] = ticket["classCCapabilities"]
-        if ticket.get("resourceScopes"):
-            fields["resourceScopes"] = ticket["resourceScopes"]
+            fields["classCCapabilities"] = sorted(
+                cap_order.parse_cap(cap).token if cap in withheld else cap
+                for cap in ticket["classCCapabilities"])
+        if scopes:
+            fields["resourceScopes"] = {
+                token: (None if token in from_caller else spelling)
+                for token, spelling in scopes.items()}
         if ticket.get("taintOrigins"):
             fields["taintOrigins"] = ticket["taintOrigins"]
         return fields

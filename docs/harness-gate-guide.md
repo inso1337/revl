@@ -40,6 +40,33 @@ on:
   component that reaches an approval-required capability with no approval edge
   is refused at admission (`test_policy_owned_requirement_refuses_at_admission`).
 
+### What a yes also writes down
+
+A class-(c) ticket names the crossing's resource target where the compiler can
+prove it (`fs.write(path="/var/spool/out")`). That target is the one part of a
+call's arguments that is not merely hashed: the rest reach the ticket only as
+`argsDigest`, while a parameter named `path`, `host` or `table` has its runtime
+VALUE bound into the capability spelling, and approving writes that spelling to
+the durable, cross-session approval log in plaintext.
+
+When the target came from a caller ARGUMENT rather than a literal the author
+wrote, the ticket says so: `resourceScopesFromCallerArgs` names the tokens and
+`resourceScopeDurability` explains what approving persists. Two ways to change
+it:
+
+- **the author's**, per parameter: declare it `Secret[Str]` and it binds to the
+  redacted placeholder everywhere (item 416c). The cost is the resource fold,
+  since every secret-valued crossing binds to the SAME placeholder and a
+  standing grant scoped to a placeholder is refused;
+- **the operator's**, per session: `revl mcp serve --approval-record-values
+  withheld` records a caller-supplied target as UNRECORDED instead of writing it
+  down. The cost is that a series of such approvals no longer folds into a
+  distilled standing rule. Author-written literal targets are recorded either
+  way, so a composition that names its destinations in source keeps the fold.
+
+The default is `bound` — what shipped, and what lets a distilled rule name a
+target rather than compare an opaque hash.
+
 Self-approval is the default identity model's hole: with no operator profile
 bound, every verb including `approve` is ungated, so the calling agent could
 answer its own prompt. An enabled policy is only meaningful alongside an

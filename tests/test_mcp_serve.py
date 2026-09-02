@@ -206,6 +206,71 @@ def test_a_served_call_reaches_the_live_operation():
         session.unload()
 
 
+APPROVAL = """
+extern emission fn announce(sink: Str, msg: Str) = @py {
+    with open(sink, 'a') as _f:
+        _f.write('announce:' + msg + '\\n')
+    return
+}
+service Ops { emission fn shout(sink: Str, msg: Str) }
+component Agent provides ops: Ops {
+  provide ops { fn shout(sink, msg) { emit announce(sink, msg) } }
+}
+"""
+
+
+def test_a_class_c_crossing_returns_the_ticket_not_an_opaque_fault():
+    """Roadmap 425 F4, second surface. `ApprovalRequired` is not a
+    `SessionError`, so it landed in `_call_tool`'s broad `except Exception` and
+    came back as `{"raised": true, ... "ApprovalRequired: approval required for
+    a class-(c) crossing"}` — no ticket, no hash. Fail-CLOSED (nothing fired)
+    but unapprovable: this wire carries only the composition's own operations,
+    so with no hash to relay the crossing could never be allowed at all."""
+    from revl.mcp.approval import ApprovalRequired
+
+    class _Raising(_StubSession):
+        def call(self, key, method, args):
+            raise ApprovalRequired({"key": key, "method": method,
+                                    "hash": "sha256:deadbeef",
+                                    "capabilities": ["announce"]})
+
+    session = _Raising(BUS)
+    server = ComposedServer(session, composition="app")
+    result = _rpc(server, "tools/call",
+                  {"name": "app.bus.send", "arguments": {"msg": "hi"}})["result"]
+    payload = result["structuredContent"]
+    assert result["isError"] is True
+    assert payload["approvalRequired"] is True
+    assert payload["ticket"]["hash"] == "sha256:deadbeef"
+    assert "raised" not in payload
+    # item 274: the refusal names what the caller can do instead, and this wire
+    # has no approve verb of its own to point at.
+    assert "no approve verb on this wire" in payload["note"]
+    assert "revl_approve" in payload["note"]
+
+
+@needs_runtime
+def test_a_live_class_c_crossing_surfaces_the_real_ticket(tmp_path):
+    """The same thing against the real chokepoint rather than a stub: the
+    ticket comes from `Session.call`'s own decision, carries a real `hash`, and
+    the emission does not fire."""
+    session = Session()
+    session.approval_policy = "auto"
+    session.load(compile_source(APPROVAL), {}, record=True)
+    sink = tmp_path / "sink.log"
+    try:
+        server = ComposedServer(session, composition="app")
+        result = _rpc(server, "tools/call",
+                      {"name": "app.ops.shout",
+                       "arguments": {"sink": str(sink), "msg": "hi"}})["result"]
+        payload = result["structuredContent"]
+        assert payload["approvalRequired"] is True
+        assert payload["ticket"]["hash"].startswith("sha256:")
+        assert not sink.exists()
+    finally:
+        session.unload()
+
+
 @needs_runtime
 def test_serve_composition_boots_and_serves_over_stdio():
     from revl.mcp.composed import serve_composition

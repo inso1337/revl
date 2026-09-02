@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import sys
 
+from .approval import ApprovalRequired, two_step_payload
 from .schema import tools_from_ir
 from .session import Session, SessionError
 
@@ -89,6 +90,23 @@ class ComposedServer:
                 "severity": "error", "code": "REVL", "category": "session",
                 "message": str(error),
             }]}
+        except ApprovalRequired as exc:
+            # roadmap 425 F4, second surface: `ApprovalRequired` is not a
+            # `SessionError`, so it used to land in the catch-all below and come
+            # back as an opaque `"ApprovalRequired: ..."` runtime diagnostic with
+            # no ticket and no hash. Fail-closed either way (the crossing does
+            # not fire), but unapprovable: this server advertises only the
+            # composition's own operations, so without the ticket a caller has
+            # nothing to relay and the crossing can never be allowed to happen.
+            return two_step_payload(
+                exc.ticket,
+                how_to_approve="This server advertises the composition's own "
+                               "operations only — there is no approve verb on "
+                               "this wire. Relay the ticket to the operator, "
+                               "who mints the yes against the same session "
+                               "(`revl_approve` on the compiler server, whose "
+                               "`hash` this ticket carries); the identical "
+                               "re-issue then fires once.")
         except Exception as exc:  # the callee raised — a result, not a crash
             return {"ok": False, "raised": True, "diagnostics": [{
                 "severity": "error", "code": "REVL", "category": "runtime",
