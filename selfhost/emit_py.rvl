@@ -75,7 +75,7 @@
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field, value_opt,
   value_list, value_at, value_str, value_int, value_bool, value_children,
-  value_keys
+  value_keys, value_is_list, value_is_object
 }
 
 // ------------------------------------------------- str kit (items 193 / 189)
@@ -596,6 +596,214 @@ fn expr(node: Any) -> Str {
   return expr_inner(node)
 }
 
+// ------------------------------------------- in-place accumulation (436 F1)
+// The reference's `_py_self_rebind` / `_py_escaped_names` / `_py_inplace_locals`
+// / `_py_inplace_stmts`. `xs.push(v)` renders `(xs + [v])`, a WHOLE copy of the
+// receiver, so `var out = []; for (..) { out = out.push(..) }` is emitted O(n^2)
+// where the developer wrote O(n). The rewrite is `out.append(v)` and its whole
+// difficulty is proving the copy unobservable: the local must be BORN here
+// (a fresh literal, or another name materialised as one defensive copy) and
+// must never ESCAPE into a second holder.
+fn is_fresh_kind(k: Str) -> Bool {
+  return k == "list" || k == "maplit" || k == "record"
+}
+
+// the persistent methods with an in-place equivalent, and their arity; -1 for
+// anything else. `concat` is absent: its receiver type is not known at this
+// node and a python `str` cannot be mutated at all.
+fn inplace_arity(method: Str) -> Int {
+  if (method == "push") { return 1 }
+  if (method == "set") { return 2 }
+  if (method == "remove") { return 1 }
+  return -1
+}
+
+// slots in which a bare `var` is READ but not RETAINED
+fn non_retaining_slots(kind: Str) -> List[Str] {
+  if (kind == "builtin") { return ["target"] }
+  if (kind == "index") { return ["target", "index"] }
+  if (kind == "len") { return ["target"] }
+  if (kind == "field") { return ["target"] }
+  if (kind == "optfield") { return ["target"] }
+  if (kind == "optcall") { return ["target"] }
+  if (kind == "bin") { return ["left", "right"] }
+  if (kind == "un") { return ["operand"] }
+  if (kind == "interp") { return ["parts"] }
+  if (kind == "record_update") { return ["base"] }
+  return []
+}
+
+// the `out = out.push(v)` shape: a persistent copy of the target rebound over
+// its own receiver
+fn self_rebind(name: Str, value: Any) -> Bool {
+  let k = node_kind(value)
+  if (k == "builtin") {
+    let arity = inplace_arity(value_str(value_field(value, "method")))
+    if (arity < 0) { return false }
+    if (value_list(value_field(value, "args")).length() != arity) { return false }
+    let tgt = value_field(value, "target")
+    return node_kind(tgt) == "var" && value_str(value_field(tgt, "name")) == name
+  }
+  if (k == "record_update") {
+    if (value_list(value_field(value, "updates")).length() == 0) { return false }
+    let base = value_field(value, "base")
+    return node_kind(base) == "var" && value_str(value_field(base, "name")) == name
+  }
+  return false
+}
+
+// every name whose object could outlive the expression that reads it, plus
+// every name a nested binder shadows
+fn escaped_names(node: Any, escapes: Bool) -> List[Str] {
+  var found: List[Str] = []
+  if (value_is_list(node)) {
+    for (item of value_list(node)) { found = found.concat(escaped_names(item, escapes)) }
+    return found
+  }
+  if (!value_is_object(node)) { return found }
+  // a `return` ENDS the function: nothing it hands out can be observed
+  // changing afterwards
+  if (value_str(value_field(node, "step")) == "return") { return found }
+  let kind = node_kind(node)
+  if (kind == "var") {
+    if (escapes) { found = found.push(value_str(value_field(node, "name"))) }
+    return found
+  }
+  if (kind == "arrow") {
+    // a lambda captures by default-argument, snapshotting the OBJECT
+    for (c of value_list(value_field(node, "captures"))) { found = found.push(value_str(c)) }
+    for (p of value_list(value_field(node, "params"))) { found = found.push(value_str(p)) }
+  }
+  if (kind == "match") {
+    for (arm of value_list(value_field(node, "arms"))) {
+      let b = value_field(arm, "bind")
+      if (!value_is_null(b)) { found = found.push(value_str(b)) }
+    }
+  }
+  // `a ?? b` YIELDS `a`, so that operand IS retained
+  let safe = (kind == "bin" && node_op(node) == "??") ? [] : non_retaining_slots(kind)
+  for (key of value_keys(node)) {
+    found = found.concat(escaped_names(value_field(node, key), !list_contains(safe, key)))
+  }
+  return found
+}
+
+// One walk over the statement tree, tagging each write: `fresh:` / `alias:` a
+// birth, `spoil:` a write the rewrite cannot own, `accum:` a self-rebind,
+// `push:` a self-rebind that names the List container.
+fn scan_locals(steps: List[Any]) -> List[Str] {
+  var out: List[Str] = []
+  for (node of steps) {
+    let step = value_str(value_field(node, "step"))
+    let name = value_str(value_field(node, "name"))
+    if (step == "let") {
+      let k = node_kind(value_field(node, "value"))
+      if (is_fresh_kind(k)) { out = out.push(`fresh:${name}`) }
+      else if (k == "var") { out = out.push(`alias:${name}`) }
+      else { out = out.push(`spoil:${name}`) }
+    }
+    if (step == "assign") {
+      let value = value_field(node, "value")
+      if (self_rebind(name, value)) {
+        out = out.push(`accum:${name}`)
+        if (value_str(value_field(value, "method")) == "push") { out = out.push(`push:${name}`) }
+      } else {
+        out = out.push(`spoil:${name}`)
+      }
+    }
+    if (step == "for") {
+      out = out.push(`spoil:${value_str(value_field(node, "bind"))}`)
+      out = out.concat(scan_locals(value_list(value_field(node, "body"))))
+    }
+    if (step == "while") { out = out.concat(scan_locals(value_list(value_field(node, "body")))) }
+    if (step == "if") {
+      out = out.concat(scan_locals(value_list(value_field(node, "then"))))
+      out = out.concat(scan_locals(value_list(value_field(node, "else"))))
+    }
+  }
+  return out
+}
+
+fn tag_count(tags: List[Str], tag: Str) -> Int {
+  var n = 0
+  for (t of tags) { if (t == tag) { n = n + 1 } }
+  return n
+}
+
+fn tag_name(t: Str) -> Str { return t.slice(t.indexOf(":") + 1, t.length()) }
+
+// the locals a persistent write may update in place
+fn inplace_locals(fnode: Any) -> List[Str] {
+  let body = value_field(fnode, "body")
+  let tags = scan_locals(value_list(body))
+  let escaped = escaped_names(body, true)
+  var params: List[Str] = []
+  for (p of value_list(value_field(fnode, "params"))) {
+    params = params.push(value_str(value_field(p, "name")))
+  }
+  var out: List[Str] = []
+  for (t of tags) {
+    if (!t.startsWith("fresh:") && !t.startsWith("alias:")) { continue }
+    let nm = tag_name(t)
+    if (list_contains(out, nm)) { continue }
+    // one python scope per fn, so a second declaration is a rebind
+    if (tag_count(tags, `fresh:${nm}`) + tag_count(tags, `alias:${nm}`) > 1) { continue }
+    if (tag_count(tags, `accum:${nm}`) == 0) { continue }
+    if (tag_count(tags, `spoil:${nm}`) > 0) { continue }
+    if (list_contains(params, nm)) { continue }
+    if (list_contains(escaped, nm)) { continue }
+    out = out.push(nm)
+  }
+  return out
+}
+
+// `name=list` / `name=dict` for each eligible local born off ANOTHER name: it
+// takes one defensive copy at birth, where the persistent form took one per
+// write. The container is named by the methods that rebind the local.
+fn inplace_births(fnode: Any, eligible: List[Str]) -> List[Str] {
+  let tags = scan_locals(value_list(value_field(fnode, "body")))
+  var out: List[Str] = []
+  for (nm of eligible) {
+    if (tag_count(tags, `alias:${nm}`) == 0) { continue }
+    out = out.push(tag_count(tags, `push:${nm}`) > 0 ? `${nm}=list` : `${nm}=dict`)
+  }
+  return out
+}
+
+fn birth_container(births: List[Str], name: Str) -> Str {
+  for (b of births) {
+    if (b.startsWith(`${name}=`)) { return b.slice(name.length() + 1, b.length()) }
+  }
+  return ""
+}
+
+// the in-place statements replacing a proven-unique persistent copy; operand
+// evaluation order matches the copying form they replace
+fn inplace_stmts(name: Str, value: Any) -> List[Str] {
+  let recv = mangle(name)
+  if (node_kind(value) == "record_update") {
+    // `.update(<mapping>)` builds the whole replacement BEFORE writing any of
+    // it, so a swap stays simultaneous exactly as the `{**p, ..}` spread was
+    var parts = []
+    for (u of value_list(value_field(value, "updates"))) {
+      parts = parts.push(`${py_repr(value_at(u, 0))}: ${expr(value_at(u, 1))}`)
+    }
+    return [`${recv}.update({${parts.join(", ")}})`]
+  }
+  let method = value_str(value_field(value, "method"))
+  let args = value_list(value_field(value, "args"))
+  if (method == "push") { return [`${recv}.append(${expr(args[0])})`] }
+  // `Map.remove` is TOTAL — an absent key is not an error — so `pop` with a
+  // default, never `del`
+  if (method == "remove") { return [`${recv}.pop(${expr(args[0])}, None)`] }
+  // `set`: the spread evaluated receiver, then key, then value; a subscript
+  // assignment evaluates the VALUE first, so a key with an observable effect
+  // would move. Bind it first when it is not a bare read.
+  let key = expr(args[0])
+  if (is_trivial_node(args[0])) { return [`${recv}[${key}] = ${expr(args[1])}`] }
+  return [`_revl_key = ${key}`, `${recv}[_revl_key] = ${expr(args[1])}`]
+}
+
 // -------------------------------------------------------------- statements
 // `_emit_assert`: bind each side of a comparison once and report both values.
 fn emit_assert(e: Any, indent: Int) -> List[Str] {
@@ -615,11 +823,28 @@ fn emit_assert(e: Any, indent: Int) -> List[Str] {
 }
 
 // `_fn_stmt`: one fn-body step -> its emitted lines (already indented).
-fn fn_stmt(node: Any, indent: Int) -> List[Str] {
+// `inplace`/`births` are item 436 F1's per-fn analysis, computed once in
+// `emit_functions` and threaded down (the reference keeps them in a module
+// global for the same reason: `fn_stmt` sees one step, the proof needs the
+// whole body).
+fn fn_stmt(node: Any, indent: Int, inplace: List[Str], births: List[Str]) -> List[Str] {
   let step = value_str(value_field(node, "step"))
   var out = []
   if (step == "let" || step == "assign") {
-    out = out.push(line(indent, `${mangle(value_str(value_field(node, "name")))} = ${expr(value_field(node, "value"))}`))
+    let nm = value_str(value_field(node, "name"))
+    let value = value_field(node, "value")
+    if (list_contains(inplace, nm)) {
+      if (step == "assign" && self_rebind(nm, value)) {
+        for (s of inplace_stmts(nm, value)) { out = out.push(line(indent, s)) }
+        return out
+      }
+      let container = step == "let" ? birth_container(births, nm) : ""
+      if (container != "") {
+        out = out.push(line(indent, `${mangle(nm)} = ${container}(${expr(value)})`))
+        return out
+      }
+    }
+    out = out.push(line(indent, `${mangle(nm)} = ${expr(value)}`))
     return out
   }
   if (step == "return") {
@@ -633,11 +858,11 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
   }
   if (step == "if") {
     out = out.push(line(indent, `if ${expr(value_field(node, "cond"))}:`))
-    for (s of value_list(value_field(node, "then"))) { out = out.concat(fn_stmt(s, indent + 1)) }
+    for (s of value_list(value_field(node, "then"))) { out = out.concat(fn_stmt(s, indent + 1, inplace, births)) }
     let els = value_list(value_field(node, "else"))
     if (els.length() > 0) {
       out = out.push(line(indent, "else:"))
-      for (s of els) { out = out.concat(fn_stmt(s, indent + 1)) }
+      for (s of els) { out = out.concat(fn_stmt(s, indent + 1, inplace, births)) }
     }
     return out
   }
@@ -647,7 +872,7 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
     if (body.length() == 0) {
       out = out.push(line(indent + 1, "pass"))
     } else {
-      for (s of body) { out = out.concat(fn_stmt(s, indent + 1)) }
+      for (s of body) { out = out.concat(fn_stmt(s, indent + 1, inplace, births)) }
     }
     return out
   }
@@ -657,7 +882,7 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
     if (body.length() == 0) {
       out = out.push(line(indent + 1, "pass"))
     } else {
-      for (s of body) { out = out.concat(fn_stmt(s, indent + 1)) }
+      for (s of body) { out = out.concat(fn_stmt(s, indent + 1, inplace, births)) }
     }
     return out
   }
@@ -696,7 +921,11 @@ fn emit_functions(functions: List[Any]) -> List[Str] {
     out = out.push(`def ${name}(${params}):`)
     let body = value_list(value_field(fnode, "body"))
     if (body.length() == 0) { out = out.push(line(1, "pass")) }
-    for (s of body) { out = out.concat(fn_stmt(s, 1)) }
+    // item 436 F1: the accumulation locals whose persistent copies are
+    // provably unobservable, computed once over the whole body
+    let inplace = inplace_locals(fnode)
+    let births = inplace_births(fnode, inplace)
+    for (s of body) { out = out.concat(fn_stmt(s, 1, inplace, births)) }
     out = out.push("")
   }
   return out

@@ -1,0 +1,272 @@
+"""In-place accumulation on the cordis-py tier (roadmap item 436 F1).
+
+`xs.push(v)` renders `(xs + [v])`, a whole copy of the receiver, so the
+ordinary `var out = []; for (..) { out = out.push(..) }` loop is EMITTED
+O(n^2) where the developer wrote O(n). `stdlib/list.rvl` writes `list_map`,
+`list_filter` and `list_dedup` as push loops, so the defect is on `xs.map(f)`
+and not only on hand-written loops. It is invisible to an opcode or profile
+counter: `xs + [v]` is one bytecode instruction that copies `len(xs)` pointers
+in C, and the audit measured the loop at 0.96x in ops against 500x in elements
+copied.
+
+The rewrite is `out.append(v)`, and every test below is about the PROOF that
+the copy was unobservable rather than about the number. The emitter may write
+through a local only when the object it names is reachable through no other
+name: born here, and never escaped into a second holder. Each disqualifying
+shape gets a test that pins BOTH the emitted spelling and the value, because a
+wrong answer here is a silent aliasing bug and not a crash.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from _backend_import import backend_emitter  # noqa: E402
+from revl import compile_source  # noqa: E402
+
+
+def emit_py(source: str) -> str:
+    return backend_emitter("python").emit(compile_source(source, "<test>"))
+
+
+def run(source: str) -> dict:
+    namespace: dict = {}
+    exec(compile(emit_py(source), "<emitted>", "exec"), namespace)
+    return namespace
+
+
+# ---------------------------------------------------------------------------
+# the shapes that DO qualify
+# ---------------------------------------------------------------------------
+
+BUILD = """
+fn build(n: Int) -> List[Int] {
+  var out: List[Int] = []
+  var i = 0
+  while (i < n) { out = out.push(i) i += 1 }
+  return out
+}
+"""
+
+
+def test_push_loop_becomes_append():
+    src = emit_py(BUILD)
+    assert "out.append(i)" in src
+    assert "(out + [i])" not in src
+    assert run(BUILD)["build"](4) == [0, 1, 2, 3]
+
+
+def test_map_set_becomes_subscript_assignment():
+    source = """
+fn tally(ks: List[Str]) -> Map[Str, Int] {
+  var m: Map[Str, Int] = Map.empty()
+  var i = 0
+  for (k of ks) { m = m.set(k, i) i += 1 }
+  return m
+}
+"""
+    src = emit_py(source)
+    assert "m[k] = i" in src
+    assert "{**m" not in src
+    assert run(source)["tally"](["a", "b"]) == {"a": 0, "b": 1}
+
+
+def test_record_update_stays_simultaneous():
+    """`.update(<mapping>)` builds the whole replacement BEFORE writing any of
+    it, so a field swap keeps the `{**p, ..}` spread's simultaneity."""
+    source = """
+type P = { x: Int, y: Int }
+fn swap_n(p0: P, n: Int) -> P {
+  var p = { x: p0.x, y: p0.y }
+  var i = 0
+  while (i < n) { p = { p | x = p.y, y = p.x } i += 1 }
+  return p
+}
+"""
+    src = emit_py(source)
+    assert ".update({" in src
+    ns = run(source)
+    assert ns["swap_n"]({"x": 1, "y": 2}, 1) == {"x": 2, "y": 1}
+    assert ns["swap_n"]({"x": 1, "y": 2}, 2) == {"x": 1, "y": 2}
+
+
+def test_library_push_loops_are_linear():
+    """`xs.map(f)` desugars to a `list_map` written as a push loop, so the
+    quadratic was in LIBRARY code and not only in hand-written loops."""
+    source = """
+fn list_map(xs: List[Int], f: (Int) -> Int) -> List[Int] {
+  var out: List[Int] = []
+  for (x of xs) { out = out.push(f(x)) }
+  return out
+}
+fn doubled(xs: List[Int]) -> List[Int] { return xs.map(x => x * 2) }
+"""
+    src = emit_py(source)
+    assert "out.append(f(x))" in src
+    assert "(out + [" not in src
+    assert run(source)["doubled"]([1, 2, 3]) == [2, 4, 6]
+
+
+def test_local_born_off_a_name_takes_one_defensive_copy():
+    """`var out = m` then `out = out.remove(k)`: the caller's binding must NOT
+    be written through, so the local is materialised ONCE at birth — one copy
+    where the persistent form made one per removal."""
+    source = """
+fn without(m: Map[Str, Int], ks: List[Str]) -> Map[Str, Int] {
+  var out = m
+  for (k of ks) { out = out.remove(k) }
+  return out
+}
+"""
+    src = emit_py(source)
+    assert "out = dict(m)" in src
+    assert "out.pop(k, None)" in src
+    caller = {"a": 1, "b": 2, "c": 3}
+    assert run(source)["without"](caller, ["a", "c"]) == {"b": 2}
+    assert caller == {"a": 1, "b": 2, "c": 3}, "the caller's map was mutated"
+
+
+def test_list_born_off_a_name_copies_as_a_list():
+    """The container is named by the methods that rebind the local — `push` is
+    List-only — so no receiver type has to be recovered."""
+    source = """
+fn extend(xs: List[Int], n: Int) -> List[Int] {
+  var out = xs
+  var i = 0
+  while (i < n) { out = out.push(i) i += 1 }
+  return out
+}
+"""
+    src = emit_py(source)
+    assert "out = list(xs)" in src
+    caller = [9, 9]
+    assert run(source)["extend"](caller, 2) == [9, 9, 0, 1]
+    assert caller == [9, 9], "the caller's list was mutated"
+
+
+# ---------------------------------------------------------------------------
+# the shapes that must NOT qualify
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,source,call,want", [
+    (
+        # a second name is bound to the accumulator, so the pre-image is live
+        "aliased",
+        """
+fn aliased(n: Int) -> Int {
+  var out: List[Int] = []
+  var snap: List[Int] = []
+  var i = 0
+  while (i < n) {
+    out = out.push(i)
+    if (i == 1) { snap = out }
+    i += 1
+  }
+  return snap.length()
+}
+""",
+        (5,), 2,
+    ),
+    (
+        # the accumulator is handed to a call, which may retain it
+        "observed",
+        """
+fn sizeof(xs: List[Int]) -> Int {
+  var t = 0
+  for (x of xs) { t = t + 1 + x - x }
+  if (t < 0) { return 0 }
+  return t
+}
+fn observed(n: Int) -> Int {
+  var out: List[Int] = []
+  var seen = 0
+  var i = 0
+  while (i < n) { out = out.push(i) seen = seen + sizeof(out) i += 1 }
+  return seen
+}
+""",
+        (4,), 10,
+    ),
+    (
+        # the accumulator is stored inside another container
+        "nested",
+        """
+fn nested(n: Int) -> Int {
+  var out: List[Int] = []
+  var keep: List[List[Int]] = []
+  var i = 0
+  while (i < n) { out = out.push(i) keep = keep.push(out) i += 1 }
+  return keep[0].length()
+}
+""",
+        (3,), 1,
+    ),
+    (
+        # a lambda captures by default-argument, snapshotting the OBJECT
+        "captured",
+        """
+fn apply_all(fs: List[() -> Int]) -> Int {
+  var t = 0
+  for (f of fs) { t = t + f() }
+  return t
+}
+fn captured(n: Int) -> Int {
+  var out: List[Int] = []
+  var fs: List[() -> Int] = []
+  var i = 0
+  while (i < n) {
+    out = out.push(i)
+    fs = fs.push(() => out.length())
+    i += 1
+  }
+  return apply_all(fs)
+}
+""",
+        (3,), 1 + 2 + 3,
+    ),
+])
+def test_escaping_accumulator_keeps_the_copy(name, source, call, want):
+    # `out` is the escaping accumulator in every case; a sibling accumulator in
+    # the same body may legitimately still be rewritten
+    src = emit_py(source)
+    assert "out.append(" not in src, f"{name}: the accumulator escapes, so the copy must stay"
+    assert "(out + [i])" in src
+    assert run(source)[name](*call) == want
+
+
+def test_a_parameter_is_never_written_through():
+    """A parameter is the CALLER's object: `out = out.push(..)` on one would
+    destructively update a binding this function does not own."""
+    source = """
+fn grow(xs: List[Int], n: Int) -> List[Int] {
+  var i = 0
+  var out: List[Int] = xs
+  while (i < n) { out = out.push(i) i += 1 }
+  return out
+}
+"""
+    caller = [7]
+    assert run(source)["grow"](caller, 2) == [7, 0, 1]
+    assert caller == [7], "the caller's list was mutated"
+
+
+def test_iterating_the_accumulator_keeps_the_copy():
+    """`for (x of out)` holds the object for the loop's duration, so appending
+    to it in place would extend what the loop is walking."""
+    source = """
+fn selfiter(n: Int) -> Int {
+  var out: List[Int] = []
+  out = out.push(1)
+  var seen = 0
+  for (x of out) { seen = seen + x }
+  return seen
+}
+"""
+    assert "out.append(" not in emit_py(source)
+    assert run(source)["selfiter"](3) == 1
