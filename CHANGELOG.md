@@ -113,6 +113,15 @@ but not seen. Every instance was closed. Representative fixes:
 - The distribution seam refuses a resource crossing on same-tier as well as
   cross-tier process boundaries, and the wire encoder fails closed on any value
   that is not scalar, list, dict, or a declared record or ADT.
+- A boundary policy rule now selects a directly emitted extern by the capability
+  token it declares. `extern emission[db] fn pg_write` put `pg_write` in a component's
+  reach while the register floor, the approval gate and a bound secret all keyed the
+  same crossing `db`, so `capability db requires register keyed` selected nothing on a
+  composition whose only `db` crossing was a direct emission: an operator wrote a floor
+  and silently got less. Reach carries the declared scope now, and the extern's name is
+  no longer a second spelling for the same crossing. `revl audit` renders the scope on
+  the host-code line, and the full table of which spelling a rule selects is in
+  docs/boundary-policy.md.
 - Approval expiry is monotonic and irreversible. The session clock is anchored
   to a monotonic source rather than read from the wall clock on every check, and
   a grant that has been observed expired is latched dead, so nothing that moves

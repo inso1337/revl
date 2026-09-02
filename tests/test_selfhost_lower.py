@@ -300,6 +300,31 @@ boot component HarnessBoot provides env: Env {
   provide env { fn data_root() = config.data_dir }
 }
 """),
+    # A `compensate` reversing an emission, and a timer body doing the same.
+    # Both are statement forms whose operand the gate reads; both must stay
+    # ADMITTED, because reading a statement is only an improvement if it does
+    # not also start refusing the ordinary shape. A compensation that undoes a
+    # write is the ordinary shape — walking it as an UNMARKED emission refused
+    # eighty-five programs in this repo's own bench corpus.
+    ("emit with a compensation that emits", """
+service Outbox { emission fn add(row: Str) }
+service Db { emission fn execute(q: Str) }
+component Writer requires db: Db provides outbox: Outbox {
+  provide outbox {
+    fn add(row) {
+      emit       db.execute(row)
+      compensate db.execute(row)
+    }
+  }
+}
+"""),
+    ("timer body emitting through a declared key", """
+service Log { emission fn write(msg: Str) -> Int }
+component Beat requires log: Log {
+  every 5s { emit log.write("beat") }
+  after 2m { emit log.write("late") }
+}
+"""),
     ("honest provider", """
 service Cache { fn put(key: Str, value: Str) }
 component HonestCache provides cache: Cache {
@@ -704,6 +729,52 @@ service S { fn go() -> Int }
 component C requires d: D provides s: S {
   provide s { fn go() { let x = d   return 0 } }
 }
+""", "G1"),
+    # G1 bare-value in a SETUP body. The reference resolves a bare head the
+    # same way wherever it stands — a setup statement's operand is not a
+    # weaker position than a provide method's — so each of these is the one
+    # `is not a declared requirement of` diagnostic, reached through a
+    # different statement form. Every statement head that takes an expression
+    # gets an entry, because the operand is walked per statement KIND and a
+    # form nobody listed is a form nobody checks.
+    ("g1 undeclared bare value in setup effect", """service S { fn go() -> Int }
+component C requires s: S { effect nope }
+""", "G1"),
+    ("g1 undeclared bare value in setup emit", """service S { emission fn go() -> Int }
+component C requires s: S { emit nope }
+""", "G1"),
+    ("g1 undeclared bare value in setup await", """service S { fn go() -> Int }
+component C requires s: S { await nope }
+""", "G1"),
+    ("g1 undeclared bare value in a setup let", """service S { fn go() -> Int }
+component C requires s: S { let x = effect nope }
+""", "G1"),
+    ("g1 undeclared bare value in a setup undo", """service S { fn go() -> Int }
+component C requires s: S { effect s.go() undo nope }
+""", "G1"),
+    ("g1 undeclared bare value in a setup compensate", """service S { emission fn go() -> Int }
+component C requires s: S { emit s.go() compensate nope }
+""", "G1"),
+    # G1 inside a TIMER body. `every`/`after` open a block of ordinary
+    # statements, and the reference resolves their heads exactly as it does the
+    # statements around them. A reader that steps over the block steps over
+    # everything in it.
+    ("g1 undeclared bare value in an every body", """service S { emission fn go() -> Int }
+component C requires s: S { every 5s { emit nope } }
+""", "G1"),
+    ("g1 undeclared bare value in an after body", """service S { emission fn go() -> Int }
+component C requires s: S { after 2m { emit nope } }
+""", "G1"),
+    # G1 under an `await` OPERAND. `await` is a keyword, so an operand that
+    # opens with one stopped the expression grammar dead; the statement became
+    # a skip and its heads were never resolved. A suspension is where a
+    # component reaches outside itself, which makes it the last operand a gate
+    # should decline to read.
+    ("g1 undeclared head awaited in a let-effect", """service S { async fn go() -> Int }
+component C requires s: S { let h = effect await nope() }
+""", "G1"),
+    ("g1 undeclared head awaited in an effect", """service S { async fn go() -> Int }
+component C requires s: S { effect await nope() }
 """, "G1"),
     # A1 passed_async: an async extern referenced as a function value in a
     # provide method — refused even when the method's op is declared `async`.

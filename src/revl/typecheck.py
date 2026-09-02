@@ -1845,12 +1845,29 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                         not compatible(case["payload"], arg_types[0], types):
                     raise mismatch(filename, line, f"`{name}(...)` payload",
                                    case["payload"], arg_types[0])
+                # A case call with NO argument. Zero args at a payload-carrying
+                # case is deliberately ACCEPTED here — the payload check above
+                # skips it on `arg_types and arg_types[0]`, and
+                # tests/test_selfhost_checker.py pins `Circle()` as accepted
+                # alongside the widening and unknown-argument cases — so the
+                # only question is what it infers. For a user ADT that is
+                # `case["adt"]` below and there is nothing to read; for the
+                # three builtin cases it used to be `arg_types[0]`, which on an
+                # empty list threw a bare `IndexError` out of the checker.
+                # `fn k() -> Opt[Int] { return Some() }` was enough to do it.
+                #
+                # `Any` is the answer the two lines already reach for when an
+                # argument's type cannot be worked out, and a missing argument
+                # is that same absence of information, so it needs no second
+                # rule — just the guard the list read never had. Found by
+                # tools/fuzz_frontend.py.
+                first = arg_types[0] if arg_types else None
                 if name == "Some":
-                    return f"Opt[{arg_types[0] or 'Any'}]"
+                    return f"Opt[{first or 'Any'}]"
                 if name == "Ok":
-                    return f"Result[{arg_types[0] or 'Any'}, Any]"
+                    return f"Result[{first or 'Any'}, Any]"
                 if name == "Err":
-                    return f"Result[Any, {arg_types[0] or 'Any'}]"
+                    return f"Result[Any, {first or 'Any'}]"
                 return case["adt"]
             sig = (types.get(FNS_KEY) or {}).get(name)
             if sig is not None:

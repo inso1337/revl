@@ -75,6 +75,41 @@ could ever carry, it is audit-grade and best-effort, and it is the importing
 engineer's to write by hand, because only they know which remote operation
 undoes which: the Agent Card does not say, and this importer will not guess.
 
+An A2A crossing suspends, so on a coloured tier the operation is `async`
+--------------------------------------------------------------------
+
+A JSON-RPC round trip to another process is not a synchronous call, and the ts
+tier has no blocking fetch to pretend otherwise with. So on a tier whose host
+body suspends, every declaration this importer writes — the service operation,
+the extern and the provide method — carries `async` (roadmap item 80,
+`docs/design/async-extern.md`). Issue #251: it used to carry none of them and
+hand the ts tier a body that `await`s, which emits `await` inside a
+non-`async` function and typechecks nowhere.
+
+PR #250's `remote` row refuses the ts tier over this same sentence, and both
+answers are right, because the two own different amounts of the surface. A
+`remote` row synthesizes only a PROVIDER for a service somebody else wrote, and
+its whole point is that a consumer does not change by one character when a
+local provider becomes a remote one; colouring a `service` declaration it did
+not write would break the property it exists to preserve, so it refuses. This
+importer writes the service, the extern and the provider together out of one
+card. Nothing it would have to recolour predates it, so it declares the colour
+the crossing actually has.
+
+For a caller that means the async-ness is DECLARED and readable: a consumer
+binds `emission async fn` off the generated service and calls it from an async
+context. That is A1's rule, not an extra one — asynchrony crosses a component
+boundary only by declaration and is never smuggled in by a provider
+(async-extern.md §3) — and the value type is untouched: `-> Untrusted[Str]`
+still means `Untrusted[Str]`, and the `Promise` exists only in the emitted
+TypeScript (§2).
+
+The `@py` binding of the same card stays SYNC. A generated file carries exactly
+one host body, and the colour it declares is the colour of that body: `urllib`
+blocks rather than suspends, and py is a coloured tier, so declaring it `async`
+would wrap a blocking call in an `async def`, stall the caller's loop, and
+colour every py caller for a suspension that never happens.
+
 Not in this slice, and deliberately
 -----------------------------------
 
@@ -498,12 +533,21 @@ crosses once and does not poll`);
       }} else if (kind !== "message") {{
         throw new Error(`a2a: unexpected result kind '${{kind}}'`);
       }}
-      const parts = kind === "task"
-        ? (result.artifacts || []).flatMap((a) => a.parts || [])
-        : (result.parts || []);
+      // The reply is the peer's JSON and nothing about it is typed: `res.json()`
+      // is `any` on every ts lib, so an unannotated `(p) => ...` here is an
+      // implicit `any` parameter and `tsc --strict` refuses the module (issue
+      // #251, the second defect the a2a-to-ts fixture found). The shape below
+      // is a CLAIM being checked, not a type being trusted — every field stays
+      // optional and the `kind`/`typeof` guards below do the real work.
+      type A2aPart = {{ kind?: unknown; text?: unknown }};
+      type A2aArtifact = {{ parts?: A2aPart[] }};
+      const parts: A2aPart[] = kind === "task"
+        ? ((result.artifacts as A2aArtifact[] | undefined) || [])
+            .flatMap((a: A2aArtifact) => a.parts || [])
+        : ((result.parts as A2aPart[] | undefined) || []);
       const text = parts
-        .filter((p) => p && p.kind === "text" && typeof p.text === "string")
-        .map((p) => p.text)
+        .filter((p: A2aPart) => p && p.kind === "text" && typeof p.text === "string")
+        .map((p: A2aPart) => p.text as string)
         .join("");
       if (text.length === 0 && parts.length > 0) {{
         throw new Error("a2a: reply carried only non-text parts");
@@ -571,6 +615,54 @@ def _py_body(endpoint: str, skill_id: str) -> str:
 
 _BODIES = {"ts": _ts_body, "py": _py_body}
 
+#: The backends whose crossing SUSPENDS, and whose generated operation is
+#: therefore declared `async` (roadmap item 80, docs/design/async-extern.md).
+#:
+#: Issue #251: this importer used to declare every operation synchronous and
+#: hand the ts tier a body that `await`s `fetch`, which emits `await` inside a
+#: non-`async` function — output no `tsc` will accept. JavaScript has no
+#: blocking fetch, so "write the body synchronously" is not available on that
+#: tier (async-extern.md, opening paragraph); the only two answers are to
+#: declare the operation `async`, or to refuse the tier.
+#:
+#: **This importer declares it `async`, and PR #250's `remote` row refuses the
+#: same tier, and both are right** — because they own different amounts of the
+#: surface. A `remote` row synthesizes only a PROVIDER for a service somebody
+#: else already wrote; its whole point is that "the consumer does not change by
+#: one character" when a local provider becomes a remote one, so it cannot
+#: colour a `service` declaration it did not write without breaking the
+#: property it exists to preserve. `revl import a2a` writes the service, the
+#: extern and the provider in one file from one card. Nothing it would have to
+#: recolour predates it, so it declares the operation the colour the crossing
+#: actually has instead of refusing the tier.
+#:
+#: What that means for a caller, stated plainly rather than left to be
+#: discovered: the generated `service` declares `emission async fn`, so a
+#: consumer binding it must call the operation from an async context — an
+#: `async fn` provide method or a lifecycle `call`. It is a DECLARED property
+#: of the service, which is exactly A1's rule: asynchrony crosses a component
+#: boundary only by declaration and is never smuggled in by a provider
+#: (async-extern.md §3). The colour is propagated, not asserted: the checker's
+#: own async-propagation rule refuses a sync provide method that reaches an
+#: async extern, so the generated provide method carries `async fn` too and the
+#: ts emitter's `await` insertion is the frontend-admitted one, not a second
+#: opinion. Nothing in revl's type language changes — `-> Untrusted[Str]` still
+#: means `Untrusted[Str]`, and the `Promise` lives only in the emitted ts
+#: (async-extern.md §2).
+#:
+#: `py` stays SYNC, and that is the same rule rather than an exception. The
+#: importer emits a SINGLE-TIER file: the extern carries exactly one host body,
+#: and the colour it declares is the colour of THAT body. The `@py` body is
+#: `urllib.request.urlopen`, which blocks rather than suspends — py is a
+#: coloured tier, so declaring it `async` would wrap a blocking call in an
+#: `async def`, stall the caller's event loop, and colour every py caller for a
+#: suspension that never happens. That is §2's own three-family split (colour
+#: where the tier suspends, blocking where it blocks) read off the one body
+#: present. If a future slice ever ships both bodies in one file, the colour
+#: has to be `async` for both and the `@py` body has to stop blocking; it does
+#: not ship both today.
+_ASYNC_BACKENDS = frozenset({"ts"})
+
 
 # ---------------------------------------------------------------- generation
 
@@ -580,6 +672,12 @@ class _Generator:
         self.card = card
         self.filename = filename
         self.backend = backend
+        # issue #251: the crossing's colour, from the one host body this file
+        # ships (`_ASYNC_BACKENDS`). Rendered into all three declarations at
+        # once — the service operation, the extern and the provide method — so
+        # the async-propagation rule (A1) is satisfied by construction rather
+        # than by the checker catching a half-coloured file.
+        self.async_kw = "async " if backend in _ASYNC_BACKENDS else ""
         name = service or card.doc.get("name") or "agent"
         self.service = _pascal(name)
         self.key = _snake(name)
@@ -604,16 +702,20 @@ class _Generator:
                      "local undo (see the header).")
         lines.append("  // The result is `Untrusted[Str]` — the peer is not "
                      "this composition's trust domain.")
-        lines.append(f"  emission fn {op}(message: Str) -> Untrusted[Str]")
+        if self.async_kw:
+            lines.append("  // `async`: a network round trip SUSPENDS on this "
+                         "tier, so callers need an")
+            lines.append("  // async context (see the header).")
+        lines.append(f"  emission {self.async_kw}fn {op}(message: Str) -> Untrusted[Str]")
 
         extern = f"a2a_{self.key}_{op}"
         body = _BODIES[self.backend](self.card.endpoint, skill_id)
         extern_decl = (
-            f"extern emission[{self.card.net_cap}] fn "
+            f"extern emission[{self.card.net_cap}] {self.async_kw}fn "
             f"{extern}(message: Str) -> Untrusted[Str]\n"
             f"  = @{self.backend} {{{body}}}"
         )
-        provide = f"    fn {op}(message) = {extern}(message)"
+        provide = f"    {self.async_kw}fn {op}(message) = {extern}(message)"
         return lines, extern_decl, provide
 
     def emit(self) -> str:
@@ -730,6 +832,30 @@ class _Generator:
             "// nothing richer is available to transcribe and nothing richer is",
             "// invented.",
         ]
+        if self.async_kw:
+            lines += [
+                "//",
+                "// COLOUR: EVERY OPERATION BELOW IS `async`, AND THAT IS PART OF THE",
+                "// SERVICE, NOT AN IMPLEMENTATION DETAIL.",
+                "//",
+                "// A JSON-RPC round trip to another process suspends the calling task,",
+                "// and this tier has no blocking fetch to hide that behind. So the",
+                "// operation is DECLARED `async` (roadmap item 80,",
+                "// docs/design/async-extern.md), on all three of the service operation,",
+                "// the extern and the provide method. Asynchrony crosses a component",
+                "// boundary only by declaration (§3): a consumer reads `async fn` off",
+                "// the service and calls it from an async context — an `async fn`",
+                "// provide method, or a lifecycle `call`. It is never smuggled in by a",
+                "// provider, and flipping it is a breaking change to the service.",
+                "//",
+                "// Nothing about the VALUE changes: `-> Untrusted[Str]` still means",
+                "// `Untrusted[Str]` (§2). The `Promise` is a tier artifact of the",
+                "// emitted TypeScript and appears nowhere in revl's type language.",
+                "//",
+                "// The `@py` binding of the same card is SYNC, because its body blocks",
+                "// rather than suspends. The colour a generated file declares is the",
+                "// colour of the one host body it carries.",
+            ]
         if self.card.unprojected:
             lines.append("//")
             lines.append("// NOT PROJECTED (recorded so it is visible, not silently dropped):")
