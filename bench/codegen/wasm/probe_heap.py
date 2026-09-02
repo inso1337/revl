@@ -6,7 +6,12 @@ Two facts, both run rather than argued:
 1. A single canonical call with a `Str` argument larger than the page
    traps. The emitter writes `(memory (export "memory") 1)` and neither
    `$alloc` nor the exported `cabi_realloc` ever calls `memory.grow`, so
-   the host's own write of the incoming string is already out of bounds.
+   the host's own write of the incoming string runs out of bounds.
+
+   Item 432(a) moved this line without removing it: the lift no longer
+   makes a SECOND copy of the argument, so the largest string one call can
+   carry roughly doubled (40000 B used to trap and now succeeds), but the
+   page is still fixed and 65536 B still traps.
 
 2. Repeated calls exhaust the instance even when every argument fits:
    `$alloc` only bumps `$__hp`. This is measured on the CORE module (the
@@ -28,15 +33,21 @@ sys.path.insert(0, str(HERE))
 
 import harness  # noqa: E402
 
-#: Replays exactly what one canonical `Str` call does to the heap: lift the
-#: argument into a fresh internal string, then bump an 8-byte return area.
+#: Replays exactly what one canonical `Str` call does to the heap, as the
+#: emitter writes it TODAY: the host's `cabi_realloc` takes one buffer with
+#: item 432(a)'s header headroom, and the lift then copies nothing into a
+#: second one. Item 432(f) made the return area static, so there is no
+#: per-call bump for it either. What is left is exactly one allocation per
+#: call, and it is still never reclaimed, which is the point of the probe.
 DRIVER = """  (func (export "drive") (param $n i32) (param $len i32) (result i32)
-    (local $i i32)
+    (local $i i32) (local $p i32)
     (block $done
       (loop $go
         (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
-        (drop (call $__canon_lift_str (i32.const 0) (local.get $len)))
-        (drop (call $alloc (i32.const 8)))
+        (local.set $p (i32.add
+          (call $alloc (i32.add (local.get $len) (i32.const 8)))
+          (i32.const 8)))
+        (drop (call $__canon_lift_str (local.get $p) (local.get $len)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $go)))
     (global.get $__hp))
