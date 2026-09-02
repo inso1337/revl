@@ -47,9 +47,12 @@ FINISHED = (
     "}\n"
 )
 
-# The wasm tier is i32-only, so the backend matrix uses an Int-shaped service:
-# a `Str` service is refused there for a reason that has nothing to do with
-# holes, and a refusal test must fail for the reason it names.
+# The backend matrix uses an Int-shaped service so that the only thing any
+# tier can refuse is the hole, and a refusal test fails for the reason it
+# names. This is NOT a wasm-tier limit: that tier lowers `Str`, `Bytes`,
+# lists, records, variants, `Opt` and `Result` across the service boundary
+# as canonical-ABI pointers, and refuses only `Float`, `Map` and function
+# types (`backends/wasm/emit.py`, `_V3Emitter._check_type`).
 INT_DRAFT = (
     "service Counter { fn bump(n: Int) -> Int }\n"                 # 1
     "component K provides k: Counter {\n"                          # 2
