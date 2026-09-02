@@ -18,8 +18,14 @@ on:
 # Runs on main are NOT cancelled: main's history is the signal, and dropping a
 # run there would leave a landed commit with no verdict.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # The group carries the SHA on push, so a push to main is unique per commit
+  # and has nothing to cancel. A pull_request keeps a stable per-ref group, so a
+  # new push to the PR cancels the superseded run. Encoding the distinction in
+  # the GROUP rather than in cancel-in-progress is deliberate: the expression
+  # form cancelled main's runs anyway, which cost three merge commits their
+  # verdict.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: true
 
 # Go module resolution resilience. The go cross-tier tests download the pinned
 # stc-go module during `go test`, which intermittently fails verifying it against
