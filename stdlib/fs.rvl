@@ -100,8 +100,16 @@ pub type MoveWitness = { from: Str, to: Str }
 pub type MkdirWitness = { path: Str }
 
 // A fallible-op error. `code` is a short machine tag (`EOUTSIDE`, `ENOENT`,
-// `EEXIST`, `EWORKSPACE`), `message` a human sentence, `path` the offending
+// `EEXIST`, `EWORKSPACE`, `EINVAL` for a name the host cannot express such as
+// one holding a NUL, `ENOTFILE`, `EMULTILINK`, `ESNAPSHOT` when no preimage
+// could be taken so the write would not be reversible, `ERACE` when a competing
+// writer parted the name from the inode that was written), `message` a human
+// sentence naming what the author can do next (item 274), `path` the offending
 // target (realpath'd where known).
+//
+// The guard's entry points are TOTAL: each raises `FsOpError` or nothing, so
+// every failure reaches these bodies as an `Err(FsError)` and the declared
+// `Result` really is the whole result (roadmap 422 F6).
 pub type FsError = { code: Str, message: Str, path: Str }
 
 // ----------------------------------------------------------------- the inverses
@@ -203,6 +211,14 @@ pub extern witnessed[fs] fn write(path: Str, contents: Str) -> Result[WriteWitne
             # HERE, before any byte is written, so the target is untouched.
             preimage = _ws.snapshot_preimage(handle)
         _ws.write_through(handle, contents)
+        # item 431(b): the bytes reached the inode the check admitted, but a
+        # competing writer that unlinked the leaf mid-call left that inode an
+        # ORPHAN, and Ok would then claim a mutation at a path which does not
+        # hold it, a witness the discharge descriptor enumerates and the undo
+        # would restore over. Confinement was never in question here; the
+        # RESULT was. A parted name is an Err, so no witness, no inverse, and
+        # discard_write clears the preimage sidecar.
+        _ws.confirm_landed(handle)
     except _ws.FsOpError as e:
         _ws.discard_write(handle)   # residue-free: an Err registers no inverse
         return Err(e.as_error())
