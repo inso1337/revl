@@ -21,8 +21,8 @@ THIS IS THE CHEAP CHECK, NOT THE GATE THE SURFACE RESTS ON. A construct is a
 DISPATCH ARM, and an arm the corpus reaches can have nearly all of its body
 unexercised, so a construct table is itself a proxy — a signal that certifies
 less than it appears to, which is the failure mode this item is about, one level
-up. Measured both ways: this file reports 20% of the mirrored constructs blind
-where `tools/selfhost_line_coverage.py` reports 53% of the reference emitter
+up. Measured both ways: this file reports 19% of the mirrored constructs blind
+where `tools/selfhost_line_coverage.py` reports 53.7% of the reference emitter
 STATEMENTS never executed. Keep this one for what it is good at — it is fast and
 it names a construct (`kind=optfield`) rather than a function — and read the
 line gate for the size of the hole.
@@ -140,19 +140,38 @@ def reference_constructs(path: Path) -> dict[str, int]:
     file-wide union would credit `_fn_stmt`'s `step=let` to `_expr`'s `kind`.
     """
     tree = ast.parse(path.read_text())
-    binds: dict[str, list[tuple[int, str]]] = {}
+    # name -> [(line, field-or-None)]. A binding from something that is NOT a
+    # discriminant read records None, which INVALIDATES the name from that line
+    # on. Without that, a `for index, (kind, value) in ...` unpacking shadows an
+    # earlier `kind = node.get("kind")` and every `kind == "arg"` below it is
+    # credited to the IR as a node kind it never had.
+    binds: dict[str, list[tuple[int, str | None]]] = {}
+
+    def bind(name: str, line: int, value: ast.AST | None) -> None:
+        binds.setdefault(name, []).append(
+            (line, _field_of(value) if value is not None else None))
+
     for node in ast.walk(tree):
-        target = value = None
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)):
-            target, value = node.targets[0].id, node.value
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bind(target.id, node.lineno, node.value)
+                else:
+                    for inner in ast.walk(target):
+                        if isinstance(inner, ast.Name):
+                            bind(inner.id, node.lineno, None)
         elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
-            target, value = node.target.id, node.value
-        if target is None:
-            continue
-        field = _field_of(value)
-        if field:
-            binds.setdefault(target, []).append((node.lineno, field))
+            bind(node.target.id, node.lineno, node.value)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            target = node.target
+            line = getattr(node, "lineno", getattr(target, "lineno", 0))
+            for inner in ast.walk(target):
+                if isinstance(inner, ast.Name):
+                    bind(inner.id, line, None)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for argument in [*node.args.args, *node.args.kwonlyargs,
+                             *node.args.posonlyargs]:
+                bind(argument.arg, node.lineno, None)
     for entries in binds.values():
         entries.sort()
 
@@ -178,19 +197,35 @@ def reference_constructs(path: Path) -> dict[str, int]:
             if field:
                 for value in _str_operands(node.comparators[0]):
                     record(field, value, node.lineno)
-        # a boolean IR flag tested directly: `if node.get("secret"):`
-        tests: list[ast.AST] = []
+        # A boolean IR flag BRANCHED ON: `if node.get("secret"):`. Only a real
+        # test position counts. `cond = loop.get("cond") or {}` is a
+        # default-value idiom, not a branch on the flag, and counting it put
+        # three phantom constructs in the go table before this was tightened.
+        conditions: list[ast.AST] = []
         if isinstance(node, (ast.If, ast.IfExp, ast.While)):
-            tests = [node.test]
-        elif isinstance(node, ast.BoolOp):
-            tests = list(node.values)
-        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            tests = [node.operand]
-        for test in tests:
-            field = _field_of(test)
-            if field:
-                record(field, TRUE, getattr(test, "lineno", node.lineno))
+            conditions = [node.test]
+        elif isinstance(node, ast.Assert):
+            conditions = [node.test]
+        elif isinstance(node, ast.comprehension):
+            # `[i for i, p in enumerate(params) if p.get("secret")]` is a branch
+            # on the flag as surely as an `if` statement is, and the python
+            # reference reads the item-421-F6 param marking exactly this way.
+            conditions = list(node.ifs)
+        for condition in conditions:
+            for test in _test_operands(condition):
+                field = _field_of(test)
+                if field:
+                    record(field, TRUE, getattr(test, "lineno", 0))
     return out
+
+
+def _test_operands(test: ast.AST) -> list[ast.AST]:
+    """A condition, flattened through `and`/`or`/`not` to the leaves it tests."""
+    if isinstance(test, ast.BoolOp):
+        return [leaf for value in test.values for leaf in _test_operands(value)]
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return _test_operands(test.operand)
+    return [test]
 
 
 # ---------------------------------------------------------------- selfhost
@@ -336,7 +371,7 @@ def check(data: dict) -> list[str]:
     for tier, found in data.items():
         recorded = ledger.get(tier, {})
         waived = _reasoned(recorded.get("blind", {}))
-        baseline = set(recorded.get("unported", []))
+        baseline = set(_reasoned(recorded.get("unported", {})))
 
         blind = set(found["blind"])
         for construct in sorted(blind - set(waived)):
@@ -367,21 +402,38 @@ def check(data: dict) -> list[str]:
     return problems
 
 
+UNPORTED_DEFAULT = (
+    "NOT TRIAGED - the reference implements this and the port does not, and no "
+    "corpus document reaches it, so nothing would notice either way. Recorded "
+    "by `--write` so the set is NAMED and cannot grow in silence. Moving an "
+    "entry out of this bucket means someone decided what it is.")
+
+
+def _regroup(existing: dict, present: set[str], default: str) -> dict:
+    """Keep every hand-written reason, drop what is no longer true, file the
+    rest under `default`. The ledger's shape survives a regeneration; only its
+    contents move."""
+    grouped = {reason: sorted(set(items) & present)
+               for reason, items in existing.items()}
+    claimed = {item for items in grouped.values() for item in items}
+    leftover = sorted(present - claimed)
+    if leftover:
+        grouped.setdefault(default, [])
+        grouped[default] = sorted(set(grouped[default]) | set(leftover))
+    return {reason: items for reason, items in sorted(grouped.items()) if items}
+
+
 def write_ledger(data: dict) -> None:
-    ledger = json.loads(LEDGER.read_text())
+    ledger = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
     for tier, found in data.items():
         entry = ledger.setdefault(tier, {})
-        waived = _reasoned(entry.get("blind", {}))
-        unclaimed = [c for c in found["blind"] if c not in waived]
-        if unclaimed:
-            entry.setdefault("blind", {}).setdefault(
-                "TODO: write the reason this construct has no corpus case", []
-            ).extend(unclaimed)
-        for reason, constructs in entry.get("blind", {}).items():
-            entry["blind"][reason] = sorted(
-                c for c in set(constructs) if c in set(found["blind"]))
-        entry["blind"] = {r: c for r, c in entry.get("blind", {}).items() if c}
-        entry["unported"] = found["unported"]
+        entry["blind"] = _regroup(
+            entry.get("blind", {}), set(found["blind"]),
+            "NOT TRIAGED - both sides implement this and no corpus document "
+            "reaches it. Recorded by `--write`; say WHY, or add the corpus case.")
+        entry["unported"] = _regroup(
+            entry.get("unported", {}) if isinstance(entry.get("unported"), dict) else {},
+            set(found["unported"]), UNPORTED_DEFAULT)
     LEDGER.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
 
 

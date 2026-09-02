@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 3862,
+      "statements": 3977,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_Env.__init__": 7,
@@ -63,11 +63,11 @@
           "_emit_keys": 10,
           "_emit_method_body": 46,
           "_emit_method_witnessed_step": 45,
-          "_emit_provide_impl": 34,
+          "_emit_provide_impl": 37,
           "_emit_return": 26,
           "_emit_services": 16,
-          "_emit_v3_go_externs": 24,
-          "_emit_v3_go_tests": 15,
+          "_emit_v3_go_externs": 31,
+          "_emit_v3_go_tests": 17,
           "_emit_witnessed_step": 53,
           "_expr": 160,
           "_flag_stream": 1,
@@ -84,11 +84,12 @@
           "_go_v3_builtin": 68,
           "_go_v3_infer_ctor": 7,
           "_go_v3_optchain": 19,
+          "_go_v3_scan_read": 14,
           "_go_widen_int": 1,
           "_go_zero": 10,
           "_hoist_go_imports": 10,
           "_host_of_bind": 1,
-          "_host_runtime": 7,
+          "_host_runtime": 10,
           "_host_type_of_acquire": 9,
           "_infer_map_value_go_type": 20,
           "_is_map_cas": 1,
@@ -116,6 +117,8 @@
           "_v3_comp_construct": 15,
           "_v3_declared_variant": 4,
           "_v3_has_any": 1,
+          "_v3_is_lit": 1,
+          "_v3_own_continue": 12,
           "_v3_record_type_for_fields": 10,
           "_witnessed_extern": 5,
           "_witnessed_result_types": 5,
@@ -130,7 +133,7 @@
           "_go_string": 8,
           "_go_v3_close_builders": 2,
           "_go_v3_construct": 29,
-          "_go_v3_expr": 64,
+          "_go_v3_expr": 67,
           "_go_v3_infer_type": 43,
           "_go_v3_interp": 13,
           "_go_v3_is_interface": 3,
@@ -138,7 +141,7 @@
           "_go_v3_match": 28,
           "_go_v3_open_builders": 8,
           "_go_v3_self_rebind": 13,
-          "_go_v3_stmt": 7,
+          "_go_v3_stmt": 17,
           "_go_v3_type": 6,
           "_guard_frame_neutral_loop": 1,
           "_infer_arrow_param.walk": 3,
@@ -147,12 +150,14 @@
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1,
           "_v3_ident": 3,
-          "_v3_self_rebind_locals": 15,
+          "_v3_len_receiver": 2,
+          "_v3_scan_loops": 1,
+          "_v3_scan_shape": 32,
           "_v3_split_fn_type": 2,
           "_v3_split_generic": 2,
           "_v3_str_accumulators": 4,
           "_v3_str_concat_pieces": 11,
-          "emit": 98
+          "emit": 101
         },
         "declared out of every self-host slice: async coloring.": {
           "_erase_async": 1
@@ -167,7 +172,7 @@
           "_emit_go_router_struct": 82,
           "_emit_realm_helper": 21,
           "_emit_spawn_support": 89,
-          "_emit_v3_placement": 194,
+          "_emit_v3_placement": 197,
           "_instance_get_expr": 9,
           "_iter_spawn_nodes": 5,
           "_realm_helper_name": 1,
@@ -183,18 +188,22 @@
           "_emit_v3_bridge_helpers": 52,
           "_go_bridge_arg_expr": 4
         },
+        "item 421 F6 CROSSED TIERS AND THE PORT DID NOT FOLLOW (a live 429(d) recurrence, verified in source). The reference now marks `Secret[T]` at both ends in the ts and go tiers; selfhost/emit_ts.rvl and selfhost/emit_go.rvl mention `secret` ZERO times and neither tier's corpus contains a single `Secret[`, so both oracles are green over a self-hosted emitter that DOES NOT REDACT. Not a triage bucket: this is a named, open security divergence. Porting it is 421 F6 cross-tier work; the corpus family goes in first and is seen to fail.": {
+          "_declares_secret": 16
+        },
         "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
           "_comp_checked_div_expr": 9,
           "_emit_load_helpers": 23,
           "_teardown_preamble": 8
         }
       },
-      "uncovered_statements": 2918
+      "uncovered_statements": 3015
     },
     "java": {
-      "statements": 2216,
+      "statements": 2301,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+          "_V3Ctx.next_gensym": 2,
           "_arrow_repeatable": 10,
           "_bind_decl_type": 7,
           "_dedup_colour_erased_poly_externs._rewrite": 6,
@@ -202,13 +211,14 @@
           "_emit_record_sink": 1,
           "_emit_result_type": 1,
           "_emit_setup_stmt": 53,
-          "_emit_v3_externs": 22,
+          "_emit_v3_externs": 23,
           "_emit_v3_tests": 18,
           "_emit_witnessed_step": 20,
-          "_format_java": 20,
-          "_format_java.literal": 2,
+          "_format_java": 28,
           "_inline_arrow": 12,
-          "_java_extern_config_bind": 12,
+          "_java_extern_config_bind": 5,
+          "_java_extern_config_constants": 17,
+          "_java_extern_config_schema": 6,
           "_java_type_arg": 2,
           "_main": 12,
           "_name_uses": 4,
@@ -230,6 +240,7 @@
           "_component_needs_frame.step_needs": 1,
           "_component_needs_modern": 5,
           "_contains_expr": 2,
+          "_core_imports": 1,
           "_covers_variant": 1,
           "_dedup_colour_erased_poly_externs": 14,
           "_emit_component": 18,
@@ -238,9 +249,9 @@
           "_emit_host_stubs": 1,
           "_emit_host_stubs.walk": 1,
           "_emit_service_interfaces": 1,
-          "_emit_v3": 9,
+          "_emit_v3": 8,
           "_emit_v3_functions": 1,
-          "_expr": 47,
+          "_expr": 49,
           "_fn_name": 3,
           "_guard_frame_neutral_loop": 1,
           "_host_of": 2,
@@ -287,7 +298,7 @@
           "_refuse_lifecycle_tests": 2
         },
         "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
-          "_emit_java_router_class": 53,
+          "_emit_java_router_class": 51,
           "_emit_spawn_handle": 13,
           "_uses_instance_get": 1,
           "_uses_instance_get.walk": 8,
@@ -298,20 +309,22 @@
         "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
           "_emit_checked_div_helpers": 1,
           "_emit_ftoa_helper": 1,
-          "_emit_stdlib_helpers": 1,
+          "_emit_stdlib_helpers": 5,
+          "_stdlib_helpers_reached": 5,
           "_uses_checked_div.walk": 1,
-          "_uses_stdlib.walk": 3,
+          "_uses_stdlib": 5,
+          "_uses_stdlib.walk": 12,
           "_v3_types_need_value_helpers": 1
         },
         "the v1/v2 live-component path: a component routes to the older runtime, not through the v3 emitter the self-host mirrors.": {
-          "_emit_v1": 5,
+          "_emit_v1": 4,
           "_emit_v2": 27
         }
       },
-      "uncovered_statements": 933
+      "uncovered_statements": 980
     },
     "py": {
-      "statements": 2066,
+      "statements": 2103,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_ComponentEmitter._approval_step": 3,
@@ -329,6 +342,7 @@
           "_ComponentEmitter._witnessed_step": 9,
           "_Lines.next_destructure_seq": 2,
           "_RenderedBody.__init__": 1,
+          "_deferred_register_kwargs": 12,
           "_emit_assert": 10,
           "_emit_py_ref_thunk": 26,
           "_inline_count_var": 10,
@@ -348,7 +362,7 @@
           "_ComponentEmitter._build_parallel_leaders": 8,
           "_ComponentEmitter._deferred_extern": 3,
           "_ComponentEmitter._emit_fire": 3,
-          "_ComponentEmitter._expr": 153,
+          "_ComponentEmitter._expr": 156,
           "_ComponentEmitter._method": 3,
           "_ComponentEmitter._method_step": 27,
           "_ComponentEmitter._provide": 4,
@@ -357,11 +371,12 @@
           "_ComponentEmitter._witnessed_extern": 3,
           "_ComponentEmitter.emit": 9,
           "_emit_externs": 40,
-          "_emit_functions": 1,
+          "_emit_functions": 3,
           "_emit_types": 1,
-          "_expr": 24,
-          "_fn_inline_template": 10,
-          "_fn_stmt": 12,
+          "_expr": 25,
+          "_field_read": 2,
+          "_fn_inline_template": 11,
+          "_fn_stmt": 11,
           "_guard_frame_neutral_loop": 1,
           "_ident": 2,
           "_inline_pure_fns.rewrite": 6,
@@ -373,22 +388,20 @@
           "_match_expr": 2,
           "_match_expr.bind_payload": 1,
           "_parallel_step_groups": 4,
-          "_py_escaped_names.walk": 7,
-          "_py_inplace_locals.scan": 6,
           "_py_inplace_stmts": 9,
-          "_py_self_rebind": 3,
+          "_py_inplace_write": 2,
           "_py_type": 3,
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1,
-          "_render_builtin": 19,
+          "_render_builtin": 15,
           "_split_fn_type": 2,
           "_split_types": 2,
           "_uses_bounded_int": 2,
           "_uses_bounded_int32": 2,
           "_uses_builtin_result": 2,
           "_uses_builtin_result.walk": 2,
-          "_uses_opt_field": 1,
-          "emit": 38
+          "_uses_opt_to_int": 1,
+          "emit": 53
         },
         "declared out of every self-host slice: async coloring.": {
           "_is_async_fn_type": 1,
@@ -398,13 +411,16 @@
           "_emit_fault_tests": 11,
           "_emit_lifecycle_harness": 8,
           "_emit_lifecycle_test": 40,
-          "_emit_tests": 23,
+          "_emit_tests": 21,
           "_lifecycle_step": 36,
           "_lifecycle_uses_abort": 1,
           "_lifecycle_uses_clock": 1
+        },
+        "item 310 `cache pure` landed after this ledger was first taken. The reference emits a memo wrapper for a `cache pure` declaration; no corpus document declares one, and selfhost/emit_py.rvl has no `pure_fn` at all. A new FEATURE, so item 391's standing port question owns it; named here so it is not invisible.": {
+          "_emit_memo_wrapper": 17
         }
       },
-      "uncovered_statements": 889
+      "uncovered_statements": 921
     },
     "rust": {
       "statements": 2968,
@@ -575,12 +591,13 @@
       "uncovered_statements": 1422
     },
     "ts": {
-      "statements": 1791,
+      "statements": 1811,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_emit_temporal": 14,
           "_emit_ts_ref_runtime": 1,
           "_emit_ts_ref_thunk": 31,
+          "_emit_ts_ref_thunk._mark": 2,
           "_emit_ts_tests": 13,
           "_float_literal": 3,
           "_main": 17,
@@ -600,7 +617,7 @@
           "_component_step": 58,
           "_context_augmentation": 2,
           "_crossing_key_name": 5,
-          "_emit_ts_externs": 17,
+          "_emit_ts_externs": 26,
           "_emit_ts_functions": 1,
           "_emit_ts_types": 19,
           "_emit_v3": 16,
@@ -618,7 +635,7 @@
           "_method_body_needs_frame": 2,
           "_needs_frame.walk": 3,
           "_prop_key": 1,
-          "_provide_impl": 3,
+          "_provide_impl": 4,
           "_raw_field": 2,
           "_refuse_deferred_emissions": 10,
           "_refuse_holes": 4,
@@ -661,7 +678,7 @@
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 624
+      "uncovered_statements": 636
     },
     "wasm": {
       "statements": 2530,
@@ -795,7 +812,7 @@
   },
   "selfhost": {
     "go": {
-      "statements": 1404,
+      "statements": 1410,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "flags_or": 1,
@@ -845,7 +862,7 @@
       "uncovered_statements": 163
     },
     "java": {
-      "statements": 2414,
+      "statements": 2423,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "emit_setup_stmt": 1,
@@ -911,7 +928,7 @@
           "render_field": 1,
           "render_index": 1,
           "render_inner": 12,
-          "render_interp": 2,
+          "render_interp": 4,
           "render_un": 5,
           "render_var": 2,
           "service_param_type": 1,
@@ -937,15 +954,15 @@
           "v3_types_need_value_helpers": 1
         }
       },
-      "uncovered_statements": 397
+      "uncovered_statements": 399
     },
     "py": {
-      "statements": 2002,
+      "statements": 1990,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "carrow": 5,
           "clist": 4,
-          "cmatch": 10,
+          "cmatch": 16,
           "cmatch_branch": 18,
           "crecord": 4,
           "crecord_update": 5,
@@ -953,9 +970,8 @@
           "emit_assert": 12,
           "ind": 1,
           "is_cmp_op": 15,
-          "is_fresh_kind": 1,
-          "setup_step": 23,
-          "tag_name": 1
+          "opt_to_int_block": 6,
+          "setup_step": 23
         },
         "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
           "birth_container": 2,
@@ -963,35 +979,32 @@
           "body_has_timer": 2,
           "body_step": 9,
           "cbin": 7,
-          "cexpr": 34,
+          "cexpr": 38,
           "emit_externs": 2,
           "emit_functions": 1,
-          "emit_py_src": 1,
+          "emit_py_src": 2,
           "emit_types": 1,
-          "escaped_names": 5,
           "expr": 1,
-          "expr_inner": 8,
+          "expr_inner": 9,
+          "field_read": 2,
           "fn_stmt": 10,
-          "inplace_arity": 5,
-          "inplace_births": 1,
-          "inplace_locals": 5,
           "inplace_stmts": 10,
           "interp_fstring": 1,
           "ir_uses_host_root": 1,
           "is_float_expr": 3,
+          "is_inplace_write": 1,
           "line": 1,
-          "match_expr": 1,
+          "match_expr": 2,
+          "match_folds": 1,
           "method_lines": 1,
           "method_step": 13,
-          "non_retaining_slots": 5,
           "provide_lines": 1,
           "py_bin_op": 8,
           "py_type": 10,
           "render_arrow": 2,
-          "render_builtin": 10,
+          "render_builtin": 9,
           "render_un": 8,
           "runtime_ref": 3,
-          "self_rebind": 6,
           "split_fn_type": 2,
           "split_types": 2,
           "strip_nl": 1,
@@ -1000,13 +1013,14 @@
           "uses_bounded_int": 2,
           "uses_bounded_int32": 2,
           "uses_builtin_result": 2,
+          "uses_opt_to_int": 2,
           "walk_result": 2
         }
       },
-      "uncovered_statements": 303
+      "uncovered_statements": 298
     },
     "rust": {
-      "statements": 1859,
+      "statements": 1865,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "default_for_rust_type": 15,
@@ -1090,7 +1104,7 @@
       "uncovered_statements": 196
     },
     "ts": {
-      "statements": 2054,
+      "statements": 2056,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "expected_missing_adt": 1,
@@ -1169,7 +1183,7 @@
       "uncovered_statements": 291
     },
     "wasm": {
-      "statements": 1339,
+      "statements": 1346,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "align4": 1,
