@@ -58,17 +58,25 @@ jobs:
       # pass closed the seven landed-branch markers, and the three that survived
       # it (items 392 and 406 naming deleted branches, item 425 F3 citing a sha
       # only on an unmerged branch) were reworded in this same commit.
-      # --check-orphan joins it as of 2026-09-02: every open or delegated
-      # finding in the file now names a branch, an issue, a fix sha or an
-      # owner, so a new unowned finding is a new red rather than one more line
-      # in a backlog. --check-delegation and --check-tier-parity are still RED
-      # on main and every finding is a real one, so they stay off in THIS line
-      # only: turn each on here as its findings are dispatched. Never add
-      # `|| true`, and never narrow a check to make this line pass.
-      # `make roadmap-check-all` runs all four locally.
+      # A (contradiction), B (delegation), C (orphan) and E (duplicate
+      # headers) are all ON, and all four are GREEN on main as of this merge.
+      # C joins the line here: every open or delegated finding in the file now
+      # names a branch, an issue, a fix sha or an owner (item 427 F8 is issue
+      # #174), so a new unowned finding is a new red rather than one more line
+      # in a backlog.
+      #
+      # D (--check-tier-parity) is the only one still off: it has two real
+      # findings on main (items 421 F6 and 422 F6, python-only fixes to a
+      # language-wide guarantee). Turn it on here as its findings are
+      # dispatched.
+      #
+      # Never add `|| true`, and never narrow a check to make this line pass.
+      # `make roadmap-check-all` runs all five locally.
       - run: |
           python3 tools/check_roadmap_markers.py \
             --check-contradiction \
+            --check-delegation \
+            --check-duplicate-headers \
             --check-orphan
 
   frontend:

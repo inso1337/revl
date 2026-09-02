@@ -884,6 +884,40 @@ def build_parser() -> argparse.ArgumentParser:
                               "the item-440 re-issue seam (off by default)")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
 
+    branch_cmd = sub.add_parser(
+        "branch",
+        help="session branch lineage over durable write-ahead logs (item 250): "
+             "what a WAL is (a branch, a parent frozen at k, or neither), the "
+             "branch tree across several WALs, and — with --at — the fork "
+             "partition of a recorded tail "
+             "(docs/design/250-session-branching.md)")
+    branch_cmd.add_argument(
+        "--wal", required=True, action="append", metavar="FILE",
+        help="a write-ahead log; repeat it to reconstruct the branch tree across "
+             "a parent and its branches")
+    branch_cmd.add_argument(
+        "--at", type=int, default=None, metavar="SEQ",
+        help="instead of the lineage, enumerate the fork partition of the tail "
+             "above this WAL position: what a fork here would put back, what "
+             "already crossed and cannot be undone, and what it would refuse. "
+             "-1 is the whole recorded tail. Requires a single --wal; runs "
+             "nothing and rewinds nothing")
+    branch_cmd.add_argument("--json", action="store_true",
+                            help="machine-readable output")
+
+    compare_cmd = sub.add_parser(
+        "compare",
+        help="compare two recorded session histories that share a fork point "
+             "(item 250): what each did after diverging, and what a comparison "
+             "of durable logs cannot yet say "
+             "(docs/design/250-session-branching.md)")
+    compare_cmd.add_argument("left", metavar="LEFT.wal",
+                             help="one session's write-ahead log")
+    compare_cmd.add_argument("right", metavar="RIGHT.wal",
+                             help="the other session's write-ahead log")
+    compare_cmd.add_argument("--json", action="store_true",
+                             help="machine-readable output")
+
     why = sub.add_parser(
         "why",
         help="explain a recorded lifecycle transition — the cause chain for a "
