@@ -39,6 +39,29 @@ import time
 import weakref
 from typing import Any, Callable, Optional
 
+# The confidentiality choke point (item 256 Slice 3): `confidential.py`, the
+# sibling module this runtime and the recorder both read, so a `Secret[T]` value
+# is redacted in ONE place rather than at each printer. It ships next to this
+# file and must travel with it.
+#
+# The fallback covers this module being loaded BY PATH with its own directory off
+# `sys.path` (`spec_from_file_location(".../runtime.py")`, which several suites
+# do). A bare import cannot survive that, and continuing without the module would
+# mean continuing to leak, so this raises rather than degrades.
+try:
+    import confidential
+except ModuleNotFoundError:  # pragma: no cover — path-loaded copy of this module
+    import importlib.util as _importlib_util
+    import sys as _sys
+
+    _confidential_spec = _importlib_util.spec_from_file_location(
+        "confidential",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "confidential.py"))
+    confidential = _importlib_util.module_from_spec(_confidential_spec)
+    _confidential_spec.loader.exec_module(confidential)
+    _sys.modules.setdefault("confidential", confidential)
+
 # item 247 second-pass (F5): a process-monotonic registration index stamped on
 # every transactional/compensation entry at construction, so the escrow can be
 # replayed LIFO (reverse registration) even when no WAL is attached and every
@@ -134,7 +157,15 @@ class ResponseValidationError(RuntimeError):
         super().__init__(message)
         self.where = where
         self.schema = schema
-        self.value = value
+        # item 416c: `value` is the raw model response — untrusted, not itself
+        # secret, but it may carry a secret the program's OWN prompt fed the
+        # model back out verbatim. A host that logs this exception (a bare
+        # `logger.exception`, a crash reporter serializing `__dict__`) reads
+        # `.value` the same as it reads `str(exc)`, so the SAME scrub applies
+        # here as to the message: exact-match only, never a heuristic, so an
+        # ordinary malformed response — the common case a retry loop or a
+        # developer needs to see in full — is retained verbatim.
+        self.value = confidential.redact_value(value)
 
 
 def _json_type_ok(value, json_type: str) -> bool:
@@ -168,12 +199,21 @@ def _json_schema_error(value, schema, path: str = "$"):
 
     if "const" in schema:
         if value != schema["const"]:
-            return f"{path}: expected const {schema['const']!r}, got {value!r}"
+            # item 416c: `value` is the raw, UNTRUSTED model response — never a
+            # declared secret itself, but a secret the program fed into the
+            # prompt can come back out of the model verbatim (§7b's model-
+            # context sink again, from the return side). `schema["const"]` is
+            # the program's OWN declared literal, never response content, so
+            # it is left as-is; only the observed value goes through the same
+            # exact-value scrub the WAL and the timeline already apply.
+            return (f"{path}: expected const {schema['const']!r}, got "
+                    f"{confidential.redact_value(value)!r}")
         return None
 
     if "enum" in schema:
         if value not in schema["enum"]:
-            return f"{path}: {value!r} is not one of {schema['enum']!r}"
+            return (f"{path}: {confidential.redact_value(value)!r} is not one "
+                    f"of {schema['enum']!r}")
         return None
 
     if "oneOf" in schema:
@@ -2683,7 +2723,10 @@ RESOLVED_CONFIG: dict = {}
 
 # ConfigSchema is constructed name-less in emitted output; the resolution is
 # parked here until the component's Frame (built on the very next line of the
-# emitted `apply`) names it.
+# emitted `apply`) names it. The third element is the set of field names the
+# author declared `Secret[T]` — carried alongside the values so the trace line
+# can be built without the secrets and the real values still reach the
+# component (item 256 Slice 3, §7b).
 _pending_config: Optional[tuple] = None
 
 
@@ -2697,14 +2740,27 @@ def resolved_config(name: Optional[str] = None):
 
 
 def _flush_config_trace(name: str) -> Optional[dict]:
-    """Attribute the parked resolution to ``name``, record it, return it."""
+    """Attribute the parked resolution to ``name``, record it, return it.
+
+    The trace line is an externalisation: `revl run` prints it to stdout and the
+    MCP session captures it into the `revl_load` response, where it lands in a
+    model's context. A field the author declared `Secret[T]` is therefore
+    rendered as the redaction placeholder — the field is still named, still in
+    the same position, so the line keeps saying which fields resolved and which
+    defaulted; only the confidential bytes are gone (item 256 Slice 3, §7b).
+
+    `RESOLVED_CONFIG` and the dict handed to the component keep the real value:
+    the component was granted it, the log and the agent were not."""
     global _pending_config
     if _pending_config is None:
         return None
-    resolved, defaulted = _pending_config
+    resolved, defaulted, secret_fields = _pending_config
     _pending_config = None
     RESOLVED_CONFIG[name] = resolved
-    body = ", ".join(f"{key}={json.dumps(resolved[key])}" for key in sorted(resolved))
+    body = ", ".join(
+        f"{key}=" + (f'"{confidential.REDACTED}"' if key in secret_fields
+                     else json.dumps(resolved[key]))
+        for key in sorted(resolved))
     tail = f" [defaults: {', '.join(defaulted)}]" if defaulted else ""
     _record(f"{name}.config {{{body}}}{tail}")
     return resolved
@@ -2722,12 +2778,21 @@ class ConfigSchema:
     hand-written host code that validates eagerly and wants a plain dict.
     """
 
-    def __init__(self, fields: list, name: Optional[str] = None) -> None:
+    def __init__(self, fields: list, name: Optional[str] = None,
+                 secret: Optional[list] = None) -> None:
         self.fields = [tuple(field) for field in fields]
         # Optional: emitted output constructs schemas positionally and
         # name-less, but a hand-written host may name one and get the
         # `<name>.config` trace event without a Frame.
         self.name = name
+        # item 256 Slice 3: the fields the author declared `Secret[T]`. The
+        # qualifier is stripped off the declared type before lowering, so the
+        # emitter passes the names here explicitly; a hand-written host that
+        # spells the qualifier in the type is honoured too. Empty for every
+        # schema that declares none, which is the byte-identical path.
+        self.secret_fields = frozenset(secret or ()) | frozenset(
+            field[0] for field in self.fields
+            if len(field) > 1 and confidential.is_secret_type(field[1]))
 
     def _resolve(self, config: Any) -> tuple[dict, list, list]:
         value = dict(config or {})
@@ -2752,7 +2817,14 @@ class ConfigSchema:
 
     def _park(self, value: dict, defaulted: list) -> None:
         global _pending_config
-        _pending_config = (dict(value), defaulted)
+        # Remember the resolved value of every `Secret[T]` field, so the SAME
+        # bytes are scrubbed if they surface at a capture point that carries no
+        # marking of its own — a credential threaded from config into a witness,
+        # say. Exact-value matching, so nothing else is affected.
+        for field in self.secret_fields:
+            if field in value:
+                confidential.register_secret_value(value[field])
+        _pending_config = (dict(value), defaulted, self.secret_fields)
         if self.name is not None:
             _flush_config_trace(self.name)
 

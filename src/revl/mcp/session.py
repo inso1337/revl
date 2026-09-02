@@ -26,6 +26,7 @@ from .. import cap_order
 from .._paths import backends_root
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
+from ..taint import REDACTED_SECRET
 from .approval import ApprovalRequired
 from .approval import _args_digest as _cache_args_digest
 
@@ -2921,13 +2922,42 @@ class Session:
                 ttls.append(rule.ttl_ms)
         return min(ttls) if ttls else None
 
+    def _ledger_entry_for_ticket(self, ticket_hash: str) -> dict | None:
+        """The ledger entry already minted for this ticket hash, if any (F5: one
+        ticket mints AT MOST one approval). Returns it regardless of `consumed` —
+        `approve_ticket`'s idempotent-resend path needs to recognize a ticket
+        that already minted, whether or not that mint has fired yet, not only a
+        still-spendable one (that is `_find_standing_approval`'s job, at the
+        crossing)."""
+        for entry in self._ledger:
+            if entry["hash"] == ticket_hash:
+                return entry
+        return None
+
     def approve_ticket(self, ticket_hash: str) -> dict:
         """Mint a standing approval bound to an outstanding ticket (Decision 2/3).
         Refuses a hash the server never issued (the outstanding-ticket table) — an
         approval can only be minted for a question the server actually asked. The
         entry is single-use and bound to the ticket hash, the reach-closure
         candidate hash, the component, and the session; a `approval-granted` WAL
-        record makes it durable."""
+        record makes it durable.
+
+        F5: one ticket mints AT MOST one approval. A duplicate `approve_ticket`
+        call against a still-outstanding ticket — the identical action re-sent by
+        a UI, a retried RPC — is an IDEMPOTENT NO-OP: it returns the SAME entry
+        already minted rather than appending a second unconsumed ledger entry.
+        Idempotent, not a refusal, because a legitimate re-send names a ticket
+        hash it did not forge — the server itself issued it, and asking the same
+        question twice should not read as an error to a caller that cannot tell
+        its first request landed. It is still safe against the adversarial
+        replay this closes: the second call mints nothing new (no new
+        `expiresAt`, no second WAL record, no second fireable ledger row), so a
+        human's one yes still authorizes exactly one crossing — the per-entry
+        single-use guarantee (`_find_standing_approval`/`_consume_approval`)
+        becomes a per-TICKET guarantee too. The ticket stays in `self._tickets`
+        (never retired) precisely so this idempotent path keeps recognizing it;
+        retiring it would turn a benign resend into a confusing "unknown ticket
+        hash" refusal instead."""
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
@@ -2935,6 +2965,12 @@ class Session:
                 f"it (or the generation changed and the outstanding-ticket table "
                 f"was replaced). Re-issue the call to get a fresh ticket, then "
                 f"approve that (item 246, the outstanding-ticket table)")
+        existing = self._ledger_entry_for_ticket(ticket_hash)
+        if existing is not None:
+            return {"approved": True, "hash": existing["hash"],
+                    "component": existing["component"], "key": existing.get("key"),
+                    "method": existing.get("method"), "kind": existing.get("kind"),
+                    "candidateHash": existing["candidateHash"]}
         now = self._now_ms()
         # item 246, Slice 2: the ttl from the policy rule covering this ticket's
         # capabilities. The tightest (min) ttl over the covered required
@@ -3349,6 +3385,24 @@ class Session:
                 "provide a `capability` (+ `uses`/`ttlMs`) to mint a standing "
                 "grant, or a ticket `hash` to mint one from an outstanding "
                 "class-(c) ticket")
+
+        # item 416c: a resource dimension declared `Secret[T]` binds to the
+        # REDACTED placeholder (approval.bind_resource_scope), never the real
+        # value — an operator can never have SEEN the value to scope a grant to
+        # it. Every secret-valued crossing of that operation binds to the SAME
+        # placeholder token, so a grant minted against it would cover every
+        # future crossing regardless of the (different) real value each one
+        # actually carries — the exact over-authorization a resource-scoped
+        # grant exists to prevent. Refused rather than silently widened; the
+        # crossing keeps prompting single-use.
+        if capability is not None and REDACTED_SECRET in capability:
+            raise SessionError(
+                f"capability {capability!r} scopes a `Secret[T]` resource "
+                f"parameter — its value is never shown, so it cannot be named "
+                f"in a standing grant (item 416c: this would silently widen "
+                f"one approval to cover every future secret value at this "
+                f"position). Approve each crossing individually with "
+                f"`revl_approve(hash=...)` instead.")
 
         # item 294 Slice 2: erase a ceiling parameter (`calls=N`) from the
         # grant's stored valuation and translate it into the shipped
