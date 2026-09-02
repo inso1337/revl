@@ -25,13 +25,29 @@ belongs.
    `backends/rust/emit.py`, run the rust emit suite and the rust golden tests.
    Do not run the root `tests/` tree. Do not run the cordis suite.
 3. Commit and push the branch.
-4. Open a PR that closes the issue:
+4. Run the cheap pre-PR checks. They take seconds and catch most `lint` reds:
+
+   ```
+   ./tools/pre_pr.sh
+   ```
+
+   This runs ruff, a Python 3.11 syntax sweep (CI runs 3.11, the dev venv is
+   newer, so 3.12+ syntax passes locally and reds CI) and the roadmap marker
+   gate. It does not run any suite.
+
+5. Open a PR that closes the issue:
 
    ```
    gh pr create --repo inso1337/revl --fill --body "Closes #<issue>"
    ```
 
-5. Report what you changed, what you ran, and the PR number. Then stop.
+   Use `Closes #<issue>` ONLY when the PR closes the whole issue. GitHub
+   auto-closes on merge, so a partial fix written that way silently closes an
+   issue whose remaining findings nobody is now tracking, which is the exact
+   failure this process exists to stop. For a partial fix write
+   `Part of #<issue>` and say in the body which findings remain open.
+
+6. Report what you changed, what you ran, and the PR number. Then stop.
    **Do not wait for CI.** The orchestrator watches it.
 
 ## What an agent does not do
@@ -72,3 +88,35 @@ check the issue is not already assigned or already closed.
 
 Security findings do not get public issues. They go to private security
 advisories.
+
+## Goldens
+
+Six backends carry checked-in emitter output, and so does `crates/revl-gate`.
+They are **snapshot tests, not a freeze**: the invariant is "emitter output
+never changes unreviewed", never "output never changes". Regenerating a golden
+and reviewing its diff is always an acceptable resolution. Bending an emitter
+back to keep old bytes is not.
+
+One command covers every tier:
+
+```
+python3 tools/regen_goldens.py             # list every target and the files it owns
+python3 tools/regen_goldens.py --check     # which goldens drifted, and the fix for each
+python3 tools/regen_goldens.py <target>    # regenerate: python typescript rust java wasm go gate-crate
+```
+
+Rules:
+
+1. If you change an emitter, regenerate its goldens **in the same commit** and
+   review the diff. A separate follow-up commit means main is red in between.
+2. `crates/revl-gate` embeds emitted rust. Any change to `backends/rust/emit.py`
+   or to `selfhost/*.rvl` rewrites about 1900 lines of it, and a PR that skips
+   the regeneration goes red on drift alone. `python3 tools/regen_goldens.py
+   gate-crate` fixes it.
+3. A red golden test names the exact command that resolves it. Run that command,
+   read the diff, and keep it only if the new bytes are what you meant.
+4. Adding a golden means adding it to `tools/regen_goldens.py`. A generated file
+   nothing can reproduce is a file nothing can check.
+
+The policy and its two declared exceptions live in
+[conformance.md](conformance.md), "Golden policy: snapshot, not freeze".

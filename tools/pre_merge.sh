@@ -228,6 +228,13 @@ gemit java "backend-java (emit goldens)" backends/java/test_emit_java.py
 # NOTE the typescript backend suite (npx vitest / tsc) is deliberately NOT in
 # this fast gate — it needs backends/typescript/node_modules and is heavy. Run it
 # yourself when you touch that tier: cd backends/typescript && npm ci && npx vitest run
+#
+# Its GOLDENS, though, are pure Python and sub-second, and no other local step
+# touches five of them (fr3_json, the three async fixtures, temporal_booktrip).
+# Check them here so a stale ts golden cannot wait for CI to be noticed. Every
+# other target's goldens are already covered: the tier suites above, and
+# `pytest tests/` for tests/test_goldens.py and the gate-crate drift gate.
+step "backend-ts   (golden drift)" python3 tools/regen_goldens.py --check typescript
 
 # 4. Generated-artifact gates (pure Python, always run): the README conformance
 #    matrix and the site/playground wheel must match a fresh generation, the same

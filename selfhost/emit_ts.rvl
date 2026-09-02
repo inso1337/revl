@@ -2250,8 +2250,30 @@ fn revl_int_arith_helper() -> Str {
 
 fn revl_str_helper() -> Str {
   var o = []
+  // The code-point decode is memoised in two slots (item 435(c)): every helper
+  // here measures or indexes `Array.from(s)`, so decoding per call made an
+  // index scan quadratic. Mirrors `_REVL_STR_HELPER` in
+  // backends/typescript/emit.py byte for byte; `revlIndexOf` deliberately
+  // keeps its own `Array.from` over a per-call substring.
+  o = o.push("let revlCpsK0: string | undefined")
+  o = o.push("let revlCpsV0: string[] = []")
+  o = o.push("let revlCpsK1: string | undefined")
+  o = o.push("let revlCpsV1: string[] = []")
+  o = o.push("function revlCps(s: string): string[] {")
+  o = o.push("  if (s === revlCpsK0) return revlCpsV0")
+  o = o.push("  if (s === revlCpsK1) {")
+  o = o.push("    const k = revlCpsK1, v = revlCpsV1")
+  o = o.push("    revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0")
+  o = o.push("    revlCpsK0 = k; revlCpsV0 = v")
+  o = o.push("    return v")
+  o = o.push("  }")
+  o = o.push("  const v = Array.from(s)")
+  o = o.push("  revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0")
+  o = o.push("  revlCpsK0 = s; revlCpsV0 = v")
+  o = o.push("  return v")
+  o = o.push("}")
   o = o.push(`function revlLen(x: string | ArrayLike<unknown>): bigint {`)
-  o = o.push(`  return BigInt(typeof x === "string" ? Array.from(x).length : x.length)`)
+  o = o.push(`  return BigInt(typeof x === "string" ? revlCps(x).length : x.length)`)
   o = o.push("}")
   o = o.push(`function revlSlice(x: string, a: bigint, b: bigint): string`)
   o = o.push(`function revlSlice(x: Uint8Array, a: bigint, b: bigint): Uint8Array`)
@@ -2260,15 +2282,15 @@ fn revl_str_helper() -> Str {
   o = o.push(`function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[] {`)
   o = o.push("  const i = Number(a), j = Number(b)")
   o = o.push(`  return typeof x === "string"`)
-  o = o.push(`    ? Array.from(x).slice(i, j).join("")`)
+  o = o.push(`    ? revlCps(x).slice(i, j).join("")`)
   o = o.push(`    : (x as string | Uint8Array | unknown[]).slice(i, j)`)
   o = o.push("}")
   o = o.push("function revlCharAt(s: string, i: bigint): string {")
-  o = o.push("  const c = Array.from(s)[Number(i)]")
+  o = o.push("  const c = revlCps(s)[Number(i)]")
   o = o.push(`  return c === undefined ? "" : c`)
   o = o.push("}")
   o = o.push("function revlCharCodeAt(s: string, i: bigint): bigint {")
-  o = o.push("  const c = Array.from(s)[Number(i)]")
+  o = o.push("  const c = revlCps(s)[Number(i)]")
   o = o.push("  return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))")
   o = o.push("}")
   o = o.push(`function revlIndexOf(x: string | unknown[], v: unknown): bigint {`)
