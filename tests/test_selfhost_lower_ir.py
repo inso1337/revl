@@ -120,27 +120,17 @@ COMPONENT_DOCS = [
 # verbatim `@py` bodies come from the lexer's new `hostbody` token.
 EXTERN_DOCS = ["externs.rvl"]
 
-# item 429 exit (5) found a SECOND, larger gap while adding the `Secret[` corpus
-# family for the emit_py oracle, one stage EARLIER than the emitter it was
-# looking at: the self-host pipeline HAS NO TAINT STAGE AT ALL. `Untrusted`,
-# `Trusted` and `Secret` appear zero times in selfhost/lower.rvl and zero times
-# in selfhost/checker.rvl, while the reference strips all three qualifiers in
-# src/revl/taint.py and leaves the stamps the backends read: a service method's
-# and an extern's `params[i]["secret"]`, and an extern's `secret_return`. So the
-# native lowering gate renders `"type": "Secret[Str]"` verbatim and emits
-# neither stamp, and the two projections below diverge on any taint-qualified
-# document. Marked strict-xfail rather than dropped from the corpus so the gate
-# stays honest: it is red for a NAMED reason today and will XPASS loudly the day
-# a taint stage lands in the self-host. Porting one qualifier's stamps in
-# isolation would be a partial taint stage, which is why this is recorded rather
-# than patched here. The emit_py port that item 429 exit (5) DID land is
-# unaffected: the emitters consume the REFERENCE IR, which carries the stamps.
-TAINT_QUALIFIED_GAP = {
-    "secrets.rvl": (
-        "item 429 exit (5): selfhost/lower.rvl has no taint stage, so it neither "
-        "strips `Secret[T]` nor emits the `secret` / `secret_return` stamps"
-    ),
-}
+# item 421 F6 / item 256 §7: the declaration-side `Secret[T]` MARKING, now
+# carried by the self-host frontend (`selfhost/lower.rvl`) exactly as
+# `src/revl/taint.py` carries it for the reference. `Secret[T]` is a qualifier,
+# not a type constructor: it is stripped off every declared type and leaves a
+# flag behind, so the native and reference IR agree on both halves — the bare
+# `type`/`returns` spelling AND the four stamps a backend reads
+# (`params[i]["secret"]`, `secret_return`, `secret_witness`, a config field's
+# `secret`). The gap this replaces was strict-xfail on `secrets.rvl`; the
+# marking lands with `secrets_nested.rvl` added FIRST and failing. Both
+# documents now run through the SAME unmarked projections as every other corpus
+# document, which is the only statement of parity worth having.
 
 
 def _corpus_params(gap: dict[str, str]):
@@ -152,8 +142,6 @@ def _corpus_params(gap: dict[str, str]):
         for name in CORPUS
     ]
 
-
-CORPUS_TAINT_AWARE = _corpus_params(TAINT_QUALIFIED_GAP)
 
 # item 445: the reference frontend now proves UNIQUE OWNERSHIP of an
 # accumulation local once (`src/revl/ownership.py`) and stamps the answer on the
@@ -167,7 +155,8 @@ CORPUS_TAINT_AWARE = _corpus_params(TAINT_QUALIFIED_GAP)
 # reference on any document with an in-place accumulation loop — one in this
 # corpus, `transforms.rvl`'s `list_map` / `list_filter`.
 #
-# Marked strict-xfail rather than dropped, on the taint gap's terms: it is red
+# Marked strict-xfail rather than dropped, on the terms the `Secret[T]` gap
+# above was recorded on before it was closed: it is red
 # for a NAMED reason and will XPASS loudly the day the pass is ported. The
 # emit_py port item 445 DID land is unaffected and stays green — `emit_py.rvl`
 # now READS the two markers where it used to carry ~130 lines of its own copy of
@@ -245,7 +234,7 @@ def test_selfhosted_lower_ir_in_file_tests_pass(ns):
         fn()  # the block's asserts fire here; a failure raises
 
 
-@pytest.mark.parametrize("rel", CORPUS_TAINT_AWARE)
+@pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_services(lower_to_ir, rel):
     """The SERVICES table is byte-identical to the reference IR on every corpus
     document (the empty `{}` on function/type/extern-only documents included)."""
@@ -299,7 +288,7 @@ def test_component_docs_emit_full_body(lower_to_ir, rel):
         assert comp["body"] == ref_by_name[comp["name"]]["body"], comp["name"]
 
 
-@pytest.mark.parametrize("rel", CORPUS_TAINT_AWARE)
+@pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_externs(lower_to_ir, rel):
     """The `externs` section (item 241) — each extern's class/params/returns and
     the verbatim `@backend` bodies (from the lexer's `hostbody` token) — is byte-
