@@ -274,7 +274,20 @@ def test_a_concurrent_writer_cannot_divert_a_write_out_of_the_root(workspace, ou
     thread.start()
     try:
         for _ in range(200):
-            mod.write("racy.txt", "RACED PAYLOAD")
+            # The swapper UNLINKS the target on purpose, so a write can land in
+            # the window where the leaf is gone and raise instead of returning.
+            # That is a liveness transient, not a confinement failure: what this
+            # test pins is that no write ever reaches an inode outside the root,
+            # and both assertions below still decide that whether this call
+            # returned or raised. Swallowing only OSError keeps a real refusal
+            # (which is not an OSError) failing the test. Seen as a FileNotFound
+            # on the undo-snapshot read in CI, where the timing differs from a
+            # dev box; whether `write` should instead be atomic against a
+            # concurrent unlink is a separate question, filed on the roadmap.
+            try:
+                mod.write("racy.txt", "RACED PAYLOAD")
+            except OSError:
+                pass
             if victim.exists():
                 break
     finally:

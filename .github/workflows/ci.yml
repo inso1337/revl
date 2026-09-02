@@ -119,6 +119,15 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v4
+      # This suite's cross-tier probes execute emitted Go against the PINNED
+      # stc-go runtime, and they decide whether to run from whether a `go`
+      # binary answers on PATH. ubuntu-latest preinstalls one, so without this
+      # pin they do not skip: they run against the wrong toolchain and fail the
+      # pinned build (64 `[go]` failures the first time this job ran). Same
+      # version `backend-go` pins, for the same reason.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
       # the same one-command setup `backend-python` uses: it clones cordis-py at
       # the pinned revision and installs revl editable beside it, so this venv's
       # interpreter can import both.
