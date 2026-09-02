@@ -150,23 +150,59 @@ def capKeys (Γ : List Cap) : List String := Γ.map (·.token)
 
 /-! ## The order is a partial order -/
 
-theorem pathLe_refl (p : List String) : PathLe p p := sorry
+theorem pathLe_refl (p : List String) : PathLe p p := ⟨[], (List.append_nil p).symm⟩
 
 theorem pathLe_trans (a b c : List String) :
-    PathLe a b → PathLe b c → PathLe a c := sorry
+    PathLe a b → PathLe b c → PathLe a c := by
+  rintro ⟨r, rfl⟩ ⟨s, rfl⟩
+  exact ⟨s ++ r, List.append_assoc c s r⟩
 
 theorem pathLe_antisymm (a b : List String) :
-    PathLe a b → PathLe b a → a = b := sorry
+    PathLe a b → PathLe b a → a = b := by
+  rintro ⟨r, rfl⟩ ⟨s, hs⟩
+  have hl := congrArg List.length hs
+  simp only [List.length_append] at hl
+  cases r with
+  | nil => simp
+  | cons x xs => simp only [List.length_cons] at hl; omega
 
-theorem pleq_refl (v : PVal) : PLeq v v := sorry
+theorem pleq_refl (v : PVal) : PLeq v v := by
+  cases v with
+  | path p => exact .path p p (pathLe_refl p)
+  | discrete s => exact .discrete s
+  | ceiling n => exact .ceiling n n (Nat.le_refl n)
 
-theorem pleq_trans {a b c : PVal} : PLeq a b → PLeq b c → PLeq a c := sorry
+theorem pleq_trans {a b c : PVal} : PLeq a b → PLeq b c → PLeq a c := by
+  intro hab hbc
+  cases hab with
+  | path n w h =>
+    cases hbc with
+    | path _ w' h' => exact .path _ _ (pathLe_trans _ _ _ h h')
+  | discrete s => exact hbc
+  | ceiling m n h =>
+    cases hbc with
+    | ceiling _ p h' => exact .ceiling _ _ (Nat.le_trans h h')
 
-theorem pleq_antisymm {a b : PVal} : PLeq a b → PLeq b a → a = b := sorry
+theorem pleq_antisymm {a b : PVal} : PLeq a b → PLeq b a → a = b := by
+  intro hab hba
+  cases hab with
+  | path n w h =>
+    cases hba with
+    | path _ _ h' => rw [pathLe_antisymm _ _ h h']
+  | discrete s => rfl
+  | ceiling m n h =>
+    cases hba with
+    | ceiling _ _ h' => rw [Nat.le_antisymm h h']
 
-theorem covers_refl (c : Cap) : Covers c c := sorry
+theorem covers_refl (c : Cap) : Covers c c :=
+  ⟨rfl, fun _ v h => ⟨v, h, pleq_refl v⟩⟩
 
-theorem covers_trans {a b c : Cap} : Covers a b → Covers b c → Covers a c := sorry
+theorem covers_trans {a b c : Cap} : Covers a b → Covers b c → Covers a c := by
+  intro hab hbc
+  refine ⟨hab.1.trans hbc.1, fun k v hv => ?_⟩
+  obtain ⟨w, hw, hwv⟩ := hab.2 k v hv
+  obtain ⟨u, hu, huw⟩ := hbc.2 k w hw
+  exact ⟨u, hu, pleq_trans huw hwv⟩
 
 /-- Antisymmetry, in the form the model can state: mutual coverage pins
 the token and makes the two valuations agree on every lookup. (The
@@ -174,42 +210,164 @@ reference's tests assert antisymmetry over *canonical* caps only, for
 exactly this reason — a valuation is a sorted, duplicate-free
 association list, so lookup agreement is structural equality there.) -/
 theorem covers_antisymm {a b : Cap} : Covers a b → Covers b a →
-    a.token = b.token ∧ ∀ k, lookupV a.params k = lookupV b.params k := sorry
+    a.token = b.token ∧ ∀ k, lookupV a.params k = lookupV b.params k := by
+  intro hab hba
+  refine ⟨hab.1, fun k => ?_⟩
+  cases hA : lookupV a.params k with
+  | none =>
+    cases hB : lookupV b.params k with
+    | none => rfl
+    | some w =>
+      obtain ⟨v, hv, _⟩ := hba.2 k w hB
+      rw [hA] at hv
+      exact absurd hv (by simp)
+  | some v =>
+    obtain ⟨w, hw, hwv⟩ := hab.2 k v hA
+    obtain ⟨v', hv', hv'w⟩ := hba.2 k w hw
+    rw [hA] at hv'
+    injection hv' with hvv
+    subst hvv
+    rw [hw, pleq_antisymm hwv hv'w]
 
-/-- `*` (the unnameable host reach) is covered only by `*`: no nameable
-token can be widened into it. -/
-theorem star_covers_iff (a : Cap) :
-    Covers a ⟨"*", []⟩ ↔ a.token = "*" := sorry
+/-- The unnameable host reach: a host emission or first-class dispatch
+collapses to `*`, which `_make_cap` refuses to parameterize. -/
+def starCap : Cap := ⟨"*", []⟩
+
+/-- `*` is covered only by `*`: no nameable token can be widened into it,
+so an amplifier reaching the host cannot hide behind it. (The reference
+short-circuits on `a.token == "*"` before looking at parameters; since
+`*` carries none, the two agree.) -/
+theorem covers_star {a : Cap} : Covers a starCap → a.token = "*" := fun h => h.1
+
+/-- Dually, `*` covers only `*`: holding the host boundary is not a
+licence over any nameable one. -/
+theorem star_covers {b : Cap} : Covers starCap b → b.token = "*" :=
+  fun h => h.1.symm
 
 /-! ## Set-level coverage -/
 
 theorem coveredBy_trans {H M : List Cap} {c : Cap} :
-    (∀ m ∈ M, CoveredBy H m) → CoveredBy M c → CoveredBy H c := sorry
+    (∀ m ∈ M, CoveredBy H m) → CoveredBy M c → CoveredBy H c := by
+  intro hHM ⟨m, hm, hmc⟩
+  obtain ⟨h, hh, hhm⟩ := hHM m hm
+  exact ⟨h, hh, covers_trans hhm hmc⟩
 
 /-! ## Ceilings -/
 
 theorem ceilingOf_lookup {c : Cap} {k : String} {n : Nat} :
-    ceilingOf c k = some n → lookupV c.params k = some (.ceiling n) := sorry
+    ceilingOf c k = some n → lookupV c.params k = some (.ceiling n) := by
+  intro h
+  unfold ceilingOf at h
+  cases hl : lookupV c.params k with
+  | none => rw [hl] at h; simp [ceilingVal] at h
+  | some v =>
+    cases v with
+    | path p => rw [hl] at h; simp [ceilingVal] at h
+    | discrete s => rw [hl] at h; simp [ceilingVal] at h
+    | ceiling m =>
+      rw [hl] at h
+      simp only [ceilingVal, Option.some.injEq] at h
+      subst h
+      rfl
 
 /-- A covered capability's ceiling is at-or-below the covering one's:
 `covers` forces the narrow side to bind every parameter the wide side
 binds, at a value below it. -/
 theorem covers_ceiling_le {a b : Cap} {k : String} {n : Nat} :
     Covers a b → ceilingOf a k = some n →
-    ∃ m, ceilingOf b k = some m ∧ m ≤ n := sorry
+    ∃ m, ceilingOf b k = some m ∧ m ≤ n := by
+  intro hab hn
+  obtain ⟨w, hw, hwn⟩ := hab.2 k _ (ceilingOf_lookup hn)
+  cases hwn with
+  | ceiling m _ hmn => exact ⟨m, by simp [ceilingOf, hw, ceilingVal], hmn⟩
 
 /-- The parent budget is *attained*: a `some` budget is some held
 capability's own declaration, so a bound on every held declaration bounds
 the budget. -/
 theorem budgetOf_attained {held : List Cap} {t k : String} {b : Nat} :
     budgetOf held t k = some b →
-    ∃ h ∈ held, h.token = t ∧ ceilingOf h k = some b := sorry
+    ∃ h ∈ held, h.token = t ∧ ceilingOf h k = some b := by
+  induction held with
+  | nil => intro h; simp [budgetOf] at h
+  | cons x rest ih =>
+    intro h
+    unfold budgetOf at h
+    by_cases hx : x.token = t
+    · rw [if_pos hx] at h
+      cases hc : ceilingOf x k with
+      | none =>
+        rw [hc] at h
+        obtain ⟨y, hy, hyt, hyc⟩ := ih h
+        exact ⟨y, List.mem_cons_of_mem _ hy, hyt, hyc⟩
+      | some n =>
+        rw [hc] at h
+        simp only [Option.some.injEq] at h
+        cases hr : budgetOf rest t k with
+        | none =>
+          rw [hr] at h
+          simp only [maxWith] at h
+          exact ⟨x, List.mem_cons_self, hx, by rw [hc, h]⟩
+        | some b' =>
+          rw [hr] at h
+          simp only [maxWith] at h
+          by_cases hle : n ≤ b'
+          · rw [if_pos hle] at h
+            obtain ⟨y, hy, hyt, hyc⟩ := ih (by rw [hr, h])
+            exact ⟨y, List.mem_cons_of_mem _ hy, hyt, hyc⟩
+          · rw [if_neg hle] at h
+            exact ⟨x, List.mem_cons_self, hx, by rw [hc, h]⟩
+    · rw [if_neg hx] at h
+      obtain ⟨y, hy, hyt, hyc⟩ := ih h
+      exact ⟨y, List.mem_cons_of_mem _ hy, hyt, hyc⟩
 
 /-- The parent budget exists whenever some held capability under the
 token declares the ceiling, and dominates that declaration. -/
 theorem budgetOf_ge {held : List Cap} {t k : String} {h : Cap} {v : Nat} :
     h ∈ held → h.token = t → ceilingOf h k = some v →
-    ∃ b, budgetOf held t k = some b ∧ v ≤ b := sorry
+    ∃ b, budgetOf held t k = some b ∧ v ≤ b := by
+  induction held with
+  | nil => intro hm; simp at hm
+  | cons x rest ih =>
+    intro hm ht hc
+    rcases List.mem_cons.mp hm with rfl | hrest
+    · unfold budgetOf
+      rw [if_pos ht, hc]
+      cases hr : budgetOf rest t k with
+      | none => exact ⟨v, by simp [maxWith], Nat.le_refl v⟩
+      | some b' =>
+        simp only [maxWith]
+        by_cases hle : v ≤ b'
+        · exact ⟨b', by rw [if_pos hle], hle⟩
+        · exact ⟨v, by rw [if_neg hle], Nat.le_refl v⟩
+    · obtain ⟨b, hb, hvb⟩ := ih hrest ht hc
+      unfold budgetOf
+      by_cases hx : x.token = t
+      · rw [if_pos hx]
+        cases hcx : ceilingOf x k with
+        | none => exact ⟨b, hb, hvb⟩
+        | some n =>
+          rw [hb]
+          simp only [maxWith]
+          by_cases hle : n ≤ b
+          · exact ⟨b, by rw [if_pos hle], hvb⟩
+          · exact ⟨n, by rw [if_neg hle], Nat.le_trans hvb (Nat.le_of_not_le hle)⟩
+      · rw [if_neg hx]; exact ⟨b, hb, hvb⟩
+
+/-- Lookup in the empty valuation. -/
+theorem lookupV_nil (k : String) : lookupV [] k = none := rfl
+
+/-- Lookup in a one-binding valuation (the shape the non-vacuity
+witnesses use). -/
+theorem lookupV_single {k' k : String} {v w : PVal} :
+    lookupV [(k', v)] k = some w → k' = k ∧ v = w := by
+  intro h
+  simp only [lookupV] at h
+  by_cases hk : k' = k
+  · rw [if_pos hk] at h
+    injection h with e
+    exact ⟨hk, e⟩
+  · rw [if_neg hk] at h
+    exact absurd h (by simp)
 
 /-- Stripping ceilings keeps the token (the resource fold is
 ceiling-blind but never token-blind). -/
