@@ -169,6 +169,18 @@ again?* (items 309 and 440):
 | `declared` (`undo idempotent`, bare `idempotent`) | the author's claim, machine-checked for shape only | replays an inverse freely; re-issues an owed emission only under the operator's explicit knob, once, fenced |
 | absent | nothing is known | one fenced at-most-once attempt, then `outcome: "unknown"` for a human |
 
+`shape-proven` is a tier the order accepts and **nothing produces yet**. It is
+designed as a syntactic check over a restore-to-recorded-value inverse BODY
+(design 309 §2), and revl has no such body to read: every extern carries a
+`@backend` host body, so an inverse is G8-opaque by construction, and
+`stdlib/fs.rvl`'s inverses are `@py`. `lower.py::_idempotent_register` therefore
+returns `declared` for every native `undo idempotent`, which is the fail-closed
+direction; the row above says what recovery WILL do if the tier ever becomes
+reachable, not what any shipped declaration earns today. The one derivation that
+must not be taken to reach it is spelled out in the paragraph below, because it
+is the same trap: `stdlib/fs.rvl`'s `restore`/`unrm`/`rmdir_if_empty` are all
+`extern pure fn` and all unlink or rename real files.
+
 The `read` tier is DECLARED, not derived. revl's `pure` extern *classification*
 means "not acquire/emission/witnessed" and is checked for shape only, and shipped
 examples classify mutating host bodies `pure` (`extern pure fn close_ledger(h)`),
