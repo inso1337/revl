@@ -27,11 +27,18 @@ What is NOT yet wired (honestly fenced, not faked):
 * the **interactive REPL** over provided go services, for the same reason it is
   unwired on the rust/java/wasm tiers (see :mod:`revl.run_rust`). Without
   ``--once`` the driver notes the gap and completes the same once round-trip.
-* **v3 typed-core documents** (top-level ``fn``/``type``/``extern``/``test``
-  declarations) — the go placement bridge generates per-service proxies/stub
-  dispatch, which needs v1/v2 live stc-go components; a v3 typed-core
-  composition is emitted as ordinary Go with no runnable component and is
-  refused at emit (the same boundary ``revl run --placement`` draws).
+
+v3 typed-core compositions (records, ADTs/variants, and rich service
+boundaries carried by live stc-go components) placed and ran here as of
+``d42d6296`` (roadmap item 177's FR-8 follow-up, ``dogfood/findings-go-v3.md``):
+the go placement bridge now emits both the typed-core tier and the live
+component proxies/stub dispatch in one module, see
+``backends/go/emit.py::emit_placement`` and
+``tests/test_run_go.py::test_run_go_v3_typed_core_places_and_round_trips``. A
+document with **no components at all** (only top-level ``fn``/``type``/
+``extern``/``test`` declarations, nothing to boot) is still refused, but by
+``run.py``'s generic "nothing to run: no components in the composition" check
+that applies to every backend alike, not a go-specific v1/v2 boundary.
 
 Runtime availability is a gate, not a lie: with no go toolchain or no
 resolvable stc-go the driver *skips with a reason* and exits nonzero, exactly as
