@@ -18,9 +18,53 @@ const { flightsCancel, flightsReserve, paymentsCharge, paymentsRefund, recordRes
 // workflow-side BETWEEN compensations (HIGH 1). Never a per-activity timeout.
 const COMPENSATION_BUDGET_MS = 5000
 
-type SagaStep = { name: string; run: () => Promise<unknown> }
+type SagaStep = { name: string; run: () => Promise<unknown>; args: () => unknown[] }
 type Residue = Record<string, unknown>
 type SagaReport = { outstanding: Residue[]; worldRemaining: number; proof: string }
+
+// A compensation activity's error text is HOST TEXT this workflow did not
+// write, and it crosses into ApplicationFailure.details, which PERSISTS IN
+// TEMPORAL HISTORY for the namespace retention period, plus the residue
+// record and the live residue query (item 421 F7). `Secret[Str]` erases to
+// plain `string` in RevlActivities, so a compensation implementer gets no
+// type-level warning before a confidential value ends up embedded in a
+// thrown Error's message (e.g. `throw new Error('close failed for '+h)`).
+// Mirror of backends/typescript/bridge.ts's seamFailure/REDACTED_ARG (item
+// 421 F5): the values this compensation call was made with (SagaStep.args,
+// evaluated lazily so a write-ahead referent is read at failure time, not
+// frozen at its pre-acquire undefined) are scrubbed out of the error text
+// before it is kept anywhere, so the exception TYPE and the sentence around
+// it survive but the caller's own bytes do not.
+const REDACTED_ARG = '<redacted:arg>'
+const MIN_MATCHABLE_ARG = 3
+function argNeedles(value: unknown, into: Set<string>): void {
+  if (value === null || value === undefined || typeof value === 'boolean') return
+  if (typeof value === 'string') {
+    if (value.length >= MIN_MATCHABLE_ARG) into.add(value)
+    return
+  }
+  if (typeof value === 'number' || typeof value === 'bigint') {
+    const form = String(value)
+    if (form.length >= MIN_MATCHABLE_ARG) into.add(form)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) argNeedles(item, into)
+    return
+  }
+  if (typeof value === 'object') {
+    for (const item of Object.values(value as Record<string, unknown>)) argNeedles(item, into)
+  }
+}
+function redactResidueError(error: unknown, args: unknown[]): string {
+  let text = String(error)
+  const needles = new Set<string>()
+  argNeedles(args ?? [], needles)
+  for (const needle of [...needles].sort((a, b) => b.length - a.length)) {
+    if (needle && text.includes(needle)) text = text.split(needle).join(REDACTED_ARG)
+  }
+  return text
+}
 
 // The residue envelope revl recover guarantees (outstanding/worldRemaining/proof), exposed for live inspection while an aborting BookTrip run drains (attack 7).
 export const BookTripResidue = defineQuery<Residue[]>("BookTrip.residue")
@@ -32,9 +76,9 @@ export async function BookTrip(): Promise<void> {
   const residue: Residue[] = []
   setHandler(BookTripResidue, () => residue)
   try {
-    saga.push({ name: "flights.cancel", run: () => flightsCancel("ABC") })  // write-ahead: registered before the forward await
+    saga.push({ name: "flights.cancel", run: () => flightsCancel("ABC"), args: () => [] })  // write-ahead: registered before the forward await
     await flightsReserve("ABC")
-    saga.push({ name: "payments.refund", run: () => paymentsRefund("visa", 100n) })  // write-ahead: registered before the forward await
+    saga.push({ name: "payments.refund", run: () => paymentsRefund("visa", 100n), args: () => [] })  // write-ahead: registered before the forward await
     await paymentsCharge("visa", 100n)
     // clean completion: the saga stack is discharged, never run.
   } catch (err) {
@@ -51,7 +95,7 @@ export async function BookTrip(): Promise<void> {
       // the per-call cutoff is each compensation activity's
       // startToCloseTimeout, NOT this budget (HIGH 1).
       try { await step.run() }
-      catch (e) { residue.push({ kind: 'compensation-residue', name: step.name, error: String(e) }) }
+      catch (e) { residue.push({ kind: 'compensation-residue', name: step.name, error: redactResidueError(e, step.args()) }) }
     }
     // Residue sink (attack 7): a durable record, plus the same
     // envelope on the workflow-failure details, so a failed run
