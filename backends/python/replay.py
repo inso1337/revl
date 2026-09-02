@@ -1917,7 +1917,8 @@ class WriteAheadLog:
 
     def record_deferred_emission(self, *, receiver: str, method: str,
                                  args: list,
-                                 idempotency: Optional[str] = None) -> dict:
+                                 idempotency: Optional[str] = None,
+                                 register: Optional[str] = None) -> dict:
         """Append the class-(b) deferral-queue descriptor at ENQUEUE (item 245,
         docs/design/245-session-commit.md, Decision 3). The intent is logged
         here, at the call site of the deferred emission; the OUTCOME is a later
@@ -1932,7 +1933,15 @@ class WriteAheadLog:
         `receiver` is the required-service KEY, not the service, so the declared
         `Secret[T]` positions are resolved through the requiring component's
         `requires` map and, failing that, by operation name — the checker's own
-        keying (item 256 Slice 3, §7b)."""
+        keying (item 256 Slice 3, §7b).
+
+        item 440 §(b): `idempotency` carries the key VALUE captured at enqueue —
+        the thing a fresh-process re-issue must repeat for the remote to dedup —
+        and `register` the extern's declaration register (`keyed`/`declared`).
+        Both are what `revl.recovery`'s re-issue seam reads to decide whether an
+        OWED emission may be auto-fired after a crash; absent (the pre-440
+        default) means it never can be, which is the fail-closed direction. Both
+        are absent-by-default, so a pre-440 descriptor is byte-identical."""
         secret = self.secrets.crossing(method=method, key=receiver)
         record = {
             "record": "deferred-emission",
@@ -1941,6 +1950,7 @@ class WriteAheadLog:
                      "args": confidential.redact_args(args, secret, _describe)},
             "origin": {"key": receiver, "method": method},
             "idempotency": idempotency,
+            **({"register": register} if register else {}),
         }
         self._seq += 1
         self._write(record)

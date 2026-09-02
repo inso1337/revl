@@ -55,6 +55,44 @@ func Scan(s string) int64 {
 	return acc
 }
 
+// FirstAt mirrors `first_at`: the code-point index of the first scalar equal to
+// c, or -1. `range` walks code points, so the index is bookkeeping and nothing
+// re-walks the string.
+func FirstAt(s string, c int64) int64 {
+	var i int64
+	for _, r := range s {
+		if int64(r) == c {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
+// RunLen mirrors `run_len`: how many leading code points equal c. The index is
+// read AFTER the loop, so it pins that a rewritten scan still leaves it right.
+func RunLen(s string, c int64) int64 {
+	var i int64
+	for _, r := range s {
+		if int64(r) != c {
+			break
+		}
+		i++
+	}
+	return i
+}
+
+// Step2 mirrors `step2`: every other code point. The index advances by 2, so
+// the scan rewrite must refuse it; this is the negative control.
+func Step2(s string) int64 {
+	r := []rune(s)
+	var acc int64
+	for i := 0; i < len(r); i += 2 {
+		acc = addChecked(acc, int64(r[i]))
+	}
+	return acc
+}
+
 // Build mirrors `build`: xs joined with sep, trailing sep included.
 func Build(xs []string, sep string) string {
 	n := 0
@@ -108,6 +146,18 @@ func IndexOf(hay, needle string) int64 {
 	if needle == "" {
 		return 0
 	}
+	if !utf8.ValidString(hay) || !utf8.ValidString(needle) {
+		// An invalid byte is one U+FFFD code point everywhere else in the
+		// language, so it must compare as one here too; strings.Index would
+		// compare it as a raw byte. Same guard the emitted helper carries.
+		rh, rn := []rune(hay), []rune(needle)
+		for i := 0; i+len(rn) <= len(rh); i++ {
+			if slices.Equal(rh[i:i+len(rn)], rn) {
+				return int64(i)
+			}
+		}
+		return -1
+	}
 	b := strings.Index(hay, needle)
 	if b < 0 {
 		return -1
@@ -134,7 +184,7 @@ func Take(s string, a, b int64) string {
 	// so both offsets start there and are only pulled back if the walk finds
 	// the code point.
 	lo, hi, i := len(s), len(s), int64(0)
-	for off := range s {
+	for off, r := range s {
 		if i == a {
 			lo = off
 		}
@@ -142,9 +192,36 @@ func Take(s string, a, b int64) string {
 			hi = off
 			break
 		}
+		if r == utf8.RuneError {
+			if _, w := utf8.DecodeRuneInString(s[off:]); w == 1 && i >= a {
+				// An invalid byte inside the requested range. revl's Str is a
+				// sequence of code points and an invalid byte reads as one
+				// U+FFFD everywhere else in the language (revlStrCharAt
+				// answers U+FFFD for it too), so the result cannot be a shared
+				// substring and this is the one case that copies.
+				return string([]rune(s)[a:b])
+			}
+		}
 		i++
 	}
 	return s[lo:hi]
+}
+
+// Chars mirrors `chars` / revlStrSplit with an empty separator: one string per
+// code point. Each element is a substring, so it shares s's bytes and the only
+// allocation is the slice itself.
+func Chars(s string) []string {
+	out := make([]string, 0, utf8.RuneCountInString(s))
+	for off := 0; off < len(s); {
+		r, w := utf8.DecodeRuneInString(s[off:])
+		if r == utf8.RuneError && w == 1 {
+			out = append(out, string(utf8.RuneError))
+		} else {
+			out = append(out, s[off:off+w])
+		}
+		off += w
+	}
+	return out
 }
 
 // Render mirrors `render` (`Int.to_str`).

@@ -10,6 +10,23 @@ on:
   # changes; this only lets the workflow be `uses:`-called from the tag build.
   workflow_call:
 
+# One run per branch at a time. Agents push to a PR branch repeatedly while
+# iterating, and without this every push stacked another full matrix behind the
+# last one: the queue hit 16 runs deep with 2 executing, which made CI the
+# bottleneck the whole push-and-let-CI-test workflow exists to remove.
+# Superseded PR runs are cancelled because only the newest commit matters.
+# Runs on main are NOT cancelled: main's history is the signal, and dropping a
+# run there would leave a landed commit with no verdict.
+concurrency:
+  # The group carries the SHA on push, so a push to main is unique per commit
+  # and has nothing to cancel. A pull_request keeps a stable per-ref group, so a
+  # new push to the PR cancels the superseded run. Encoding the distinction in
+  # the GROUP rather than in cancel-in-progress is deliberate: the expression
+  # form cancelled main's runs anyway, which cost three merge commits their
+  # verdict.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: true
+
 # Go module resolution resilience. The go cross-tier tests download the pinned
 # stc-go module during `go test`, which intermittently fails verifying it against
 # the online checksum database (sum.golang.org stream errors) and reddens CI on a
@@ -256,6 +273,13 @@ jobs:
       # rides this job. The drift gate needs no toolchain and already runs in
       # the frontend job's plain `pytest tests/ -q`.
       - run: pytest tests/test_gate_crate_admit.py -q
+      # item 338: the committed rust CONSUMER example
+      # (examples/ecosystem-consumer-rs), built from outside the checkout with
+      # the crate as its only dependency. Its source-level contract checks run
+      # in the frontend job's plain `pytest tests/ -q`; the build-and-run half
+      # is toolchain-gated, so it rides this job or it executes nowhere (the
+      # item-445 rule: a skip is not a pass).
+      - run: pytest tests/test_gate_consumer_example_rs.py -q
       # item 336 slice 1: the rust LSP binary's byte-identity agreement against
       # `python -m revl.lsp`. REVL_LSP_PYTHON points it at this job's python.
       - run: PYTHONPATH=src REVL_LSP_PYTHON=$(which python) cargo test --manifest-path crates/revl-lsp/Cargo.toml

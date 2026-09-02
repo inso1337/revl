@@ -29,6 +29,22 @@ const argv = process.argv.slice(2)
 const only = argv.includes('--case') ? argv[argv.indexOf('--case') + 1] : null
 const withTiming = argv.includes('--timing')
 
+// Name the growth curve from the measured column instead of asserting it in
+// prose, so this line cannot go stale the way the pre-435(c) "grows as 2n^2+n"
+// text did. Sizes double, so the count ratio between consecutive rows is ~1 for
+// constant, ~2 for linear and ~4 for quadratic.
+function growth (sizes, counts) {
+  const ratios = []
+  for (let i = 1; i < counts.length; i++) {
+    if (counts[i - 1] === 0) return counts.every((c) => c === 0) ? 'no growth (0)' : 'n/a'
+    ratios.push(counts[i] / counts[i - 1])
+  }
+  if (ratios.length === 0) return 'n/a'
+  const avg = ratios.reduce((a, b) => a + b, 0) / ratios.length
+  const shape = avg < 1.4 ? 'CONSTANT' : avg < 2.8 ? 'LINEAR' : avg < 5.5 ? 'QUADRATIC' : 'SUPER-QUADRATIC'
+  return `${shape} in n (x${avg.toFixed(1)} per doubling of ${sizes[0]}..${sizes[sizes.length - 1]})`
+}
+
 function checkProvenance (mod) {
   for (const p of mod.provenance ?? []) {
     const text = readFileSync(join(HERE, 'emitted', p.file), 'utf8')
@@ -105,6 +121,7 @@ if (!only || only === scan.name) {
   const realFrom = Array.from
   let cps = 0
   const counting = function (...args) { const r = realFrom.apply(Array, args); cps += r.length; return r }
+  const emittedCol = []
   for (const n of scan.sizes) {
     const s = 'ab1cd2ef3gh4'.repeat(Math.ceil(n / 12)).slice(0, n)
     const row = []
@@ -114,9 +131,10 @@ if (!only || only === scan.name) {
       try { fn(s) } finally { Array.from = realFrom }
       row.push(cps)
     }
+    emittedCol.push(row[0])
     console.log(`  ${String(n).padEnd(8)}${row.map((c) => String(c).padStart(13)).join('')}`)
   }
-  console.log('  emitted grows as 2n^2 + n; memo and hand are n. Quadratic in the input length.')
+  console.log(`  emitted: ${growth(scan.sizes, emittedCol)}`)
 }
 
 // --- element-copy probe for the list-build case ----------------------------
@@ -124,10 +142,12 @@ const lb = await import(join(HERE, 'cases', 'list_build.ts'))
 if (!only || only === lb.name) {
   console.log('\n## list-build element copies (exact counts, no timing)')
   console.log('  n         emitted         hand')
+  const emittedCol = []
   for (const n of lb.sizes) {
     const e = lb.copiedElements(lb.emittedBuildFn, n)
     const h = lb.copiedElements(lb.handBuildFn, n)
+    emittedCol.push(e)
     console.log(`  ${String(n).padEnd(8)}${String(e).padStart(9)}${String(h).padStart(13)}`)
   }
-  console.log('  emitted grows as n(n-1)/2; hand copies nothing. Quadratic in the list length.')
+  console.log(`  emitted: ${growth(lb.sizes, emittedCol)}; hand copies nothing.`)
 }

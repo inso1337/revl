@@ -653,7 +653,8 @@ class _Canon:
 
     # -- the canonical export wrapper ------------------------------------
     def canon_export(self, fn: dict, package: str, iface: str,
-                     call_symbol: str | None = None) -> str:
+                     call_symbol: str | None = None,
+                     arena: bool = False) -> str:
         """A canonical-ABI wrapper for one boundary function/method.
 
         `fn` carries `name`/`params`/`returns` in the SAME shape whether it is a
@@ -662,6 +663,14 @@ class _Canon:
         default); for a service method it is the named provide-method function
         (`$__prov_<key>_<method>`), which carries the very same internal ABI a
         pure `fn` does, so exactly one wrapper shape serves both.
+
+        `arena` turns this wrapper into a per-call arena (item 432(e), reclaim
+        half): the bump pointer is rewound to the arena floor on the way out,
+        so everything the call allocated -- the host's own `cabi_realloc`
+        placement of the arguments included -- is released when the call
+        returns. Only `_canonical_module` may pass it, and only after
+        `_arena_safe` has proved this module keeps nothing in the heap across
+        calls; see that function for the proof obligation.
         """
         name = fn["name"]
         params = fn.get("params") or []
@@ -726,6 +735,16 @@ class _Canon:
             stmts.append("(local.set $area (global.get $__canon_ret_area))")
             stmts.append(self.store_canon(ret, f"(local.get {rv})", "(local.get $area)"))
             ret_expr = "(local.get $area)"
+
+        if arena:
+            # item 432(e) reclaim. The rewind is a POINTER move, never a write,
+            # so the result the host has yet to lift is still sitting in memory
+            # when this returns; the first byte that can overwrite it belongs to
+            # the next call, which a single-threaded component instance cannot
+            # start before the host has finished lifting this one. Placed after
+            # every statement and before `ret_expr` for the same reason: reading
+            # `$rv` through the rewound pointer reads memory that is still there.
+            stmts.append("(global.set $__hp (global.get $__canon_arena_base))")
 
         local_decl = " ".join(f"(local {nm} {wt})" for nm, wt in locals_)
         body = "\n    ".join(stmts)
@@ -909,13 +928,70 @@ def _name_provide_funcs(module: str) -> tuple[str, dict[str, str]]:
 _HEAP_GLOBAL = _re.compile(r"\(global \$__hp \(mut i32\) \(i32\.const (\d+)\)\)")
 
 
-def _canonical_module(core: str, canon: _Canon, exports: list[str]) -> str:
+#: Every mutable i32 global a module declares. An i32 global is the only place
+#: an emitted module can park a heap ADDRESS across two canonical calls, which
+#: is the one thing a per-call arena may not allow (item 432(e), reclaim half).
+_MUT_I32_GLOBAL = _re.compile(r"\(global (\$[^\s()]+) \(mut i32\)")
+#: A write to a global, with the head of its operand when that head is a
+#: constant. `group(2) is None` means "assigned something computed".
+_GLOBAL_SET = _re.compile(r"\(global\.set (\$[^\s()]+)\s*(\(i32\.const\b)?")
+
+
+def _arena_safe(core: str) -> tuple[bool, str]:
+    """Can every canonical export in `core` rewind the bump heap on the way out?
+
+    Item 432(e) left growth fixed and reclaim open: nothing is ever freed, so a
+    long-lived instance walks up to the host's cap for a workload whose working
+    set is one call. The fix is a per-call arena -- rewind `$__hp` to the floor
+    when a canonical export returns -- and it is sound exactly when NOTHING the
+    heap holds is still needed after the call that allocated it.
+
+    That is a decidable property of the emitted module, so it is CHECKED here
+    rather than assumed. A live-across-calls heap value has to be reachable
+    from a module-level cell, and this tier has exactly one kind: a global.
+    Immutable globals are const-initialised, so they can only name the return
+    area and the literal segments, both of which sit BELOW the floor and are
+    never handed out by `$alloc`. i64 globals hold `Int` values, not addresses.
+    That leaves the mutable i32 globals, and a mutable i32 global cannot be
+    holding an address if every write to it stores an `i32.const`: the
+    activation cursors (`$__step`, `$__dstep`) and the commit flag are written
+    that way, whereas a module-level `let` binding of a `Str`/`List`/record and
+    the witnessed-accumulator head (`$__mw_head`) are not, and those are the
+    modules that keep the old never-reclaim behaviour.
+
+    Returns `(safe, why_not)`; `why_not` is the reason a module was refused,
+    which the caller may quote.
+    """
+    if "(start " in core:
+        # a start function can allocate before any export runs, and the arena
+        # floor is the initial `$__hp`, which would rewind over it.
+        return False, "module has a start function"
+    for m in _MUT_I32_GLOBAL.finditer(core):
+        g = m.group(1)
+        if g == "$__hp":
+            continue                       # the bump pointer is not a payload
+        writes = [w for w in _GLOBAL_SET.finditer(core) if w.group(1) == g]
+        if not writes:
+            continue                       # never written; holds its const init
+        if any(w.group(2) is None for w in writes):
+            return False, (f"mutable i32 global {g} is assigned a computed "
+                           "value, which may be a heap address that outlives "
+                           "the call")
+    return True, ""
+
+
+def _canonical_module(core: str, canon: _Canon, exports: list[str],
+                      arena: bool = False) -> str:
     """`core` with the canonical boundary spliced in: the shared return area
     carved off the bottom of the bump heap, then cabi_realloc + the lift/lower
     library + one wrapper per boundary function.
 
     Must run AFTER every `canon.canon_export` call, since those are what size
     the return area and populate `canon.helpers`.
+
+    `arena` must be the `_arena_safe(core)` verdict the same caller passed to
+    `canon_export`: it is what decides whether `$__canon_arena_base` is
+    declared, and the wrappers reference it.
     """
     m = _HEAP_GLOBAL.search(core)
     if m is None:
@@ -937,7 +1013,30 @@ def _canonical_module(core: str, canon: _Canon, exports: list[str]) -> str:
             "  ;; cell serves every call instead of one bump allocation each.\n"
             f"  (global $__canon_ret_area i32 (i32.const {heap_start}))",
             1)
-    additions = ([canon.base_helpers(heap_start + area)]
+    floor = heap_start + area
+    if arena:
+        # item 432(e), reclaim half: the floor every canonical export rewinds
+        # `$__hp` to. It is `$__hp`'s own initial value -- the return area and
+        # the literal data segments are below it and stay put -- so the rewind
+        # frees exactly what the call allocated, the host's `cabi_realloc`
+        # placement of the arguments included, and the heap high-water mark
+        # stops depending on the call count. A global rather than a folded
+        # constant because the floor is only known here, after the wrappers
+        # that reference it have been rendered.
+        # NB `core` may already have been rewritten by the return-area splice
+        # above, so re-find the heap global rather than reusing `m`.
+        hp = _HEAP_GLOBAL.search(core)
+        if hp is None:                      # pragma: no cover - defended above
+            raise EmitError("heap global vanished while splicing the arena base")
+        core = core.replace(
+            hp.group(0),
+            f"{hp.group(0)}\n"
+            "  ;; item 432(e): the per-call arena floor. Every canonical export\n"
+            "  ;; rewinds $__hp here on the way out, so nothing a call allocates\n"
+            "  ;; survives it (see `_arena_safe` for why that is sound here).\n"
+            f"  (global $__canon_arena_base i32 (i32.const {floor}))",
+            1)
+    additions = ([canon.base_helpers(floor)]
                  + list(canon.helpers.values()) + exports)
     return _splice_canonical(core, additions)
 
@@ -957,8 +1056,9 @@ def _core_with_canonical(ir: dict, canon: _Canon, boundary: list[dict],
     """The `_V3Emitter` core module for this IR, with the canonical boundary
     (cabi_realloc + lift/lower library + one export per boundary function)
     spliced in just before the module's closing paren."""
-    # generate the exports first so `canon.helpers` is fully populated
-    exports = [canon.canon_export(fn, package, iface) for fn in boundary]
+    # the core comes first: item 432(e)'s per-call arena is only sound for a
+    # module that parks nothing in the heap across calls, and that verdict is
+    # read off the emitted core.
     modules = _emit_core({
         "ir_version": 3,
         "types": ir.get("types") or {},
@@ -969,7 +1069,11 @@ def _core_with_canonical(ir: dict, canon: _Canon, boundary: list[dict],
     core = modules.get("functions")
     if core is None:
         raise EmitError("no `functions` module was emitted for the canonical component")
-    return _canonical_module(core, canon, exports)
+    arena, _why = _arena_safe(core)
+    # generate the exports next so `canon.helpers` is fully populated
+    exports = [canon.canon_export(fn, package, iface, arena=arena)
+               for fn in boundary]
+    return _canonical_module(core, canon, exports, arena)
 
 
 def _service_core_with_canonical(ir: dict, canon: _Canon, component: dict,
@@ -989,6 +1093,11 @@ def _service_core_with_canonical(ir: dict, canon: _Canon, component: dict,
             f"no module emitted for component {name!r} (the canonical service "
             "boundary lowers a single provider component)")
     named_core, symbols = _name_provide_funcs(core)
+    # item 432(e): a component that keeps state -- a module-level binding of a
+    # compound, a witnessed accumulator -- keeps it in a mutable i32 global, and
+    # `_arena_safe` refuses exactly those, so a stateful service keeps the old
+    # never-reclaim heap and a stateless one gets the arena.
+    arena, _why = _arena_safe(named_core)
     exports = []
     for mname, spec in boundary:
         # resolve the provide export by its `.<method>` suffix so a realm-scoped
@@ -996,8 +1105,9 @@ def _service_core_with_canonical(ir: dict, canon: _Canon, component: dict,
         sym = _resolve_provide_symbol(symbols, mname)
         fn = {"name": mname, "params": spec.get("params") or [],
               "returns": spec.get("returns")}
-        exports.append(canon.canon_export(fn, package, iface, call_symbol=sym))
-    return _canonical_module(named_core, canon, exports)
+        exports.append(canon.canon_export(fn, package, iface, call_symbol=sym,
+                                          arena=arena))
+    return _canonical_module(named_core, canon, exports, arena)
 
 
 def _resolve_provide_symbol(symbols: dict[str, str], method: str) -> str:
