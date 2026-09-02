@@ -41,6 +41,20 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from .taint import REDACTED_SECRET
+
+
+def _has_redacted_arg(call: dict) -> bool:
+    """Whether a durable named-call descriptor has an argument the recorder
+    redacted because the author declared it `Secret[T]` (item 256 Slice 3).
+
+    A redacted argument is not a value: re-issuing the call with the placeholder
+    would address the WRONG referent (`World.key` is `receiver:args[0]`) and let
+    recovery report a miss as a clean rollback. So it is refused and surfaced as
+    residue instead — recovery loses the ability to re-issue THAT inverse, and
+    says so, rather than pretending it ran."""
+    return any(arg == REDACTED_SECRET for arg in (call.get("args") or []))
+
 
 class RecoveryError(RuntimeError):
     """A WAL could not be read or recovered."""
@@ -669,6 +683,29 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
                      "idempotency key, or finish this inverse by hand — its "
                      "at-most-once attempt is already spent (item 309)"))
             continue
+        if _has_redacted_arg(call):
+            # item 256 Slice 3: the descriptor's argument was declared `Secret[T]`
+            # and never reached the log, so this inverse is not reconstructible in
+            # a fresh process. Refuse rather than re-issue against the placeholder
+            # — that would address the wrong referent and report a miss as clean.
+            # No fence is spent: nothing was attempted.
+            restore_residue.append({"seq": seq, "referent": referent})
+            outstanding.append(_record(
+                "redacted-residue",
+                crossing=_crossing_of_descriptor(d),
+                attempted={"call": call.get("method"),
+                           "args": list(call.get("args") or []), "phase": 1},
+                error={"type": "redacted-argument",
+                       "message": "the inverse's argument was declared "
+                                  "`Secret[T]` and is redacted in the log, so "
+                                  "the call cannot be reconstructed — not "
+                                  "attempted"},
+                attempted_flag=False, outcome="unknown", referent=referent,
+                hint="a confidential value is never written to the WAL (it is "
+                     "plaintext at rest). Re-issue this inverse by hand with the "
+                     "value from its own store, or carry a non-confidential "
+                     "handle (an idempotency key, a row id) as the witness"))
+            continue
         # A DECLARED-idempotent inverse replays FREELY on every recovery run (no
         # fence, no bookkeeping) — `revl recover` is itself idempotent over the
         # declared subset (§3a). An UNDECLARED one takes its single fenced
@@ -706,6 +743,25 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
             # success (the forward emission was the deliverable). Skip, no residue.
             discharged_skipped.append({"seq": d.get("seq"), "referent": referent,
                                        "retained": False})
+            continue
+        if _has_redacted_arg(call):
+            # Same refusal as Phase 1: a compensation whose argument was declared
+            # `Secret[T]` cannot be re-issued from the log, so it is reported as
+            # residue rather than applied against the placeholder.
+            outstanding.append(_record(
+                "redacted-residue",
+                crossing=_crossing_of_descriptor(d),
+                attempted={"call": call.get("method"),
+                           "args": list(call.get("args") or []), "phase": 2},
+                error={"type": "redacted-argument",
+                       "message": "the compensation's argument was declared "
+                                  "`Secret[T]` and is redacted in the log, so "
+                                  "the call cannot be reconstructed — not "
+                                  "attempted"},
+                attempted_flag=False, outcome="unknown", referent=referent,
+                hint="the forward crossing is still out. Offset it by hand with "
+                     "the value from its own store, or carry a non-confidential "
+                     "handle as the compensation's argument"))
             continue
         world.apply_compensation(call)   # forced record-branch: never pops
         compensations_reissued.append({"seq": d.get("seq"), "referent": referent})

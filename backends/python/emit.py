@@ -1806,7 +1806,14 @@ class _ComponentEmitter:
             for spec in self.config_fields:
                 field = _ident(spec.get("name"), f"{where}: config field")
                 out.add(1, f"({field!r}, {spec.get('type')!r}, {spec.get('default')!r}),")
-            out.add(0, "])")
+            # item 256 Slice 3: the fields declared `Secret[T]`. The runtime keeps
+            # their values out of the `<name>.config` trace line (stdout under
+            # `revl run`, the `revl_load` response under MCP) while still handing
+            # the real value to the component. Emitted only when the author
+            # declared one, so every existing module stays byte-identical.
+            secret = [spec.get("name") for spec in self.config_fields
+                      if spec.get("secret")]
+            out.add(0, f"], secret={secret!r})" if secret else "])")
             out.add(0)
             out.add(0)
 
