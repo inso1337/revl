@@ -167,8 +167,11 @@ def _run_emitted_lifecycle(src: str, filename: str, expected_passes: int, tmp_pa
     pytest.importorskip(
         "cordis",
         reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)")
-    (tmp_path / "runtime.py").write_text(
-        (ROOT / "backends" / "python" / "runtime.py").read_text())
+    # `runtime.py` reads its sibling `confidential.py` (the item-256
+    # Slice 3 redaction choke point), so the scratch dir needs both.
+    for _module in ("runtime.py", "confidential.py"):
+        (tmp_path / _module).write_text(
+            (ROOT / "backends" / "python" / _module).read_text())
     (tmp_path / "app.py").write_text(_emit("python", compile_source(src, filename)))
     (tmp_path / "driver.py").write_text(
         "import warnings\n"

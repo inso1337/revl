@@ -382,6 +382,41 @@ def _is_host_valued(expr, scope) -> bool:
 IR_VERSION_V2 = 2  # emitted only when a compiled component uses realms/interception
 IR_VERSION_V3 = 3  # emitted when a program uses full-language features (fn/type)
 
+
+def _ir_params(named_types, secret_params=()) -> list:
+    """The IR `params` list for a declaration, carrying the `Secret[T]` marking.
+
+    `named_types` yields `(name, type)` pairs; `secret_params` is the index set
+    `taint.extract_and_normalize` stamped on the declaration for the positions
+    the author declared `Secret[T]`.
+
+    The qualifier itself is stripped from `type` before lowering (orthogonality:
+    the base checker and every emitter see bare types), so this flag is the ONLY
+    surviving statement that position `i` is a declared disclosure receiver. The
+    recorder reads it back to decide what a crossing's argument is allowed to
+    look like in the WAL and in an MCP response — the runtime cannot re-derive
+    confidentiality from a value.
+
+    Additive: absent unless the author wrote `Secret[T]`, so every existing IR
+    document stays byte-identical."""
+    secret = frozenset(secret_params or ())
+    return [{"name": name, "type": type_name,
+             **({"secret": True} if index in secret else {})}
+            for index, (name, type_name) in enumerate(named_types)]
+
+
+def _ir_config_field(field) -> dict:
+    """The IR entry for one component config field, carrying the `Secret[T]`
+    marking `taint.extract_and_normalize` stamped on it.
+
+    Same reason as `_ir_params`: the qualifier is stripped off `type` before
+    lowering, so the flag is the only surviving statement that this field holds
+    a credential. The emitted `ConfigSchema` reads it back to keep the value out
+    of the `<name>.config` trace line, which `revl run` prints and the MCP
+    session captures. Absent unless declared, so existing IR is byte-identical."""
+    return {"name": field.name, "type": field.type, "default": field.default,
+            **({"secret": True} if getattr(field, "secret", False) else {})}
+
 # ── IR expression-kind schema (roadmap item 76a) ─────────────────────────────
 # The complete set of expression kinds this frontend can lower, split by the
 # positions in which each can appear. This is the *registration point* for a
@@ -2996,7 +3031,9 @@ def _lower_externs(program: Program, filename: str, types: dict,
         entry: dict = {
             "name": decl.name,
             "class": decl.classification,
-            "params": [{"name": p.name, "type": p.type} for p in decl.params],
+            "params": _ir_params(
+                ((p.name, p.type) for p in decl.params),
+                getattr(decl, "secret_params", ())),
             "returns": decl.returns,
             "bodies": bodies,
             # item 396 option A: file-splice provenance, present only when a
@@ -3061,8 +3098,8 @@ def _lower_externs(program: Program, filename: str, types: dict,
             # emitter and driver reuse the component config path verbatim. Absent
             # unless the author wrote a `config` block, so every existing extern's
             # IR is byte-identical.
-            **({"config": [{"name": f.name, "type": f.type, "default": f.default}
-                           for f in decl.config]} if decl.config else {}),
+            **({"config": [_ir_config_field(f) for f in decl.config]}
+               if decl.config else {}),
             # item 257: the `validated` flag and the derived response schema, a
             # compile-time-constant dict the emit-side validate seam checks the
             # completion against. ADDITIVE: absent unless the author wrote
@@ -5459,7 +5496,8 @@ def check_and_lower(program: Program, ambient: dict | None = None,
                 **({"commutative": True} if svc.commutative else {}),
                 "methods": {
                     m.name: {
-                        "params": [{"name": p, "type": t} for p, t in m.params],
+                        "params": _ir_params(
+                            m.params, getattr(m, "secret_params", ())),
                         "returns": m.returns,
                         "emission": m.emission,
                         # only a *scoped* emission carries the key: bare
@@ -8003,7 +8041,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     lowered = {
         "name": comp.name,
         "source": comp.source or filename,
-        "config": [{"name": f.name, "type": f.type, "default": f.default} for f in comp.config],
+        "config": [_ir_config_field(f) for f in comp.config],
         # the IR carries the *qualified* wiring key (G2 / injection identity),
         # not the code-facing binding; for unqualified keys the two coincide,
         # so v1 documents stay byte-identical (docs/namespacing.md)
