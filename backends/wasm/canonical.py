@@ -1038,7 +1038,11 @@ def _canonical_module(core: str, canon: _Canon, exports: list[str],
             1)
     additions = ([canon.base_helpers(floor)]
                  + list(canon.helpers.values()) + exports)
-    return _splice_canonical(core, additions)
+    # item 432(b): sweep the ASSEMBLED module. Doing it here rather than inside
+    # the core emitter is what keeps `$alloc_str` (reached only from a lift
+    # wrapper) and drops `$str_cp_slice` (reached from nothing) in the same
+    # module -- a core-only sweep would have got both wrong.
+    return _emit_mod.prune_unreachable_funcs(_splice_canonical(core, additions))
 
 
 def _splice_canonical(core: str, additions: list[str]) -> str:
@@ -1059,13 +1063,17 @@ def _core_with_canonical(ir: dict, canon: _Canon, boundary: list[dict],
     # the core comes first: item 432(e)'s per-call arena is only sound for a
     # module that parks nothing in the heap across calls, and that verdict is
     # read off the emitted core.
+    # item 432(b): unpruned. The canonical wrappers spliced in below call
+    # helpers (`$alloc`, `$alloc_str`, the lift/lower library) that no core
+    # export reaches, so the sweep runs on the ASSEMBLED module instead --
+    # see `_canonical_module`.
     modules = _emit_core({
         "ir_version": 3,
         "types": ir.get("types") or {},
         "functions": ir.get("functions") or [],
         "externs": ir.get("externs") or [],
         "tests": [],
-    })
+    }, prune=False)
     core = modules.get("functions")
     if core is None:
         raise EmitError("no `functions` module was emitted for the canonical component")
@@ -1085,7 +1093,7 @@ def _service_core_with_canonical(ir: dict, canon: _Canon, component: dict,
     tier's INTERNAL ABI (`_ComponentEmitter._boundary_wty` — `Int` an i64 value,
     every compound an i32 pointer), which is exactly what the pure-`fn` wrapper
     consumes, so the SAME lift/lower library and wrapper serve both."""
-    modules = _emit_core(ir)
+    modules = _emit_core(ir, prune=False)   # item 432(b): swept after splicing
     name = component.get("name")
     core = modules.get(name)
     if core is None:
