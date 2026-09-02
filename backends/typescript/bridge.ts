@@ -18,6 +18,12 @@ import fs from 'node:fs'
 import net from 'node:net'
 import tls from 'node:tls'
 
+// The declared-`Secret[T]` value registry an emitted program fills at both ends
+// of a marking (item 421 F6). Imported rather than restated: the seam's error
+// channel and the host trace are two sinks on ONE marking, and a second set of
+// remembered values would be a second thing to keep in step.
+import { redactText } from './runtime.ts'
+
 // --- seam endpoints: a local UDS (default) or a network TCP + mTLS seam -------
 //
 // The node client mirrors backends/python/bridge.py's `Endpoint`/`TlsConfig`
@@ -458,8 +464,25 @@ function argNeedles(value: unknown, into: Set<string>): void {
 }
 
 /** The error text a provider-side failure is allowed to send back to the
- *  consumer, with this call's own argument values replaced by `REDACTED_ARG`.
- *  Longest needle first, so one that contains another leaves no tail behind. */
+ *  consumer: this call's own argument values replaced by `REDACTED_ARG`, and
+ *  THEN every value a declared `Secret[T]` marking registered replaced by
+ *  `REDACTED_SECRET`. Longest needle first within each stage, so one that
+ *  contains another leaves no tail behind.
+ *
+ *  Two stages because they answer two different questions, and the second one
+ *  the arguments cannot answer. A held credential — a `Secret[T]` config field,
+ *  a token an extern minted earlier — is not among THIS call's arguments, so
+ *  the argument scrub never sees it, and a provider message that quotes it
+ *  crossed the seam verbatim. `redactText` is the same registry the host trace
+ *  already funnels through (item 421 F6), reused rather than restated: one
+ *  marking, one set of remembered values, two sinks that read it.
+ *
+ *  The stages keep DISTINCT markers on purpose: `<redacted:arg>` says "a value
+ *  the caller passed in was here", `<redacted:secret>` says "a declared
+ *  `Secret[T]` was here", and a reader of a seam error should be able to tell
+ *  which. Ordering matters only in that the argument scrub runs first, so an
+ *  argument that is ALSO a registered secret is reported as the caller's own
+ *  data — the more specific of the two facts. */
 export function seamFailure(error: unknown, args: unknown[]): string {
   let text = String(error)
   const needles = new Set<string>()
@@ -467,7 +490,7 @@ export function seamFailure(error: unknown, args: unknown[]): string {
   for (const needle of [...needles].sort((a, b) => b.length - a.length)) {
     if (needle && text.includes(needle)) text = text.split(needle).join(REDACTED_ARG)
   }
-  return text
+  return redactText(text)
 }
 
 /** Provider side: export a declared surface from `ctx` over a Unix socket, so

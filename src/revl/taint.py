@@ -156,6 +156,67 @@ def _mentions_trusted(type_name: str | None) -> bool:
     return any(_mentions_trusted(a) for a in args)
 
 
+def mentions_secret(type_name: str | None) -> bool:
+    """True if a `Secret[...]` head appears anywhere the VALUE ITSELF reaches.
+
+    The sibling of :func:`_mentions_trusted`, and the rule that decides which
+    declarations get a confidentiality stamp in the IR. `top_qualifier` answers
+    only for the OUTERMOST head, which is where the qualifier is written in the
+    common case; a declaration that wraps the confidential payload in a type
+    constructor writes it one level in:
+
+        extern witnessed fn lease(...) -> Result[Secret[Str], Str]
+
+    The bytes crossing there are exactly as confidential as `Secret[Str]`'s, so
+    the marking has to follow the value rather than the spelling. `Result`,
+    `Opt`/`Option`, `List`, `Map`, a tuple and a declared record are all
+    containers whose value graph physically carries the secret bytes — and the
+    runtime funnels that consume this marking are themselves value-graph walks
+    (`confidential.register_secret_tree` / `redact_value` recurse into exactly
+    those containers), so recursing here is what makes the two halves agree.
+
+    The ONE argument position that is not a container is a FUNCTION type's:
+    `Fn[Secret[Str], Int]` (and its `(Secret[Str]) -> Int` spelling) declares
+    what a closure will one day be CALLED WITH, not what the closure value holds.
+    A closure carries no confidential bytes for a redactor to find, so marking it
+    would redact a `<function ...>` repr while the real disclosure — the call —
+    happens elsewhere and is caught at its own crossing. Descending there would
+    also silently promote whole containers of ordinary callbacks, which is
+    exactly the over-redaction `SecretIndex` is careful to bound.
+
+    Deliberately WIDER than what the static refusal walk mints (see
+    `CONFIDENTIAL_ORIGIN` below): a stamp only tells a runtime "these bytes are
+    confidential once they leave the process", so widening it can over-redact a
+    durable record at worst. Minting the origin more widely would newly REFUSE
+    programs that compile today, which is a language change and not this
+    module's business."""
+    if not type_name:
+        return False
+    head, args = parse_type(type_name)
+    if head == "Secret":
+        return True
+    if head == FN_HEAD or head == "Fn":
+        return False
+    return any(mentions_secret(a) for a in args)
+
+
+def secret_witness_position(type_name: str | None) -> bool:
+    """True if a witnessed extern's declared return puts a `Secret[...]` in the
+    position its WITNESS is read out of — the `Ok` arm of `Result[W, E]`.
+
+    The narrower sibling of :func:`mentions_secret`, and the one a WAL writer
+    wants. A witnessed extern's durable discharge-descriptor records the Ok
+    witness as the inverse's referent argument, so `Result[Secret[Str], Str]`
+    puts a confidential value on disk while `Result[Str, Secret[Str]]` — the
+    same declaration with the qualifier on the error arm — does not. Reading
+    `secret_return` alone would redact both and lose the second one's referent
+    for nothing."""
+    if not type_name:
+        return False
+    head, args = parse_type(type_name)
+    return head == "Result" and len(args) == 2 and mentions_secret(args[0])
+
+
 def _origin_of(capabilities) -> str:
     """The coarse origin label a crossing mints, derived from its declared
     capability scope, never guessed (Decision 2, the G8 caveat). `emission[web]`
@@ -286,15 +347,24 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             elif qual == "Untrusted":
                 model.untrusted_params.setdefault(name, {})[index] = _origin_of(())
             elif qual == "Secret":
+                # ...and, INSIDE the implementing body, the parameter still
+                # carries `confidential`. The declaration admits the crossing TO
+                # the receiver, never onward disclosure. Kept on the OUTERMOST
+                # qualifier alone: this one is a refusal input, and widening it
+                # would newly reject programs that compile today.
+                model.confidential_params.setdefault(
+                    name, {})[index] = CONFIDENTIAL_ORIGIN
+            if mentions_secret(type_str):
                 # item 256 Slice 3: a declared `Secret[T]` receiver (§7b). A
                 # `confidential` value is ADMITTED here and refused everywhere
                 # else — the dual of a `Trusted[T]` sink, on a disjoint origin.
+                # `mentions_secret`, not `top_qualifier`: a parameter that takes
+                # the confidential payload inside a container is receiving the
+                # same bytes, and the recorder that reads the surviving stamp
+                # redacts the ARGUMENT, so the container is what it must name.
+                # Admission-only, so widening it can never refuse a program that
+                # compiles today.
                 model.secret_receivers.setdefault(name, set()).add(index)
-                # ...and, INSIDE the implementing body, the parameter still
-                # carries `confidential`. The declaration admits the crossing TO
-                # the receiver, never onward disclosure.
-                model.confidential_params.setdefault(
-                    name, {})[index] = CONFIDENTIAL_ORIGIN
                 secret_indices.add(index)
             clean = strip_qualifiers(type_str)
             if clean != type_str:
@@ -313,14 +383,28 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             # override at the bottom of this loop can still stamp `secret` for a
             # bound emission cap, but the two never collapse onto one token.
             model.sources[ext.name] = CONFIDENTIAL_ORIGIN
-            # ...and the stamp the IR carries into the runtime (item 421 F6).
-            # `ext.returns` is stripped a few lines below, so this attribute is
-            # the only surviving record that the RETURN position is confidential
-            # (the return-side counterpart of `secret_params`). A backend reads
-            # it off the IR to register the produced value at its origin, which
-            # is what lets a sink with no positional marking of its own (the host
-            # trace an operator console prints) scrub it.
+        # The stamp the IR carries into the runtime (item 421 F6). `ext.returns`
+        # is stripped a few lines below, so this attribute is the only surviving
+        # record that the RETURN position is confidential (the return-side
+        # counterpart of `secret_params`). A backend reads it off the IR to
+        # register the produced value at its origin, which is what lets a sink
+        # with no positional marking of its own (the host trace an operator
+        # console prints, the durable WAL an inverse's referent is written to)
+        # scrub it.
+        #
+        # `mentions_secret`, not `top_qualifier`: a declaration that hands the
+        # confidential payload back inside a type constructor — the shape a
+        # fallible lease has to use, `Result[Secret[Str], Str]` — produces the
+        # very same bytes, and stamping only the unwrapped spelling left every
+        # fallible secret-returning crossing unmarked at its origin.
+        if mentions_secret(ext.returns):
             ext.secret_return = True
+        # ...and, narrower, whether the WITNESS position specifically is
+        # confidential. A witnessed extern's durable discharge-descriptor
+        # records the Ok witness as the inverse's referent argument, so this is
+        # the flag a WAL writer reads to keep a leased credential off disk.
+        if secret_witness_position(ext.returns):
+            ext.secret_witness = True
         params = []
         for i, p in enumerate(ext.params):
             params.append((i, p.type, _fnparam_setter(p)))
@@ -387,18 +471,23 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 elif qual == "Untrusted":
                     model.untrusted_params.setdefault(method.name, {})[i] = "input"
                 elif qual == "Secret":
-                    # item 256 Slice 3: a `Secret[T]` service-operation parameter
-                    # is a declared disclosure receiver — the ONE crossing that
-                    # admits a `confidential` value (§7b). Keyed by the operation
-                    # name, so an `emit s.take(x)` call site resolves to it.
-                    model.secret_receivers.setdefault(method.name, set()).add(i)
                     # the INSIDE half: the provide method implementing this
                     # operation sees the parameter as a `confidential` value, so
                     # disclosing it from the body is refused exactly as a call-site
                     # flow is. Without this the receiver body launders the
-                    # qualifier away and is a universal declassifier.
+                    # qualifier away and is a universal declassifier. Kept on the
+                    # OUTERMOST qualifier alone — a refusal input, see
+                    # `mentions_secret`.
                     model.confidential_params.setdefault(
                         method.name, {})[i] = CONFIDENTIAL_ORIGIN
+                if mentions_secret(ptype):
+                    # item 256 Slice 3: a `Secret[T]` service-operation parameter
+                    # is a declared disclosure receiver — the ONE crossing that
+                    # admits a `confidential` value (§7b). Keyed by the operation
+                    # name, so an `emit s.take(x)` call site resolves to it.
+                    # `mentions_secret` so a payload wrapped in a container is
+                    # marked at the same crossing (admission-only; see there).
+                    model.secret_receivers.setdefault(method.name, set()).add(i)
                     secret_indices.add(i)
                 new_params.append((pname, clean))
             method.params = new_params
@@ -429,7 +518,11 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     # §7b). Byte-identical for a field with no qualifier.
     for comp in getattr(program, "components", ()):
         for cfield in getattr(comp, "config", ()) or ():
-            if top_qualifier(cfield.type) == "Secret":
+            # `mentions_secret`, not `top_qualifier`: a config field that holds
+            # its credential inside a container (`Opt[Secret[Str]]`, the shape an
+            # optional API key takes) carries the same bytes into the run log and
+            # the `revl_load` MCP response, so it earns the same stamp.
+            if mentions_secret(cfield.type):
                 cfield.secret = True
             clean = strip_qualifiers(cfield.type)
             if clean != cfield.type:

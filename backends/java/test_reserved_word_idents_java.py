@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_source  # noqa: E402
 
 # reuse the sibling suite's toolchain probe + stub-compile helper
-from test_emit_java import JAVA, JAVAC, STUB_SOURCES  # noqa: E402
+from test_emit_java import JAVA, JAVAC, NO_JDK, STUB_SOURCES  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("revl_java_emit_rw", HERE / "emit.py")
 emit = importlib.util.module_from_spec(_spec)
@@ -69,7 +69,7 @@ def test_keyword_decls_and_uses_are_consistent():
         assert bad not in out
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_runs_keyword_named_function(tmp_path):
     """Compile the emitted class against the stubs and EXECUTE `go` — proving
     the keyword renames are consistent on the JVM."""
