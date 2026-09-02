@@ -91,9 +91,9 @@ was corrected by hand and had drifted back within a day.
 | backend-ir.md | needs-work | 11 |  |
 | backends-roadmap.md | needs-work | 44 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
-| boundary-policy.md | needs-work | 18 |  |
+| boundary-policy.md | needs-work | 22 |  |
 | bundle.md | needs-work | 0 |  |
-| capabilities.md | needs-work | 23 |  |
+| capabilities.md | needs-work | 28 |  |
 | capability-attenuation.md | needs-work | 21 |  |
 | capability-realm-placement.md | needs-work | 11 |  |
 | closures.md | needs-work | 3 |  |
@@ -131,7 +131,7 @@ was corrected by hand and had drifted back within a day.
 | guide-humans.md | stale-fixed | 0 | yes |
 | harness-gate-guide.md | needs-work | 2 |  |
 | holes.md | needs-work | 29 |  |
-| import-a2a.md | current | 1 |  |
+| import-a2a.md | current | 6 |  |
 | import-cordis.md | needs-work | 58 |  |
 | import-openapi.md | needs-work | 45 |  |
 | import-wit.md | needs-work | 29 |  |
@@ -149,14 +149,14 @@ was corrected by hand and had drifted back within a day.
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |
-| process.md | needs-work | 0 |  |
+| process.md | needs-work | 2 |  |
 | prompt-injection-resistance.md | needs-work | 38 |  |
 | prop-test.md | needs-work | 23 |  |
 | quarantine-tier.md | needs-work | 26 |  |
 | queries.md | needs-work | 43 |  |
 | records.md | needs-work | 13 |  |
 | registry-probe.md | needs-work | 15 |  |
-| registry.md | needs-work | 30 | yes |
+| registry.md | needs-work | 39 | yes |
 | rejections.md | needs-work | 66 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
@@ -186,8 +186,8 @@ was corrected by hand and had drifted back within a day.
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
-| truc.md | needs-work | 43 |  |
-| v2.0-roadmap.md | needs-work | 1273 | yes |
+| truc.md | needs-work | 47 |  |
+| v2.0-roadmap.md | needs-work | 1291 | yes |
 | verified-canary.md | needs-work | 22 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |

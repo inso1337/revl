@@ -389,12 +389,13 @@ CHECKS: list[tuple[str, str, str, object]] = [
 # Drivers.                                                                     #
 # --------------------------------------------------------------------------- #
 def run_blocks(*, write: bool) -> list[str]:
-    """Regenerate (or compare) every block. Ordered so that DOC-STATUS runs
-    last: its em-dash counts read the other docs, so it has to see them after
-    this pass has rewritten them."""
-    stale: list[str] = []
+    """Regenerate (or compare) every block, returning the ones that differed
+    from the committed bytes. Ordered so that DOC-STATUS runs last: its em-dash
+    counts read the other docs, so it has to see them after this pass has
+    rewritten them."""
+    changed: list[str] = []
     ordered = sorted(BLOCKS, key=lambda b: b[0] == "doc-status")
-    for key, rel, _source, render in ordered:
+    for key, rel, source, render in ordered:
         path = ROOT / rel
         text = path.read_text(encoding="utf-8")
         body = render(extract(text, key))
@@ -403,9 +404,10 @@ def run_blocks(*, write: bool) -> list[str]:
             continue
         if write:
             path.write_text(updated, encoding="utf-8")
+            changed.append(f"{rel}: block '{key}' regenerated (source: {source})")
         else:
-            stale.append(f"{rel}: block '{key}' is stale (source: {_source})")
-    return stale
+            changed.append(f"{rel}: block '{key}' is stale (source: {source})")
+    return changed
 
 
 def main() -> int:
@@ -429,8 +431,11 @@ def main() -> int:
         return 0
 
     if args.write:
-        stale = run_blocks(write=True)
-        print("docgen: blocks regenerated." if stale else "docgen: blocks already current.")
+        written = run_blocks(write=True)
+        for line in written:
+            print(f"  {line}")
+        print(f"docgen: {len(written)} block(s) regenerated."
+              if written else "docgen: blocks already current.")
         failures = [f for _, _, _, fn in CHECKS for f in fn()]
         if failures:
             print("\ndocgen: coverage checks still fail. These need PROSE, not a "
