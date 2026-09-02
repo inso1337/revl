@@ -576,14 +576,32 @@ _APPROVAL_SOURCE = (
 )
 
 
+@pytest.mark.skipif(
+    __import__("importlib.util", fromlist=["util"]).find_spec("cordis") is None,
+    reason="the ticket two-step is proven against a live cordis-py composition")
 def test_revl_call_surfaces_ticket_for_class_c_crossing(tmp_path):
+    """The composition is loaded from a `.rvl` file in a directory the operator
+    sanctioned (`revl mcp serve --root`), not from inline `source`: the server
+    does not trust the driving agent as a host-code author, so inline source
+    declaring `= @py { ... }` is refused at admission.
+
+    That is the right premise here rather than something to switch off. What
+    this pins is an agent CALLING an operator-deployed emission and needing a
+    ticket to do it — which is the class-(c) prompt's whole reason to exist. An
+    agent trusted to have written `announce` itself would hardly need anyone's
+    permission to run it."""
+    from revl.mcp import server as server_mod
     from revl.mcp.server import SESSION
 
+    deployed = tmp_path / "approval.rvl"
+    deployed.write_text(_APPROVAL_SOURCE, encoding="utf-8")
     sink = str(tmp_path / "sink.log")
     old_policy = SESSION.approval_policy
+    old_authoring = server_mod.AUTHORING
     SESSION.approval_policy = "auto"
+    server_mod.set_authoring_trust(roots=(str(tmp_path),))
     try:
-        loaded = _call("revl_load", {"source": _APPROVAL_SOURCE, "record": True})
+        loaded = _call("revl_load", {"files": [str(deployed)], "record": True})
         assert loaded["ok"] is True
 
         blocked = _call("revl_call", {"key": "ops", "method": "shout",
@@ -608,3 +626,4 @@ def test_revl_call_surfaces_ticket_for_class_c_crossing(tmp_path):
     finally:
         SESSION.approval_policy = old_policy
         _call("revl_unload", {})
+        server_mod.AUTHORING = old_authoring

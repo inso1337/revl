@@ -107,11 +107,37 @@ def _call(tool: str, arguments: dict) -> dict:
     return response["result"]["structuredContent"]
 
 
-def _load() -> dict:
-    loaded = _call("revl_load", {"source": LEAKY, "config": CONFIG,
+def _load(deployed: Path) -> dict:
+    loaded = _call("revl_load", {"files": [str(deployed)], "config": CONFIG,
                                  "record": True})
     assert loaded["ok"] is True, loaded
     return loaded
+
+
+@pytest.fixture
+def deployed(tmp_path):
+    """`LEAKY` as the OPERATOR deployed it: a `.rvl` file in a directory the
+    operator sanctioned when starting the server (`revl mcp serve --root`).
+
+    The MCP server does not trust the driving agent as a host-code author, so
+    inline `source` declaring `= @py { ... }` is refused at admission. That is
+    the right default here rather than something to switch off: these tests are
+    about a credential-holding composition leaking to the MODEL, and the model is
+    the agent driving the session — an operator who would not hand it the
+    `api_token` would certainly not hand it authorship of the extern that
+    returns one. So the composition is operator-authored and on disk (exactly as
+    the `run_once` fixture already treats it for the CLI half), and the agent
+    only names it. Nothing about the redaction under test changes with the load
+    input: the trace, timeline, fork and origin records are built by the runtime
+    from the booted composition either way."""
+    from revl.mcp import server as server_mod  # noqa: PLC0415
+
+    path = tmp_path / "leaky.rvl"
+    path.write_text(LEAKY, encoding="utf-8")
+    before = server_mod.AUTHORING
+    server_mod.set_authoring_trust(roots=(str(tmp_path),))
+    yield path
+    server_mod.AUTHORING = before
 
 
 @pytest.fixture(autouse=True)
@@ -259,10 +285,10 @@ def test_revl_run_does_not_print_a_secret_config_field(run_once):
 # ===========================================================================
 
 @needs_runtime
-def test_revl_load_does_not_echo_a_secret_config_field():
+def test_revl_load_does_not_echo_a_secret_config_field(deployed):
     """LEAK 3. The same trace line, captured into the `revl_load` response and
     handed to the agent driving the session."""
-    loaded = _load()
+    loaded = _load(deployed)
     assert CANARY not in json.dumps(loaded)
     line = next(event["detail"] for event in loaded["trace"]
                 if event.get("subject") == "Agent.config")
@@ -270,10 +296,10 @@ def test_revl_load_does_not_echo_a_secret_config_field():
 
 
 @needs_runtime
-def test_revl_timeline_does_not_hand_the_secret_to_the_model():
+def test_revl_timeline_does_not_hand_the_secret_to_the_model(deployed):
     """LEAK 4. `revl_timeline` is a real MCP tool: its response lands in a
     model's context window, the exact sink §7b singles out."""
-    _load()
+    _load(deployed)
     _call("revl_call", {"key": "ops", "method": "go", "args": ["u1"]})
 
     blob = json.dumps(_call("revl_timeline", {}))
@@ -283,10 +309,10 @@ def test_revl_timeline_does_not_hand_the_secret_to_the_model():
 
 
 @needs_runtime
-def test_revl_fork_report_does_not_hand_the_secret_to_the_model():
+def test_revl_fork_report_does_not_hand_the_secret_to_the_model(deployed):
     """LEAK 5. `revl_fork` enumerates the emissions that already crossed, each
     with its recorded arguments — the same record, a second reader."""
-    _load()
+    _load(deployed)
     _call("revl_call", {"key": "ops", "method": "go", "args": ["u1"]})
 
     blob = json.dumps(_call("revl_fork", {"component": "Agent", "at": -1}))
@@ -295,23 +321,23 @@ def test_revl_fork_report_does_not_hand_the_secret_to_the_model():
 
 
 @needs_runtime
-def test_a_call_argument_landing_on_a_secret_receiver_is_redacted_in_the_origin():
+def test_a_call_argument_landing_on_a_secret_receiver_is_redacted_in_the_origin(deployed):
     """The `origin` a call tags its steps with rides into the WAL and is
     rendered as `whoRan` by `:bisect`. `vault.store` is a provided operation
     whose parameter is declared `Secret[Str]`, so calling it directly puts a
     confidential value in that origin — redacted at the same capture point."""
-    _load()
+    _load(deployed)
     _call("revl_call", {"key": "vault", "method": "store", "args": [CANARY]})
     blob = json.dumps(_call("revl_timeline", {}))
     assert CANARY not in blob
 
 
 @needs_runtime
-def test_the_component_still_receives_the_real_config_value():
+def test_the_component_still_receives_the_real_config_value(deployed):
     """FALSE POSITIVE, and the point of the whole exercise: the component was
     granted the credential, so it still gets it. Only the log and the agent are
     fenced out."""
-    _load()
+    _load(deployed)
     assert _call("revl_call", {"key": "ops", "method": "go",
                                "args": ["u1"]})["result"] == 1
 
