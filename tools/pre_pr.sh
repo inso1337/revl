@@ -33,7 +33,7 @@ print("py3.11 clean")
 PY
 
 echo "== roadmap markers =="
-python3 tools/check_roadmap_markers.py --check-contradiction || fail=1
+python3 tools/check_roadmap_markers.py --check-contradiction --check-orphan || fail=1
 
 # The frontend suite runs tests/test_gate_crate_drift.py on every PR, so a
 # stale crate is a hard red. crates/revl-gate embeds emitted rust, which means

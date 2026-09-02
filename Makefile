@@ -30,13 +30,14 @@ pre-merge-affected:
 # can and cannot know, and CONTRIBUTING.md "Tracking work" for the discipline.
 # Add --require-issue once the GitHub-issue migration lands.
 roadmap-check:
-	python3 tools/check_roadmap_markers.py --check-contradiction
+	python3 tools/check_roadmap_markers.py --check-contradiction --check-orphan
 
 # The same tool with all four prose checks on: self-contradiction, dangling
 # delegation, orphaned findings, and single-tier fixes for language-wide
-# guarantees. RED on main as of 2026-09-02 and every finding is a real finding
-# with no owner, which is why CI runs only --check-contradiction for now. Run
-# this before writing a roadmap item and after closing one.
+# guarantees. --check-delegation and --check-tier-parity are still RED on main
+# as of 2026-09-02 and every finding is a real finding, which is why CI runs
+# contradiction + orphan only for now. Run this before writing a roadmap item
+# and after closing one.
 roadmap-check-all:
 	python3 tools/check_roadmap_markers.py --check-all
 
