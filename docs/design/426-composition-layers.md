@@ -9,7 +9,32 @@ row table in the IR and the manifest. `src/revl/composition.py`,
 `revl composition`, `docs/composition-rows.md`, `tests/test_composition_rows.py`.
 Item 424's residual R2 (the `granted` clause, its empty default and the
 `requires`-subset check) rode with it, which is where 424 slice A1 files it.
-S2 through S6 are still design only, and §11 says what each waits on.
+
+Slice S2 (§11), the fold, is BUILT: the `layer` document, the four levels
+(§3.1), the four operations (§3.2), the pure fold with withdrawals applied
+before admissions (§3.3), peer refusal with layer provenance (§3.4), address
+resolution in both spellings with refusal-never-no-op (§2.3, §2.4), `touches`,
+the invocation overlay, and `revl layer check`. `docs/composition-layers.md`,
+`tests/test_composition_layers.py`. R2's third rule (`granted` is never
+writable in a stack layer), which needed layers to exist, rode with it.
+
+Two surface deviations from this note, both deliberate and both recorded where
+they land:
+
+- **`configure @id with { ... }`, not `configure @id { ... }`** (§3.2's
+  spelling). A brace immediately after a label lexes as an `@id` HOST BODY
+  (`lexer.py:422-446`). The alternatives were composition context in the lexer
+  or a different shape; the shape changed, because `with { ... }` is the
+  spelling `spawn C with { ... }` and `intercept k with { ... }` already use and
+  it keeps the lexer context-free, which keeps the self-hosted lexer in sync for
+  nothing. `::` is likewise two `:` pieces rather than a new operator token, for
+  the same reason.
+- **A layer document's head is `layer NAME for COMPOSITION`, not `layer
+  origin::NAME`** (§6.1's sketch). The origin is read off where the document
+  lives and is never minted by a document (§1.2), so writing it on the head
+  would be the one place a document names its own origin.
+
+S3 through S6 are still design only, and §11 says what each waits on.
 
 **This document supersedes two earlier notes and they are both kept:**
 
@@ -682,14 +707,21 @@ composition Harness {
 }
 ```
 
-```revl sketch
-layer acme::pg for Harness {
-  replace key("db") with row @db from "acme/pg_database.rvl"
+```revl
+layer pg for Harness {
+  replace key("db") with row @db from "acme/pg_database.rvl" provides db
     component PgDatabase
     config { url: "postgres://primary:5432/app", pool: 8 }
   add row @metrics from "acme/metrics.rvl" provides metrics
 }
 ```
+
+As built (S2): the head is `layer pg for Harness`, not `layer acme::pg for
+Harness`. `acme` is the layer's ORIGIN, and §1.2 decides an origin is read off
+where the document lives rather than written by it — a document naming its own
+origin is the one thing the scoping rule forbids. `provides` is likewise
+required on the replacement row, because §1.3's assertion is what makes the
+document unable to lie about the wiring, and a replacement is a row.
 
 Surface points that carry weight:
 

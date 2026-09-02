@@ -1,0 +1,19 @@
+{
+  "name": "agent-prefilter-js",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A third-party JavaScript consumer of the revl admission gate, as a wasm component transpiled by jco. Refuses locally; never admits.",
+  "license": "Apache-2.0",
+  "bin": {
+    "agent-prefilter-js": "./prefilter.mjs"
+  },
+  "scripts": {
+    "build": "python3 ../../tools/build_gate_js.py --out ./dist --check-surface",
+    "prefilter": "node prefilter.mjs candidates/",
+    "serve": "node serve.mjs"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "1.32.1"
+  }
+}
