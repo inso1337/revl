@@ -2583,27 +2583,30 @@ def _check_witnessed_inverse(decl, extern_class: dict, emitting_fns: set,
                                 emitting_witness, refuse=_refuse)
 
 
-# item 309: the idempotency register partial order (design §2, §"question 4").
-# `declared` (a trust-me claim) is the floor; `keyed` (dedup-by-construction on a
-# named key) and `shape-proven` (a statically-checked restore-to-recorded-value
-# native body) are the two STRONG peers, either satisfying a strong floor. The
-# 290 `requires register <level>` and 309 `requires idempotent-teardown(strength)`
-# policies read this order.
+# item 309: the idempotency register order (design §2, §"question 4"). The
+# register set is exactly `{declared, keyed, read}`. `declared` (a trust-me
+# claim) is the floor; `keyed` (dedup-by-construction on a named key) is the
+# strong emission register. The 290 `requires register <level>` and 309
+# `requires idempotent-teardown(strength)` policies read this order.
 # `strong` is a policy FLOOR level only (never an actual IR register): it means
-# "any strong register", so it ranks with the two strong peers at 1.
+# "any register above the trust-me floor", so it ranks with `keyed` at 1.
 # item 440 adds the third tier, `read`, at the TOP of the order: a call that
 # changes nothing is re-dispatchable with no key, no fence and no reconciliation,
-# which is strictly stronger than dedup-by-key. Only `undo pure` produces it, so
-# no existing program's register or policy verdict moves.
-_REGISTER_RANK = {"declared": 0, "keyed": 1, "shape-proven": 1, "strong": 1,
-                  "read": 2}
+# which is strictly stronger than dedup-by-key. Only `undo pure` produces it.
+# item 207 REMOVED a fourth name, `shape-proven`, which sat here as a peer of
+# `keyed` for a check nothing ever ran. See `_idempotent_register` below for why
+# the check cannot be written against today's language, and
+# `docs/design/207-checkable-extern-body.md` for why the name's absence changes
+# no verdict: its designed provenance was an inverse BODY, and every set that
+# accepted it grades a forward EMISSION.
+_REGISTER_RANK = {"declared": 0, "keyed": 1, "strong": 1, "read": 2}
 
 #: item 440: the registers a fresh-process `recover` may RE-DISPATCH without
 #: spending a fence and without escalating to an operator. `read` because the
-#: call changes nothing (there is no outcome to be ambiguous about); `keyed` /
-#: `shape-proven` because a second issue is dedup-safe by construction. Every
-#: other register — and, crucially, NO register at all — stays fenced.
-REDISPATCH_FREE = frozenset({"read", "keyed", "shape-proven"})
+#: call changes nothing (there is no outcome to be ambiguous about); `keyed`
+#: because a second issue is dedup-safe by construction. Every other register —
+#: and, crucially, NO register at all — stays fenced.
+REDISPATCH_FREE = frozenset({"read", "keyed"})
 
 
 def _idempotent_register(decl) -> str:
@@ -2613,13 +2616,15 @@ def _idempotent_register(decl) -> str:
     (a bare `idempotent` emission, an `undo idempotent` over a host body) is the
     author's `declared` claim, machine-checked only for shape.
 
-    TODO(309-slice4) is BLOCKED, not merely undone, and the blocker is in the
-    language rather than in this function. `shape-proven` is designed as a
-    SYNTACTIC check over a restore-to-recorded-value inverse body (design §2:
-    "every write is `set(target, w.field)`, no reads of current state, no deltas,
-    no appends"), which is last-writer-wins and therefore idempotent by
-    construction. Running that check needs a body the checker can READ, and there
-    is none:
+    Item 309 slice 4 proposed a fourth register, `shape-proven`, for an inverse
+    whose body PASSES a syntactic check (design §2: "every write is
+    `set(target, w.field)`, no reads of current state, no deltas, no appends"),
+    which is last-writer-wins and therefore idempotent by construction. Item 207
+    deleted the name; this function is where the reasons live, because this is
+    the function that would have produced it.
+
+    First, the check cannot be written: running it needs a body the checker can
+    READ, and there is none.
 
     * An extern has only HOST bodies. `parser.py::_extern` refuses a declaration
       with no `@backend { ... }` (or `file`/`ref`) body, so every extern body is
@@ -2642,13 +2647,35 @@ def _idempotent_register(decl) -> str:
       current state, and the rule excludes exactly that. So the first adopters
       would not have earned the tier anyway.
 
-    Until an extern can carry a revl-expressed body the rule can be run over,
-    this function returns `declared` for every native `undo idempotent` body,
+    So this function returns `declared` for every native `undo idempotent` body,
     which is the fail-closed direction the whole lattice is built on: on any
-    ambiguity, fall back to the weaker claim. `shape-proven` therefore stays a
-    tier the partial order ACCEPTS (`_REGISTER_RANK`, `REDISPATCH_FREE`) and
-    nothing produces; `tests/test_idempotent_inverse_309.py` pins that, so the
-    day a body form arrives the tripwire says which promise to keep.
+    ambiguity, fall back to the weaker claim.
+
+    Second, and this is why item 207 deleted the name rather than leaving it
+    parked: the tier would not have bought a verdict even fully built. Its
+    provenance is an inverse BODY, and the register field is provenance-disjoint
+    by classification — `idempotent` is emission-only and an emission cannot
+    declare `undo` — so an inverse-family register can never appear on the owed
+    DEFERRED EMISSION that `REDISPATCH_FREE`, the audit's `owed-emission` branch
+    and the Temporal backend's `_RETRY_EARNING_REGISTERS` all grade. And in the
+    one consumer that does read an inverse's register,
+    `recovery.py::_replay_tier`, a shape-proven inverse and a declared-idempotent
+    one both replay `free`. `tests/test_207_checkable_extern_body.py` asserts
+    each of those structurally, and is the tripwire that fails if a future change
+    makes them false.
+
+    The gap underneath the proposal is real and NOT closed by the deletion: no
+    local MUTATING inverse can reach a strong policy floor, because `keyed` is
+    emission-only and `read` requires the inverse to change nothing. The answer
+    to that already ships and needs no language change — pair the register floor
+    with an evidence floor, `capability fs requires register declared` plus
+    `requires evidence [inverse-roundtrip pass, attestation valid]`, which runs
+    309's own value-aware double-undo against the real `@py` body and catches a
+    lying declaration. A syntactic shape rule could not: it grades declared leaf
+    algebras rather than behaviour, and its own "no reads of current state" rule
+    rejects all four of `stdlib/fs.rvl`'s inverses, each of which branches on
+    `lexists_confined`. See `docs/crash-recovery.md` §4b and
+    `docs/design/207-checkable-extern-body.md`.
 
     item 440: `undo pure <inverse>(result)` is the READ tier — the author states
     the inverse OBSERVES and does not mutate, so re-issuing it is observationally
@@ -2663,11 +2690,9 @@ def _idempotent_register(decl) -> str:
 
 def _register_satisfies(actual: str | None, floor: str) -> bool:
     """True when the register `actual` meets or exceeds the policy `floor` under
-    309's PARTIAL order. `None` (no idempotency claim) never satisfies a floor.
-    `keyed` and `shape-proven` are peers: either satisfies a strong floor, and
-    neither satisfies the other only if the floor names the specific peer — which
-    the strength grammar never does (it names `declared`/`keyed`/`shape-proven`
-    as a MINIMUM rank, so the two strong forms are interchangeable at rank 1)."""
+    309's order. `None` (no idempotency claim) never satisfies a floor. The floor
+    names a MINIMUM rank, so `strong` and `keyed` are interchangeable at rank 1
+    and 440's `read` satisfies both."""
     if actual is None:
         return False
     return _REGISTER_RANK.get(actual, -1) >= _REGISTER_RANK.get(floor, 0)
@@ -3493,9 +3518,9 @@ def _lower_externs(program: Program, filename: str, types: dict,
             # at-most-once INVERSE (undo slot); `idempotent`/`idempotency_key`
             # mark a re-deliverable emission (bare = trust-me, keyed = by
             # construction). `register` is the per-declaration honesty tier the
-            # audit prints and the 290/309 policy floors read (partial order:
-            # declared < keyed, declared < shape-proven; keyed/shape-proven are
-            # peers) (docs/design/309-idempotent-inverse.md, §2, §"question 4").
+            # audit prints and the 290/309 policy floors read (order:
+            # declared < keyed < read)
+            # (docs/design/309-idempotent-inverse.md, §2, §"question 4").
             # item 421 F6: this extern's DECLARED return carried `Secret[T]`, so
             # its result is where a confidential value ENTERS the value world
             # (item 256 §7a). `taint.py` strips the qualifier before lowering, so

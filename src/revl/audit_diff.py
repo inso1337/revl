@@ -236,8 +236,20 @@ def _capability_registers(ir: dict) -> dict:
     """Map each capability token an idempotent extern scopes to its declaration
     register (item 309/290, §3.2). An extern's register attaches to every
     capability token in its `capabilities` scope; a token declared by several
-    externs takes the STRONGEST register (the floor the policy can safely
-    assert). Absent for a token no idempotent extern scopes."""
+    externs takes the WEAKEST register. Absent for a token no idempotent extern
+    scopes.
+
+    WORST-WINS is the direction 290 §3.2 specifies, and the only direction a
+    refusal rule can use: "the effective register of a capability is the WEAKEST
+    among the declarations behind it. One bare `declared` inverse beside three
+    keyed ones fails a `keyed` floor." A register floor asks whether EVERY
+    declaration behind the token meets it, so the map has to carry the floor the
+    weakest declaration can support — folding strongest-wins would let one keyed
+    declaration carry bare-`declared` siblings on the same token past a `keyed`
+    or `strong` floor, which is the fail-open direction in a rule whose only job
+    is to refuse. The sibling rule `policy._teardown_violations` grades the same
+    declarations worst-wins by construction (it walks every recovery-surface
+    entry), so both register rules now read the same convention."""
     from .lower import _REGISTER_RANK  # noqa: PLC0415 — the partial order
 
     out: dict = {}
@@ -246,7 +258,7 @@ def _capability_registers(ir: dict) -> dict:
         for token in tokens:
             prior = out.get(token)
             if prior is None or _REGISTER_RANK.get(register, -1) \
-                    > _REGISTER_RANK.get(prior, -1):
+                    < _REGISTER_RANK.get(prior, -1):
                 out[token] = register
 
     for ext in ir.get("externs") or []:
