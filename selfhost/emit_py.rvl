@@ -696,6 +696,18 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
     for (p of value_list(value_field(ext, "params"))) { ps = ps.push(mangle(value_str(value_field(p, "name")))) }
     var kw = "def"
     if (value_bool(value_field(ext, "async"))) { kw = "async def" }
+    // item 421 F6 (ported per item 429(d)): the extern's declared return carried
+    // `Secret[T]`, so its result is where a confidential value ENTERS the value
+    // world (item 256 §7a). `taint.py` strips the qualifier and leaves
+    // `externs[i].secret_return` as the only surviving record of it, so the
+    // decorator is emitted from that stamp: one wrapper per declaration rather
+    // than one per call site, which is what lets a sink with no positional
+    // marking of its own (the host trace an operator console prints) scrub it.
+    // Emitted ONLY for a `Secret[T]`-returning extern, so every other module is
+    // byte-identical.
+    if (value_bool(value_field(ext, "secret_return"))) {
+      out = out.push("@".concat(runtime_ref("secret_result")))
+    }
     out = out.push(`${kw} ${name}(${ps.join(", ")}):`)
     let body = dedent(strip_nl(value_str(value_field(value_field(ext, "bodies"), "py"))))
     if (body != "") {
@@ -814,6 +826,10 @@ fn runtime_ref(name: Str) -> Str {
   if (name == "ConfigSchema") { return "_revl_ConfigSchema" }
   if (name == "schedule_every") { return "_revl_schedule_every" }
   if (name == "schedule_after") { return "_revl_schedule_after" }
+  // item 421 F6 (ported per item 429(d)): the two declared-`Secret[T]` markings
+  // the EMITTED program carries.
+  if (name == "mark_secret") { return "_revl_mark_secret" }
+  if (name == "secret_result") { return "_revl_secret_result" }
   return name
 }
 
@@ -1062,17 +1078,55 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
   return { lines: [line(indent, `<<UNSUPPORTED-METHODSTEP:${kind}>>`)], counter: counter }
 }
 
+// item 421 F6 (ported per item 429(d)): the SURFACE names of this method's
+// params that its SERVICE declares `Secret[T]`. The qualifier itself is stripped
+// in `taint.py`, so the service spec's `params[i].secret` stamp is the only
+// surviving record that the position is confidential, the same record
+// `confidential.SecretIndex` reads in the recorder. A method's param names are
+// its own and may differ from the declared ones (only the arity must agree), so
+// the stamp is read BY INDEX off the declaration and the name comes from the
+// method. `specs` is the service's `methods` record, reached by threading the
+// services table down from `emit_py_src`: the method IR node alone cannot see
+// this, which is exactly why the self-host was blind to it.
+fn method_secret_params(m: Any, specs: Any) -> List[Str] {
+  let declared = value_list(value_field(value_field(specs, value_str(value_field(m, "name"))), "params"))
+  var out = []
+  var i = 0
+  for (p of value_list(value_field(m, "params"))) {
+    if (i < declared.length() && value_bool(value_field(declared[i], "secret"))) {
+      out = out.push(mangle(value_str(p)))
+    }
+    i += 1
+  }
+  return out
+}
+
 // `_method`: one provide-method as a Python `def` (sync only in this slice),
 // threading the shared timer/effect counter across its body steps.
-fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int) -> Emit {
+fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any) -> Emit {
   let name = mangle(value_str(value_field(m, "name")))
   var head = `def ${name}(self`
   for (p of value_list(value_field(m, "params"))) { head = head.concat(", ").concat(mangle(value_str(p))) }
   head = head.concat("):")
   var out = []
   out = out.push(line(indent, head))
+  // A param the service declared `Secret[T]` is a declared DISCLOSURE RECEIVER.
+  // Registering the value at the head of the receiver is what lets the runtime's
+  // `_record` scrub it out of the operator console trace when the body goes on
+  // to use it as a `Map` key (the shipped `demo/components/user_cache.rvl`
+  // idiom), a `pool.query`, or a stream item. Emitted ONLY for a method that
+  // actually declares one, so every other emitted module is byte-identical.
+  let secret_params = method_secret_params(m, specs)
+  if (secret_params.length() > 0) {
+    out = out.push(line(indent + 1, `${runtime_ref("mark_secret")}(${secret_params.join(", ")})`))
+  }
   let body = value_list(value_field(m, "body"))
-  if (body.length() == 0) { out = out.push(line(indent + 1, "pass")); return { lines: out, counter: counter } }
+  if (body.length() == 0) {
+    // the mark is a statement in its own right, so a marked method with an empty
+    // body needs no `pass` (mirrors the reference's `if not secret_params`).
+    if (secret_params.length() == 0) { out = out.push(line(indent + 1, "pass")) }
+    return { lines: out, counter: counter }
+  }
   var c = counter
   for (s of body) {
     let se = method_step(s, indent + 1, provide_name, name, comp_name, c)
@@ -1085,9 +1139,12 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
 // `_provide`: the provision class, its methods, and the runtime-derived
 // revertible provision (yield the disposer, then populate). Threads the counter
 // across its methods (a method-body effect shares the component's counter).
-fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int) -> Emit {
+fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any) -> Emit {
   let name = mangle(value_str(value_field(step, "name")))
   let svc = value_str(value_field(step, "service"))
+  // item 421 F6: the provided service's method specs, the only place the
+  // `Secret[T]` param stamps survive.
+  let specs = value_field(value_field(services, svc), "methods")
   let cls = "_".concat(pascal(name))
   var out = []
   out = out.push(line(indent, `class ${cls}:`))
@@ -1097,7 +1154,7 @@ fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int) -> Emit {
   var c = counter
   for (m of methods) {
     out = out.push("")
-    let me = method_lines(m, indent + 1, name, comp_name, c)
+    let me = method_lines(m, indent + 1, name, comp_name, c, specs)
     out = out.concat(me.lines)
     c = me.counter
   }
@@ -1129,7 +1186,7 @@ fn timer_emit(step: Any, indent: Int, counter: Int) -> Emit {
 
 // `_body_step`: one activation-body step -> its lines (with the reference's
 // trailing blank), threading the timer counter.
-fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int) -> Emit {
+fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any) -> Emit {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect") {
     var out = []
@@ -1171,13 +1228,13 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int) -> Emit {
   if (kind == "if") {
     var out = [line(indent, `if ${cexpr(value_field(step, "cond"))}:`)]
     var c = counter
-    let te = emit_body_steps(value_list(value_field(step, "then")), indent + 1, comp_name, c)
+    let te = emit_body_steps(value_list(value_field(step, "then")), indent + 1, comp_name, c, services)
     out = out.concat(te.lines)
     c = te.counter
     let els = value_list(value_field(step, "else"))
     if (els.length() > 0) {
       out = out.push(line(indent, "else:"))
-      let ee = emit_body_steps(els, indent + 1, comp_name, c)
+      let ee = emit_body_steps(els, indent + 1, comp_name, c, services)
       out = out.concat(ee.lines)
       c = ee.counter
     }
@@ -1191,7 +1248,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int) -> Emit {
     return { lines: out, counter: e.counter }
   }
   if (kind == "provide") {
-    let pe = provide_lines(step, indent, comp_name, counter)
+    let pe = provide_lines(step, indent, comp_name, counter, services)
     var out = pe.lines
     out = out.push("")
     return { lines: out, counter: pe.counter }
@@ -1201,11 +1258,11 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int) -> Emit {
   return { lines: out, counter: counter }
 }
 
-fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int) -> Emit {
+fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int, services: Any) -> Emit {
   var out = []
   var c = counter
   for (s of steps) {
-    let e = body_step(s, indent, comp_name, c)
+    let e = body_step(s, indent, comp_name, c, services)
     out = out.concat(e.lines)
     c = e.counter
   }
@@ -1226,8 +1283,29 @@ fn body_has_timer(steps: List[Any], mode: Str) -> Bool {
   return false
 }
 
+// item 421 F6: does any provide-method in these body steps (walking `if`
+// branches, as `body_has_timer` does) declare a `Secret[T]` param? Gates the
+// `mark_secret` import EXACTLY where `method_lines` emits the call, so a
+// secret-free document's import line is byte-identical.
+fn body_has_secret_param(steps: List[Any], services: Any) -> Bool {
+  for (s of steps) {
+    let k = value_str(value_field(s, "step"))
+    if (k == "provide") {
+      let specs = value_field(value_field(services, value_str(value_field(s, "service"))), "methods")
+      for (m of value_list(value_field(s, "methods"))) {
+        if (method_secret_params(m, specs).length() > 0) { return true }
+      }
+    }
+    if (k == "if") {
+      if (body_has_secret_param(value_list(value_field(s, "then")), services)) { return true }
+      if (body_has_secret_param(value_list(value_field(s, "else")), services)) { return true }
+    }
+  }
+  return false
+}
+
 // One component: the `_<snake>_apply` closure and its plugin dict.
-fn component_body(comp: Any) -> List[Str] {
+fn component_body(comp: Any, services: Any) -> List[Str] {
   let name = mangle(value_str(value_field(comp, "name")))
   let sn = snake(name)
   var out = []
@@ -1256,7 +1334,7 @@ fn component_body(comp: Any) -> List[Str] {
   // post-activation abort's activation-body offsets are drained after Phase 1
   // instead of lost. Mirrors backends/python/emit.py (byte-agreement oracle).
   out = out.push(line(2, "yield _revl_frame.begin"))
-  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0)
+  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0, services)
   out = out.concat(e.lines)
   out = out.push(line(2, "yield _revl_frame.drain"))
   out = out.push("")
@@ -1649,6 +1727,20 @@ pub fn emit_py_src(ir: Any) -> Str {
   for (c of components) {
     if (value_list(value_field(c, "config")).length() > 0) { need_config = true }
   }
+  // item 421 F6 (ported per item 429(d)): the two declared-`Secret[T]` marking
+  // imports, each gated on EXACTLY the condition that emits its call, so a
+  // secret-free document's import line is unchanged. `secret_result` is gated
+  // from the extern list rather than through a component, because the externs
+  // are rendered outside any component emitter (the reference gates it in the
+  // same place, for the same reason).
+  var need_mark_secret = false
+  for (c of components) {
+    if (body_has_secret_param(value_list(value_field(c, "body")), value_field(ir, "services"))) { need_mark_secret = true }
+  }
+  var need_secret_result = false
+  for (e of value_list(value_field(ir, "externs"))) {
+    if (value_bool(value_field(e, "secret_return"))) { need_secret_result = true }
+  }
   // Collect the needed imports in any order; `list_sort` fixes the canonical
   // codepoint order below. Each alias-bearing name carries its `_revl_` alias.
   var imports = []
@@ -1657,8 +1749,10 @@ pub fn emit_py_src(ir: Any) -> Str {
   if (ir_uses_host_root(ir, "Job")) { imports = imports.push("Job") }
   if (ir_uses_host_root(ir, "Map")) { imports = imports.push("Map") }
   if (ir_uses_host_root(ir, "Pool")) { imports = imports.push("Pool") }
+  if (need_mark_secret) { imports = imports.push("mark_secret as _revl_mark_secret") }
   if (need_after) { imports = imports.push("schedule_after as _revl_schedule_after") }
   if (need_every) { imports = imports.push("schedule_every as _revl_schedule_every") }
+  if (need_secret_result) { imports = imports.push("secret_result as _revl_secret_result") }
   if (imports.length() > 0) {
     let sorted_imports = list_sort(list_dedup(imports))
     out = out.push("from runtime import ".concat(sorted_imports.join(", ")))
@@ -1695,7 +1789,7 @@ pub fn emit_py_src(ir: Any) -> Str {
   out = out.push("")
   out = out.push("")
   for (c of components) {
-    out = out.concat(component_body(c))
+    out = out.concat(component_body(c, value_field(ir, "services")))
     out = out.push("")
     out = out.push("")
   }
