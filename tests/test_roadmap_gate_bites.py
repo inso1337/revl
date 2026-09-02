@@ -115,6 +115,40 @@ def test_a_does_not_fire_on_a_past_tense_restatement():
     assert gate.contradiction_findings(_A_RETROSPECTIVE) == []
 
 
+# The other three false positives this check produced while it was being
+# built, each measured against the real file and each fixed by a bound rather
+# than by loosening the check. They are pinned here so the bounds cannot be
+# quietly removed.
+def test_a_does_not_read_not_fixed_by_x_as_a_contradiction():
+    """Item 422 F7: "**NOT fixed by refusing**" says HOW, not that it is open."""
+    text = SECTION + """422. **FS CONFINEMENT AUDIT.** Findings below.
+
+**F7 INFO. ✅ FIXED** (`src/revl/compiler.py`). The search path is not
+identity-pinned. **NOT fixed by refusing**: a local file winning outright is
+item 319's design, so refusal would break supported behaviour.
+"""
+    assert gate.contradiction_findings(text) == []
+
+
+def test_a_does_not_read_a_lower_case_topic_name_as_an_open_status():
+    """Item 104's block (c) is headed "(c) **partial import**", a subject."""
+    text = SECTION + """104. ✅ **`revl import cordis` cannot see DSH's plugin shapes.** Landed.
+
+(c) **partial import** is what the importer produces for a decorated method.
+"""
+    assert gate.contradiction_findings(text) == []
+
+
+def test_a_does_not_read_a_bold_panel_title_as_a_closure_claim():
+    """Item 434's header is "PARTIALLY LANDED ...", with a **WHAT LANDED** panel."""
+    text = SECTION + """434. PARTIALLY LANDED 2026-09-02 on `fix/434-go-codegen-perf`: (h), (f) and
+(e) are done; (d) and (g) are NOT, see the **WHAT LANDED** panel.
+
+(d) **❌ NOT DONE, AS THE AUDIT ORDERED.** Text.
+"""
+    assert gate.contradiction_findings(text) == []
+
+
 # --------------------------------------------------------------------------
 # (B) DANGLING DELEGATION. Item 425 F3 read "folded into the item-416c fix"
 # while 416 was closed, so the residual was tracked nowhere and owned by
