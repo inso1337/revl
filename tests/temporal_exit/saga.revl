@@ -1,0 +1,33 @@
+// The roadmap item 253 exit saga, run on a REAL Temporal dev server.
+//
+// Four crossings, chosen so one run proves three separate derived properties:
+//
+//   1. `settle` declares `idempotent(key: card)` — item 309's `keyed` register,
+//      the one class Slice 2's derivation lets out of the at-most-once group.
+//      Its host implementation fails once and then succeeds, so a live run that
+//      reaches the end proves Temporal actually retried it.
+//   2. `boom.trigger` declares nothing, so it stays at-most-once. Its host
+//      implementation always fails, so the attempt count it records proves the
+//      platform did NOT retry it — the property that keeps a non-idempotent
+//      effect from being silently re-run.
+//   3. `boom.trigger` failing aborts the saga, and the two compensations
+//      registered before it must drain in the G7 LIFO order: refund, then
+//      cancel. That order is DERIVED from source order, never authored.
+service Flights { emission fn reserve(itinerary: Str) -> Str
+                  emission fn cancel(key: Str) -> Str }
+service Payments { emission fn charge(card: Str, total: Str) -> Str
+                   emission fn refund(card: Str, total: Str) -> Str }
+service Boom { emission fn trigger() -> Str }
+extern emission idempotent(key: card) fn settle(card: Str, total: Str) -> Str
+  = @ts { return card }
+component ExitSaga requires flights: Flights, payments: Payments, boom: Boom {
+  emit flights.reserve("ABC") compensate flights.cancel("ABC")
+  emit payments.charge("visa", "100") compensate payments.refund("visa", "100")
+  emit settle("visa", "100")
+  emit boom.trigger()
+}
+// Every parameter is `Str` on purpose: revl's `Int` emits as a TS `bigint`,
+// and Temporal's default payload converter is `JSON.stringify`, which throws
+// on a BigInt. Carrying an `Int` across an activity boundary needs a custom
+// data converter, which is its own piece of work and not what this saga is
+// here to prove.

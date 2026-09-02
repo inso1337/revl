@@ -10,4 +10,5 @@ export function flightsCancel(key: string): Promise<string> { return Promise.res
 export function flightsReserve(itinerary: string): Promise<string> { return Promise.resolve(itinerary) }
 export function paymentsCharge(card: string, total: bigint): Promise<string> { return Promise.resolve(`${card}:${total}`) }
 export function paymentsRefund(card: string, total: bigint): Promise<string> { return Promise.resolve(`${card}:${total}`) }
+export function settle(card: string, total: bigint): Promise<string> { return Promise.resolve(`${card}:${total}`) }
 export function recordResidue(report: SagaReport): Promise<void> { void report; return Promise.resolve() }

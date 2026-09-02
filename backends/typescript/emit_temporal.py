@@ -1,4 +1,4 @@
-"""The Temporal emission target (roadmap item 253, Slice 1).
+"""The Temporal emission target (roadmap item 253, Slices 1-2).
 
 `revl emit --target temporal` is a RENDERING MODE of the existing TypeScript
 emitter, not an eighth runtime and not a new tier under `backends/`
@@ -35,9 +35,21 @@ Slice 1 bakes in the six adversarial-review fixes from the v2 design note:
     `startToCloseTimeout` (per-call, Temporal-honored). The budget is NEVER a
     schedule-to-close timeout.
 
-  * `maximumAttempts: 1` on every activity and compensation (attack 3). No
-    evidence-derived retries in Slice 1, so nothing can double-apply. This is
-    FAITHFUL to revl: the TS runtime does not auto-retry forward emissions.
+  * `maximumAttempts: 1` as the FALL-THROUGH for every activity and
+    compensation (attack 3), never as a blanket. Slice 2 derives each activity's
+    retry policy from the item-309/440 idempotency ledger the crossing's
+    declaration already carries (§3, and `_forward_register` below), and only a
+    crossing whose evidence PROVES re-delivery is safe — today, a declaration
+    carrying `idempotent(key: <param>)` — leaves the at-most-once class. Every
+    other class stays at 1, which is FAITHFUL to revl: the TS runtime does not
+    auto-retry forward emissions either.
+
+Slice 2 also widens the crossing mapping to a DIRECT EMISSION-EXTERN call
+(`emit charge(...)`, not only `emit key.method(...)`). That is not a
+convenience: a service-interface method carries only the bare `idempotent`
+modifier (`parser.py` still has `TODO(309-slice1)` for the keyed form), so an
+extern is the only crossing that can carry the ledger the derivation reads.
+Without it the derivation would have no input that ever clears the bar.
 
   * The determinism guard (attack 4) ships as a test asserting the pure-builtin
     table is a subset of a reviewed deterministic allowlist; see the temporal
@@ -83,6 +95,31 @@ _COMPENSATION_BUDGET_MS = 5000
 # revl `perCallMs`: the per-compensation cutoff, mapped to each compensation
 # activity's `startToCloseTimeout` (Temporal-honored, per call).
 _START_TO_CLOSE_TIMEOUT = "1 minute"
+
+# ------------------------------------------------- retry classes (Slice 2, §3)
+
+#: The two retry classes an activity can land in. A class is a NAME, not a
+#: number, so the derivation below decides membership and the renderer decides
+#: the policy text; nothing in the walk hard-codes an attempt count.
+_AT_MOST_ONCE = "at-most-once"
+_KEYED = "keyed"
+
+#: The registers that earn a Temporal retry. This is item 440's
+#: `recovery.REDISPATCH_FREE` — "may be issued AGAIN without spending a fence"
+#: — read at the FORWARD position, which is the only question a Temporal
+#: `RetryPolicy` asks. `shape-proven` is listed because the partial order names
+#: it a peer of `keyed`; `lower.py::_idempotent_register` cannot yet produce it
+#: (TODO(309-slice4)), so today the set is reachable only through `keyed`.
+_RETRY_EARNING_REGISTERS = frozenset({"keyed", "shape-proven"})
+
+# The bounded backoff a retry-earning crossing gets. BOUNDED, not unbounded: a
+# forward activity that retries forever never throws, so the workflow's catch
+# never runs and the derived compensation phase never drains. The saga's abort
+# path is the reason an attempt ceiling exists at all.
+_RETRY_INITIAL_INTERVAL = "1 second"
+_RETRY_BACKOFF_COEFFICIENT = 2
+_RETRY_MAXIMUM_INTERVAL = "30 seconds"
+_RETRY_MAXIMUM_ATTEMPTS = 5
 
 # ------------------------------------------------------------ closed allowlist
 
@@ -148,19 +185,20 @@ def _witnessed_by_name(ir: dict) -> dict:
             if ext.get("class") == "witnessed"}
 
 
-def _check_expr(node: Any, component: str, source: str, witnessed: dict) -> None:
+def _check_expr(node: Any, component: str, source: str, witnessed: dict,
+                index: "_Index") -> None:
     """Refuse any expression node kind outside the closed allowlist, and any
     host-pinned witnessed crossing reached through a call/fn node."""
     if isinstance(node, list):
         for item in node:
-            _check_expr(item, component, source, witnessed)
+            _check_expr(item, component, source, witnessed, index)
         return
     if not isinstance(node, dict):
         return
     kind = node.get("kind")
     if kind is None:
         for value in node.values():
-            _check_expr(value, component, source, witnessed)
+            _check_expr(value, component, source, witnessed, index)
         return
     if kind == "spawn":
         _refuse("spawn", component, source, node.get("line", "?"),
@@ -185,7 +223,7 @@ def _check_expr(node: Any, component: str, source: str, witnessed: dict) -> None
     # recurse into children (args, operands, targets, ...)
     for value in node.values():
         if isinstance(value, (dict, list)):
-            _check_expr(value, component, source, witnessed)
+            _check_expr(value, component, source, witnessed, index)
 
 
 def _check_host_pinned(ext: dict, component: str, source: str,
@@ -205,33 +243,46 @@ def _check_host_pinned(ext: dict, component: str, source: str,
 
 
 def _check_crossing_target(call: dict, component: str, source: str,
-                           line: object) -> None:
-    """A crossing must be a service method call (`req.method(...)`). Anything
-    else (a bare fn, a 2.0-shaped `callee` call) is outside the Slice-1 mapping."""
+                           line: object, index: "_Index") -> None:
+    """A crossing must be a service-method call (`req.method(...)`) or, since
+    Slice 2, a direct emission-extern call (`charge(...)`).
+
+    The extern form is what makes §3's retry derivation reachable at all: a
+    service-interface method carries only the bare `idempotent` modifier (the
+    `declared` register), while an extern carries the whole item-309/440 ledger
+    — `idempotent(key: p)`, `undo idempotent`, `undo pure`. Anything else (a
+    2.0-shaped `callee` call, a crossing on a non-requirement target) is still
+    outside the mapping."""
+    if call.get("kind") == "fn":
+        if not index.is_emission_extern(call.get("name")):
+            _refuse(f"crossing to `{call.get('name')}`", component, source, line,
+                    "a direct crossing must name an EMISSION extern; this name "
+                    "is not one, so there is no activity to dispatch it to")
+        return
     if call.get("kind") != "call" or "target" not in call:
         _refuse("non-service crossing", component, source, line,
-                "Slice 1 maps only a service-method emission (`key.method(...)`) "
-                "to an activity")
+                "this target maps a service-method emission (`key.method(...)`) "
+                "or a direct emission-extern call (`extern(...)`) to an activity")
     target = call.get("target") or {}
     if target.get("kind") != "req":
         _refuse("crossing on a non-requirement target", component, source, line,
                 "the activity name is derived from the requirement key and the "
-                "method; a crossing on another target has no Slice-1 mapping")
+                "method; a crossing on another target has no mapping")
 
 
-def _refuse_outside_allowlist(ir: dict) -> None:
+def _refuse_outside_allowlist(ir: dict, index: "_Index") -> None:
     """Walk every component activation body and refuse any step or expression
-    outside the Slice-1 closed allowlist, with a why-trace naming the construct
-    and line. Called at the top of `emit_temporal` so refusal precedes emission."""
+    outside the closed allowlist, with a why-trace naming the construct and
+    line. Called at the top of `emit_temporal` so refusal precedes emission."""
     witnessed = _witnessed_by_name(ir)
     for comp in ir.get("components") or []:
         name = comp.get("name") or "?"
         source = comp.get("source") or comp.get("file") or "<source>"
-        _walk_steps(comp.get("body") or [], name, source, witnessed)
+        _walk_steps(comp.get("body") or [], name, source, witnessed, index)
 
 
 def _walk_steps(steps: list, component: str, source: str,
-                witnessed: dict) -> None:
+                witnessed: dict, index: "_Index") -> None:
     for step in steps or []:
         kind = step.get("step")
         # `await approval` (item 246) surfaces either as its own `approval` step
@@ -249,20 +300,20 @@ def _walk_steps(steps: list, component: str, source: str,
                     "registration, a pure guard)")
         if kind == "emit":
             _check_crossing_target(step.get("expr") or {}, component, source,
-                                   _line_of(step))
-            _check_expr(step.get("expr"), component, source, witnessed)
+                                   _line_of(step), index)
+            _check_expr(step.get("expr"), component, source, witnessed, index)
             if step.get("compensate") is not None:
                 _check_crossing_target(step["compensate"], component, source,
-                                       _line_of(step))
-                _check_expr(step["compensate"], component, source, witnessed)
+                                       _line_of(step), index)
+                _check_expr(step["compensate"], component, source, witnessed, index)
         elif kind in ("effect", "let-effect"):
-            _check_expr(step.get("acquire"), component, source, witnessed)
+            _check_expr(step.get("acquire"), component, source, witnessed, index)
             if step.get("undo") is not None:
-                _check_expr(step.get("undo"), component, source, witnessed)
+                _check_expr(step.get("undo"), component, source, witnessed, index)
         elif kind == "if":
-            _check_expr(step.get("cond"), component, source, witnessed)
-            _walk_steps(step.get("then") or [], component, source, witnessed)
-            _walk_steps(step.get("else") or [], component, source, witnessed)
+            _check_expr(step.get("cond"), component, source, witnessed, index)
+            _walk_steps(step.get("then") or [], component, source, witnessed, index)
+            _walk_steps(step.get("else") or [], component, source, witnessed, index)
 
 
 # ------------------------------------------------------------ expression sink
@@ -320,16 +371,23 @@ def _t_expr(node: Any, scope: "_Scope") -> str:
 
 
 def _activity_name(call: dict) -> str:
-    """The activity name derived from a crossing `key.method(...)`: the
-    requirement key joined to the capitalised method (`flights` + `reserve` ->
-    `flightsReserve`). Deterministic, so the workflow and its `activities.ts`
-    agree without a table."""
+    """The activity name derived from a crossing.
+
+    A service-method crossing (`key.method(...)`) joins the requirement key to
+    the capitalised method (`flights` + `reserve` -> `flightsReserve`); an
+    emission-extern crossing (`charge(...)`, Slice 2) is the extern's own name.
+    Deterministic either way, so the workflow and its `activities.ts` agree
+    without a table."""
+    if call.get("kind") == "fn":
+        return _mangle(_ident(call.get("name"), "emission extern"))
     key = _ident((call.get("target") or {}).get("name"), "requirement")
     method = _ident(call.get("method"), "method")
     return _mangle(key + method[:1].upper() + method[1:])
 
 
 def _crossing_label(call: dict) -> str:
+    if call.get("kind") == "fn":
+        return str(call.get("name"))
     key = (call.get("target") or {}).get("name")
     return f"{key}.{call.get('method')}"
 
@@ -381,38 +439,142 @@ def _redaction_args(node: Any, scope: "_Scope") -> str:
     return "() => [" + ", ".join(exprs) + "]"
 
 
+# ------------------------------------------------- evidence-derived retries
+
+def _forward_register(call: dict, comp: dict, index: "_Index") -> str | None:
+    """The register governing whether the crossing `call` may be ISSUED AGAIN.
+
+    This is the ONLY question a Temporal `RetryPolicy` asks, and it is NOT the
+    same question `lower.py::_idempotent_register` answers. That function folds
+    the forward-side and the inverse-side claims into ONE value, and its FIRST
+    branch is the inverse-side one::
+
+        if decl.undo_read:          return "read"      # item 440: `undo pure`
+        if decl.idempotency_key:    return "keyed"     # item 309: forward key
+        return "declared"
+
+    So an extern written `emission fn charge(...) undo pure receipt(x)` carries
+    `register: "read"` while saying NOTHING about re-delivering `charge`. Reading
+    the folded `register` here would enable Temporal retries on that forward
+    activity and double-charge the card — the exact silent double-apply the
+    at-most-once default exists to prevent. This function therefore reads the
+    two FORWARD-side facts (`idempotency_key`, `idempotent`) directly and never
+    touches `register`.
+
+    Returns `"keyed"` (dedup-safe by construction), `"declared"` (the author's
+    unverified claim) or `None` (no claim at all, at-most-once).
+    """
+    if call.get("kind") == "fn":                      # an emission-extern crossing
+        ext = index.externs.get(call.get("name")) or {}
+        if ext.get("idempotency_key") is not None:
+            return "keyed"
+        return "declared" if ext.get("idempotent") else None
+    spec = index.method_spec(call, comp)
+    # A service-interface method carries only the BARE `idempotent` modifier —
+    # `parser.py` still has `TODO(309-slice1): accept the idempotent(key: p)
+    # keyed form` for a method — so the strongest register reachable through a
+    # `key.method(...)` crossing today is `declared`.
+    return "declared" if spec.get("idempotent") else None
+
+
+def _retry_class(call: dict, comp: dict, index: "_Index") -> str:
+    """The retry class of the activity rendering the crossing `call`.
+
+    The whole of Slice 2's safety argument is in the three refusals below, so
+    they are spelled out rather than compressed into a table lookup:
+
+    * **`validated` (item 257) pins to at-most-once, register or not.** A
+      `validated` crossing's `retry N` is NOT item 44's idempotent-delivery
+      retry — `lower.py` says so at the declaration: "a completion is a read
+      with a cost, not an idempotent write". It re-issues a completion THUNK
+      revl-side. Handing it to Temporal as a `RetryPolicy` would let the
+      platform re-bill a model call as if it were idempotent, so a `validated`
+      method keeps `maximumAttempts: 1` even when it also carries a key, and
+      its 257 retry stays workflow-side (design §3, last paragraph).
+
+    * **`declared` does not earn a retry.** It is the author's claim over an
+      opaque host body, machine-checked for shape only. revl's own forward
+      re-issue seam already refuses to act on it unhelped:
+      `recovery._reissue_permitted(register="declared", strength=None)` is
+      False, and only an operator writing `recovery may re-issue owed emissions
+      (strength: declared)` admits it. A Temporal `RetryPolicy` is baked into
+      the emitted workflow with no operator knob at the run, so there is nowhere
+      for that acceptance to be expressed — and Temporal WILL retry on every
+      transient failure, which turns one false claim into a production
+      double-apply. At-most-once.
+
+    * **No register at all is never promoted.** The fail-closed direction is the
+      fall-through, exactly as `recovery._replay_tier` has it.
+    """
+    if index.is_validated(call, comp):
+        return _AT_MOST_ONCE
+    register = _forward_register(call, comp, index)
+    return _KEYED if register in _RETRY_EARNING_REGISTERS else _AT_MOST_ONCE
+
+
 # ------------------------------------------------------------ activity registry
 
-class _Activity:
-    __slots__ = ("name", "params", "returns")
+class _Index:
+    """The name lookups the crossing walk needs: services, externs, and the
+    requirement bindings of the component currently being rendered."""
 
-    def __init__(self, name: str, params: str, returns: str) -> None:
+    __slots__ = ("services", "externs")
+
+    def __init__(self, ir: dict) -> None:
+        self.services: dict = ir.get("services") or {}
+        self.externs: dict = {ext.get("name"): ext
+                              for ext in (ir.get("externs") or [])}
+
+    def method_spec(self, call: dict, comp: dict) -> dict:
+        """The service-method spec a `key.method(...)` crossing resolves to."""
+        key = (call.get("target") or {}).get("name")
+        svc_name = (comp.get("requires") or {}).get(key)
+        return (((self.services.get(svc_name) or {}).get("methods") or {})
+                .get(call.get("method")) or {})
+
+    def is_emission_extern(self, name: object) -> bool:
+        return (self.externs.get(name) or {}).get("class") == "emission"
+
+    def is_validated(self, call: dict, comp: dict) -> bool:
+        """item 257: does this crossing reach a `validated` declaration?"""
+        if call.get("kind") == "fn":
+            return bool((self.externs.get(call.get("name")) or {}).get("validated"))
+        return bool(self.method_spec(call, comp).get("validated"))
+
+
+class _Activity:
+    __slots__ = ("name", "params", "returns", "retry")
+
+    def __init__(self, name: str, params: str, returns: str,
+                 retry: str = _AT_MOST_ONCE) -> None:
         self.name = name
         self.params = params
         self.returns = returns
+        self.retry = retry
 
 
-def _crossing_signature(call: dict, comp: dict, services: dict,
+def _crossing_signature(call: dict, comp: dict, index: "_Index",
                         known_types: frozenset) -> _Activity:
-    """The activity signature for a crossing, read off the service method the
-    requirement key resolves to (params and return type), so the emitted
-    `activities.ts` interface is typed."""
-    key = (call.get("target") or {}).get("name")
-    method = call.get("method")
-    svc_name = (comp.get("requires") or {}).get(key)
-    method_spec = (((services.get(svc_name) or {}).get("methods") or {})
-                   .get(method) or {})
+    """The activity signature for a crossing, read off the declaration it
+    resolves to — the service method behind the requirement key, or the emission
+    extern it names — so the emitted `activities.ts` interface is typed, and
+    carrying the evidence-derived retry class the crossing earned (§3)."""
+    if call.get("kind") == "fn":
+        decl = index.externs.get(call.get("name")) or {}
+    else:
+        decl = index.method_spec(call, comp)
     params = ", ".join(
         f"{_ident(p.get('name'), 'parameter')}: {_ts_type(p.get('type'), known_types)}"
-        for p in method_spec.get("params") or [])
-    returns = (_ts_type(method_spec["returns"], known_types)
-               if method_spec.get("returns") else "void")
-    return _Activity(_activity_name(call), params, f"Promise<{returns}>")
+        for p in decl.get("params") or [])
+    returns = (_ts_type(decl["returns"], known_types)
+               if decl.get("returns") else "void")
+    return _Activity(_activity_name(call), params, f"Promise<{returns}>",
+                     _retry_class(call, comp, index))
 
 
 # ------------------------------------------------------------ component render
 
-def _render_component(comp: dict, ir: dict, ctx: "_Ctx", services: dict,
+def _render_component(comp: dict, ir: dict, ctx: "_Ctx", index: "_Index",
                       activities: dict) -> list[str]:
     name = _ident(comp.get("name"), "component")
     scope = _Scope(comp)
@@ -422,8 +584,38 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", services: dict,
     config_fields = comp.get("config") or []
 
     def register(call: dict) -> None:
-        act = _crossing_signature(call, comp, services, known_types)
-        activities.setdefault(act.name, act)
+        act = _crossing_signature(call, comp, index, known_types)
+        seen = activities.get(act.name)
+        if seen is None:
+            activities[act.name] = act
+            return
+        # One activity NAME, two crossings. The signature is a function of the
+        # declaration so it cannot disagree, but the retry class is a function
+        # of the CALL, so take the weaker of the two: a name reached even once
+        # without retry-earning evidence stays at-most-once. Fail-closed, and
+        # the direction that can only remove retries, never add them.
+        if seen.retry != act.retry:
+            seen.retry = _AT_MOST_ONCE
+
+    def register_reachable(node: Any) -> None:
+        """Register every emission-extern crossing reachable in `node`.
+
+        An `effect`/`undo` slot reaches its crossing through a plain `fn` node
+        rather than an `emit` step, and `_t_expr` renders that node as a bare
+        call to the extern's own name — which is the activity name. Registering
+        it here is what makes that call resolve to a proxied activity instead of
+        an undefined symbol."""
+        if isinstance(node, list):
+            for item in node:
+                register_reachable(item)
+            return
+        if not isinstance(node, dict):
+            return
+        if node.get("kind") == "fn" and index.is_emission_extern(node.get("name")):
+            register(node)
+        for value in node.values():
+            if isinstance(value, (dict, list)):
+                register_reachable(value)
 
     body: list[str] = []
 
@@ -448,6 +640,8 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", services: dict,
                 body.append(f"{indent}await {_activity_call(fwd, scope)}")
             elif kind in ("effect", "let-effect"):
                 acquire = step["acquire"]
+                register_reachable(acquire)
+                register_reachable(step.get("undo"))
                 bind = step.get("bind") if kind == "let-effect" else None
                 if bind is not None:
                     bind = scope.bind(bind)
@@ -544,6 +738,71 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", services: dict,
     return lines
 
 
+# ------------------------------------------------------------ retry rendering
+
+def _render_retry_policies(activities: dict) -> list[str]:
+    """The `proxyActivities` groups, one per retry class the walk derived.
+
+    Temporal's TS SDK carries `RetryPolicy` in the PROXY options, not per call,
+    so a per-activity policy is spelled as one `proxyActivities` call per class
+    with the names of that class destructured out of it. Every activity appears
+    in exactly one group.
+
+    The at-most-once group is always emitted, even when empty of user crossings,
+    because `recordResidue` lives in it. The retryable group is emitted ONLY
+    when some crossing earned it, so a document with no idempotency evidence
+    renders the same single at-most-once proxy Slice 1 did."""
+    groups: dict = {}
+    for act in activities.values():
+        groups.setdefault(act.retry, []).append(act.name)
+    # Totality. A class the renderer does not know would leave its activities
+    # undestructured — an undefined symbol in the emitted workflow, and an
+    # activity silently NOT dispatched. Fail at emit instead.
+    unknown = set(groups) - {_AT_MOST_ONCE, _KEYED}
+    if unknown:  # pragma: no cover — a derivation/renderer disagreement
+        raise EmitError(
+            f"no proxy group renders the retry class(es) {sorted(unknown)}; "
+            f"the derivation and the renderer disagree")
+
+    lines = [
+        "// item 253 §3: RETRY POLICIES ARE DERIVED, NEVER AUTHORED. Every",
+        "// activity below sits in the class the item-309/440 idempotency ledger",
+        "// put it in, and `at-most-once` is the fall-through: a crossing whose",
+        "// evidence does not PROVE re-delivery is safe keeps revl's own",
+        "// at-most-once semantics, because a Temporal retry fires on every",
+        "// transient failure and would turn an unproven claim into a",
+        "// double-apply. Raising one of these by hand defeats the derivation.",
+        "const AT_MOST_ONCE = { maximumAttempts: 1 }",
+    ]
+    if _KEYED in groups:
+        lines += [
+            "// A crossing whose declaration carries `idempotent(key: <param>)`:",
+            "// dedup-safe BY CONSTRUCTION (item 309's `keyed` register, the",
+            "// forward half of item 440's REDISPATCH_FREE set), so a redelivery",
+            "// is the remote's dedup, not a second effect. BOUNDED on purpose —",
+            "// an unbounded forward retry never reaches the catch, so the",
+            "// compensation phase would never run and the saga could not abort.",
+            f"const DEDUP_SAFE_RETRY = {{ initialInterval: {_string(_RETRY_INITIAL_INTERVAL)}, "
+            f"backoffCoefficient: {_RETRY_BACKOFF_COEFFICIENT}, "
+            f"maximumInterval: {_string(_RETRY_MAXIMUM_INTERVAL)}, "
+            f"maximumAttempts: {_RETRY_MAXIMUM_ATTEMPTS} }}",
+        ]
+    for retry_class, policy in ((_AT_MOST_ONCE, "AT_MOST_ONCE"),
+                                (_KEYED, "DEDUP_SAFE_RETRY")):
+        names = groups.get(retry_class)
+        if not names:
+            continue
+        lines += [
+            f"const {{ {', '.join(sorted(names))} }} = "
+            f"proxyActivities<typeof activities>({{",
+            f"  startToCloseTimeout: {_string(_START_TO_CLOSE_TIMEOUT)},  "
+            f"// revl perCallMs — per-call, Temporal-honoured (HIGH 1)",
+            f"  retry: {policy},",
+            "})",
+        ]
+    return lines
+
+
 # ------------------------------------------------------------ module render
 
 def emit_temporal(ir: dict, *, runtime_import: str = "@temporalio/workflow") -> str:
@@ -561,10 +820,12 @@ def emit_temporal(ir: dict, *, runtime_import: str = "@temporalio/workflow") -> 
             "--target temporal needs at least one component: a Temporal workflow "
             "is a rendering of a component activation (docs/design/253-temporal-target.md §1)")
 
-    # Refusal precedes emission (the closed allowlist, CRITICAL 2).
-    _refuse_outside_allowlist(ir)
-
     services = ir.get("services") or {}
+    index = _Index(ir)
+
+    # Refusal precedes emission (the closed allowlist, CRITICAL 2).
+    _refuse_outside_allowlist(ir, index)
+
     doc_ctx = _Ctx(ir.get("types") or {}, ir.get("functions") or [],
                    ir.get("externs") or [], services=services)
 
@@ -575,16 +836,16 @@ def emit_temporal(ir: dict, *, runtime_import: str = "@temporalio/workflow") -> 
         if comp.get("name") in seen:
             raise EmitError(f"duplicate component name: {comp.get('name')!r}")
         seen.add(comp.get("name"))
-        rendered.extend(_render_component(comp, ir, doc_ctx, services, activities))
+        rendered.extend(_render_component(comp, ir, doc_ctx, index, activities))
         rendered.append("")
 
     # `recordResidue` is the durable residue sink activity every workflow drains
-    # into on abort (attack 7).
+    # into on abort (attack 7). It is revl-EMITTED but host-IMPLEMENTED, and no
+    # declaration carries evidence about it, so it takes the fail-closed default
+    # like any other crossing with no register: at-most-once.
     activities.setdefault(
         "recordResidue",
         _Activity("recordResidue", "report: SagaReport", "Promise<void>"))
-
-    proxy_names = ", ".join(sorted(activities))
 
     out: list[str] = [
         "// Generated by revl backends/typescript/emit.py (--target temporal) — do not edit.",
@@ -596,16 +857,9 @@ def emit_temporal(ir: dict, *, runtime_import: str = "@temporalio/workflow") -> 
         f"from {_string(runtime_import)}",
         "import type * as activities from './activities'",
         "",
-        "// Slice 1: every activity and compensation is at-most-once "
-        "(maximumAttempts: 1).",
-        "// FAITHFUL to revl — the TS runtime does not auto-retry forward emissions",
-        "// either. Evidence-derived retries are Slice 2 "
-        "(docs/design/253-temporal-target.md §3).",
-        f"const {{ {proxy_names} }} = proxyActivities<typeof activities>({{",
-        f"  startToCloseTimeout: {_string(_START_TO_CLOSE_TIMEOUT)},  "
-        f"// revl perCallMs — per-call, Temporal-honoured (HIGH 1)",
-        "  retry: { maximumAttempts: 1 },",
-        "})",
+    ]
+    out.extend(_render_retry_policies(activities))
+    out += [
         "",
         "// revl budgetMs (runtime.ts:880): a SINGLE Phase-2 total budget, checked",
         "// workflow-side BETWEEN compensations (HIGH 1). Never a per-activity timeout.",
