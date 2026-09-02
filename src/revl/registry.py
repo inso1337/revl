@@ -76,6 +76,28 @@ INDEX_FILENAME = "index.json"
 # is refused rather than answered about a different one.
 ENTRY_VERSION_FILENAME = "version"
 
+# The two discoverability fields the compiler cannot derive — what a component
+# IS (`description`) and how to find it (`tags`) — declared by the publisher in
+# `<entry>/meta.json` and copied verbatim into the index row.
+#
+# They live in a file for the same reason `version` does. `index.json` is
+# GENERATED and a stale index is a CI failure (docs/registry.md §1), which only
+# means anything while every key in a row is derivable from something under
+# `components/`. Before this file existed, the publish path wrote these two keys
+# INTO the row AFTER `build_index` had run: a fresh regeneration could never
+# reproduce them, so `verify` reported every registry with a published component
+# as stale forever — and a genuinely stale index was indistinguishable from the
+# normal state. Moving them beside the source, where the version already lives,
+# puts the whole row back under the check; it also makes them survive an update
+# that does not restate them, instead of being dropped by the next regeneration.
+ENTRY_META_FILENAME = "meta.json"
+
+# What `meta.json` may declare. Deliberately closed: an unrecognised key is a
+# refusal, not a shrug, because a key nothing regenerates into the row is exactly
+# the defect this file exists to close. Adding a field here is a deliberate act,
+# with an index-version bump behind it.
+ENTRY_META_FIELDS = ("description", "tags")
+
 # The frozen release history of one entry: `<entry>/releases/<version>/`, written
 # by `publish_release` and never rewritten (roadmap item 49 phase 2).
 #
@@ -555,7 +577,8 @@ def _audit_document(ir: dict) -> dict:
 
 def _entry_index_row(name: str, ir: dict, source: str, manifest: dict,
                      manifest_text: str, version: str | None = None,
-                     releases: list | None = None) -> dict:
+                     releases: list | None = None,
+                     meta: dict | None = None) -> dict:
     """What the generated index records for one component — enough to rank and
     shortlist without opening its source."""
     provides: dict = {}
@@ -587,7 +610,57 @@ def _entry_index_row(name: str, ir: dict, source: str, manifest: dict,
     # learn which releases it may ask about.
     if releases:
         row["releases"] = list(releases)
+    # The publisher-declared discoverability fields, read off `<entry>/meta.json`
+    # (never patched in after the fact — see ENTRY_META_FILENAME). Only the keys
+    # the file actually declares appear, so an entry that describes itself and an
+    # entry that does not are distinguishable rather than both reading as "".
+    for fieldname in ENTRY_META_FIELDS:
+        if meta is not None and fieldname in meta:
+            row[fieldname] = meta[fieldname]
     return row
+
+
+def _entry_meta(entry_dir: Path) -> dict | None:
+    """The publisher-declared discoverability fields of one entry, from
+    `<entry>/meta.json`, or None when the entry declares none.
+
+    Fails closed the way `_entry_version` does. A file that is present but
+    unusable — not an object, an unrecognised key, a description that is not a
+    string, a tag list that is not a list of strings — is a REFUSAL, not a
+    shrug: this file is the only thing that puts `description`/`tags` under
+    `verify`, so a publisher who meant to describe a component and wrote
+    something the regenerator cannot copy must hear about it now rather than
+    ship an entry whose row nothing can reproduce.
+    """
+    path = entry_dir / ENTRY_META_FILENAME
+    if not path.exists():
+        return None
+
+    def refuse(detail: str) -> RevlError:
+        return RevlError(
+            str(path), 0,
+            f"{entry_dir.name}: {ENTRY_META_FILENAME} {detail}; the index row "
+            "is regenerated from this file, so it must be exactly what the row "
+            "should say")
+
+    try:
+        meta = json.loads(_read(path))
+    except (json.JSONDecodeError, OSError) as error:
+        raise refuse(f"is not readable JSON ({error})") from error
+    if not isinstance(meta, dict):
+        raise refuse("must be a JSON object")
+    unknown = sorted(set(meta) - set(ENTRY_META_FIELDS))
+    if unknown:
+        raise refuse(
+            f"declares {', '.join(unknown)}, which nothing regenerates into "
+            f"the index row (known keys: {', '.join(ENTRY_META_FIELDS)})")
+    if "description" in meta and not isinstance(meta["description"], str):
+        raise refuse("description must be a string")
+    tags = meta.get("tags")
+    if "tags" in meta and (not isinstance(tags, list)
+                           or not all(isinstance(t, str) for t in tags)):
+        raise refuse("tags must be a list of strings")
+    return meta
 
 
 def _entry_version(entry_dir: Path) -> str | None:
@@ -661,6 +734,12 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
     The manifest.json written here is the item-28 interchange document the
     current compiler produces for the source, so `verify` can catch an entry
     whose manifest no longer matches its own audit surface.
+
+    Every key in a row is derived from files under `components/<name>/`: the
+    compiled surfaces and hashes from `component.rvl`, `version` from the
+    `version` file, `releases` from the `releases/` directory, and
+    `description`/`tags` from `meta.json`. Nothing is patched into a row after
+    this function returns — that is what keeps `verify` meaningful.
     """
     comps = _components_dir(registry_dir)
     rows: dict = {}
@@ -675,12 +754,87 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
             (entry_dir / "manifest.json").write_text(manifest_text, encoding="utf-8")
         rows[name] = _entry_index_row(name, ir, source, manifest, manifest_text,
                                       _entry_version(entry_dir),
-                                      released_versions(entry_dir))
+                                      released_versions(entry_dir),
+                                      _entry_meta(entry_dir))
     index = {"indexVersion": INDEX_VERSION, "components": rows}
     if write:
         index_text = json.dumps(index, indent=2, sort_keys=True) + "\n"
         (Path(registry_dir) / INDEX_FILENAME).write_text(index_text, encoding="utf-8")
     return index
+
+
+def _unhoused_meta(registry_dir: Path, committed_index: dict) -> list[str]:
+    """Entries whose committed row carries `description`/`tags` that no
+    `meta.json` beside the component accounts for.
+
+    This is the shape of a registry published by the pre-`meta.json` write path,
+    which patched those two keys into the row after the regenerator had run. It
+    needs naming SEPARATELY, because the obvious response to a stale index —
+    regenerate and commit — would silently DELETE fields nothing else records.
+    """
+    comps = _components_dir(registry_dir)
+    unhoused: list[str] = []
+    for name, row in sorted((committed_index.get("components") or {}).items()):
+        if not isinstance(row, dict):
+            continue
+        entry_dir = comps / name
+        if not entry_dir.is_dir() or (entry_dir / ENTRY_META_FILENAME).exists():
+            continue
+        declared = [f for f in ENTRY_META_FIELDS if f in row]
+        if declared:
+            unhoused.append(
+                f"{name}: {'/'.join(declared)} live only in {INDEX_FILENAME}, "
+                f"with no {name}/{ENTRY_META_FILENAME} to regenerate them from "
+                f"— run registry.migrate_meta first; regenerating the index "
+                f"without it would drop them")
+    return unhoused
+
+
+def migrate_meta(registry_dir: str | os.PathLike, *, write: bool = True) -> list[str]:
+    """Lift `description`/`tags` out of a committed `index.json` into each
+    entry's `meta.json`, and return the names migrated.
+
+    The one-shot migration for a registry published before those two fields had
+    a file of their own. It reads the committed index — the only place that
+    registry recorded them — writes `components/<name>/meta.json` for every
+    entry whose row carries them and has no such file, and regenerates the
+    index. Afterwards the whole row is derived from `components/` again and
+    `verify` is back to meaning what it says.
+
+    Idempotent, and it never overwrites a `meta.json` that already exists: the
+    file beside the component outranks anything the generated index claims.
+    """
+    registry_dir = Path(registry_dir)
+    index_path = registry_dir / INDEX_FILENAME
+    if not index_path.exists():
+        return []
+    committed_index = json.loads(_read(index_path))
+    comps = _components_dir(registry_dir)
+    migrated: list[str] = []
+    for name, row in sorted((committed_index.get("components") or {}).items()):
+        if not isinstance(row, dict):
+            continue
+        entry_dir = comps / name
+        if not entry_dir.is_dir() or (entry_dir / ENTRY_META_FILENAME).exists():
+            continue
+        meta = {f: row[f] for f in ENTRY_META_FIELDS if f in row}
+        if not meta:
+            continue
+        migrated.append(name)
+        if write:
+            _write_meta(entry_dir, meta)
+    if migrated and write:
+        build_index(registry_dir)
+    return migrated
+
+
+def _write_meta(entry_dir: Path, meta: dict) -> None:
+    """Write `<entry>/meta.json`. Same spelling as every other generated JSON
+    document in the tree, so the file the publisher commits and the file a
+    regenerator would write are byte-identical."""
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    (entry_dir / ENTRY_META_FILENAME).write_text(
+        json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def verify(registry_dir: str | os.PathLike) -> list[str]:
@@ -691,6 +845,12 @@ def verify(registry_dir: str | os.PathLike) -> list[str]:
     "current"), and every entry's ``manifest.json`` is byte-reproducible from
     its ``component.rvl`` by the current compiler (an entry cannot lie about
     its own audit surface). A non-empty result is what turns the CI job red.
+
+    The first invariant covers the WHOLE row, including the publisher-declared
+    `version`, `description` and `tags`, because each of those is regenerated
+    from a file beside the component. Nothing here is exempted from the
+    comparison: an exempt key is a key a stale index could hide behind, and the
+    check would certify less every time one was added.
     """
     problems: list[str] = []
     registry_dir = Path(registry_dir)
@@ -698,6 +858,9 @@ def verify(registry_dir: str | os.PathLike) -> list[str]:
     if not index_path.exists():
         return [f"{INDEX_FILENAME} is missing — run registry.build_index"]
     committed_index = json.loads(_read(index_path))
+    # Named before the generic staleness line, and phrased as its own fix: this
+    # is the one stale index whose repair is NOT "run build_index and commit".
+    problems.extend(_unhoused_meta(registry_dir, committed_index))
     fresh = build_index(registry_dir, write=False)
     if committed_index != fresh:
         problems.append(
@@ -1040,8 +1203,13 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
 
     The registry's write path. It re-runs `release_facts` itself rather than
     trusting the caller to have looked, freezes the release being replaced
-    before it is replaced, regenerates the index the way CI would, and attaches
+    before it is replaced, records the publisher-declared discoverability fields
+    in `<entry>/meta.json`, regenerates the index the way CI would, and attaches
     the derived changelog (item 261) for the release it publishes.
+
+    Everything it records lands in a file under `components/<name>/`, and the
+    regeneration is the LAST thing it does, so `verify` is empty on the registry
+    it leaves behind.
     """
     facts = release_facts(registry_dir, name, source, version,
                           scheme=scheme, publisher=publisher)
@@ -1083,6 +1251,15 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
     (entry_dir / "component.rvl").write_text(source, encoding="utf-8")
     if declared:
         (entry_dir / ENTRY_VERSION_FILENAME).write_text(declared + "\n", encoding="utf-8")
+    # The discoverability fields go beside the source, BEFORE the regenerator
+    # runs, so `build_index` derives them like every other key in the row. They
+    # used to be patched into the row afterwards, which left `verify` reporting
+    # every registry with a published component as permanently stale. A publish
+    # that restates neither field leaves an existing meta.json alone rather than
+    # erasing what the last release said about the component.
+    if description is not None or tags is not None:
+        _write_meta(entry_dir, {"description": description or "",
+                                "tags": [str(t) for t in (tags or [])]})
     if dossier_text:
         (entry_dir / "dossier.json").write_text(dossier_text, encoding="utf-8")
 
@@ -1114,14 +1291,9 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
 
     # The index row's `releases` list is read off the directory, so it only
     # becomes true after the freeze above; regenerate once more so the committed
-    # index is the one CI would regenerate.
-    index = build_index(registry_dir)
-    row = (index.get("components") or {}).get(name)
-    if row is not None and (description is not None or tags is not None):
-        row["description"] = description or ""
-        row["tags"] = list(tags or [])
-        (Path(registry_dir) / INDEX_FILENAME).write_text(
-            json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # index is the one CI would regenerate — and this time it is the LAST write,
+    # so `verify(registry_dir)` on the result is empty.
+    build_index(registry_dir)
     return record
 
 
@@ -2177,7 +2349,8 @@ def resolve(registry, need, manifest: dict | None = None,
 __all__ = ["Registry", "RegistryEntry", "EvidenceBundle", "EvidenceAssessment",
            "build_index", "build_evidence", "verify", "resolve",
            "load_evidence_bundle", "assess_evidence", "INDEX_VERSION",
-           "ENTRY_VERSION_FILENAME",
+           "ENTRY_VERSION_FILENAME", "ENTRY_META_FILENAME", "ENTRY_META_FIELDS",
+           "migrate_meta",
            "release_facts", "publish_release", "released_versions",
            "release_changelog", "RELEASES_DIRNAME", "RELEASE_RECORD_FILENAME",
            "RELEASE_CHANGELOG_FILENAME", "BUMP_VERIFIED", "BUMP_UNVERIFIABLE",
