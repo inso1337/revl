@@ -495,8 +495,13 @@ pub type Prog = { services: List[SvcD], fns: List[FnD], comps: List[CompD],
 
 // ---------------------------------------------------------------- tokens
 
+// The token at `i`, or a synthetic eof when there is none. Both bounds are
+// tested: `i < ts.length()` alone is true for a negative `i` too, and a scan
+// that backs up past the start then reads the LAST token on python and panics
+// on rust/go/java (see the same guard in selfhost/lower.rvl for the full
+// account). Total means total.
 fn tkc(ts: List[Token], i: Int) -> Token {
-  if (i < ts.length()) { return ts[i] }
+  if (i >= 0 && i < ts.length()) { return ts[i] }
   return { kind: "eof", text: "", line: 0 }
 }
 
