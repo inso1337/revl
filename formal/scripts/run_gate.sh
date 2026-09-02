@@ -109,5 +109,40 @@ python3 scripts/axioms_gate.py \
   RevL.G9.secret_rules_not_vacuous \
   RevL.G9.authority_refusal_is_not_universal \
   RevL.G9.sink_rules_are_distinct \
-  RevL.G9.secret_refusal_is_load_bearing < .axioms.out
+  RevL.G9.secret_refusal_is_load_bearing \
+  RevL.Lemmas.reach_mono_fuel \
+  RevL.Lemmas.reaches_le \
+  RevL.Lemmas.reach_exact \
+  RevL.Lemmas.reach_le_trans \
+  RevL.Lemmas.reachCaps_sound \
+  RevL.Lemmas.reachCaps_complete \
+  RevL.G4Classified.inverse_or_emit_classified \
+  RevL.G4Classified.program_mutations_carry_inverse_or_marker \
+  RevL.G4Classified.reached_crossing_is_classified \
+  RevL.G4Classified.reached_crossing_carries_inverse_or_marker \
+  RevL.G4Classified.raw_mutation_is_representable \
+  RevL.G4Classified.g4_not_vacuous \
+  RevL.G4Classified.fn_wrapper_still_crosses \
+  RevL.G5Classified.registrations_seq \
+  RevL.G5Classified.registrations_zero_iff \
+  RevL.G5Classified.inverse_reaches_no_emission \
+  RevL.G5Classified.admitted_inverse_registers_nothing \
+  RevL.G5Classified.admitted_inverse_body_registers_nothing \
+  RevL.G5Classified.pureOnly_run \
+  RevL.G5Classified.clean_inverse_run_logs_nothing \
+  RevL.G5Classified.admitted_inverse_run_logs_nothing \
+  RevL.G5Classified.registrations_depends_on_its_argument \
+  RevL.G5Classified.registrations_counts \
+  RevL.G5Classified.sneaky_undo_is_refused \
+  RevL.G5Classified.fold_must_run_to_stability \
+  RevL.G5Classified.sneaky_inverse_run_emits \
+  RevL.G5Classified.clean_inverse_run_is_silent \
+  RevL.G8Classified.surface_enumerates_reached_crossings \
+  RevL.G8Classified.surface_only_declared_crossings \
+  RevL.G8Classified.surface_implies_crossing \
+  RevL.G8Classified.effect_carrying_emission_is_on_the_surface \
+  RevL.G8Classified.surface_agrees_with_an_honest_marker \
+  RevL.G8Classified.raw_leak_is_on_the_surface \
+  RevL.G8Classified.g8_surface_is_not_universal \
+  RevL.G8Classified.witness_surface_traces_to_its_declaration < .axioms.out
 python3 harness/diff_corpus.py
