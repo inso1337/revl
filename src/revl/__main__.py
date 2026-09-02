@@ -661,7 +661,7 @@ def _run_audit(args, ir: dict) -> int:
     # deferred emission, and compensation with its replay class (`replay: free`
     # for a declared/keyed idempotent entry, `replay: fenced` for an undeclared
     # inverse, `recovery: human-finish` for an unkeyed owed emission) and its
-    # register (`declared`/`keyed`/`shape-proven`).
+    # register (`declared`/`keyed`/`shape-proven`/item 440's `read`).
     if getattr(args, "recovery", None):
         for line in _recovery_audit_view(ir):
             print(line)
@@ -680,9 +680,17 @@ def _recovery_audit_view(ir: dict) -> list:
         register = entry.get("register")
         kind = entry.get("kind")
         if kind == "inverse":
-            cls = "replay: free" if register else "replay: fenced"
+            # item 440: the read tier is its own class — a `undo pure` inverse is
+            # re-dispatched with no key and no fence, and never escalates.
+            cls = ("replay: read" if register == "read"
+                   else "replay: free" if register else "replay: fenced")
         elif kind == "owed-emission":
-            cls = "replay: free" if register == "keyed" else "recovery: human-finish"
+            # item 440 §(b): the seam can now ACT on this classification, but only
+            # under the operator's `recovery may re-issue owed emissions` knob, so
+            # the class says "re-issuable" rather than promising a fire.
+            cls = ("replay: re-issuable" if register in ("read", "keyed",
+                                                         "shape-proven")
+                   else "recovery: human-finish")
         else:  # compensation
             cls = ("compensate: keyed-retry" if register == "keyed"
                    else "compensate: best-effort")

@@ -61,6 +61,59 @@ class RecoveryError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# the re-dispatch register: what makes a call safe to issue AGAIN (item 440)
+# ---------------------------------------------------------------------------
+
+#: item 440 §(a). Item 309 gave recovery a TWO-valued question — was this
+#: inverse declared idempotent or not — and everything undeclared fell into one
+#: fenced bucket. The third tier is READ: a call the author declared `undo pure`
+#: (lowered to `register: "read"` and carried on the WAL descriptor) CHANGES
+#: NOTHING, so re-issuing it is observationally free. That is stronger than a
+#: key: a keyed call still crosses and leans on the remote's dedup contract, a
+#: read crosses nothing, so there is no outcome to be ambiguous ABOUT.
+#:
+#: The tier is DECLARED, never derived. revl's `pure` extern classification is
+#: checked for shape only ("no observable effect" is the declaration's wording,
+#: never a proof) and shipped examples classify mutating host bodies `pure`, so
+#: reading the tier off the classification alone would resolve an ambiguity
+#: optimistically — the one direction this module never takes. `undo pure` is
+#: the author's explicit claim, and lower holds it to a `pure`-classified callee.
+READ = "read"
+
+#: The registers a fresh process may RE-DISPATCH without spending a fence and
+#: without escalating to an operator. `read` (changes nothing) and the two
+#: by-construction strong registers, `keyed` (the remote dedups on a stable key
+#: carried in the descriptor) and `shape-proven`. Everything else — including,
+#: crucially, NO register at all — stays fenced and fails closed.
+REDISPATCH_FREE = frozenset({READ, "keyed", "shape-proven"})
+
+
+def _replay_tier(register: Optional[str], declared_idempotent: bool) -> str:
+    """The replay tier of one journalled call: ``read`` | ``free`` | ``fenced``.
+
+    ``read``    the descriptor carries `register: "read"` — re-issue freely and
+                report it as a read; a second run never escalates it.
+    ``free``    item 309's declared-idempotent inverse — re-issue freely,
+                exactly as 309 already does.
+    ``fenced``  everything else, including an ABSENT register. One fenced
+                at-most-once attempt, then `outcome: "unknown"` for a human.
+
+    ONLY `read` is new here: a `keyed`/`shape-proven` register on an INVERSE
+    descriptor is deliberately not promoted, because 309's replay policy for
+    that family is keyed off `undo_idempotent` and widening it is a different
+    item's change. `REDISPATCH_FREE` (the set the FORWARD re-issue seam reads)
+    is the place those registers earn free re-dispatch.
+
+    Absent/unknown input can only produce ``fenced``: the fail-closed default is
+    the fall-through, not a special case."""
+    if register == READ:
+        return "read"
+    if declared_idempotent:
+        return "free"
+    return "fenced"
+
+
+# ---------------------------------------------------------------------------
 # the world an inverse acts on
 # ---------------------------------------------------------------------------
 
@@ -90,6 +143,20 @@ class World:
         raise NotImplementedError
 
     def apply_compensation(self, op: dict) -> None:  # pragma: no cover — interface
+        raise NotImplementedError
+
+    def reissue(self, op: dict) -> None:  # pragma: no cover — interface
+        """item 440 §(b): the RE-ISSUE SEAM. Fire a FORWARD named call again in
+        a fresh process — the owed deferred emission item 309 §3b classified as
+        free to replay and then handed to a human anyway, because recover had no
+        way to re-invoke the emission host body.
+
+        This is the way: recover does not re-enter the dead runtime (it cannot);
+        it re-issues the named call with its captured arguments against the same
+        world adapter that already carries `apply_inverse`/`apply_compensation`.
+        A real host supplies an adapter over the actual outside world. Called
+        ONLY for a descriptor whose tier permits it and only under the operator's
+        item-33 policy knob — never by default."""
         raise NotImplementedError
 
     def remaining(self) -> list:  # pragma: no cover — interface
@@ -141,8 +208,18 @@ class DictWorld(World):
         out in the world — never CLEAN."""
         self.state[f"compensation:{self.key(op)}"] = op
 
+    def reissue(self, op: dict) -> None:
+        """Re-fire a forward emission (item 440 §(b)). It RECORDS the crossing,
+        exactly like a compensation: an emission is a crossing OUT, never a
+        removal, so it must not clear a referent. Recorded under its own
+        `reissued:` prefix so `remaining` (the residue set) is untouched — a
+        re-issued emission is a crossing that HAPPENED, not residue left out in
+        the world."""
+        self.state[f"reissued:{self.key(op)}"] = op
+
     def remaining(self) -> list:
-        return sorted(k for k in self.state if not k.startswith("compensation:"))
+        return sorted(k for k in self.state
+                      if not k.startswith(("compensation:", "reissued:")))
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +253,8 @@ def _referent_key(record: dict, world: World) -> Optional[str]:
 
 
 def recover(wal_path: str, *, world: Optional[World] = None,
-            session=None, snapshot: Optional[dict] = None) -> dict:
+            session=None, snapshot: Optional[dict] = None,
+            reissue: Optional[str] = None) -> dict:
     """Read the WAL at ``wal_path`` and prove a way back.
 
     Returns a stated verdict (``rolled-forward`` or ``rolled-back``) with a
@@ -185,6 +263,16 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     (this composes with it; it does not reimplement admission). For a roll-back,
     reconstructible boundary inverses are run LIFO against ``world`` (a
     :class:`DictWorld` by default).
+
+    ``reissue`` is item 440 §(b)'s operator knob, resolved from the item-33
+    boundary policy (``recovery may re-issue owed emissions [(strength: L)]``).
+    ``None`` — the default, and what every caller without a policy gets — means
+    recover auto-fires NOTHING and the owed-emission report is byte-identical to
+    item 245's v1 rule. A strength turns the seam on for owed emissions whose
+    descriptor register meets it: ``keyed`` (the bare rule) admits only the
+    dedup-safe registers, ``declared`` additionally admits the author's unproven
+    trust-me claim. An owed emission with NO register is never auto-fired under
+    any strength — the ambiguous case stays human-finish, always.
 
     The WAL is read through the tier-agnostic core (:func:`revl.wal.read_wal`),
     NOT the py backend: item 322 factored the reader out of
@@ -219,7 +307,9 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # session. The durable approval, not the discharge record, is the commit
         # proof; recover replays no inverse and rolls the missing discharge
         # forward. This dominates the discharge-set skip for a session-owned WAL.
-        return _roll_forward_window(wal_path, wal, approved)
+        return _roll_forward_window(wal_path, wal, approved,
+                                    world=world or DictWorld(),
+                                    reissue=reissue)
     return _roll_back(wal, world=world or DictWorld(), wal_path=wal_path)
 
 
@@ -376,7 +466,67 @@ def _append_replay_fence(wal_path: str, seq: int) -> None:
             pass
 
 
-def _roll_forward_window(wal_path: str, wal: dict, approved: dict) -> dict:
+def _append_reissue_fence(wal_path: str, seq: int, register: Optional[str]) -> None:
+    """Append the `reissue-fence` record for one owed deferred emission BEFORE
+    recover re-fires it (item 440 §(b)), fsync'd. Same consume-before-fire
+    discipline as item 309's `replay-fence`, and for the same reason: the fence
+    proves an attempt was ABOUT to start, never that it ran, so a crash between
+    the fence and the fire leaves 'fenced-before-attempt, outcome unknown'.
+
+    What a later run does with the fence depends on the tier, and this is where
+    the register pays: a `read` or `keyed` descriptor is re-dispatchable BY
+    CONSTRUCTION, so a second run may fire it again and the fence is only a
+    record of what recovery did. A `declared` (trust-me) descriptor is not, so
+    its fence is spent and a second run REFUSES with `outcome: "unknown"` — the
+    same fail-closed shape 309 gives an undeclared inverse. The register is
+    written into the record so a later run reads the tier even from a WAL whose
+    descriptor it can no longer resolve."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    record = {"record": "reissue-fence", "seq": seq}
+    if register:
+        record["register"] = register
+    with open(wal_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
+
+
+def _reissue_permitted(register: Optional[str], strength: Optional[str]) -> bool:
+    """Whether the operator's knob admits AUTO-FIRING one owed deferred emission
+    (item 440 §(b), item 309 §3b's v2 rule).
+
+    ``strength`` is `None` unless a boundary policy turned the seam on, so the
+    default answer is NO for every descriptor — recover auto-fires nothing
+    unless an operator asked for it, and the v1 "never auto-fires an owed
+    emission" rule is what a policy-less recover still does.
+
+    With the seam on:
+
+    * `read` / `keyed` / `shape-proven` — admitted at any strength. The fire is
+      free (a read changes nothing) or dedup-safe by construction (the
+      descriptor carries the key, so a fire that duplicates a pre-crash flush is
+      the remote's dedup, not a double-apply). This is the case item 309 §3b
+      classified as free to replay and could not act on.
+    * `declared` — admitted ONLY at `strength: declared`, the operator's
+      explicit "I accept the author's unverified claim".
+    * ANYTHING ELSE, including no register at all — never. The ambiguous owed
+      emission stays human-finish under every knob setting, because nothing
+      about it can be proven and this module does not resolve an ambiguity
+      optimistically."""
+    if strength is None:
+        return False
+    if register in REDISPATCH_FREE:
+        return True
+    return register == "declared" and strength == "declared"
+
+
+def _roll_forward_window(wal_path: str, wal: dict, approved: dict, *,
+                         world: Optional[World] = None,
+                         reissue: Optional[str] = None) -> dict:
     """A crash inside the approved-to-discharged window (item 245, Decision 3):
     `commit-approved` is durable but `discharge`/`activation-complete` may not
     be. The session is COMMITTED. Recover replays NO transactional inverse and
@@ -408,8 +558,14 @@ def _roll_forward_window(wal_path: str, wal: dict, approved: dict) -> dict:
     if owed_discharge:
         _append_discharge(wal_path, owed_discharge)
 
+    # item 440 §(b): the durable `reissue-fence` records a prior recovery run
+    # wrote before firing an owed emission. Read once, before the loop, the same
+    # way `_roll_back` reads `replay-fence`.
+    reissue_fenced: set = {r.get("seq") for r in records
+                           if r.get("record") == "reissue-fence"}
+
     outstanding: list = []
-    fired, owed = [], []
+    fired, owed, reissued = [], [], []
     for d in deferred:
         seq = d.get("seq")
         call = d.get("call") or {}
@@ -430,7 +586,58 @@ def _roll_forward_window(wal_path: str, wal: dict, approved: dict) -> dict:
                      "(continue-and-record); finish it by hand or re-run with an "
                      "idempotency key"))
         else:
-            owed.append({"seq": seq, "referent": referent, "outcome": "not-attempted"})
+            # item 440 §(b), item 309 §3b: THE RE-ISSUE SEAM. An owed deferred
+            # emission whose descriptor carries a re-dispatchable register MAY be
+            # auto-fired here, because the fire is free (a read) or dedup-safe
+            # (the descriptor carries the key, so firing after a pre-crash flush
+            # that actually landed is the remote's dedup, not a double-apply).
+            # Firing needs no runtime: recover re-issues the NAMED CALL against
+            # the same `World` adapter that already carries `apply_inverse` and
+            # `apply_compensation` (`World.reissue`), which is the seam item 309
+            # said it lacked. It is off unless an operator turned it on
+            # (`reissue is None` → `_reissue_permitted` is False for every
+            # descriptor), and an owed emission with NO register is never fired
+            # under any setting.
+            register = d.get("register")
+            if _reissue_permitted(register, reissue) \
+                    and (seq not in reissue_fenced
+                         or register in REDISPATCH_FREE):
+                entry = _reissue_owed(wal_path, world, d, seq, referent,
+                                      register)
+                if entry["outcome"] == "reissued":
+                    reissued.append(entry)
+                    continue
+                owed.append({"seq": seq, "referent": referent,
+                             "outcome": "failed"})
+                outstanding.append(entry["residue"])
+                continue
+            spent = (seq in reissue_fenced
+                     and _reissue_permitted(register, reissue))
+            owed.append({"seq": seq, "referent": referent,
+                         "outcome": "unknown" if spent else "not-attempted"})
+            if spent:
+                # the seam is ON and this descriptor's tier admits it, but its
+                # single at-most-once attempt was already spent by an earlier
+                # recovery run that did not live to record the outcome. The
+                # fence proves the fire was ABOUT to start, never that it ran,
+                # so a second attempt cannot be proven safe — refuse it and hand
+                # it over, exactly as item 309 §3a does for an inverse.
+                outstanding.append(_record(
+                    "flush-residue", crossing=_crossing_of_descriptor(d),
+                    attempted={"call": call.get("method"),
+                               "args": list(call.get("args") or []),
+                               "phase": None},
+                    error={"type": "fenced-before-attempt",
+                           "message": "fenced-before-attempt, outcome unknown, "
+                                      "will not re-fire — an earlier recovery "
+                                      "run fenced this owed emission under the "
+                                      "author's unverified `declared` claim; a "
+                                      "second attempt cannot be proven safe"},
+                    attempted_flag=False, outcome="unknown", referent=referent,
+                    hint="declare `idempotent(key: <param>)` so the re-issue is "
+                         "dedup-safe by construction and needs no fence, or "
+                         "finish this flush by hand (item 440)"))
+                continue
             outstanding.append(_record(
                 "flush-residue", crossing=_crossing_of_descriptor(d),
                 attempted={"call": call.get("method"),
@@ -439,17 +646,7 @@ def _roll_forward_window(wal_path: str, wal: dict, approved: dict) -> dict:
                        "message": "approved but no `flushed` record — the host "
                                   "body may not have fired before the crash"},
                 attempted_flag=False, outcome="not-attempted", referent=referent,
-                hint="the emission was approved but its flush is unconfirmed; v1 "
-                     "recover never auto-fires an owed emission — finish the flush "
-                     "by hand or re-run with the idempotency key (item 309)"))
-            # TODO(309-slice3): §3b — an owed deferred emission whose extern is
-            # `idempotent(key: p)` MAY be auto-fired here (the descriptor carries
-            # the key, so the fire is dedup-safe even if the pre-crash flush
-            # landed), gated by an item-33 policy knob; the `--recovery` audit
-            # already classifies a keyed owed emission as `replay: free`. Firing
-            # it requires re-invoking the emission host body, which this minimal
-            # fresh-process recover has no runtime for; deferred to the slice that
-            # gives recover an emission re-issue seam. Unkeyed stays human-finish.
+                hint=_owed_hint(register, reissue)))
 
     clean = not outstanding
     return {
@@ -465,26 +662,123 @@ def _roll_forward_window(wal_path: str, wal: dict, approved: dict) -> dict:
         "rolledForwardDischarge": owed_discharge,
         "flushed": fired,
         "owedFlushes": owed,
+        # item 440 §(b): owed emissions this run AUTO-FIRED through the re-issue
+        # seam. Empty (and the key still present) whenever the seam is off, which
+        # is every recover with no operator policy.
+        "reissued": reissued,
         "residue": {
             "clean": clean,
             "outstanding": outstanding,
-            "proof": _window_proof(owed_discharge, fired, owed),
+            "proof": _window_proof(owed_discharge, fired, owed, reissued),
         },
         "guarantee": _guarantee(),
     }
 
 
-def _window_proof(rolled: list, fired: list, owed: list) -> str:
+def _owed_hint(register: Optional[str], strength: Optional[str]) -> str:
+    """The operator hint on an owed emission recover did NOT fire (item 440).
+
+    With the seam OFF the wording is item 245's v1 sentence, byte-for-byte, so a
+    policy-less recover's residue is unchanged. With the seam ON it says WHY this
+    particular descriptor was not admitted, which is the whole usability point:
+    an unregistered emission is ambiguous and stays human-finish, and a
+    `declared` one needs the operator's explicit acceptance of an unproven
+    claim."""
+    if strength is None:
+        return ("the emission was approved but its flush is unconfirmed; v1 "
+                "recover never auto-fires an owed emission — finish the flush "
+                "by hand or re-run with the idempotency key (item 309)")
+    if register == "declared":
+        return ("the emission was approved but its flush is unconfirmed. Its "
+                "register is `declared` (the author's unverified claim) and the "
+                "policy admits only dedup-safe re-issues; finish the flush by "
+                "hand, declare `idempotent(key: <param>)`, or widen the knob to "
+                "`recovery may re-issue owed emissions (strength: declared)` "
+                "(item 440)")
+    return ("the emission was approved but its flush is unconfirmed, and it "
+            "carries NO idempotency register — whether the pre-crash flush "
+            "landed cannot be decided, so recovery refuses to fire it under any "
+            "policy. Finish the flush by hand, or declare `idempotent(key: "
+            "<param>)` so a re-issue is dedup-safe by construction (item 440)")
+
+
+def _reissue_owed(wal_path: str, world: Optional[World], descriptor: dict,
+                  seq, referent: str, register: Optional[str]) -> dict:
+    """Fire ONE owed deferred emission through the re-issue seam (item 440 §(b)).
+
+    Consume-before-fire: the `reissue-fence` is fsync'd BEFORE the call, so a
+    crash between them leaves a durable 'fenced-before-attempt' record and the
+    next run decides by TIER — free for a read/keyed descriptor, refused for a
+    `declared` one. The fire itself is `World.reissue`, a forward re-dispatch of
+    the named call with its captured arguments; a raising adapter is residue
+    (`outcome: "failed"`), never a silent success."""
+    call = descriptor.get("call") or {}
+    if _has_redacted_arg(call):
+        # item 256 Slice 3, same refusal the inverse and compensation paths make:
+        # a `Secret[T]` argument never reached the log, so re-issuing would send
+        # the placeholder to the remote. No fence is spent; nothing is attempted.
+        return {"outcome": "failed", "seq": seq, "referent": referent,
+                "residue": _record(
+                    "redacted-residue", crossing=_crossing_of_descriptor(descriptor),
+                    attempted={"call": call.get("method"),
+                               "args": list(call.get("args") or []), "phase": None},
+                    error={"type": "redacted-argument",
+                           "message": "the owed emission's argument was declared "
+                                      "`Secret[T]` and is redacted in the log, so "
+                                      "the call cannot be re-issued — not "
+                                      "attempted"},
+                    attempted_flag=False, outcome="unknown", referent=referent,
+                    hint="a confidential value is never written to the WAL. "
+                         "Finish this flush by hand with the value from its own "
+                         "store, or carry a non-confidential idempotency key")}
+    if wal_path is not None and seq is not None:
+        _append_reissue_fence(wal_path, seq, register)
+    try:
+        if world is None:  # pragma: no cover — recover always supplies one
+            raise RecoveryError("the re-issue seam needs a world adapter")
+        world.reissue(call)
+    except Exception as error:  # noqa: BLE001 — a re-issue is fallible
+        return {"outcome": "failed", "seq": seq, "referent": referent,
+                "residue": _record(
+                    "flush-residue", crossing=_crossing_of_descriptor(descriptor),
+                    attempted={"call": call.get("method"),
+                               "args": list(call.get("args") or []), "phase": None},
+                    error={"type": type(error).__name__, "message": str(error)},
+                    attempted_flag=True, outcome="failed", referent=referent,
+                    hint="the owed emission was re-issued by recovery and the "
+                         "adapter raised; the crossing is unconfirmed — finish "
+                         "it by hand (item 440)")}
+    return {"outcome": "reissued", "seq": seq, "referent": referent,
+            "register": register,
+            "idempotency": descriptor.get("idempotency")}
+
+
+def _window_proof(rolled: list, fired: list, owed: list,
+                  reissued: Optional[list] = None) -> str:
+    reissued = reissued or []
+    note = ""
+    if reissued:
+        keyed = [r for r in reissued if r.get("register") != READ]
+        note = (f" {len(reissued)} owed emission(s) were AUTO-FIRED through the "
+                f"item-440 re-issue seam under the operator's policy"
+                + (f"; {len(keyed)} of them crossed again under a stable "
+                   f"idempotency register, so a duplicate is the remote's dedup "
+                   f"CONTRACT (never a confirmed fact of a dedup)." if keyed
+                   else " (read tier: the calls change nothing, so re-issuing "
+                        "them is observationally free)."))
     if not owed:
         return (f"committed: {len(rolled)} witnessed mutation(s) rolled forward "
                 f"(discharge appended, none rolled back), {len(fired)} deferred "
-                f"emission(s) confirmed flushed. The world holds only what the "
-                f"approved commit meant to cross.")
+                f"emission(s) confirmed flushed.{note} The world holds only what "
+                f"the approved commit meant to cross.")
+    rule = ("never auto-fired (v1)" if not reissued else
+            "left for a human — nothing about them can be proven, so the seam "
+            "refused them")
     return (f"committed with {len(owed)} OWED flush(es): the session was approved, "
             f"but {len(owed)} deferred emission(s) have no `flushed` record — their "
             f"host bodies may not have fired before the crash. Reported honestly, "
-            f"never auto-fired (v1); {len(fired)} confirmed flushed, "
-            f"{len(rolled)} witnessed mutation(s) rolled forward.")
+            f"{rule}; {len(fired)} confirmed flushed, "
+            f"{len(rolled)} witnessed mutation(s) rolled forward.{note}")
 
 
 def _record(kind: str, *, crossing: dict, attempted: Optional[dict],
@@ -599,8 +893,13 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
         if inverse.get("reconstructible"):
             seq = record.get("seq")
             declared_idempotent = bool(inverse.get("undo_idempotent"))
+            # item 440: the third tier. A `register: "read"` inverse changes
+            # nothing, so it is re-dispatchable with no key and no fence; the
+            # fenced branch below is skipped entirely and a second recovery run
+            # never escalates it to an operator.
+            tier = _replay_tier(inverse.get("register"), declared_idempotent)
             op = inverse["op"]
-            if not declared_idempotent and seq in fenced_seqs:
+            if tier == "fenced" and seq in fenced_seqs:
                 # item 309 §3a, extended: this undeclared inverse's single
                 # at-most-once attempt was already spent on an earlier
                 # `recover` pass (there is no in-process abort for this family
@@ -631,12 +930,11 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
             # single fenced attempt: the fence is fsync'd BEFORE the apply so
             # a crash between them leaves a fence and no double-apply (§3a,
             # consume-before-fire).
-            if not declared_idempotent and wal_path is not None and seq is not None:
+            if tier == "fenced" and wal_path is not None and seq is not None:
                 _append_replay_fence(wal_path, seq)
                 fenced_seqs.add(seq)
             world.apply_inverse(op)
-            ran.append({**entry, "op": op,
-                        "replay": "free" if declared_idempotent else "fenced"})
+            ran.append({**entry, "op": op, "replay": tier})
         else:
             # a boundary inverse we could only find as a closure: it cannot be
             # re-issued in a fresh process. Say so — do not pretend it ran.
@@ -694,7 +992,12 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
                                        "retained": True})
             continue
         declared_idempotent = bool(d.get("undo_idempotent"))
-        if not declared_idempotent and seq in fenced_seqs and abort_completed:
+        # item 440: `read` | `free` | `fenced`. Only `fenced` consults the fence
+        # set and only `fenced` writes one — a read and a declared-idempotent
+        # inverse both replay freely, for different reasons the report keeps
+        # apart (`replay: "read"` vs `replay: "free"`).
+        tier = _replay_tier(d.get("register"), declared_idempotent)
+        if tier == "fenced" and seq in fenced_seqs and abort_completed:
             # item 309 follow-up: a COMPLETED in-process abort. The `aborted`
             # completion record is present, so the abort's Phase 1 ran this fenced
             # inverse's apply to completion — its outcome is KNOWN (it ran), not
@@ -706,7 +1009,7 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
                                               "op": call,
                                               "replay": "abort-phase1"})
             continue
-        if not declared_idempotent and seq in fenced_seqs:
+        if tier == "fenced" and seq in fenced_seqs:
             # item 309 §3a: an UNDECLARED inverse whose single at-most-once
             # attempt was already spent on another apply path (the headline
             # abort-then-crash: Phase 1 fenced-and-applied, then the process died
@@ -759,16 +1062,14 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
         # declared subset (§3a). An UNDECLARED one takes its single fenced
         # attempt: the fence is fsync'd BEFORE the apply so a crash between them
         # leaves a fence and no double-apply (§3a, consume-before-fire).
-        if not declared_idempotent and wal_path is not None:
+        if tier == "fenced" and wal_path is not None:
             _append_replay_fence(wal_path, seq)
             fenced_seqs.add(seq)
         # ABORTED / undischarged: reconstruct and run the declared inverse.
         try:
             world.apply_inverse(call)
             transactional_rolled_back.append({"seq": seq, "referent": referent,
-                                              "op": call,
-                                              "replay": ("free" if declared_idempotent
-                                                         else "fenced")})
+                                              "op": call, "replay": tier})
         except Exception as error:  # noqa: BLE001 — 243 rule 6: the inverse is fallible
             restore_residue.append({"seq": seq, "referent": referent})
             outstanding.append(_record(
@@ -938,7 +1239,27 @@ def _guarantee() -> str:
 
 def render(report: dict) -> str:
     lines = [f"verdict: {report['verdict'].upper()}", report["decision"], ""]
-    if report["verdict"] == "rolled-forward":
+    if report["verdict"] == "rolled-forward" and "owedFlushes" in report:
+        # item 245's approved-to-discharged window verdict shares the
+        # `rolled-forward` name but carries a different body (no
+        # `committedEffects`/`components`/`resumed`), so it gets its own render
+        # arm; without it `revl recover` raised KeyError on exactly the WAL the
+        # item-440 re-issue seam acts on.
+        lines.append("  rolled forward discharge: "
+                     + (", ".join(str(s) for s in report.get(
+                         "rolledForwardDischarge") or []) or "(none)"))
+        for entry in report.get("flushed") or []:
+            lines.append(f"  flushed  seq {entry['seq']:<3} {entry['referent']}")
+        for entry in report.get("reissued") or []:
+            key = entry.get("idempotency")
+            under = (f"register {entry.get('register')!r}"
+                     + (f", key {key!r}" if key else ""))
+            lines.append(f"  re-issued seq {entry['seq']:<3} {entry['referent']} "
+                         f"— auto-fired by the item-440 seam ({under})")
+        for entry in report.get("owedFlushes") or []:
+            lines.append(f"  OWED     seq {entry['seq']:<3} {entry['referent']} "
+                         f"— {entry['outcome']}")
+    elif report["verdict"] == "rolled-forward":
         lines.append(f"  committed effects (all balanced): {report['committedEffects']}")
         lines.append(f"  components: {', '.join(report['components']) or '(none)'}")
         lines.append(f"  resumed persisted generation: {report['resumed']}")
@@ -976,6 +1297,10 @@ def render(report: dict) -> str:
         for entry in report.get("fencedDeferred") or []:
             lines.append(f"  FENCED   seq {entry['seq']:<3} undeclared inverse — "
                          f"fenced-before-attempt, will not re-run: {entry['referent']}")
+        for entry in report.get("ran") or []:
+            if entry.get("replay") == "read":
+                lines.append(f"  read     {entry['label']:<22} re-dispatched freely "
+                             f"— the inverse changes nothing (item 440)")
     residue = report["residue"]
     lines += ["", f"residue proof [{'CLEAN' if residue['clean'] else 'RESIDUE'}]:",
               f"  {residue['proof']}", "", f"guarantee: {report['guarantee']}"]
