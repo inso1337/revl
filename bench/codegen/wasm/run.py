@@ -69,6 +69,13 @@ CASES = {
         sizes=[4, 1024],
         variants=["list_bulk", "prune_dead", "combined"],
     ),
+    "constfold": dict(
+        service="Scaler",
+        export="revl:exported/scaler#scaled",
+        call="scaled(3)",
+        sizes=[0],
+        variants=["const_fold", "prune_dead", "combined"],
+    ),
     "scalar": dict(
         service="Doubler",
         export="revl:exported/doubler#dbl",
