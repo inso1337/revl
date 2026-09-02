@@ -713,7 +713,7 @@ def _run_audit(args, ir: dict) -> int:
     # deferred emission, and compensation with its replay class (`replay: free`
     # for a declared/keyed idempotent entry, `replay: fenced` for an undeclared
     # inverse, `recovery: human-finish` for an unkeyed owed emission) and its
-    # register (`declared`/`keyed`/`shape-proven`/item 440's `read`).
+    # register (`declared`/`keyed`/item 440's `read`).
     if getattr(args, "recovery", None):
         for line in _recovery_audit_view(ir):
             print(line)
@@ -748,8 +748,7 @@ def _recovery_audit_view(ir: dict) -> list:
             # item 440 §(b): the seam can now ACT on this classification, but only
             # under the operator's `recovery may re-issue owed emissions` knob, so
             # the class says "re-issuable" rather than promising a fire.
-            cls = ("replay: re-issuable" if register in ("read", "keyed",
-                                                         "shape-proven")
+            cls = ("replay: re-issuable" if register in ("read", "keyed")
                    else "recovery: human-finish")
         else:  # compensation
             cls = ("compensate: keyed-retry" if register == "keyed"

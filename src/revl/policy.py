@@ -424,13 +424,19 @@ _EVIDENCE_STATUS_THRESHOLDS = {
 _SELF_ATTESTING_FACETS = frozenset({"fault-sweep", "inverse-roundtrip",
                                     "gauntlet"})
 
-# The declaration-strength floors (item 290, §3.2, adopting 309's partial
-# order). Item 309 now records `declared`/`keyed`/`shape-proven` in the IR
-# (lower.py `_idempotent_register`), so every floor is recordable: `declared` is
-# the trust-me floor, `keyed` and `shape-proven` are the strong peers, and
-# `strong` is the floor meaning "any strong register" (keyed OR shape-proven).
-_REGISTER_LEVELS = ("declared", "keyed", "shape-proven", "strong")
+# The declaration-strength floors (item 290, §3.2, adopting 309's order). Item
+# 309 records `declared`/`keyed` in the IR (lower.py `_idempotent_register`) and
+# item 440 adds `read`, so every floor is recordable: `declared` is the trust-me
+# floor, `keyed` is the strong emission register, and `strong` is the floor
+# meaning "any register above the trust-me floor" (today `keyed` or `read`).
+_REGISTER_LEVELS = ("declared", "keyed", "strong")
 _REGISTER_RECORDABLE = frozenset(_REGISTER_LEVELS)
+
+# Floor spellings item 207 RETIRED. `shape-proven` named a register nothing ever
+# produced, and over the whole producible vocabulary it was an exact synonym for
+# `strong`. Rejected at parse naming the replacement rather than silently
+# accepted, which is 290's own precedent for closing a vocabulary in time.
+_RETIRED_REGISTER_LEVELS = {"shape-proven": "strong"}
 
 
 @dataclass(frozen=True)
@@ -473,7 +479,7 @@ class RegisterRule:
     parses only ``declared`` (the sole register the IR records today); a higher
     floor is a parse error until 309's ledger lands."""
     capability: str                   # glob over capability reach tokens
-    at_least: str                     # "declared" | "keyed" | "shape-proven" | "strong"
+    at_least: str                     # "declared" | "keyed" | "strong"
 
 
 @dataclass(frozen=True)
@@ -484,7 +490,7 @@ class TeardownRule:
     compensation) contains an entry whose register is below the strength floor,
     under 309's partial order. The bare form is ``strength = "declared"``:
     refuse a fenced/unregistered entry, admit any of the three registers."""
-    strength: str                     # "declared" | "keyed" | "shape-proven" | "strong"
+    strength: str                     # "declared" | "keyed" | "strong"
 
 
 @dataclass(frozen=True)
@@ -499,14 +505,14 @@ class ReissueRule:
     register at or above `strength`, under 309's partial order:
 
     * bare (``strength = "keyed"``) — only the dedup-safe registers (`keyed`,
-      `shape-proven`, and 440's `read`, which crosses nothing at all). The fire
-      is safe BY CONSTRUCTION even if the pre-crash flush actually landed.
+      and 440's `read`, which crosses nothing at all). The fire is safe BY
+      CONSTRUCTION even if the pre-crash flush actually landed.
     * ``(strength: declared)`` — additionally the author's unverified trust-me
       claim, which an operator may choose to accept.
 
     An owed emission with NO register is never auto-fired under any strength: the
     ambiguous case stays human-finish, because nothing about it can be proven."""
-    strength: str                     # "declared" | "keyed" | "shape-proven" | "strong"
+    strength: str                     # "declared" | "keyed" | "strong"
 
 
 @dataclass(frozen=True)
@@ -712,10 +718,18 @@ def _parse_evidence_subject(head: str, source, lineno) -> tuple[str, str, str | 
 
 
 def _parse_register_level(level: str, source, lineno) -> str:
-    """Validate a `requires register <level>` floor. Slice 1 records only
-    `declared` in the IR, so a higher floor is a distinct parse error until
-    309's ledger lands (§3.2)."""
+    """Validate a `requires register <level>` floor (§3.2). Every level in
+    `_REGISTER_LEVELS` is recordable now that 309's ledger and 440's read tier
+    have landed. A level item 207 RETIRED is rejected with its replacement named,
+    so a policy written against the old vocabulary fails loudly rather than
+    grading nothing."""
     lvl = level.strip()
+    if lvl in _RETIRED_REGISTER_LEVELS:
+        raise PolicyError(
+            source, lineno,
+            f"register level {lvl!r} was removed (item 207) — write "
+            f"{_RETIRED_REGISTER_LEVELS[lvl]!r} instead, which is what it "
+            f"graded")
     if lvl not in _REGISTER_LEVELS:
         raise PolicyError(
             source, lineno,
@@ -1544,10 +1558,10 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                                          rule.self_attested, True, tuple(clauses)))
         for rrule in policy.register_rules:
             # item 309 §3.2: read the per-token register off the audit's
-            # `capability_registers` map (built from the IR's declared registers)
-            # and refuse a selected token whose register is below the floor, under
-            # 309's partial order (`declared < keyed`, `declared < shape-proven`;
-            # the two strong forms are peers, `strong` names either).
+            # `capability_registers` map (built from the IR's declared registers,
+            # WEAKEST-wins per token) and refuse a selected token whose register
+            # is below the floor, under 309's order (`declared < keyed < read`;
+            # `strong` names any register above the trust-me floor).
             matched = [tok for tok in reach_tokens
                        if tok != UNBOUNDED and fnmatchcase(tok, rrule.capability)]
             selected = bool(matched)

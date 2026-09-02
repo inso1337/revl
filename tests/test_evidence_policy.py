@@ -13,7 +13,7 @@ worst-wins with the shipped rule families. These tests pin the deliverable:
   * an unrooted threshold is a `PolicyError` unless acknowledged;
   * `mcp requires evidence [gauntlet admissible]` is satisfiable now via the
     live session gauntlet dossier;
-  * `requires register declared` admits; a higher floor is a parse error;
+  * `requires register declared` admits; a retired level is a parse error;
   * `revl policy evaluate` explains pass/fail with facts vs thresholds, names
     vacuous-vs-checked admission, and reports inert selectors;
   * an evidence-free policy is byte-identical to today.
@@ -324,8 +324,9 @@ def test_requires_register_declared_refuses_an_unregistered_capability():
 
 def test_requires_register_higher_floor_parses_and_enforces():
     # 309's ledger unlocks the floors: they PARSE now, and enforce under the
-    # partial order (declared < keyed, declared < shape-proven; peers).
-    for level in ("keyed", "shape-proven", "strong"):
+    # order (declared < keyed < read; `strong` names any of those above
+    # `declared`).
+    for level in ("keyed", "strong"):
         policy = parse_policy(f"capability db requires register {level}")
         declared_audit = _audit(IDEMPOTENT_SOLO)  # db is only `declared`
         violations = evaluate(policy, declared_audit)
@@ -379,3 +380,19 @@ def test_evidence_free_policy_is_byte_identical():
                      trusted_publishers=frozenset(), key=None, evidence_ir={})
     assert [v.message for v in base] == [v.message for v in grown]
     assert base == []
+
+
+def test_a_retired_register_level_is_rejected_with_its_replacement_named():
+    """Item 207 removed `shape-proven`. A policy written against the old
+    vocabulary must fail loudly and say what to write instead, rather than being
+    accepted as a level that grades nothing (290's own precedent for closing a
+    vocabulary in time)."""
+    for text in ("capability db requires register shape-proven\n",
+                 "requires idempotent-teardown(strength: shape-proven)\n",
+                 "recovery may re-issue owed emissions "
+                 "(strength: shape-proven)\n"):
+        with pytest.raises(PolicyError) as exc:
+            parse_policy(text)
+        assert "shape-proven" in str(exc.value)
+        assert "'strong'" in str(exc.value)
+        assert "item 207" in str(exc.value)
