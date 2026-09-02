@@ -15,55 +15,56 @@ directly, with the tier's own `CORPUS` list as the workload — the exact
 documents `tests/test_selfhost_emit_<tier>.py` holds to byte agreement, not the
 fixture directory.
 
-MEASURED (2026-09-02). The reference emitter under the tier's own corpus, the
-self-host port under the same corpus, and — to price the fix — the reference
-under EVERY `.rvl` in the tree:
+MEASURED (2026-09-02, re-taken on current main). The reference emitter under
+the tier's own corpus, the self-host port under the same corpus, and — to price
+the fix — the reference under EVERY `.rvl` in the tree:
 
     tier  docs  ref stmts  ref cov   port stmts  port cov   whole tree
-    py      20       2066    57.0%         2002     73.5%        80.4%
-    ts      31       1791    65.2%         2054     77.5%        83.4%
-    go       9       3862    24.4%         1404     67.9%        73.9%
-    java    22       2216    57.9%         2414     73.1%        81.5%
-    rust    19       2968    52.1%         1859     80.0%        85.2%
-    wasm    11       2530    42.8%         1339     78.9%        84.2%
-    TOTAL  112      15433    46.7%        11072     75.2%        80.9%
+    py      20       2103    56.2%         1990     73.2%        79.1%
+    ts      31       1811    64.9%         2056     77.4%        83.0%
+    go       9       3977    24.2%         1410     67.7%        74.6%
+    java    22       2301    57.4%         2423     72.9%        80.9%
+    rust    19       2968    52.1%         1865     79.8%        85.2%
+    wasm    11       2530    42.8%         1346     78.9%        84.2%
+    TOTAL  112      15690    46.3%        11090     75.0%        80.7%
 
 **MORE THAN HALF of the reference emitter statements the byte-agreement oracles
-run against are never executed by the corpus those oracles use: 8233 of 15433,
-53.3%.** The construct gate said 20% blind. It was optimistic by two and a half
+run against are never executed by the corpus those oracles use: 8421 of 15690,
+53.7%.** The construct gate says 19% blind. It is optimistic by nearly three
 times, in the direction that matters, which is the same failure mode item 429 is
 about, one level up.
 
 WHERE THE UNCOVERED MASS SITS, and why a construct table cannot see it:
 
-    3753 statements in 243 functions no corpus document CALLS AT ALL
-    2868 statements in 313 functions the corpus DOES call and leaves unrun
-    1612 statements on declared exclusions (in-file tests, realms, bridge, v1/v2)
+    3834 statements in 250 functions no corpus document CALLS AT ALL
+    2921 statements in 315 functions the corpus DOES call and leaves unrun
+    1666 statements on declared exclusions and named open gaps
 
 That middle row is the point. The dispatch arm is reached, so the construct
 counts as covered, while the branch, error arm or fallback below it never runs.
 
 AUTHOR CASES, OR POINT THE ORACLE AT MORE INPUTS? Measured, because the two
 answers cost very differently. Of 867 `.rvl` documents in the tree, 619 compile;
-running all six ports over them gives 2949 (tier, document) pairs the reference
-emits, of which **1132 ALREADY AGREE byte-for-byte and 1817 DIVERGE**. Adopting
-every agreeing document — a tenfold corpus, 1132 documents, zero authoring —
-moves reference coverage from 46.7% to only **51.4%**. The whole tree reaches
-80.9%, so the remaining ~29 points live ENTIRELY on the diverging pairs.
+running all six ports over them gives ~2950 (tier, document) pairs the reference
+emits, of which **1136 ALREADY AGREE byte-for-byte and the rest DIVERGE**.
+Adopting every agreeing document — a tenfold corpus, 1136 documents, zero
+authoring — moves reference coverage from 46.3% to only **51.0%**. The whole
+tree reaches 80.7%, so the remaining ~30 points live ENTIRELY on the diverging
+pairs.
 
 The binding constraint is therefore neither corpus size nor authoring: it is
-TRIAGE of those 1817 divergences, each of which is either a real self-host gap
-to port or a declared out-of-slice shape to record. Free adoption buys about
-five points and is worth taking; the rest has to be decided divergence by
-divergence, which is item 429's exit (2) and the standing rule in
-`docs/process.md`, not a corpus-authoring exercise.
+TRIAGE of those divergences, each of which is either a real self-host gap to
+port or a declared out-of-slice shape to record. Free adoption buys about five
+points and is worth taking; the rest has to be decided divergence by divergence,
+which is item 429's exit (2) and the standing rule in `docs/process.md`, not a
+corpus-authoring exercise.
 
 NOT AFFECTED BY THE `_infile_programs()` TRUNCATION BUG. That harvester in
 `tests/test_selfhost_lower.py` scans a plain string literal to the next `"` and
 does not honour `\"`, so a program containing an escaped quote is silently cut
 short. Nothing here goes through it: `corpus_documents()` parses the tier's
 `CORPUS` list for FILENAMES and reads those `.rvl` files off disk. (Checked at
-the source anyway: 50 programs are harvested there today and none is currently
+the source anyway: 50 programs are harvested there and none is currently
 truncated, because every `\"` in that section sits inside a `\"\"\"` literal,
 which the harvester scans correctly. The bug is real and latent, not biting.)
 
@@ -472,8 +473,22 @@ def write_ledger(data: dict) -> None:
         out: dict[str, dict] = {}
         for tier in TIERS:
             found = data[half][tier]
+            # Counts always come from the fresh measurement; the GROUPING is
+            # preserved, so a reason someone wrote by hand survives a
+            # regeneration and only the numbers move. Functions that are no
+            # longer uncovered fall out of their bucket on their own.
+            previous = raw.get(half, {}).get(tier, {}).get("uncovered", {})
             grouped: dict[str, dict[str, int]] = {}
+            claimed: set[str] = set()
+            for reason, names in previous.items():
+                kept = {n: found["functions"][n] for n in names
+                        if n in found["functions"]}
+                if kept:
+                    grouped[reason] = kept
+                    claimed |= set(kept)
             for name, count in found["functions"].items():
+                if name in claimed:
+                    continue
                 reason = _group_for(name, count, found["sizes"].get(name, count))
                 grouped.setdefault(reason, {})[name] = count
             out[tier] = {
