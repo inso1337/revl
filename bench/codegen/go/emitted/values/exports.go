@@ -8,6 +8,9 @@ func IndexOf(hay, needle string) int64 { return index_of(hay, needle) }
 // Take is the emitted `take`.
 func Take(s string, a, b int64) string { return take(s, a, b) }
 
+// Chars is the emitted `chars` (`Str.split("")` -> revlStrSplit).
+func Chars(s string) []string { return chars(s) }
+
 // Render is the emitted `render` (`Int.to_str`).
 func Render(n int64) string { return render(n) }
 

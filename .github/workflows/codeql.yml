@@ -3,10 +3,28 @@ name: "CodeQL Advanced"
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   schedule:
     - cron: '40 14 * * 0'
+  workflow_dispatch:
+
+# NOT run on pull_request, deliberately. Six language lanes per PR made CodeQL
+# roughly half of every queued job on a repository whose runner concurrency is
+# the throughput limit, and the ci workflow (which IS required for merge) was
+# queuing behind scans of code that had not landed yet. Everything that reaches
+# main is still scanned on the push, plus the weekly schedule, so no landed code
+# goes unscanned; what is lost is the pre-merge signal on a PR branch.
+# `workflow_dispatch` is here so a scan can be run on demand against a branch
+# when a change warrants it before merge.
+
+concurrency:
+  # The group carries the SHA on push, so a push to main is unique per commit
+  # and has nothing to cancel. A pull_request keeps a stable per-ref group, so a
+  # new push to the PR cancels the superseded run. Encoding the distinction in
+  # the GROUP rather than in cancel-in-progress is deliberate: the expression
+  # form cancelled main's runs anyway, which cost three merge commits their
+  # verdict.
+  group: codeql-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: true
 
 jobs:
   analyze:

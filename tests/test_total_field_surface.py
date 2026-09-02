@@ -456,7 +456,13 @@ def test_component_length_code_point_count_py_emit(case):
 # RUNNERS returns ("skip", reason) where a tier's runtime/toolchain is absent —
 # the same skip-when-absent contract the wasm exec test uses — so this never
 # reds for an environment without cordis-py / node / cargo / javac / wasmtime,
-# and runs for real wherever the toolchain is present (CI runs the full matrix).
+# and runs for real wherever the toolchain is present.
+#
+# It does NOT follow that CI runs the full matrix, and this comment used to
+# claim it did (item 445). This file is not `*_slow`-gated, so it needs no env
+# switch, but it is still bounded by which toolchains the job installs: the
+# `frontend` and `frontend-cordis` jobs run it with python and go only, so
+# `ts`, `rust`, `java` and `wasm` skip there. Treat a skip here as unmeasured.
 @pytest.mark.parametrize("tier", ["py", "ts", "go", "rust", "java", "wasm"])
 @pytest.mark.parametrize("case", list(_LEN_STRINGS))
 def test_component_length_executes_to_code_points_per_tier(tier, case):

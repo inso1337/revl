@@ -1,0 +1,50 @@
+// Item 435(c) — the code-point decode behind the `Str` helpers is memoised, so
+// an index scan over a string is LINEAR in the string's length.
+//
+// `revlLen` / `revlCharAt` / `revlCharCodeAt` / `revlSlice` all index a string's
+// code-point decomposition (docs/strings.md: a `Str` is code points, a JS string
+// is UTF-16). Each used to call `Array.from` itself, so the idiomatic scan below
+// — whose `while` condition re-evaluates `s.length()` every iteration — built and
+// threw away the whole array 2n + 1 times, materialising 2n^2 + n code points to
+// read n of them. `tests/str_scan_memo.test.ts` counts them by executing this.
+//
+// `mixed` is here so the count is checked on astral characters too, where code
+// points and UTF-16 code units genuinely differ and the decode is doing real work.
+//
+// Regenerate with:
+//   python3 -c "import json,sys; sys.path.insert(0,'src'); from revl import compile_source; \
+//     print(json.dumps(compile_source(open('backends/typescript/tests/fixtures/str_scan.rvl').read()), indent=2))" \
+//     > backends/typescript/tests/fixtures/str_scan.ir.json
+
+pub fn count_digits(s: Str) -> Int {
+  var n = 0
+  var i = 0
+  while (i < s.length()) {
+    if (s.charAt(i).is_digit()) { n = n + 1 }
+    i = i + 1
+  }
+  return n
+}
+
+pub fn checksum(s: Str) -> Int {
+  var acc = 0
+  var i = 0
+  while (i < s.length()) {
+    acc = (acc + s.charCodeAt(i)).mod(65536)
+    i = i + 1
+  }
+  return acc
+}
+
+// A pairwise scan: two distinct strings alternating through the helpers. This is
+// why the memo has two slots — with one it would thrash back to the pre-435(c)
+// cost on this shape, which is common (compare, merge, diff).
+pub fn common_prefix(a: Str, b: Str) -> Int {
+  var i = 0
+  while (i < a.length()) {
+    if (i >= b.length()) { return i }
+    if (a.charAt(i) != b.charAt(i)) { return i }
+    i = i + 1
+  }
+  return i
+}

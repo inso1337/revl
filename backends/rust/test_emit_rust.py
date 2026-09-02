@@ -20,6 +20,12 @@ _spec = importlib.util.spec_from_file_location("revl_rust_emit", Path(__file__).
 emit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(emit)
 from revl import compile_files, compile_source  # noqa: E402
+# A red golden is a REVIEW prompt, not a wall: the goldens are snapshot tests
+# (docs/conformance.md, "Golden policy: snapshot, not freeze"), so regenerating
+# and reviewing the diff is always an acceptable resolution. Every golden
+# assertion says which command regenerates it.
+_TAIL = ("If the change is intended: python3 tools/regen_goldens.py {t}, then review "
+         "the diff. Goldens are snapshots, not a freeze (docs/conformance.md).")
 
 
 def _ir(name: str = "user_cache") -> dict:
@@ -60,7 +66,9 @@ def test_accepts_ir_versions_1_2_3_and_rejects_4():
 def test_user_cache_golden_byte_equality():
     src = emit.emit(_ir("user_cache"))
     golden = (Path(__file__).parent / "golden" / "user_cache.rs").read_text(encoding="utf-8")
-    assert src == golden
+    assert src == golden, (
+        "backends/rust/golden/user_cache.rs drifted from the emitter. "
+        + _TAIL.format(t="rust"))
 
 
 _CRASHPROOF = Path(__file__).resolve().parent / "scenarios" / "crashproof"
@@ -169,7 +177,9 @@ def test_jsonwire_scenario_emits_serde_backed_bodies():
 def test_jsonwire_golden_byte_equality():
     src = emit.emit(compile_files([str(_JSONWIRE_RVL)]))
     golden = (Path(__file__).parent / "golden" / "jsonwire.rs").read_text(encoding="utf-8")
-    assert src == golden
+    assert src == golden, (
+        "backends/rust/golden/jsonwire.rs drifted from the emitter. "
+        + _TAIL.format(t="rust"))
 
 
 def test_string_literals_emit_printable_non_ascii_literally():

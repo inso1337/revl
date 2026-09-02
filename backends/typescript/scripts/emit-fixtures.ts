@@ -41,6 +41,9 @@ export function emitFixtures(): void {
   emitFixture('spawn.ir.json', 'spawn.ts')
   emitFixture('instance_get.ir.json', 'instance_get.ts')
   emitFixture('fr1_loop.ir.json', 'fr1_loop.ts')
+  // item 435(c): index scans over a Str, so `str_scan_memo.test.ts` can count
+  // the code points the emitted `Str` helpers actually materialise
+  emitFixture('str_scan.ir.json', 'str_scan.ts')
   // item 165: identifiers that are JS/TS reserved words, renamed uniformly
   emitFixture('reserved_words.ir.json', 'reserved_words.ts')
   // item 279: a reserved-word JSON field on a DYNAMIC (json_parse/Any) value
