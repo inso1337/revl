@@ -1755,6 +1755,11 @@ fn generic_arity(h: Str) -> Int {
 fn ty_wellformed(t: Str) -> Bool {
   if (t == "") { return true }
   let sp = split_type(t)
+  // `Never` is the checker's inferred bottom (`List[Never]` for `[]`), a
+  // wildcard in both directions and uninhabited, so it is not denotable as a
+  // WRITTEN annotation — writing it is an unchecked cast with no cast syntax.
+  // The reference refuses it in check_type_wellformed; this is the port.
+  if (sp.head == "Never") { return false }
   let ar = generic_arity(sp.head)
   if (ar != 0 - 1 && sp.args.length() != ar) { return false }
   var i = 0
