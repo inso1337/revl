@@ -24,9 +24,11 @@ runtime policy check):
 
   (b) `granted` — an allowlist of the service NAMES the admitted program may
       reach. Even a *declared* service is refused unless it is in the granted
-      set (or provided internally by the same turn). This closes the gap where
-      an admitted turn, wired against a running composition, could reach ANY
-      ambient service; the profile restricts it to an explicit subset.
+      set (or the requirement BINDS to the turn's own provision of that key —
+      internal wiring, resolved the way `lower`'s link phase resolves it, never
+      by service name alone). This closes the gap where an admitted turn, wired
+      against a running composition, could reach ANY ambient service; the
+      profile restricts it to an explicit subset.
 
 Deferred (item 45, the fuller answer): compiling the turn to the wasm substrate
 with the granted tools wired in as host imports, so confinement is *physical*
@@ -70,8 +72,10 @@ def _granted_navigate(granted, *, reached: str | None = None) -> dict:
             action=f"reach the granted service `{svc}` instead", ref=svc))
     alts.append(nav.alternative(
         enacts=nav.ENACTS_AUTHOR,
-        action=("or provide the service internally (a service the turn's own "
-                "components provide is not an outward reach)"),
+        action=("or provide the service internally, under the very key the "
+                "requirement names (a requirement that binds to the turn's own "
+                "provision of that KEY is not an outward reach; a provision "
+                "under some other key does not exempt it)"),
         ref="provide-internally"))
     refused = {"granted": sorted(granted or ())}
     if reached is not None:
@@ -367,39 +371,184 @@ def check_no_declassify(root_programs: list[Program],
                 navigate=_no_declassify_navigate())
 
 
+# The realm a key with no `isolate` clause lives in. Mirrors `lower.SHARED_REALM`
+# (kept local so the allowlist check has no import-time dependency on lower).
+_SHARED_REALM = ""
+
+
+def _manifest_entries(document: dict) -> list | None:
+    """The lowered manifest's component entries — the WHOLE resulting composition
+    (the admitted candidate's components PLUS every ambient component still
+    running), each with its bare `provides` key list and its `isolate`/`routes`
+    realm bindings. `None` when the document carries no usable manifest, which
+    the caller must treat as INDETERMINATE (fail closed), never as "no ambient
+    provider exists"."""
+    manifest = document.get("manifest")
+    if not isinstance(manifest, dict):
+        return None
+    entries = manifest.get("components")
+    if not isinstance(entries, list):
+        return None
+    return entries
+
+
+def _provider_of(entries: list) -> dict:
+    """`(key, realm) -> providing component name`, resolved exactly as `lower`'s
+    link phase resolves it: provision disjointness is per-`(key, realm)` and, on
+    a G2 conflict, the FIRST provider stays registered (lower keeps it so route
+    and edge resolution still find a provider rather than fabricating a "no
+    provider"). Mirroring that here means the allowlist reasons about the SAME
+    binding the wiring will perform."""
+    table: dict = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        isolate = entry.get("isolate") or {}
+        for key in entry.get("provides") or ():
+            realm = isolate.get(key, _SHARED_REALM) if isinstance(isolate, dict) \
+                else _SHARED_REALM
+            table.setdefault((key, realm), entry.get("name"))
+    return table
+
+
+def _binding_targets(entries: list, provider_of: dict, comp_name: str,
+                     key: str) -> set | None:
+    """The component name(s) a `requires <key>` on `comp_name` actually BINDS to
+    in the resulting composition, or `None` when that cannot be determined.
+
+    This is the whole point of the check: the wiring resolves a requirement by
+    provision KEY (per realm), never by service NAME. A routed key (`isolate
+    <key> in realms(...)`) binds one provider per named realm, so every leg is a
+    target; a plain key binds the single provider of `(key, realm)`.
+
+    `None` (indeterminate) is returned when the requiring component has no
+    manifest entry (a spawn TEMPLATE is instantiated at runtime and takes no
+    place in the static table), when no provider owns the key, or when a routed
+    leg dangles. The caller fails closed on `None`.
+    """
+    entry = None
+    for candidate in entries:
+        if isinstance(candidate, dict) and candidate.get("name") == comp_name:
+            entry = candidate
+            break
+    if entry is None:
+        return None
+    routes = entry.get("routes") or {}
+    if isinstance(routes, dict) and key in routes:
+        route = routes.get(key) or {}
+        realms = route.get("realms") or ()
+        if not realms:
+            return None
+        targets: set = set()
+        for realm in realms:
+            provider = provider_of.get((key, realm))
+            if provider is None:
+                return None
+            targets.add(provider)
+        return targets
+    isolate = entry.get("isolate") or {}
+    realm = isolate.get(key, _SHARED_REALM) if isinstance(isolate, dict) \
+        else _SHARED_REALM
+    provider = provider_of.get((key, realm))
+    if provider is None:
+        return None
+    return {provider}
+
+
 def check_allowlist(document: dict, profile: AdmissionProfile) -> None:
     """(b) Refuse if the admitted program reaches a service outside `granted`.
 
-    A component "reaches" a service by `requires`-ing it. A service the turn's
-    own components also PROVIDE is internal wiring, not an outward reach, so it
-    is exempt; every other required service must be in the granted allowlist.
-    This is what bounds an admitted turn to a subset of a running composition's
-    ambient services instead of all of them.
+    A component "reaches" a service by `requires`-ing it. Every required service
+    must be in the granted allowlist, with ONE exemption: a requirement that
+    binds to the candidate's OWN provision is internal wiring, not an outward
+    reach.
+
+    That exemption used to be keyed on the service NAME — "does any component of
+    this turn provide a service of this name?" — while the wiring binds by
+    provision KEY. The gap was a full bypass of the allowlist: a candidate
+    declared one throwaway component providing the same SERVICE under an unused
+    KEY, which made the service count as "internal", and its real
+    `requires <live-key>: <Service>` was then never checked at all — at wiring
+    time it bound to the ambient, host-backed provider that owns that key. The
+    `granted` argument became decorative, and the same trick reached the admit
+    decider itself past item 334's FORBIDDEN_GRANT rule (which only inspects the
+    granted set, and the bypass never has to NAME the decider).
+
+    So the exemption is now resolved the way the wiring resolves: find which
+    provision key/realm the requirement BINDS to, and exempt it only when every
+    binding target is one of the candidate's OWN components AND that component
+    provides that key with the same service. A binding onto an AMBIENT provider
+    is an outward reach and must be granted, no matter what the turn also
+    provides under other keys.
+
+    Fails CLOSED: if the binding target cannot be determined (no manifest, a
+    requiring component that takes no place in the static table, no provider of
+    the key, a dangling routed leg), the requirement is NOT exempt and must be
+    granted like any other reach.
     """
     if profile.granted is None:
         return
     granted = profile.granted
     components = document.get("components") or []
-    provided_internally: set[str] = set()
+    # the candidate's OWN components: `document["components"]` is only what this
+    # compile produced (the admitted source), never the ambient composition.
+    own_provisions: dict = {}
     for comp in components:
         provides = comp.get("provides")
-        if isinstance(provides, dict):
-            provided_internally.update(provides.values())
+        own_provisions[comp.get("name")] = dict(provides) \
+            if isinstance(provides, dict) else {}
+    entries = _manifest_entries(document)
+    provider_of = _provider_of(entries) if entries is not None else {}
+
+    def _own_binding(comp_name: str, key: str, service: str) -> bool:
+        """Whether `requires key: service` on `comp_name` binds ONLY to the
+        candidate's own provision(s) of that key."""
+        if entries is None:
+            return False           # indeterminate -> not exempt (fail closed)
+        targets = _binding_targets(entries, provider_of, comp_name, key)
+        if not targets:
+            return False           # indeterminate / unbound -> not exempt
+        for target in targets:
+            if target not in own_provisions:
+                return False       # binds to an AMBIENT provider: an outward reach
+            if own_provisions[target].get(key) != service:
+                return False       # own provision, but of a different service
+        return True
+
     for comp in components:
         requires = comp.get("requires") or {}
+        name = comp.get("name")
         for key, service in requires.items():
-            if service in granted or service in provided_internally:
+            if service in granted:
+                continue
+            if _own_binding(name, key, service):
                 continue
             allowed = ", ".join(f"`{s}`" for s in sorted(granted)) or "<nothing>"
+            # the decoy shape, named explicitly so the repair signal is not a
+            # mystery: the turn DOES provide this service, just not under the key
+            # the requirement binds to.
+            decoy_keys = sorted(
+                k for prov in own_provisions.values()
+                for k, svc in prov.items() if svc == service and k != key)
+            if decoy_keys:
+                where = ", ".join(f"`{k}`" for k in decoy_keys)
+                extra = (f" This turn does provide `{service}` under key(s) "
+                         f"{where}, but a `requires` binds by KEY, not by service "
+                         f"name: `{key}` binds elsewhere (an ambient provider, or "
+                         f"nothing at all), so that provision does not make the "
+                         f"reach internal.")
+            else:
+                extra = ""
             raise RevlError(
                 comp.get("source") or document.get("filename") or "<candidate>",
                 0,
-                f"admission refused: component `{comp.get('name')}` reaches "
+                f"admission refused: component `{name}` reaches "
                 f"service `{service}` (via `requires {key}`), which is not in the "
                 f"granted set",
                 hint=f"the untrusted-author profile grants [{allowed}] and "
                      f"nothing else; an admitted turn may only reach a granted "
-                     f"service or one it provides itself (item 329 allowlist)",
+                     f"service or one its OWN components provide under the very "
+                     f"key it requires (item 329 allowlist).{extra}",
                 code="R2", category="admission",
                 navigate=_granted_navigate(granted, reached=service),
             )
