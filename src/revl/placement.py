@@ -1365,28 +1365,37 @@ def ts_safe_ir(ir: dict) -> dict:
     speaks the service interface over the seam. So the node module needs the
     *interface*, not the remote `@py` implementation.
 
-    This drops exactly the un-emittable part: every extern with no `@ts` body,
-    and every component (or top-level fn) whose body reaches one. Services,
-    types and ts-safe components are kept verbatim — a composition with no
-    py-only extern is returned byte-identical, so existing node placements are
+    This drops exactly the un-emittable part: every extern the ts emitter
+    refuses (`_ts_unemittable_externs` — no `@ts` body AND no `@ts ref`), and
+    every component (or top-level fn) whose body reaches one. Services, types
+    and ts-safe components are kept verbatim — a composition with no such
+    extern is returned byte-identical, so existing node placements are
     unaffected. The dropped provider still runs, on its own (py) process; the
     node process consumes it as a proxy.
+
+    The `@ts ref` half of that predicate is item 225. Classifying by `bodies`
+    alone counted a `= @ts ref` extern — empty `bodies`, populated `refs` — as
+    un-emittable, when it is precisely an extern the ts tier CAN spell: the
+    emitter turns it into a lazy import thunk (backends/typescript/emit.py,
+    item 396 option B). So this deleted, and `tier_capability_gate` refused,
+    every component reaching one, which is why no node placement ever carried a
+    `spec.refs` entry and the runner's deploy-contract hash check had nothing
+    to verify.
     """
     externs = ir.get("externs") or []
-    py_only = {e.get("name") for e in externs
-               if "ts" not in (e.get("bodies") or {}) and e.get("name")}
-    if not py_only:
+    unemittable = _ts_unemittable_externs(ir)
+    if not unemittable:
         return ir
 
-    def reaches_py_only(carrier) -> bool:
-        return bool(_names_in(carrier, set()) & py_only)
+    def reaches_unemittable(carrier) -> bool:
+        return bool(_names_in(carrier, set()) & unemittable)
 
     out = dict(ir)
-    out["externs"] = [e for e in externs if e.get("name") not in py_only]
+    out["externs"] = [e for e in externs if e.get("name") not in unemittable]
     out["components"] = [c for c in ir.get("components") or []
-                         if not reaches_py_only(c)]
+                         if not reaches_unemittable(c)]
     out["functions"] = [f for f in ir.get("functions") or []
-                        if not reaches_py_only(f)]
+                        if not reaches_unemittable(f)]
     return out
 
 
@@ -1506,11 +1515,28 @@ def _emit_gate_module(backend: str):
     return _EMIT_GATE_MODULES[backend]
 
 
-def _py_only_externs(ir: dict) -> set[str]:
-    """Externs with no `@ts` body — the ones `ts_safe_ir` deletes (and every
-    component reaching one with them)."""
+def _ts_unemittable_externs(ir: dict) -> set[str]:
+    """Externs the ts emitter cannot spell — the ones `ts_safe_ir` deletes (and
+    every component reaching one with them).
+
+    THE predicate, in one place, mirroring the emitter's own two-arm decision in
+    `backends/typescript/emit.py::_emit_ts_externs`:
+
+      * `"ts" in refs and "ts" not in bodies` -> a lazy import thunk (item 396
+        option B). EMITTABLE.
+      * `"ts" in bodies`                      -> the verbatim body. EMITTABLE.
+      * neither                               -> `EmitError`. Un-emittable.
+
+    Item 225: this used to test `bodies` alone, so a `= @ts ref` extern (empty
+    `bodies`, populated `refs`) fell in the un-emittable arm and every component
+    reaching one was refused the node tier at plan time — the reason the item
+    396(B) / 410 host-module pin check in `placement_runner.ts` had never once
+    run with a pin to verify. Keep this function the single definition: a second
+    copy of the test is exactly how the two drifted from the emitter.
+    """
     return {e.get("name") for e in ir.get("externs") or []
-            if "ts" not in (e.get("bodies") or {}) and e.get("name")}
+            if "ts" not in (e.get("bodies") or {})
+            and "ts" not in (e.get("refs") or {}) and e.get("name")}
 
 
 def _dryrun_emit(backend: str, sliced: dict) -> None:
@@ -1531,11 +1557,14 @@ def _dryrun_emit(backend: str, sliced: dict) -> None:
       gate said yes — the exact failure stage-3 exists to eliminate (F2). rust,
       node and java already agree with their builds via `emit`.
     * **node** — the build (and this dry-run) narrows through `ts_safe_ir`,
-      which DELETES any component reaching a py-only extern rather than refusing
-      it, so a node-placed dirty component would be silently omitted from the
-      artifact while the spec still lists it (a boot crash, F3). Diff the placed
-      component set against `ts_safe_ir`'s output and REFUSE at plan time,
-      naming the component + the py-only extern it reaches."""
+      which DELETES any component reaching a ts-unemittable extern rather than
+      refusing it, so a node-placed dirty component would be silently omitted
+      from the artifact while the spec still lists it (a boot crash, F3). Diff
+      the placed component set against `ts_safe_ir`'s output and REFUSE at plan
+      time, naming the component + the extern it reaches. An extern with a
+      `@ts ref` is NOT such an extern (item 225): it emits as a lazy import
+      thunk, so a component reaching one is admitted here and the node runner
+      hash-checks the ref against its compile-time pin before importing it."""
     module = _emit_gate_module(backend)
     if backend == "node":
         placed_comps = {c.get("name") for c in sliced.get("components") or []}
@@ -1543,19 +1572,22 @@ def _dryrun_emit(backend: str, sliced: dict) -> None:
         kept_comps = {c.get("name") for c in safe.get("components") or []}
         dropped = placed_comps - kept_comps
         if dropped:
-            py_only = _py_only_externs(sliced)
+            unemittable = _ts_unemittable_externs(sliced)
             by_name = {c.get("name"): c for c in sliced.get("components") or []}
             details = []
             for cname in sorted(n for n in dropped if n is not None):
-                reached = sorted(_names_in(by_name.get(cname) or {}, set()) & py_only)
+                reached = sorted(_names_in(by_name.get(cname) or {}, set())
+                                 & unemittable)
                 reach_str = ", ".join(reached) or "a py-only extern"
                 details.append(f"{cname} (reaches {reach_str})")
             raise RuntimeError(
                 "a node-placed component reaches a `@py`-only extern (no `@ts` "
-                "body), which the ts tier cannot emit: " + "; ".join(details)
+                "body and no `@ts ref`), which the ts tier cannot emit: "
+                + "; ".join(details)
                 + " — a py-only provider must stay on the py tier and be reached "
-                "across the seam as a bridge proxy (place it on `py`, or give the "
-                "extern a `@ts` body)")
+                "across the seam as a bridge proxy (place it on `py`, give the "
+                "extern a `@ts` body, or point it at a host module with "
+                "`= @ts ref sym from \"...\"`)")
         module.emit(safe)
     elif backend == "go":
         module.emit_placement(sliced, "emitted")
