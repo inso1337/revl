@@ -151,6 +151,59 @@ def _snake(name: str) -> str:
     return f"{ident}_" if ident in KEYWORDS else ident
 
 
+def _authority_split(server: str) -> tuple[str, str]:
+    """Split a URL into `(userinfo, hostport)` from its authority.
+
+    The authority is everything after `scheme://` and before the first `/`,
+    `?` or `#`. Per RFC 3986 §3.2.1, userinfo is everything before the LAST
+    `@` in the authority: a password may itself legally contain `@` or `:`,
+    so the first `@`/`:` is not a safe split point. `hostport` is returned
+    with the userinfo (and its `@`) stripped; a bracketed IPv6 literal
+    (`[::1]:8080`) is left intact for the caller to unwrap."""
+    if not server or "://" not in server:
+        return "", server or ""
+    authority = server.split("://", 1)[-1]
+    for sep in ("/", "?", "#"):
+        authority = authority.split(sep, 1)[0]
+    if "@" in authority:
+        userinfo, hostport = authority.rsplit("@", 1)
+        return userinfo, hostport
+    return "", authority
+
+
+def _authority_host(server: str) -> str:
+    """The bare HOST from a URL's authority: never the userinfo, never the
+    port. Used to derive a `net.<host>` capability token (item 421 F4): a
+    credential in a URL's userinfo must never be mistaken for the boundary
+    it authenticates to, and two different credentials against two different
+    hosts must never collapse onto one token."""
+    _userinfo, hostport = _authority_split(server)
+    if hostport.startswith("["):
+        end = hostport.find("]")
+        return hostport[1:end] if end != -1 else hostport[1:]
+    return hostport.split(":", 1)[0]
+
+
+def _redact_userinfo(url: str) -> str:
+    """`url` with any authority userinfo (`user:pass@`) removed.
+
+    A URL credential is a live secret, not an identifier: it must never be
+    echoed verbatim into generated source, a comment, or any other
+    diagnostic surface (item 421 F4)."""
+    if not url or "://" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    cut = len(rest)
+    for sep in ("/", "?", "#"):
+        idx = rest.find(sep)
+        if idx != -1:
+            cut = min(cut, idx)
+    authority, tail = rest[:cut], rest[cut:]
+    if "@" in authority:
+        authority = authority.rsplit("@", 1)[-1]
+    return f"{scheme}://{authority}{tail}"
+
+
 def _pointer(*parts: object) -> str:
     """A JSON pointer, RFC 6901-escaped.
 
@@ -1133,11 +1186,14 @@ class _Generator:
         explored branch is exactly the residue item 245 prevents). The token is
         the server host, realm-style dotted (`net.api_example_com`); with no
         `servers` block it falls back to `net.<service_key>` so the crossing is
-        still a named net cap, never a bare emission."""
-        host = ""
-        if server:
-            rest = server.split("://", 1)[-1]
-            host = rest.split("/", 1)[0].split(":", 1)[0].split("@")[-1]
+        still a named net cap, never a bare emission.
+
+        The host comes from `_authority_host`, which parses the authority
+        properly (userinfo split on the LAST `@`, IPv6 literal brackets
+        respected) rather than by naively splitting on `:`: a naive split
+        that runs `:` before `@` turns a URL credential into the token
+        itself (item 421 F4)."""
+        host = _authority_host(server) if server else ""
         host = _snake(host) if host else self.key
         return f"net.{host}"
 
@@ -1248,7 +1304,12 @@ class _Generator:
             ops.append(f"  {modifiers}fn {operation.name}({signature}){returns}")
 
             extern = f"http_{self.key}_{operation.name}"
-            target = f"{server}{operation.path}" if server else operation.path
+            # a URL credential must never be echoed into the generated
+            # source, including here, where the host comment describing the
+            # stub is otherwise a verbatim copy of the document's URL
+            # (item 421 F4).
+            target = (f"{_redact_userinfo(server)}{operation.path}" if server
+                      else operation.path)
             if operation.compensate:
                 # item 254 Slice 1: the forward emission carries a NETWORK cap
                 # scope and an item-247 `compensate` slot. The reversal extern is
@@ -1309,7 +1370,10 @@ class _Generator:
             lines.append(f"// API: {title}"
                          + (f" {info['version']}" if info.get("version") else ""))
         if server:
-            lines.append(f"// Server: {server}")
+            # never echo a URL credential into the generated header comment
+            # (item 421 F4): this is the top of the file, the first thing a
+            # reviewer scrubbing for secrets reads.
+            lines.append(f"// Server: {_redact_userinfo(server)}")
         lines += [
             "//",
             "// This boundary is TRUSTED, NOT CHECKED (G8). What is trusted here is",
