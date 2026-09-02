@@ -164,9 +164,19 @@ tier agrees on this — it is a property of the type, not a divergence between
 backends (docs/arithmetic.md). Rationale: models emit both reflexively; making one of them an
 error would burn feedback cycles on a distinction revl doesn't have. The
 compiler canonicalizes to `==` in the IR (the parser folds `===`→`==`,
-`!==`→`!=`), so no backend can diverge; a source-level formatter pass that
-also rewrites the spelling is future work (`revl fmt` today only does
-`--migrate`).
+`!==`→`!=`), so no backend can diverge on the *spelling*; a source-level
+formatter pass that also rewrites the spelling is future work (`revl fmt`
+today only does `--migrate`).
+
+That clause used to read "so no backend can diverge", full stop. Three
+backends have since diverged on the *meaning*, which canonicalizing to one IR
+node does nothing to prevent: typescript lowered `==` to JS `===` (identity
+for objects), rust derived no `PartialEq` so `==` on a record did not compile
+at all, and java emitted record and variant-case classes carrying no `equals`,
+so they inherited `Object.equals` and compared by reference. All three are
+closed and pinned in docs/contract-errata.md under "Semantic divergences".
+Read the sentence as what it is: a claim about what the IR guarantees (one
+node), not about what the emitters do with it.
 
 ### 3.5 Local mutation: `var`, `while`, `for`
 
