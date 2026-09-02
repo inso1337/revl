@@ -25,7 +25,10 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8.0", "pytest-asyncio"]
+# `coverage` is a TEST dependency, not a runtime one: tests/test_selfhost_coverage.py
+# measures which statements of the mirrored reference emitters the self-host corpus
+# never executes (roadmap item 429) and gates on it, which needs a real tracer.
+test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0"]
 # OpenTelemetry export for causal lifecycle traces (revl.otel, item 120). Kept
 # out of the base install so it stays dependency-light; absent, revl.otel
 # degrades to a no-op / span-mapping dump rather than a hard import error.

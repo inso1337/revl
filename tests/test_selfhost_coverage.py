@@ -40,9 +40,9 @@ MIRRORED = (
 TIERS = ("py", "ts", "go", "java", "rust", "wasm")
 
 
-def _load_tool():
+def _load(stem: str):
     spec = importlib.util.spec_from_file_location(
-        "selfhost_coverage_tool", ROOT / "tools" / "selfhost_coverage.py")
+        f"{stem}_tool", ROOT / "tools" / f"{stem}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -50,7 +50,8 @@ def _load_tool():
 
 @pytest.fixture(scope="module")
 def tool():
-    return _load_tool()
+    return _load("selfhost_coverage")
+
 
 
 @pytest.fixture(scope="module")
@@ -137,3 +138,4 @@ def test_every_recorded_blind_spot_carries_a_reason(tool):
             assert len(reason) > 40, (
                 f"{tier}: `{reason}` is not a reason, it is a label")
             assert constructs, f"{tier}: reason with no constructs: {reason}"
+
