@@ -53,15 +53,60 @@ test with it) to admit a new one.
    inverse can consume only a sidecar this workspace itself produced — never an
    arbitrary path, inside the root or out (see "why the inverses stay `pure`").
 4. `syscall-time` (`open_confined_write`, `replace_confined`, `remove_confined`,
-   `mkdir_confined`, `rmdir_confined`, `snapshot_preimage`, `write_through`) —
-   the mutation itself. Resolving a path and then re-walking it BY NAME at the
-   syscall leaves a check-to-syscall window; measured on the previous revision,
-   a competing thread in the workspace won it on essentially every trial. Every
-   mutation now runs through a directory fd walked down from the workspace root
-   one component at a time with `O_NOFOLLOW`, so no component can be swapped
-   for a symlink after the check: the syscall reaches the inode the check
-   admitted, or it fails. This family is also where the HARDLINK control lives
-   (below).
+   `mkdir_confined`, `rmdir_confined`, `snapshot_preimage`, `write_through`,
+   `confirm_landed`) — the mutation itself. Resolving a path and then
+   re-walking it BY NAME at the syscall leaves a check-to-syscall window;
+   measured on the previous revision, a competing thread in the workspace won
+   it on essentially every trial. Every mutation now runs through a directory
+   fd walked down from the workspace root one component at a time with
+   `O_NOFOLLOW`, so no component can be swapped for a symlink after the check:
+   the syscall reaches the inode the check admitted, or it fails. This family
+   is also where the HARDLINK control lives (below) and where a write's
+   truthfulness is established (`confirm_landed`, "a write never lies" below).
+
+# Every guard entry point is TOTAL (roadmap 422 F6)
+
+A `@py` body in `stdlib/fs.rvl` catches `FsOpError` and turns it into
+`Err(FsError)`. Anything else escapes the body as a raw exception, which breaks
+the module's stated Fallible contract: `write` is declared
+`-> Result[WriteWitness, FsError]` and a caller that handles the `Err` arm still
+crashes. Executed instance: a NUL byte in a path made `os.path.realpath` raise
+`ValueError("embedded null character")` straight out of all four witnessed ops.
+`hostfile.py:189-196` already handles exactly this for the item-396 jail; the
+workspace guard had not had the same treatment.
+
+The fix is structural rather than one `except` per call site: `_make_total`
+wraps EVERY entry point named in `PATH_FAMILIES` and `READ_HELPERS`, so an
+`OSError` or a `ValueError` escaping any of them becomes an `FsOpError` carrying
+a code, a sentence and the offending path. The enumeration is what decides,
+which means a fifth entry point added to the table is total the moment it is
+listed, and `tests/test_fs_confinement_families.py` asserts the wrapping over
+the same table. Private helpers (`_open_dirfd`, `_split`, ...) are NOT wrapped:
+they are internal, their callers translate their errnos deliberately, and the
+totality claim is about the surface a body can reach.
+
+# A write never lies (roadmap 431(b))
+
+`open_confined_write` holds an fd, so a competing writer that unlinks the leaf
+between the open and the write does not divert the bytes — they go to the inode
+the check admitted, which by then is an ORPHAN with no directory entry. The
+write then reported `Ok` with a witness naming a path that does not hold those
+bytes: the discharge descriptor enumerated a successful witnessed write, the
+file was gone, and the undo would "restore" a preimage over a forward mutation
+that never became visible. Confinement held throughout; the RESULT was false.
+
+The answer is not to recreate the vanished leaf. "Atomic against a concurrent
+unlink" is a liveness promise this jail cannot honour — the premise is that the
+workspace writer is untrusted, so whatever a create-or-replace put back can be
+unlinked again the instant after, and a rename-based write would additionally
+have to reintroduce the by-name step the directory-fd walk exists to remove.
+What the reversibility story actually needs is that the witness be TRUE. So
+`confirm_landed` re-walks to the parent through the same directory fds and
+compares `(st_dev, st_ino)` on the leaf against the fd that was written: if the
+name no longer resolves to the written inode, the write is an `Err(ERACE)`, not
+an `Ok`. An `Err` registers no inverse, `discard_write` removes the preimage
+sidecar and (only when the leaf is still OUR inode) the file the open created,
+so a lost race leaves no residue and no witness at all.
 
 # Hardlinks
 
@@ -125,6 +170,8 @@ still carries the pre-fix shape and gets its own pass with Slice 2b.
 
 from __future__ import annotations
 
+import errno
+import functools
 import os
 import stat
 import uuid
@@ -155,8 +202,9 @@ PATH_FAMILIES: dict[str, tuple[str, ...]] = {
     "sidecar-directory": ("garbage_dir", "preimage_dir", "fresh_sidecar"),
     "inverse-source": ("resolve_sidecar",),
     "syscall-time": ("open_confined_write", "write_through", "snapshot_preimage",
-                     "replace_confined", "remove_confined", "mkdir_confined",
-                     "rmdir_confined", "close_handle", "discard_write"),
+                     "confirm_landed", "replace_confined", "remove_confined",
+                     "mkdir_confined", "rmdir_confined", "close_handle",
+                     "discard_write"),
 }
 
 #: Read-only helpers an `@py` body may call. They observe and mutate nothing,
@@ -171,6 +219,7 @@ SYSCALL_PATH_ARGS: dict[str, tuple[int, ...]] = {
     "open_confined_write": (0,),
     "write_through": (),
     "snapshot_preimage": (),
+    "confirm_landed": (),
     "replace_confined": (0, 1),
     "remove_confined": (0,),
     "mkdir_confined": (0,),
@@ -206,6 +255,85 @@ class ConfinementError(FsOpError):
     root was configured. A subclass of `FsOpError` so a body needs one `except`
     clause, and a distinct type so a caller (and the test suite) can tell a
     confinement refusal from an ordinary `ENOENT`."""
+
+
+# ---------------------------------------------------------------------------
+# totality: every guard entry point raises FsOpError or nothing (item 422 F6)
+# ---------------------------------------------------------------------------
+
+def _sanitized(path) -> str:
+    """A path safe to put in a refusal's `path` field. A NUL cannot survive
+    into a log line or a WAL witness verbatim, so it is escaped; anything that
+    is not a string at all is repr'd rather than crashing the refusal."""
+    if not isinstance(path, str):
+        return repr(path)
+    return path.replace("\x00", "\\x00")
+
+
+def refuse_unusable_path(path) -> None:
+    """Refuse a path no filesystem name can hold, BEFORE any syscall sees it.
+
+    The only member today is the embedded NUL: `os.path.realpath` calls `lstat`,
+    which raises `ValueError("embedded null character in path")` rather than an
+    `OSError`, so it escaped the `except FsOpError` every `@py` body wraps its
+    work in and broke fs.rvl's `-> Result[_, FsError]` contract (item 422 F6).
+    Raised as an `EINVAL` `FsOpError`, so the body's existing `Err` arm handles
+    it like every other refusal.
+
+    The message names what the author can do (item 274): the nearest allowed
+    space is the same call with the NUL removed, and the whole allowed space is
+    stated, because a NUL usually means a byte string or a length-prefixed
+    buffer was pasted in where a name belongs."""
+    if isinstance(path, str) and "\x00" in path:
+        raise FsOpError(
+            "EINVAL",
+            "path contains a NUL byte, which no filesystem name can hold; pass "
+            "the same path with the NUL removed. A witnessed fs path is a "
+            "plain name, relative to the session workspace root or absolute "
+            "inside it — never raw bytes or a length-prefixed buffer",
+            _sanitized(path),
+        )
+
+
+def _errno_code(exc: OSError) -> str:
+    """`ENOENT`, `ELOOP`, ... for an errno the guard did not translate itself.
+    Falls back to `EIO` for an `OSError` carrying no recognisable errno, so the
+    `FsError.code` tag is always a short machine token."""
+    name = errno.errorcode.get(exc.errno or 0)
+    return name or "EIO"
+
+
+def _make_total(name: str, fn):
+    """Wrap one guard entry point so it raises `FsOpError` or nothing.
+
+    Applied over `PATH_FAMILIES` + `READ_HELPERS` at import, so the enumeration
+    that states the choke point is also what states the totality: a fifth entry
+    point is total the moment it is listed, and cannot be added to the table
+    without gaining the property. An `FsOpError` (`ConfinementError` included)
+    passes through untouched — the guard's own refusals already carry a code, a
+    sentence and a path, and re-wrapping them would flatten the confinement
+    refusal a caller and the test suite distinguish by type."""
+    @functools.wraps(fn)
+    def total(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except FsOpError:
+            raise
+        except ValueError as exc:
+            raise FsOpError(
+                "EINVAL",
+                f"{name} was handed a path the host cannot express ({exc})",
+                _sanitized(args[0] if args else ""),
+            ) from None
+        except OSError as exc:
+            raise FsOpError(
+                _errno_code(exc),
+                f"{name} failed ({exc.strerror or exc})",
+                _sanitized(getattr(exc, "filename", None)
+                           or (args[0] if args else "")),
+            ) from None
+    total.is_total_guard = True
+    return total
 
 
 def workspace_root() -> str:
@@ -261,6 +389,11 @@ def resolve_within(path: str) -> str:
     `syscall-time` helpers below are what actually reach the filesystem, and
     they re-establish containment through directory fds rather than trusting
     this string a second time."""
+    # item 422 F6: refused BEFORE realpath, whose `lstat` would raise a
+    # `ValueError` this module's callers do not catch. Family 1 is where every
+    # caller-supplied path enters, so one check here covers the four forward ops
+    # and every inverse endpoint (`resolve_sidecar` routes through here too).
+    refuse_unusable_path(path)
     root = workspace_root()
     target = path if os.path.isabs(path) else os.path.join(root, path)
     real = os.path.realpath(target)
@@ -458,7 +591,8 @@ class WriteHandle:
     file type and link count were established ON THIS FD, and every subsequent
     step uses the fd rather than re-walking the name."""
 
-    __slots__ = ("fd", "real", "created", "mode", "atime_ns", "mtime_ns")
+    __slots__ = ("fd", "real", "created", "mode", "atime_ns", "mtime_ns",
+                 "preimage")
 
     def __init__(self, fd: int, real: str, created: bool, st) -> None:
         self.fd = fd
@@ -467,6 +601,12 @@ class WriteHandle:
         self.mode = stat.S_IMODE(st.st_mode)
         self.atime_ns = st.st_atime_ns
         self.mtime_ns = st.st_mtime_ns
+        #: the preimage sidecar `snapshot_preimage` took, so `discard_write`
+        #: can remove it when the write is abandoned after the snapshot. The
+        #: body cannot clean it up itself: the AST scan requires every path
+        #: reaching a mutation to be bound from a family 1-3 guard, and a
+        #: snapshot's return value is not one.
+        self.preimage = ""
 
 
 #: How many times `_open_leaf` retries the open/create pair before giving up.
@@ -594,15 +734,73 @@ def close_handle(handle: WriteHandle) -> None:
         handle.fd = -1
 
 
+def _leaf_is_handle(handle: WriteHandle) -> bool:
+    """Does `handle.real` still name the very inode `handle.fd` holds?
+
+    Answered through the same directory-fd walk the mutations use and with
+    `follow_symlinks=False`, so neither a swapped component nor a symlink
+    planted at the leaf can make a different inode answer yes. `False` for a
+    vanished leaf, a replaced one, or a walk that no longer reaches the parent
+    — every "the name and the fd have parted" case, which is exactly what both
+    callers need to know."""
+    parent, leaf = _split(handle.real)
+    try:
+        dirfd = _open_dirfd(parent)
+    except OSError:
+        return False
+    try:
+        st = os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)
+    except OSError:
+        return False
+    finally:
+        os.close(dirfd)
+    cur = os.fstat(handle.fd)
+    return (st.st_dev, st.st_ino) == (cur.st_dev, cur.st_ino)
+
+
+def confirm_landed(handle: WriteHandle) -> None:
+    """Refuse the write unless `handle.real` still names the inode that was
+    written (roadmap 431(b); the "a write never lies" section above).
+
+    Confinement is not in question here — the bytes went through a verified fd
+    and reached the inode the check admitted, inside the root, whatever the name
+    did afterwards. The question is whether the WITNESS is true. A competing
+    writer that unlinks the leaf mid-call leaves that inode an orphan, and
+    reporting `Ok` then claims a mutation at a path that does not hold it: the
+    discharge descriptor enumerates a write nobody can see, and the registered
+    undo would restore a preimage over a forward change that never became
+    visible. So a parted name is `ERACE`, and `Err` registers no inverse."""
+    if not _leaf_is_handle(handle):
+        raise FsOpError(
+            "ERACE",
+            "the write target was removed or replaced by a concurrent writer "
+            "while the write was in flight, so this path does not hold the "
+            "bytes written; nothing outside the session workspace root was "
+            "reached and no undo was registered. Retry the write, or serialize "
+            "with the other writer before retrying",
+            handle.real,
+        )
+
+
 def discard_write(handle: WriteHandle) -> None:
-    """Abandon a write that failed after the open: if the open CREATED the
-    target, remove it again.
+    """Abandon a write that failed after the open: remove the preimage sidecar
+    it snapshotted, and — if the open CREATED the target and the name still
+    holds that very inode — remove the target again.
 
     A forward op that returns `Err` registers no inverse (Ok-conditional
     registration, item 243), so anything the failed attempt left behind would be
     residue nothing enumerates. An existing target is left alone — the open does
-    not truncate, so it still holds its original bytes."""
-    if handle.created:
+    not truncate, so it still holds its original bytes.
+
+    The inode check on the created branch is not decoration. Removing BY NAME
+    after a lost race (item 431(b)) would delete whatever the competing writer
+    put at that name, which is neither ours to remove nor residue of ours: the
+    file we created is by then an unlinked orphan that vanishes when the fd
+    closes."""
+    if handle.preimage:
+        remove_confined(handle.preimage)
+        handle.preimage = ""
+    if handle.created and _leaf_is_handle(handle):
         remove_confined(handle.real)
 
 
@@ -650,31 +848,47 @@ def snapshot_preimage(handle: WriteHandle) -> str:
     `O_CREAT|O_EXCL`. The APFS clone is attempted first (`fclonefileat`, O(1)
     until the subsequent write diverges the two), with a portable `pread`/write
     copy as the fallback; the fallback restores the original mode and mtime so a
-    restored preimage is not silently re-permissioned."""
+    restored preimage is not silently re-permissioned.
+
+    A snapshot that cannot be taken is an `ESNAPSHOT` refusal, never a raise: a
+    write with no preimage is not reversible, so the honest outcome is to refuse
+    before a byte is written rather than to let an `OSError` escape the body
+    (item 422 F6) or to write irreversibly. The sidecar is recorded on the
+    handle so `discard_write` can remove it when a LATER step refuses."""
     directory = preimage_dir()
     dst = fresh_sidecar(directory, "pre")
     dst_leaf = os.path.basename(dst)
-    dirfd = _open_dirfd(directory)
     try:
-        if _clone_from_fd(handle.fd, dirfd, dst_leaf):
-            return dst
-        out = os.open(dst_leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
-                      dir_fd=dirfd)
+        dirfd = _open_dirfd(directory)
         try:
-            offset = 0
-            while True:
-                chunk = os.pread(handle.fd, 1 << 20, offset)
-                if not chunk:
-                    break
-                offset += len(chunk)
-                while chunk:
-                    chunk = chunk[os.write(out, chunk):]
-            os.fchmod(out, handle.mode)
-            os.utime(out, ns=(handle.atime_ns, handle.mtime_ns))
+            if not _clone_from_fd(handle.fd, dirfd, dst_leaf):
+                out = os.open(dst_leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                              0o600, dir_fd=dirfd)
+                try:
+                    offset = 0
+                    while True:
+                        chunk = os.pread(handle.fd, 1 << 20, offset)
+                        if not chunk:
+                            break
+                        offset += len(chunk)
+                        while chunk:
+                            chunk = chunk[os.write(out, chunk):]
+                    os.fchmod(out, handle.mode)
+                    os.utime(out, ns=(handle.atime_ns, handle.mtime_ns))
+                finally:
+                    os.close(out)
         finally:
-            os.close(out)
-    finally:
-        os.close(dirfd)
+            os.close(dirfd)
+    except OSError as exc:
+        raise FsOpError(
+            "ESNAPSHOT",
+            f"could not snapshot the write target's preimage "
+            f"({exc.strerror or exc}), so the write would not be reversible "
+            f"and was refused before any byte was written; retry, or write to "
+            f"a path no other writer is racing",
+            handle.real,
+        ) from None
+    handle.preimage = dst
     return dst
 
 
@@ -764,3 +978,20 @@ def lexists_confined(real: str) -> bool:
     follows re-establishes containment through fds regardless of what this said,
     so a lost race here costs an error message, never an escape."""
     return os.path.lexists(real)
+
+
+# ---------------------------------------------------------------------------
+# apply totality over the enumeration (item 422 F6)
+# ---------------------------------------------------------------------------
+# Last statement in the module, so every entry point above is already defined
+# and every INTERNAL call (`open_confined_write` -> `resolve_within`,
+# `discard_write` -> `remove_confined`, ...) goes through the wrapped global too.
+# Driven by the tables rather than by a decorator per function, so the
+# single-choke-point enumeration and the totality guarantee cannot drift apart:
+# `tests/test_fs_confinement_families.py` asserts every listed name is wrapped.
+for _family in PATH_FAMILIES.values():
+    for _entry in _family:
+        globals()[_entry] = _make_total(_entry, globals()[_entry])
+for _entry in READ_HELPERS:
+    globals()[_entry] = _make_total(_entry, globals()[_entry])
+del _family, _entry
