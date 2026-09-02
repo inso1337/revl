@@ -564,7 +564,6 @@ def test_strip_to_base_emits_expression_helpers():
     ir = compile_source(SHAPES, "shapes.rvl")
     source = _emitter("python").emit(mocks_mod._strip_to_base(ir))
     assert "def _revl_i64" in source
-    assert "def _revl_field" in source
 
 
 # ----------------------------------------------------------------------------

@@ -113,6 +113,17 @@ but not seen. Every instance was closed. Representative fixes:
 - The distribution seam refuses a resource crossing on same-tier as well as
   cross-tier process boundaries, and the wire encoder fails closed on any value
   that is not scalar, list, dict, or a declared record or ADT.
+- Approval expiry is monotonic and irreversible. The session clock is anchored
+  to a monotonic source rather than read from the wall clock on every check, and
+  a grant that has been observed expired is latched dead, so nothing that moves
+  the machine's notion of "now" can hand back an expired grant for its remaining
+  uses.
+- `revl mcp serve --approval-record-values` now defaults to `withheld`: a
+  crossing whose resource target came from a caller argument is not written into
+  the durable cross-session approval log unless the operator opts in with
+  `bound`. The cost of the default is that such approvals no longer fold into a
+  distilled auto-approve rule, and the distiller now says so and names the flag
+  when it declines. Author-written literal targets are recorded either way.
 
 ### Live systems
 
