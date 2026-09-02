@@ -47,6 +47,31 @@ python3 scripts/axioms_gate.py \
   RevL.CapCeilings.no_star_amplification \
   RevL.CapCeilings.parameter_widening_refused \
   RevL.CapCeilings.ceiling_check_not_subsumed \
+  RevL.R4.residue_is_exactly_what_remains \
+  RevL.R4.abort_leaves_no_residue \
+  RevL.R4.residue_complete \
+  RevL.R4.residue_sound \
+  RevL.R4.txn_run \
+  RevL.R4.emit_run \
+  RevL.R4.residue_necessary \
+  RevL.R4.emission_is_not_replayed \
+  RevL.A8.revert_on_failure \
+  RevL.A8.trace_reads_back_as_abort \
+  RevL.A8.committed_transaction_is_retained \
+  RevL.A8.commit_replays_no_inverse \
+  RevL.A8.outcome_trichotomy \
+  RevL.A8.crash_cut_converges \
+  RevL.A8.commit_record_is_the_decision \
+  RevL.A8.approved_decides_the_crash_window \
+  RevL.A8.fence_before_apply_at_every_cut \
+  RevL.A8.at_most_once_across_crash \
+  RevL.A8.declared_idempotent_replay_free \
+  RevL.A8.double_apply_observable \
+  RevL.A8.crash_cut_witness \
+  RevL.A8.commit_witness \
+  RevL.A8.mixed_disposition_admitted \
+  RevL.A8.revert_witness \
+  RevL.A8.revert_witness_restores \
   RevL.CapCeilings.derived_held_tokens_are_declared_keys \
   RevL.CapCeilings.derived_reach_is_emit_surface \
   RevL.CapCeilings.unnameable_receiver_is_star \
