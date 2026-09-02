@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>revl gate at the edge: the double enforcement</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --ink: #16181d; --dim: #5c6270; --line: #d7dae2; --bg: #fbfbfd;
+    --panel: #ffffff; --reject: #a4102b; --escalate: #8a5300; --ok: #16603a;
+    --code: #f2f3f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e8eaf0; --dim: #9aa1b1; --line: #333846; --bg: #14161b;
+      --panel: #1b1e25; --reject: #ff8a9c; --escalate: #f0b454; --ok: #7ddba6;
+      --code: #22262f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem 4rem; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 62rem; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 .35rem; letter-spacing: -.01em; }
+  h2 { font-size: 1rem; margin: 0 0 .6rem; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); }
+  p { margin: .5rem 0; }
+  .lede { color: var(--dim); max-width: 48rem; }
+  section {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1.1rem 1.25rem; margin: 1.1rem 0;
+  }
+  .step { display: flex; gap: .6rem; align-items: baseline; }
+  .num {
+    flex: none; width: 1.6rem; height: 1.6rem; border-radius: 50%;
+    border: 1px solid var(--line); display: grid; place-items: center;
+    font-size: .8rem; color: var(--dim);
+  }
+  textarea {
+    width: 100%; min-height: 9rem; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--code); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: .7rem; resize: vertical;
+  }
+  button {
+    font: inherit; padding: .45rem .9rem; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--code); color: var(--ink);
+  }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .row { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin-top: .7rem; }
+  .verdict { margin-top: .8rem; padding: .7rem .85rem; border-radius: 6px; border: 1px solid var(--line); background: var(--code); }
+  .verdict.reject { border-color: var(--reject); }
+  .verdict.escalate { border-color: var(--escalate); }
+  .tag { font-weight: 600; letter-spacing: .05em; }
+  .tag.reject { color: var(--reject); }
+  .tag.escalate { color: var(--escalate); }
+  .tag.ok { color: var(--ok); }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre { background: var(--code); padding: .7rem; border-radius: 6px; overflow-x: auto; margin: .6rem 0 0; font-size: 12.5px; }
+  label { display: inline-flex; gap: .4rem; align-items: center; }
+  .meta { color: var(--dim); font-size: 12.5px; }
+  .warn { border-left: 3px solid var(--escalate); padding-left: .8rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>The revl admission gate, in this browser tab</h1>
+  <p class="lede">
+    No server round trip and no Python: this page loaded the
+    <code>revl:gate@1.0.0</code> wasm component, transpiled by <code>jco</code>,
+    and calls <code>admit(source)</code> in process. What it demonstrates is
+    the <strong>double enforcement</strong>: the gate <em>decides</em>, and the
+    substrate <em>enforces</em>, and neither trusts the other's absence.
+  </p>
+
+  <section class="warn">
+    <h2>This gate issues no admissions</h2>
+    <p>
+      It decides the composition and guarantee layer (G1&ndash;G4, A1, PRELUDE,
+      and parse failures as BAD) and <strong>not</strong> the reference type
+      layer, so <code>admitted</code> is <code>false</code> on every arm and its
+      non-refusing arm means <em>&ldquo;found nothing I am able to
+      refuse&rdquo;</em>, never <em>&ldquo;admitted&rdquo;</em>. There are
+      exactly two safe readings: <span class="tag reject">REJECT</span> on
+      <code>refused</code>, <span class="tag escalate">ESCALATE</span> on
+      <code>no-objection</code> and <code>outside-frontier</code>.
+    </p>
+    <p class="meta" id="version">loading the gate&hellip;</p>
+  </section>
+
+  <section>
+    <div class="step"><span class="num">1</span><div style="flex:1">
+      <h2>Layer 1 &mdash; the decision</h2>
+      <p class="meta">
+        The gate reads the candidate's source. A refusal is authoritative and
+        byte-agrees with the reference compiler, so the artifact is never
+        fetched, never compiled, never instantiated.
+      </p>
+      <div class="row">
+        <label>candidate:
+          <select id="pick"></select>
+        </label>
+      </div>
+      <textarea id="source" spellcheck="false"></textarea>
+      <div class="row">
+        <button id="check">Check with the gate</button>
+      </div>
+      <div id="verdict" class="verdict meta">no verdict yet</div>
+    </div></div>
+  </section>
+
+  <section>
+    <div class="step"><span class="num">2</span><div style="flex:1">
+      <h2>The escalation gap</h2>
+      <p class="meta">
+        A non-refusal is not an admission, so <code>loadOrRefuse</code> has no
+        code path that instantiates on this gate's word alone: without a
+        reference verdict it throws <code>EscalationRequired</code>. There is no
+        flag to skip it. In production this box is
+        <code>revl compile</code> or <code>revl.gate.admit</code> answering over
+        the network (or Pyodide, which is the browser's full-coverage fallback);
+        here it is a checkbox, so you can watch what changes.
+      </p>
+      <div class="row">
+        <label><input type="checkbox" id="reference"> the reference toolchain returned <code>admitted: true</code></label>
+      </div>
+    </div></div>
+  </section>
+
+  <section>
+    <div class="step"><span class="num">3</span><div style="flex:1">
+      <h2>Layer 2 &mdash; the substrate</h2>
+      <p class="meta">
+        The artifact declares its reach as wasm <strong>imports</strong>. The
+        host instantiates it with an import object shaped by the policy and
+        nothing else, so an ungranted reach is a <em>missing import</em> and the
+        engine refuses to instantiate. That refusal is not this page's code and
+        not the gate's: uncheck a capability the artifact needs and watch
+        <code>WebAssembly.instantiate</code> do it.
+      </p>
+      <div class="row">
+        <label><input type="checkbox" id="cap-log" checked> grant <code>revl:host/log</code></label>
+        <label><input type="checkbox" id="cap-db" checked> grant <code>revl:host/db</code></label>
+      </div>
+      <div class="row">
+        <button id="instantiate">Instantiate under this policy</button>
+      </div>
+      <div id="run" class="verdict meta">not instantiated</div>
+    </div></div>
+  </section>
+
+  <section>
+    <h2>What this page is not</h2>
+    <p class="meta">
+      A verdict is a decision, not a confinement, and this gate covers the
+      self-host frontier rather than the whole reference language: the
+      <code>frontier</code> above is part of the verdict, and a verdict cached
+      from this tier must never be served to a reader of the py tier's. A trap
+      inside the component is not a verdict either; treat it as
+      &ldquo;no verdict reached&rdquo; and fail closed. Full contract:
+      <code>docs/gate-dependency-contract.md</code>.
+    </p>
+  </section>
+</main>
+
+<script type="module">
+import {
+  EscalationRequired, ESCALATE, REJECT, Refused, decide, loadGate, loadOrRefuse,
+} from "../gate.mjs";
+
+const CANDIDATES = [
+  "undeclared_tool.rvl",
+  "unmarked_emission_tool.rvl",
+  "double_tool.rvl",
+  "digit_tool.rvl",
+];
+
+const $ = (id) => document.getElementById(id);
+const pick = $("pick");
+const sourceBox = $("source");
+const verdictBox = $("verdict");
+const runBox = $("run");
+const instantiateButton = $("instantiate");
+
+let gate = null;
+let artifact = null;
+let lastVerdict = null;
+
+function render(el, tone, html) {
+  el.className = `verdict ${tone}`;
+  el.innerHTML = html;
+}
+
+function escape(text) {
+  return String(text).replace(/[&<>]/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]
+  ));
+}
+
+// Layer 1. The only two readings this gate supports.
+$("check").addEventListener("click", () => {
+  lastVerdict = gate.admit(sourceBox.value);
+  const decision = decide(lastVerdict);
+  if (decision === REJECT) {
+    render(verdictBox, "reject",
+      `<span class="tag reject">${REJECT}</span> ` +
+      `<code>${escape(lastVerdict.code)}</code><br>` +
+      `${escape(lastVerdict.message)}` +
+      `<p class="meta">Authoritative: the reference compiler refuses this ` +
+      `source too, with this code and this message verbatim. Nothing about ` +
+      `this candidate is fetched, compiled or instantiated.</p>`);
+  } else {
+    render(verdictBox, "escalate",
+      `<span class="tag escalate">${ESCALATE}</span> ` +
+      `<code>${escape(lastVerdict.kind)}</code>` +
+      `<p class="meta">Not an admission. <code>admitted</code> is ` +
+      `<code>${String(lastVerdict.admitted)}</code>, as it is on every arm. ` +
+      `${lastVerdict.kind === "outside-frontier"
+        ? escape(lastVerdict.message)
+        : "This gate simply had nothing it was able to refuse."}</p>`);
+  }
+});
+
+// Layer 2, through the loader that will not skip the escalation.
+instantiateButton.addEventListener("click", async () => {
+  if (lastVerdict === null) {
+    render(runBox, "escalate", "Run the gate first: layer 1 comes first.");
+    return;
+  }
+  const policy = {};
+  if ($("cap-log").checked) policy["revl:host/log"] = { write: () => {} };
+  if ($("cap-db").checked) policy["revl:host/db"] = { query: (key) => key + 1 };
+
+  try {
+    const instance = await loadOrRefuse(gate, sourceBox.value, {
+      artifact,
+      policy,
+      reference: $("reference").checked ? { admitted: true } : undefined,
+    });
+    render(runBox, "",
+      `<span class="tag ok">INSTANTIATED</span> under the granted policy ` +
+      `(<code>run(41)</code> = <code>${instance.exports.run(41)}</code>)` +
+      `<p class="meta">Both layers passed: the gate had no refusal AND the ` +
+      `reference admitted AND every reach the artifact declares was granted.</p>`);
+  } catch (error) {
+    const why = error instanceof Refused
+      ? "layer 1 refused it, so it was never instantiated"
+      : error instanceof EscalationRequired
+        ? "the escalation gap: this gate issues no admissions, so there is no path to instantiation without a reference verdict"
+        : "layer 2: the wasm engine refused to link the artifact against a policy that does not grant everything it reaches";
+    render(runBox, "reject",
+      `<span class="tag reject">NOT INSTANTIATED</span> ` +
+      `<code>${escape(error.name)}</code><br>${escape(error.message)}` +
+      `<p class="meta">${escape(why)}.</p>`);
+  }
+});
+
+async function boot() {
+  gate = await loadGate("../dist/revl_gate.js");
+  const v = gate.version;
+  $("version").textContent =
+    `api=${v.api} language=${v.language} frontier=${v.frontier} ` +
+    `tier=${v.tier} — layer: ${v.layer}`;
+
+  artifact = new Uint8Array(
+    await (await fetch("../artifacts/reaching_tool.wasm")).arrayBuffer());
+
+  for (const name of CANDIDATES) {
+    const option = document.createElement("option");
+    option.value = option.textContent = name;
+    pick.append(option);
+  }
+  pick.addEventListener("change", load);
+  await load();
+}
+
+async function load() {
+  sourceBox.value = await (await fetch(`../candidates/${pick.value}`)).text();
+  render(verdictBox, "meta", "no verdict yet");
+  render(runBox, "meta", "not instantiated");
+  lastVerdict = null;
+}
+
+boot().catch((error) => {
+  $("version").textContent =
+    `the gate failed to load: ${error.message}. Build it first: ` +
+    `npm install && npm run build, then node serve.mjs`;
+});
+</script>
+</body>
+</html>

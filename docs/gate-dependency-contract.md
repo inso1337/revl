@@ -5,14 +5,17 @@ MCP server, a CI system, an agent framework, a registry — rather than
 shelling out to the `revl` command. Read this before writing a line of
 integration code.
 
-Two dependency forms exist, and they do not give the same guarantee. Sections
-one to five below are the py wheel (`pip install revl`, then
+Three dependency forms exist, and they do not give the same guarantee.
+Sections one to five below are the py wheel (`pip install revl`, then
 `from revl.gate import admit, gate_version, ...`), which is the full
 reference compiler and can both refuse and admit.
 ["The rust tier"](#the-rust-tier-the-revl-gate-crate) is the native
 `revl-gate` crate, which can only REFUSE — it issues no admissions at all.
-The contract is the same asymmetric one in both; the crate simply has less of
-the admitting half, none of it.
+["The wasm tier"](#the-wasm-tier-the-gate-in-a-browser-a-worker-a-cdn-node)
+is that same crate packaged as a component for a browser, an edge worker or
+`wasmtime`, with the same contract and the same absent admitting arm. The
+contract is the same asymmetric one in all three; the two native tiers simply
+have less of the admitting half, none of it.
 
 ## The contract, stated once
 
@@ -180,6 +183,69 @@ keyed on the full `gate_version()` triple, and exactly two decisions —
 acceptance the gate did not give, and
 `tests/test_gate_consumer_example_rs.py` holds that as a test.
 
+## The wasm tier: the gate in a browser, a worker, a CDN node
+
+There is a third dependency form, and it is the rust tier's contract
+unchanged, because it IS the rust tier: `crates/revl-gate-wasm` packages
+`crates/revl-gate` as a `revl:gate@1.0.0` WASI-P2 component (roadmap item
+335). Everything the section above says about the rust crate holds here word
+for word: three arms, no admission among them, `frontier` is
+`selfhost-admit:<hash>`, `layer` says what was decided, `admit_into` and
+`compile_to` output are absent. What the wasm packaging adds is reach, not
+authority: the same verdict where there is no Python and no native toolchain,
+only a wasm engine. `gate_version()` carries a fifth field here, `tier`
+(`"wasm"`), so the packaging is distinguishable from the crate it wraps.
+
+Two things are specific to this tier, and both matter before you embed it.
+
+**The import section is empty, and that is a checkable fact about the
+artifact.** The component imports no clock, no filesystem, no random and no
+host function, so a verdict is a total, deterministic function of its
+arguments, provable from the binary rather than promised in prose. Nothing in
+the environment can widen a verdict, because there is no channel through
+which anything could. `tests/test_gate_wasm_vector.py` reads the import list
+off the built artifact and requires it empty; a build that grows an import is
+a red.
+
+**A trap is not a verdict.** On every wasm target rust's panic strategy is
+`abort`, so the crate's fail-closed `catch_unwind` path does not catch and a
+panic inside the native gate takes the instance down instead of returning
+`outside_frontier`. A trap is loud and it is not an admission, but a host
+must treat it as "no verdict was reached" and fail closed on it, never as a
+non-refusal.
+
+For JavaScript hosts, `jco transpile` turns the component into a JS module
+(`tools/build_gate_js.py` drives it), and the packaging step does one thing
+the transpiler cannot: it narrows the emitted `admitted: boolean` back to the
+literal `false`. WIT has no singleton type, so `bool` is the strongest thing
+the component's world can say, and a TypeScript consumer handed `boolean`
+writes `if (v.admitted) run(x)` with the type checker's blessing, on a branch
+that is not reachable. After narrowing, `v.admitted === true` is a compile
+error. Branch on `kind`, never on `admitted`:
+
+```js
+const v = admit(source);
+if (v.kind === "refused") return REJECT;   // authoritative, final
+return ESCALATE;                           // ask the reference toolchain
+```
+
+And the sentence that carries over from the design: **a verdict is a
+decision, not an enforcement.** The gate returns a verdict; the browser's
+loader, the worker's dispatcher or the CDN's serving path is the code that
+must refuse to instantiate, execute or serve on a refusal. A gate whose
+verdict nobody consults gates nothing. For an artifact you do go on to run,
+item 289 gives a second, independent enforcement for free: instantiate it
+with an import object shaped by the policy, and an ungranted reach is a
+missing import refused by the wasm engine itself. The gate decides, the
+substrate enforces, and neither trusts the other's absence.
+
+[`examples/ecosystem-consumer-js/`](../examples/ecosystem-consumer-js/) is a
+standalone project demonstrating all of it: the same four candidates, the
+same two decisions, a browser page that walks both enforcement layers, and an
+edge `fetch` handler whose only answers are `403 REJECT` and `202 ESCALATE`,
+with no `200` arm because there is no arm that would justify one.
+`tests/test_gate_consumer_example_js.py` holds that as a test.
+
 ## What is and is not deliverable today
 
 The py surface above ships now: `pip install revl` and
@@ -189,9 +255,14 @@ with no Python on the machine, so a rust consumer can depend on it via a path
 dependency today (see the example's `README.md`); what is NOT done is the
 PUBLISH step — `revl-gate` is not on crates.io, so `cargo add revl-gate` is
 the shape a consumer gets once revl's release path cuts it, not a command
-that works right now. `npm i` the wasm gate is named in
-`docs/design/338-revl-as-dependency.md` as the remaining polyglot exit and is
-frontier-gated on item 335 (cordis-rs on wasm32), which has not landed.
+that works right now. The wasm tier is in the same position one step further
+along: the component builds from committed crate source and transpiles to a
+JS module that runs in a browser, a worker or `wasmtime` today
+(`python3 tools/build_gate_js.py --out DIR`, or `npm run build` inside
+`examples/ecosystem-consumer-js/`), and what is NOT done is again the PUBLISH
+step — nothing is on npm, so `npm i` the gate is the shape a consumer gets
+once revl's release path cuts it, not a command that works right now. Neither
+publish changes a line of the contract above; both are packaging.
 
 See also: [`docs/design/338-revl-as-dependency.md`](design/338-revl-as-dependency.md)
 for the full design and its adversarial review;

@@ -17,6 +17,13 @@ crates/*/target/
 examples/ecosystem-consumer-rs/target/
 examples/ecosystem-consumer-rs/Cargo.lock
 
+# the gate transpiled for JavaScript (tools/build_gate_js.py, roadmap item 335
+# slice 4). Not committed for the same reason the .wasm is not: the output is a
+# function of an exact jco and an exact rustc, so a committed copy would red on
+# every bump while proving nothing. The crate SOURCE is what is drift-gated.
+examples/ecosystem-consumer-js/dist/
+examples/ecosystem-consumer-js/package-lock.json
+
 # stray localhost access log (item 110a)
 .srv.log
 *.srv.log
