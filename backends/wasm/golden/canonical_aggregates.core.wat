@@ -5,7 +5,11 @@
 (module
   (memory (export "memory") 1)
   (data (i32.const 0) "\0b\00\00\00nonpositive")
-  (global $__hp (mut i32) (i32.const 16))
+  (global $__hp (mut i32) (i32.const 32))
+  ;; item 432(f): the canonical return area is constant for the
+  ;; module (the host reads it before it can re-enter), so one
+  ;; cell serves every call instead of one bump allocation each.
+  (global $__canon_ret_area i32 (i32.const 16))
   (func $__heap_exhausted
     (unreachable))
   (func $__heap_grow (param $end i32)
@@ -572,21 +576,30 @@
   ;; place an incoming string/list into this module's memory. Backed
   ;; by the same bump heap ($__hp / $alloc); old/align are unused (a
   ;; bump allocator never frees, and $alloc already 8-aligns).
+  ;; item 432(a): every buffer is handed out with 8 bytes of headroom
+  ;; below it, so lifting a canonical string into the internal
+  ;; [u32 len][bytes] layout is one store instead of a copy.
   (func (export "cabi_realloc")
       (param $old i32) (param $old_size i32) (param $align i32) (param $new_size i32)
       (result i32)
-    (call $alloc (local.get $new_size)))
+    (i32.add
+      (call $alloc (i32.add (local.get $new_size) (i32.const 8)))
+      (i32.const 8)))
   ;; bare (ptr,len) canonical string <-> internal [u32 len][bytes].
+  ;; The lift is zero-copy for a buffer that came from the
+  ;; cabi_realloc above (every conforming host's string param), and
+  ;; falls back to a bulk copy for any pointer outside this heap.
   (func $__canon_lift_str (param $ptr i32) (param $len i32) (result i32)
-    (local $s i32) (local $i i32)
+    (local $s i32)
+    (if (i32.ge_u (local.get $ptr) (i32.const 40))
+      (then
+        (i32.store (i32.sub (local.get $ptr) (i32.const 4)) (local.get $len))
+        (return (i32.sub (local.get $ptr) (i32.const 4)))))
     (local.set $s (call $alloc_str (local.get $len)))
-    (block (loop
-      (br_if 1 (i32.ge_u (local.get $i) (local.get $len)))
-      (i32.store8
-        (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))
-        (i32.load8_u (i32.add (local.get $ptr) (local.get $i))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br 0)))
+    (memory.copy
+      (i32.add (local.get $s) (i32.const 4))
+      (local.get $ptr)
+      (local.get $len))
     (local.get $s))
   (func $__canon_lower_str (param $s i32) (param $dst i32)
     (i32.store (local.get $dst) (i32.add (local.get $s) (i32.const 4)))
@@ -594,26 +607,18 @@
   (func $__canon_lower_rec_Person (param $r i32) (param $c i32)
     (call $__canon_lower_str (i32.wrap_i64 (i64.load (local.get $r))) (local.get $c))
     (i64.store (i32.add (local.get $c) (i32.const 8)) (i64.load (i32.add (local.get $r) (i32.const 8)))))
+  ;; item 432(c): `Int` lays out identically canonical and internal, so the
+  ;; internal body IS the canonical array: point at it, copy nothing.
   (func $__canon_lower_list_Int (param $r i32) (param $dst i32)
-    (local $count i32) (local $i i32) (local $buf i32)
-    (local.set $count (i32.load (local.get $r)))
-    (local.set $buf (call $alloc (i32.mul (local.get $count) (i32.const 8))))
-    (block (loop
-      (br_if 1 (i32.ge_u (local.get $i) (local.get $count)))
-      (i64.store (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 8))) (i64.load (i32.add (local.get $r) (i32.add (i32.const 8) (i32.mul (local.get $i) (i32.const 8))))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br 0)))
-    (i32.store (local.get $dst) (local.get $buf))
-    (i32.store offset=4 (local.get $dst) (local.get $count)))
+    (i32.store (local.get $dst) (i32.add (local.get $r) (i32.const 8)))
+    (i32.store offset=4 (local.get $dst) (i32.load (local.get $r))))
+  ;; item 432(c): `Int` lays out identically canonical and internal, so the
+  ;; whole body crosses in one bulk copy, not a load/store per element.
   (func $__canon_lift_list_Int (param $p i32) (param $len i32) (result i32)
-    (local $r i32) (local $i i32)
+    (local $r i32)
     (local.set $r (call $alloc (i32.add (i32.const 8) (i32.mul (local.get $len) (i32.const 8)))))
     (i32.store (local.get $r) (local.get $len))
-    (block (loop
-      (br_if 1 (i32.ge_u (local.get $i) (local.get $len)))
-      (i64.store (i32.add (local.get $r) (i32.add (i32.const 8) (i32.mul (local.get $i) (i32.const 8)))) (i64.load (i32.add (local.get $p) (i32.mul (local.get $i) (i32.const 8)))))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br 0)))
+    (memory.copy (i32.add (local.get $r) (i32.const 8)) (local.get $p) (i32.mul (local.get $len) (i32.const 8)))
     (local.get $r))
   (func $__canon_lower_list_Person (param $r i32) (param $dst i32)
     (local $count i32) (local $i i32) (local $buf i32)
@@ -639,7 +644,7 @@
     (local.set $a0 (call $__canon_lift_str (local.get $c0) (local.get $c1)))
     (local.set $a1 (local.get $c2))
     (local.set $rv (call $make (local.get $a0) (local.get $a1)))
-    (local.set $area (call $alloc (i32.const 16)))
+    (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_rec_Person (local.get $rv) (local.get $area))
     (local.get $area))
   ;; canonical export of `age_of` -> WIT `registry#age-of`
@@ -660,7 +665,7 @@
     (local.set $a0 (local.get $t2))
     (local.set $a1 (call $__canon_lift_str (local.get $c3) (local.get $c4)))
     (local.set $rv (call $rename (local.get $a0) (local.get $a1)))
-    (local.set $area (call $alloc (i32.const 16)))
+    (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_rec_Person (local.get $rv) (local.get $area))
     (local.get $area))
   ;; canonical export of `dbl` -> WIT `registry#dbl`
@@ -681,7 +686,7 @@
     (local.set $a0 (local.get $c0))
     (local.set $a1 (local.get $c1))
     (local.set $rv (call $pair (local.get $a0) (local.get $a1)))
-    (local.set $area (call $alloc (i32.const 8)))
+    (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_list_Int (local.get $rv) (local.get $area))
     (local.get $area))
   ;; canonical export of `head` -> WIT `registry#head`
@@ -696,7 +701,7 @@
     (local.set $a0 (call $__canon_lift_str (local.get $c0) (local.get $c1)))
     (local.set $a1 (local.get $c2))
     (local.set $rv (call $roster (local.get $a0) (local.get $a1)))
-    (local.set $area (call $alloc (i32.const 8)))
+    (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_list_Person (local.get $rv) (local.get $area))
     (local.get $area))
   ;; canonical export of `maybe` -> WIT `registry#maybe`
@@ -704,7 +709,7 @@
     (local $a0 i64) (local $rv i32) (local $area i32)
     (local.set $a0 (local.get $c0))
     (local.set $rv (call $maybe (local.get $a0)))
-    (local.set $area (call $alloc (i32.const 16)))
+    (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_var_Opt_Int_ (local.get $rv) (local.get $area))
     (local.get $area))
   ;; canonical export of `or_zero` -> WIT `registry#or-zero`
@@ -722,7 +727,7 @@
     (local $a0 i64) (local $rv i32) (local $area i32)
     (local.set $a0 (local.get $c0))
     (local.set $rv (call $checked (local.get $a0)))
-    (local.set $area (call $alloc (i32.const 16)))
+    (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_var_Result_Int__Str_ (local.get $rv) (local.get $area))
     (local.get $area))
 )

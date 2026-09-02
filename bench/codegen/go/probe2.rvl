@@ -1,0 +1,60 @@
+type Row = { id: Int, name: Str }
+type Outcome = Ok(Row) | NotFound | Invalid(Str)
+
+pub fn index_of(hay: Str, needle: Str) -> Int {
+  return hay.indexOf(needle)
+}
+
+pub fn take(s: Str, a: Int, b: Int) -> Str {
+  return s.slice(a, b)
+}
+
+pub fn render(n: Int) -> Str {
+  return n.to_str()
+}
+
+pub fn describe(o: Outcome) -> Str {
+  return match o {
+    Ok(row) => row.name,
+    NotFound => "not found",
+    Invalid(why) => why,
+  }
+}
+
+pub fn bucket(n: Int) -> Str {
+  if (n < 0) { return "neg" }
+  if (n == 0) { return "zero" }
+  return "pos"
+}
+
+pub fn tally(words: List[Str]) -> Int {
+  var m: Map[Str, Int] = Map.empty()
+  for (w of words) { m = m.set(w, 1) }
+  return m.size()
+}
+
+pub fn find(m: Map[Str, Int], k: Str) -> Int {
+  var hit = m.lookup(k)
+  return match hit {
+    Some(v) => v,
+    None => 0 - 1,
+  }
+}
+
+pub fn key_list(m: Map[Str, Int]) -> List[Str] {
+  return m.keys()
+}
+
+pub fn char_at(s: Str, i: Int) -> Int {
+  return s.charCodeAt(i)
+}
+
+pub fn maybe(m: Map[Str, Int], k: Str) -> Opt[Int] {
+  return m.lookup(k)
+}
+
+pub fn boxed(xs: List[Str], m: Map[Str, Int]) -> List[Opt[Int]] {
+  var out: List[Opt[Int]] = []
+  for (x of xs) { out = out.push(m.lookup(x)) }
+  return out
+}

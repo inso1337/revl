@@ -340,9 +340,24 @@ i32-only, so it cannot host a TypeScript plugin.
   traffic in a record imported *with* a `.ts` extension (`from './types.ts'`).
 - `tests/fixtures/cordis/inv.ts` (+ `types.ts`) — the NodeNext `.js`-extension
   spelling of a local record import (`from './types.js'`).
+- `tests/fixtures/cordis/branded.ts`, `literal_union.ts`: the idiomatic types on
+  their own: a branded-string id collapsing to `Str`, and a literal-only union
+  synthesizing a named variant with `null` becoming `Opt`.
+- `tests/fixtures/cordis/idiomatic.ts` (+ `idioms.ts`): the gateway shape with
+  those types threaded through nested records, in their friendly spellings (a
+  locally defined `Branded`, an inline union).
+- `tests/fixtures/cordis/leading_pipe_union.ts`: DSH's real union *formatting*:
+  one member per line with a leading `|`, and the `=`-line-then-bare-first-member
+  shape, both synthesizing the same variant as the inline form.
+- `tests/fixtures/cordis/dsh_gateway.ts` (+ `dsh_types.ts`): the whole real
+  gateway with every hard spelling at once: an external `*Service` base,
+  `@Remote(…)` operations, a `.ts`-extension import whose brace list wraps across
+  lines, a `Branded` imported from another package, and both multiline union
+  shapes. This is the combination the real plugin actually is; the fixtures above
+  each take one layer's hard spelling and the rest's friendly one.
 
 ```console
-$ ./.venv/bin/pytest tests/test_import_cordis.py -q     # 30 passed
+$ ./.venv/bin/pytest tests/test_import_cordis.py -q     # 39 passed
 ```
 
 ## 8. The family, complete

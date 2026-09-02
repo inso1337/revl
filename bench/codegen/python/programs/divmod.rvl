@@ -1,0 +1,13 @@
+// Truncated `%` and the div_* family: each is a lambda BUILT and CALLED
+// per evaluation in the emitted Python.
+fn churn(n: Int) -> Int {
+  var acc = 0
+  var i = 1
+  while (i < n) {
+    acc += i % 7
+    acc += i.div_trunc(3)
+    acc += i.div_euclid(5)
+    i += 1
+  }
+  return acc
+}
