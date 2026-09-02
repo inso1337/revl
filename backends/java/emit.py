@@ -2151,7 +2151,7 @@ def _emit_v3_value_equality(cls: str, components: list, *, tag: str = None) -> l
 
 def _v3_types_need_value_helpers(types: dict) -> bool:
     """True when some generated `equals`/`hashCode` above will CALL `revlEq` /
-    `revlHash` — i.e. some record field or variant payload is a reference type.
+    `revlHash`, i.e. some record field or variant payload is a reference type.
     A record of nothing but `Int`/`Float`/`Bool` compares and hashes with
     primitive operators and needs neither helper, so it stays byte-identical
     to what a document with no `==` emitted before. Same gating idiom as

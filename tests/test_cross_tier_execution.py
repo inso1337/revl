@@ -63,6 +63,50 @@ test "nesting composes" { assert nested() }
 test "inequality is the negation" { assert { id: 1, name: "a" } != { id: 2, name: "a" } }
 """,
 
+    # The probe above compares an ANONYMOUS record literal and a list; this one
+    # compares the values a v3 `type` declaration builds: a nested record, a
+    # variant case with a payload, a nullary case, and a record whose component
+    # is a Float. java answered `false` for every one of them: `_emit_v3_types`
+    # emitted each record class and each sealed-variant case class with fields
+    # and a ctor and NO `equals`, so `revlEq`'s `java.util.Objects.equals`
+    # fallback called the `equals` they inherited from `Object`, which is
+    # REFERENCE IDENTITY. `revlEq` could not fix that from outside, because its
+    # fallback IS the inherited method.
+    #
+    # The Float component is the part `equals` is easy to get wrong in the other
+    # direction: `Double.equals`/`Double.compare` compare `doubleToLongBits`, so
+    # a generated `equals` reaching for either would call NaN equal to itself and
+    # -0.0 unequal to 0.0, the same inversion item 433 rider R2 removed from the
+    # top level. Both floats arrive through a PARAMETER for the reason the probe
+    # above gives: a literal zero divisor is a checker rejection, and Go folds
+    # untyped float constants in arbitrary precision.
+    "declared value types compare structurally": """
+type Point = { x: Int, y: Int }
+type Seg = { a: Point, b: Point }
+type Weight = { w: Float }
+type Shape = Circle(Int) | Dot
+
+pub fn fdiv(a: Float, b: Float) -> Float { return a / b }
+pub fn scale(a: Float, b: Float) -> Float { return a * b }
+pub fn seg(p: Point, q: Point) -> Seg { return { a: p, b: q } }
+pub fn wt(v: Float) -> Weight { return { w: v } }
+pub fn circle(r: Int) -> Shape { return Circle(r) }
+pub fn dot() -> Shape { return Dot }
+
+test "a declared record compares by value" {
+  assert seg({ x: 1, y: 2 }, { x: 3, y: 4 }) == seg({ x: 1, y: 2 }, { x: 3, y: 4 })
+}
+test "nesting compares all the way down" {
+  assert seg({ x: 1, y: 2 }, { x: 3, y: 4 }) != seg({ x: 1, y: 2 }, { x: 3, y: 5 })
+}
+test "a payload case compares by value" { assert circle(2) == circle(2) }
+test "different payloads differ"        { assert circle(2) != circle(3) }
+test "a nullary case equals itself"     { assert dot() == dot() }
+test "different cases differ"           { assert circle(2) != dot() }
+test "a Float component stays IEEE"     { assert wt(fdiv(0.0, 0.0)) != wt(fdiv(0.0, 0.0)) }
+test "so negative zero is one value"    { assert wt(scale(0.0, 0.0 - 1.0)) == wt(0.0) }
+""",
+
     # The former pinned divergence "Int widens into a Float position": revl
     # widens `Int` into `Float` implicitly (`compatible("Float", "Int")`), so
     # `ident(3)` for `ident: (Float) -> Float` is a legal program — and until
@@ -422,6 +466,105 @@ def test_java_equality_goes_through_the_revl_helper():
         "the helper must travel with the module")
     assert "java.util.Objects.equals(a, b)" in emitted, (
         "structural equality is still the fallback for every non-Float value")
+
+
+def _java_value_classes(emitted: str) -> dict:
+    """Every class `_emit_v3_types` generates, mapped to its body text.
+
+    A v3 record is `public static final class X {` at one indent; a
+    sealed-variant case is `final class X implements Owner {` one level in.
+    Both are matched here so a future third shape cannot quietly opt out of the
+    sweep below by not looking like a record."""
+    out = {}
+    lines = emitted.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        opener = None
+        if stripped.startswith("public static final class "):
+            opener = stripped[len("public static final class "):].split()[0]
+        elif stripped.startswith("final class ") and " implements " in stripped:
+            opener = stripped[len("final class "):].split()[0]
+        if opener is None or "<" in opener:
+            continue
+        indent = len(line) - len(line.lstrip())
+        body = []
+        for rest in lines[i + 1:]:
+            if rest.strip() and (len(rest) - len(rest.lstrip())) <= indent:
+                break
+            body.append(rest)
+        out[opener] = "\n".join(body)
+    return out
+
+
+def test_java_declared_value_types_carry_a_structural_equals():
+    """The defect this file exists to catch, in its cheapest form.
+
+    `_emit_v3_types` emitted every record class and every sealed-variant case
+    class with fields and a ctor and NO `equals`, so each inherited
+    `Object.equals`, which is reference identity, and `revlEq`'s `Objects.equals`
+    fallback dispatched straight into it. `{ id: 1 } == { id: 1 }` was `false`
+    here and `true` on python, TypeScript, rust and go.
+
+    This is the guard that runs with no toolchain, which is the only kind that
+    was ever going to fire: the executed probe above sits behind
+    REVL_CROSS_TIER_SLOW, which this repository sets nowhere, and behind a JDK
+    the `frontend` job does not have."""
+    emitted = _emit("java", PROBES["declared value types compare structurally"])
+    classes = _java_value_classes(emitted)
+    for name in ("Point", "Seg", "Weight", "Circle", "Dot"):
+        assert name in classes, f"{name} was not emitted as a class"
+    for name, body in classes.items():
+        assert "public boolean equals(Object o) {" in body, (
+            f"{name} inherits Object.equals, which is reference identity; "
+            "revl equality is structural (docs/syntax-2.0.md §3.4)")
+        assert "public int hashCode() {" in body, (
+            f"{name} defines equals without hashCode")
+
+
+def test_java_record_equals_compares_floats_with_ieee_equality():
+    """`Double.equals` and `Double.compare` both go through
+    `doubleToLongBits`, which calls NaN equal to itself and 0.0 unequal to
+    -0.0. Both are inverted against docs/arithmetic.md, and it is the bug item
+    433 rider R2 removed from the top level. A generated `equals` must compare
+    the PRIMITIVE `double`s, and its `hashCode` must fold -0.0 to 0.0 so that
+    two values `equals` calls equal cannot hash apart."""
+    emitted = _emit("java", PROBES["declared value types compare structurally"])
+    body = _java_value_classes(emitted)["Weight"]
+    assert "return this.w == __revl_other.w;" in body, (
+        "a Float component compares with the primitive `==`, which IS the "
+        "IEEE comparison")
+    assert "Double.compare" not in body and ".equals(__revl_other.w)" not in body
+    assert "java.lang.Double.hashCode(this.w == 0.0d ? 0.0d : this.w)" in body, (
+        "0.0 and -0.0 are equal under `==`, so they must hash alike")
+
+
+def test_java_nested_record_equals_recurses_structurally():
+    """A record whose component is a record must compare all the way down.
+    The component is a reference, so it routes through `revlEq`, whose
+    `Objects.equals` fallback now lands on the INNER class's generated
+    `equals` rather than on `Object`'s. Both halves of that chain are pinned
+    here, because either one missing silently restores identity comparison."""
+    emitted = _emit("java", PROBES["declared value types compare structurally"])
+    classes = _java_value_classes(emitted)
+    assert "return revlEq(this.a, __revl_other.a) && revlEq(this.b, __revl_other.b);" \
+        in classes["Seg"]
+    assert "return this.x == __revl_other.x && this.y == __revl_other.y;" \
+        in classes["Point"]
+    assert "private static boolean revlEq" in emitted, (
+        "the generated equals calls revlEq, so the helper must travel with the "
+        "module even though this document never writes `==` in a fn body")
+    assert "private static int revlHash" in emitted
+
+
+def test_java_nullary_variant_cases_are_not_all_one_value():
+    """A nullary case has no component, so its `equals` is the `instanceof`
+    alone, but its `hashCode` must still separate it from a sibling case, or
+    `Circle` and `Dot` collide in every hash container for no reason."""
+    emitted = _emit("java", PROBES["declared value types compare structurally"])
+    classes = _java_value_classes(emitted)
+    assert "return o instanceof Dot;" in classes["Dot"]
+    assert 'return "Shape.Dot".hashCode();' in classes["Dot"]
+    assert 'int h = "Shape.Circle".hashCode();' in classes["Circle"]
 
 
 def test_java_true_division_widens_both_operands():
