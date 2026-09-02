@@ -55,8 +55,8 @@ Every fact the rule language can threshold is OBJECTIVE and RECORDED:
 - a gauntlet run ended `admissible` or it did not;
 - a publisher is in the operator's trust set or it is not (trust is supplied by
   the operator, never self-asserted: `registry._publisher_status`);
-- a declaration carries the `declared`, `keyed`, or `shape-proven` register
-  (the item-44/309 honesty ledger; section 3.2 adopts 309's partial order).
+- a declaration carries the `declared` or `keyed` register (the item-44/309
+  honesty ledger, plus 440's `read`; section 3.2 adopts 309's order).
 
 A rule is a predicate over these facts. `component Csv* requires evidence
 [fault-sweep 12/12, attestation valid]` either holds or does not hold; the
@@ -212,23 +212,30 @@ item-44/309 honesty ledger. 290 adopts 309's PARTIAL order verbatim, because
 declaration differently:
 
 ```
-declared < keyed        declared < shape-proven        keyed, shape-proven: peers
+declared < keyed < read       (`strong` = any register above `declared`)
 ```
 
-`declared` is the bare item-44 trust-me register; `keyed` (the
-idempotency-key discipline) and `shape-proven` (the static proof) are PEERS,
-neither above the other, and either one satisfies a strong floor. An earlier
-draft of this design used the total order `declared < keyed <
-sweep-evidenced < shape-proven`; that is withdrawn. It contradicted 309
-outright (same rule, opposite verdicts: a keyed declaration under a
-shape-proven floor passes in one ordering and fails in the other), and
-`sweep-evidenced` is not a declaration register at all but evidence about
-the component, already thresholdable as the `fault-sweep` facet; keeping it
-in the ladder would fork 309's vocabulary. The floor vocabulary is therefore
-`declared`, `keyed`, `shape-proven`, and `strong` (at least one strong form:
-`keyed` or `shape-proven`, exactly 309's strong floor). A named-form floor
-is satisfied only by that form or a form above it (nothing sits above either
-peer today); an operator who means "verified, either way" writes `strong`.
+`declared` is the bare item-44 trust-me register; `keyed` is the
+idempotency-key discipline; 440's `read` (`undo pure`) sits above both,
+because a call that changes nothing needs no key at all. An earlier draft of
+this design used the total order `declared < keyed < sweep-evidenced <
+shape-proven`; that is withdrawn. `sweep-evidenced` is not a declaration
+register at all but evidence about the component, already thresholdable as
+the `fault-sweep` facet; keeping it in the ladder would fork 309's
+vocabulary. The floor vocabulary is therefore `declared`, `keyed`, and
+`strong` (any register above the trust-me floor). An operator who means
+"verified, either way" writes `strong`.
+
+**Item 207 removed `shape-proven` from this section.** It was written here as
+a PEER of `keyed` — a static proof over an inverse body — and nothing ever
+produced it. Its provenance is an inverse, and every consumer that graded the
+register set grades a forward emission, so no declaration could reach it; over
+the whole producible vocabulary the `shape-proven` floor was an exact synonym
+for `strong`. The spelling is now a parse error naming `strong`. See
+`docs/design/207-checkable-extern-body.md`, and §4d of `docs/crash-recovery.md`
+for the rule that answers the operator sentence `shape-proven` was reached for
+("verified, not merely claimed", for a local mutating inverse): pair this floor
+with `requires evidence [inverse-roundtrip pass, attestation valid]`.
 
 The rule selects components reaching the capability and refuses any whose
 relevant declarations (today: the witnessed-inverse and idempotence claims
@@ -249,10 +256,10 @@ stated here so slice work does not invent them ad hoc:
   lowering time. The rule evaluates against that map, and the why-trace
   names the weakest declaration.
 
-Timing, stated bluntly: the register does not exist in the IR yet. Only
-`idempotent: true` is recorded per method; no `keyed`/`shape-proven` string
-exists anywhere in `src/revl`, and there is no `idempotent(key: p)` parse
-form. A floor above `declared` accepted today would be an unsatisfiable
+Timing, stated bluntly (as of this note; 309 has since landed the ledger): the
+register does not exist in the IR yet. Only `idempotent: true` is recorded per
+method; no `keyed` string exists anywhere in `src/revl`, and there is no
+`idempotent(key: p)` parse form. A floor above `declared` accepted today would be an unsatisfiable
 rule, an unconditional deny wearing a register costume, whose meaning
 silently flips the day 309's ledger lands. So slice 1 parses
 `requires register declared` only and rejects every higher level at parse
@@ -311,7 +318,7 @@ class EvidenceRule:
 @dataclass(frozen=True)
 class RegisterRule:
     capability: str                   # glob over capability tokens
-    at_least: str                     # "declared" | "keyed" | "shape-proven" | "strong"
+    at_least: str                     # "declared" | "keyed" | "strong"
 ```
 
 `Violation` gains two `kind` values, `evidence` and `register`, beside the
@@ -646,7 +653,7 @@ resolve-side `wouldBeRefused` marker.
 
 **Slice 3: recomputed evidence + register depth.** `--recompute` running local
 producers and marking facets `recomputed` vs `published`; the register
-floors above `declared` (`keyed`, `shape-proven`, `strong`) unlocked when
+floors above `declared` (`keyed`, `strong`) unlocked when
 309's ledger actually records those registers in the IR (they stay
 parse-rejected until then, per section 3.2); distillation (251) taught to
 emit evidence rules stays in 251's own item, unblocked by slice 1.
@@ -722,10 +729,10 @@ emit evidence rules stays in 251's own item, unblocked by slice 1.
     per section 9). A witnessed inverse at the bare `declared` register
     behind `inventory.*` is refused by `capability inventory.* requires
     register keyed`; the same declaration with an idempotency key admits. A
-    `keyed` declaration satisfies a `strong` floor and does NOT satisfy a
-    `shape-proven` floor (peers, not rungs). With one `declared` and one
-    `keyed` declaration behind the same token, a `keyed` floor refuses
+    `keyed` declaration satisfies a `strong` floor. With one `declared` and
+    one `keyed` declaration behind the same token, a `keyed` floor refuses
     (worst register wins) and the why-trace names the weakest declaration.
+    (The `shape-proven` floor this test also named was removed by item 207.)
 15. **Inert selectors are reported.** An evidence rule whose selector matches
     no component in the audit graph (`component Csv*` against a component
     named `csv-reader`) is reported inert in the evaluate report body and in

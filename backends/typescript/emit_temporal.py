@@ -107,10 +107,10 @@ _KEYED = "keyed"
 #: The registers that earn a Temporal retry. This is item 440's
 #: `recovery.REDISPATCH_FREE` — "may be issued AGAIN without spending a fence"
 #: — read at the FORWARD position, which is the only question a Temporal
-#: `RetryPolicy` asks. `shape-proven` is listed because the partial order names
-#: it a peer of `keyed`; `lower.py::_idempotent_register` cannot yet produce it
-#: (TODO(309-slice4)), so today the set is reachable only through `keyed`.
-_RETRY_EARNING_REGISTERS = frozenset({"keyed", "shape-proven"})
+#: `RetryPolicy` asks. Item 207 removed a second member, `shape-proven`: it was
+#: an INVERSE-body register and this set grades a forward emission, so no
+#: declaration could reach it here.
+_RETRY_EARNING_REGISTERS = frozenset({"keyed"})
 
 # The bounded backoff a retry-earning crossing gets. BOUNDED, not unbounded: a
 # forward activity that retries forever never throws, so the workflow's catch

@@ -1,10 +1,13 @@
 """Item 207: the falsification harness for docs/design/207-checkable-extern-body.md.
 
-The design pass recommends DELETING `shape-proven` from item 309's idempotence
-lattice rather than building a checkable extern-body form to reach it. That
-recommendation rests on five structural claims about `origin/main`, and this
-file asserts every one of them mechanically, so the recommendation can be
-re-checked by running the tests instead of by rereading the argument.
+The design pass recommended DELETING `shape-proven` from item 309's idempotence
+lattice rather than building a checkable extern-body form to reach it, and the
+deletion landed. That recommendation rests on five structural claims about the
+tree, and this file asserts every one of them mechanically, so it can be
+re-checked by running the tests instead of by rereading the argument. The claims
+outlive the deletion: each one says why a body-shape register would still sit in
+a set its own provenance cannot reach, so they are what a future proposal to
+re-add the tier has to overturn first.
 
 The claims, in the order the design note makes them:
 
@@ -17,12 +20,12 @@ The claims, in the order the design note makes them:
       cannot declare `undo`. `shape-proven`, whose designed provenance is an
       INVERSE body, is therefore an inverse-only register.
 * C3  `REDISPATCH_FREE` is read at the OWED-DEFERRED-EMISSION seam only, and
-      `deferred` is emission-only. So an inverse-only register can never be seen
-      by the set that contains it. The membership is inert.
-* C4  In the one path that does read an inverse's register, `_replay_tier`,
-      `shape-proven` produces exactly the verdict `undo idempotent` already
-      produces today. The behavioural delta of the whole feature, in recovery,
-      is zero.
+      `deferred` is emission-only. So an inverse-only register could never be
+      seen by the set that used to contain it. The membership was inert.
+* C4  In the one path that does read an inverse's register, `_replay_tier`, a
+      body-shape register would produce exactly the verdict `undo idempotent`
+      already produces today. The behavioural delta of the whole feature, in
+      recovery, is zero.
 * C5  The one surface where the tier would change a verdict is the POLICY floor,
       and the gap there is real: no mutating local inverse can reach a strong
       floor today, because `keyed` is emission-only and `read` requires the
@@ -31,12 +34,14 @@ The claims, in the order the design note makes them:
 And the falsifier for the recommendation itself:
 
 * C6  Deleting `shape-proven` from `_REGISTER_RANK` and `REDISPATCH_FREE`
-      changes no verdict any shipped surface can produce, because no input that
-      reaches those surfaces carries it.
+      changed no verdict any shipped surface can produce, because no input that
+      reaches those surfaces carried it. The register vocabulary is now exactly
+      `{declared, keyed, read}`, and the one visible consequence — the retired
+      floor spelling — is rejected at parse naming `strong`.
 
-If a future change makes C3 or C4 false, the tier has become load-bearing and
-the design note's recommendation must be re-argued. That is what this file is
-for.
+If a future change makes C3 or C4 false, a body-shape register has become
+load-bearing and the design note's recommendation must be re-argued. That is
+what this file is for.
 """
 
 from __future__ import annotations
@@ -189,18 +194,29 @@ def test_c3_no_declaration_can_put_an_inverse_register_on_an_owed_emission():
 
 
 def test_c3_the_reissue_gate_is_only_ever_asked_about_emission_registers():
-    """`_reissue_permitted` is total over the register vocabulary, and its
-    `shape-proven` arm is unreachable given C2 + C3: the argument is read off a
-    deferred-emission descriptor."""
-    # the arm exists ...
-    assert _reissue_permitted("shape-proven", "declared") is True
-    assert _reissue_permitted("shape-proven", "keyed") is True
-    # ... and is behaviourally identical to the `keyed` arm it sits beside, for
-    # every knob setting. Deleting it therefore cannot change a verdict that a
-    # keyed descriptor does not already produce.
-    for strength in (None, "declared", "keyed", "shape-proven", "strong"):
-        assert _reissue_permitted("shape-proven", strength) \
-            == _reissue_permitted("keyed", strength)
+    """`_reissue_permitted` reads the register off a deferred-emission
+    descriptor, so the only registers it can ever be asked about are the
+    emission-family ones (C2 + C3).
+
+    `shape-proven` was in `REDISPATCH_FREE` and admitted at every strength. It is
+    gone, and the gate now falls through to the fail-closed arm for it, exactly
+    as it does for any other name a descriptor cannot carry — which is the whole
+    content of the deletion at this seam."""
+    from revl.recovery import REDISPATCH_FREE as FREE  # noqa: PLC0415
+
+    assert FREE == frozenset({"read", "keyed"})
+    # the emission-family registers, graded as before ...
+    for strength in ("declared", "keyed", "strong"):
+        assert _reissue_permitted("keyed", strength) is True
+        assert _reissue_permitted("read", strength) is True
+    assert _reissue_permitted("declared", "declared") is True
+    assert _reissue_permitted("declared", "keyed") is False
+    # ... the seam OFF is still no for everything ...
+    for register in ("read", "keyed", "declared", "shape-proven", None):
+        assert _reissue_permitted(register, None) is False
+    # ... and a name no descriptor can carry never auto-fires under any knob.
+    for strength in ("declared", "keyed", "strong"):
+        assert _reissue_permitted("shape-proven", strength) is False
 
 
 # --------------------------------------------------------------------- C4
@@ -243,9 +259,14 @@ def test_c5_no_mutating_local_inverse_can_reach_a_strong_floor_today():
     assert row["register"] == "declared"
     assert not _register_satisfies(row["register"], "strong")
     assert not _register_satisfies(row["register"], "keyed")
-    assert not _register_satisfies(row["register"], "shape-proven")
-    # the floor is satisfiable in principle, just not by this declaration.
-    assert _register_satisfies("shape-proven", "strong")
+    # the floor is satisfiable in principle, just not by a MUTATING inverse: the
+    # two routes above `declared` are `keyed` (emission-only) and `read` (a
+    # non-mutating inverse). Deleting the tier did not close this gap, and the
+    # design note's §6.2 recipe — a `declared` register floor paired with
+    # `requires evidence [inverse-roundtrip pass, attestation valid]` — is the
+    # answer that does, by testing the real body instead of naming a fourth tier.
+    assert _register_satisfies("keyed", "strong")
+    assert _register_satisfies("read", "strong")
 
 
 def test_c5_the_read_tier_route_requires_a_non_mutating_inverse():
@@ -272,12 +293,11 @@ def test_c5_the_read_tier_route_requires_a_non_mutating_inverse():
 # The recommendation's own falsifier.
 
 def test_c6_deleting_the_tier_changes_no_producible_verdict():
-    """The removal is a no-op over every input a shipped surface can produce.
+    """The removal was a no-op over every input a shipped surface can produce.
 
-    Enumerated the same way item 309's tripwire enumerates: every declaration
-    surface that produces a register at all. If this set ever grows a
-    `shape-proven`, the deletion is no longer free and the design note is
-    overturned."""
+    Enumerated the same way item 309's vocabulary test enumerates: every
+    declaration surface that produces a register at all. The producible set is
+    exactly the lattice, so nothing is accepted that nothing can reach."""
     surfaces = [
         _PRE + ("extern witnessed[fs] fn rm(path: Str) -> Result[W, E]\n"
                 "    undo idempotent restore(result) = @py { pass }\n"),
@@ -300,30 +320,36 @@ def test_c6_deleting_the_tier_changes_no_producible_verdict():
                 produced.add(ext["register"])
     assert produced == {"declared", "keyed", "read"}
 
-    # every consumer, over exactly that producible vocabulary, is indifferent to
-    # whether `shape-proven` is a member of the rank map and the free set.
-    without = frozenset(REDISPATCH_FREE - {"shape-proven"})
-    for register in produced | {None}:
-        assert (register in REDISPATCH_FREE) == (register in without)
-    ranks_without = {k: v for k, v in _REGISTER_RANK.items()
-                     if k != "shape-proven"}
-    for register in produced:
-        for floor in ("declared", "keyed", "strong"):
-            expected = ranks_without.get(register, -1) >= ranks_without.get(floor, 0)
-            assert _register_satisfies(register, floor) == expected
+    # and the lattice names exactly those, plus `strong`, which is a policy FLOOR
+    # spelling and never an IR register. No accepted name is unreachable.
+    assert set(_REGISTER_RANK) - {"strong"} == produced
+    assert REDISPATCH_FREE == {"keyed", "read"}
+    assert REDISPATCH_FREE <= produced
+    # the free set is total over the producible vocabulary: every register is
+    # either free to re-dispatch or fenced, and no register at all is fenced.
+    assert {r for r in produced if r in REDISPATCH_FREE} == {"keyed", "read"}
+    assert None not in REDISPATCH_FREE
 
 
-def test_c6_the_only_floor_that_loses_a_spelling_is_the_named_peer():
+def test_c6_the_only_floor_that_loses_a_spelling_is_rejected_at_parse():
     """The one visible consequence of deletion, stated so it is not a surprise.
 
     `requires register shape-proven` / `idempotent-teardown(strength:
-    shape-proven)` stops being a spellable floor. It is today an alias for
-    `strong` in every producible case (nothing produces the tier, so the floor
-    is satisfied only by `keyed` or `read`), which is what makes the removal a
-    rename of a synonym rather than a loss of expressiveness."""
+    shape-proven)` stops being a spellable floor. It was an alias for `strong` in
+    every producible case (nothing produced the tier, so the floor was satisfied
+    only by `keyed` or `read`), which is what makes the removal a rename of a
+    synonym rather than a loss of expressiveness. Following 290's precedent, the
+    retired spelling is a `PolicyError` naming the replacement rather than a
+    level silently accepted and grading nothing."""
+    from revl.policy import PolicyError, parse_policy  # noqa: PLC0415
+
+    with pytest.raises(PolicyError) as exc:
+        parse_policy("capability db requires register shape-proven\n")
+    assert "shape-proven" in str(exc.value) and "'strong'" in str(exc.value)
+    # and the replacement grades every producible register identically to the
+    # spelling it replaces, which is why no policy loses meaning.
     for register in ("declared", "keyed", "read"):
-        assert _register_satisfies(register, "shape-proven") \
-            == _register_satisfies(register, "strong")
+        assert _register_satisfies(register, "strong") == (register != "declared")
 
 
 # ------------------------------------------------------ the defect this pass found

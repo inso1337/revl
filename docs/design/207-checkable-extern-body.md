@@ -415,11 +415,12 @@ Three live constants, one audit branch, one floor spelling. The rest is prose.
 
 The one behavioural change is the floor spelling: `requires register
 shape-proven` and `idempotent-teardown(strength: shape-proven)` stop parsing.
-`test_c6_the_only_floor_that_loses_a_spelling_is_the_named_peer` asserts that
+`test_c6_the_only_floor_that_loses_a_spelling_is_rejected_at_parse` asserts that
 over the whole producible register vocabulary that floor is an exact synonym for
 `strong`, so no policy loses meaning. Follow 290's own precedent for closing a
 vocabulary in time: reject it at parse with a distinct `PolicyError` naming the
-replacement, rather than silently accepting a level that grades nothing.
+replacement, rather than silently accepting a level that grades nothing. That is
+what shipped.
 
 ---
 
@@ -505,7 +506,7 @@ here.
 
 ## 9. Slices
 
-**S1. Delete `shape-proven`. Build this.** Remove it from `_REGISTER_RANK`,
+**S1. Delete `shape-proven`. LANDED.** Remove it from `_REGISTER_RANK`,
 `REDISPATCH_FREE`, `_REGISTER_LEVELS`, `_RETRY_EARNING_REGISTERS` and the audit
 branch; reject the floor spelling at parse with a `PolicyError` naming `strong`;
 rewrite `docs/crash-recovery.md` §4b's shared row so `keyed` states its own
@@ -515,13 +516,20 @@ this note's C6. Small, mechanical, and it closes issue #207 with a negative
 result rather than leaving a tier the partial order accepts and nothing
 produces.
 
+Landed as described, with one addition: `docs/crash-recovery.md` gained §4d for
+S2's recipe rather than a footnote next to the old caveat, because the recipe is
+the answer an operator arrives at §4b looking for. The register set is now
+exactly `{declared, keyed, read}`, and item 309's tripwire — which existed to
+flag the gap between what the lattice accepted and what a declaration could
+produce — became an assertion that the two are the same set, passing by
+construction.
+
 Keep `strong` as the "either verified form" floor. After the deletion it means
 `keyed` or `read`, which is exactly what it means in practice today.
 
-**S2. The doc recipe for the real sentence (§3, §6.2). Build this next.** In
-`docs/crash-recovery.md`, next to where the `shape-proven` caveat lives today,
-the two-clause policy that answers "verified, not merely claimed" for a local
-mutating inverse:
+**S2. The doc recipe for the real sentence (§3, §6.2). LANDED as
+`docs/crash-recovery.md` §4d.** The two-clause policy that answers "verified, not
+merely claimed" for a local mutating inverse:
 
 ```
 capability fs requires register declared
@@ -533,8 +541,10 @@ the evidence says it was tested against the real body, and the attestation roots
 the dossier. Two paragraphs. This is the deliverable the operator actually
 wanted, and it needs no code.
 
-**S3. F1, on its own issue.** §8. One comparison, one docstring, one roadmap
-note for the audit-surface change.
+**S3. F1. LANDED alongside S1.** §8. One comparison, one docstring, one roadmap
+note for the audit-surface change. It shipped in the same PR rather than a
+separate one: it is the urgent half, and holding a fail-open fold behind a
+lattice cleanup would have been the wrong order.
 
 **Not in 207, and deliberately not filed as a follow-on:** F2's declared
 write-algebras. If a trigger ever arrives (§11), it is a new item with its own
@@ -555,21 +565,23 @@ declared xfail.
    emission; a two-declaration program shows the two register families never
    meet.
 3. **C3.** `deferred` is refused on a non-emission; a walked `recovery_surface`
-   shows `owed-emission` rows carry only emission registers; `_reissue_permitted`
-   is verdict-identical on `shape-proven` and `keyed` at every knob setting.
-4. **C4.** `_replay_tier` returns `free` for `shape-proven`, `declared` and
-   `None` alike when `undo idempotent` is declared, and `fenced` without it.
+   shows `owed-emission` rows carry only emission registers; `REDISPATCH_FREE`
+   is exactly `{read, keyed}` and `_reissue_permitted` falls through to the
+   fail-closed arm for a name no descriptor can carry.
+4. **C4.** `_replay_tier` returns `free` for a declared-idempotent inverse
+   regardless of the register it carries, and `fenced` without the declaration —
+   which is why a body-shape register would have changed no recovery verdict.
 5. **C5.** A witnessed mutating inverse registers `declared` and satisfies
-   neither `keyed`, `shape-proven` nor `strong`; `undo pure` is the only strong
-   route and lower refuses it on a non-`pure` callee.
+   neither `keyed` nor `strong`; `undo pure` is the only strong route and lower
+   refuses it on a non-`pure` callee.
 6. **C6.** The producible register vocabulary is exactly
-   `{declared, keyed, read}`, and `REDISPATCH_FREE` and `_register_satisfies`
-   give identical answers over it with `shape-proven` removed. Plus: the
-   `shape-proven` floor is an exact synonym for `strong` over that vocabulary.
-7. **F1** (strict-xfail). `capability db requires register keyed` refuses a token
-   reached by one keyed and one bare-`declared` emission.
+   `{declared, keyed, read}`, the rank map names exactly those plus the `strong`
+   floor spelling, and `REDISPATCH_FREE` is a subset of what declarations can
+   produce. The retired floor spelling is a `PolicyError` naming `strong`.
+7. **F1.** `capability db requires register keyed` refuses a token reached by one
+   keyed and one bare-`declared` declaration.
 
-**What S1 must add when it lands.** The tripwire that replaces 309's: the
+**What S1 added when it landed.** The tripwire that replaces 309's: the
 producible register set is exactly `{declared, keyed, read}` and the floor
 vocabulary is exactly `{declared, keyed, strong}`, so a future tier cannot be
 added to the type without a producer and a consumer landing with it. That is the
