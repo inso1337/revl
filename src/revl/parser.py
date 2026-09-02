@@ -1434,6 +1434,28 @@ class Parser:
     def peek(self) -> Token:
         return self.toks[self.pos]
 
+    def peek_ahead(self, offset: int = 1) -> Token:
+        """The token `offset` past the cursor, CLAMPED to the eof token.
+
+        Most lookaheads in this file are taken under a guard
+        (`at("ident", "lifecycle")`) that already proves the current token is
+        not eof, so a next token exists. Not all of them are:
+        `_reject_lifecycle_stmt_here` takes its lookahead before any such
+        guard, so a `test` body whose input simply ran out indexed past the end
+        and threw a bare `IndexError` out of the parser.
+
+        A frontend fault is not a refusal. `RevlError` is the language saying
+        no and every caller handles it; an `IndexError` is an unhandled crash
+        in a library, and in `revl.gate` an unhandled crash in a security
+        surface. The token list always ends with an eof token, so clamping to
+        the last one is exactly "there is nothing after this" — the answer
+        every already-guarded call site computes anyway, which is why routing
+        them through here changes no behaviour.
+
+        Found by tools/fuzz_frontend.py; the reproducer is `test"e"{`.
+        """
+        return self.toks[min(self.pos + offset, len(self.toks) - 1)]
+
     def next(self) -> Token:
         tok = self.toks[self.pos]
         self.pos += 1
@@ -1686,8 +1708,8 @@ class Parser:
                 program.fn_decls.append(self.fn_decl(False))
             elif self.at("kw", "test"):
                 program.tests.append(self.test_decl())
-            elif self.at("ident", "fault") and self.toks[self.pos + 1].kind == "kw" \
-                    and self.toks[self.pos + 1].value == "test":
+            elif self.at("ident", "fault") and self.peek_ahead(1).kind == "kw" \
+                    and self.peek_ahead(1).value == "test":
                 # `fault` is a *contextual* keyword: it only heads a
                 # declaration when immediately followed by `test`, so adding
                 # this form cannot break a program that already uses `fault`
@@ -1696,9 +1718,9 @@ class Parser:
                 program.fault_tests.append(self.fault_test_decl())
 
             elif self.at("ident", "secret") \
-                    and self.toks[self.pos + 1].kind == "ident" \
-                    and self.toks[self.pos + 2].kind == "kw" \
-                    and self.toks[self.pos + 2].value == "for":
+                    and self.peek_ahead(1).kind == "ident" \
+                    and self.peek_ahead(2).kind == "kw" \
+                    and self.peek_ahead(2).value == "for":
                 # `secret` is a *contextual* keyword (roadmap item 256), the same
                 # discipline `witnessed`/`deferred`/`fault`/`prop` use: it heads a
                 # declaration ONLY in the shape `secret NAME for CAP`, so no program
@@ -1706,8 +1728,8 @@ class Parser:
                 # self-hosted lexer's KEYWORDS table needs no sync.
                 program.secrets.append(self.secret_decl())
 
-            elif self.at("ident", "prop") and self.toks[self.pos + 1].kind == "kw" \
-                    and self.toks[self.pos + 1].value == "test":
+            elif self.at("ident", "prop") and self.peek_ahead(1).kind == "kw" \
+                    and self.peek_ahead(1).value == "test":
                 # `prop` is a *contextual* keyword: like `fault`, it only heads a
                 # declaration when immediately followed by `test`, so adding
                 # `prop test` cannot break a program that already uses `prop` as
@@ -1716,7 +1738,7 @@ class Parser:
                 program.prop_tests.append(self.prop_test_decl())
 
             elif self.at("ident", "composition") \
-                    and self.toks[self.pos + 1].kind == "ident":
+                    and self.peek_ahead(1).kind == "ident":
                 # item 426 S1. `composition` is a CONTEXTUAL keyword — it heads
                 # a declaration only in the shape `composition NAME {`, so no
                 # program that already uses `composition` as an ordinary
@@ -1746,7 +1768,7 @@ class Parser:
                 # (syntax-2.0 §7.1). It is deliberately NOT a lexer keyword —
                 # the grammar delta is one token in one position, and the
                 # self-hosted lexer's token stream stays unchanged.
-                nxt = self.toks[self.pos + 1]
+                nxt = self.peek_ahead(1)
                 if not (nxt.kind == "kw" and nxt.value == "test"):
                     raise self.err(
                         self.peek().line,
@@ -2528,7 +2550,7 @@ class Parser:
         first = self.expect("ident", what=what).value
         # `ns::local`: a `:` immediately followed by another `:`. A single
         # `:` here is the ordinary `key: Service` separator and is left alone.
-        if self.at(":") and self.toks[self.pos + 1].kind == ":":
+        if self.at(":") and self.peek_ahead(1).kind == ":":
             self.next()  # first `:`
             self.next()  # second `:`
             local = self.expect("ident", what="a key after `::`").value
@@ -3050,7 +3072,7 @@ class Parser:
 
     def literal(self):
         tok = self.peek()
-        if tok.kind == "-" and self.toks[self.pos + 1].kind == "int":
+        if tok.kind == "-" and self.peek_ahead(1).kind == "int":
             self.next()
             return -self.next().value
         if tok.kind in ("int", "float"):
@@ -3067,7 +3089,7 @@ class Parser:
     def stmt(self, in_method: bool, in_async_method: bool = False):
         tok = self.peek()
         # `y = expr` — assignment to a `var` bound earlier in this method
-        if in_method and tok.kind == "ident" and self.toks[self.pos + 1].kind == "=":
+        if in_method and tok.kind == "ident" and self.peek_ahead(1).kind == "=":
             self.next()
             self.next()
             return AssignStmt(tok.value, self.pure_expr(), tok.line)
@@ -3138,8 +3160,8 @@ class Parser:
             # activation body exactly where `let x = effect …` is (both bind a
             # value the plain-value stratum otherwise refuses here).
             if not mutable and self.at("kw", "await") \
-                    and self.toks[self.pos + 1].kind == "ident" \
-                    and self.toks[self.pos + 1].value == "approval":
+                    and self.peek_ahead(1).kind == "ident" \
+                    and self.peek_ahead(1).value == "approval":
                 if in_method:
                     raise self.err(
                         tok.line,
@@ -3405,7 +3427,7 @@ class Parser:
         # ident), so `effect lease()`, `effect lease.m()`, and any other use of a
         # binding named `lease` stay ordinary acquisition expressions. `await`
         # does not combine with a lease (it is gated at load, not a suspension).
-        if self.at("ident", "lease") and self.toks[self.pos + 1].kind == "ident":
+        if self.at("ident", "lease") and self.peek_ahead(1).kind == "ident":
             if is_async:
                 raise self.err(
                     line,
@@ -4264,7 +4286,7 @@ class Parser:
         """A lifecycle statement inside a plain `test` (or any pure body) is
         refused by name rather than by a confusing expression-parse error."""
         tok = self.peek()
-        nxt = self.toks[self.pos + 1]
+        nxt = self.peek_ahead(1)
         word = None
         # `advance` is followed by a duration (`advance 30s`), so its lookahead
         # is an int; the others name a component/key and are followed by an ident.
@@ -4700,11 +4722,11 @@ class Parser:
     def _assign_ahead(self) -> bool:
         """True when the token after the current identifier starts `=` or a
         compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`)."""
-        nxt = self.toks[self.pos + 1]
+        nxt = self.peek_ahead(1)
         if nxt.kind == "=":
             return True
         if nxt.kind in ("+", "-", "*", "/", "%"):
-            return self.toks[self.pos + 2].kind == "="
+            return self.peek_ahead(2).kind == "="
         return False
 
     def _record_pattern(self) -> RecordPattern:
@@ -4737,8 +4759,8 @@ class Parser:
     def _rest_pattern_ahead(self) -> bool:
         return (
             self.at(".")
-            and self.toks[self.pos + 1].kind == "."
-            and self.toks[self.pos + 2].kind == "."
+            and self.peek_ahead(1).kind == "."
+            and self.peek_ahead(2).kind == "."
         )
 
     def while_stmt(self) -> WhileStmt:
@@ -4873,7 +4895,7 @@ class Parser:
         # separate statement, not within this expression — untouched.
         if (self.at("kw", "if")
                 and self.pos + 1 < len(self.toks)
-                and self.toks[self.pos + 1].kind != "("):
+                and self.peek_ahead(1).kind != "("):
             raise self.err(
                 self.peek().line,
                 "revl has no Python-style `a if c else b` conditional expression",
@@ -5267,12 +5289,12 @@ class Parser:
         *literal* always opens `ident :` (or is the empty `{}`), and a record
         *update* opens `base | ...`. Anything else — a `let`/`var`/`if`/`while`/
         `for`/assignment, or a bare tail expression — is a statement block."""
-        first = self.toks[self.pos + 1]  # token after the `{`
+        first = self.peek_ahead(1)  # token after the `{`
         if first.kind == "}":
             return False  # empty record literal
         if self._record_update_ahead():
             return False  # `{ base | f = e }`
-        if first.kind == "ident" and self.toks[self.pos + 2].kind == ":":
+        if first.kind == "ident" and self.peek_ahead(2).kind == ":":
             return False  # `{ field: value, ... }`
         return True
 
@@ -5358,7 +5380,7 @@ class Parser:
         # ident or `:` in expression position) is untouched.
         if (tok.kind == "ident" and tok.value == "lambda"
                 and self.pos + 1 < len(self.toks)
-                and self.toks[self.pos + 1].kind in ("ident", ":")):
+                and self.peek_ahead(1).kind in ("ident", ":")):
             raise self.err(
                 tok.line,
                 "revl has no `lambda`",
@@ -5371,7 +5393,7 @@ class Parser:
         # forms); a bare `endorse` used as a value name is untouched.
         if (tok.kind == "ident" and tok.value == "endorse"
                 and self.pos + 1 < len(self.toks)
-                and self.toks[self.pos + 1].kind in ("[", "(")):
+                and self.peek_ahead(1).kind in ("[", "(")):
             return self._endorse_expr()
         if self._is_name_tok(tok):
             # item 158: a variable *reference* is a name position too — a param
@@ -5578,10 +5600,10 @@ class Parser:
         would lose its subject. So there is no shared mutable environment to
         write through, and the write form is rejected rather than snapshotted."""
         if self.at("{"):
-            nxt = self.toks[self.pos + 1]
-            after = self.toks[self.pos + 2]
+            nxt = self.peek_ahead(1)
+            after = self.peek_ahead(2)
             compound = (after.kind in ("+", "-", "*", "/", "%")
-                        and self.toks[self.pos + 3].kind == "=")
+                        and self.peek_ahead(3).kind == "=")
             if self._is_name_tok(nxt) and (after.kind == "=" or compound):
                 raise self.err(
                     nxt.line,

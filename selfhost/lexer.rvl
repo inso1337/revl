@@ -164,17 +164,37 @@ fn digit_val(cc: Int) -> Int {
   return 0 - 1
 }
 
-// Fold an underscore-free digit string in `base` to its Int value. The token
-// TEXT must be the parsed value's decimal spelling (the reference canonicalizes
-// an int token as `str(int(digits, base))`), so `0xFF` -> `255` and `1_000` ->
-// `1000`. Folds in i64, so a magnitude beyond i64 wraps rather than promoting
-// to a bignum as the reference's Python int would (out-of-corpus edge).
+// Fold an underscore-free digit string in `base` to its Int value, or -1 when
+// the value does not fit an i64. The token TEXT must be the parsed value's
+// decimal spelling (the reference canonicalizes an int token as
+// `str(int(digits, base))`), so `0xFF` -> `255` and `1_000` -> `1000`.
+//
+// The fold is Int arithmetic, and revl's Int TRAPS at the 64-bit edge on every
+// tier (docs/arithmetic.md) — it does not wrap and it does not promote to a
+// bignum as the reference's Python int does. An earlier comment here claimed a
+// wrap and called the case out-of-corpus; what actually happened was that
+// `9223372036854775808` — nineteen digits, no context needed — made the fold
+// trap, so the LEXER faulted on an input the reference lexes without
+// complaint. A gate that raises where it should refuse is a gate that cannot
+// be called from a `catch`-less consumer, which is what `crates/revl-gate` is.
+//
+// So the bound is tested BEFORE the multiply that would cross it: with base and
+// digit both positive, `v * base + d <= MAX` is exactly `v <= (MAX - d) / base`
+// in truncating integer division. The -1 answer becomes an `error` token at the
+// two call sites, which is a refusal the reference agrees with — an Int literal
+// outside the 64-bit range is refused there too (typecheck's
+// `_reject_int_literal_range`, examples/rejections/t20_int_literal_range.rvl).
+// Only the INT paths fold; a float keeps its source spelling, so a float with a
+// huge integer part is unaffected. Found by tools/fuzz_frontend.py.
 fn radix_value(digits: Str, base: Int) -> Int {
+  let max = 9223372036854775807
   var v = 0
   var i = 0
   let n = digits.length()
   while (i < n) {
-    v = v * base + digit_val(digits.codepoint_at(i))
+    let d = digit_val(digits.codepoint_at(i))
+    if (v > (max - d).div_trunc(base)) { return 0 - 1 }
+    v = v * base + d
     i += 1
   }
   return v
@@ -215,9 +235,6 @@ fn scan_quoted(source: Str, i: Int, q: Int) -> Scan {
   }
   return { j: 0 - 1, out: "", nl: 0 }
 }
-
-// Plain string body after the opening quote; out is the text, j is the
-// index AFTER the closing quote. Unterminated / newline -> j = -1.
 
 // Three consecutive `"` (code point 34) at j. The `"""` delimiter cannot be
 // written as a plain literal (no escapes) nor a triple literal (it would
@@ -270,6 +287,27 @@ fn scan_triple(source: Str, i: Int) -> Scan {
 // "%%p" reads back as "%p" and not as "|".
 fn esc(s: Str) -> Str {
   return s.split("%").join("%%").split("|").join("%p")
+}
+
+// Item 380: a `${...}` inside a plain `"..."` / `'...'` is a silent-wrong
+// interpolation. 2.0 interpolation lives ONLY in backtick templates, so the
+// `${...}` in a plain string is emitted as LITERAL text — `"hi ${name}"`
+// compiled clean and produced the characters `${name}`. The reference refuses
+// it (`_reject_dollar_interpolation` in src/revl/lexer.py) and this lexer did
+// not, so the gate admitted exactly the silent-wrong program the rule exists
+// to stop. Found by tools/fuzz_frontend.py; the reproducer is `"${}"`.
+//
+// The reference's conditions, mirrored precisely rather than approximated,
+// because an eager version of this rule is itself a false rejection: it fires
+// only on a COMPLETE `${...}` (a closing brace somewhere after the `${`), and
+// never when the string carries a backtick — a plain string containing a
+// backtick is quoting template or shell source as DATA, which is how this
+// file's own fixtures spell it.
+fn dollar_interp(text: Str) -> Bool {
+  let at = text.indexOf("${")
+  if (at == 0 - 1) { return false }
+  if (text.indexOf("`") != 0 - 1) { return false }
+  return text.slice(at + 2, text.length()).indexOf("}") != 0 - 1
 }
 
 // Whitespace including newline (is_space deliberately excludes it, since
@@ -523,6 +561,10 @@ fn step(source: Str, i: Int, line: Int) -> Step {
       return { i: source.length(), line: line,
                tok: { kind: "error", text: "unterminated string", line: line } }
     }
+    if (dollar_interp(ss.out)) {
+      return { i: source.length(), line: line,
+               tok: { kind: "error", text: "plain string does not interpolate", line: line } }
+    }
     return { i: ss.j, line: line, tok: { kind: "string", text: ss.out, line: line } }
   }
   if (cc == 96) {
@@ -547,6 +589,10 @@ fn step(source: Str, i: Int, line: Int) -> Step {
     if (sq.j == 0 - 1) {
       return { i: source.length(), line: line,
                tok: { kind: "error", text: "unterminated string", line: line } }
+    }
+    if (dollar_interp(sq.out)) {
+      return { i: source.length(), line: line,
+               tok: { kind: "error", text: "plain string does not interpolate", line: line } }
     }
     return { i: sq.j, line: line, tok: { kind: "string", text: sq.out, line: line } }
   }
@@ -573,6 +619,10 @@ fn step(source: Str, i: Int, line: Int) -> Step {
                  tok: { kind: "error", text: "bad numeric literal", line: line } }
       }
       let val = radix_value(g.out, base)
+      if (val == 0 - 1) {
+        return { i: source.length(), line: line,
+                 tok: { kind: "error", text: "int literal out of 64-bit range", line: line } }
+      }
       let gj = g.j
       return { i: gj, line: line, tok: { kind: "int", text: val.to_str(), line: line } }
     }
@@ -627,6 +677,10 @@ fn step(source: Str, i: Int, line: Int) -> Step {
       return { i: jj, line: line, tok: { kind: "float", text: ftext, line: line } }
     }
     let ival = radix_value(ip.out, 10)
+    if (ival == 0 - 1) {
+      return { i: source.length(), line: line,
+               tok: { kind: "error", text: "int literal out of 64-bit range", line: line } }
+    }
     return { i: jj, line: line, tok: { kind: "int", text: ival.to_str(), line: line } }
   }
   if (cc == 64) {
