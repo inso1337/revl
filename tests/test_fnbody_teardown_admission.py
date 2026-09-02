@@ -69,11 +69,22 @@ def test_399_acquire_undo_allowed_in_activation_body():
 
 
 def test_399_acquire_undo_allowed_in_provide_method():
+    # item 399's claim here is ADMISSION: an `acquire`-with-`undo` extern in
+    # effect position inside a provide method compiles, because the enclosing
+    # activation's accumulator takes the entry. The site `undo` used to read
+    # `r_close("h")` - a `Str` handed to an `(RHandle)` inverse, which compiled
+    # only because the site slot was never argument-checked. It is now, so the
+    # slot names a declared callable at its declared signature. The acquired
+    # handle itself still cannot be named at a seam (only `spawn` may be bound
+    # in a provide-method body, and `result` is not in scope in a site `undo`);
+    # releasing exactly the acquired handle at a seam is what `witnessed`
+    # spells, covered in tests/test_site_undo_argument_typecheck.py.
     ir = _compile(_ACQ_UNDO + (
+        "extern pure fn r_forget(tag: Str) = @py { return }\n"
         "service Res { fn take() }\n"
         "component R provides res: Res {\n"
         "  provide res {\n"
-        "    fn take() { effect r_open(0) undo r_close(\"h\") }\n"
+        "    fn take() { effect r_open(0) undo r_forget(\"h\") }\n"
         "  }\n"
         "}\n"))
     assert any(c["name"] == "R" for c in ir["components"])

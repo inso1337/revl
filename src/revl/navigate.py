@@ -243,18 +243,32 @@ def ceiling_navigate(*, param: str, child_value: str, parent_bound: str,
 def ownership_navigate(*, kind: str, resource: str | None = None,
                        mode: str | None = None, clause: str | None = None,
                        binding: str | None = None, returns: str | None = None,
-                       handle_name: str | None = None, profile=None) -> dict:
+                       handle_name: str | None = None, seam: bool = False,
+                       profile=None) -> dict:
     """Ownership (item 308, design §2.5). All alternatives are author-enacted -
     there is no policy knob, so the hint must not invent one. They are
     `candidate`, never `clears-this-gate`: the compiler does not re-synthesize the
     restructured source to re-run the gate, so it cannot promise the rewrite
-    clears (§3). `kind` selects O1 / B1 / R0."""
+    clears (§3). `kind` selects O1 / B1 / R0.
+
+    `seam` marks an O1 refusal fired inside a provide METHOD, where the
+    own-undo alternative is not enactable: only `spawn` may be acquired there,
+    so no acquiring binding exists to carry an `undo`, and `result` is not in
+    scope in a site `undo`. The enactable move at a seam is `witnessed`, whose
+    DECLARED inverse replays per acquisition with `result` bound to the handle
+    (docs/design/243-witnessed-externs.md). A navigable refusal that names an
+    unreachable fix is the failure mode item 274 exists to prevent."""
     alts = []
     if kind == "o1":
         alts.append(alternative(
             enacts=ENACTS_AUTHOR,
-            action=("let teardown run the inverse; the only legal explicit close "
-                    "is the acquiring binding's own `undo`"),
+            action=(("declare the extern `witnessed` and drop the site `undo`, so "
+                     "its declared inverse replays with `result` bound to the "
+                     "acquired handle; a provide-method body has no acquiring "
+                     "binding to carry an own-`undo`")
+                    if seam else
+                    ("let teardown run the inverse; the only legal explicit close "
+                     "is the acquiring binding's own `undo`")),
             ref=binding or resource))
     elif kind == "b1":
         if clause == "compensate":
