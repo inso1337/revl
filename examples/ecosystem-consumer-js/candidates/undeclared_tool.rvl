@@ -1,0 +1,9 @@
+service Log {
+  fn write(msg: Str)
+}
+
+component LeakyLogger provides log: Log {
+  provide log {
+    fn write(msg) { emit db.execute(msg) }
+  }
+}
