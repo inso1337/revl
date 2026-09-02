@@ -214,28 +214,6 @@ EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
 EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
 
 
-def _refuse_stream_host(fn: str) -> None:
-    """Refuse a `Stream.*` host builtin on this tier (roadmap item 419e).
-
-    `subscribe` already refuses honestly above, but the ACQUISITION that opens
-    the stream (`let src = effect Stream.source() undo src.close()`) did not:
-    `Stream` is not in `_HOST_ROOTS` and `runtime.ts`'s `host` exports only
-    `Pool`, `Map` and `Job`, so the emitter rendered `host.Stream.source()`, a
-    reference to a primitive this tier does not have, and the program failed at
-    RUN time, on the tier the README calls the portability reference. wasm
-    refuses the same shape at emit time; match it, because a compile-time
-    refusal that names the tiers which do lower streams is the honest answer and
-    a dead emit is not."""
-    if fn.split(".", 1)[0] == "Stream":
-        raise EmitError(
-            f"`{fn}` opens a stream; a stream subscription suspends a fiber "
-            "and the ts lowering (the same queue-vs-cancel race the py "
-            "reference runs) is not implemented, so this tier has no `Stream` "
-            "runtime primitive; streams run on py, go and rust "
-            "(item 130 §4.6); try `--backend py`"
-        )
-
-
 def _mangle(name: str) -> str:
     """Rename a syntactically-valid identifier that collides with a *JS/TS*
     reserved word, so a valid revl identifier that happens to be a JS keyword
@@ -726,7 +704,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             fn = node.get("fn")
             if not isinstance(fn, str) or not all(IDENT_RE.match(p) for p in fn.split(".")):
                 raise EmitError(f"invalid host builtin: {fn!r}")
-            _refuse_stream_host(fn)
+            _refuse_missing_host_root(fn)
             args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
             return f"host.{fn}({args})"
         # kind == "format"
@@ -2098,6 +2076,33 @@ _TS_V3_BIN_OPS = {
 
 _HOST_ROOTS = {"Pool", "Map", "Job"}
 _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
+
+# item 416a: host roots this tier's `runtime.ts` does NOT implement. A `host.<X>`
+# call is emitted verbatim against whatever `host` supplies, so a root with no
+# runtime behind it produced a program that compiled here and died in the
+# consumer's own build with a name error — a SILENT EMIT where the design
+# promises a refusal. `subscribe` was already refused; `Stream.source()` alone
+# was not, so the honest refusal only fired for half the surface. Refuse the
+# whole root, in the shape wasm uses, and name the tiers that do carry it.
+_UNIMPLEMENTED_HOST_ROOTS = {
+    "Stream": (
+        "opens a stream, and a stream subscription suspends a fiber. This tier "
+        "has no `Stream`/`Subscription` runtime primitive at all (`runtime.ts` "
+        "implements Pool, Map and Job), so the emitted program would name a "
+        "host object that does not exist: streams run on py, go and rust "
+        "(item 130 §4.6, tracked for this tier as roadmap 419e); try "
+        "`--backend py`"
+    ),
+}
+
+
+def _refuse_missing_host_root(fn: str) -> None:
+    """Refuse a host builtin whose ROOT this tier has no runtime for, instead of
+    emitting a call against a name the target does not define."""
+    root = fn.split(".")[0]
+    reason = _UNIMPLEMENTED_HOST_ROOTS.get(root)
+    if reason is not None:
+        raise EmitError(f"`{fn}` {reason}")
 
 _V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
 

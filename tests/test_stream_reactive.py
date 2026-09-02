@@ -696,26 +696,43 @@ def test_unimplemented_tiers_refuse_honestly(tier):
     assert "py, go and rust" in msg
 
 
+# item 416a: `subscribe` was refused on every tier, but a `Stream.source()`-only
+# program was not. It lowers to a plain `host` node, which java and typescript
+# rendered verbatim against a runtime that has no `Stream` at all, so the
+# failure surfaced as the CONSUMER's build error (`Stream` undeclared in the
+# generated java, `host.Stream` undefined in the generated ts) instead of a
+# refusal here. That is the silent emit the honest refusal exists to prevent.
+_SOURCE_ONLY = """
+component C {
+  let src = effect Stream.source() undo src.close()
+}
+"""
+
+
 @pytest.mark.parametrize("tier", ["java", "typescript"])
-def test_unimplemented_tiers_refuse_the_stream_acquisition_too(tier):
-    """Roadmap 419e. `subscribe` refused honestly on both tiers, but the
-    acquisition that OPENS the stream did not: `Stream` is in neither tier's
-    `_HOST_ROOTS`, so ts rendered `host.Stream.source()` against a `host` that
-    exports only Pool/Map/Job, and java rendered `Stream src = Stream.source();`
-    against a class it never emits. Both produced a file, so the program failed
-    at run time (ts) or did not compile (java) instead of being refused. wasm
-    refuses this exact shape; a tier without the primitive must say so."""
+def test_source_only_program_is_refused_not_silently_emitted(tier):
     emit = _tier_emit(tier)
-    ir = compile_source(
-        "component C {\n"
-        "  let src = effect Stream.source() undo src.close()\n"
-        "}\n", "s.rvl")
     with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(ir)
+        emit.emit(compile_source(_SOURCE_ONLY, "s.rvl"))
     msg = str(excinfo.value)
-    assert "Stream.source" in msg
     assert "unsupported" not in msg
+    assert "Stream.source" in msg
     assert "py, go and rust" in msg
+
+
+@pytest.mark.parametrize("tier", ["go", "rust"])
+def test_source_only_program_still_emits_on_the_lowered_tiers(tier):
+    """The refusal is scoped to the tiers with no runtime: go and rust carry a
+    real `Stream` (Slice 3) and must keep emitting one."""
+    code = _tier_emit(tier).emit(compile_source(_SOURCE_ONLY, "s.rvl"))
+    assert "Stream" in code
+
+
+def test_wasm_refuses_the_source_only_program_too():
+    emit = _tier_emit("wasm")
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_SOURCE_ONLY, "s.rvl"))
+    assert "suspends a fiber" in str(excinfo.value)
 
 
 def test_wasm_still_refuses_the_fan_in():

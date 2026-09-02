@@ -573,3 +573,62 @@ def test_non_model_crossing_record_is_byte_identical_to_pre_glue():
     # byte-identical to the pre-121 emit shape (drop the monotonic ts on both)
     expect = wr.make_emit_event(0, 3, "Reporter", "fs", "Report.write", cause)
     assert {k: v for k, v in ev.items() if k != "ts"} == expect
+
+
+# ---------------------------------------------------------------------------
+# 5. the driver actually performs the reset it documents (item 416d)
+# ---------------------------------------------------------------------------
+
+
+def _emit_module_driver(generation: int = 0):
+    """A `_Driver` holding only what `_emit_module`'s reset arm reads."""
+    driver = run._Driver.__new__(run._Driver)
+    driver.runtime = rt
+    driver.generation = generation
+    return driver
+
+
+def test_a_new_generation_resets_the_run_trace_state():
+    """Item 416d: `revl_reset_run_trace_state` documents "called at run start"
+    and, until this landed, ONLY tests called it. So a model completion observed
+    in generation N and never consumed by a crossing was still stashed when a
+    `--watch` reload booted generation N+1, and the FIRST emit crossing of the
+    new program consumed it and was recorded as a model hop it never made.
+
+    Driven through `_emit_module`'s reset arm (the one place a generation
+    begins) rather than by calling the runtime seam directly, so the test fails
+    if the wiring is removed."""
+    # gen N leaves an unconsumed completion in the fiber-local register.
+    rt.validate_retry(lambda: {"tag": "ok"}, budget=0,
+                      schema={"type": "object"}, where="Agent")
+    assert rt._revl_last_model_call.get() is not None
+
+    driver = _emit_module_driver()
+    reset = getattr(driver.runtime, "revl_reset_run_trace_state", None)
+    assert reset is not None, "the driver's reset seam must exist"
+    reset()
+
+    # gen N+1 starts clean: the stale observation cannot be mis-attributed.
+    assert rt._revl_last_model_call.get() is None
+    assert _bare_driver()._model_crossing_payload(activation_id="C#g2") is None
+
+
+def test_the_reset_is_wired_into_the_generation_boundary():
+    """The reset must be performed BY `_emit_module`, not merely available."""
+    import inspect
+    src = inspect.getsource(run._Driver._emit_module)
+    assert "revl_reset_run_trace_state" in src
+    # and it must run before the emit, so gen N+1's own crossings see the new
+    # nonce rather than gen N's.
+    assert src.index("revl_reset_run_trace_state") < src.index("self.emit.emit")
+
+
+def test_each_generation_gets_its_own_digest_salt():
+    """Two generations of one `--watch` process must not be correlatable by
+    digest equality: the nonce is per generation, not per process."""
+    args = ["a", "b"]
+    first = rt.revl_prompt_digest(args, arg_origins=set(), taint_engaged=True)
+    driver = _emit_module_driver()
+    driver.runtime.revl_reset_run_trace_state()
+    second = rt.revl_prompt_digest(args, arg_origins=set(), taint_engaged=True)
+    assert first["salted"] != second["salted"]
