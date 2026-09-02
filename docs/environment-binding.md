@@ -19,6 +19,11 @@ invisible.
 A **`boot` component** is where you write it down.
 
 ```revl
+service Env {
+  fn data_root() -> Str
+  fn port() -> Int
+}
+
 boot component HarnessBoot provides env: Env {
   config {
     data_dir: Str under "./.harness-data",
