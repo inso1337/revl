@@ -296,6 +296,61 @@ public final class PlacementRunner {
         void close() {}
     }
 
+    // --- what a failure may carry BACK across the seam (item 421 F5) ---------
+    //
+    // Mirror of backends/python/bridge.py's seam_failure, and of the same helper
+    // in the typescript and go bridges. The consumer is on the other side of a
+    // trust boundary: a forward crossing into a declared Secret[T] receiver
+    // authorises disclosure TO THE RECEIVER, and does not authorise the error
+    // channel to perform the reverse crossing the checker refuses statically.
+    // The trigger needs no author interpolation - a plain map miss produces a
+    // message quoting the key. So every argument value the call was made with is
+    // scrubbed out of the host error text, while the exception's type and the
+    // sentence around it survive.
+
+    // The placeholder a caller's own argument becomes inside seam error text.
+    // Must equal confidential.REDACTED_ARG on the python tier, so a polyglot
+    // seam produces the SAME marker whichever tier answered.
+    static final String REDACTED_ARG = "<redacted:arg>";
+
+    // Below this length an argument is left alone: a shorter substring match is
+    // a coin flip against ordinary English and replacing it would shred the
+    // diagnostic for no confidentiality gain. Same bound as python, ts and go.
+    static final int MIN_MATCHABLE_ARG = 3;
+
+    // Collect the string forms a decoded argument can take inside host error
+    // text. Booleans and null are skipped (their renderings are ordinary words);
+    // a record's KEYS are skipped too, because they are field names the author
+    // wrote rather than the caller's data.
+    static void argNeedles(Object value, java.util.Set<String> into) {
+        if (value == null || value instanceof Boolean) return;
+        if (value instanceof String s) {
+            if (s.length() >= MIN_MATCHABLE_ARG) into.add(s);
+        } else if (value instanceof Number n) {
+            String form = String.valueOf(n);
+            if (form.length() >= MIN_MATCHABLE_ARG) into.add(form);
+        } else if (value instanceof List<?> items) {
+            for (Object item : items) argNeedles(item, into);
+        } else if (value instanceof Map<?, ?> record) {
+            for (Object item : record.values()) argNeedles(item, into);
+        }
+    }
+
+    // The error text a provider-side failure is allowed to send back to the
+    // consumer, with this call's own argument values replaced by REDACTED_ARG.
+    // Longest needle first, so one that contains another leaves no tail behind.
+    static String seamFailure(Throwable t, List<Object> args) {
+        String text = t.getClass().getSimpleName() + ": " + t.getMessage();
+        java.util.Set<String> needles = new java.util.HashSet<>();
+        argNeedles(args, needles);
+        List<String> ordered = new ArrayList<>(needles);
+        ordered.sort((a, b) -> Integer.compare(b.length(), a.length()));
+        for (String needle : ordered) {
+            if (!needle.isEmpty()) text = text.replace(needle, REDACTED_ARG);
+        }
+        return text;
+    }
+
     // --- transport: the provider-side stub ----------------------------------
 
     static final class Stub {
@@ -337,20 +392,23 @@ public final class PlacementRunner {
                 String line;
                 while ((line = r.readLine()) != null) {
                     Map<String, Object> reply = new java.util.LinkedHashMap<>();
+                    // Hoisted so the catch can scrub the failing call's own
+                    // arguments out of the host error text (item 421 F5).
+                    List<Object> args = List.of();
                     try {
                         Map<String, Object> req = (Map<String, Object>) Json.parse(line);
                         String key = (String) req.get("key");
                         Class<?> iface = served.get(key);
                         if (iface == null) throw new RuntimeException("key " + key + " not exported");
                         Object service = ctx.get((Class) iface);
-                        List<Object> args = (List<Object>) req.getOrDefault("args", List.of());
+                        args = (List<Object>) req.getOrDefault("args", List.of());
                         Method m = findMethod(iface, (String) req.get("method"), args.size());
                         Object result = m.invoke(service, coerceArgs(m, args));
                         reply.put("ok", true);
                         reply.put("value", BridgeCodec.encode(result));
                     } catch (Throwable t) {
                         reply.put("ok", false);
-                        reply.put("error", t.getClass().getSimpleName() + ": " + t.getMessage());
+                        reply.put("error", seamFailure(t, args));
                     }
                     w.write(Json.write(reply)); w.write("\n"); w.flush();
                 }

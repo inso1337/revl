@@ -76,6 +76,30 @@ if _sys.modules.get(__name__) is None:
     _sys.modules[__name__] = _types.ModuleType(__name__)
 
 
+# The confidentiality choke point (item 256 Slice 3): `confidential.py`, the
+# sibling module the runtime, the recorder and this bridge all read, so a value
+# that must not leave is redacted in ONE place rather than at each printer. It
+# ships next to this file and must travel with it.
+#
+# The fallback covers this module being loaded BY PATH with its own directory off
+# `sys.path` (`spec_from_file_location(".../bridge.py")`, which several suites
+# do). A bare import cannot survive that, and continuing without the module would
+# mean continuing to leak, so this raises rather than degrades.
+try:
+    import confidential
+except ModuleNotFoundError:  # pragma: no cover (path-loaded copy of this module)
+    import importlib.util as _importlib_util
+    import os as _os
+
+    _confidential_spec = _importlib_util.spec_from_file_location(
+        "confidential",
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                      "confidential.py"))
+    confidential = _importlib_util.module_from_spec(_confidential_spec)
+    _confidential_spec.loader.exec_module(confidential)
+    _sys.modules.setdefault("confidential", confidential)
+
+
 # ---------------------------------------------------------------------------
 # transport endpoints: a local UDS (default) or a network TCP + mTLS seam
 # (docs/network-placement.md)
@@ -401,6 +425,25 @@ def _public_methods(service) -> frozenset:
     return frozenset(names)
 
 
+def seam_failure(exc: BaseException, args) -> str:
+    """The error text a provider-side failure is allowed to carry BACK ACROSS the
+    seam (item 421 F5).
+
+    The consumer is on the other side of a trust boundary. A forward crossing
+    into a declared `Secret[T]` receiver authorises disclosure TO THE RECEIVER;
+    it does not authorise the error channel to perform the REVERSE crossing the
+    checker refuses statically. And the trigger needs no author interpolation at
+    all: a plain `self.data[token]` lookup raises `KeyError: '<token>'`, so the
+    provider hands the consumer back the very value it was called with.
+
+    The exception TYPE and the message's shape survive, so a failure still
+    says what went wrong and where, while every argument value it quotes
+    becomes `confidential.REDACTED_ARG`. A remembered `Secret[T]` value is
+    scrubbed too, so a credential threaded in from config (never an argument of
+    this call) cannot ride out either."""
+    return confidential.redact_call_text(f"{type(exc).__name__}: {exc}", args)
+
+
 async def _invoke(ctx, exports: dict, req: dict, module=None) -> dict:
     key, method = req.get("key"), req.get("method")
     # Decode the arguments symmetrically with the client's `_encode_value`
@@ -428,8 +471,12 @@ async def _invoke(ctx, exports: dict, req: dict, module=None) -> dict:
         if inspect.isawaitable(result):
             result = await result
         return {"ok": True, "value": _encode_value(result)}
-    except Exception as exc:  # marshal the failure across the seam (leak 3)
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    except Exception as exc:  # marshal the failure across the seam
+        # ...with the caller's own argument values scrubbed out of it first
+        # (item 421 F5): `_Client.call` re-raises this text as a RuntimeError on
+        # the consumer, and `_process_runner` logs it, so this ONE funnel is
+        # what those two sinks inherit.
+        return {"ok": False, "error": seam_failure(exc, args)}
 
 
 def peer_identity(writer) -> str | None:

@@ -869,6 +869,20 @@ _revl_record_sinks: "contextvars.ContextVar[tuple]" = contextvars.ContextVar(
 
 
 def _record(event: str) -> None:
+    # The confidentiality funnel for the host trace (item 421 F6). A trace event
+    # is an f-string this file already interpolated a key / sql / stream item
+    # into, so `confidential.redact_value`, which funnels a VALUE, cannot be
+    # applied at the sink; and redacting at each `_record` CALL SITE would be
+    # exactly the "at each printer" discipline `confidential.py` exists to
+    # replace, leaving whatever site is added next open. So the scrub happens
+    # here, at the one choke point every event passes through, before the event
+    # can reach a branch buffer, the `set_trace` sink (the operator console,
+    # forwarded to the conductor's stdout) or any observer.
+    #
+    # The match is EXACT against the values a declared `Secret[T]` marking
+    # registered, never a pattern, so ordinary trace is byte-identical and a
+    # composition that declares no secret pays a single empty-set test.
+    event = confidential.redact_text(event)
     sinks = _revl_record_sinks.get()
     if sinks:
         # innermost installed branch sink wins: buffer for a plan-order replay at
@@ -879,6 +893,61 @@ def _record(event: str) -> None:
         _trace(event)
     for observer in list(_observers):
         observer(event)
+
+
+def mark_secret(*values) -> None:
+    """Remember that these values crossed at a declared `Secret[T]` receiver
+    (item 421 F6). Emitted at the head of every provide method implementing an
+    operation whose IR params carry `secret: true`.
+
+    Why here and not only in the recorder: `replay.redact_args` already
+    registers a declared receiver's argument, but the recorder is engaged only
+    under `revl run --record` / `--wal` / an MCP `revl_load(record=True)`. A
+    plain `revl run` prints the SAME host trace with no recorder attached, which
+    is exactly the console the audit read the secret off, so the positional
+    marking has to fire from the emitted program itself. Registration is
+    idempotent and exact-valued, so doing it in both places costs one set
+    insert."""
+    for value in values:
+        confidential.register_secret_tree(value)
+
+
+def secret_result(fn):
+    """Decorator on an extern whose DECLARED return was `Secret[T]`: item 256
+    §7a's origin, where a confidential value enters the value world.
+
+    `mark_secret` covers the RECEIVER end of a crossing, which is enough when the
+    value crosses one; it is not enough for the body that PRODUCES it and then
+    uses it locally (`let t = emit mint(); effect store.insert(t, v)`, the shape
+    the audit read off the console). Marking at the origin covers both, and is
+    the narrowest place to do it: one wrapper per declared extern, not one per
+    call site, and the verbatim `@py` body is untouched.
+
+    Registration is the ONLY effect: the value is returned unchanged, so the
+    program's semantics are byte-identical and only what a trace or a seam error
+    may SAY about it changes."""
+    if inspect.iscoroutinefunction(fn):
+        async def _secret_result_async(*args, **kwargs):
+            value = await fn(*args, **kwargs)
+            confidential.register_secret_tree(value)
+            return value
+        _secret_result_async.__name__ = fn.__name__
+        _secret_result_async.__qualname__ = fn.__qualname__
+        _secret_result_async.__doc__ = fn.__doc__
+        return _secret_result_async
+
+    def _secret_result_sync(*args, **kwargs):
+        value = fn(*args, **kwargs)
+        # A sync extern that hands back an awaitable is a colour error the ref
+        # thunk already refuses; here we simply do not touch it, so the wrapper
+        # never awaits on a caller's behalf.
+        if not inspect.isawaitable(value):
+            confidential.register_secret_tree(value)
+        return value
+    _secret_result_sync.__name__ = fn.__name__
+    _secret_result_sync.__qualname__ = fn.__qualname__
+    _secret_result_sync.__doc__ = fn.__doc__
+    return _secret_result_sync
 
 
 # ---------------------------------------------------------------------------
