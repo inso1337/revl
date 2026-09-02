@@ -166,25 +166,66 @@ class LetEffect:
 
 
 @dataclass
-class SubscribeExpr:
-    """`subscribe <stream>` — the acquisition head of a subscription bracket
-    (item 130, docs/design/130-stream-reactive-types.md §1).
+class StreamStage:
+    """One link of a derived-stream combinator chain (item 130 Slice 2,
+    docs/design/130-stream-reactive-types.md §1).
 
-    `stream` is the expression naming the `Stream[T]` capability (a required
-    stream binding, or a host-acquired stream source on the reference tier). The
-    subscription is single-consumer; `policy` is the backpressure policy declared
-    at `subscribe` — Slice 1 supports only `error` (a full bounded buffer faults
-    the subscription with `Faulted(overflow)` and closes; no silent loss)."""
-    stream: object
-    policy: str
+    `map(f)` / `filter(p)` / `take(n)` are *derived streams*: each wraps the
+    stream to its left, and the derived subscription's `close` closes its
+    upstream link, so the whole chain tears down on the ONE bracket the
+    `subscribe` registers (teardown stays one LIFO stack, §1).
+
+    Deliberately NOT a method call. Lowering a combinator as `src.map(…)` would
+    put `map`/`filter`/`take` into the shared HOST-VERB namespace, which
+    docs/stdlib-2.0.md promises is disjoint from the value-method table (`map`
+    and `filter` are value methods there) — the invariant pinned in
+    tests/test_map_value_type.py. A chain parsed here, in the one position where
+    `subscribe` already controls the grammar, adds zero host verbs."""
+    kind: str          # "map" | "filter" | "take"
+    arg: object        # an arrow (map/filter) or a positive Int literal (take)
     line: int
 
 
+@dataclass
+class SubscribeExpr:
+    """`subscribe <stream>[.<combinator>…] [policy P] [buffer N] [drain <dur>]`
+    — the acquisition head of a subscription bracket (item 130,
+    docs/design/130-stream-reactive-types.md §1).
+
+    `stream` is the expression naming the `Stream[T]` capability (a required
+    stream binding, or a host-acquired stream source on the reference tier);
+    `stages` is the derived-stream combinator chain applied to it (Slice 2).
+
+    The subscription is single-consumer with a BOUNDED buffer whose capacity
+    (`buffer`) and overflow `policy` are declared here — there are no unbounded
+    buffers (§4.4). `policy` defaults to `error` (a full buffer faults the
+    subscription with `Faulted(overflow)` and closes; the safe default, no silent
+    loss); `drop_newest`/`drop_oldest` are the explicit lossy opt-ins, and
+    `block` suspends the provider (the `Paused` state index) until the consumer
+    drains. `drain_ms` is the `block`-policy drain window — the time-windowed
+    buffering that fires on the deterministic test clock's `advance` (§8);
+    `None` means resume the instant the consumer drains."""
+    stream: object
+    policy: str
+    line: int
+    stages: list = field(default_factory=list)
+    buffer: object = None      # int capacity, or None for the runtime default
+    drain_ms: object = None    # int ms (block policy only), or None
+
+
 # item 130: the state index of `Stream[T, State]`. `subscribe` yields `Active`;
-# `close` yields `Closed`; `Paused` is reserved for `block`-policy backpressure
-# (Slice 2) and is not producible in Slice 1; `Created` is the pre-subscribe
-# state (docs/design/130-stream-reactive-types.md §1).
+# `close` yields `Closed`; `Paused` is the `block`-policy backpressure state
+# (Slice 2, §4.4); `Created` is the pre-subscribe state
+# (docs/design/130-stream-reactive-types.md §1).
 _STREAM_STATES = frozenset({"Created", "Active", "Paused", "Closed"})
+
+# item 130 §1: the v1 pure combinators. `merge` is Slice 3 (multi-source
+# teardown ordering); it is deliberately absent so the refusal names it.
+_STREAM_COMBINATORS = ("map", "filter", "take")
+
+# item 130 §4.4: the declared overflow policies of a subscription's bounded
+# buffer. `error` is the default — deterministic, no silent loss.
+_STREAM_POLICIES = ("error", "drop_newest", "drop_oldest", "block")
 
 
 @dataclass
@@ -839,13 +880,30 @@ class ExprArrow:
     params: list[str]
     body: object
     line: int
-    # `(v: Int) => ...` — the author's parameter annotations, parallel to
-    # `params` (None where written bare). The checker *overwrites* this with
-    # the types it resolved (from an annotation or from the expected type) and
-    # fills `returns`, so lowering can put a real signature in the IR; both
-    # stay None/empty exactly when the arrow is still untyped.
-    param_types: list = field(default_factory=list)
+    # item 75(a) §2.4 — the WRITTEN annotations and the RESOLVED types are
+    # separate fields. They used to be one pair: the parser wrote the author's
+    # annotations into `param_types` and the checker *overwrote* them with what
+    # it resolved. That conflation is what left the IR emit condition unable to
+    # tell a complete signature from a partial one, and it makes the async
+    # colour rules (C1/C2) inexpressible, because nothing downstream could tell
+    # an author-written return from a checker-derived one.
+    #
+    # written by the parser, never by the checker:
+    written_param_types: list = field(default_factory=list)  # `(v: Int) => …`
+    written_returns: str | None = None                       # `(v): Int => …`
+    # written by the checker (`typecheck.py::_resolve_arrow`), never by the
+    # parser. `None` (not `[]`) means the checker never resolved this arrow;
+    # a `None` *entry* means that parameter is still unknown. Lowering reads
+    # only these two, and only emits a signature when every entry is known.
+    param_types: list | None = None
     returns: str | None = None
+    # the same resolution as a function type, but in the CHECKER's spelling:
+    # `param_types`/`returns` go to the IR and so have the implicit-type-
+    # parameter marker stripped by `render_type`, which turns an unsolved `?B`
+    # into the opaque nominal `B`. Re-inferring an already-resolved arrow off
+    # the stripped fields would feed that `B` back into unification as a
+    # concrete type, so the marked spelling is kept here for the checker.
+    resolved_type: str | None = None
 
 
 @dataclass
@@ -2394,9 +2452,12 @@ class Parser:
                              "whose state index the checker tracks; drop the "
                              "annotation (item 130)",
                     )
-                stream, undo, line = self.subscribe_form(tok.line, bind)
-                return LetEffect(bind, SubscribeExpr(stream, "error", line), undo,
-                                 line, subscribe=True)
+                (stream, stages, policy, buffer, drain_ms, undo,
+                 line) = self.subscribe_form(tok.line, bind)
+                return LetEffect(
+                    bind,
+                    SubscribeExpr(stream, policy, line, stages, buffer, drain_ms),
+                    undo, line, subscribe=True)
             # item 246: `let a = await approval[C] { fields }` — an acquisition-
             # shaped suspension that yields an `Approval[C]`. Allowed in the
             # activation body exactly where `let x = effect …` is (both bind a
@@ -2733,15 +2794,127 @@ class Parser:
         undo = self.pure_expr()
         return acquire, undo, line, setup, is_async
 
-    def subscribe_form(self, line: int, bind: str):
-        """`subscribe <stream> undo <close>` (item 130).
+    def _stream_chain(self):
+        """`.map(<arrow>)` / `.filter(<arrow>)` / `.take(<int>)` after the stream
+        operand of a `subscribe` (item 130 Slice 2, §1).
 
-        The stream is a pure expression naming the `Stream[T]` capability; the
+        Parsed HERE rather than as ordinary method calls on purpose: see
+        `StreamStage`. Each link is a derived stream; the chain is left-to-right,
+        so `src.filter(p).map(f)` filters first."""
+        stages: list = []
+        while self.at("."):
+            dot = self.peek()
+            name = self.toks[self.pos + 1] if self.pos + 1 < len(self.toks) else None
+            if name is None or name.kind != "ident" \
+                    or name.value not in _STREAM_COMBINATORS:
+                found = name.value if name is not None else "end of input"
+                raise self.err(
+                    dot.line,
+                    f"`.{found}` is not a stream combinator",
+                    hint="the v1 combinators are `map(f)`, `filter(p)` and "
+                         "`take(n)`, each a pure derived stream; `merge(a, b)` "
+                         "is a later slice (item 130 §1)")
+            self.next()                      # '.'
+            kind = self.next().value         # the combinator name
+            self.expect("(")
+            if kind == "take":
+                ntok = self.peek()
+                if ntok.kind != "int" or ntok.value < 1:
+                    raise self.err(
+                        ntok.line,
+                        f"`take` needs a positive whole count, found "
+                        f"{ntok.value!r}",
+                        hint="`take(3)` ends the derived stream with a `Closed` "
+                             "terminal after 3 items (item 130 §1)")
+                self.next()
+                arg = Lit(ntok.value, ntok.line)
+            else:
+                # `map`/`filter` take a G6-PURE transform; an arrow `x => …` is
+                # the only anonymous-function surface revl has, and its body is a
+                # single pure expression by construction (rule 3.5).
+                arg = self.pure_expr()
+            self.expect(")")
+            stages.append(StreamStage(kind, arg, dot.line))
+        return stages
+
+    def _subscribe_quals(self, line: int):
+        """`[policy <name>] [buffer <n>] [drain <n><unit>]` after the stream
+        operand of a `subscribe` (item 130 §4.4, §8).
+
+        Bare-ident qualifiers, not reserved words, order-free, each at most once
+        — exactly the `effect lease … ttl … uses …` shape (`_lease_acquire`).
+        Returns `(policy, buffer, drain_ms)`."""
+        policy = None
+        buffer = None
+        drain_ms = None
+        while (self.at("ident", "policy") or self.at("ident", "buffer")
+               or self.at("ident", "drain")):
+            qual = self.next().value
+            if qual == "policy":
+                if policy is not None:
+                    raise self.err(line, "duplicate `policy` on a `subscribe`")
+                tok = self.peek()
+                if tok.kind != "ident" or tok.value not in _STREAM_POLICIES:
+                    raise self.err(
+                        tok.line,
+                        f"unknown backpressure policy {tok.value!r}",
+                        hint="the declared policies are `error` (the default — a "
+                             "full buffer faults and closes, no silent loss), "
+                             "`drop_newest`, `drop_oldest` and `block` "
+                             "(item 130 §4.4)")
+                self.next()
+                policy = tok.value
+            elif qual == "buffer":
+                if buffer is not None:
+                    raise self.err(line, "duplicate `buffer` on a `subscribe`")
+                tok = self.peek()
+                if tok.kind != "int" or tok.value < 1:
+                    raise self.err(
+                        tok.line,
+                        f"`buffer` needs a positive whole capacity, found "
+                        f"{tok.value!r}",
+                        hint="every subscription's buffer is BOUNDED — there are "
+                             "no unbounded buffers (item 130 §4.4)")
+                self.next()
+                buffer = tok.value
+            else:
+                if drain_ms is not None:
+                    raise self.err(line, "duplicate `drain` on a `subscribe`")
+                drain_ms = self._duration_ms()
+        if drain_ms is not None and policy != "block":
+            raise self.err(
+                line,
+                "`drain` is the `block`-policy drain window and needs "
+                "`policy block`",
+                hint="only a `block` subscription pauses its provider, so only it "
+                     "has a drain window to re-check on the clock's `advance`; "
+                     "the `drop_*`/`error` policies resolve an overflow "
+                     "immediately (item 130 §4.4, §8)")
+        return policy or "error", buffer, drain_ms
+
+    def subscribe_form(self, line: int, bind: str):
+        """`subscribe <stream>[.<combinator>…] [policy P] [buffer N]
+        [drain <dur>] undo <close>` (item 130).
+
+        The stream is a pure expression naming the `Stream[T]` capability,
+        optionally wrapped in a derived-stream combinator chain (Slice 2); the
         `undo` is required (rule 3.2 — a held subscription with no inverse has no
         place on the accumulator, the same G4 reason plain `let` is refused in an
-        activation body). Returns `(stream, undo, line)`."""
+        activation body). Returns `(stream, stages, policy, buffer, drain_ms,
+        undo, line)`."""
         self.expect("kw", "subscribe")
-        stream = self.pure_expr()
+        # A bare identifier head lets the combinator chain be parsed as stages
+        # rather than as method calls (see `StreamStage`); any other operand
+        # shape falls through to the ordinary pure expression, which the
+        # admission pass then refuses for not naming a stream source.
+        stages: list = []
+        if self.at("ident"):
+            tok = self.next()
+            stream = Postfix(tok.value, [], tok.line)
+            stages = self._stream_chain()
+        else:
+            stream = self.pure_expr()
+        policy, buffer, drain_ms = self._subscribe_quals(line)
         if not self.at("kw", "undo"):
             raise self.err(
                 line,
@@ -2753,7 +2926,7 @@ class Parser:
             )
         self.next()
         undo = self.pure_expr()
-        return stream, undo, line
+        return stream, stages, policy, buffer, drain_ms, undo, line
 
     def _lease_acquire(self, line: int) -> "LeaseAcquire":
         """`<cap> [ttl <n><unit>] [uses <n>]` after `effect lease` (item 294).
@@ -4382,8 +4555,20 @@ class Parser:
                     if self.at(","):
                         self.next()
                 self.expect(")")
+                # item 75(a): `(v: Int): Int => …` — an optional return
+                # annotation. `:` and not `->`, because `) -> T` is already the
+                # tail of a function *type* and would put two readings of the
+                # same tokens next to each other, while `:` already means "the
+                # type of this named thing" at every other revl annotation site
+                # (docs/function-types.md §2(c)). It is a full type, so `?`
+                # binds to it: `(v: Int): Str? => …` returns `Opt[Str]`.
+                returns = None
+                if self.at(":"):
+                    self.next()
+                    returns = self.type_()
                 self.expect("=>")
-                return ExprArrow(params, self._arrow_body(), tok.line, param_types)
+                return ExprArrow(params, self._arrow_body(), tok.line,
+                                 param_types, returns)
             self.next()
             node = self.pure_expr()
             # item 384: `(a, b)` is a Python/JS tuple — revl has no tuple type.
@@ -4564,7 +4749,15 @@ class Parser:
         rather than by token shape; what settles it is the `=>` after the
         closing paren, which can follow nothing else. The first two tokens are
         still shape-checked so that a malformed `(a + b) => c` reports as a bad
-        expression rather than as a bad parameter list."""
+        expression rather than as a bad parameter list.
+
+        item 75(a): a return annotation may sit between the two, so `)` `:`
+        `<type>` `=>` settles it as well. The type is read with the real
+        `type_()` on a saved-and-restored position rather than scanned by token
+        shape — a hand-rolled scan cannot bound itself (a ternary's
+        `c ? (x) : (y)` is `)` `:` too, and any later `=>` in the statement
+        would fool it), and `type_()` is greedy and cannot consume `=>`, so the
+        lookahead terminates exactly where the annotation does."""
         i = self.pos
         if self.toks[i].kind != "(":
             return False
@@ -4581,11 +4774,32 @@ class Parser:
             elif kind in (")", "]"):
                 depth -= 1
                 if depth == 0:
-                    return self.toks[i + 1].kind == "=>"
+                    if self.toks[i + 1].kind == "=>":
+                        return True
+                    if self.toks[i + 1].kind != ":":
+                        return False
+                    return self._return_annotation_ahead(i + 2)
             elif kind == "eof":
                 return False
             i += 1
         return False
+
+    def _return_annotation_ahead(self, start: int) -> bool:
+        """Does a complete type followed by `=>` start at token `start`?
+
+        Speculative: the position is saved and restored, and a parse error in
+        the candidate type means "not an arrow" rather than a diagnostic — the
+        caller falls back to the parenthesised-expression reading, which
+        reports its own."""
+        saved = self.pos
+        try:
+            self.pos = start
+            self.type_()
+            return self.at("=>")
+        except RevlError:
+            return False
+        finally:
+            self.pos = saved
 
     def provide(self) -> ProvideStmt:
         line = self.expect("kw", "provide").line

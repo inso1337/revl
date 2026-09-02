@@ -51,6 +51,8 @@ Two expression dialects are covered:
 
 from __future__ import annotations
 
+import dataclasses
+
 from .errors import RevlError
 
 # reserved keys carried inside the `types` table (type names never start
@@ -1740,15 +1742,35 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             result = t if result is None else join(result, t)
         return result
     if isinstance(expr, ExprArrow):
-        # An arrow in *inference* position has no expected type to read its
-        # parameters off, so it is typed only when the author wrote them:
-        # `(v: Int) => v + 1` has type `(Int) -> Int`. Without annotations the
-        # arrow still has no type (it is the last item on the frontier the
-        # header enumerates) — but its *body* is an ordinary expression over
-        # the enclosing scope, and skipping it let every check above leak:
-        # `(x) => s[0]` and `(x) => o.name` were accepted inside an arrow and
-        # refused outside it. Parameters shadow into the unknown; free
-        # variables keep their types.
+        # item 75(a) §3.1 — an arrow in *inference* position has no expected
+        # type to read its parameters off, so each parameter is its written
+        # annotation or ⊥ (unknown), and the result is the written return
+        # annotation or, when the body cannot depend on a ⊥ parameter (§3.2),
+        # what the body infers to.
+        #
+        # An arrow ALWAYS types, as a function type with every ⊥ rendered
+        # `Any`. Returning `None` here (which is what a single bare parameter
+        # used to do) threw away the arity too, and arity is purely syntactic
+        # and never in doubt — that is what let `let f = (x) => "s"` pass its
+        # `Str` into an `Int` position, and `f(1, 2, 3)` compile, in silence.
+        #
+        # The body is typed either way: it is an ordinary expression over the
+        # enclosing scope, and skipping it let every check above leak.
+        # Parameters shadow into the unknown; free variables keep their types.
+        refuse_self_declared_async(expr, filename)
+        if getattr(expr, "param_types", None) is not None:
+            # A checking position already resolved this node — a `let`, a
+            # `return` or a call argument is checked and then *inferred*, the
+            # same object twice. The position wins over the annotation (§3.1)
+            # and its result is already recorded, so re-deriving from the
+            # written annotations alone here would throw it away again.
+            #
+            # `resolved_type` and not a rebuild from `param_types`/`returns`:
+            # those two are the IR's spelling, with the implicit-type-parameter
+            # marker stripped, and this value goes back into `unify` at the
+            # enclosing call site. An unsolved `?B` rebuilt as `B` is a
+            # concrete opaque nominal, and unification binds it.
+            return expr.resolved_type
         annotations = arrow_annotations(expr)
         inner = dict(tenv)
         for param, ptype in zip(expr.params, annotations):
@@ -1756,19 +1778,138 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                 inner[param] = ptype
             else:
                 inner.pop(param, None)
-        body_t = infer_ast(expr.body, inner, types, filename)
-        if expr.params and any(a is None for a in annotations):
-            return None
-        return _resolve_arrow(expr, list(annotations), body_t)
+        independent = not arrow_depends_on_unknown_param(expr, annotations)
+        written_return = getattr(expr, "written_returns", None)
+        if written_return and independent and filename:
+            # the annotation is a claim about the body, so check it — but only
+            # where the body cannot mention a ⊥ parameter. Under a ⊥ parameter
+            # the body's type is `Any`-infected (or half-solved, §3.2), so the
+            # check could only pass vacuously or misfire.
+            check_ast(expr.body, written_return, inner, types, filename,
+                      "the body of this arrow (from its return annotation)")
+            returns = written_return
+        else:
+            # the body is walked either way — it is an ordinary expression over
+            # the enclosing scope, and skipping it let every check above leak
+            body_t = infer_ast(expr.body, inner, types, filename)
+            # §3.2: inferring a result from a body typed under unknown
+            # parameters is not sound — `[x]` infers `List[Never]` and
+            # `{ a: x }` infers `{a: Any}`, half-solved types that look known
+            # and are not. So the result stays ⊥ whenever a ⊥ parameter occurs
+            # free in the body. `(x) => x + 1` keeps behaving exactly as it
+            # does today; `(x) => "s"` does not.
+            returns = written_return or (body_t if independent else None)
+        return _resolve_arrow(expr, list(annotations), returns)
     return None
 
 
 def arrow_annotations(expr) -> list:
     """The author's `(v: Int) => ...` parameter annotations, one per
     parameter (None where the parameter was written bare)."""
-    written = list(getattr(expr, "param_types", None) or [])
+    written = list(getattr(expr, "written_param_types", None) or [])
     written += [None] * (len(expr.params) - len(written))
     return written[:len(expr.params)]
+
+
+def arrow_depends_on_unknown_param(expr, resolved: list) -> bool:
+    """Does a ⊥ (still unknown) parameter occur free in the arrow's body?
+
+    item 75(a) §3.2, the bottom-parameter-independence rule. Syntactic,
+    decidable and deliberately conservative: it refuses to name a result that
+    a parameter of unknown type could have shaped, and it under-approximates
+    (`(x) => str_of(x)` has a result that provably does not depend on `x`, and
+    this rule still declines it — widening needs a dependency analysis)."""
+    unknown = {name for name, t in zip(expr.params, resolved) if not t}
+    if not unknown:
+        return False
+    return bool(unknown & _free_names(expr.body, frozenset()))
+
+
+def _free_names(expr, bound: frozenset) -> set:
+    """Every variable name read in `expr` and not shadowed by an inner binder.
+
+    Recursion is over dataclass *fields* rather than a hand-written list of
+    child attributes, so an expression node this module has never heard of is
+    still descended into. Missing an occurrence would let §3.2 name a result
+    it must not name, so the walk errs towards visiting too much."""
+    from .parser import ExprArrow, ExprBlockArm, ExprMatch, ExprVar, LetStmt
+
+    if expr is None or isinstance(expr, (str, int, float, bool)):
+        return set()
+    if isinstance(expr, (list, tuple)):
+        found: set = set()
+        for item in expr:
+            found |= _free_names(item, bound)
+        return found
+    if isinstance(expr, ExprVar):
+        return set() if expr.name in bound else {expr.name}
+    if isinstance(expr, ExprArrow):
+        return _free_names(expr.body, bound | frozenset(expr.params))
+    if isinstance(expr, ExprMatch):
+        found = _free_names(expr.scrutinee, bound)
+        for _, bind, body in expr.arms:
+            inner = bound | (frozenset([bind]) if bind is not None else frozenset())
+            found |= _free_names(body, inner)
+        return found
+    if isinstance(expr, ExprBlockArm):
+        # Only a `let` contributes a name the rest of the block can read (the
+        # imperative statements declare nothing at the block's own level), so
+        # only a `let` shadows here — treating an assignment's target as a
+        # binder would *hide* an occurrence, which is the unsafe direction.
+        # Every statement is walked generically for the expressions it holds.
+        inner = set(bound)
+        found = set()
+        for stmt in expr.stmts:
+            found |= _free_names(stmt, frozenset(inner))
+            if isinstance(stmt, LetStmt) and isinstance(stmt.name, str):
+                inner.add(stmt.name)
+        return found | _free_names(expr.tail, frozenset(inner))
+    if not dataclasses.is_dataclass(expr):
+        return set()
+    found = set()
+    for f in dataclasses.fields(expr):
+        found |= _free_names(getattr(expr, f.name, None), bound)
+    return found
+
+
+def _mentions_async(type_: str | None) -> bool:
+    """Does `type_` name `Async[...]` anywhere inside it?
+
+    Well-formedness confines `Async` to a function type's return, so this is
+    the whole of "at the top level or as the return of a function type it
+    names" (item 75(a) rule C1) with no case analysis."""
+    if not type_:
+        return False
+    head, args = parse_type(type_)
+    if head == "Async":
+        return True
+    return any(_mentions_async(a) for a in args)
+
+
+def refuse_self_declared_async(expr, filename: str | None) -> None:
+    """Rule C1 — colour is positional; an arrow may not declare its own.
+
+    `"async": true` on a lowered arrow is not a label, it is a *certificate*
+    that some declaration promised to await the arrow: `_refuse_leaky_pure_arrow`
+    skips a flagged arrow, and callee collection with `stop_async_arrows` stops
+    descending at one. A written `Async[...]` return annotation would forge that
+    certificate with no consumer behind it, laundering arbitrary nested async
+    reach out of the enclosing scope's reach set. So the annotation is refused
+    at the source, and rule C2 (asserted at the lowering site) keeps
+    `written_returns` out of the flag."""
+    written = getattr(expr, "written_returns", None)
+    if not filename or not _mentions_async(written):
+        return
+    raise RevlError(
+        filename, getattr(expr, "line", 0) or 0,
+        "an arrow may not declare its own async colour",
+        hint="an arrow is coloured by the position it flows into, e.g. "
+             "`let g: (Int) -> Async[Str] = ...` or a parameter declared "
+             "`(Int) -> Async[Str]`, because that declaration is what makes "
+             "the consumer await it (docs/function-types.md, "
+             "docs/design/async-function-values.md)",
+        code="A1", category="async-propagation",
+    )
 
 
 def _resolve_arrow(expr, param_types: list, returns: str | None) -> str:
@@ -1777,16 +1918,26 @@ def _resolve_arrow(expr, param_types: list, returns: str | None) -> str:
 
     Lowering reads these back off the node (`lower.py::_lower_pure_expr`), so
     the types the checker recovered are exactly the ones that reach the IR and
-    the backends; an unknown component degrades to the `Any` wildcard rather
-    than to a guess."""
+    the backends; an unknown component stays `None` on the node — which is what
+    lets lowering tell a complete signature from a partial one (item 75(a) §4)
+    — and renders `Any` in the function type the checker hands back."""
     # `render_type` strips the implicit-type-parameter marker: the IR carries
     # the author's spelling, and the marker never leaves the checker (see
     # "type parameters" above). Without it, checking an arrow against an
     # uninstantiated `(T) -> T` would write `?T` into the IR.
-    resolved = [render_type(p) or "Any" for p in param_types]
-    expr.param_types = resolved
-    expr.returns = render_type(returns) or "Any"
-    return format_type(FN_HEAD, resolved + [expr.returns])
+    expr.param_types = [render_type(p) for p in param_types]
+    expr.returns = render_type(returns)
+    # …and the checker's own view of the same resolution keeps the marker. An
+    # arrow checked against a generic position resolves to `?B`, which is a
+    # *wildcard*; it has to stay one, because a `return`/`let` is checked and
+    # then inferred — the same node twice — and the second pass hands this type
+    # to `unify`. Reconstructing it from the stripped fields instead offered
+    # unification the opaque nominal `B`, which it dutifully bound `?B := B`;
+    # that is how `map_([1, 2], n => n + 1)` came to check its arrow body
+    # against `B` and refuse an `Int`.
+    expr.resolved_type = format_type(
+        FN_HEAD, [p or "Any" for p in param_types] + [returns or "Any"])
+    return expr.resolved_type
 
 
 def _check_arrow_args(args, params, tenv: dict, types: dict,
@@ -1854,6 +2005,15 @@ def call_function_value(expr, fn_type: str, what: str, arg_types: list,
     rhead, rargs = parse_type(returns)
     if rhead == "Async":
         return rargs[0] if rargs else None
+    if returns == "Any":
+        # item 75(a) §3.2/§6: `Any` in a function type's return is the *absence*
+        # of a claim — it is how a ⊥ result (an arrow whose body depends on an
+        # un-annotated parameter) renders. Handing `Any` back as the call's
+        # inferred type would make the ordinary operand checks (`x + f(1)`) and
+        # the erased-value checks refuse a call that was silent before this
+        # item, which is exactly the migration class §6 rules out. Unknown, not
+        # `Any`; arity and the argument positions were already checked above.
+        return None
     return returns
 
 
@@ -1867,6 +2027,7 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
     against the expected *return* type. A parameter the author did annotate
     must still accept what this position will pass it (contravariance), so an
     annotation can only ever be wider than the expectation."""
+    refuse_self_declared_async(expr, filename)
     if _is_wildcard(expected):
         infer_ast(expr, tenv, types, filename)
         return
@@ -1910,9 +2071,26 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
     rhead, rargs = parse_type(want_return)
     if rhead == "Async":
         body_return = rargs[0] if rargs else None
+    # item 75(a) §3.1: a written return annotation is checked against what the
+    # position asks for (covariantly), and against the *unwrapped* return when
+    # the position is async — rule C3, an annotation on an arrow that will be
+    # coerced into an `Async[T]` slot names the sync inner type `T`.
+    written_return = getattr(expr, "written_returns", None)
+    if written_return and body_return and not compatible(body_return, written_return):
+        raise mismatch(filename, line,
+                       f"the return type of this arrow (from {where})",
+                       body_return, written_return)
     check_ast(expr.body, body_return, inner, types, filename,
               f"the body of this arrow (from {where})")
-    _resolve_arrow(expr, resolved, want_return)
+    # The *position's* return reaches the node, not the annotation's: it is the
+    # one that can carry an async colour, and rule C1 has already refused a
+    # written `Async[...]`, so this is where colour comes from and the only
+    # place it can. Where the position says nothing more than the annotation
+    # does, the annotation is the more precise of the two.
+    _resolve_arrow(expr, resolved,
+                   written_return if (written_return and rhead != "Async"
+                                      and _is_wildcard(want_return))
+                   else want_return)
 
 
 def check_ast(expr, expected: str | None, tenv: dict, types: dict,
