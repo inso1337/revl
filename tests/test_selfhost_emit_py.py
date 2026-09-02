@@ -149,6 +149,31 @@ CORPUS = [
     # emitter with no site for the stamp emits a schema the runtime cannot redact
     # from.
     "secrets_nested.rvl",
+    # item 233 / 276 (self-host port per item 429(d)): the ASCII classification
+    # builtins and `codepoint_at`. Added FIRST and red — `selfhost/emit_py.rvl`
+    # rendered `<<UNSUPPORTED-BUILTIN:is_digit>>` for every one of them. No
+    # corpus document called them, so the oracle was green while the self-host
+    # could not emit a program that classifies a character, `selfhost/lexer.rvl`
+    # (which calls all five) included.
+    "classify.rvl",
+    # docs/arithmetic.md's total division forms: the `_revl_checked_*` preamble
+    # helpers and the `Ok`/`Err` gate they need. `selfhost/lower.rvl` already
+    # lowered these as `builtin` nodes — the gap was emission-only, and invisible
+    # for the same reason: nothing in the corpus divided totally.
+    "checked_div.rvl",
+    # item 189: the Value dot-accessors. Byte-identical BY CONSTRUCTION on this
+    # tier (the redirect happens in the frontend, so the emitter sees a plain
+    # call) — the document is here so the emit oracle pins that property, while
+    # tests/test_selfhost_lower_ir.py, which globs this directory, is the oracle
+    # that actually sees the frontend gap.
+    "value_accessors.rvl",
+    # TAGGED ADT construction (`Ok`/`Err` and user variant cases). `result.rvl`
+    # only MATCHES on Ok/Err and nothing in the corpus built a variant, so both
+    # oracles agreed trivially while the self-host emitted
+    # `<<UNSUPPORTED-EXPR:adt>>` and lowered every constructor as a call of a
+    # function that does not exist — the self-host could not compile a program
+    # that BUILDS a Result. Added red on both stages.
+    "adt.rvl",
 ]
 
 

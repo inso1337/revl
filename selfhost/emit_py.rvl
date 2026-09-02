@@ -402,6 +402,11 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "slice") { return `${target}[${args[0]}:${args[1]}]` }
   if (method == "charAt") { return `${target}[${args[0]}]` }
   if (method == "charCodeAt") { return `ord(${target}[${args[0]}])` }
+  // Codepoint-at-index scan (item 276, item 391 self-host port): the Unicode
+  // scalar at index i, returned directly. `ord(s[i])` allocates only the
+  // transient 1-char slice `ord` consumes — no persistent 1-char Str the
+  // self-host lexer would otherwise index a second time via `code0`.
+  if (method == "codepoint_at") { return `ord(${target}[${args[0]}])` }
   if (method == "concat") { return `(${target} + ${args[0]})` }
   // A preamble helper, not a lambda built and applied at every evaluation
   // (item 436 F6): one frame, no function-object allocation.
@@ -411,6 +416,25 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "repeat") { return `(${target} * ${args[0]})` }
   if (method == "startsWith") { return `${target}.startswith(${args[0]})` }
   if (method == "endsWith") { return `${target}.endswith(${args[0]})` }
+  // Single-character ASCII classification (item 233, item 391 self-host port):
+  // a native inline test, no revl-fn call and no 1-char `ord` round-trip.
+  // Chained string comparison is ASCII code-point order AND empty-safe
+  // (`"a" <= "" <= "z"` is False), so an empty receiver is false rather than
+  // faulting. `is_alpha`/`is_alnum` reference the receiver more than once, so a
+  // walrus binds it a single time (`_rc`) — correct even when the receiver has
+  // side effects, with no lambda-call overhead.
+  if (method == "is_digit") { return `("0" <= ${target} <= "9")` }
+  if (method == "is_alpha") {
+    return `(("a" <= (_rc := ${target}) <= "z") or ("A" <= _rc <= "Z"))`
+  }
+  if (method == "is_alnum") {
+    return `(("0" <= (_rc := ${target}) <= "9") or ("a" <= _rc <= "z") or ("A" <= _rc <= "Z"))`
+  }
+  // is_space: space, tab, LF, CR — tuple membership (a bare `in " \t\n\r"`
+  // would wrongly match the empty string, a substring of every str). revl plain
+  // strings carry no escapes, so the two-character `\t` written here IS the
+  // python escape the emitted source must contain.
+  if (method == "is_space") { return `(${target} in (" ", "\t", "\n", "\r"))` }
   if (method == "set") { return `({**${target}, ${args[0]}: ${args[1]}})` }
   if (method == "lookup") { return `${target}.get(${args[0]})` }
   if (method == "has") { return `(${args[0]} in ${target})` }
@@ -438,6 +462,11 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
     return `(${target})`
   }
   if (method == "to_int32") { return `_revl_i32(${target})` }
+  // The total forms (docs/arithmetic.md, item 391 self-host port): the same
+  // quotient as the faulting operation, but a zero divisor yields Err(reason)
+  // instead of raising — a pure fn cannot `fail`, so the error travels as a
+  // value. The helper is emitted into the preamble by `checked_div_block`.
+  if (is_checked_div(method)) { return `_revl_${method}(${target}, ${args[0]})` }
   if (method == "to_str") { return `str(${target})` }
   return `<<UNSUPPORTED-BUILTIN:${method}>>`
 }
@@ -660,6 +689,15 @@ fn expr_inner(node: Any) -> Str {
     var args = []
     for (a of value_list(value_field(node, "args"))) { args = args.push(expr(a)) }
     return render_builtin(value_str(value_field(node, "method")), expr(value_field(node, "target")), args, value_str(value_field(node, "recv")))
+  }
+  // item 391 (self-host port): TAGGED ADT construction. The built-in `Result`
+  // (`Ok`/`Err`) and every user variant case are emitted as classes (see
+  // `result_class` / `emit_types`), so building one is a plain constructor call
+  // on the case NAME — unmangled, exactly as the class is declared. `Opt`'s
+  // `Some`/`None` never reach here: they stay host-value/None and are handled
+  // by the `call`/`var` arms above.
+  if (kind == "adt") {
+    return `${value_str(value_field(node, "case"))}(${commajoin(value_list(value_field(node, "args")))})`
   }
   if (kind == "maplit") { return "{}" }
   if (kind == "arrow") { return render_arrow(node) }
@@ -1071,6 +1109,42 @@ fn str_to_int_block() -> List[Str] {
   return o
 }
 
+// item 391 (self-host port): the preamble helper behind a total division form
+// (docs/arithmetic.md). Same quotient as the faulting operation, but a zero
+// divisor answers `Err(reason)` instead of raising, and a quotient that leaves
+// the i64 range (Int.MIN / -1) answers `Err` rather than a wrong value. `Ok`/
+// `Err` are the tagged classes `uses_builtin_result` already gates on the
+// presence of a checked division, so the helper never names a missing class.
+fn checked_quotient(method: Str) -> Str {
+  if (method == "checked_div_trunc") {
+    return "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))"
+  }
+  if (method == "checked_div_floor") { return "a // b" }
+  if (method == "checked_div_euclid") { return "a // b if b > 0 else -(a // -b)" }
+  return "a % abs(b)"
+}
+
+fn checked_div_block(method: Str) -> List[Str] {
+  let short = method.slice(8, method.length())
+  var o = []
+  o = o.push("def _revl_".concat(method).concat("(a, b):"))
+  o = o.push("    \"\"\"Total `".concat(short)
+    .concat("`: a zero divisor is Err(reason), never a raise.\"\"\""))
+  o = o.push("    if b == 0:")
+  o = o.push("        return Err('revl: division by zero')")
+  o = o.push("    q = ".concat(checked_quotient(method)))
+  if (method == "checked_mod") {
+    // a remainder cannot leave the range its operands are already in
+    o = o.push("    return Ok(q)")
+  } else {
+    o = o.push("    if -(2**63) <= q <= 2**63 - 1:")
+    o = o.push("        return Ok(q)")
+    o = o.push("    return Err('revl: Int overflow')")
+  }
+  o = o.push("")
+  return o
+}
+
 fn opt_to_int_block() -> List[Str] {
   var o = []
   o = o.push("def _revl_opt_to_int(v):")
@@ -1297,6 +1371,9 @@ fn cexpr(node: Any) -> Str {
     var args = []
     for (a of value_list(value_field(node, "args"))) { args = args.push(cexpr(a)) }
     return render_builtin(value_str(value_field(node, "method")), cexpr(value_field(node, "target")), args, value_str(value_field(node, "recv")))
+  }
+  if (kind == "adt") {
+    return `${value_str(value_field(node, "case"))}(${ccommajoin(value_list(value_field(node, "args")))})`
   }
   if (kind == "maplit") { return "{}" }
   if (kind == "optfield") {
@@ -2131,6 +2208,13 @@ pub fn emit_py_src(ir: Any) -> Str {
   if (uses_builtin_method(ir, "to_int")) {
     out = out.concat(str_to_int_block())
     if (uses_opt_to_int(ir)) { out = out.concat(opt_to_int_block()) }
+  }
+  // The total division forms, in the reference's `_CHECKED_DIVS` order.
+  for (checked of ["checked_div_trunc", "checked_div_floor",
+                   "checked_div_euclid", "checked_mod"]) {
+    if (uses_builtin_method(ir, checked)) {
+      out = out.concat(checked_div_block(checked))
+    }
   }
   if (uses_float_interp(ir)) { out = out.concat(ftoa_block()) }
   // Built-in Result classes (gated), each suppressed if a user variant case
