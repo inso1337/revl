@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 IR_VERSION = 1
 
-_HOST_ROOTS = {"Pool", "Map", "Job"}
+_HOST_ROOTS = {"Pool", "Map", "Job", "Stream"}
 
 # The module-level `from runtime import …` names the emitter injects. Every one
 # of them shared the same failure mode: a user identifier the checker accepts
@@ -1018,6 +1018,21 @@ class _ComponentEmitter:
             self.uses.add(root)
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
             return f"{fn}({args})"
+        if kind == "subscribe":
+            # item 130: `subscribe <stream>` opens a single-consumer subscription
+            # on the stream source and registers the bracket. `Stream.subscribe`
+            # returns a Subscription whose `next()` awaits an item raced against a
+            # cancel future and whose `close()` trips that future synchronously —
+            # so the bracket inverse is reachable off the teardown path even while
+            # a `next` is parked (design §4.6, the cancellation-first fix).
+            self.uses.add("Stream")
+            stream = self._expr(expr.get("stream"), where)
+            policy = expr.get("policy") or "error"
+            # `_revl_ctx` lets the subscription observe owner withdrawal so a
+            # parked `next` resolves as `Closed` when the owner unloads (§9 Part
+            # A) — the cancellation-first fix that keeps the bracket inverse
+            # reachable and teardown deadlock-free on the event-loop tier.
+            return f"Stream.subscribe({stream}, {policy!r}, _revl_ctx)"
         if kind == "fn":
             name = _ident(expr.get("name"), f"{where}: function")
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
