@@ -1289,6 +1289,25 @@ def _call_method_name(node: Any) -> str:
     return "undo"
 
 
+def _acquire_method_name(node: Any) -> str:
+    """The name of the ACQUISITION half of a bracket crossing.
+
+    Separate from `_call_method_name` because that function also serves the
+    `undo` slot, where `"undo"` is the right fallback. Here it is not: a
+    residue record exists to name the crossing an operator must check by hand,
+    and `Frame.referentOf` renders `method` as `<key>.<method>()`, so a
+    fabricated name sends them looking for a method that does not exist.
+
+    A `spawn` acquisition carries no `method`/`name`/`fn`, so it reached the
+    generic fallback and a spawn crossing rendered as `w1.undo()`. It is named
+    for the `spawn(ctx, Worker, ...)` call that actually performs it. Every
+    other acquisition shape in the corpus (`fn`, `host`, `call`) resolves in
+    `_call_method_name` already."""
+    if isinstance(node, dict) and node.get("kind") == "spawn":
+        return "spawn"
+    return _call_method_name(node)
+
+
 def _replay_call(node: dict, target_ts: Optional[str], method: str, temps: list[str]) -> str:
     """Rebuild the call expression from the temps `_bind_call_temps` bound,
     so the deferred (Phase-2 / undo) invocation never re-reads the original
@@ -1660,8 +1679,8 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     lines.append(f"{indent}{acquire}")
             undo = _expr(step["undo"], ctx)
             acquire_node = step.get("acquire") or {}
-            b_key = step.get("bind") or _call_method_name(acquire_node)
-            b_method = _call_method_name(acquire_node)
+            b_key = step.get("bind") or _acquire_method_name(acquire_node)
+            b_method = _acquire_method_name(acquire_node)
             b_site = f"{component['name']}.body:{b_key}"
             b_undo = _call_method_name(step.get("undo"))
             if cas_bind is not None and _is_map_cas(step.get("acquire")):

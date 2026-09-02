@@ -1678,7 +1678,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     // an emitted program had the hole even though runtime.ts's `Frame.bracket`
     // was already correct and unit-tested. Mirrors `_bracket_yield` in the
     // reference emitter, byte-for-byte.
-    let b_method = call_method_name(value_field(step, "acquire"))
+    let b_method = acquire_method_name(value_field(step, "acquire"))
     var b_key = b_method
     if (kind == "let-effect") { b_key = value_str(value_field(step, "bind")) }
     let b_site = `${comp_name}.body:${b_key}`
@@ -2310,6 +2310,19 @@ fn call_method_name(node: Any) -> Str {
     }
   }
   return "undo"
+}
+
+// `_acquire_method_name`: the name of the ACQUISITION half of a bracket
+// crossing. Separate from `call_method_name` because that one also serves the
+// `undo` slot, where "undo" is the right fallback. Here it is not: a residue
+// record names the crossing an operator checks by hand, and `Frame.referentOf`
+// renders `method` as `<key>.<method>()`, so a fabricated name sends them after
+// a method that does not exist. A `spawn` acquisition carries no
+// `method`/`name`/`fn` and reached the generic fallback, rendering `w1.undo()`;
+// it is named for the `spawn(ctx, Worker, ...)` call that performs it.
+fn acquire_method_name(node: Any) -> Str {
+  if (node_kind(node) == "spawn") { return "spawn" }
+  return call_method_name(node)
 }
 
 // `_uses_frame`: document-level gate for the import line — true iff any component
