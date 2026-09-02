@@ -27,6 +27,18 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
   cancel-in-progress: true
 
+# Least privilege for GITHUB_TOKEN, workflow-wide. Every job below only checks
+# out the repository and runs tests: none opens an issue, writes a check, pushes
+# a commit, uploads a package or requests an OIDC token. The repository default
+# is broader than that, so declare the floor here rather than per job — a new
+# job inherits it, and a job that genuinely needs more has to say so and be
+# reviewed for it. This is also the ceiling when publish.yml `uses:`-calls this
+# workflow (a called workflow can only narrow the caller's grants, never widen
+# them), which is fine: the tag build's publish job declares its own
+# `id-token: write` on itself, not here.
+permissions:
+  contents: read
+
 # Go module resolution resilience. The go cross-tier tests download the pinned
 # stc-go module during `go test`, which intermittently fails verifying it against
 # the online checksum database (sum.golang.org stream errors) and reddens CI on a
@@ -96,6 +108,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      # `tests/` carries cross-tier probes that EXECUTE emitted Java on a JVM
+      # (test_insert_if_absent, test_total_field_surface, and every other
+      # `[java]` parameter), and the emitter compiles at `--release 21` because
+      # `match` lowers to Java 21 pattern switches. This job pinned no JDK, so
+      # those probes met whatever the runner image happened to carry. Same
+      # shape, same fix as the Go pin above: without it they do not measure the
+      # tier they claim to. The runner-side gate now SKIPS with a reason on an
+      # older JDK rather than failing, which makes an unpinned job silently
+      # unmeasured -- exactly what roadmap item 445 exists to prevent -- so the
+      # pin is what keeps this coverage real.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
       - run: pip install -e ".[test]"
       # roadmap 328: the README conformance + performance matrix is generated
       # from real emitter output, never authored. Fail the build if the
@@ -122,7 +148,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4 (v4.2.0)
       - run: sh backends/python/setup.sh
       - run: cd backends/python && .venv/bin/pytest -q
       - run: cd backends/python && .venv/bin/python demo.py
@@ -170,7 +196,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4 (v4.2.0)
       # This suite's cross-tier probes execute emitted Go against the PINNED
       # stc-go runtime, and they decide whether to run from whether a `go`
       # binary answers on PATH. ubuntu-latest preinstalls one, so without this
@@ -180,6 +206,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      # `tests/` carries cross-tier probes that EXECUTE emitted Java on a JVM
+      # (test_insert_if_absent, test_total_field_surface, and every other
+      # `[java]` parameter), and the emitter compiles at `--release 21` because
+      # `match` lowers to Java 21 pattern switches. This job pinned no JDK, so
+      # those probes met whatever the runner image happened to carry. Same
+      # shape, same fix as the Go pin above: without it they do not measure the
+      # tier they claim to. The runner-side gate now SKIPS with a reason on an
+      # older JDK rather than failing, which makes an unpinned job silently
+      # unmeasured -- exactly what roadmap item 445 exists to prevent -- so the
+      # pin is what keeps this coverage real.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
       # the same one-command setup `backend-python` uses: it clones cordis-py at
       # the pinned revision and installs revl editable beside it, so this venv's
       # interpreter can import both.
@@ -275,7 +315,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable branch @ 2026-08-05; still installs the stable toolchain
       - run: pip install -e ".[test]"
       # the cargo gates resolve offline first and fall back to the networked
       # resolve when a crate is not in the local registry — which is always
@@ -366,7 +406,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable branch @ 2026-08-05; still installs the stable toolchain
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -374,7 +414,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4 (v4.2.0)
       - name: Install wasmtime (pinned)
         run: |
           curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v47.0.3/wasmtime-v47.0.3-x86_64-linux.tar.xz -o /tmp/wasmtime.tar.xz
@@ -483,7 +523,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: leanprover/lean-action@v1
+      - uses: leanprover/lean-action@50fcf42d2e460296f1a34b402e990d1b24f8b596  # v1 (v1.6.0)
         with:
           lake-package-directory: formal
       - name: axioms gate (no sorry, no project axioms) + harness census

@@ -3355,8 +3355,364 @@ fn link_g2_g3(pg: Prog) -> Str {
   return ""
 }
 
+// ==================================================== item 384: foreign-construct redirects
+//
+// PORT of the reference's foreign-construct redirect table (item 384,
+// src/revl/parser.py `_FOREIGN_STMT_KEYWORDS` / `_reject_incr_decr` and the
+// per-form redirects in `for_stmt` / `_postfix` / `_primary`, plus
+// src/revl/lower.py `_FOREIGN_NAME_REDIRECTS` / `_reject_foreign_name`).
+//
+// WHY IT IS A SEPARATE PASS HERE. The reference fires each redirect from the
+// ERROR PATH it already reaches — the parser's statement/declaration dispatch,
+// or the name resolver after `scope`/`callables` lookup missed. The gate has
+// no such error path: its statement reader is deliberately lenient (it reads
+// only the forms admission cares about and skips the rest), so every one of
+// these programs slid through as ADMITTED. So the port is a TOKEN-LEVEL
+// SCANNER that recognises each foreign construct POSITIVELY, run before
+// `parse_prog` — which is where the reference's parser half fires, and (since
+// no admission refusal can precede a parse refusal) an order the reference
+// agrees with for the parser half. The name half is ordered slightly earlier
+// than the reference's (which resolves names during lowering, after the parse):
+// no program that reaches a G1/G2/G3/G4/A1 refusal also contains one of these
+// twelve foreign spellings, so the difference is unobservable.
+//
+// PRECISION IS THE WHOLE GAME. A redirect that fires on a VALID program is a
+// false refusal, and the differential oracle would (rightly) fail. Every
+// pattern below is therefore either (a) a token shape no valid revl program
+// can produce (`i + +`, `if` not followed by `(`, `for (let`, `xs[a:b]`,
+// `{"k":`, `f(k=v)`), or (b) an identifier from the twelve-name table used in
+// a position that only the foreign idiom puts it in AND not bound anywhere in
+// the file (`bound_idents` over-approximates the binders, so a program that
+// genuinely names something `len`/`print`/`and` shadows the entry exactly as
+// it does in the reference). When in doubt the scanner stays silent: a missed
+// redirect is a smaller defect than a false refusal.
+
+// The twelve identifier-shaped foreign idioms (lower.py `_FOREIGN_NAME_REDIRECTS`).
+fn foreign_names() -> List[Str] {
+  return ["and", "or", "not", "True", "False", "const", "len", "print",
+          "throw", "def", "lambda", "elif"]
+}
+
+fn foreign_name_msg(n: Str) -> Str {
+  if (n == "and") { return "`and` is not a revl operator" }
+  if (n == "or") { return "`or` is not a revl operator" }
+  if (n == "not") { return "`not` is not a revl operator" }
+  if (n == "True") { return "revl booleans are lowercase" }
+  if (n == "False") { return "revl booleans are lowercase" }
+  if (n == "const") { return "revl has no `const`" }
+  if (n == "len") { return "revl has no `len(...)`" }
+  if (n == "print") { return "revl has no `print`" }
+  if (n == "throw") { return "revl has no `throw`" }
+  if (n == "def") { return "revl has no `def`" }
+  if (n == "lambda") { return "revl has no `lambda`" }
+  return "revl has no `elif`"
+}
+
+// Token kinds that can BEGIN an expression.
+fn starts_expr(t: Token) -> Bool {
+  if (t.kind == "kw") {
+    return contains(["true", "false", "null", "await", "spawn", "match",
+                     "hole", "async"], t.text)
+  }
+  return contains(["ident", "int", "float", "string", "template",
+                   "(", "[", "{", "!", "-", "~"], t.kind)
+}
+
+// Token kinds that can END an expression.
+fn ends_expr(t: Token) -> Bool {
+  if (t.kind == "kw") { return contains(["true", "false", "null"], t.text) }
+  return contains(["ident", "int", "float", "string", "template",
+                   ")", "]", "}"], t.kind)
+}
+
+// A BOUNDS-SAFE token lookup. `tkc` guards only the upper bound, so a negative
+// index reads from the END of the list under the python backend (silently
+// wrong) and PANICS under the rust tier the gate crate ships — which is how
+// the crate's own cargo test caught `def foo() ...`, whose `def` sits at index
+// 0 and looks one token back. Every backward look in this scanner goes through
+// this. `tkc` itself is left alone: its other callers never index backwards,
+// and widening it would be a behaviour change outside this slice.
+fn tkl(ts: List[Token], i: Int) -> Token {
+  if (i < 0) { return { kind: "eof", text: "", line: 0 } }
+  return tkc(ts, i)
+}
+
+// Positions where a VALUE — or a prefix operator applied to one — is expected.
+// A POSITIVE allow-list, not `!ends_expr`: `@@@ not revl @@@` is a parse
+// failure (the reference says "expected a top-level declaration, found '@'"),
+// NOT a Python `not`, and reading a redirect out of a malformed adjacency
+// would replace an honest BAD with a confident wrong answer. `@` is a real
+// revl token (item 396's `@py file "..."`, a composition row label `@db`), so
+// it cannot simply abort the scan the way an `error` token does — it just
+// never precedes a value.
+fn value_pos(ts: List[Token], i: Int) -> Bool {
+  if (i == 0) { return true }
+  let p = tkl(ts, i - 1)
+  if (p.kind == "kw") {
+    return contains(["return", "if", "while", "assert", "fail", "emit",
+                     "await", "else", "of", "in", "spawn", "match", "effect",
+                     "undo", "every", "after", "subscribe", "handoff"], p.text)
+  }
+  return contains(["(", "[", "{", ",", "=", ":", "?", "=>", "->", "!", "+",
+                   "-", "*", "/", "%", "==", "!=", "===", "!==", "<", ">",
+                   "<=", ">=", "&&", "||", "??", "&", "|", "^", "~", "<<",
+                   ">>", ";"], p.kind)
+}
+
+// Positions where a STATEMENT may start: the open/close of a block, an
+// explicit separator, the start of input, or straight after a statement that
+// ended in a complete expression.
+fn stmt_pos(ts: List[Token], i: Int) -> Bool {
+  if (i == 0) { return true }
+  let p = tkl(ts, i - 1)
+  return contains(["{", "}", ";"], p.kind) || ends_expr(p)
+}
+
+// Every identifier the file could possibly BIND, over-approximated: a name in
+// this set never triggers a name redirect (it is shadowed, as in the
+// reference, where the resolver reaches the table only after a scope miss).
+// Over-approximating is the safe direction — it can only SUPPRESS a redirect.
+fn bound_idents(ts: List[Token]) -> List[Str] {
+  var out: List[Str] = []
+  var j = 0
+  while (j < ts.length()) {
+    if (atk(ts, j, "ident")) {
+      let prev = tkl(ts, j - 1)
+      let nxt = tkc(ts, j + 1)
+      let binder = prev.kind == "kw" && contains(
+        ["let", "var", "fn", "type", "service", "component", "extern", "use",
+         "spawn", "provide", "handoff", "isolate", "intercept"], prev.text)
+      // `x:` (param / record field / config field), `x =>` (single arrow
+      // param), `(x of` (for-of bind), and a bare arrow param list `(a, b) =>`.
+      let shape = nxt.kind == ":" || nxt.kind == "=>"
+        || (prev.kind == "(" && nxt.kind == "kw" && nxt.text == "of")
+        || ((prev.kind == "(" || prev.kind == ",")
+            && (nxt.kind == "," || nxt.kind == ")"))
+      if (binder || shape) { out = out.push(tkc(ts, j).text) }
+    }
+    j += 1
+  }
+  return out
+}
+
+// The index of the bracket matching the opener at `i` (`(`, `[` or `{`), or -1.
+fn match_bracket(ts: List[Token], i: Int) -> Int {
+  let open = tkc(ts, i).kind
+  var depth = 0
+  var j = i
+  while (j < ts.length()) {
+    let k = tkc(ts, j).kind
+    if (k == "(" || k == "[" || k == "{") { depth += 1 }
+    if (k == ")" || k == "]" || k == "}") {
+      depth -= 1
+      if (depth == 0) { return j }
+    }
+    j += 1
+  }
+  return 0 - 1
+}
+
+// `f(k=v)` — a depth-1 `=` between a call's parens. `=` never appears in a
+// revl expression, and a record update's `=` sits inside `{}` (depth 2+).
+fn kwarg_at(ts: List[Token], i: Int) -> Bool {
+  let end = match_bracket(ts, i)
+  if (end == 0 - 1) { return false }
+  var depth = 0
+  var j = i
+  while (j < end) {
+    let k = tkc(ts, j).kind
+    if (k == "(" || k == "[" || k == "{") { depth += 1 }
+    if (k == ")" || k == "]" || k == "}") { depth -= 1 }
+    if (depth == 1 && k == "=") { return true }
+    j += 1
+  }
+  return false
+}
+
+// `xs[a:b]` — a depth-1 `:` between index brackets that is NOT the `:` of a
+// ternary (`?` opens one) and not inside a nested record/call.
+fn slice_at(ts: List[Token], i: Int) -> Bool {
+  let end = match_bracket(ts, i)
+  if (end == 0 - 1) { return false }
+  var depth = 0
+  var q = 0
+  var j = i
+  while (j < end) {
+    let k = tkc(ts, j).kind
+    if (k == "(" || k == "[" || k == "{") { depth += 1 }
+    if (k == ")" || k == "]" || k == "}") { depth -= 1 }
+    if (depth == 1 && k == "?") { q += 1 }
+    if (depth == 1 && k == ":") {
+      if (q == 0) { return true }
+      q -= 1
+    }
+    j += 1
+  }
+  return false
+}
+
+// `(a, b)` in VALUE position — a depth-1 comma inside a GROUPING paren whose
+// close is not followed by `=>`/`:` (an arrow parameter list).
+fn tuple_at(ts: List[Token], i: Int) -> Bool {
+  let end = match_bracket(ts, i)
+  if (end == 0 - 1) { return false }
+  let closer = tkc(ts, end + 1)
+  if (closer.kind == "=>" || closer.kind == ":") { return false }
+  var depth = 0
+  var j = i
+  while (j < end) {
+    let k = tkc(ts, j).kind
+    if (k == "(" || k == "[" || k == "{") { depth += 1 }
+    if (k == ")" || k == "]" || k == "}") { depth -= 1 }
+    if (depth == 1 && k == ",") { return true }
+    j += 1
+  }
+  return false
+}
+
+// A grouping `(` opened where a VALUE is expected: after `let x =` / `var x =`
+// (never `type X =`, whose parenthesised form is a TYPE and carries the
+// reference's other tuple diagnostic), or after a binary/prefix operator.
+// `->` is deliberately absent: `-> (Int, Int)` is a type position.
+fn value_paren(ts: List[Token], i: Int) -> Bool {
+  let prev = tkl(ts, i - 1)
+  if (prev.kind == "=") {
+    let p2 = tkl(ts, i - 2)
+    let p3 = tkl(ts, i - 3)
+    return p2.kind == "ident"
+      && p3.kind == "kw" && (p3.text == "let" || p3.text == "var")
+  }
+  if (prev.kind == "kw") { return prev.text == "return" }
+  return contains(["+", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=",
+                   "&&", "||", "??", "!", "&", "^", "|", "<<", ">>"], prev.kind)
+}
+
+// The name-table redirect for the identifier at `i`, "" when it does not fire.
+fn foreign_name_at(ts: List[Token], i: Int, bound: List[Str]) -> Str {
+  let t = tkc(ts, i)
+  if (t.kind != "ident") { return "" }
+  let n = t.text
+  if (!contains(foreign_names(), n)) { return "" }
+  if (contains(bound, n)) { return "" }
+  if (tkl(ts, i - 1).kind == ".") { return "" }
+  let prev = tkl(ts, i - 1)
+  let nxt = tkc(ts, i + 1)
+  let nxt2 = tkc(ts, i + 2)
+  // infix word operators: two juxtaposed primaries around the word.
+  if (n == "and" || n == "or") {
+    return ends_expr(prev) && starts_expr(nxt) ? foreign_name_msg(n) : ""
+  }
+  if (n == "not") {
+    return value_pos(ts, i) && starts_expr(nxt) ? foreign_name_msg(n) : ""
+  }
+  if (n == "True" || n == "False") {
+    return value_pos(ts, i) ? foreign_name_msg(n) : ""
+  }
+  if (n == "const") {
+    return nxt.kind == "ident" && nxt2.kind == "=" ? foreign_name_msg(n) : ""
+  }
+  if (n == "len" || n == "print") {
+    return nxt.kind == "(" ? foreign_name_msg(n) : ""
+  }
+  if (n == "throw") {
+    return stmt_pos(ts, i) && starts_expr(nxt) ? foreign_name_msg(n) : ""
+  }
+  if (n == "def") {
+    return nxt.kind == "ident" && nxt2.kind == "(" ? foreign_name_msg(n) : ""
+  }
+  if (n == "lambda") {
+    return nxt.kind == "ident" && nxt2.kind == ":" ? foreign_name_msg(n) : ""
+  }
+  // `elif` in its Python shape: it closes a `then` block and opens a condition.
+  return prev.kind == "}" && nxt.kind == "(" ? foreign_name_msg(n) : ""
+}
+
+// The syntactic (parser-half) redirect at `i`, "" when none fires.
+fn foreign_form_at(ts: List[Token], i: Int) -> Str {
+  let t = tkc(ts, i)
+  let nxt = tkc(ts, i + 1)
+  // `i++` — `++` strands a `+` in operand position, and revl has no unary `+`,
+  // so an adjacent `+ +` is unconditionally an error (parser `_reject_incr_decr`).
+  if (t.kind == "+" && nxt.kind == "+") {
+    return "revl has no `++` increment operator — expressions are pure (syntax-2.0 §3.3)"
+  }
+  // `i--` — `- -` IS valid as `a - (-b)`, so this fires only when what follows
+  // cannot begin an expression (exactly where the reference's error path lands).
+  if (t.kind == "-" && nxt.kind == "-" && !starts_expr(tkc(ts, i + 2))) {
+    return "revl has no `--` decrement operator — expressions are pure (syntax-2.0 §3.3)"
+  }
+  if (t.kind == "kw" && t.text == "for" && nxt.kind == "(") {
+    if (atw(ts, i + 2, "let") || atw(ts, i + 2, "var")) {
+      return "revl has no C-style `for (init; cond; step)` loop"
+    }
+    if (atk(ts, i + 2, "ident")
+        && (atk(ts, i + 3, "=") || atk(ts, i + 3, ";"))) {
+      return "revl has no C-style `for (init; cond; step)` loop"
+    }
+    if (atk(ts, i + 2, "ident") && atw(ts, i + 3, "in")) {
+      return "revl iterates elements with `for (x of xs)`, not `for (x in xs)`"
+    }
+  }
+  // a revl `if` STATEMENT always opens `if (`, so an `if` not followed by `(`
+  // is the Python postfix conditional (parser `_ternary`).
+  if (t.kind == "kw" && t.text == "if" && nxt.kind != "(") {
+    return "revl has no Python-style `a if c else b` conditional expression"
+  }
+  let pv = tkl(ts, i - 1)
+  if (t.kind == "ident" && nxt.kind == "("
+      && !(pv.kind == "kw" && pv.text == "fn")
+      && kwarg_at(ts, i + 1)) {
+    return "revl has no keyword arguments — `f(k=v)` is not a call"
+  }
+  if (t.kind == "[" && ends_expr(pv) && slice_at(ts, i)) {
+    return "revl has no slice syntax `xs[a:b]`"
+  }
+  if (t.kind == "{" && nxt.kind == "string" && atk(ts, i + 2, ":")) {
+    return "revl records use identifier keys, not string keys like `{\"k\": v}`"
+  }
+  if (t.kind == "(" && value_paren(ts, i) && tuple_at(ts, i)) {
+    return "revl has no tuples — `(a, b)` is not a value"
+  }
+  return ""
+}
+
+// The whole scan, left to right: the FIRST foreign construct in the token
+// stream, "" when the file contains none. Left-to-right approximates the
+// reference's own report order (its parser walks the source once).
+pub fn foreign_scan(src: Str) -> Str {
+  let ts = lex_src(src)
+  let bound = bound_idents(ts)
+  var i = 0
+  while (i < ts.length()) {
+    // A lex failure makes every position downstream meaningless — an `error`
+    // token means the stream is not this program's tokens any more, so no
+    // redirect may be read out of it.
+    if (atk(ts, i, "error")) { return "" }
+    // `emission[fs.write(path="/tmp")]` — a PARAMETERISED CAPABILITY (item
+    // 294) is the one revl form that spells `name=value` inside parens, and it
+    // is not a call. Skip the whole capability list rather than mistake it for
+    // a Python keyword argument.
+    if (atw(ts, i, "emission") && atk(ts, i + 1, "[")) {
+      let e = match_bracket(ts, i + 1)
+      if (e != 0 - 1) { i = e + 1 } else { i += 1 }
+    } else {
+      let f = foreign_form_at(ts, i)
+      if (f != "") { return f }
+      let n = foreign_name_at(ts, i, bound)
+      if (n != "") { return n }
+      i += 1
+    }
+  }
+  return ""
+}
+
 // The admission entry. "" admits; "<tag>|<message>" refuses.
 pub fn admit_src(src: Str) -> Str {
+  // item 384: the foreign-construct redirects run first — the reference's
+  // parser half fires before any admission check, and no program that reaches
+  // an admission refusal carries one of these spellings.
+  let fgn = foreign_scan(src)
+  if (fgn != "") { return tagged("FOREIGN", fgn) }
   let pg = parse_prog(src)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
   let base = build_maps(pg)
@@ -5746,4 +6102,110 @@ service S { emission fn go(y: Str) -> Str }
 component C provides s: S {
   provide s { fn go(y) { let r = emit h(y)   return r } }
 }""") == ""
+}
+
+// ---------------------------------------------- item 384: foreign redirects
+//
+// Each `assert` below pins the reference's diagnostic TEXT byte-for-byte
+// (src/revl/parser.py `_FOREIGN_STMT_KEYWORDS` / the per-form redirects, and
+// src/revl/lower.py `_FOREIGN_NAME_REDIRECTS`). Before this port every one of
+// these programs was ADMITTED by the gate — see examples/rejections/foreign_*.rvl,
+// the reference fixtures these mirror one-for-one.
+//
+// The refusal side asserts on `foreign_scan` rather than `admit_src` ON PURPOSE.
+// `admit_src` wraps the message in the NEW `FOREIGN` tag, and the differential
+// oracle's reference classifier (tests/test_selfhost_lower.py `_classify`)
+// does not know that family yet, so it renders these reference refusals
+// `OUT:<message>` and an `admit_src` assertion here would be harvested by
+// `test_in_file_test_programs_agree` and fail on the TAG while agreeing on
+// every byte of the message. Asserting the message directly keeps this port
+// pinned without pre-empting the corpus work (roadmap item 429). The
+// ADMIT-side block below does go through `admit_src`, so the oracle harvests
+// and cross-checks it against the reference — that is the half where a
+// regression would be a false REFUSAL, and it is the half worth guarding.
+
+test "foreign word operators redirect to the revl spelling" {
+  assert foreign_scan("fn f(a: Bool, b: Bool) -> Bool { return a and b }")
+    == "`and` is not a revl operator"
+  assert foreign_scan("fn f(a: Bool, b: Bool) -> Bool { return a or b }")
+    == "`or` is not a revl operator"
+  assert foreign_scan("fn f(a: Bool) -> Bool { return not a }")
+    == "`not` is not a revl operator"
+}
+
+test "foreign literals and declaration keywords redirect" {
+  assert foreign_scan("fn f() -> Bool { return True }")
+    == "revl booleans are lowercase"
+  assert foreign_scan("fn f() -> Bool { return False }")
+    == "revl booleans are lowercase"
+  assert foreign_scan("fn f() -> Int { const x = 1 return x }")
+    == "revl has no `const`"
+  assert foreign_scan("def foo() -> Int { return 1 }")
+    == "revl has no `def`"
+  assert foreign_scan("fn f() -> Int { let g = lambda x: x return g(1) }")
+    == "revl has no `lambda`"
+  assert foreign_scan("fn f(n: Int) -> Int { if (n > 0) { return 1 } elif (n < 0) { return 2 } return 0 }")
+    == "revl has no `elif`"
+}
+
+test "foreign builtins redirect to the revl surface" {
+  assert foreign_scan("fn f(xs: List[Int]) -> Int { return len(xs) }")
+    == "revl has no `len(...)`"
+  assert foreign_scan("fn f(n: Int) -> Int { print(n) return n }")
+    == "revl has no `print`"
+  assert foreign_scan("fn f(n: Int) -> Int { throw n }")
+    == "revl has no `throw`"
+}
+
+test "foreign statement and expression FORMS redirect" {
+  assert foreign_scan("fn f() -> Int { var i = 0 i++ return i }")
+    == "revl has no `++` increment operator — expressions are pure (syntax-2.0 §3.3)"
+  assert foreign_scan("fn f() -> Int { var i = 0 i-- return i }")
+    == "revl has no `--` decrement operator — expressions are pure (syntax-2.0 §3.3)"
+  assert foreign_scan("fn f() -> Int { var s = 0 for (let i = 0; i < 10; i += 1) { s += i } return s }")
+    == "revl has no C-style `for (init; cond; step)` loop"
+  assert foreign_scan("fn f(xs: List[Int]) -> Int { var s = 0 for (x in xs) { s += x } return s }")
+    == "revl iterates elements with `for (x of xs)`, not `for (x in xs)`"
+  assert foreign_scan("fn g(k: Int) -> Int { return k } fn f() -> Int { return g(k=1) }")
+    == "revl has no keyword arguments — `f(k=v)` is not a call"
+  assert foreign_scan("fn f(c: Bool) -> Int { let x = 1 if c else 2 return x }")
+    == "revl has no Python-style `a if c else b` conditional expression"
+  assert foreign_scan("fn f(xs: List[Int]) -> Int { let s = xs[0:2] return 0 }")
+    == "revl has no slice syntax `xs[a:b]`"
+  assert foreign_scan("fn f() -> Int { let d = {\"k\": 1} return 0 }")
+    == "revl records use identifier keys, not string keys like `{\"k\": v}`"
+  assert foreign_scan("fn f() -> Int { let t = (1, 2) return 0 }")
+    == "revl has no tuples — `(a, b)` is not a value"
+  // the NEW tag `admit_src` wraps a redirect in. Bound to a `let` first so the
+  // oracle's in-file program harvester does not pick it up: the reference
+  // classifier has no FOREIGN family yet (roadmap item 429), so it would read
+  // this reference refusal as `OUT:<message>` and fail on the tag alone.
+  let thrower = "fn f(n: Int) -> Int { throw n }"
+  assert admit_tag(thrower) == "FOREIGN"
+  // ...and the position rules that keep it OFF malformed input. `@@@ not revl
+  // @@@` is a parse failure ("expected a top-level declaration, found '@'"),
+  // not a Python `not`: a redirect read out of a malformed adjacency would
+  // replace an honest BAD with a confident wrong answer, and any consumer
+  // matching the gate's BAD code would silently stop matching. (Bound to a
+  // `let` for the same harvester reason as above.)
+  let garbage = "@@@ not revl @@@"
+  assert admit_tag(garbage) == "BAD"
+}
+
+test "a redirect never fires on a valid program (no false refusal)" {
+  // the shapes each pattern must NOT mistake: a subtraction of a negation, a
+  // real `for`-of, a typed arrow parameter list, an `else if` chain, a ternary
+  // inside an index, a parameterised capability (item 294 — the one revl form
+  // that spells `name=value` inside parens), and a name that SHADOWS a table
+  // entry (as it does in the reference, where the resolver reaches the table
+  // only after a scope miss).
+  assert admit_src("fn f(a: Int, b: Int) -> Int { return a - -b }") == ""
+  assert admit_src("fn f(xs: List[Int]) -> Int { var s = 0 for (x of xs) { s += x } return s }") == ""
+  assert admit_src("fn f() -> Int { let g = (a: Int, b: Int) => a + b return g(1, 2) }") == ""
+  assert admit_src("fn f(n: Int) -> Int { if (n > 0) { return 1 } else if (n < 0) { return 2 } return 0 }") == ""
+  assert admit_src("fn f(xs: List[Int], c: Bool) -> Int { return xs[c ? 0 : 1] }") == ""
+  assert admit_src("fn f(n: Int) -> Int { let len = n return len }") == ""
+  // (triple-quoted: the oracle's in-file program harvester reads a plain
+  // string literal up to the next `"`, so an escaped quote would truncate it)
+  assert admit_src("""service S { emission[fs.write(path="/tmp")] fn go(r: Str) -> Int }""") == ""
 }

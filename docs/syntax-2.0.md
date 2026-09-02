@@ -826,10 +826,16 @@ the sketch that motivated this form fails with its own explanation.
 **cordis-py** (the reference, R1 + R4 against its host vocabulary),
 **cordis-rs** (`#[test]` drivers over a live `cordis::Context`, R4 registry +
 an R1 host-resource counter), **cordis (TS)** (async vitest cases over a live
-`Context`, R4 introspection + R1 live-host-resource accounting), and
+`Context`, R4 introspection + R1 live-host-resource accounting),
 **cordis-go** (`go test` funcs over the live stc-go runtime, `len(root
-.Fibers()) == 0` + an R1 host-resource counter), and — as of item 142 — the
-**wasm** substrate (the emitted components booted on the live cordis-wasm
+.Fibers()) == 0` + an R1 host-resource counter), and — as of item 178(b) —
+**cordis4j** (static methods on the `REVL_TESTS` roster: the root comes from
+`Contexts.create()`, load is `root.plugin(new <Comp>Plugin(<config>))`, unload
+is the `Disposable` that returns, and `assert no_residue` is R4 read back
+through the public API — nothing the document provides still answers
+`ctx.get(iface)` — plus an R1 host-resource counter; the same read
+`revl run --backend java --once` proves after its LIFO teardown), and — as of
+item 142 — the **wasm** substrate (the emitted components booted on the live cordis-wasm
 runtime: load = `rt.plug`, call = resolve the provision key in the coeffect
 table Σ and invoke its op, unload = `rt.unplug`, and `assert no_residue` =
 `len(rt.fibers) == 0` (R4) + the coeffect table `rt.table` empty (R1), the
@@ -849,17 +855,20 @@ coeffect seam), or an `advance` (timers are the item-57 follow-on). See
 `examples/lifecycle_cache.rvl` (`config`/`Pool`/`Map`, so it skips on wasm), and
 docs/wasm-capabilities.md.
 
-The **java (cordis4j)** emitter still refuses lifecycle tests by name — it has
-no lifecycle-test driver yet (a documented follow-up, FR-5):
+Two java refusals survive, both per-construct rather than per-tier: the
+pre-`ir_version: 3` dialects have no test machinery on that tier at all, and an
+`advance` step drives the clock coeffect, which does not lower there yet (the
+item-57 follow-on, docs/time-coeffect.md — a component that arms a timer
+already skips the same way):
 
 ```
-lifecycle test 'cache reverts cleanly' is not lowerable on the java tier:
-  it drives a live composition (load/call/unload) and asserts R4
-  residue-freedom through the host runtime's introspection, which only the
-  reference tier implements — run it with `revl test --backend py`
+lifecycle test 'cache reverts cleanly' is not lowerable on the cordis4j tier
+  below ir_version 3: it drives a live composition (load/call/unload) and
+  asserts R4 residue-freedom by reading the host runtime back, which this
+  tier does only for ir_version 3 — run it with `revl test --backend py`
 ```
 
-`revl test --all` reports that refusal, and any per-test wasm skip, as `skip:`
+`revl test --all` reports those refusals, and any per-test wasm skip, as `skip:`
 with the reason (a tier that cannot run the document's tests is never a failure
 of the run). A refusal by name is deliberate — a construct silently dropped by
 one renderer and honored by another is this project's recurring bug class. In the IR a

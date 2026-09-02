@@ -199,6 +199,32 @@ def register_secret_value(value: Any) -> None:
         _secret_values.add(value)
 
 
+def _members(value: Any) -> Optional[list]:
+    """The member VALUES of a wrapper object, or None if it is not one.
+
+    A revl value does not always reach the runtime as a builtin container. The
+    emitted `Ok`/`Err` classes carry their payload in `__slots__ = ("value",)`
+    and so have no `__dict__` at all; a declared record emits as a dataclass and
+    has one. Both are containers as far as confidentiality goes — the payload is
+    the value the author declared — so both have to be walked, and `__slots__`
+    is exactly the case a plain `__dict__` probe misses.
+
+    Deliberately narrow: strings and bytes are LEAVES (walking a str's members
+    would recurse forever on nothing), and an object with neither `__dict__` nor
+    `__slots__` is left to the caller as a scalar."""
+    if value is None or isinstance(value, (str, bytes, bool, int, float)):
+        return None
+    members = getattr(value, "__dict__", None)
+    if isinstance(members, dict):
+        return list(members.values())
+    slots = getattr(type(value), "__slots__", None)
+    if isinstance(slots, str):
+        slots = (slots,)
+    if slots:
+        return [getattr(value, name) for name in slots if hasattr(value, name)]
+    return None
+
+
 def register_secret_tree(value: Any) -> None:
     """Remember every string leaf of a value a declared marking identified as
     confidential, containers included.
@@ -215,6 +241,18 @@ def register_secret_tree(value: Any) -> None:
         # Values only: a record's KEYS are field names the author wrote, and
         # registering them would redact the field name out of every later trace.
         for item in value.values():
+            register_secret_tree(item)
+        return
+    members = _members(value)
+    if members is not None:
+        # An emitted `Ok`/`Err` wrapper, or a declared record rendered as a
+        # class: the payload is the confidential value and the wrapper is only
+        # how the declaration spelled it. Without this a crossing that can FAIL —
+        # `Result[Secret[Str], Str]`, the shape a fallible lease has to use —
+        # registered the WRAPPER, which is not a string, and so registered
+        # nothing at all. Attribute NAMES are skipped for the same reason a
+        # record's keys are: they are the author's field names, not the value.
+        for item in members:
             register_secret_tree(item)
         return
     register_secret_value(value)
@@ -342,9 +380,12 @@ def _needles(value: Any, into: set, minimum: int) -> None:
         for item in value.values():
             _needles(item, into, minimum)
         return
-    members = getattr(value, "__dict__", None)
-    if isinstance(members, dict):
-        for item in members.values():
+    members = _members(value)
+    if members is not None:
+        # `_members`, not a bare `__dict__` probe: an emitted `Ok`/`Err` wrapper
+        # keeps its payload in `__slots__` and has no `__dict__`, so a fallible
+        # crossing's value used to contribute no needles at all.
+        for item in members:
             _needles(item, into, minimum)
 
 

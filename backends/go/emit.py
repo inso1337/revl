@@ -2205,6 +2205,32 @@ def _witnessed_result_types(returns) -> tuple[str, str]:
     return _go_v3_type(ok, _V3_TYPES), _go_v3_type(err, _V3_TYPES)
 
 
+# The placeholder a confidential witness is written as in the durable WAL. Must
+# equal `revl.taint.REDACTED_SECRET` / `confidential.REDACTED`: it is part of the
+# log's on-disk contract, and `revl recover` reads it back to refuse a replay it
+# cannot honestly perform (src/revl/recovery.py `_has_redacted_arg`) rather than
+# addressing the wrong referent and reporting the miss as a clean rollback.
+_REDACTED_SECRET = "<redacted:secret>"
+
+
+def _wal_referent(ext: dict) -> str:
+    """The Go expression for a witnessed inverse's referent argument in the WAL.
+
+    Ordinarily the stringified witness. When the author declared the witness
+    position confidential (`Result[Secret[W], E]`, the shape a fallible lease
+    has to use) the descriptor gets the placeholder instead: `$REVL_WAL` is a
+    plaintext file at rest, and a `Secret[T]` declaration authorises disclosure
+    to the declared receiver, never a durable copy.
+
+    Decided HERE, at the one point that writes the record, off a stamp the
+    compiler put in the IR — not at each reader of the log. A tier with no
+    value-registry of its own needs no registry for this: the confidentiality is
+    positional and known before the program runs."""
+    if ext.get("secret_witness"):
+        return _go_string(_REDACTED_SECRET)
+    return 'fmt.Sprintf("%v", result)'
+
+
 def _emit_witnessed_step(out, pad, step, ext, env, bind: Optional[str]) -> None:
     """Emit a witnessed effect (item 243): run the mutation inside the SAME
     `ctx.Effect` the bracket path uses — `install` performs the forward
@@ -2260,8 +2286,9 @@ def _emit_witnessed_step(out, pad, step, ext, env, bind: Optional[str]) -> None:
         # — the re-issuable named call recover replays LIFO to undo the mutation
         # — and fsync it, so a crash BEFORE commit is still recoverable from the
         # log alone. The witness is stringified as the referent argument.
-        out.append('%srevlRecordTransactional(%s, %s, []string{fmt.Sprintf("%%v", result)})'
-                   % (inner2, _go_string(ext_name), _go_string(undo_name)))
+        out.append('%srevlRecordTransactional(%s, %s, []string{%s})'
+                   % (inner2, _go_string(ext_name), _go_string(undo_name),
+                      _wal_referent(ext)))
     out.append("%sreturn func() (_revlErr error) {" % inner2)
     out.append("%sif _revlFrame.committed {" % inner3)
     out.append("%s\t// item 243 a5a: discharge — the mutation is the" % inner3)
