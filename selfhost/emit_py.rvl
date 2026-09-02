@@ -270,6 +270,48 @@ fn commajoin(nodes: List[Any]) -> Str {
   return parts.join(", ")
 }
 
+// ----------------------------------------------- single-evaluation `??`/`?.`
+// The reference's `_opt_height` / `_opt_bind` (item 436 F7): `??`, `?.` and
+// `?.()` must evaluate their LEFT OPERAND ONCE, so a non-trivial operand is
+// bound with a walrus and the bound name is what the presence test and the
+// result both read. The temp is named after the opt-chain HEIGHT of the whole
+// node, which is strictly greater than every opt node beneath it — a chain
+// nested in an ARGUMENT therefore cannot clobber the one above it, and some
+// builtins (`join`, `indexOf`) render the argument before the receiver.
+fn opt_height(n: Any) -> Int {
+  var inner = 0
+  for (c of value_children(n)) {
+    let h = opt_height(c)
+    if (h > inner) { inner = h }
+  }
+  let k = node_kind(n)
+  if (k == "optfield" || k == "optcall" || (k == "bin" && node_op(n) == "??")) {
+    return inner + 1
+  }
+  return inner
+}
+
+// The reference's `_INLINE_TRIVIAL`: a read that is free to repeat and yields
+// the same value every time, so it keeps the plain double render.
+fn is_trivial_node(n: Any) -> Bool {
+  let k = node_kind(n)
+  return k == "var" || k == "name" || k == "lit" || k == "config" || k == "maplit"
+}
+
+fn opt_temp(node: Any) -> Str {
+  return `_ov${opt_height(node).to_str()}`
+}
+
+fn opt_binder(node: Any, target: Any, rendered: Str) -> Str {
+  if (is_trivial_node(target)) { return `(${rendered})` }
+  return `(${opt_temp(node)} := ${rendered})`
+}
+
+fn opt_reader(node: Any, target: Any, rendered: Str) -> Str {
+  if (is_trivial_node(target)) { return rendered }
+  return opt_temp(node)
+}
+
 // `_render_builtin`: the stdlib surface rendered as portable Python.
 fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "length") { return `len(${target})` }
@@ -305,8 +347,13 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   }
   if (method == "mod") { return `(${target} % abs(${args[0]}))` }
   if (method == "to_int") {
-    if (recv == "Str") {
-      return `(lambda _s: (None if (_s == "" or _s == "-" or not _s.isascii() or not (_s.isdigit() or (_s[0] == "-" and _s[1:].isdigit())) or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) else _n))(${target})`
+    // `recv == "?"` is the reference's `_RECV_VIA_OPT`: reached through `?.`,
+    // whose node carries no receiver tag, so the Int32-widen and Str-parse
+    // rows are told apart at runtime instead.
+    if (recv == "Str" || recv == "?") {
+      let parse = `(None if (_s == "" or _s == "-" or not _s.isascii() or not (_s.isdigit() or (_s[0] == "-" and _s[1:].isdigit())) or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) else _n)`
+      if (recv == "?") { return `(lambda _s: ${parse} if isinstance(_s, str) else _s)(${target})` }
+      return `(lambda _s: ${parse})(${target})`
     }
     return `(${target})`
   }
@@ -416,9 +463,14 @@ fn render_arrow(node: Any) -> Str {
 fn render_bin(node: Any) -> Str {
   let op = node_op(node)
   if (op == "??") {
-    let lhs = expr(value_field(node, "left"))
+    let left = value_field(node, "left")
+    let lhs = expr(left)
     let rhs = expr(value_field(node, "right"))
-    return `(${rhs} if ${lhs} is None else ${lhs})`
+    if (is_trivial_node(left)) { return `(${rhs} if ${lhs} is None else ${lhs})` }
+    // the walrus binds in the presence test, which a conditional expression
+    // evaluates FIRST, so the `then` branch reads a value produced once
+    let name = opt_temp(node)
+    return `(${name} if (${name} := ${lhs}) is not None else ${rhs})`
   }
   let opnd = node_operands(node)
   if (is_addsubmul(op) && opnd == "Int") {
@@ -516,13 +568,21 @@ fn expr_inner(node: Any) -> Str {
   }
   if (kind == "interp") { return interp_fstring(value_list(value_field(node, "parts"))) }
   if (kind == "optfield") {
-    let t = expr(value_field(node, "target"))
-    return `(None if (${t}) is None else _revl_field(${t}, ${py_repr(value_field(node, "name"))}))`
+    let tgt = value_field(node, "target")
+    let t = expr(tgt)
+    return `(None if ${opt_binder(node, tgt, t)} is None else _revl_field(${opt_reader(node, tgt, t)}, ${py_repr(value_field(node, "name"))}))`
   }
   if (kind == "optcall") {
-    let t = expr(value_field(node, "target"))
-    let args = commajoin(value_list(value_field(node, "args")))
-    return `(None if (${t}) is None else (${t}).${value_str(value_field(node, "method"))}(${args}))`
+    // the method is a STDLIB builtin (the checker types an optcall through
+    // `builtin_check`), so it goes through the same table a plain `.m(..)`
+    // does — rendering `payload.m(..)` put a method python values do not
+    // have on the receiver.
+    let tgt = value_field(node, "target")
+    let t = expr(tgt)
+    var args = []
+    for (a of value_list(value_field(node, "args"))) { args = args.push(expr(a)) }
+    let body = render_builtin(value_str(value_field(node, "method")), opt_reader(node, tgt, t), args, "?")
+    return `(None if ${opt_binder(node, tgt, t)} is None else ${body})`
   }
   return `<<UNSUPPORTED-EXPR:${kind}>>`
 }
@@ -856,9 +916,12 @@ fn carrow(node: Any) -> Str {
 fn cbin(node: Any) -> Str {
   let op = node_op(node)
   if (op == "??") {
-    let lhs = cexpr(value_field(node, "left"))
+    let left = value_field(node, "left")
+    let lhs = cexpr(left)
     let rhs = cexpr(value_field(node, "right"))
-    return `(${rhs} if ${lhs} is None else ${lhs})`
+    if (is_trivial_node(left)) { return `(${rhs} if ${lhs} is None else ${lhs})` }
+    let name = opt_temp(node)
+    return `(${name} if (${name} := ${lhs}) is not None else ${rhs})`
   }
   let pop = py_bin_op(op)
   return `(${cexpr(value_field(node, "left"))} ${pop} ${cexpr(value_field(node, "right"))})`
@@ -961,12 +1024,17 @@ fn cexpr(node: Any) -> Str {
   }
   if (kind == "maplit") { return "{}" }
   if (kind == "optfield") {
-    let t = cexpr(value_field(node, "target"))
-    return `(None if (${t}) is None else _revl_field(${t}, ${py_repr(value_field(node, "name"))}))`
+    let tgt = value_field(node, "target")
+    let t = cexpr(tgt)
+    return `(None if ${opt_binder(node, tgt, t)} is None else _revl_field(${opt_reader(node, tgt, t)}, ${py_repr(value_field(node, "name"))}))`
   }
   if (kind == "optcall") {
-    let t = cexpr(value_field(node, "target"))
-    return `(None if (${t}) is None else (${t}).${value_str(value_field(node, "method"))}(${ccommajoin(value_list(value_field(node, "args")))}))`
+    let tgt = value_field(node, "target")
+    let t = cexpr(tgt)
+    var args = []
+    for (a of value_list(value_field(node, "args"))) { args = args.push(cexpr(a)) }
+    let body = render_builtin(value_str(value_field(node, "method")), opt_reader(node, tgt, t), args, "?")
+    return `(None if ${opt_binder(node, tgt, t)} is None else ${body})`
   }
   if (kind == "fn") {
     return `${mangle(value_str(value_field(node, "name")))}(${ccommajoin(value_list(value_field(node, "args")))})`
