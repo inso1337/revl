@@ -380,6 +380,74 @@ item — for a payload that differs only by a schema contract and a dedup key.
 Events add exactly those two things on top of `Stream[T]` and nothing else.
 They are Slice 5 (§7), gated on the iteration form (Slice 4) they desugar to.
 
+### 6b. Slice 5, as shipped
+
+The surface that landed:
+
+```revl sketch
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+
+component Fulfiller requires ship: Ship {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub { emit ship.dispatch(e.order_id) }
+}
+```
+
+`on … as` parses to the SAME `StreamIterStmt` and lowers to the same
+`stream-iter` step as `every … in`, with an additive `event` block carrying the
+name, the key, the window and the derived schema. One node, one lowering, one
+emitted loop — so the two properties the guarantee rests on (the iteration
+boundary immediately after the await, and a `Faulted` that is not caught) are
+literally the same code rather than a second implementation that could drift.
+The emitted loop gains one gate, `if not <contract>.admit(<x>): continue`, placed
+after the await, after its `yield`, and after the terminal test; the contract
+itself is built ONCE above the loop.
+
+Three deviations from §6 as written, each stated rather than quiet:
+
+1. **The handler names its subscription (`in <sub>`).** §6's `on <Event> as e
+   { … }` resolves the event's stream through the provide/inject graph — "the
+   event source is the provided `Stream[T]`" — which needs a REQUIRED
+   `Stream[T]` capability the language does not have (`subscribe`'s own
+   diagnostic says a required stream capability is a later slice). Naming the
+   subscription keeps the source honest and keeps every Slice 2/3 qualifier
+   (`policy`, `buffer`, `drain`, the combinator chain, `merge`) available to an
+   event consumer, which an implicit `subscribe` would have stranded. When the
+   coeffect wiring lands, the clause can become optional.
+2. **The key is REQUIRED and the dedup window is BOUNDED.** §6 lists handler
+   idempotency and duplicate handling as obligations events deliver; an event
+   with no key delivers neither, so a key-less `event` is refused. The window is
+   a fixed-size LRU of recently admitted keys — constant per handler, never one
+   entry per delivered item — which bounds the claim as well as the memory: a
+   redelivery further apart than the window runs the handler again. This
+   collapses redeliveries; it is not a durable exactly-once claim, which needs
+   the §4.5 cursor.
+3. **Schema compatibility is checked on BOTH sides.** Statically the item has the
+   event's record type inside the handler, so a field the event does not declare
+   and a field used at the wrong type are compile errors. Dynamically each
+   delivered item is validated against the derived schema at the boundary before
+   the body runs, on item 257's machinery and under its §3.3 rule: an event whose
+   shape is not exactly derivable is refused at compile time rather than shipped
+   with a vacuous guarantee. A violation raises the same `Faulted` terminal a
+   provider abort does, so it takes the path that already closes the
+   subscription — §6's last row with no events-specific teardown.
+
+§4.7's acquisition refusal is NOT lifted and the calculus is unchanged: the
+dedup window is per handler, so it bounds nothing an `effect … undo …` per
+delivered item would need bounded, and the per-iteration discharge still does
+not exist.
+
+Also carried by this slice, on the go tier: a document with top-level
+declarations routes to that tier's pure typed-core path, which DROPS its
+components. A typed event always brings a record declaration with it, so an
+event program would have emitted a bare struct and silently never subscribed.
+That path now refuses a dropped component that holds a stream, by name.
+
+Still open on §6: the `replay(...)` row (§4.5) and the reconstructible
+crash-recovery case (§4.9), and the iteration/handler forms on go, rust, java
+and typescript.
+
 ## 7. Slices
 
 The blast radius is parser + typecheck + lower + all six backends +
@@ -392,7 +460,7 @@ core guarantee and the refusal fence, on the reference tier.
 | **2** | Pure combinators + backpressure + test clock | typecheck + lower + py/ts | `map`/`filter`/`take`; `drop_*`/`block` policies (`Paused`); deterministic `advance`-driven firing (§8) | 1 |
 | **3** | Blocking tiers + `merge` | **go/java/rust** emit + one runtime helper each; the multi-source teardown ordering | `merge`; go/java/rust lowering of Slices 1-2 | 1 (2 for combinators) |
 | **4** | `every … in` async iteration | parser (`every IDENT in`), the effect-context body §4.7, handler-abort-closes | `every x in sub { … }` | 1; **item 131** (the body composes effects across the `next` suspension, so it needs awaited `effect`/`emit`) |
-| **5** | Typed EVENTS | `event`/`on … as`, schema contract, idempotency key (item 309), dedup | `event`, `on … as e { }` | 4 |
+| **5** | Typed EVENTS | `event`/`on … as`, schema contract, idempotency key (item 309), dedup | `event E(key: f)`, `on E as e in sub { }` (§6b) | 4 |
 
 **Slice 1 is the landable unit.** It ships the type, the three core operations,
 the bracket lifecycle, and the core-guarantee exit tests (§10.1-10.3) on py,
