@@ -342,6 +342,14 @@ jobs:
       # and reporting success.
       - run: cd backends/typescript && node scripts/typecheck-generated.mjs
       - run: cd backends/typescript && npx tsc --noEmit
+      # the tier's acceptance demo (R1-R4 self-checks, exit code reflects them).
+      # `tsc --noEmit` above type-checks demo.ts but never RUNS it, so its
+      # assertions were dead text: the R2 "fresh store" check compared against
+      # `null` and stayed wrong from cabbd931 (which moved the host Map's absent
+      # answer to `undefined`) until somebody ran it by hand. The python tier's
+      # demo is invoked in `backend-python`, which is exactly why that one never
+      # rotted. No env gate and no optional toolchain: this step always executes.
+      - run: cd backends/typescript && node demo.ts
 
   backend-wasm:
     runs-on: ubuntu-latest
