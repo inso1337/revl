@@ -277,8 +277,37 @@ _GO_KEYWORDS = {"type", "range", "func", "map", "chan", "select", "go",
 
 
 def _safe_local(name: str) -> str:
+    """Rename a revl identifier that collides with a *Go* keyword so it emits
+    as a usable Go local (roadmap item 165).
+
+    The rename must be a pure function of the name (declaration site and use
+    sites agree without a table) AND INJECTIVE: two distinct revl identifiers
+    may never land on one Go identifier. The naive "`n + '_'` if reserved" map
+    is pure but not injective — it sends `func` to `func_` and leaves the
+    equally legal revl identifier `func_` alone, so both reach `func_`. Here
+    that breaks loudly (`go build` reports "no new variables on left side of
+    :="), but the python tier silently CAPTURES on the same shape, so the rule
+    is fixed identically on every tier rather than left to a downstream
+    compiler CI does not run.
+
+    The injective rule: escape a name iff the name OR any name reachable from
+    it by dropping trailing `_` is a Go keyword, and escape it by exactly ONE
+    `_`. Names whose underscore-stripped root is a keyword shift up one rung of
+    the `kw`/`kw_`/`kw__` ladder (`func` -> `func_`, `func_` -> `func__`),
+    which is injective; every other name is returned unchanged and can never
+    equal a shifted name, because a shifted name's root is a keyword and an
+    unchanged name's root is not. The output is never itself a keyword: no
+    member of `_GO_KEYWORDS` ends in `_`. Only a name whose root is a keyword
+    can change, so no existing program's output moves."""
     n = str(name)
-    return n + "_" if n in _GO_KEYWORDS else n
+    root = n
+    while root:
+        if root in _GO_KEYWORDS:
+            return n + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return n
 
 
 def _bind_field(name: str) -> str:
@@ -3128,10 +3157,24 @@ _V3_PRIM = {
 
 
 def _v3_ident(name, role: str) -> str:
+    """The pure-v3 counterpart of `_safe_local`, over the full Go keyword set.
+
+    Same injective rule (see `_safe_local`): escape a name iff the name OR any
+    name reachable from it by dropping trailing `_` is a Go keyword, by exactly
+    one `_`. The plain "reserved -> name + '_'" map sent both `func` and the
+    equally legal revl identifier `func_` to `func_`, so two distinct revl
+    locals became one Go local and `go build` reported "no new variables on
+    left side of :=" — a loud break here, a SILENT capture on the python tier
+    from the same shape."""
     if not isinstance(name, str) or not name:
         raise EmitError(f"invalid {role} identifier: {name!r}")
-    if name in _GO_RESERVED:
-        return name + "_"
+    root = name
+    while root:
+        if root in _GO_RESERVED:
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
     return name
 
 
