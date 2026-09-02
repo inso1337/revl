@@ -1,0 +1,14 @@
+// Reading elements out of a List[Str] by index, in a read-only position.
+// `selfhost/*.rvl` does this about 325 times; `checker.rvl`'s `while (i <
+// xs.length()) { .. xs[i] .. }` is the shape.
+pub fn list_index(xs: List[Str], probe: Str) -> Int {
+  var hits = 0
+  var i = 0
+  let n = xs.length()
+  while (i < n) {
+    if (xs[i] == probe) { hits = hits + 1 }
+    if (xs[i].startsWith("k")) { hits = hits + 1 }
+    i = i + 1
+  }
+  return hits
+}

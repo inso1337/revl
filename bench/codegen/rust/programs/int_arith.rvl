@@ -1,0 +1,12 @@
+// Pure integer arithmetic. revl `Int` traps on overflow, so the emitted
+// `checked_add(..).expect(..)` is SEMANTICS, not waste. Measured to confirm
+// the emitter is not paying more than the semantics cost.
+pub fn int_arith(n: Int) -> Int {
+  var acc = 0
+  var i = 1
+  while (i < n) {
+    acc = acc + i * 2 - i.div_trunc(3)
+    i = i + 1
+  }
+  return acc
+}
