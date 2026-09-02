@@ -27,8 +27,12 @@ provider vanishing would trigger (`bridge._Client.repoint`). The `component`
 and `backend` fields carry the admissible identity of the successor so this
 process can RE-ADMIT it against its own running manifest before accepting the
 cutover (item 337, `_repoint_decision`); a socket-only repoint with no such
-reference is refused fail-closed. The process acknowledges an accepted repoint
-with `[name] REPOINTED <k> -> <socket>`.
+reference is refused fail-closed. The wire's `component` is only a SELECTOR,
+never an authorization: this process binds it to `<k>` against its own manifest
+(`_providers_of`) and sanctions `<socket>` against its own placement directory
+(`_sanction_address`) before the cutover is applied, so a selector naming an
+unrelated component, or an address the receiver does not sanction, is refused.
+The process acknowledges an accepted repoint with `[name] REPOINTED <k> -> <socket>`.
 
 All output is line-prefixed with the process name so the conductor can
 interleave several of these into one readable log. `[name] UP` marks a process
@@ -42,6 +46,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import os
 import signal
 import sys
 import threading
@@ -95,7 +100,170 @@ def _load_module(ir: dict) -> types.ModuleType:
     return module
 
 
-def _repoint_decision(spec_files: list, running_ir: dict, cmd: dict) -> tuple[bool, str | None]:
+# ---------------------------------------------------------------------------
+# item 337 admission seams: the anchors the RECEIVER holds on its own.
+#
+# Mesh property 1 (docs/design/337-polyglot-admission-mesh.md:94) is that every
+# input to a seam decision is receiver-controlled: "the wire supplies only which
+# component to re-admit and onto which tier". A selector is therefore not an
+# authorization. Two things must be receiver-derived beyond the manifest itself:
+#
+#   * the BINDING of the selector to the key whose proxy moves — otherwise any
+#     admissible (component, backend) pair in the composition is a pass token
+#     for ANY key;
+#   * the ADDRESS the proxy is actually pointed at — the address IS the whole
+#     effect of a repoint or a boot wiring, so admitting a selector and then
+#     applying an unjudged address judges the wrong thing entirely.
+#
+# `_providers_of` supplies the first, `_seam_anchor` + `_sanction_address` the
+# second. All three read only state this process already holds: its own
+# compiled manifest, and the placement directory it was handed its own spec in.
+# ---------------------------------------------------------------------------
+
+
+def _providers_of(running_ir: dict, key: str) -> set[str]:
+    """The components of THIS process's own running manifest that provide `key`.
+
+    The same key -> component map `placement.py` builds (`key_component`,
+    `placement.py:1742`), recomputed here from `running_ir =
+    compile_files(spec["files"])` rather than believed off the wire. It answers
+    two receiver-derived questions: is the selector the wire named genuinely the
+    provider of this key, and — since a key this composition provides nowhere is
+    by definition not a member of it — is a proxy a same-composition seam at
+    all. The `remote` flag is never consulted for the latter: a flag is wire
+    state, and a same-composition key carrying `remote: true` must not skip the
+    gate.
+    """
+    return {c["name"] for c in (running_ir.get("components") or [])
+            if key in (c.get("provides") or {})}
+
+
+def _tls_identity(tls) -> tuple | None:
+    """The (cert, key, ca, identity) a seam's mTLS block presents, realpath'd —
+    or None when the block is absent or incomplete. `server_hostname` is
+    deliberately excluded: it legitimately differs per peer (`placement.py`
+    `_sni`), while the identity material does not."""
+    if not isinstance(tls, dict):
+        return None
+    cert, key, ca, identity = (tls.get("cert"), tls.get("key"),
+                               tls.get("ca"), tls.get("identity"))
+    if not (cert and key and ca and identity):
+        return None
+    return (os.path.realpath(str(cert)), os.path.realpath(str(key)),
+            os.path.realpath(str(ca)), str(identity))
+
+
+def _seam_anchor(spec: dict, spec_path=None) -> dict:
+    """The address anchors this process holds INDEPENDENTLY of any one seam
+    entry, computed once at boot. Returns `{"dir": <placement dir or None>,
+    "tls": <this process's own mTLS identity or None>}`.
+
+    * `dir` is the directory this process was handed its OWN spec in
+      (`argv[1]`), which the conductor creates with `mkdtemp` at 0700 and is the
+      only place it ever binds a seam socket (`placement.py:1751-1754`,
+      `2316`, and the swap successor's `new_sock`, `2427`). It comes from the
+      exec'd argv, never from the spec JSON, so an edit to the JSON cannot move
+      it — that is exactly what makes it a receiver-side anchor for a UDS
+      address.
+    * `tls` is the one mTLS identity this process itself presents on network
+      seams; placement stamps the SAME `certs[pname]` material on this process's
+      `serve` endpoint and on every network proxy it holds
+      (`placement.py:1961-1969`), so a unanimous value is this receiver's own
+      trust anchor. Disagreement (an injected entry carrying foreign material)
+      collapses it to None, which refuses every network seam — fail closed.
+    """
+    directory = None
+    if spec_path:
+        directory = os.path.realpath(os.path.dirname(os.path.abspath(str(spec_path))))
+    blocks = [((spec.get("serve") or {}).get("endpoint") or {}).get("tls")]
+    for info in (spec.get("proxies") or {}).values():
+        if isinstance(info, dict) and isinstance(info.get("endpoint"), dict):
+            blocks.append(info["endpoint"].get("tls"))
+    identities = {ident for ident in (_tls_identity(b) for b in blocks) if ident}
+    return {"dir": directory, "tls": identities.pop() if len(identities) == 1 else None}
+
+
+def _sanction_address(target, anchor: dict | None) -> str | None:
+    """Judge the ADDRESS a proxy is about to be pointed at against what this
+    receiver independently sanctions. Returns None when sanctioned, else the
+    reason to REFUSE.
+
+    A local UDS seam is sanctioned by containment in this process's own
+    placement directory: the conductor binds every seam socket there and nowhere
+    else, the directory is 0700, and the receiver learned it from its argv
+    rather than from the spec. `/tmp/attacker.sock` is therefore not an address
+    this receiver sanctions, whoever named it.
+
+    A network seam is sanctioned by this process's own mTLS trust anchor: the
+    receiver cannot enumerate the composition's machines (the addresses live in
+    the placement manifest, which it does not hold), but it does hold the
+    identity + CA it was itself issued, and a network seam is by construction
+    "the two processes that hold CA-signed certs" (`bridge.TlsConfig`), not
+    whoever can reach a port. An endpoint with no mTLS material, or material
+    that is not this process's own, is refused. THE HONEST LIMIT, named rather
+    than smuggled past: a spec edit that copies this process's own material onto
+    a foreign host:port passes this check and is then stopped one layer down, at
+    the handshake, because the foreign host holds no CA-signed leaf.
+
+    Indeterminate is a refusal in both shapes: no placement directory, or no
+    single mTLS identity of its own, means the receiver cannot sanction the
+    address and therefore does not.
+    """
+    if isinstance(target, str):
+        target = {"socket": target}
+    if not isinstance(target, dict):
+        return "seam target is neither a socket path nor an endpoint mapping"
+    anchor = anchor or {}
+    if target.get("host") is None:
+        path = target.get("socket") or target.get("path")
+        if not path:
+            return "seam target carries no address; refused fail-closed (item 337)"
+        anchor_dir = anchor.get("dir")
+        if not anchor_dir:
+            return ("receiver holds no placement directory of its own to sanction a "
+                    "socket address against; refused fail-closed (item 337)")
+        path = str(path)
+        parent = os.path.realpath(os.path.dirname(os.path.abspath(path)))
+        if parent != anchor_dir:
+            return (f"socket {path!r} is outside this process's placement directory "
+                    f"{anchor_dir!r} — not an address this receiver sanctions")
+        if not os.path.basename(path).endswith(".sock"):
+            return f"socket {path!r} is not a seam socket in the placement directory"
+        return None
+    if not str(target.get("host") or "") or not isinstance(target.get("port"), int):
+        return "network seam target has no host/port; refused fail-closed (item 337)"
+    identity = _tls_identity(target.get("tls"))
+    if identity is None:
+        return ("network seam target carries no complete mTLS material "
+                "(cert/key/ca/identity) — not an address this receiver sanctions")
+    if anchor.get("tls") is None:
+        return ("receiver holds no single mTLS identity of its own to sanction a "
+                "network seam against; refused fail-closed (item 337)")
+    if identity != anchor["tls"]:
+        return ("network seam target is not anchored on this process's own mTLS "
+                "identity and CA — not an address this receiver sanctions")
+    return None
+
+
+def _selector_binding(running_ir: dict, key: str, component: str) -> str | None:
+    """Bind the wire's SELECTOR to the key whose proxy actually moves. Returns
+    None when `component` is genuinely a provider of `key` in this process's own
+    running manifest, else the reason to REFUSE. Without this, admission of any
+    component in the composition is a pass token for a repoint or a wiring of
+    any OTHER key."""
+    providers = _providers_of(running_ir, key)
+    if not providers:
+        return (f"key {key!r} is provided by no component of this process's own "
+                f"running manifest; refused fail-closed (item 337)")
+    if component not in providers:
+        return (f"component {component!r} does not provide key {key!r} — this "
+                f"process's own manifest names {', '.join(sorted(providers))}; an "
+                "unrelated component is not an admission token for this key")
+    return None
+
+
+def _repoint_decision(spec_files: list, running_ir: dict, cmd: dict,
+                      anchor: dict | None = None) -> tuple[bool, str | None]:
     """Decide whether a `repoint` control command may be accepted, item 337.
 
     A `repoint` re-points a live proxy onto a successor provider. It must pass
@@ -114,11 +282,28 @@ def _repoint_decision(spec_files: list, running_ir: dict, cmd: dict) -> tuple[bo
     Fail-closed: a legacy socket-only command that carries no admissible
     reference is REFUSED, never silently accepted. This is a planned-cutover
     gate only; the peer-death withdrawal path (`bridge._Client`) is untouched.
+
+    The selector alone is NOT the decision. Before `swap_admission` runs at all,
+    two receiver-derived checks bind the verdict to the thing that actually
+    changes: `_selector_binding` refuses a `component` that this process's own
+    manifest does not name as the provider of `cmd["key"]`, and
+    `_sanction_address` refuses a `cmd["socket"]` outside the placement
+    directory this process was handed its own spec in. Admitting a component
+    while re-pointing a key at an unjudged address judged the wrong thing.
     """
+    key = cmd.get("key")
     component, backend = cmd.get("component"), cmd.get("backend")
+    if not key:
+        return False, "repoint names no key; refused fail-closed (item 337)"
     if not component or not backend:
         return False, ("repoint carries no admissible successor reference "
                        "(component/backend); refused fail-closed (item 337)")
+    problem = _selector_binding(running_ir, key, component)
+    if problem:
+        return False, problem
+    problem = _sanction_address(cmd.get("socket"), anchor)
+    if problem:
+        return False, problem
     from revl.placement import swap_admission  # noqa: PLC0415
     try:
         _candidate, error = swap_admission(list(spec_files), running_ir, component, backend)
@@ -129,7 +314,8 @@ def _repoint_decision(spec_files: list, running_ir: dict, cmd: dict) -> tuple[bo
     return True, None
 
 
-def _boot_wiring_decision(spec_files: list, running_ir: dict, info: dict) -> tuple[bool, str | None]:
+def _boot_wiring_decision(spec_files: list, running_ir: dict, key: str, info: dict,
+                          anchor: dict | None = None) -> tuple[bool, str | None]:
     """Decide whether a boot-time bridge proxy may be wired to its provider,
     item 337 Seam 2 (`docs/design/337-polyglot-admission-mesh.md`).
 
@@ -147,11 +333,19 @@ def _boot_wiring_decision(spec_files: list, running_ir: dict, info: dict) -> tup
     carrying no admissible reference (component/backend) is REFUSED, never
     silently wired; any failure to reach a verdict fails closed; and a refused
     proxy is simply never wired, so the honest boot proceeds unchanged around
-    it. A cross-composition remote seam (item 151) never carries a
-    component/backend at all — that is Seam 3, a different, deferred seam —
-    so it is a caller's job to only invoke this for same-composition entries;
-    it still fails closed here rather than assume-admit if one arrives without
-    a selector.
+    it. Whether an entry is a same-composition seam at all is decided by the
+    CALLER from the receiver's own manifest (`_apply_boot_wiring` ->
+    `_providers_of`), never from the entry's `remote` flag; a genuine
+    cross-composition seam (item 151) is Seam 3, a different, deferred seam.
+
+    And, as at the repoint seam, the selector is not the decision: the entry's
+    `component` must be bound to `key` by this process's own manifest
+    (`_selector_binding`), and the address the proxy would actually be pointed
+    at — `info["endpoint"] or info["socket"]`, which is the whole effect of the
+    wiring — must be sanctioned by the receiver's own anchors
+    (`_sanction_address`). Keeping an honest selector while swapping the
+    address underneath it is exactly the "injected wiring" this seam exists to
+    catch.
 
     The honest limit (named in the design, not smuggled past it): at boot the
     consumer holds the SAME centrally-sliced source the conductor already
@@ -164,6 +358,12 @@ def _boot_wiring_decision(spec_files: list, running_ir: dict, info: dict) -> tup
     if not component or not backend:
         return False, ("boot proxy carries no admissible provider reference "
                        "(component/backend); refused fail-closed (item 337)")
+    problem = _selector_binding(running_ir, key, component)
+    if problem:
+        return False, problem
+    problem = _sanction_address(info.get("endpoint") or info.get("socket"), anchor)
+    if problem:
+        return False, problem
     from revl.placement import swap_admission  # noqa: PLC0415
     try:
         _candidate, error = swap_admission(list(spec_files), running_ir, component, backend)
@@ -175,31 +375,40 @@ def _boot_wiring_decision(spec_files: list, running_ir: dict, info: dict) -> tup
 
 
 async def _apply_boot_wiring(key: str, info: dict, spec_files: list, running_ir: dict,
-                             wire, log=None) -> bool:
+                             wire, log=None, anchor: dict | None = None) -> bool:
     """Decide, then (only if admitted) perform one boot-time proxy wiring —
     item 337 Seam 2. `wire` is the actual proxy setup (async: builds the bridge
     proxy and awaits its fiber, in `run()` below); it is invoked ONLY when the
     named provider passes `_boot_wiring_decision`. Returns True when the proxy
     was wired, False when it was REFUSED — in which case `wire` is never
     called at all, so the refusal actually blocks the wiring rather than
-    merely producing a diagnostic. A remote seam (item 151: a genuinely
-    separate composition, carrying no component/backend at all) is Seam 3, out
-    of this seam's scope, and always wires. Split out of `run()`'s boot loop so
-    the admission seam is unit-testable without a live Context, mirroring
+    merely producing a diagnostic. Split out of `run()`'s boot loop so the
+    admission seam is unit-testable without a live Context, mirroring
     `_apply_repoint`.
+
+    Whether this entry is in scope is decided from the RECEIVER's own manifest,
+    not from the entry: a key some component of `running_ir` provides is a
+    same-composition seam and IS gated, whatever the entry's `remote` flag
+    says. Only a key this composition provides nowhere is a genuine
+    cross-composition handoff (item 151), which is Seam 3 — a different,
+    deferred seam with its own trust-anchor requirement — and wires ungated.
+    Believing a wire-carried `remote: true` instead let one flag skip the gate
+    on a key this process's own manifest owns.
     """
-    if not info.get("remote"):
-        ok, reason = _boot_wiring_decision(spec_files, running_ir, info)
+    if _providers_of(running_ir, key):
+        ok, reason = _boot_wiring_decision(spec_files, running_ir, key, info, anchor)
         if not ok:
             if log:
                 log("proxy", key, f"REFUSED (admission): {reason}")
             return False
+    elif log:
+        log("proxy", key, "cross-composition remote (Seam 3): not Seam-2 gated")
     await wire()
     return True
 
 
 def _apply_repoint(cmd: dict, clients: dict, spec_files: list, running_ir: dict,
-                   log=None) -> bool:
+                   log=None, anchor: dict | None = None) -> bool:
     """Apply one `repoint` command: re-admit the successor against the running
     manifest, and ONLY on admission re-point the proxy's `_Client`. Returns True
     when the proxy was re-pointed, False when the command was refused (the proxy
@@ -211,7 +420,7 @@ def _apply_repoint(cmd: dict, clients: dict, spec_files: list, running_ir: dict,
         if log:
             log("repoint", key or "?", "no such proxy in this process")
         return False
-    ok, reason = _repoint_decision(spec_files, running_ir, cmd)
+    ok, reason = _repoint_decision(spec_files, running_ir, cmd, anchor)
     if not ok:
         if log:
             log("repoint", key, f"REFUSED (admission): {reason}")
@@ -230,8 +439,13 @@ async def _flush() -> None:
         await asyncio.sleep(0)
 
 
-async def run(spec: dict) -> None:
+async def run(spec: dict, spec_path=None) -> None:
     name = spec["name"]
+    # item 337: the address anchors this process holds independently of any one
+    # seam entry — the placement directory it was handed its own spec in (from
+    # argv, not from the spec JSON) and the mTLS identity it presents itself.
+    # Every seam address, at boot and at a live cutover, is judged against these.
+    anchor = _seam_anchor(spec, spec_path)
     backend_dir = str(backends_root() / "python")
     if backend_dir not in sys.path:
         sys.path.insert(0, backend_dir)
@@ -289,7 +503,8 @@ async def run(spec: dict) -> None:
             fibers.append((f"{key}-proxy", fiber))
             log("proxy", key, f"-> {bridge.Endpoint.from_spec(target).describe()}")
 
-        await _apply_boot_wiring(key, info, spec["files"], running_ir, _wire, log=log)
+        await _apply_boot_wiring(key, info, spec["files"], running_ir, _wire, log=log,
+                                 anchor=anchor)
 
     # 2. this process's own components. G3 proves the dependency graph is a
     # checked DAG, so independent branches are provably independent and boot
@@ -383,7 +598,8 @@ async def run(spec: dict) -> None:
                 # admission; on refusal the proxy keeps its current target (no
                 # blip). This is the planned-cutover path only, distinct from
                 # the peer-death withdrawal `bridge._Client` drives.
-                if _apply_repoint(cmd, clients, spec["files"], running_ir, log=log):
+                if _apply_repoint(cmd, clients, spec["files"], running_ir, log=log,
+                                  anchor=anchor):
                     print(f"[{name}] REPOINTED {cmd.get('key')} -> "
                           f"{cmd.get('socket')}", flush=True)
 
@@ -423,8 +639,14 @@ async def run(spec: dict) -> None:
 
 
 def main() -> None:
-    spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    asyncio.run(run(spec))
+    # The spec PATH, not just its contents: the directory the conductor wrote
+    # this process's spec into is the placement directory (0700, mkdtemp) and is
+    # the receiver's anchor for judging seam addresses (item 337,
+    # `_seam_anchor`). It arrives through argv, so an edit to the spec JSON
+    # cannot move it.
+    spec_path = sys.argv[1]
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    asyncio.run(run(spec, spec_path=spec_path))
 
 
 if __name__ == "__main__":
