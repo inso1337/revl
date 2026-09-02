@@ -300,6 +300,85 @@ def test_double_approve_before_a_swap_still_re_prompts_with_a_new_hash(sink):
 
 
 # ---------------------------------------------------------------------------
+# F5, the other half: the SAME question, asked twice, is answerable twice.
+#
+# A ticket hash is the identity of a QUESTION — component, reach-closure
+# candidate hash, kind, args digest — so the identical class-(c) crossing
+# attempted a second time re-raises the SAME hash. Scoping the "one ticket mints
+# at most one approval" rule to that hash for the life of the session made the
+# second asking permanently unanswerable: `approve_ticket` reported the SPENT
+# entry back as already-approved, minted nothing, and the re-issued call raised
+# the same ticket forever. Every repeat-a-crossing shape in the lighthouse
+# workload — a shell escape run twice, an edit re-applied, a session verb
+# re-issued — dead-ended there.
+#
+# The unit is the answer ROUND: a new round opens only once the previous answer
+# has been spent, so the duplicate-mint guarantee above is untouched and a
+# repeated crossing stays approvable.
+# ---------------------------------------------------------------------------
+
+@needs_cordis
+def test_the_same_crossing_can_be_approved_a_second_time(sink):
+    from revl.mcp.approval import ApprovalRequired
+    session = _session()
+    session.load(_ir(), record=True)
+
+    with pytest.raises(ApprovalRequired) as e1:
+        session.call("ops", "shout", [sink, "hi"])
+    session.approve_ticket(e1.value.ticket["hash"])
+    session.call("ops", "shout", [sink, "hi"])
+    assert _lines(sink) == ["announce:hi"]
+
+    # the identical crossing again: same question, same hash, and a fresh yes
+    # has to buy it. BEFORE the fix this `approve_ticket` was an idempotent
+    # no-op against the already-spent entry and the re-issue below raised
+    # `ApprovalRequired` again, with no way for any operator to get past it.
+    with pytest.raises(ApprovalRequired) as e2:
+        session.call("ops", "shout", [sink, "hi"])
+    assert e2.value.ticket["hash"] == e1.value.ticket["hash"]
+    session.approve_ticket(e2.value.ticket["hash"])
+    session.call("ops", "shout", [sink, "hi"])
+    assert _lines(sink) == ["announce:hi", "announce:hi"]
+
+    # two yeses, two crossings, two DISTINCT ledger rows — so the audit join
+    # (`approval-granted` -> `approval-consumed` -> emission, on `requestId`)
+    # can still say which decision authorized which fire.
+    entries = [e for e in session._ledger if e["hash"] == e1.value.ticket["hash"]]
+    assert len(entries) == 2
+    assert all(e["consumed"] for e in entries)
+    assert len({e["requestId"] for e in entries}) == 2
+    assert entries[0]["requestId"] == e1.value.ticket["hash"]   # round 1 unchanged
+
+
+@needs_cordis
+def test_duplicate_approves_never_over_mint_in_any_round(sink):
+    # the guard on the fix above: re-opening a round must NOT reopen the
+    # over-mint. In EVERY round, N duplicate `approve_ticket` calls still buy
+    # exactly ONE crossing.
+    from revl.mcp.approval import ApprovalRequired
+    session = _session()
+    session.load(_ir(), record=True)
+
+    for expected in (1, 2):
+        with pytest.raises(ApprovalRequired) as exc:
+            session.call("ops", "shout", [sink, "hi"])
+        h = exc.value.ticket["hash"]
+        first = session.approve_ticket(h)
+        assert session.approve_ticket(h) == first     # idempotent within a round
+        assert session.approve_ticket(h) == first
+        live = [e for e in session._ledger
+                if e["hash"] == h and not e["consumed"]]
+        assert len(live) == 1                         # three yeses, one token
+        session.call("ops", "shout", [sink, "hi"])
+        assert _lines(sink) == ["announce:hi"] * expected
+
+    # and the crossing after the last spend is still refused, not replayed
+    with pytest.raises(ApprovalRequired):
+        session.call("ops", "shout", [sink, "hi"])
+    assert _lines(sink) == ["announce:hi", "announce:hi"]
+
+
+# ---------------------------------------------------------------------------
 # 4. a compensated emission still prompts (class (c) unchanged by 247)
 # ---------------------------------------------------------------------------
 
@@ -364,6 +443,73 @@ def test_activation_body_emission_cannot_dodge_the_prompt(sink):
     session.approve_ticket(exc.value.ticket["hash"])
     session.swap(candidate)
     assert _lines(sink) == ["announce:boot"]
+
+
+# ---------------------------------------------------------------------------
+# 12b. a MULTI-COMPONENT gated load converges — driven end to end, the way an
+# operator drives it.
+#
+# The gate walks every activation body in load order and consumes each standing
+# approval as it goes, so a load that raises on the SECOND class-(c) activation
+# has already spent the FIRST one on an attempt that never booted. The retry
+# therefore re-raises the first component's ticket, verbatim. That is the whole
+# operator loop for any real composition — raise, approve, re-issue, until it
+# boots — and it is exactly what a single-component test cannot see: with one
+# gated component the loop is prompt/approve/boot and never asks the same
+# question twice.
+#
+# The revl suite had no test that drove a composition with more than one gated
+# activation body through `load` to a boot, which is why a hash-scoped
+# idempotency rule could turn this loop into a non-terminating one and stay
+# green here while it broke every route-chain check downstream.
+# ---------------------------------------------------------------------------
+
+def _two_gated_activations(sink: str) -> str:
+    return (
+        "extern emission fn announce(sink: Str, msg: Str) = @py {\n"
+        "    with open(sink, 'a') as _f:\n"
+        "        _f.write('announce:' + msg + '\\n')\n"
+        "    return\n"
+        "}\n"
+        "service Ops { fn ping() -> Int }\n"
+        "service Aux { fn pong() -> Int }\n"
+        f"component First provides ops: Ops {{\n"
+        f"  emit announce(\"{sink}\", \"first\")\n"
+        "  provide ops { fn ping() = 1 }\n"
+        "}\n"
+        f"component Second provides aux: Aux {{\n"
+        f"  emit announce(\"{sink}\", \"second\")\n"
+        "  provide aux { fn pong() = 2 }\n"
+        "}\n"
+    )
+
+
+@needs_cordis
+def test_a_multi_component_gated_load_converges(sink):
+    from revl.mcp.approval import ApprovalRequired
+    ir = compile_source(_two_gated_activations(sink), "two_activations.rvl")
+    session = _session()
+
+    asked = []
+    for _attempt in range(12):            # bounded: the bug made this unbounded
+        try:
+            session.load(ir, record=True)
+            break
+        except ApprovalRequired as exc:
+            asked.append(exc.ticket["component"])
+            session.approve_ticket(exc.ticket["hash"])
+    else:                                  # pragma: no cover — the regression
+        pytest.fail(f"the gated load never converged; asked={asked}")
+
+    assert session.loaded
+    # every gated activation body ran, exactly once each
+    assert sorted(_lines(sink)) == ["announce:first", "announce:second"]
+    # and the operator was asked about the first component twice: once for the
+    # attempt that did not boot, once for the one that did. Re-asking is correct
+    # (its first yes was spent on the abandoned attempt); never being able to
+    # ANSWER the second asking is the regression.
+    assert asked.count("First") == 2
+    assert asked.count("Second") == 1
 
 
 # ---------------------------------------------------------------------------
