@@ -199,6 +199,17 @@ semantics test and a ts fixture went uncommitted — both green under `tests/`,
 both red on the per-backend CI jobs (roadmap item 327; see the
 `revl-wave-backend-golden-gap` note).
 
+There is a second, narrower version of the same gap, and it is the reason CI
+has a `frontend-cordis` job as well as `frontend`. `pytest tests/` on a plain
+`.[test]` install has no cordis-py runtime, so every test in `tests/` guarded on
+`importlib.util.find_spec("cordis")` skips. Both halves are gated now: the
+`frontend` job runs the suite WITHOUT a runtime (it must stay green on a bare
+checkout) and `frontend-cordis` runs the same suite under
+`backends/python/.venv/bin/python` after `sh backends/python/setup.sh`, which is
+where the guarded tests actually execute. To run that half locally, set the venv
+up once and then run the root suite under it. Roadmap item 430 tracks what is
+excluded there and why.
+
 `make pre-merge` (script: [`tools/pre_merge.sh`](tools/pre_merge.sh)) closes that
 gap by mirroring the **fast half** of every per-backend CI job in one local
 command, in order, reporting each step:
