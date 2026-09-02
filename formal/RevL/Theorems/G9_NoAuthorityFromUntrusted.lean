@@ -43,21 +43,62 @@ modelling propagation as label-preserving and join as growth is the sound
 reading of it: nothing here claims a step *loses* taint except the one
 step that is allowed to.
 
-## Scope, stated honestly
+## Non-vacuity, up front (roadmap item 418)
 
+The adversarial review of 2026-09-02 found that G4/G5/G6/G8 are
+tautologies over a chosen inductive — the identical statements hold of a
+typing relation that admits nothing — and that only 3 of 25 theorems
+carry non-vacuity evidence. This file is written against that bar, and
+carries four separate guards, all proved below:
+
+* `g9_not_vacuous` and `secret_rules_not_vacuous` exhibit **inhabited**
+  flows, so nothing here is true by an empty relation;
+* `authority_refusal_is_not_universal` exhibits ONE flow that an
+  authority sink refuses and a disclosure sink admits, so the conclusion
+  depends on the sink rule rather than refusing everything;
+* `sink_rules_are_distinct` separates all four `Admits` rules pairwise,
+  so this is not one predicate written four times (the review's "G1 and
+  G6 are literally the same theorem" finding);
+* `secret_refusal_is_load_bearing` shows the label algebra **can** clear a
+  `secret` — the very same declassifier forms clear every other origin —
+  so `secret_persists` holds because of `taint.py`'s two refusals, not
+  because the datatype lacks a constructor for the bad case. Delete
+  either refusal from `kindOK` and the theorem becomes false.
+
+## Scope — what G9 does NOT cover
+
+Stated plainly, because the review's finding is that STATUS.md claimed
+more than the Lean proved.
+
+* **Path coverage is NOT proved, and this is where the real bugs live.**
+  `Flow` starts from a path that is *given*. That the checker *walks*
+  every path a program contains is a separate obligation, and it is the
+  one that actually broke: `taint._walk_component_methods` descends only
+  into `provide` steps, so a component's **activation body was never
+  taint-checked at all** (fixed on `fix/taint-activation-body-and-secret-
+  receiver`), and a `Secret[T]` parameter was stripped inside its own
+  receiver body. Nothing in this file would have caught either. The
+  obligation cannot even be *stated* against the current L0: L0 has no
+  component bodies, no `provide`/activation distinction, and no typed
+  parameters — the exact structure both bugs live in. It is therefore
+  recorded as a named open obligation in `formal/STATUS.md`, not smuggled
+  in as a proved row and not `sorry`'d as a statement that does not
+  typecheck.
+* The interprocedural fixed point (`_Signature`, `_infer_signatures`)
+  that discovers which paths exist is likewise unmodelled. As `CrossTier`
+  says of its emitters: the model proves what follows once the path is
+  exhibited.
 * This is the STATIC half (Slice A/B/C/D). The runtime tag of Slice B
   (item 243) is not modelled; nothing here claims a runtime property.
-* `Flow` is one path. The reference's interprocedural fixed point
-  (`_Signature`, `_infer_signatures`) computes which paths *exist*; that
-  the fixed point finds them all is a separate obligation, out of scope
-  here — as `CrossTier` says of its emitters, the model proves what
-  follows once the path is exhibited.
 * `Admits` classifies a sink; that the checker *labels* the right
   positions as sinks (`TaintModel.sinks`, `_sink_of`,
-  `_SINK_CLASS_SCOPES`) is extraction, not theorem. The
-  `taint_surface_within_declared_context` bridge below is the part of the
-  labelling that IS proved: the origin side is derived from the declared
-  capability scope and is bounded by G6's confinement.
+  `_SINK_CLASS_SCOPES`) is extraction, not theorem. The origin half of
+  that labelling IS proved: `taint_surface_within_declared_context`
+  composes with G6 to bound the origins a statement can mint by its
+  declared context.
+* No differential-oracle row references these definitions; the oracle
+  carries no taint verdicts, so G9 is not covered by that gate either
+  (review C4 applies here as much as elsewhere).
 * The `via` diagnostic chain carries no security content and is dropped.
 -/
 
@@ -392,5 +433,69 @@ theorem secret_rules_not_vacuous :
     exact ⟨fun _ => rfl, by decide, by decide⟩
   · intro ℓ
     exact selfMinted_refused rfl rfl
+
+/-! ### Anti-tautology guards (roadmap item 418)
+
+Three properties a shape tautology could not have. -/
+
+/-- **The refusal is not universal.** One and the same declassifier-free
+flow — a `web` value relayed through a pure hop — is *admitted* at a
+disclosure sink and *refused* at an authority sink. So
+`no_authority_from_untrusted` is not the degenerate "nothing ever reaches
+anything": its conclusion turns on which sink rule applies, which is
+exactly the `Untrusted[T]`-into-`Trusted[T]` distinction G9 is about. (In
+the reference: a `web`-tainted value crossing an emission is *recorded*
+on the audit surface, not refused; the same value at a `Trusted[T]`
+parameter is the G9 error.) -/
+theorem authority_refusal_is_not_universal (P : Profile) (G : Grants) :
+    Flow P G [Origin.web] [Step.propagate] [Origin.web] ∧
+    declassifiersOf [Step.propagate] = [] ∧
+    Admits Sink.disclosure ([Origin.web] : Label) ∧
+    ¬ Admits Sink.authority ([Origin.web] : Label) := by
+  refine ⟨Flow.propagate _ _ _ (Flow.nil _), rfl, ⟨by decide, by decide⟩, ?_⟩
+  intro h
+  exact h Origin.web (by decide)
+
+/-- **The four sink rules are four different rules**, separated pairwise
+by a witness each. This is the guard against the review's "G1 and G6 are
+literally the same theorem" pattern: an authority sink refuses a
+provenance origin a disclosure sink admits; a disclosure sink refuses a
+`confidential` value a declared `Secret[T]` receiver admits; and a
+`Secret[T]` receiver — the most permissive of the three — still refuses a
+capability-bound key, which is the A8 disjointness. -/
+theorem sink_rules_are_distinct :
+    (¬ Admits Sink.authority ([Origin.web] : Label) ∧
+      Admits Sink.disclosure ([Origin.web] : Label)) ∧
+    (¬ Admits Sink.disclosure ([Origin.confidential] : Label) ∧
+      Admits Sink.secretReceiver ([Origin.confidential] : Label)) ∧
+    ¬ Admits Sink.secretReceiver ([Origin.secret] : Label) ∧
+    ¬ Admits Sink.unnameable ([Origin.web] : Label) := by
+  refine ⟨⟨?_, ⟨by decide, by decide⟩⟩,
+          ⟨?_, (by decide : Origin.secret ∉ ([Origin.confidential] : Label))⟩, ?_, ?_⟩
+  · intro h; exact h Origin.web (by decide)
+  · intro h; exact h.2 (by decide)
+  · intro h; exact h (by decide)
+  · intro h; exact h Origin.web (by decide)
+
+/-- **The `secret` refusals are load-bearing, not structural.** The label
+algebra is perfectly capable of clearing a `secret`: `applyD` on the very
+same `endorse[secret]` node computes the empty label, and the very same
+declassifier forms do clear every other origin. What stops a bound
+provider key is `taint.py`'s two explicit refusals — `endorse[secret]`
+rejected before the declared-slot check (§4a.3), and a checked parser
+rejected on a secret-carrying value rather than laundering it — both of
+which sit in `kindOK`. Remove either and `secret_persists` is false.
+This is the guard the review asks for: the theorem is not true because
+the datatype has no constructor for the bad case. -/
+theorem secret_refusal_is_load_bearing (P : Profile) (G : Grants) :
+    applyD ⟨.endorse Origin.secret, true⟩ [Origin.secret] = ([] : Label) ∧
+    applyD ⟨.parser, true⟩ [Origin.secret] = ([] : Label) ∧
+    ¬ DeclassOK P G ⟨.endorse Origin.secret, true⟩ [Origin.secret] ∧
+    ¬ DeclassOK P G ⟨.parser, true⟩ [Origin.secret] ∧
+    DeclassOK P [Origin.web] ⟨.endorse Origin.web, true⟩ [Origin.web] ∧
+    applyD ⟨.endorse Origin.web, true⟩ [Origin.web] = ([] : Label) := by
+  refine ⟨by decide, rfl, endorse_secret_refused, ?_, ?_, by decide⟩
+  · intro h; exact h.2 (by simp)
+  · exact ⟨fun _ => rfl, by decide, by decide⟩
 
 end RevL.G9
