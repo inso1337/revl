@@ -2810,14 +2810,21 @@ class Parser:
             # dotted path, a literal, a binary op, …) is refused immediately,
             # exactly as before — no import can turn `Pool.open(...)` into a
             # witnessed call, so there is nothing to defer.
-            if isinstance(acquire, ExprCall) and isinstance(acquire.callee, ExprVar):
+            #
+            # Item 420(d): a BARE NAME defers too, called or not. `effect
+            # open_h` names the same extern `effect open_h()` does, so the
+            # parser's copy of the refusal could otherwise deny a declared
+            # `undo` that the lowering (which HAS the extern table) can see
+            # and name. Deferring both spellings leaves the parser's domain
+            # exactly the shapes where no declared inverse can exist, which
+            # is what makes the generic wording below the right one for every
+            # refusal it still raises.
+            if isinstance(acquire, ExprVar) or (
+                    isinstance(acquire, ExprCall)
+                    and isinstance(acquire.callee, ExprVar)):
                 return acquire, None, line, setup, is_async
-            head = _describe_expr(acquire)
-            raise self.err(
-                line,
-                f"effect has no `undo` and {head} is not pure",
-                hint=f"write `effect {head}(...) undo <expr>`, or mark the call `emit` if it deliberately crosses the system boundary (G4)",
-            )
+            message, hint = missing_undo_refusal(_describe_expr(acquire))
+            raise self.err(line, message, hint=hint)
         self.next()
         undo = self.pure_expr()
         return acquire, undo, line, setup, is_async
@@ -4996,6 +5003,62 @@ def _describe_expr(expr) -> str:
     if isinstance(expr, ExprLit):
         return repr(expr.value)
     return "the expression"
+
+
+def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None) -> tuple[str, str]:
+    """The ONE rendering of G4's bare-acquisition refusal: `(message, hint)`.
+
+    Two positions raise it and neither may drift from the other. The parser
+    refuses at the point it can prove the acquisition is not a bare name
+    (`effect Pool.open(url)`); `lower.py._lower_effect_step` refuses on the
+    MERGED, post-import program, which is where a bare name's classification
+    is finally known (item 315). So the text lives here, once, and both call
+    it.
+
+    `declared` is the half only the lowering can supply: the acquisition's
+    callee IS a declared extern, and it DOES declare an inverse
+    (`(classification, inverse_callee)`), which was rejected rather than
+    absent. That distinction is item 420(d). Saying "effect has no `undo`"
+    about `extern acquire fn open_h() -> H undo close_h(result)` denies the
+    existence of something the author wrote two lines up and sends them
+    looking for a missing declaration instead of at the rule that discarded
+    it: only a `witnessed` extern's declared inverse is auto-registered by
+    the teardown accumulator, so an `acquire` extern's is never replayed on
+    either tier (`ext["undo"]` is read only by the item-243 witnessed
+    emitters). The refusal names the rule and both fixes the author can
+    enact (item 274), instead of a fact that is not true. It does NOT offer
+    the generic wording's third escape: `emit` marks an `emission` crossing,
+    and `emit open_h()` on an `acquire`-classified extern is itself refused
+    ("`emit` on a fn expression, which is not declared `emission`"), so
+    naming it here would be advice the author cannot take, which is exactly
+    the failure 274 is about.
+
+    The parser cannot supply `declared` and must not try: `use` imports
+    resolve one file at a time, after parsing, so an imported extern's
+    classification is unknown there. Its domain is exactly the shapes that
+    can never BE a bare-name extern call, which is why the generic wording
+    is the right one for every refusal it still raises."""
+    spelling = head.strip("`")
+    if declared is not None:
+        classification, inverse = declared
+        article = "an" if classification[:1].lower() in "aeiou" else "a"
+        message = (
+            f"effect has no site `undo`: {head} declares "
+            f"`undo {inverse}(...)`, but {article} `{classification}` extern's "
+            f"declared inverse is never replayed")
+        hint = (
+            f"spell the inverse at the site, where it is the teardown that "
+            f"actually runs on abort: `effect {spelling}(...) undo "
+            f"{inverse}(<the acquired handle>)`. To have the DECLARED inverse "
+            f"be the one that replays, classify {head} `witnessed`, which "
+            f"registers it on the `Ok` branch and requires the return be "
+            f"`Result[Witness, Error]` "
+            f"(docs/design/243-witnessed-externs.md, G4)")
+        return message, hint
+    return (
+        f"effect has no `undo` and {head} is not pure",
+        f"write `effect {spelling}(...) undo <expr>`, or mark the call `emit` "
+        f"if it deliberately crosses the system boundary (G4)")
 
 
 def _dotted_path(expr) -> str | None:
