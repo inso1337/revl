@@ -49,6 +49,20 @@ The slice mirrors three guarantees, in the reference's own checking order
   * G2 (provision disjointness) — two components providing one key (shared
     realm).
 
+Item 186 (bounded pieces) adds the last two single-source surfaces:
+  * multi-realm routing VALIDATION (item 162) — `isolate <key> in realms(...)
+    [strategy(...)]` was parsed-but-unvalidated. Its component-level refusals
+    (prelude placement, a routed provision, an undeclared target, a key both
+    pinned and routed, a key routed twice, an unknown strategy) and the
+    link-time per-realm provider check now cross-check; the four
+    routing-specific ones carry the "ROUTE" tag, its prelude case is PRELUDE and
+    its undeclared target is the shared G1 diagnostic.
+  * the async-coloring approximation — callee collection and leak-reach now stop
+    at a nested COERCED arrow (`stop_async_arrows`). Reaching it needs an
+    async-typed but UNCALLED parameter (else rule 2 colors the callee and masks
+    the difference), which no fixture had; the corpus and
+    `test_nested_coerced_arrows_agree` now cover both sides of every switch.
+
 Corpus discipline (as in the checker oracle): every rejected program is one
 whose ONLY reference refusal is inside this slice — a T1/G1/G3/parse refusal
 would be out of slice on the selfhost side, so those are excluded and the test
@@ -175,6 +189,20 @@ def _classify(e: RevlError) -> str:
     if ("is not a declared requirement or provision of" in m
             or "is isolated twice in" in m):
         return "G1"
+    # ---- item 186: multi-realm routing validation (item 162) ---------------
+    # `isolate … in realms(...)` — the four routing-specific component refusals
+    # (lower.py's `RouteStmt` branch) plus the link-time per-realm provider
+    # check. All code-less; the gate tags them "ROUTE" so the oracle compares
+    # tag AND message. Two of the branch's refusals are NOT here on purpose:
+    # its prelude case reuses the "must precede …" wording (PRELUDE above) and
+    # its undeclared-target case IS the shared "is not a declared requirement
+    # of" G1 diagnostic (above).
+    if ("routes a *required* key" in m
+            or "is already isolated to a single realm in" in m
+            or "is routed twice in" in m
+            or "unknown routing strategy" in m
+            or "multi-realm bind of" in m):
+        return "ROUTE"
     if ("declared plain, but this implementation reaches" in m
             or "must be marked `emit`" in m
             or "emits through" in m):
@@ -228,6 +256,21 @@ def _agree(admit, src: str) -> None:
 
 
 # ---------------------------------------------------------------- corpus
+
+# Two providers of one key, isolated into realms `r1` and `r2` — the backend
+# realms every multi-realm routing case below binds against (item 162). Per-realm
+# G2 keeps them non-conflicting, so the routing verdict is the only one in play.
+_ROUTE_PROVIDERS = """service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component StoreA provides kv: Kv {
+  isolate kv in realm("r1")
+  provide kv { fn get(k) { return k } }
+}
+component StoreB provides kv: Kv {
+  isolate kv in realm("r2")
+  provide kv { fn get(k) { return k } }
+}
+"""
 
 # Programs the reference admits — the gate must admit them too. Kept
 # reference-clean (no out-of-slice defect), so "" is the only agreement.
@@ -505,6 +548,53 @@ component Worker requires net: Net provides task: Task {
 service Sup { emission fn go(prompt: Str) -> Int }
 component Supervisor provides sup: Sup {
   provide sup { fn go(prompt: Str) { let w = effect spawn Worker with { } undo w.dispose()  emit w.task.run(prompt)  return 0 } }
+}
+"""),
+    # ---- item 186: multi-realm routing (item 162) --------------------------
+    # A route whose every named realm has its own provider composes, with and
+    # without a strategy; pinning a key AFTER routing it is NOT a refusal (the
+    # reference's IsolateStmt branch does not consult `routes`, and the routed
+    # key resolves per-realm at link, shadowing the single-realm table).
+    ("a multi-realm bind with a provider per realm admits",
+     _ROUTE_PROVIDERS + """component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1", "r2") strategy(round_robin)
+  provide api { fn go(k) { return kv.get(k) } }
+}
+"""),
+    ("a multi-realm bind without a strategy admits",
+     _ROUTE_PROVIDERS + """component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1", "r2")
+  provide api { fn go(k) { return kv.get(k) } }
+}
+"""),
+    ("a routed key pinned afterwards still admits",
+     _ROUTE_PROVIDERS + """component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1", "r2")
+  isolate kv in realm("r1")
+  provide api { fn go(k) { return kv.get(k) } }
+}
+"""),
+    # ---- item 186: the closed coloring approximation -----------------------
+    # Callee collection and leak-reach STOP at a nested COERCED arrow, exactly
+    # as `stop_async_arrows` does. `wrap`'s async-typed parameter is never
+    # CALLED, so rule 2 does not color `wrap` and mask the difference — these
+    # are the inputs that reach the approximation the gate used to carry.
+    ("a coerced arrow nested in a sync arrow does not leak", """
+extern emission async fn tick(n: Str) -> Str = @py { return n }
+fn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }
+fn plain(f: (Str) -> Str) -> Str { return f("a") }
+service S { emission async fn go(y: Str) -> Str }
+component C provides s: S {
+  provide s { async fn go(y) { let r = plain(w => wrap(z => tick(z), w))   return r } }
+}
+"""),
+    ("a fn whose only async reach is a coerced arrow stays sync", """
+extern emission async fn tick(n: Str) -> Str = @py { return n }
+fn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }
+fn h(y: Str) -> Str { return wrap(z => tick(z), y) }
+service S { emission fn go(y: Str) -> Str }
+component C provides s: S {
+  provide s { fn go(y) { let r = emit h(y)   return r } }
 }
 """),
 ]
@@ -822,6 +912,54 @@ component C requires kv: Kv {
   let v = effect kv.get("x") undo kv.get("x")
 }
 """, "G1"),
+    # ---- item 186: multi-realm routing validation (item 162) ---------------
+    # The routing form's four own refusals, its undeclared-target G1, and the
+    # link-time per-realm provider check. Each program is otherwise clean, so
+    # the routing verdict is the only one the reference can reach.
+    ("routing a provision is refused (ROUTE)",
+     _ROUTE_PROVIDERS + """component Router requires kv: Kv provides api: Api {
+  isolate api in realms("r1")
+  provide api { fn go(k) { return kv.get(k) } }
+}
+""", "ROUTE"),
+    ("routing an undeclared key is refused (G1)",
+     _ROUTE_PROVIDERS + """component Router requires kv: Kv provides api: Api {
+  isolate nope in realms("r1")
+  provide api { fn go(k) { return kv.get(k) } }
+}
+""", "G1"),
+    ("a pinned key cannot also be routed (ROUTE)",
+     _ROUTE_PROVIDERS + """component Router requires kv: Kv provides api: Api {
+  isolate kv in realm("r1")
+  isolate kv in realms("r1", "r2")
+  provide api { fn go(k) { return kv.get(k) } }
+}
+""", "ROUTE"),
+    ("a key routed twice is refused (ROUTE)",
+     _ROUTE_PROVIDERS + """component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1")
+  isolate kv in realms("r2")
+  provide api { fn go(k) { return kv.get(k) } }
+}
+""", "ROUTE"),
+    ("an unknown routing strategy is refused (ROUTE)",
+     _ROUTE_PROVIDERS + """component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1", "r2") strategy(round_robbin)
+  provide api { fn go(k) { return kv.get(k) } }
+}
+""", "ROUTE"),
+    ("a routed realm with no provider is refused (ROUTE)",
+     _ROUTE_PROVIDERS + """component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1", "r9")
+  provide api { fn go(k) { return kv.get(k) } }
+}
+""", "ROUTE"),
+    ("a route after a provide block is refused (PRELUDE)",
+     _ROUTE_PROVIDERS + """component Router requires kv: Kv provides api: Api {
+  provide api { fn go(k) { return kv.get(k) } }
+  isolate kv in realms("r1", "r2")
+}
+""", "PRELUDE"),
 ]
 
 
@@ -1144,3 +1282,101 @@ def test_in_file_test_programs_agree(admit):
     assert len(progs) >= 25, f"expected the in-file programs, found {len(progs)}"
     for src in progs:
         _agree(admit, src)
+
+
+# ------------------------------------------------------ multi-realm route fuzz
+
+# Random routed compositions (item 162, mirrored under roadmap item 186): a few
+# single-key providers scattered over three realms, and one consumer routing the
+# key across a random realm subset with a random (sometimes misspelled)
+# strategy. Providers take DISTINCT realms, so per-realm G2 never fires and the
+# only reachable verdicts are the routing ones: a realm with no provider is the
+# link-time refusal, an unknown strategy is refused earlier, while the component
+# is read. (A same-realm provider pair is deliberately not generated: the
+# reference's collect-all sink orders its diagnostics by LINE, so an
+# earlier-line G2 outranks a later-line component refusal, while this gate
+# reports the first refusal it reaches. That order gap is pre-existing — it
+# already separates the two on `isolate … twice` — and is not a routing
+# property.)
+_ROUTE_REALMS = ["r1", "r2", "r3"]
+_ROUTE_STRATEGIES = [None, "round_robin", "least_loaded", "random", "sticky",
+                     "round_robbin", "roundrobin"]
+
+
+def _compose_routes(rng: random.Random) -> str:
+    lines = ["service Kv { fn get(k: Str) -> Str }",
+             "service Api { fn go(k: Str) -> Str }"]
+    for i, realm in enumerate(rng.sample(_ROUTE_REALMS, rng.randint(1, 3))):
+        lines.append(
+            f"component Store{i} provides kv: Kv {{\n"
+            f'  isolate kv in realm("{realm}")\n'
+            f"  provide kv {{ fn get(k) {{ return k }} }}\n}}")
+    picked = rng.sample(_ROUTE_REALMS, rng.randint(1, 3))
+    labels = ", ".join('"%s"' % r for r in picked)
+    strategy = rng.choice(_ROUTE_STRATEGIES)
+    clause = f"  isolate kv in realms({labels})"
+    if strategy is not None:
+        clause += f" strategy({strategy})"
+    lines.append("component Router requires kv: Kv provides api: Api {\n"
+                 + clause
+                 + "\n  provide api { fn go(k) { return kv.get(k) } }\n}")
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("oneline", [False, True])
+@pytest.mark.parametrize("seed", range(24))
+def test_generated_routes_agree(admit, seed, oneline):
+    rng = random.Random(seed)
+    for _ in range(20):
+        src = _compose_routes(rng)
+        if oneline:
+            src = _oneline(src)
+        ref_tag, _ = _ref(src)
+        assert ref_tag in ("", "ROUTE"), \
+            f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
+        _agree(admit, src)
+
+
+# --------------------------------------------------- nested coerced-arrow fuzz
+
+# The inputs that reach roadmap item 186's residual coloring approximation, and
+# the neighbours that do not. Three independent switches:
+#   * the inner callee's callback parameter is `Async[T]`-typed or plain — the
+#     first coerces (and async-stamps) the arrow handed to it, the second does
+#     not, so the arrow leaks;
+#   * that callee CALLS its parameter or ignores it — calling it is async
+#     coloring rule 2, which colors the callee and MASKS the pruning (this is
+#     why the approximation needed an async-typed-but-uncalled parameter to be
+#     reachable at all);
+#   * the arrow is nested one level down inside a plain sync arrow, or passed
+#     directly — nesting is what makes the outer arrow's own reach the question.
+# The gate must agree on every combination, which pins both the prune and the
+# absence of a prune.
+@pytest.mark.parametrize("oneline", [False, True])
+@pytest.mark.parametrize("async_slot", [False, True])
+@pytest.mark.parametrize("calls_param", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("async_method", [False, True])
+def test_nested_coerced_arrows_agree(admit, oneline, async_slot, calls_param,
+                                     nested, async_method):
+    cb_type = "(Str) -> Async[Str]" if async_slot else "(Str) -> Str"
+    wrap_body = "return cb(y)" if calls_param else "return y"
+    call = ("plain(w => wrap(z => tick(z), w))" if nested
+            else "wrap(z => tick(z), y)")
+    decl = "emission async fn go(y: Str) -> Str" if async_method \
+        else "emission fn go(y: Str) -> Str"
+    method = "async fn go(y)" if async_method else "fn go(y)"
+    src = f"""extern emission async fn tick(n: Str) -> Str = @py {{ return n }}
+fn wrap(cb: {cb_type}, y: Str) -> Str {{ {wrap_body} }}
+fn plain(f: (Str) -> Str) -> Str {{ return f("a") }}
+service S {{ {decl} }}
+component C provides s: S {{
+  provide s {{ {method} {{ let r = {call}   return r }} }}
+}}
+"""
+    if oneline:
+        src = _oneline(src)
+    ref_tag, _ = _ref(src)
+    assert ref_tag in ("", "A1", "G4"), \
+        f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
+    _agree(admit, src)
