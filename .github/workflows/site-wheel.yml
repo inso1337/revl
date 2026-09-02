@@ -1,0 +1,97 @@
+# The committed playground/site wheel must match a fresh build of `src/revl`.
+#
+# WHY THIS IS A SEPARATE WORKFLOW, ON MAIN ONLY (issue #252).
+#
+# `site/vendor/revl-2.0.0-py3-none-any.whl` and its playground twin vendor the
+# WHOLE of `src/revl`, so any change to a bundled module makes them stale. That
+# is why `tools/check_site_wheel.py` is deliberately NOT a per-PR gate: as one,
+# it reddened CI on every source change, which is an outage class rather than a
+# defect — the wheel is a deploy artifact, and a PR that edits `parser.py` is
+# not wrong for not having rebuilt it. Roadmap 110c moved the check to merge and
+# release time (`make pre-merge`, and `tools/affected_tests.py` selects the
+# `site-wheel` gate whenever `src/revl/**.py` changes).
+#
+# In practice nobody runs it. Agents run targeted tests and open a PR, CI runs
+# the matrix, the pipeline merges on green — so the merge-time step has no owner
+# and the wheel rots between deliberate regenerations. It was found stale three
+# times in one day, each time by an agent who happened to run `pre-merge` for an
+# unrelated reason. Every other generated artifact in this repo has automatic
+# drift detection (`crates/revl-gate` and `crates/revl-gate-wasm` drift gates,
+# `tools/regen_goldens.py --check`, `tools/conformance.py --check-readme`); the
+# wheel was the only one with none.
+#
+# This job gives it an owner that cannot forget, WITHOUT putting it back on the
+# per-PR critical path: it runs after the merge, on main, where the tree is the
+# thing that actually ships to Pages. A PR is unaffected — this workflow has no
+# `pull_request` trigger at all, so it contributes no check name to a PR and
+# nothing here can become a required check by accident.
+#
+# WHY IT FAILS RATHER THAN OPENING A PR. The other half of issue #252's option 2
+# was "regenerate and open a PR". It does not work with the default token: a
+# pull request opened by `GITHUB_TOKEN` does not trigger `ci.yml`, so the bot's
+# PR would arrive with none of the 13 required checks and could not be merged
+# under branch protection until a human pushed to it — an owner that cannot
+# forget, producing work that cannot land. Making it work needs a PAT or a
+# GitHub App with write access to the default branch, which is a standing
+# credential to maintain for an artifact whose fix is one command. So: detect
+# loudly, and let the orchestrator run that command. A red main is exactly the
+# signal this issue says was missing, and it is the same contract every other
+# generated artifact here is already held to.
+#
+# THE FIX when this job is red:
+#
+#     python3 tools/check_site_wheel.py --write   # rebuilds both vendor copies
+#     git commit -am "Refresh the committed playground/site wheel"
+#
+# (`python3 site/build.py` does the same thing plus the site's examples.js.)
+name: site wheel drift
+
+on:
+  # Every push to main. No `paths:` filter on purpose: the wheel's inputs are
+  # all of `src/revl/**`, plus `pyproject.toml`'s version, the builder and the
+  # checker — a filter listing them is one more thing that can be silently
+  # wrong, and the job is a stdlib-only zip build measured in seconds against a
+  # 13-job matrix that runs on the same event.
+  push:
+    branches: [main]
+  # Backstop and manual handle: a weekly run catches drift that landed while
+  # this workflow was disabled or its run was lost, and `gh workflow run "site
+  # wheel drift"` answers "is the wheel current?" before a release without
+  # running the rest of the gate.
+  schedule:
+    - cron: "40 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  site-wheel-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # No `pip install`: playground/build_wheel.py is stdlib-only and reads
+      # src/revl off the checkout, so this needs no revl install and no
+      # backend toolchain.
+      - name: committed wheel matches a fresh build
+        run: python3 tools/check_site_wheel.py
+      - name: how to fix
+        if: failure()
+        run: |
+          {
+            echo "### The committed playground/site wheel is stale"
+            echo
+            echo 'Regenerate it and open a PR:'
+            echo
+            echo '```sh'
+            echo 'python3 tools/check_site_wheel.py --write'
+            echo 'git commit -am "Refresh the committed playground/site wheel"'
+            echo '```'
+            echo
+            echo "Until then the published playground at"
+            echo "<https://inso1337.github.io/revl/> runs an older compiler"
+            echo "than main. See the job log above for the drifted modules."
+          } >> "$GITHUB_STEP_SUMMARY"
