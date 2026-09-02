@@ -2984,9 +2984,23 @@ class LeaseHandle:
         return self._revoke_cb(self.request_id)
 
 
+_CLOCK_ANCHOR: list = []
+
+
 def _default_now_ms() -> int:
+    """Epoch-ms for approval expiry, MONOTONIC-ANCHORED (roadmap 427 F8).
+
+    The wall clock is sampled once; every later reading is that sample plus the
+    elapsed `time.monotonic_ns()`. A settimeofday, an NTP step or a DST change
+    therefore cannot move this backwards, and an `expiresAt` computed from one
+    reading cannot be un-passed by a later one. The MCP session overrides
+    `SessionOwner.now_ms` with its own ratcheted clock; this is the standalone-run
+    default, which must not be weaker."""
     import time  # noqa: PLC0415 — stdlib
-    return int(time.time() * 1000)
+    if not _CLOCK_ANCHOR:
+        _CLOCK_ANCHOR.append((int(time.time() * 1000), time.monotonic_ns()))
+    wall_ms, mono_ns = _CLOCK_ANCHOR[0]
+    return wall_ms + (time.monotonic_ns() - mono_ns) // 1_000_000
 
 
 def _approval_scope_covers(scope: Optional[str], token: str) -> bool:
@@ -3160,8 +3174,14 @@ class SessionOwner:
                 continue                                   # invariant 5: deputy
             if not _approval_scope_covers(entry.get("capability"), capability):
                 continue                                   # wrong capability
+            # roadmap 427 F8: expiry LATCHES. Once this ledger entry has been
+            # seen past its deadline it stays dead, so no later clock reading —
+            # a stepped wall clock, an injected `now_ms` — can hand it back.
+            if entry.get("expiredAt") is not None:
+                continue                                   # invariant 3: expired
             exp = entry.get("expiresAt")
             if exp is not None and now > exp:
+                entry["expiredAt"] = now
                 continue                                   # invariant 3: expired
             if want_hash is not None and entry.get("candidateHash") != want_hash:
                 continue                                   # invariant 4: swapped
