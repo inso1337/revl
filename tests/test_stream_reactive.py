@@ -1,4 +1,4 @@
-"""Item 130 Slice 1 — `Stream[T]` reactive types: admission + lowering + refusals.
+"""Item 130 — `Stream[T]` reactive types: admission + lowering + refusals.
 
 The tier-agnostic half of the item (the runtime PROOF is the py suite at
 backends/python/tests/test_stream_runtime.py). This suite pins:
@@ -10,6 +10,12 @@ backends/python/tests/test_stream_runtime.py). This suite pins:
   a non-suspending teardown, a non-source operand, and stream type-formation;
 * the py emitter renders the cancellation-first bracket, and wasm REFUSES with
   the honest EmitError (§4.6, exit test §10.8).
+
+Slice 2 adds the pure combinators (`map`/`filter`/`take`, lowered as
+derived-stream STAGES rather than host method calls so the host-verb namespace
+does not grow), the declared backpressure policies with their bounded buffer
+(§4.4), and the `block`-policy drain window that fires on the deterministic test
+clock (§8) — each with its refusal, and each still refused on wasm.
 """
 
 from __future__ import annotations
@@ -203,3 +209,263 @@ def test_wasm_refuses_a_stream_program_with_an_honest_emit_error():
     msg = str(excinfo.value)
     assert "suspends a fiber" in msg
     assert "Job.run" in msg and "backend py" in msg
+
+
+# ===========================================================================
+# Slice 2 — pure combinators, the declared backpressure policies, the clock
+# ===========================================================================
+
+_CHAIN = """
+component C {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src.map(x => x * 2).filter(x => x > 2).take(3)
+              policy drop_oldest buffer 4 undo sub.close()
+  await sub.next()
+}
+"""
+
+
+def _subscribe_step(src: str) -> dict:
+    body = compile_source(src, "s.rvl")["components"][0]["body"]
+    return next(s for s in body if s.get("subscribe"))
+
+
+# ---------------------------------------------------------------------------
+# Combinators lower as DERIVED-STREAM stages, not as host method calls (§1)
+# ---------------------------------------------------------------------------
+
+def test_combinator_chain_lowers_to_ordered_pure_stages():
+    acquire = _subscribe_step(_CHAIN)["acquire"]
+    stages = acquire["stages"]
+    assert [s["stage"] for s in stages] == ["map", "filter", "take"], \
+        "the chain lowers left to right, one derived stream per link"
+    assert stages[0]["fn"]["kind"] == "arrow" and stages[1]["fn"]["kind"] == "arrow"
+    assert stages[2]["count"] == 3
+    # still ONE bracket: the whole chain rides the subscription's single inverse
+    assert _subscribe_step(_CHAIN)["undo"]["method"] == "close"
+
+
+def test_combinators_add_no_host_verbs():
+    """The reason the chain is parsed as stages rather than as `src.map(…)`
+    method calls: `map`/`filter`/`take` never enter the shared host-verb
+    namespace, whose disjointness from the value-method table is the invariant
+    pinned in tests/test_map_value_type.py."""
+    from revl.typecheck import _HOST_ARG_SIG, _HOST_FAMILIES
+
+    verbs = set()
+    for methods in _HOST_FAMILIES.values():
+        verbs |= set(methods)
+    assert verbs.isdisjoint({"map", "filter", "take"})
+    assert not any(key.split(".")[-1] in ("map", "filter", "take")
+                   for key in _HOST_ARG_SIG)
+    # and the stage carries no `call` node the host-verb checker would consult
+    stages = _subscribe_step(_CHAIN)["acquire"]["stages"]
+    assert all(stage.get("fn", {}).get("kind", "arrow") == "arrow"
+               for stage in stages)
+
+
+def test_a_non_combinator_after_the_stream_is_refused_naming_merge():
+    msg = _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src.merge(x => x) undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "is not a stream combinator" in msg
+    assert "map(f)" in msg and "merge" in msg
+
+
+def test_rule_3_5_refuses_an_effectful_transform():
+    """A `map`/`filter` transform types in PURE mode (G6): the chain is a pure
+    derivation whose only effects are the source's bracket and the consumer's
+    body (§3.5, §4.7)."""
+    msg = _refusal("""
+    component C {
+      let pool = effect Pool.open("u", 1) undo pool.close()
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src.map(x => pool.query("q")) undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "pool.query" in msg and "combinator is pure" in msg
+    assert "move the effect into the consumer body" in msg
+
+
+def test_take_needs_a_positive_count():
+    assert "positive whole count" in _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src.take(0) undo sub.close()
+      await sub.next()
+    }
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Backpressure: the declared policies and the bounded buffer (§4.4)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("policy", ["error", "drop_newest", "drop_oldest", "block"])
+def test_every_declared_policy_lowers(policy):
+    step = _subscribe_step(f"""
+    component C {{
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src policy {policy} undo sub.close()
+      await sub.next()
+    }}
+    """)
+    assert step["policy"] == policy and step["acquire"]["policy"] == policy
+
+
+def test_error_is_the_default_policy_and_the_defaults_stay_absent():
+    """`error` is the default — deterministic, no silent loss (§4.4, judgment
+    call 2) — and an undeclared buffer/drain/chain leaves the IR exactly as
+    Slice 1 lowered it (the additive-keys promise, §5)."""
+    step = _subscribe_step(_CONSUMER)
+    assert step["policy"] == "error"
+    assert "buffer" not in step and "drain" not in step
+    assert step["acquire"] == {"kind": "subscribe",
+                               "stream": {"kind": "name", "id": "src"},
+                               "policy": "error"}
+
+
+def test_bounded_buffer_capacity_lowers_and_zero_is_refused():
+    step = _subscribe_step("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src policy drop_newest buffer 2 undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert step["buffer"] == 2 and step["acquire"]["buffer"] == 2
+    assert "no unbounded buffers" in _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src buffer 0 undo sub.close()
+      await sub.next()
+    }
+    """)
+
+
+def test_an_unknown_policy_is_refused_naming_the_four():
+    msg = _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src policy retry undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "unknown backpressure policy" in msg
+    for policy in ("error", "drop_newest", "drop_oldest", "block"):
+        assert policy in msg
+
+
+def test_a_qualifier_may_not_be_declared_twice():
+    assert "duplicate `policy`" in _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src policy block policy error undo sub.close()
+      await sub.next()
+    }
+    """)
+
+
+# ---------------------------------------------------------------------------
+# The deterministic test clock: the `block` drain window (§8)
+# ---------------------------------------------------------------------------
+
+def test_block_drain_window_lowers_in_milliseconds():
+    step = _subscribe_step("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src policy block buffer 2 drain 10ms undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert step["policy"] == "block" and step["drain"] == 10
+    assert step["acquire"]["drain"] == 10
+
+
+def test_the_drain_window_and_the_advance_statement_share_one_clock():
+    """§8: stream timing is testable WITHOUT wall-clock sleeps because the drain
+    window rides the existing test clock — the same `Clock` the `advance <n><unit>`
+    lifecycle statement steps. Pinned on one emitted module so the two can never
+    drift onto separate clocks."""
+    code = _tier_emit("python").emit(compile_source("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src policy block buffer 2 drain 10ms undo sub.close()
+      await sub.next()
+    }
+    lifecycle test "the window fires on a timeline step" {
+      load C
+      advance 10ms
+      unload C
+      assert no_residue
+    }
+    """, "s.rvl"))
+    assert "Stream.subscribe(src, 'block', _revl_ctx, capacity=2, drain_ms=10)" in code
+    assert "_revl_Clock.advance(10)" in code
+    assert "Clock as _revl_Clock" in code
+
+
+def test_drain_is_refused_without_the_block_policy():
+    """The clock only drives the one time-windowed behavior the design names —
+    a `block`-policy drain interval (§8). `drop_*`/`error` resolve an overflow
+    immediately and have no window to fire."""
+    msg = _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src policy drop_oldest drain 10ms undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "`drain` is the `block`-policy drain window" in msg
+
+
+# ---------------------------------------------------------------------------
+# Emission: py renders the chain/policy/window; wasm still REFUSES (§4.6)
+# ---------------------------------------------------------------------------
+
+def test_python_emits_the_chain_the_capacity_and_the_drain_window():
+    code = _tier_emit("python").emit(compile_source(_CHAIN, "s.rvl"))
+    assert ("sub = Stream.subscribe(src, 'drop_oldest', _revl_ctx, "
+            "stages=[('map', lambda x: (x * 2)), ('filter', lambda x: (x > 2)), "
+            "('take', 3)], capacity=4)") in code
+    assert "yield lambda: sub.close()" in code, "still ONE bracket for the chain"
+
+    windowed = _tier_emit("python").emit(compile_source("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src policy block buffer 2 drain 10ms undo sub.close()
+      await sub.next()
+    }
+    """, "s.rvl"))
+    assert ("Stream.subscribe(src, 'block', _revl_ctx, capacity=2, drain_ms=10)"
+            in windowed)
+
+
+def test_a_slice_1_subscription_still_emits_the_exact_three_argument_call():
+    """Byte-identity for the Slice 1 surface (§10.9): every Slice 2 argument is
+    appended only when DECLARED."""
+    code = _tier_emit("python").emit(compile_source(_CONSUMER, "s.rvl"))
+    assert "sub = Stream.subscribe(src, 'error', _revl_ctx)\n" in code
+
+
+def test_wasm_still_refuses_the_slice_2_surface():
+    """The refusal fence holds over the new surface too: a combinator chain, a
+    declared policy and a drain window are all still a fiber suspension this
+    tier has no async host seam for (§4.6, exit test §10.8)."""
+    emit = _tier_emit("wasm")
+    for src in (_CHAIN, """
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src policy block buffer 2 drain 10ms undo sub.close()
+      await sub.next()
+    }
+    """):
+        with pytest.raises(emit.EmitError) as excinfo:
+            emit.emit(compile_source(src, "s.rvl"))
+        msg = str(excinfo.value)
+        assert "suspends a fiber" in msg and "backend py" in msg
