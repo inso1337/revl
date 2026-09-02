@@ -3488,21 +3488,35 @@ class Session:
                     uses = ticket.get("leaseUses")
                 if ttl_ms is None:
                     ttl_ms = ticket.get("leaseTtlMs")
-            caps = ticket.get("capabilities") or []
+            # item 427 F3: mint against the SPELLINGS THE OPERATOR WAS SHOWN.
+            # `capabilities` is the worst-class-over-reach fold and holds BARE
+            # tokens; `classCCapabilities` is the class-(c) subset carrying the
+            # resource-bound spellings the ticket renders and `_find_standing
+            # _grant` enforces. Reading the former meant `revl_approve(hash=…,
+            # uses=N)` with no explicit capability minted bare `http_post` off a
+            # ticket reading `http_post(host="api.stripe.com")`: the bare token
+            # TOPS the cone, so the grant then auto-approved a send to any host.
+            # That contradicted `_grant_covers`'s own docstring. Now the two
+            # agree: the string minted is a string the operator read.
+            caps = ticket.get("classCCapabilities") or []
             if capability is None:
                 if len(caps) != 1:
                     raise SessionError(
-                        f"this ticket reaches {len(caps)} capabilities "
+                        f"this ticket reaches {len(caps)} class-(c) capabilities "
                         f"({', '.join(caps) or 'none'}) — name which one to "
                         f"widen into a standing grant via `capability`")
                 capability = caps[0]
             elif not any(_cap_covers(c, capability) for c in caps):
                 raise SessionError(
-                    f"capability {capability!r} is not on this ticket's reach "
-                    f"({', '.join(caps) or 'none'}) — a grant may only narrow a "
-                    f"capability the crossing actually reaches, never widen past "
-                    f"the declaration (item 294: the mint must be at or below a "
-                    f"declared crossing cone)")
+                    f"capability {capability!r} is not on this ticket's class-(c) "
+                    f"reach ({', '.join(caps) or 'none'}): a grant may only "
+                    f"narrow a capability the crossing actually reaches, never "
+                    f"widen past it (item 294: the mint must be at or below a "
+                    f"declared crossing cone; item 427 F3: at or below the "
+                    f"resource-bound spelling the ticket SHOWED, so a grant can "
+                    f"never top the cone the operator read). To grant a wider "
+                    f"cone, mint proactively against the declared capability "
+                    f"with `revl_approve(capability=…)` instead of this ticket")
             component = ticket["component"]
             candidate_hash = ticket["candidateHash"]
             policy_ttl = self._ticket_ttl_ms(ticket)
