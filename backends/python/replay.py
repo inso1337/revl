@@ -190,6 +190,33 @@ class Sources:
         return lines[lineno - 1].strip()
 
 
+def _unguarded(value: Any) -> Any:
+    """The disposer that sits underneath the runtime's Phase-1 guard.
+
+    ``Frame._guard`` (backends/python/runtime.py) routes every disposer an
+    activation body yields through a catch-and-record closure, and the
+    recorder wraps the body from the OUTSIDE (``ctx.effect`` receives
+    ``Frame._tracked(body)``), so the value that reaches
+    :meth:`Timeline.record_yield` is the guard's closure, not the disposer
+    ``ctx.provide`` or the emitted ``lambda: <undo>`` produced. Every such
+    wrapper publishes the thing it wraps on ``_revl_entry`` (the same seam
+    the runtime's own residue naming reads), so following that chain is what
+    keeps a provision identified BY IDENTITY (its ``ctx.provide`` disposer)
+    and an inverse's code site read from the author's own lambda rather than
+    from runtime.py's guard.
+
+    Pass-through when nothing is wrapped, so an un-guarded runtime (or a
+    disposer the guard declined to wrap) behaves exactly as before.
+    """
+    seen: set = set()
+    while True:
+        seen.add(id(value))
+        entry = getattr(value, "_revl_entry", None)
+        if entry is None or id(entry) in seen:
+            return value
+        value = entry
+
+
 def _code_site(value: Any) -> tuple:
     code = getattr(value, "__code__", None)
     if code is None:
@@ -400,8 +427,14 @@ class Timeline:
             self._wal_append(step)
             return step, value
 
-        key = self._provisions.pop(id(value), None)
-        file, lineno = _code_site(value)
+        # classify the disposer the author/runtime actually produced, not the
+        # Phase-1 guard wrapped around it on the way out of the body
+        # (`_unguarded`). Identity is load-bearing twice over here: it is how a
+        # provision is named without guessing, and how a compensation is
+        # matched to the emission one line above it.
+        entry = _unguarded(value)
+        key = self._provisions.pop(id(entry), None)
+        file, lineno = _code_site(entry)
         source = self.sources.line(file, lineno)
 
         if key is not None:
