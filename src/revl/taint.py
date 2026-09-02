@@ -170,6 +170,15 @@ class TaintModel:
     sinks: dict[str, dict[int, str | None]] = field(default_factory=dict)
     # callable name -> {param_index: origin} for params declared `Untrusted[T]`
     untrusted_params: dict[str, dict[int, str]] = field(default_factory=dict)
+    # item 256 Slice 3: callable name -> {param_index: `confidential`} for params
+    # declared `Secret[T]`. The sibling of `untrusted_params`, and the INSIDE half
+    # of `secret_receivers`: the `Secret[T]` declaration authorises the crossing TO
+    # this callable, and `secret_receivers` (read at the CALL SITE) admits it, but
+    # inside the implementing body the parameter is still a confidential value. Seed
+    # it here or the receiver body becomes a self-mintable universal declassifier —
+    # `logit(x)`/`prompt(x)` on its own parameter would disclose the secret with no
+    # `endorse`, no `declassify:confidential` token, and nothing on the audit surface.
+    confidential_params: dict[str, dict[int, str]] = field(default_factory=dict)
     # verified fns whose return declares `Trusted[...]` — parser declassifiers
     declassifiers: set[str] = field(default_factory=set)
     # a human sink label for the diagnostic, keyed by callable name
@@ -262,6 +271,11 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 # `confidential` value is ADMITTED here and refused everywhere
                 # else — the dual of a `Trusted[T]` sink, on a disjoint origin.
                 model.secret_receivers.setdefault(name, set()).add(index)
+                # ...and, INSIDE the implementing body, the parameter still
+                # carries `confidential`. The declaration admits the crossing TO
+                # the receiver, never onward disclosure.
+                model.confidential_params.setdefault(
+                    name, {})[index] = CONFIDENTIAL_ORIGIN
             clean = strip_qualifiers(type_str)
             if clean != type_str:
                 setter(clean)
@@ -348,6 +362,13 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                     # admits a `confidential` value (§7b). Keyed by the operation
                     # name, so an `emit s.take(x)` call site resolves to it.
                     model.secret_receivers.setdefault(method.name, set()).add(i)
+                    # the INSIDE half: the provide method implementing this
+                    # operation sees the parameter as a `confidential` value, so
+                    # disclosing it from the body is refused exactly as a call-site
+                    # flow is. Without this the receiver body launders the
+                    # qualifier away and is a universal declassifier.
+                    model.confidential_params.setdefault(
+                        method.name, {})[i] = CONFIDENTIAL_ORIGIN
                 new_params.append((pname, clean))
             method.params = new_params
             # Slice D (D1/D3): a shell/exec/terminal-scoped service operation is a
@@ -1401,6 +1422,36 @@ class _FlowChecker:
         env.update(merged)
 
 
+def _declared_param_origins(model: TaintModel, key: str) -> dict[int, frozenset]:
+    """The origins a callable's DECLARED parameter qualifiers put on its
+    parameters inside its own body, keyed by parameter index.
+
+    Two qualifiers seed taint here, and both must, for the same reason: the
+    qualifier states what the value IS, so the body has to see it. `Untrusted[T]`
+    seeds its provenance origin (landed, item 249); `Secret[T]` seeds
+    `confidential` (item 256 Slice 3). The `Secret[T]` case is the one that used
+    to be missing: `secret_receivers` is consulted only at the CALL SITE, to admit
+    the crossing, and the qualifier was then stripped — so the receiver's own body
+    saw a bare `Str` with empty taint and could hand it to a log, an LLM prompt or
+    `fs.write` with no `endorse` and no audit token. A declared receiver is
+    authorised to RECEIVE the value, never to disclose it onward."""
+    origins: dict[int, frozenset] = {}
+    for index, origin in (model.untrusted_params.get(key) or {}).items():
+        origins[index] = origins.get(index, frozenset()) | {origin}
+    for index, origin in (model.confidential_params.get(key) or {}).items():
+        origins[index] = origins.get(index, frozenset()) | {origin}
+    return origins
+
+
+def _seed_param_env(model: TaintModel, key: str, params, env: dict) -> None:
+    """Seed a body's environment from its declared parameter qualifiers."""
+    seeded = _declared_param_origins(model, key)
+    for i, param in enumerate(params or []):
+        pname = param["name"] if isinstance(param, dict) else param
+        if i in seeded:
+            env[pname] = Taint(seeded[i], (pname,))
+
+
 def _param_names(params) -> list[str]:
     """Parameter names from a lowered param list (dicts for fns, bare strings
     for provide methods)."""
@@ -1508,10 +1559,7 @@ def _infer_state_env(body, model: TaintModel, source: str, line: int,
                 enforce=False, known_callables=known, any_sink=any_sink,
                 state_env=state_env, state_names=state_names)
             env: dict = {}
-            seeded = model.untrusted_params.get(mname, {})
-            for i, pname in enumerate(method.get("params") or []):
-                if i in seeded:
-                    env[pname] = Taint(frozenset({seeded[i]}), (pname,))
+            _seed_param_env(model, mname, method.get("params"), env)
             checker.run(method.get("body") or [], env)
             for name, taint in checker.state_writes.items():
                 old = state_env.get(name, CLEAN)
@@ -1553,11 +1601,9 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
                                    infer=True, qualname=qual,
                                    known_callables=known, any_sink=any_sink)
             env: dict = {}
-            seeded = model.untrusted_params.get(key, {})
+            seeded = _declared_param_origins(model, key)
             for i, pname in enumerate(params):
-                origins = {_param_marker(i)}
-                if i in seeded:
-                    origins.add(seeded[i])
+                origins = {_param_marker(i)} | set(seeded.get(i, ()))
                 env[pname] = Taint(frozenset(origins), (pname,))
             checker.run(body, env)
             flows = {i for i in range(len(params))
@@ -1608,11 +1654,7 @@ def check_taint(program, fns, components, model: TaintModel,
                                known_callables=known, any_sink=any_sink,
                                untrusted=untrusted)
         env: dict = {}
-        seeded = model.untrusted_params.get(fn["name"], {})
-        for i, param in enumerate(fn.get("params") or []):
-            pname = param["name"] if isinstance(param, dict) else param
-            if i in seeded:
-                env[pname] = Taint(frozenset({seeded[i]}), (pname,))
+        _seed_param_env(model, fn["name"], fn.get("params"), env)
         checker.run(fn.get("body") or [], env)
         if checker.declassified or checker.reaches:
             fn_prov[fn["name"]] = (set(checker.declassified),
@@ -1741,6 +1783,41 @@ def _walk_component_methods(body, model: TaintModel, source: str,
     declassified: set = set()
     records: list[dict] = []
     approvals: set = set()
+
+    # The ACTIVATION body (every step that is not a `provide` block). It runs once
+    # when the component activates and is exactly where `examples/migrator.rvl` and
+    # `examples/fault_sweep_two_phase.rvl` teach authors to write emissions — so an
+    # `emit` here is a real boundary crossing and must face the same refusals a
+    # `provide` method's does. Nothing enforced over it before: the only other walk
+    # of these steps is `_infer_state_env`'s deliberately NON-enforcing seeding
+    # sweep, which runs BEFORE the state fixed point has converged (refusing there
+    # would depend on iteration order, and it is skipped entirely when the component
+    # has no state world). That sweep stays non-enforcing; this is the one enforcing
+    # pass, run after `state_env` is final, so each activation-body statement is
+    # walked by exactly one enforcing checker and no diagnostic is reported twice.
+    act_steps = [s for s in body
+                 if isinstance(s, dict) and s.get("step") != "provide"]
+    if act_steps:
+        act = _FlowChecker(
+            model, source, line, signatures=signatures,
+            # a component activation body carries no `endorse[...]` slot of its
+            # own (only a `fn` or a service operation can declare one), so an
+            # `endorse` written here is undeclared and refused — a declassification
+            # is never ambient (Slice C).
+            endorse_allowed=frozenset(),
+            endorse_label=f"{component} activation" if component else "activation",
+            known_callables=known, any_sink=any_sink,
+            state_env=state_env if state_env is not None else {},
+            state_names=state_names, untrusted=untrusted,
+            # an activation-body `return` is not a crossing of the service / MCP
+            # bridge, so the provide-method return rules do not apply here.
+            provide_return=False)
+        act.run(act_steps, {})
+        reaches |= act.reaches
+        declassified |= act.declassified
+        records.extend(act.declassify_records)
+        approvals |= act.reach_approvals
+
     for step in body:
         if not isinstance(step, dict):
             continue
@@ -1757,10 +1834,7 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                     state_names=state_names, untrusted=untrusted,
                     provide_return=True)
                 env: dict = {}
-                seeded = model.untrusted_params.get(mname, {})
-                for i, pname in enumerate(method.get("params") or []):
-                    if i in seeded:
-                        env[pname] = Taint(frozenset({seeded[i]}), (pname,))
+                _seed_param_env(model, mname, method.get("params"), env)
                 checker.run(method.get("body") or [], env)
                 reaches |= checker.reaches
                 declassified |= checker.declassified
