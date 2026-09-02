@@ -1,0 +1,2 @@
+fn dbl(n: Int) -> Int { return n + n }
+fn flip(b: Bool) -> Bool { return !b }
