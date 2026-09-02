@@ -282,7 +282,7 @@ failing link, never a judgement call:
 |-----------------------------|---------------------------------------------------------------|
 | source or IR hash changed   | recomputed `composition_hash` != bound (attest hash-mismatch) |
 | backend differs             | no `artifact/<host-backend>` binding, or its hash != re-emit  |
-| capability set expanded     | `policy.json` requires a capability outside the host ceiling  |
+| capability set expanded     | the surface derived from `ir/ir.json` reaches outside the ceiling |
 | policy incompatible         | bound `policy` hash mismatch, or realm/operator gate fails    |
 | evidence stale              | `gauntlet`/`conformance` timestamp older than the host's TTL  |
 | signer untrusted            | `key_id` / verify-key not in the host's `[deploy].trust` store|
