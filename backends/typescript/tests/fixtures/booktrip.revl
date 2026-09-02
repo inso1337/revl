@@ -2,7 +2,10 @@ service Flights { emission fn reserve(itinerary: Str) -> Str
                   emission fn cancel(key: Str) -> Str }
 service Payments { emission fn charge(card: Str, total: Int) -> Str
                    emission fn refund(card: Str, total: Int) -> Str }
+extern emission idempotent(key: card) fn settle(card: Str, total: Int) -> Str
+  = @ts { return card }
 component BookTrip requires flights: Flights, payments: Payments {
   emit flights.reserve("ABC") compensate flights.cancel("ABC")
   emit payments.charge("visa", 100) compensate payments.refund("visa", 100)
+  emit settle("visa", 100)
 }

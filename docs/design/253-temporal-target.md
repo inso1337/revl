@@ -313,6 +313,73 @@ activity keeps `maximumAttempts: 1` and the 257 retry, if rendered at all, is
 workflow-side re-invocation. Slice 2 must keep these two retries distinct or it
 will hand a completion to Temporal to retry as if idempotent.
 
+
+### 3a. What Slice 2 actually shipped
+
+The table above is the design; this is the outcome, including the two places
+the implementation is stricter than the table and the one place the table was
+missing a step.
+
+**The register is a FOLD, and reading it at the forward position is a
+double-apply bug.** `lower.py::_idempotent_register` returns ONE value from two
+unrelated claims, and its first branch is the inverse-side one:
+
+```python
+if decl.undo_read:       return "read"      # item 440: `undo pure <inverse>`
+if decl.idempotency_key: return "keyed"     # item 309: a forward key
+return "declared"
+```
+
+So a declaration written `... undo pure chk(result)` carries `register: "read"`
+— the TOP of the partial order, and a member of item 440's `REDISPATCH_FREE` —
+while saying nothing whatever about re-delivering the FORWARD crossing. A
+retry policy asks exactly one question ("may this call be issued again?") and
+it asks it about the forward. So `emit_temporal._forward_register` reads the
+two forward-side facts (`idempotency_key`, `idempotent`) DIRECTLY and never
+touches `register`. `test_folded_register_read_never_promotes_a_forward_crossing`
+compiles a real `undo pure` declaration and pins the asymmetry.
+
+**One class earns a retry: `keyed`.** Everything else stays at
+`maximumAttempts: 1`:
+
+| what | verdict | why |
+|---|---|---|
+| `idempotent(key: p)` (`keyed`) | bounded backoff, 5 attempts | dedup-safe by construction |
+| bare `idempotent` (`declared`) | 1 | an unverified claim; see below |
+| `undo idempotent` (309 inverse claim) | 1 | says nothing about the forward, and is itself only `declared` |
+| `undo pure` (`register: "read"`) | 1 | an INVERSE-side claim; see above |
+| `validated` (257), key or not | 1 | a completion is a read with a cost, not an idempotent write |
+| no claim at all | 1 | the fail-closed fall-through |
+| `recordResidue` (revl-emitted, host-implemented) | 1 | no declaration, so no evidence |
+
+`shape-proven` is admitted by the mapping and unreachable today:
+`_idempotent_register` cannot produce it (`TODO(309-slice4)`).
+
+**Why `declared` gets no opt-in knob.** The design said "opt-in to relax", and
+revl already has that knob — `recovery may re-issue owed emissions (strength:
+declared)`, read by `recovery._reissue_permitted`, which returns False for
+`declared` unless an operator supplied that strength. A Temporal `RetryPolicy`
+is baked into the emitted workflow: there is no operator at the run to supply
+it, and the platform retries on every transient failure. So the knob has
+nowhere to live here and `declared` is at-most-once, full stop.
+`test_derivation_agrees_with_revls_own_reissue_seam` imports the real
+`recovery` symbols so this stays one vocabulary rather than two.
+
+**The retry ceiling is a correctness bound, not timidity.** "High/unbounded
+`maximumAttempts`" above is wrong for a saga: a forward activity that retries
+forever never throws, so the workflow's `catch` never runs and the derived
+compensation phase never drains. Bounded attempts are what keeps the abort path
+reachable.
+
+**The crossing mapping had to widen first.** A service-interface METHOD carries
+only the bare `idempotent` modifier — `parser.py` still has
+`TODO(309-slice1): accept the idempotent(key: p) keyed form` for a method — so
+no `key.method(...)` crossing can reach above `declared`, and the derivation
+would have been vacuous. Slice 2 therefore maps a direct emission-extern
+crossing (`emit charge(...)`) to an activity as well; an extern carries the
+whole ledger. Non-emission externs in effect position are unchanged (they still
+render as host-supplied calls, as Slice 1 had them).
+
 ## 4. The target-variant mechanism
 
 `revl emit --target temporal` is a rendering mode of the existing TypeScript

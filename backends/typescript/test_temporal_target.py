@@ -59,10 +59,12 @@ def _emit_temporal_module():
     return importlib.import_module("emit_temporal")
 
 
-# A mappable saga: two remote-resource crossings, each with an independent-key
-# compensation. Nothing host-pinned, nothing outside the Slice-1 allowlist.
-# Committed beside the other emitter fixtures so `tools/regen_goldens.py` emits
-# the golden from the same bytes this test does.
+# A mappable saga: two remote-resource crossings with independent-key
+# compensations, plus (Slice 2) a third crossing that is a KEYED emission
+# extern, so the one golden exercises both derived retry classes at once and
+# `tsc --noEmit` typechecks both proxy groups. Nothing host-pinned, nothing
+# outside the closed allowlist. Committed beside the other emitter fixtures so
+# `tools/regen_goldens.py` emits the golden from the same bytes this test does.
 _BOOKTRIP = (_HERE / "tests" / "fixtures" / "booktrip.revl").read_text(encoding="utf-8")
 
 
@@ -210,9 +212,23 @@ def test_continue_and_record_does_not_abort_the_drain():
     assert "continue  // record and skip" in got
 
 
-def test_every_activity_is_at_most_once():
-    got = EMIT.emit(_booktrip_ir(), target="temporal")
-    assert "retry: { maximumAttempts: 1 }" in got
+def test_a_document_with_no_evidence_is_wholly_at_most_once():
+    """A document that declares no idempotency evidence anywhere renders the
+    ONE at-most-once group and no retryable group at all — the Slice-1 shape,
+    now reached by DERIVATION rather than by a hard-coded constant. This is the
+    default the derivation must fall through to."""
+    src = (
+        'service Flights { emission fn reserve(itinerary: Str) -> Str\n'
+        '                  emission fn cancel(key: Str) -> Str }\n'
+        'component Trip requires flights: Flights {\n'
+        '  emit flights.reserve("ABC") compensate flights.cancel("ABC")\n'
+        '}\n'
+    )
+    got = _emit_temporal_module().emit_temporal(compile_source(src, "trip.revl"))
+    assert "const AT_MOST_ONCE = { maximumAttempts: 1 }" in got
+    assert "retry: AT_MOST_ONCE," in got
+    assert "DEDUP_SAFE_RETRY" not in got
+    assert got.count("proxyActivities<typeof activities>({") == 1
 
 
 def test_residue_sink_present():
@@ -423,3 +439,236 @@ def test_builtin_sig_determinism_guard_fail_closed():
         "reclassified as an emission or refused for the Temporal target, since a "
         "non-deterministic builtin in workflow position breaks Temporal replay "
         "determinism (docs/design/253-temporal-target.md §6 attack 4).")
+
+
+# ------------------------------------------------- evidence-derived retries (Slice 2)
+#
+# The whole of Slice 2's safety argument is "the retry count is DERIVED from
+# evidence revl already has, and the derivation refuses to promote anything it
+# cannot prove". These tests pin both halves: what earns a retry, and — the
+# larger half — what deliberately does not.
+
+_KEYED_SRC = (
+    'extern emission idempotent(key: card) fn charge(card: Str, total: Int)'
+    ' -> Str = @ts { return "ok" }\n'
+    'extern emission fn refund(card: Str, total: Int) -> Str'
+    ' = @ts { return "ok" }\n'
+    'component Pay {\n'
+    '  emit charge("visa", 100) compensate refund("visa", 100)\n'
+    '}\n'
+)
+
+
+def _groups(text: str) -> tuple:
+    """(at-most-once names, retryable names) from the emitted proxy groups."""
+    at_most, retryable = set(), set()
+    blocks = text.split("proxyActivities<typeof activities>({")
+    header = blocks[0]
+    for block in blocks[1:]:
+        names = {n.strip() for n in
+                 header.rsplit("const {", 1)[1].split("}", 1)[0].split(",")
+                 if n.strip()}
+        body, header = block.split("})", 1)
+        (retryable if "DEDUP_SAFE_RETRY" in body else at_most).update(names)
+    return at_most, retryable
+
+
+def test_emission_extern_crossing_renders_as_an_activity():
+    """Slice 2 widens the crossing mapping to a direct emission-extern call.
+
+    Not a convenience: a service-interface METHOD carries only the bare
+    `idempotent` modifier (parser.py still has `TODO(309-slice1)` for the keyed
+    form), so an extern is the only crossing that can carry the item-309/440
+    ledger the retry derivation reads. Without this the derivation would have
+    no input that ever clears the bar."""
+    got = _emit_temporal_module().emit_temporal(compile_source(_KEYED_SRC, "pay.revl"))
+    assert "await charge(\"visa\", 100n)" in got
+    assert 'saga.push({ name: "refund", run: () => refund("visa", 100n)' in got
+    assert "  charge(card: string, total: bigint): Promise<string>" in got
+
+
+def test_keyed_crossing_earns_a_bounded_retry():
+    """`idempotent(key: <param>)` — item 309's `keyed` register, dedup-safe BY
+    CONSTRUCTION — is the one class that earns a Temporal RetryPolicy."""
+    got = _emit_temporal_module().emit_temporal(compile_source(_KEYED_SRC, "pay.revl"))
+    at_most, retryable = _groups(got)
+    assert retryable == {"charge"}
+    assert {"refund", "recordResidue"} <= at_most
+    assert "const DEDUP_SAFE_RETRY = {" in got
+    assert "maximumAttempts: 5" in got
+
+
+def test_retry_is_bounded_so_the_saga_can_still_abort():
+    """The retry ceiling is not a timidity knob, it is a correctness one: a
+    forward activity that retried forever would never throw, so the workflow's
+    catch — and with it the whole derived compensation drain — would never
+    run."""
+    got = _emit_temporal_module().emit_temporal(compile_source(_KEYED_SRC, "pay.revl"))
+    policy = got.split("const DEDUP_SAFE_RETRY = ", 1)[1].split("\n", 1)[0]
+    assert "maximumAttempts:" in policy
+    attempts = int(policy.split("maximumAttempts:", 1)[1].split("}", 1)[0].strip())
+    assert 1 < attempts < 100, policy
+    assert "backoffCoefficient" in policy and "maximumInterval" in policy
+
+
+def test_declared_idempotent_does_not_earn_a_retry():
+    """A bare `idempotent` — extern or service method — is the author's claim
+    over an opaque host body, machine-checked for SHAPE only. Temporal retries
+    on every transient failure, so promoting a claim here turns one unverified
+    sentence into a production double-apply."""
+    src = (
+        'service Mail { emission idempotent fn send(to: Str) -> Str }\n'
+        'extern emission idempotent fn ping(peer: Str) -> Str'
+        ' = @ts { return "ok" }\n'
+        'component Notify requires mail: Mail {\n'
+        '  emit mail.send("a@b")\n'
+        '  emit ping("h")\n'
+        '}\n'
+    )
+    got = _emit_temporal_module().emit_temporal(compile_source(src, "notify.revl"))
+    at_most, retryable = _groups(got)
+    assert retryable == set()
+    assert {"mailSend", "ping"} <= at_most
+    assert "DEDUP_SAFE_RETRY" not in got
+
+
+def test_undo_idempotent_does_not_earn_a_forward_retry():
+    """item 309's INVERSE-side claim says nothing about re-delivering the
+    forward, and is itself only a `declared` register."""
+    temporal = _emit_temporal_module()
+    src = (
+        'extern pure fn r_close(h: RH) = @ts { return }\n'
+        'extern acquire fn r_open(n: Int) -> RH undo idempotent r_close(result)'
+        ' = @ts { return "h" }\n'
+        'component Res {\n'
+        '  let h = effect r_open(0) undo r_close(h)\n'
+        '}\n'
+    )
+    ir = compile_source(src, "res.revl")
+    entry = next(e for e in ir["externs"] if e["name"] == "r_open")
+    assert entry["undo_idempotent"] is True and entry["register"] == "declared"
+    index = temporal._Index(ir)
+    call = {"kind": "fn", "name": "r_open"}
+    assert temporal._forward_register(call, ir["components"][0], index) is None
+    assert temporal._retry_class(call, ir["components"][0], index) \
+        == temporal._AT_MOST_ONCE
+
+
+def test_folded_register_read_never_promotes_a_forward_crossing():
+    """THE trap this derivation exists to avoid.
+
+    `lower.py::_idempotent_register` folds the forward-side and inverse-side
+    claims into ONE `register` field, and its FIRST branch is the inverse-side
+    one: `if decl.undo_read: return "read"`. So `undo pure` — a claim about the
+    INVERSE — stamps `register: "read"`, and `read` is a member of item 440's
+    `REDISPATCH_FREE`. A derivation that read the folded field would hand the
+    FORWARD crossing a retry policy on the strength of a claim about its
+    inverse, and re-run a mutation nobody said was safe to re-run.
+
+    Compiled from real source, so the trap is the shipped fold, not a fixture."""
+    temporal = _emit_temporal_module()
+    src = (
+        'type WT = { id: Str }\n'
+        'extern pure fn chk(w: WT) -> Int = @ts { return 1 }\n'
+        'extern witnessed fn w_write(x: Str) -> Result[WT, Str] undo pure'
+        ' chk(result) = @ts { return x }\n'
+        'component Res { }\n'
+    )
+    ir = compile_source(src, "read.revl")
+    entry = next(e for e in ir["externs"] if e["name"] == "w_write")
+    # the fold really does stamp the strongest tier in the order...
+    assert entry["register"] == "read" and entry["undo_read"] is True
+    from revl.recovery import REDISPATCH_FREE
+    assert entry["register"] in REDISPATCH_FREE
+    # ...and the forward derivation still refuses to promote it, because
+    # nothing here says re-delivering `w_write` is safe.
+    index = temporal._Index(ir)
+    call = {"kind": "fn", "name": "w_write"}
+    assert temporal._forward_register(call, ir["components"][0], index) is None
+    assert temporal._retry_class(call, ir["components"][0], index) \
+        == temporal._AT_MOST_ONCE
+
+
+def test_validated_pins_to_at_most_once_even_when_keyed():
+    """item 257: a `validated` crossing's `retry N` re-issues a completion
+    THUNK revl-side. `lower.py` says it plainly — a completion is a read with a
+    cost, not an idempotent write — so it must never be lowered to a Temporal
+    RetryPolicy, even when the same declaration also carries a key that would
+    otherwise earn one."""
+    src = (
+        'extern emission[model] validated retry 2 idempotent(key: card)'
+        ' fn ask(card: Str) -> Str = @ts { return "ok" }\n'
+        'component Pay {\n'
+        '  emit ask("visa")\n'
+        '}\n'
+    )
+    ir = compile_source(src, "ask.revl")
+    entry = next(e for e in ir["externs"] if e["name"] == "ask")
+    assert entry["register"] == "keyed" and entry["validated"] is True
+    got = _emit_temporal_module().emit_temporal(ir)
+    at_most, retryable = _groups(got)
+    assert retryable == set() and "ask" in at_most
+    # and the 257 retry budget is not smuggled into the policy either
+    assert "maximumAttempts: 2" not in got
+
+
+def test_record_residue_sink_is_at_most_once():
+    """The residue sink is revl-EMITTED but host-IMPLEMENTED; no declaration
+    carries evidence about it, so it takes the fail-closed default."""
+    got = _emit_temporal_module().emit_temporal(compile_source(_KEYED_SRC, "pay.revl"))
+    at_most, _ = _groups(got)
+    assert "recordResidue" in at_most
+
+
+def test_every_activity_lands_in_exactly_one_retry_group():
+    """Total and disjoint: an activity the derivation forgot would be an
+    undefined symbol in the emitted workflow."""
+    got = _emit_temporal_module().emit_temporal(compile_source(_KEYED_SRC, "pay.revl"))
+    at_most, retryable = _groups(got)
+    assert not (at_most & retryable)
+    declared = {line.strip().split("(", 1)[0]
+                for line in got.split("export interface RevlActivities {", 1)[1]
+                .splitlines() if line.startswith("  ")}
+    assert at_most | retryable == declared
+
+
+def test_derivation_agrees_with_revls_own_reissue_seam():
+    """The retry classes are not a second, parallel idempotency vocabulary:
+    they are item 440's `REDISPATCH_FREE` read at the forward position, and the
+    `declared` refusal is `recovery._reissue_permitted`'s own answer when no
+    operator strength knob is supplied — which a baked-in RetryPolicy can never
+    supply, because there is no operator at the run."""
+    temporal = _emit_temporal_module()
+    from revl.recovery import REDISPATCH_FREE, _reissue_permitted
+
+    assert temporal._RETRY_EARNING_REGISTERS <= REDISPATCH_FREE
+    assert not _reissue_permitted("declared", None)
+    assert not _reissue_permitted("keyed", None)
+    assert _reissue_permitted("keyed", "keyed")
+    # `read` is REDISPATCH_FREE and still not retry-earning here. That
+    # asymmetry is the point of the test above: `read` is stamped by an
+    # INVERSE-side claim, and this position asks a forward-side question.
+    assert "read" in REDISPATCH_FREE
+    assert "read" not in temporal._RETRY_EARNING_REGISTERS
+
+
+def test_one_activity_name_reached_by_two_classes_downgrades():
+    """Two crossings can derive one activity NAME (an extern named exactly what
+    a `key.method` crossing mangles to). The signature cannot disagree, but the
+    retry class can, so the weaker wins: a name reached even once without
+    retry-earning evidence goes back to at-most-once. The only direction that
+    can remove a retry rather than add one."""
+    src = (
+        'service Pay { emission fn charge(card: Str) -> Str }\n'
+        'extern emission idempotent(key: card) fn payCharge(card: Str) -> Str'
+        ' = @ts { return "ok" }\n'
+        'component ViaExtern {\n'
+        '  emit payCharge("visa")\n'
+        '}\n'
+        'component ViaService requires pay: Pay {\n'
+        '  emit pay.charge("visa")\n'
+        '}\n'
+    )
+    got = _emit_temporal_module().emit_temporal(compile_source(src, "clash.revl"))
+    at_most, retryable = _groups(got)
+    assert "payCharge" in at_most and "payCharge" not in retryable
