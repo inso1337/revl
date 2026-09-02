@@ -54,6 +54,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -65,6 +66,7 @@ from pathlib import Path
 
 from ._paths import backends_root, stdlib_root
 from .activation import local_prereqs
+from .attest import canonical_hash
 from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
@@ -1899,6 +1901,35 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             explicit_tls[pname] = {"cert": tconf["cert"], "key": tconf["key"],
                                    "ca": tconf["ca"], "identity": tconf["identity"]}
 
+    # --- effect-correlation guard (item 118 S1 / roadmap 421 F8): every local
+    # UDS seam gets a `revl.deploy.CorrelationGuard` the way bridge.py's own
+    # `peer_identity()` docstring says it should, namely "a correlation guard
+    # authenticates the peer by its own per-process secret alone". Each process
+    # gets a peer identity (its declared [tls] identity when it has one, the
+    # same item-55 identity a network process presents, else its own process
+    # name, unique within this placement) and a fresh per-process secret; the
+    # conductor is the only party that ever holds every secret at once, same as
+    # it is for TLS key material. Scoped to LOCAL sockets only: a network
+    # provider (`[processes.*].address`) may also be reachable by an item-151
+    # remote consumer this placement never enumerates, so wiring a guard there
+    # from this table alone could refuse a legitimate caller it knows nothing
+    # about; that stays a follow-on, not a regression this fix can introduce.
+    correlation_identity = {pname: identities.get(pname, pname) for pname in processes}
+    correlation_secret = {pname: secrets.token_bytes(32) for pname in processes}
+    composition_id = canonical_hash(ir)
+    # provider -> the local (UDS) consumers of its keys, mirroring exactly the
+    # branch below that assigns `entry["socket"]` (never a network or remote
+    # entry), so the two stay in lockstep by construction.
+    uds_consumers: dict[str, set[str]] = {}
+    for _cname in processes:
+        for _key in requires.get(_cname, {}):
+            if _key in provides.get(_cname, {}):
+                continue
+            _host = owner.get(_key)
+            if _host is None or _host in addresses:
+                continue
+            uds_consumers.setdefault(_host, set()).add(_cname)
+
     # --- two-composition topology (item 151): a `[remotes.<key>]` names a seam
     # whose provider lives in a *separate* composition, on its own placement —
     # item 56's stated non-goal made reachable ("the provider runs its own
@@ -2133,6 +2164,16 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 # (`swap_admission`) moved one event earlier, no new transport.
                 entry["component"] = key_component.get(key)
                 entry["backend"] = backends.get(host)
+                # item 118 S1 / roadmap 421 F8: what THIS consumer needs to seal
+                # a correlation envelope on every call, namely its own identity
+                # and secret, plus the composition it is scoped to. The
+                # provider's matching secret table is built below from
+                # `uds_consumers`.
+                entry["correlation"] = {
+                    "composition_id": composition_id,
+                    "peer_identity": correlation_identity[pname],
+                    "secret": correlation_secret[pname].hex(),
+                }
             if p_deadlines:
                 entry["deadlines"] = dict(p_deadlines)
             proxies[key] = entry
@@ -2200,6 +2241,19 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 serve_spec["endpoint"] = _serve_endpoint(pname)
             else:
                 serve_spec["socket"] = sockets[pname]
+                # item 118 S1 / roadmap 421 F8: the secret table this provider
+                # runs its `CorrelationGuard` on, one entry per LOCAL consumer of
+                # these keys (`uds_consumers`, built above in lockstep with the
+                # `entry["socket"]` branch). Never built for a network provider,
+                # which may also answer an item-151 remote consumer this table
+                # cannot enumerate.
+                peers = uds_consumers.get(pname) or set()
+                if peers:
+                    serve_spec["correlation"] = {
+                        "composition_id": composition_id,
+                        "peers": {correlation_identity[q]: correlation_secret[q].hex()
+                                 for q in sorted(peers)},
+                    }
             spec["serve"] = serve_spec
         specs[pname] = spec
 

@@ -176,11 +176,14 @@ def test_tiers_form_equals_hand_written_processes_form(tmp_path, monkeypatch):
     def _norm(spec: dict) -> dict:
         out = {k: v for k, v in spec.items()
                if k not in ("files", "refRoot", "stdlibRefRoot")}
-        # drop tmp socket/module paths from proxies and serve
-        out["proxies"] = {k: {kk: vv for kk, vv in v.items() if kk != "socket"}
+        # drop tmp socket/module paths from proxies and serve, and the item-118
+        # correlation secret table: it is a freshly random per-boot secret
+        # (roadmap 421 F8), incidental to this test the same way the socket
+        # path is, not part of the structural equivalence being checked.
+        out["proxies"] = {k: {kk: vv for kk, vv in v.items() if kk not in ("socket", "correlation")}
                           for k, v in (spec.get("proxies") or {}).items()}
         if "serve" in out:
-            out["serve"] = {k: v for k, v in out["serve"].items() if k != "socket"}
+            out["serve"] = {k: v for k, v in out["serve"].items() if k not in ("socket", "correlation")}
         return out
 
     tiers_specs = wire(monkeypatch)
