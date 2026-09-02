@@ -20,6 +20,7 @@ live run needed), so the fixtures cannot drift from the real record shape:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import subprocess
@@ -38,6 +39,7 @@ from revl import trace as tr  # noqa: E402
 from revl import why_runtime as wr  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
 
+import replay as rp  # noqa: E402
 import runtime as rt  # noqa: E402
 
 
@@ -576,6 +578,158 @@ def test_non_model_crossing_record_is_byte_identical_to_pre_glue():
 
 
 # ---------------------------------------------------------------------------
+# 7b. item 242: the hop is bound to the crossing it was MEASURED at.
+#
+#     The step-back walk that records crossings reports them NEWEST FIRST
+#     (`replay.Timeline.step_back` iterates `reversed(tail)`). While the model-hop
+#     discriminator was "did this fiber observe a completion", whichever crossing
+#     the walk reached first consumed it — so a run that crossed a completion and
+#     then wrote a file attributed the model, token, cost and latency numbers to
+#     the write. These pin the record-time marking that replaces it.
+# ---------------------------------------------------------------------------
+
+
+def _model_host_return(model="openai:gpt-4o-2024-08-06", tokens_in=1204):
+    return {"tag": "ok", "model": model, "tokensIn": tokens_in, "tokensOut": 88,
+            "cost": {"amount": 0.0121, "currency": "USD"}}
+
+
+def _two_crossing_timeline():
+    """One activation that crosses the MODEL boundary and THEN writes a file.
+
+    Both crossings go through the real `Timeline.record_emission`, and the model
+    one is recorded from INSIDE `validate_retry`'s `make_call` — the real
+    nesting, which is what lets the seam bind its observation to that step."""
+    timeline = rp.Timeline("AgentLoop")
+
+    def host_model():
+        timeline.record_emission("Model", "complete", ("system", "ask"),
+                                 "model", ("agent.rvl", 12))
+        return _model_host_return()
+
+    rt.validate_retry(host_model, budget=0, schema={"type": "object"},
+                      where="AgentLoop")
+    # the LATER, non-model crossing — the one the newest-first walk reaches first
+    timeline.record_emission("Report", "write", ("/tmp/out.txt",), "fs",
+                             ("agent.rvl", 19))
+    return timeline
+
+
+def _record_the_crossings(driver, timeline, report):
+    """The driver's own `emissionsCrossed` arm, over a real step-back report."""
+    activation_id = f"{timeline.component}#g{driver.generation}"
+    for step in report["emissionsCrossed"]:
+        detail = step.get("detail") or {}
+        llm = driver._model_crossing_payload(
+            activation_id=activation_id, args=detail.get("args"),
+            crossing=(timeline.component, step.get("index")))
+        driver._record_emit(
+            timeline.component, detail.get("service") or "",
+            step.get("label") or "",
+            wr.cause_trigger("crossed by step-back (an emission has no inverse)"),
+            llm=llm, activation_id=(activation_id if llm is not None else None))
+    return {e["key"]: e for e in driver._events}
+
+
+def test_the_model_hop_lands_on_the_completion_not_the_newest_crossing():
+    """THE REGRESSION. A model completion crossed, then a filesystem write. The
+    step-back reports the write FIRST; the `llm` payload must still land on the
+    completion, and the write's record must stay byte-identical to a pre-121 v2
+    emit. Drop the crossing key from `_model_crossing_payload` and the write
+    consumes the completion's numbers, which is the whole defect."""
+    timeline = _two_crossing_timeline()
+    report = asyncio.run(timeline.step_back(-1, force=True))
+    # the ordering the defect fed on, asserted rather than assumed
+    assert [s["label"] for s in report["emissionsCrossed"]] == [
+        "Report.write", "Model.complete"]
+
+    events = _record_the_crossings(_bare_driver(), timeline, report)
+
+    hop = events["Model.complete"]["llm"]
+    assert hop["model"] == "openai:gpt-4o-2024-08-06"
+    assert hop["tokensIn"] == 1204 and hop["tokensOut"] == 88
+    assert hop["attempts"] == 1 and hop["attemptCeiling"] == 1
+    assert hop["cost"]["amount"] == 0.0121
+    # the filesystem write is NOT a model hop and carries none of it
+    write = events["Report.write"]
+    assert "llm" not in write and "activationId" not in write
+    assert "openai:gpt-4o-2024-08-06" not in json.dumps(write)
+
+
+def test_two_completions_in_one_body_are_told_apart_by_their_crossings():
+    """Fiber-locality isolates concurrent ACTIVATIONS; it cannot separate two
+    completions inside ONE body, which is the lesson `producedSeq` already
+    learned from its activation-id key. The crossing identity is the equivalent
+    here: two completions are two crossings, so they are two entries, and each
+    keeps its own numbers however the walk orders them."""
+    timeline = rp.Timeline("AgentLoop")
+
+    def complete(model, tokens_in):
+        def host_model():
+            timeline.record_emission("Model", "complete", ("ask",), "model",
+                                     ("agent.rvl", 12))
+            return _model_host_return(model, tokens_in)
+
+        rt.validate_retry(host_model, budget=0, schema={"type": "object"},
+                          where="AgentLoop")
+        return timeline.steps[-1].index
+
+    first = complete("openai:gpt-4o-2024-08-06", 100)
+    second = complete("anthropic:claude-sonnet-4", 200)
+
+    driver = _bare_driver()
+    # read them back NEWEST FIRST, the order the walk uses
+    newer = driver._model_crossing_payload(crossing=("AgentLoop", second))
+    older = driver._model_crossing_payload(crossing=("AgentLoop", first))
+    assert newer["model"] == "anthropic:claude-sonnet-4" and newer["tokensIn"] == 200
+    assert older["model"] == "openai:gpt-4o-2024-08-06" and older["tokensIn"] == 100
+    # and nothing is left over for a third crossing to inherit
+    assert driver._model_crossing_payload(crossing=("AgentLoop", 99)) is None
+
+
+def test_a_completion_never_crosses_a_component_boundary():
+    """The key carries the COMPONENT as well as the step index: two timelines
+    both number their steps from zero, so the index alone would let one
+    component's crossing claim another's hop."""
+    timeline = rp.Timeline("AgentLoop")
+
+    def host_model():
+        timeline.record_emission("Model", "complete", ("ask",), "model",
+                                 ("agent.rvl", 12))
+        return _model_host_return()
+
+    rt.validate_retry(host_model, budget=0, schema={"type": "object"},
+                      where="AgentLoop")
+    index = timeline.steps[-1].index
+    driver = _bare_driver()
+    assert driver._model_crossing_payload(crossing=("Reporter", index)) is None
+    assert driver._model_crossing_payload(crossing=("AgentLoop", index)) is not None
+
+
+def test_the_recorder_marks_the_crossing_at_record_time():
+    """The mark is published BY `record_emission`, not inferred later — the
+    assertion that fails if the recorder stops telling the runtime which
+    crossing it is minting."""
+    import inspect
+    src = inspect.getsource(rp.Timeline.record_emission)
+    assert "_note_emission_index" in src
+    timeline = rp.Timeline("AgentLoop")
+    timeline.record_emission("Model", "complete", ("ask",), "model",
+                             ("agent.rvl", 12))
+    assert rt.revl_recorded_crossing() == ("AgentLoop", timeline.steps[-1].index)
+
+
+def test_the_crossing_key_is_wired_into_the_emissions_arm():
+    """The key must be fed BY the `emissionsCrossed` arm, not merely accepted by
+    `_model_crossing_payload` — this is what fails if run.py goes back to the
+    unkeyed take."""
+    import inspect
+    src = inspect.getsource(run._Driver)
+    arm = src[src.index('for step in report["emissionsCrossed"]'):]
+    assert 'crossing=(timeline.component, step.get("index"))' in arm
+
+
+# ---------------------------------------------------------------------------
 # 5. the driver actually performs the reset it documents (item 416d)
 # ---------------------------------------------------------------------------
 
@@ -598,10 +752,10 @@ def test_a_new_generation_resets_the_run_trace_state():
     Driven through `_emit_module`'s reset arm (the one place a generation
     begins) rather than by calling the runtime seam directly, so the test fails
     if the wiring is removed."""
-    # gen N leaves an unconsumed completion in the fiber-local register.
+    # gen N leaves an unconsumed completion in the fiber-local store.
     rt.validate_retry(lambda: {"tag": "ok"}, budget=0,
                       schema={"type": "object"}, where="Agent")
-    assert rt._revl_last_model_call.get() is not None
+    assert rt._revl_model_calls.get() != ()
 
     driver = _emit_module_driver()
     reset = getattr(driver.runtime, "revl_reset_run_trace_state", None)
@@ -609,7 +763,8 @@ def test_a_new_generation_resets_the_run_trace_state():
     reset()
 
     # gen N+1 starts clean: the stale observation cannot be mis-attributed.
-    assert rt._revl_last_model_call.get() is None
+    assert rt._revl_model_calls.get() == ()
+    assert rt._revl_recorded_crossing.get() is None
     assert _bare_driver()._model_crossing_payload(activation_id="C#g2") is None
 
 

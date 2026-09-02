@@ -134,10 +134,10 @@ def test_a_capability_register_floor_is_never_predicted_from_a_claim():
     capabilities — the one input §5's assumption list says is not cross-checked
     — so predicting from it would be predicting from the thing the gate refuses
     to trust. It is unpredicted, and no marker mentions it."""
-    policy = parse_policy("capability db.* requires register shape-proven\n")
+    policy = parse_policy("capability db.* requires register strong\n")
     result = _reg().resolve(DATABASE_NEED, policy=policy)
     assert result["policyPreview"]["unpredicted"] == [
-        "capability db.* requires register shape-proven"]
+        "capability db.* requires register strong"]
     assert all("wouldBeRefused" not in c for c in result["candidates"])
 
 

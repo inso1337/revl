@@ -230,6 +230,25 @@ record with an `llm` sub-object built at this seam. A non-model emission records
 no `llm` object, so its record is byte-identical to today's (schema-additive,
 the same discipline `metrics.py`/`otel.py` already follow for v2 fields).
 
+**Which crossing the hop belongs to is decided at RECORD time, not at read time**
+(item 242). The seam measures the hop, but the driver attaches it while walking a
+step-back's `emissionsCrossed`, and that walk reports crossings NEWEST FIRST
+(`replay.Timeline.step_back` iterates `reversed(tail)`). A discriminator of the
+form "did this fiber observe a completion" is therefore consumed by whichever
+crossing the walk reaches first: a run that crossed a completion and then wrote a
+file gave the model, token, cost and latency numbers to the write. Fiber-locality
+cannot repair that, for the same reason §2.2's NEW CRITICAL gives for
+`producedSeq` — it isolates concurrent ACTIVATIONS, and both crossings are in one
+fiber. So `replay.Timeline.record_emission` publishes each crossing's identity
+(`component` + step index) as it mints the step, the seam binds its observation
+to the crossing `make_call` just recorded, and the driver reads the entry for the
+crossing it is recording. Two completions in one body are two crossings, hence
+two entries: the same finer-than-fiber property `producedSeq` gets from the
+activation id. The bound on the pre-fix defect is worth keeping: it could not
+forge a `produced` edge, because the back-patch requires the resolved target to
+carry an `llm` payload, so a misattached payload degrades to no edge — what was
+wrong was the hop itself.
+
 ### 2.2 The widened `emit` record
 
 ```revl fragment

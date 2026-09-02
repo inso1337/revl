@@ -81,11 +81,13 @@ class RecoveryError(RuntimeError):
 READ = "read"
 
 #: The registers a fresh process may RE-DISPATCH without spending a fence and
-#: without escalating to an operator. `read` (changes nothing) and the two
-#: by-construction strong registers, `keyed` (the remote dedups on a stable key
-#: carried in the descriptor) and `shape-proven`. Everything else — including,
-#: crucially, NO register at all — stays fenced and fails closed.
-REDISPATCH_FREE = frozenset({READ, "keyed", "shape-proven"})
+#: without escalating to an operator. `read` (changes nothing) and `keyed` (the
+#: remote dedups on a stable key carried in the descriptor). Everything else —
+#: including, crucially, NO register at all — stays fenced and fails closed.
+#: Item 207 removed a third member, `shape-proven`: it was an INVERSE-body
+#: register, and this set is only ever asked about an owed deferred EMISSION, so
+#: no declaration could put it here (`docs/design/207-checkable-extern-body.md`).
+REDISPATCH_FREE = frozenset({READ, "keyed"})
 
 
 def _replay_tier(register: Optional[str], declared_idempotent: bool) -> str:
@@ -98,11 +100,11 @@ def _replay_tier(register: Optional[str], declared_idempotent: bool) -> str:
     ``fenced``  everything else, including an ABSENT register. One fenced
                 at-most-once attempt, then `outcome: "unknown"` for a human.
 
-    ONLY `read` is new here: a `keyed`/`shape-proven` register on an INVERSE
-    descriptor is deliberately not promoted, because 309's replay policy for
-    that family is keyed off `undo_idempotent` and widening it is a different
-    item's change. `REDISPATCH_FREE` (the set the FORWARD re-issue seam reads)
-    is the place those registers earn free re-dispatch.
+    ONLY `read` is new here: a `keyed` register on an INVERSE descriptor is
+    deliberately not promoted, because 309's replay policy for that family is
+    keyed off `undo_idempotent` and widening it is a different item's change.
+    `REDISPATCH_FREE` (the set the FORWARD re-issue seam reads) is the place
+    that register earns free re-dispatch.
 
     Absent/unknown input can only produce ``fenced``: the fail-closed default is
     the fall-through, not a special case."""
@@ -540,11 +542,11 @@ def _reissue_permitted(register: Optional[str], strength: Optional[str]) -> bool
 
     With the seam on:
 
-    * `read` / `keyed` / `shape-proven` — admitted at any strength. The fire is
-      free (a read changes nothing) or dedup-safe by construction (the
-      descriptor carries the key, so a fire that duplicates a pre-crash flush is
-      the remote's dedup, not a double-apply). This is the case item 309 §3b
-      classified as free to replay and could not act on.
+    * `read` / `keyed` — admitted at any strength. The fire is free (a read
+      changes nothing) or dedup-safe by construction (the descriptor carries the
+      key, so a fire that duplicates a pre-crash flush is the remote's dedup, not
+      a double-apply). This is the case item 309 §3b classified as free to
+      replay and could not act on.
     * `declared` — admitted ONLY at `strength: declared`, the operator's
       explicit "I accept the author's unverified claim".
     * ANYTHING ELSE, including no register at all — never. The ambiguous owed
