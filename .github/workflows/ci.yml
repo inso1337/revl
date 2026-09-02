@@ -367,6 +367,19 @@ jobs:
       # is the whole reason for the switch below; it is proportionate for a job
       # that already provisions six toolchains, and it is the price of the
       # matrix being real rather than implied.
+      #
+      # ONE KNOWN SKIP IS LEFT OPEN HERE, enumerated rather than left silent.
+      # test_realm_conformance.py::test_cordis4j_realm_conformance needs
+      # REVL_CORDIS4J_CLASSES. That variable IS set in CI, but only in the
+      # `backend-java` job, which runs backends/java/test_emit_java.py and never
+      # collects tests/, so the probe skips in every job that does run it. This
+      # is item 430's shape a third time: right variable, wrong job. Closing it
+      # means cloning and compiling cordis4j-core here the way `backend-java`
+      # already does; it is left off because it could not be run on the audit
+      # machine to prove it green first, and an unverified CI step is how a red
+      # build happens. Tracked on roadmap item 445 and asserted in
+      # tests/test_env_gated_skips_run_somewhere.py (_KNOWN_WRONG_JOB), so it
+      # cannot go quiet.
       - run: backends/python/.venv/bin/python -m pytest tests/test_cross_tier_execution.py tests/test_realm_conformance.py tests/test_time_coeffect.py -q
         # env:
         #   REVL_CROSS_TIER_SLOW: "1"
