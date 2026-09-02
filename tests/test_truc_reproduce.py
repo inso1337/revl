@@ -66,7 +66,14 @@ def _tier(report, name: str):
 
 def test_reproduce_is_green_for_a_published_component(registry):
     """The recorded component rebuilds bit-for-bit: every tier that has recorded
-    evidence is OK, none is a MISMATCH, and the overall verdict is reproduced."""
+    evidence is OK and none is a MISMATCH.
+
+    It is NOT `fully_verified`, and the report says so. Three tiers had nothing
+    to check — no attestation, no recorded artifact, and (reproducing straight
+    out of the registry) no truc.lock pin to anchor the registry against
+    anything but itself. `ok` means "nothing diverged", which is a much weaker
+    claim than "everything agreed"; a tier that verified nothing is not a pass.
+    """
     report = R.reproduce(COMPONENT, registry=str(registry))
     assert report.ok, [(c.tier, c.status, c.detail) for c in report.mismatches]
     assert not report.mismatches
@@ -76,6 +83,9 @@ def test_reproduce_is_green_for_a_published_component(registry):
     # nothing recorded for these in a plain registry entry -> honest cannot-verify
     assert _tier(report, R.TIER_ATTESTATION).status == R.UNVERIFIED
     assert _tier(report, R.TIER_ARTIFACT).status == R.UNVERIFIED
+    assert _tier(report, R.TIER_ANCHOR).status == R.UNVERIFIED
+    assert not report.fully_verified
+    assert report.verdict == "partially reproduced"
 
 
 def test_render_names_the_verdict(registry):
@@ -83,6 +93,10 @@ def test_render_names_the_verdict(registry):
     text = R.render(report)
     assert "reproduced:" in text and COMPONENT in text
     assert "MISMATCH" not in text
+    # and it never claims a bit-for-bit rebuild it did not establish.
+    assert "partially reproduced:" in text
+    assert "not proof of reproduction" in text
+    assert "rebuilds bit-for-bit" not in text
 
 
 # --------------------------------------------------------------- tamper cases
@@ -146,7 +160,11 @@ def test_missing_attestation_is_cannot_verify_not_a_crash(registry):
     att = _tier(report, R.TIER_ATTESTATION)
     assert att.status == R.UNVERIFIED
     assert "no recorded attestation" in att.detail
+    # the tier names the path it looked at, so "nothing there" is checkable
+    # rather than something a reader has to take on faith.
+    assert "evidence/attestation.json" in att.detail
     assert report.ok  # the unverifiable tier does not fail the rebuild
+    assert not report.fully_verified  # but it does not count as verified either
 
 
 def test_missing_registry_row_is_a_clean_error(registry):
@@ -173,14 +191,29 @@ def test_requested_version_with_no_recorded_version_is_unverifiable(registry):
 
 # ------------------------------------------------------------- attestation tier
 
-def _attest_the_entry(registry: Path, key: bytes) -> None:
+def _attest_the_entry(registry: Path, key: bytes, *, legacy: bool = False) -> Path:
     """Sign the entry's rebuilt (canonical) IR with `key` and drop the
-    attestation next to the component, the way a publish would."""
+    attestation where a publish actually puts it.
+
+    That is `<entry>/evidence/attestation.json`, the path
+    `registry.build_evidence` writes. This helper used to write
+    `<entry>/attestation.json` — the same path the tier used to read — so the
+    attestation tier tested green against a location nothing publishes to,
+    while being structurally dead for every real entry. `legacy=True` writes the
+    bare root path, still honoured for entries published before item 293.
+    """
     verdict = attest.run_gate(paths=[str(_entry(registry) / "component.rvl")],
                               normalize=R._normalized_ir)
     att = attest.make_attestation(R._normalized_ir(verdict.ir), key,
                                   verdict=verdict)
-    (_entry(registry) / "attestation.json").write_text(json.dumps(att, indent=2))
+    if legacy:
+        target = _entry(registry) / "attestation.json"
+    else:
+        evidence = _entry(registry) / "evidence"
+        evidence.mkdir(exist_ok=True)
+        target = evidence / "attestation.json"
+    target.write_text(json.dumps(att, indent=2))
+    return target
 
 
 def test_attestation_verifies_green(registry, monkeypatch):
@@ -199,8 +232,7 @@ def test_tampered_attestation_is_a_mismatch(registry, monkeypatch):
     """Altering a signed field (the verdict) after signing is caught as an
     attestation MISMATCH, a signature failure, exactly the item-127 contract."""
     monkeypatch.setenv(attest.KEY_ENV, "a-shared-secret")
-    _attest_the_entry(registry, b"a-shared-secret")
-    att_path = _entry(registry) / "attestation.json"
+    att_path = _attest_the_entry(registry, b"a-shared-secret")
     doc = json.loads(att_path.read_text())
     doc["verdict"] = "tampered"
     att_path.write_text(json.dumps(doc, indent=2))
@@ -221,6 +253,181 @@ def test_attestation_present_but_no_key_is_cannot_verify(registry, monkeypatch):
     att = _tier(report, R.TIER_ATTESTATION)
     assert att.status == R.UNVERIFIED
     assert "no signing key" in att.detail
+
+
+# ------------------------------------------- attestation tier: the published path
+
+def test_the_attestation_tier_finds_what_build_evidence_publishes(registry,
+                                                                  monkeypatch):
+    """The F6 regression. `registry.build_evidence` writes the attestation to
+    `<entry>/evidence/attestation.json`; the tier read `<entry>/attestation.json`,
+    a path nothing writes. So for every entry the real publish path produces the
+    tier was structurally DEAD — it could only ever say "no recorded
+    attestation", and an unverifiable tier does not fail a rebuild, so a dead
+    tier read as a pass. Drive the real publisher and require the tier to
+    actually find and verify the file."""
+    key = b"published-evidence-key"
+    monkeypatch.setenv(attest.KEY_ENV, "published-evidence-key")
+    from revl import registry as R_registry
+
+    R_registry.build_evidence(str(registry), key=key, signer="revl-ci")
+    published = (_entry(registry) / R_registry.EVIDENCE_DIRNAME
+                 / R_registry.EVIDENCE_ATTESTATION)
+    assert published.exists(), "build_evidence must publish here"
+    assert not (_entry(registry) / "attestation.json").exists()
+
+    report = R.reproduce(COMPONENT, registry=str(registry))
+    att = _tier(report, R.TIER_ATTESTATION)
+    assert att.status == R.OK, att.detail
+    assert "no recorded attestation" not in att.detail
+
+
+def test_a_forged_bound_dossier_is_an_attestation_mismatch(registry, monkeypatch):
+    """`build_evidence` binds each dossier's hash into the signed attestation.
+    Swapping a bound dossier afterwards leaves the signature authentic but the
+    binding broken, and the tier must call that a MISMATCH rather than verifying
+    the signature and calling it a day."""
+    key = b"published-evidence-key"
+    monkeypatch.setenv(attest.KEY_ENV, "published-evidence-key")
+    from revl import registry as R_registry
+
+    R_registry.build_evidence(str(registry), key=key, signer="revl-ci")
+    capabilities = (_entry(registry) / R_registry.EVIDENCE_DIRNAME
+                    / R_registry.EVIDENCE_CAPABILITIES)
+    capabilities.write_text(json.dumps(
+        {"kind": "revl.capabilities", "boundary": {}}, indent=2, sort_keys=True))
+
+    report = R.reproduce(COMPONENT, registry=str(registry))
+    att = _tier(report, R.TIER_ATTESTATION)
+    assert att.status == R.MISMATCH, att.detail
+    assert "capabilities" in att.detail
+    assert not report.ok
+
+
+def test_the_legacy_root_attestation_is_still_honoured(registry, monkeypatch):
+    """Entries published before item 293 wrote the attestation at the entry
+    root. Pointing the tier at the bundle path must not orphan them."""
+    monkeypatch.setenv(attest.KEY_ENV, "a-shared-secret")
+    path = _attest_the_entry(registry, b"a-shared-secret", legacy=True)
+    assert path == _entry(registry) / "attestation.json"
+
+    report = R.reproduce(COMPONENT, registry=str(registry))
+    assert _tier(report, R.TIER_ATTESTATION).status == R.OK
+
+
+# --------------------------------------- independent pin: the registry as adversary
+
+def _project_with(tmp_path: Path, registry: Path, name: str,
+                  source_hash: str | None) -> Path:
+    """A project that vendored `name` out of `registry` and pinned it. Passing
+    `source_hash=None` writes the honest pin; passing a value overrides it."""
+    import hashlib
+
+    project = tmp_path / "app"
+    (project / "trucs" / name).mkdir(parents=True)
+    source = (registry / "components" / name / "component.rvl").read_text()
+    (project / "trucs" / name / "component.rvl").write_text(source)
+    pin = (hashlib.sha256(source.encode()).hexdigest()
+           if source_hash is None else source_hash)
+    (project / "truc.lock").write_text(json.dumps(
+        {"lockVersion": 0, "trucs": [{"name": name, "sourceHash": pin}]},
+        indent=2))
+    return project
+
+
+def test_a_substituted_dependency_is_caught_by_the_independent_pin(registry,
+                                                                   tmp_path):
+    """When the REGISTRY is the adversary, every registry-internal tier
+    reproduces green: substitute the source, regenerate the index over it, and
+    source/IR/policy/backend all agree — because they compare the registry with
+    itself. The project's truc.lock pin is the one value the registry cannot
+    mint, and it catches the swap.
+
+    The pin cross-check itself is not new; it lived inside the source tier,
+    where its ABSENCE was invisible (see the no-pin case below). It gets its own
+    tier so "there was nothing independent to check against" is a thing the
+    report can say."""
+    from revl import registry as R_registry
+
+    project = _project_with(tmp_path, registry, COMPONENT, None)
+
+    # the adversary: swap the published source, then re-index over it so the
+    # registry is perfectly self-consistent again.
+    entry_source = _entry(registry) / "component.rvl"
+    entry_source.write_text(entry_source.read_text() + "\n// substituted\n")
+    R_registry.build_index(str(registry))
+    assert R_registry.verify(str(registry)) == []   # the registry looks pristine
+
+    report = R.reproduce(COMPONENT, project_dir=str(project),
+                         registry=str(registry))
+    # every self-referential tier is still green ...
+    for tier in (R.TIER_SOURCE, R.TIER_IR, R.TIER_POLICY, R.TIER_BACKEND):
+        assert _tier(report, tier).status == R.OK, tier
+    # ... and the independent one is not.
+    anchor = _tier(report, R.TIER_ANCHOR)
+    assert anchor.status == R.MISMATCH, anchor.detail
+    assert "substituted dependency" in anchor.detail
+    assert not report.ok
+
+
+def test_a_substituted_dependency_with_no_pin_was_invisible(registry, tmp_path):
+    """The same substitution, against a project that vendored the truc but never
+    pinned it — the state F3 used to allow. Every tier then compares the registry
+    with itself, the reproduce comes back entirely green, and nothing anywhere
+    notices that the vendored dependency was replaced. An unpinned vendored truc
+    is now a MISMATCH in its own right: the report says what it could not check
+    instead of passing for lack of anything to check against."""
+    from revl import registry as R_registry
+
+    project = _project_with(tmp_path, registry, COMPONENT, None)
+    (project / "truc.lock").unlink()          # no pin at all
+
+    entry_source = _entry(registry) / "component.rvl"
+    entry_source.write_text(entry_source.read_text() + "\n// substituted\n")
+    R_registry.build_index(str(registry))
+
+    report = R.reproduce(COMPONENT, project_dir=str(project),
+                         registry=str(registry))
+    assert _tier(report, R.TIER_SOURCE).status == R.OK   # self-consistent registry
+    anchor = _tier(report, R.TIER_ANCHOR)
+    assert anchor.status == R.MISMATCH, anchor.detail
+    assert "no truc.lock row" in anchor.detail
+    assert not report.ok
+
+
+def test_an_honest_pin_makes_the_anchor_tier_green(registry, tmp_path):
+    """The anchor tier is not a blanket refusal: a project whose pin agrees with
+    the registry's source and with its own vendored bytes reports OK."""
+    project = _project_with(tmp_path, registry, COMPONENT, None)
+    report = R.reproduce(COMPONENT, project_dir=str(project),
+                         registry=str(registry))
+    anchor = _tier(report, R.TIER_ANCHOR)
+    assert anchor.status == R.OK, anchor.detail
+    assert "vendored copy" in anchor.detail
+
+
+def test_a_blank_pin_is_a_mismatch_not_a_shrug(registry, tmp_path):
+    """A lock row with a blank `sourceHash` anchors nothing. Reporting it as
+    fine is how an unpinned dependency stays invisible."""
+    project = _project_with(tmp_path, registry, COMPONENT, "")
+    report = R.reproduce(COMPONENT, project_dir=str(project),
+                         registry=str(registry))
+    anchor = _tier(report, R.TIER_ANCHOR)
+    assert anchor.status == R.MISMATCH
+    assert "blank" in anchor.detail
+    assert not report.ok
+
+
+def test_a_vendored_truc_with_no_lock_row_is_a_mismatch(registry, tmp_path):
+    """Vendored, used, and pinned by nothing."""
+    project = _project_with(tmp_path, registry, COMPONENT, None)
+    (project / "truc.lock").write_text(json.dumps(
+        {"lockVersion": 0, "trucs": []}, indent=2))
+    report = R.reproduce(COMPONENT, project_dir=str(project),
+                         registry=str(registry))
+    anchor = _tier(report, R.TIER_ANCHOR)
+    assert anchor.status == R.MISMATCH
+    assert "no truc.lock row" in anchor.detail
 
 
 # --------------------------------------------------------- emitted-artifact tier
@@ -268,6 +475,27 @@ def test_cli_run_returns_zero_on_green(registry, capsys):
     code = R.run([COMPONENT, "--registry", str(registry)])
     assert code == 0
     assert "reproduced:" in capsys.readouterr().out
+
+
+def test_cli_strict_refuses_to_pass_an_unverifiable_tier(registry, capsys):
+    """`--strict` is the switch that says a tier which checked nothing is not a
+    pass. Same rebuild, same absence of any MISMATCH — exit 1."""
+    code = R.run([COMPONENT, "--registry", str(registry), "--strict"])
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "partially reproduced" in out
+    assert "MISMATCH" not in out
+
+
+def test_cli_json_reports_what_was_not_verified(registry, capsys):
+    code = R.run([COMPONENT, "--registry", str(registry), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["reproduced"] is True
+    assert doc["fullyVerified"] is False
+    assert doc["verdict"] == "partially reproduced"
+    assert R.TIER_ATTESTATION in doc["unverified"]
+    assert R.TIER_ANCHOR in doc["unverified"]
 
 
 def test_cli_run_returns_one_on_mismatch(registry, capsys):

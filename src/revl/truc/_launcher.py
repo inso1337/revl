@@ -23,18 +23,33 @@ _HERE = Path(__file__).resolve().parent
 
 
 def component_files() -> list[str]:
-    """truc's own composition file list. Stage 0 reads it from truc's committed
-    `truc.lock` (§7); absent or unreadable, it falls back to a sorted glob of
-    `components/` so a checkout is never wedged by a stale lock."""
+    """truc's own composition file list, from truc's committed `truc.lock` (§7).
+
+    The glob fallback is for a checkout with no lock at all. It is NOT a
+    fallback for a lock that is present but unreadable: a lock that exists and
+    cannot be parsed, or that names no files, is a tampering signal, and quietly
+    compiling whatever happens to sit in `components/` instead is exactly what
+    someone who corrupted the lock would want. That case fails loudly.
+
+    This list still carries no hashes (slice S5 turns it into truc's full
+    self-description). That is acceptable for one reason and no other: these
+    files ship *inside the installed revl package*, so the trust root is the
+    package's own integrity. Anyone able to rewrite them can rewrite
+    `registry.py` beside them, and a hash list living in the same directory
+    would not survive that either, so pins here buy nothing the package does not
+    already have to guarantee. The project-side `truc.lock` pins bytes fetched
+    from somewhere ELSE - a different question, and there a pin is now mandatory
+    (`planner.plan_drift`).
+    """
     lock = _HERE / "truc.lock"
     if lock.exists():
-        try:
-            data = json.loads(lock.read_text(encoding="utf-8"))
-            files = data.get("files")
-            if files:
-                return [str((_HERE / f).resolve()) for f in files]
-        except (OSError, json.JSONDecodeError):
-            pass
+        data = json.loads(lock.read_text(encoding="utf-8"))
+        files = data.get("files")
+        if not files:
+            raise ValueError(
+                f"{lock} names no component files; truc will not fall back to "
+                "compiling whatever is in components/")
+        return [str((_HERE / f).resolve()) for f in files]
     return sorted(str(p) for p in (_HERE / "components").glob("*.rvl"))
 
 
