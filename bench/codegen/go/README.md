@@ -78,6 +78,23 @@ makes a measured gap a finding rather than an artifact:
 The `Test*` functions in `ab_test.go` enforce all of this. If one fails, the
 hand side is no longer the same program and its numbers are worthless.
 
+One place the two sides genuinely disagree, and the fixtures say so.
+`revlStrSlice` still materialises `[]rune`, which substitutes U+FFFD for a
+byte that is not valid UTF-8; `hand.Take` walks bytes and does not. So
+`invalidText` is used only by `TestCharCodeAtIsRuneIndexed`, and is kept out
+of the shared slice/`indexOf` fixture list until item 434 (g) settles which
+side is right. `astralText` (code points past U+FFFF) is in the shared list.
+
+## The emitter has been edited since the audit
+
+Item 434's (h), (f), (c) stage one, (a), (b) and (e) landed, so the numbers in
+the audit are the BEFORE column, not what this harness reports today. What it
+reports now, at `-benchtime=2000x`: `Scan*` and `CharCodeAt` are 0 allocs/op
+on both sides; `Collect`, `Tally` and `Build` are no longer quadratic; `Tag`
+and `Render` match the hand form exactly. `IndexOf`, `Take`, `Maybe` and the
+`Opt` boxes inside `BoxedList` are unchanged, because (g) and (d) are not
+done.
+
 ## Controls
 
 `SumIds`, `Bucket`, `Describe` and `Find` all report 0 allocs/op on both

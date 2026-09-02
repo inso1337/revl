@@ -95,6 +95,14 @@ jobs:
       # installed in this job, so the runtime-execution wasm tests skip here
       # (backend-wasm below is what gates those); that is fine, this step
       # exists only to catch the cross-root collision.
+      #
+      # This step pins ONE pair. The decision behind 419a is broader: the
+      # backend roots are co-importable, full stop, and the structural half of
+      # it (no two collectable test files under backends/ share a basename, no
+      # root grows an __init__.py, the set of same-named backend modules is the
+      # one the pin covers) is checked in the root suite by
+      # tests/test_backend_suite_roots_combine.py, which needs no toolchain and
+      # so covers the tiers this job cannot install.
       - run: cd backends/python && .venv/bin/pytest ../wasm/ tests/ -q
 
   # The root `tests/` suite, WITH the cordis-py runtime.

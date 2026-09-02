@@ -38,6 +38,20 @@ const asciiText = "the quick brown fox jumps over the lazy dog, and then does it
 // semantics are actually exercised, not just the ASCII fast path.
 const mixedText = "naïve café, ünïcödé sämplé with a few multi-byte runes sprinkled through"
 
+// astralText carries 4-byte code points past U+FFFF, where a code-point index
+// and a UTF-16 code-unit index disagree.
+const astralText = "a\U0001F600b\U0001F1EB\U0001F1F7c\U0010FFFFd"
+
+// invalidText carries a byte that is not valid UTF-8. `[]rune(s)` substitutes
+// U+FFFD for it, so any code-point walk that replaces `[]rune` must do the
+// same; item 434 (c) replaced the `[]rune(s)` in revlStrCharAt/CharCodeAt with
+// a utf8.DecodeRuneInString walk, and TestCharCodeAtIsRuneIndexed is what pins
+// that they still agree. It is deliberately NOT in the shared fixture list:
+// revlStrSlice still materializes `[]rune` (item 434 (g), not done), and
+// hand.Take walks bytes, so the two answer differently for an invalid byte:
+// a pre-existing yardstick gap that belongs to (g), not to (c).
+const invalidText = "a\U0001F600b\xffc"
+
 func words(n int) []string {
 	out := make([]string, n)
 	for i := range out {
@@ -72,7 +86,7 @@ func TestHandMatchesEmitted(t *testing.T) {
 	if got, want := hand.SumIds(nums(64)), loops.SumIds(nums(64)); got != want {
 		t.Errorf("SumIds: hand %v, emitted %v", got, want)
 	}
-	for _, s := range []string{"", "a", asciiText, mixedText} {
+	for _, s := range []string{"", "a", asciiText, mixedText, astralText} {
 		if got, want := hand.Scan(s), loops.Scan(s); got != want {
 			t.Errorf("Scan(%q): hand %v, emitted %v", s, got, want)
 		}
@@ -100,8 +114,8 @@ func TestHandMatchesEmitted(t *testing.T) {
 }
 
 func TestHandMatchesEmittedStrings(t *testing.T) {
-	for _, s := range []string{"", "a", asciiText, mixedText} {
-		for _, sub := range []string{"", "a", "é", "quick", "zzz", s} {
+	for _, s := range []string{"", "a", asciiText, mixedText, astralText} {
+		for _, sub := range []string{"", "a", "é", "quick", "zzz", "\U0001F600", s} {
 			if got, want := hand.IndexOf(s, sub), values.IndexOf(s, sub); got != want {
 				t.Errorf("IndexOf(%q, %q): hand %v, emitted %v", s, sub, got, want)
 			}
@@ -110,6 +124,25 @@ func TestHandMatchesEmittedStrings(t *testing.T) {
 		for _, ab := range [][2]int64{{0, 0}, {0, 1}, {1, 3}, {0, n}, {n, n}, {-5, 2}, {2, 1}, {0, n + 9}} {
 			if got, want := hand.Take(s, ab[0], ab[1]), values.Take(s, ab[0], ab[1]); got != want {
 				t.Errorf("Take(%q, %d, %d): hand %q, emitted %q", s, ab[0], ab[1], got, want)
+			}
+		}
+	}
+}
+
+// TestCharCodeAtIsRuneIndexed walks every code-point index of every fixture and
+// pins the emitted read against `[]rune(s)[i]`, the lowering revlStrCharCodeAt
+// had before item 434 (c). The replacement walks with utf8.DecodeRuneInString
+// instead of materializing the string, so this is what proves the two agree:
+// astral scalars and the U+FFFD substitution for an invalid byte included.
+func TestCharCodeAtIsRuneIndexed(t *testing.T) {
+	for _, s := range []string{"a", asciiText, mixedText, astralText, invalidText} {
+		runes := []rune(s)
+		for i := range runes {
+			if got, want := values.CharAt(s, int64(i)), int64(runes[i]); got != want {
+				t.Errorf("CharAt(%q, %d): emitted %d, []rune %d", s, i, got, want)
+			}
+			if got, want := values.CharAt(s, int64(i)), handCharAt(s, int64(i)); got != want {
+				t.Errorf("CharAt(%q, %d): emitted %d, hand %d", s, i, got, want)
 			}
 		}
 	}

@@ -35,6 +35,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_files  # noqa: E402
 from revl import placement as _placement  # noqa: E402
 from revl.placement import (  # noqa: E402
+    _fs_covers,
     _normalize_sandbox_table,
     _parse_need,
     expand_tiers,
@@ -459,3 +460,80 @@ def test_audit_view_empty_without_sandbox(tmp_path):
     ir = _ir(tmp_path)
     lines, err = sandbox_audit_view(ir, {"default_tier": "py"})
     assert err is None and lines == []
+
+
+# ==========================================================================
+# roadmap 422 F5: `_fs_covers` did no path normalization
+# ==========================================================================
+
+def test_fs_covers_refuses_a_traversing_need_that_a_mount_does_not_grant():
+    """The executed finding: `_fs_covers` compared raw strings, so
+    `/scratch/../../etc/shadow` was COVERED by a `/scratch:rw` mount while the
+    same file spelled `/etc/shadow` was refused. Bounded while Slice 1 launches
+    no jail and this gate is advisory, but `_fs_covers` is what Slice 2 inherits
+    for deriving real mounts."""
+    assert _fs_covers(["/scratch:rw"], "/etc/shadow", "rw") is False
+    assert _fs_covers(["/scratch:rw"], "/scratch/../../etc/shadow", "rw") is False
+    # the same escape through the other non-canonical spellings
+    assert _fs_covers(["/scratch:rw"], "/scratch/./../etc/shadow", "rw") is False
+    assert _fs_covers(["/scratch:rw"], "/scratch//../etc/shadow", "rw") is False
+    assert _fs_covers(["/scratch:rw"], "/scratch/..", "rw") is False
+
+
+def test_fs_covers_still_grants_what_the_mount_really_grants():
+    """Canonicalizing must not cost the honest cases: prefix coverage, the mount
+    itself, and the ro/rw ordering all read exactly as before."""
+    assert _fs_covers(["/scratch:rw"], "/scratch", "rw") is True
+    assert _fs_covers(["/scratch:rw"], "/scratch/sub/file", "rw") is True
+    assert _fs_covers(["/data"], "/data/x", "ro") is True
+    assert _fs_covers(["/data"], "/data/x", "rw") is False       # ro mount, rw need
+    # a sibling that merely shares the prefix is not covered
+    assert _fs_covers(["/scratch:rw"], "/scratch-evil/x", "rw") is False
+
+
+def test_a_non_canonical_mount_covers_nothing_rather_than_widening():
+    """The two sides fail closed differently, on purpose. Canonicalizing a
+    traversing MOUNT could only WIDEN it (`/scratch/..` denotes `/`), and a
+    defense-in-depth pass must never be the thing that widens a grant, so such a
+    mount covers nothing here, and is refused outright where it enters."""
+    assert _fs_covers(["/scratch/..:rw"], "/etc/shadow", "rw") is False
+    assert _fs_covers(["/scratch/..:rw"], "/scratch/x", "rw") is False
+    # a relative spelling has no meaning at this layer either
+    assert _fs_covers(["scratch:rw"], "scratch/x", "rw") is False
+
+
+def test_a_traversing_mount_is_refused_by_the_envelope_normalizer():
+    norm, err = _normalize_sandbox_table(
+        {"isolation": "container", "image": "i", "fs": ["/scratch/../..:rw"]})
+    assert norm is None
+    assert "canonical spelling" in err
+    assert "'/'" in err            # item 274: names what it actually denotes
+    norm, err = _normalize_sandbox_table(
+        {"isolation": "container", "image": "i", "fs": ["scratch:rw"]})
+    assert norm is None and "absolute path" in err
+    # the canonical spelling is admitted unchanged
+    norm, err = _normalize_sandbox_table(
+        {"isolation": "container", "image": "i", "fs": ["/scratch:rw"]})
+    assert err is None and norm["fs"] == ["/scratch:rw"]
+
+
+def test_gate_refuses_a_traversing_fs_need_naming_the_canonical_spelling(tmp_path):
+    """The gate refuses the SPELLING before comparing it, because the comparison
+    is literal: an author whose need was silently normalized would believe the
+    gate had checked the path they wrote."""
+    args = _gate_setup(tmp_path,
+                       {"isolation": "container", "image": "i",
+                        "fs": ["/scratch:rw"]},
+                       {"fetch": ["fs:/scratch/../../etc/shadow:rw"]})
+    err = sandbox_capability_gate(*args)
+    assert err is not None
+    assert "[sandbox.needs]" in err and "fetch" in err
+    assert "/etc/shadow" in err                      # item 274: the canonical form
+
+
+def test_gate_admits_a_canonical_need_the_mount_really_covers(tmp_path):
+    args = _gate_setup(tmp_path,
+                       {"isolation": "container", "image": "i",
+                        "fs": ["/scratch:rw"]},
+                       {"fetch": ["fs:/scratch/work:rw"]})
+    assert sandbox_capability_gate(*args) is None

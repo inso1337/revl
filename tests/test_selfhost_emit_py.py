@@ -129,6 +129,16 @@ CORPUS = [
     # desugar (frontend) to `list_map`/`list_filter`/`list_reduce` free calls; the
     # py tier lowers the function-value params, arrow args, and `f(x)` calls.
     "transforms.rvl",
+    # item 421 F6 / item 429(d): the declared-`Secret[T]` markings the EMITTED
+    # program carries at both ends: `@_revl_secret_result` on a `Secret[T]`-
+    # returning extern (the origin, where a confidential value enters the value
+    # world) and `_revl_mark_secret(...)` at the head of a provide method whose
+    # service declares that param `Secret[T]` (the receiver), plus both names in
+    # the sorted `from runtime import`. Added as a family that FAILED FIRST
+    # (item 429 exit (3)/(5)): the corpus carried no `Secret[` at all, so the
+    # oracle was green while the self-host emitted a program that DOES NOT
+    # REDACT, a security divergence and not a parity nicety.
+    "secrets.rvl",
 ]
 
 
