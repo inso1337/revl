@@ -216,10 +216,14 @@ func scan(s string) int64 {
 func build(xs []string, sep string) string {
 	out := ""
 	_ = out
+	var _revlSB0 strings.Builder
+	_revlSB0.WriteString(out)
 	for _, x := range xs {
 		_ = x
-		out = ((out + x) + sep)
+		_revlSB0.WriteString(x)
+		_revlSB0.WriteString(sep)
 	}
+	out = _revlSB0.String()
 	return out
 }
 

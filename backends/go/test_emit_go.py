@@ -948,3 +948,56 @@ fn nested(n: Int) -> List[List[Int]] {
     # ARGUMENT there, which is what disqualifies `out`, not `rows`. `rows` is
     # never aliased, so it still lowers in place.
     _has(src, "rows = append(rows, out)")
+
+
+# ---------------------------------------------------------------------------
+# Roadmap item 434 (e): the string-accumulator lowering.
+#
+# `out = out + x + sep` in a loop allocates one whole intermediate string per
+# iteration (1001 allocs / 3,717,392 B at n=1000, against a strings.Builder's
+# 1 / 8,192). A Go string cannot be mutated, so unlike (a)/(b) the fix is not a
+# destructive rebind but a Builder that spans the loop. It applies only when
+# nothing can observe the accumulator between the loop's first and last write.
+
+
+def test_str_accumulator_loop_uses_a_builder():
+    src = emit.emit(_compile("""
+fn build(xs: List[Str], sep: Str) -> Str {
+  var out = ""
+  for (x of xs) { out = out + x + sep }
+  return out
+}
+"""))
+    _has(src, "var _revlSB0 strings.Builder")
+    _has(src, "_revlSB0.WriteString(out)")
+    _has(src, "_revlSB0.WriteString(x)")
+    _has(src, "_revlSB0.WriteString(sep)")
+    _has(src, "out = _revlSB0.String()")
+    assert "out = (out + x)" not in src
+
+
+def test_str_accumulator_refused_when_the_partial_value_is_read():
+    """A read of the accumulator inside the loop, and a `return` out of it,
+    each need the partial string to exist on every iteration; the Builder only
+    materializes after the loop, so neither may be rewritten."""
+    src = emit.emit(_compile("""
+fn counted(xs: List[Str]) -> Int {
+  var out = ""
+  var n = 0
+  for (x of xs) {
+    out = out + x
+    n = n + out.length()
+  }
+  return n
+}
+fn early(xs: List[Str]) -> Str {
+  var out = ""
+  for (x of xs) {
+    out = out + x
+    if (out.length() > 8) { return out }
+  }
+  return out
+}
+"""))
+    assert "strings.Builder" not in src
+    assert src.count("out = (out + x)") == 2
