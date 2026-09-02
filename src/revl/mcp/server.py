@@ -2216,7 +2216,14 @@ TOOLS = [
                        "queue, FREEZES the parent (retired at k, non-callable), "
                        "snapshots the step-k state, and mints the branch (fresh "
                        "session id + WAL, no approval carry). The branch is then "
-                       "the only live continuation over the shared workspace.",
+                       "the only live continuation over the shared workspace. The "
+                       "result carries `lineage`: what the branch inherited "
+                       "(composition, generation, IR and source digests, "
+                       "capability surface, WAL position) and, listed explicitly, "
+                       "what it did NOT (provider versions, seeds and clock, model "
+                       "decisions). The same lineage is written durably into the "
+                       "branch's own WAL, so `revl branch` / `revl compare` read "
+                       "the branch tree back after the process is gone.",
         "inputSchema": {
             "type": "object",
             "properties": {"hash": {"type": "string",
