@@ -489,7 +489,10 @@ class Session:
         # names no `auto-approve` rule, so an off-distillation load is byte-identical.
         self._install_auto_approve_rules()
         # item 310: the seam-method cache index, rebuilt atomically with the class
-        # map so a call is never decided against a stale cache contract.
+        # map so a call is never decided against a stale cache contract. Surface H
+        # runs first: the applicability fold over the PROVIDER closure, which only
+        # a linked composition knows, refuses an uncacheable reach before boot.
+        self._check_cache_applicability(ir, self._class_map)
         self._install_cache_index(ir)
         self._enforce_activation_gate(ir)
         # item 294 Slice 2: the capability-lease gate, alongside the activation
@@ -849,6 +852,11 @@ class Session:
         # so a call mid-swap is impossible.
         new_map = self._build_class_map(ir)
         self._enforce_activation_gate(ir, class_map=new_map)
+        # item 310, surface H: the successor's cache declarations are folded over
+        # the SUCCESSOR's provider closure, here — before any teardown — so a swap
+        # that moves a cached method onto an uncacheable reach refuses with the
+        # running composition untouched.
+        self._check_cache_applicability(ir, new_map)
         old_ir = self.ir
         # capture BEFORE teardown — while the old instances are still live and
         # their state still exists (Q2). Empty unless something spawned, so a
@@ -2293,6 +2301,10 @@ class Session:
         # item 246, Fix 1: the turn's ACTIVATION body answers for its class-(c)
         # crossings before it runs, exactly as a loaded/swapped generation does.
         self._enforce_activation_gate(merged, new_map, components=turn_names)
+        # item 310, surface H: a turn widens the composition, so a cached method
+        # the turn newly resolves (or newly reaches) is folded against the MERGED
+        # closure before anything is plugged.
+        self._check_cache_applicability(merged, new_map)
 
         module = self._prepare_module(turn_doc)
 
@@ -2666,6 +2678,32 @@ class Session:
 
         walk(ir.get("components") or [])
         return index
+
+    def _check_cache_applicability(self, ir: dict, class_map) -> None:
+        """Surface H (item 310): refuse a `cache`-declaring seam method whose
+        PROVIDER CLOSURE is not cacheable, BEFORE the generation is committed.
+
+        The compile-time admission checks see only the declaring method's
+        declared reach shape; the clause is an interface contract every provider
+        inherits, so what the cached reach actually crosses is a fact about the
+        linked composition. Called from `load` (pre-boot), `swap` (pre-teardown,
+        next to the activation gate) and `_wire_turn` (pre-plug) — never after a
+        generation is committed, so a refusal never leaves a half-installed
+        index. Inert for a composition that declares no `cache`."""
+        index = self._build_cache_index(ir)
+        if not index:
+            return
+        from .approval import (ClassMap,  # noqa: PLC0415
+                               cache_applicability_refusal)
+        # the class map is None when no approval policy is configured, but the
+        # fold is not a policy gate: `cache pure` memoizes in every session (the
+        # no-policy inertness rule covers the ENTRY STORE, not applicability), so
+        # an uncacheable reach must refuse off-policy too. Built here, only for a
+        # composition that actually declares `cache`.
+        problem = cache_applicability_refusal(
+            class_map if class_map is not None else ClassMap(ir), index)
+        if problem is not None:
+            raise SessionError(problem)
 
     def _install_cache_index(self, ir: dict) -> None:
         """Rebuild the per-generation cache index and drop every entry from the
