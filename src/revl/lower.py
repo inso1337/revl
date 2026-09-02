@@ -2604,12 +2604,46 @@ REDISPATCH_FREE = frozenset({"read", "keyed", "shape-proven"})
 def _idempotent_register(decl) -> str:
     """The honesty register for `decl`'s idempotency claim (design §2).
 
-    A keyed emission is dedup-safe BY CONSTRUCTION (`keyed`). A native inverse in
-    restore-to-recorded-value form would be `shape-proven`, but that check needs
-    244's revl-expressed bodies — TODO(309-slice4): detect the shape and upgrade
-    an `undo idempotent` native body to `shape-proven`. Every other claim (a bare
-    `idempotent` emission, an `undo idempotent` over a host body) is the author's
-    `declared` claim, machine-checked only for shape.
+    A keyed emission is dedup-safe BY CONSTRUCTION (`keyed`). Every other claim
+    (a bare `idempotent` emission, an `undo idempotent` over a host body) is the
+    author's `declared` claim, machine-checked only for shape.
+
+    TODO(309-slice4) is BLOCKED, not merely undone, and the blocker is in the
+    language rather than in this function. `shape-proven` is designed as a
+    SYNTACTIC check over a restore-to-recorded-value inverse body (design §2:
+    "every write is `set(target, w.field)`, no reads of current state, no deltas,
+    no appends"), which is last-writer-wins and therefore idempotent by
+    construction. Running that check needs a body the checker can READ, and there
+    is none:
+
+    * An extern has only HOST bodies. `parser.py::_extern` refuses a declaration
+      with no `@backend { ... }` (or `file`/`ref`) body, so every extern body is
+      G8-opaque by construction — the exact thing the design's own ledger row
+      says revl "cannot prove anything about".
+    * The undo SLOT holds an expression, not a body, and every world-touching
+      leaf of that expression is a call to another extern. `stdlib/fs.rvl`'s
+      inverses are the first-party case the design named as the prerequisite, and
+      they are `@py` blocks: 244 landed the revl-expressed CATALOG, not
+      revl-expressed bodies. So the prerequisite is not met by 244 and is not
+      met by anything else in the tree.
+    * The classification cannot stand in for the body. `pure` is checked for
+      SHAPE only — the same trap item 440 recorded for the `read` tier — and
+      `stdlib/fs.rvl` proves it concretely: `restore`, `unrm` and
+      `rmdir_if_empty` are all `extern pure fn` and all unlink or rename real
+      files. Deriving `shape-proven` from `pure` would promote mutating inverses
+      into the free-replay tier, which is unsound in the unsafe direction.
+    * Even GIVEN a revl body, those same fs inverses would FAIL the design's
+      shape rule: each branches on `lexists_confined(...)`, which is a read of
+      current state, and the rule excludes exactly that. So the first adopters
+      would not have earned the tier anyway.
+
+    Until an extern can carry a revl-expressed body the rule can be run over,
+    this function returns `declared` for every native `undo idempotent` body,
+    which is the fail-closed direction the whole lattice is built on: on any
+    ambiguity, fall back to the weaker claim. `shape-proven` therefore stays a
+    tier the partial order ACCEPTS (`_REGISTER_RANK`, `REDISPATCH_FREE`) and
+    nothing produces; `tests/test_idempotent_inverse_309.py` pins that, so the
+    day a body form arrives the tripwire says which promise to keep.
 
     item 440: `undo pure <inverse>(result)` is the READ tier — the author states
     the inverse OBSERVES and does not mutate, so re-issuing it is observationally
