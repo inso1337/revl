@@ -884,10 +884,12 @@ class Registry:
 
     def resolve(self, need, manifest: dict | None = None,
                 limit: int = 5, *, verify_required: bool = False,
-                key: bytes | None = None, trusted_publishers=()) -> dict:
+                key: bytes | None = None, trusted_publishers=(),
+                adapt: bool = True, adapt_opt_ins: dict | None = None) -> dict:
         return resolve(self, need, manifest=manifest, limit=limit,
                        verify_required=verify_required, key=key,
-                       trusted_publishers=trusted_publishers)
+                       trusted_publishers=trusted_publishers,
+                       adapt=adapt, adapt_opt_ins=adapt_opt_ins)
 
 
 # --------------------------------------------------------------- the need
@@ -897,6 +899,14 @@ class _Need:
     """A canonical service shape a candidate is filtered against."""
     label: str            # a human tag for the `why`/diagnostics, never matched on
     decl: ServiceDecl     # the shape; `_service_compatible` ignores the name
+    # The consumer-side type table, when the need arrived as source. Only the
+    # item-296 adapter probe reads it (`compatible_total` resolves nominals on
+    # BOTH sides against real tables, design section 2.2 B3); the direct §5
+    # filter never needed one. A fill spec or a bare shape object carries no
+    # table, and a nominal that cannot be resolved refuses the bridge rather
+    # than being bridged permissively - which is the point of the restricted
+    # relation.
+    types: dict = field(default_factory=dict)
 
 
 def _split_top(text: str, sep: str) -> list[str]:
@@ -974,7 +984,8 @@ def _needs(need) -> list[_Need]:
                             hint="pass a single `service` declaration, a fill "
                                  "spec, or a shape object")
         (name, spec), = services.items()
-        return [_Need(name, _service_from_ir(name, spec))]
+        return [_Need(name, _service_from_ir(name, spec),
+                      types=doc.get("types") or {})]
     if isinstance(need, dict):
         if "fillSpec" in need:                 # a whole obligation was passed
             return _needs_from_fillspec(need["fillSpec"])
@@ -990,6 +1001,23 @@ def _needs(need) -> list[_Need]:
 
 # --------------------------------------------------------------- resolve
 
+@dataclass(frozen=True)
+class _Bridge:
+    """A PROPOSED adapter for a candidate the direct §5 filter refused
+    (item 296, design section 3: proposed, never silent).
+
+    The plan and the rendered `.rvl` ride out on the candidate so the author
+    commits the declaration and the compiler re-admits it through the ordinary
+    gate. `chain_depth` is 1 for a bridge onto ordinary code and n+1 onto a
+    committed adapter marking itself depth n (section 6.4).
+    """
+    plan: object              # adapt.BridgeResult
+    source: str               # the rendered section-4 artifact
+    derivation: str
+    chain_depth: int
+    merges: tuple             # the outcome-merge shapes the plan opted into
+
+
 @dataclass
 class _Match:
     entry: RegistryEntry
@@ -997,8 +1025,32 @@ class _Match:
     service: str             # the provided service name that matched
     need_label: str
     exact: bool              # identical interface vs a compatible widening
+    # None for a directly §5-compatible candidate; a proposed adapter for one
+    # that is only `compatible-with-adapter` (item 296 slice 3).
+    bridge: "_Bridge | None" = None
 
     def why(self) -> str:
+        if self.bridge is not None:
+            depth = self.bridge.chain_depth
+            parts = [f"provides `{self.service}` as `{self.key}`: NOT directly "
+                     f"§5-compatible, but compatible-with-adapter — a safe "
+                     f"bridge is proposed (commit the `adapt` source, the "
+                     f"compiler re-admits it through the ordinary gate)"]
+            if depth > 1:
+                parts.append(
+                    f"chain depth {depth}: this candidate is ITSELF a "
+                    f"synthesized adapter, so the bridge stacks on one already "
+                    f"committed; it ranks below a fresh single bridge onto the "
+                    f"underlying candidate")
+            else:
+                parts.append("chain depth 1")
+            if self.bridge.merges:
+                parts.append(
+                    f"the plan merges outcomes ({', '.join(self.bridge.merges)}): "
+                    f"any fault-sweep conclusion that errors surface as `Err` is "
+                    f"INVERTED behind this bridge, so that evidence class is "
+                    f"discounted in the ranking")
+            return "; ".join(parts)
         fit = "exact interface match" if self.exact \
             else "compatible superset (adds/widens, breaks no call site)"
         return (f"provides `{self.service}` as `{self.key}`: §5-compatible with "
@@ -1009,6 +1061,10 @@ class _Match:
         # sits ABOVE evidence quality:
         #   1. smallest declared capability set (unscoped `*` ranks last)
         #   2. tighter interface fit (exact over compatible-with-widening)
+        #   3. direct over adapted, then shallower chain over deeper (item 296
+        #      §6.1/§6.4: "the bridge is a cost, not a tie", and "depth only
+        #      ever ranks down"). Both sit AT equal authority fit and AHEAD of
+        #      evidence, which is exactly where the design puts them.
         # Evidence quality (item 293) breaks the tie among candidates equal here;
         # interface compatibility itself is a hard filter, decided in
         # `_match_entry`, and never a ranking term.
@@ -1018,6 +1074,8 @@ class _Match:
             len([c for c in e.capabilities if c != "*"]),
             e.emissions,
             0 if self.exact else 1,
+            0 if self.bridge is None else 1,
+            0 if self.bridge is None else self.bridge.chain_depth,
         )
 
 
@@ -1067,6 +1125,193 @@ def _match_entry(entry: RegistryEntry, needs: list[_Need]) -> _Match | None:
     return best
 
 
+# ------------------------------------------- item 296: compatible-with-adapter
+#
+# A candidate the §5 filter refuses may still be reachable across a SAFE bridge
+# (docs/design/296-adapter-synthesis.md). Resolve's job here is the design's
+# option (b), "explicit and proposed": report the candidate as
+# `compatible-with-adapter`, carry the plan and the rendered `adapt` source, and
+# rank it BELOW every directly compatible candidate at equal authority. Nothing
+# is wired: the author commits the declaration and the compiler re-admits it
+# through the ordinary gate. This module adds ZERO adapter logic of its own -
+# the predicate is `adapt.bridge_plan`, exactly as the §5 relation is `lower`'s.
+
+
+def _compiled_entry_ir(entry: RegistryEntry, ir_cache: dict) -> dict:
+    """The entry's own compiled IR, once per resolve. Normalized the way an
+    attestation binds it (basenamed `file`/`source`), which leaves `services`
+    and `types` untouched, so the same cached document serves both the evidence
+    check and the adapter probe's type tables. A source that does not compile
+    caches as `{}` - nothing can be proposed against what the gate would refuse
+    anyway."""
+    ir = ir_cache.get(entry.name)
+    if ir is None:
+        from .compiler import compile_source  # noqa: PLC0415
+        try:
+            # compile under the stable published filename so the audit-
+            # normalized `file` basename (and thus the attested composition
+            # hash) matches what `build_evidence` signed from component.rvl.
+            ir = _normalize_ir_for_attest(
+                compile_source(entry.source, "component.rvl"))
+        except RevlError:
+            ir = {}
+        ir_cache[entry.name] = ir
+    return ir
+
+
+def _bridge_entry(entry: RegistryEntry, needs: list[_Need], ir_cache: dict,
+                  opt_ins: dict) -> tuple["_Match | None", list[dict]]:
+    """Probe `entry` for a proposed adapter. Returns `(match, near_misses)`.
+
+    Only entries whose provided service carries EVERY method name the need
+    declares are probed: v1 matches methods by name (design §2.4, §8, no rename
+    mapping), so a missing method is never bridgeable, and probing anyway would
+    make every unrelated entry in the registry a "near miss".
+
+    A probe that refuses rides out as a near miss - the named clauses at the
+    named positions, plus the item-274 `navigate` record - so "fix it by hand"
+    starts from the exact positions rather than a diff hunt (design §5).
+    """
+    from .adapt import (bridge_plan, chain_depth_for,  # noqa: PLC0415
+                        derivation_hash, navigate_for_refusals, render_adapter,
+                        service_surface)
+
+    near: list[dict] = []
+    prov_types: dict | None = None
+    for key, service in sorted((entry.provides or {}).items()):
+        shape = entry.service_shapes.get(service)
+        if not shape:
+            continue
+        provided = _service_from_ir(service, shape)
+        for need in needs:
+            if not set(need.decl.methods) <= set(provided.methods):
+                continue
+            if prov_types is None:
+                # only now is the entry's own source worth compiling: the
+                # predicate resolves nominals against real type tables, and an
+                # entry with no name overlap never reaches this point. Cached,
+                # and shared with the evidence check.
+                prov_types = _compiled_entry_ir(entry,
+                                                ir_cache).get("types") or {}
+            result = bridge_plan(need.decl, provided, opt_ins,
+                                 req_types=need.types, prov_types=prov_types)
+            if not result.ok:
+                near.append({
+                    "name": entry.name,
+                    "key": key,
+                    "service": service,
+                    "need": need.label,
+                    "refusals": [
+                        {"method": r.method, "position": r.position,
+                         "transformation": r.transformation, "clause": r.clause,
+                         "reason": r.reason, "hint": r.hint}
+                        for r in result.refusals],
+                    "navigate": navigate_for_refusals(result.refusals),
+                })
+                continue
+            derivation = derivation_hash(
+                service_surface(need.decl), service_surface(provided),
+                entry.source_hash, json.dumps(opt_ins, sort_keys=True))
+            depth = chain_depth_for(entry.source)
+            carried: list[str] = []
+            for method in need.decl.methods.values():
+                for cap in (method.capabilities or ()):
+                    if cap not in carried:
+                        carried.append(cap)
+            try:
+                rendered = render_adapter(
+                    f"{need.decl.name}Adapter", need.decl, provided, opt_ins,
+                    provide_key=key, require_key="backing",
+                    carried_tokens=tuple(carried), prov_types=prov_types,
+                    derivation=derivation, chain_depth=depth)
+            except ValueError as error:
+                # the slice-1 renderer does not cover every catalogue
+                # combination yet, and it RAISES rather than emitting source it
+                # cannot render correctly. The plan is still sound and still
+                # worth reporting; the artifact is simply not renderable here.
+                rendered = ""
+                near.append({"name": entry.name, "key": key,
+                             "service": service, "need": need.label,
+                             "unrenderable": str(error)})
+            # One proposal per entry, and the near misses collected for its
+            # OTHER keys are dropped with it: "this key of this entry needs a
+            # different bridge" is not actionable once one bridge to the entry
+            # already works, it is just noise in the answer.
+            return _Match(entry, key, service, need.label, False,
+                          bridge=_Bridge(plan=result, source=rendered,
+                                         derivation=derivation,
+                                         chain_depth=depth,
+                                         merges=tuple(result.merges))), []
+    return None, near
+
+
+def _adapter_block(match: _Match) -> dict:
+    """The `compatible-with-adapter` payload a candidate carries: the verdict,
+    the per-method plan, the chain depth, the derivation hash, and the rendered
+    section-4 artifact the author commits. Deliberately the same shape
+    `revl adapt --check --emit` prints, so a harness reads one record."""
+    bridge = match.bridge
+    block = {
+        "verdict": "compatible-with-adapter",
+        "need": match.need_label,
+        "candidate": match.service,
+        "provideKey": match.key,
+        "chainDepth": bridge.chain_depth,
+        "merges": list(bridge.merges),
+        "derivation": bridge.derivation,
+        # Design section 4, "Wiring": the adapter provides the consumer-facing
+        # key and binds the candidate under a FRESH alias, so G2 sees exactly
+        # one provider of that key. The rename is the author's, on the same
+        # commit as the `adapt` declaration - phase 0 is the READ path and
+        # writes no manifest.
+        "wiring": {
+            "requireAlias": "backing",
+            "renameCandidateKey": {"from": match.key, "to": "backing"},
+            "note": "bind the candidate's provision under `backing` when you "
+                    "commit this: the adapter provides `"
+                    f"{match.key}` itself, and G2 forbids two providers of one "
+                    "key",
+        },
+        "methods": [
+            {"method": mp.method,
+             "steps": [{"position": st.position,
+                        "transformation": st.transformation,
+                        "detail": st.detail,
+                        "merge_shape": st.merge_shape}
+                       for st in mp.steps]}
+            for mp in bridge.plan.methods],
+        "applied": False,
+        "note": "PROPOSED, never wired: commit this `adapt` source and the "
+                "compiler re-admits the whole composition through the ordinary "
+                "gate (item 296, design section 3)",
+    }
+    if bridge.source:
+        block["source"] = bridge.source
+    return block
+
+
+def _discount_error_semantics(rank_key: tuple) -> tuple:
+    """Item 296 §6.1: a plan containing an outcome merge INVERTS a fault-sweep
+    conclusion of the shape "failures surface as `Err`, data is never
+    corrupted" - behind the merge, those dutifully surfaced errors are exactly
+    what the consumer stops seeing. So the error-semantics evidence class (the
+    fault sweep, `assess_evidence`'s leading rank term and its coverage
+    tiebreak) is discounted to `unavailable` FOR RANKING when the proposed plan
+    merges outcomes. Every other class - inverse-roundtrip, gauntlet,
+    attestation, publisher - describes value behavior the bridge leaves
+    untouched and keeps full weight. The REPORTED facets are never touched: the
+    candidate's evidence is still stated honestly, it just stops buying rank it
+    no longer earns.
+    """
+    discounted = list(rank_key)
+    assert len(discounted) == 6, (
+        "assess_evidence's rank_key changed shape; the fault-sweep terms this "
+        "discounts are no longer at 0 and 5")
+    discounted[0] = _SWEEP_RANK["unavailable"]
+    discounted[5] = 0                     # -passed, the finer coverage tiebreak
+    return tuple(discounted)
+
+
 _ASSUMPTIONS = [
     "index generated from the committed sources; entries added since are not seen",
     "extern classifications inside candidates are trusted, not verified (G8)",
@@ -1105,25 +1350,15 @@ def _assess_match(match: "_Match", *, key: bytes | None,
     bundle = entry.evidence_bundle or EvidenceBundle()
     ir = None
     if key is not None and bundle.attestation is not None:
-        ir = ir_cache.get(entry.name)
-        if ir is None:
-            from .compiler import compile_source  # noqa: PLC0415
-            try:
-                # compile under the stable published filename so the audit-
-                # normalized `file` basename (and thus the attested composition
-                # hash) matches what `build_evidence` signed from component.rvl.
-                ir = _normalize_ir_for_attest(
-                    compile_source(entry.source, "component.rvl"))
-            except RevlError:
-                ir = {}
-            ir_cache[entry.name] = ir
+        ir = _compiled_entry_ir(entry, ir_cache)
     return assess_evidence(bundle, key=key, ir=ir,
                            trusted_publishers=trusted_publishers)
 
 
 def resolve(registry, need, manifest: dict | None = None,
             limit: int = 5, *, verify_required: bool = False,
-            key: bytes | None = None, trusted_publishers=()) -> dict:
+            key: bytes | None = None, trusted_publishers=(),
+            adapt: bool = True, adapt_opt_ins: dict | None = None) -> dict:
     """Rank the registry's §5-admissible providers for a need (docs/registry.md §2).
 
     `registry` is a `Registry` or a directory path. `need` is a service
@@ -1146,6 +1381,20 @@ def resolve(registry, need, manifest: dict | None = None,
     `verify_required` a missing or unverifiable attestation only ranks a
     candidate lower; it is never silently treated as valid.
 
+    `adapt` (on by default, item 296) additionally reports a candidate the §5
+    filter REFUSED as `compatible-with-adapter` when a safe bridge exists to it:
+    the candidate carries an `adapter` block with the bridge plan, the rendered
+    `adapt` source to commit, the chain depth, and the derivation hash. Nothing
+    is wired - the proposal is explicit and the compiler re-admits the committed
+    declaration through the ordinary gate (design section 3, "proposed, not
+    silent"). Adapted candidates rank strictly BELOW every directly compatible
+    one at equal authority fit, a deeper chain below a shallower one, and a plan
+    that merges outcomes has the candidate's error-semantics evidence discounted
+    (section 6.1/6.4). `adapt_opt_ins` is the author's `D` map, keyed by method
+    name exactly as `revl adapt --adapt` takes it: without it the transformations
+    that need an opt-in (an outcome merge, a non-canonical default) refuse, and
+    the refusal rides out under `nearMisses` naming the position and the clause.
+
     Two things here are checked rather than trusted, always: an entry whose
     `index.json` row disagrees with its own `component.rvl` is REFUSED (it is
     listed in `refused` with the reason, never ranked), and evidence only earns
@@ -1167,6 +1416,8 @@ def resolve(registry, need, manifest: dict | None = None,
     ir_cache: dict = {}
     graded: list[tuple[_Match, EvidenceAssessment]] = []
     refused: list[dict] = []
+    near_misses: list[dict] = []
+    opt_ins = dict(adapt_opt_ins or {})
     for entry in registry.entries:
         if entry.index_problems:
             # the index disagrees with the entry's own source. Ranking it would
@@ -1178,6 +1429,11 @@ def resolve(registry, need, manifest: dict | None = None,
                             "reasons": list(entry.index_problems)})
             continue
         match = _match_entry(entry, needs)
+        if match is None and adapt:
+            # the §5 filter refused it directly. Item 296: is it reachable
+            # across a SAFE bridge? A proposal, never a wiring.
+            match, near = _bridge_entry(entry, needs, ir_cache, opt_ins)
+            near_misses.extend(near)
         if match is None:
             continue  # interface-incompatible: the hard filter, never ranked in
         if match.key in taken:
@@ -1191,13 +1447,20 @@ def resolve(registry, need, manifest: dict | None = None,
             continue
         graded.append((match, assessment))
 
-    # least authority, then fit, then evidence quality, then a stable tiebreak.
-    graded.sort(key=lambda pair: (
-        pair[0].authority_fit_key(),
-        pair[1].rank_key,
-        len(pair[0].entry.source),
-        pair[0].entry.name,
-    ))
+    # least authority, then fit (direct over adapted, shallow chain over deep),
+    # then evidence quality, then a stable tiebreak.
+    def _rank(pair: tuple) -> tuple:
+        match, assessment = pair
+        evidence = assessment.rank_key
+        if match.bridge is not None and match.bridge.merges:
+            # §6.1: the plan merges outcomes, so the fault sweep's
+            # errors-surface-as-`Err` conclusion no longer describes what the
+            # consumer sees. Discount that class - and only that class.
+            evidence = _discount_error_semantics(evidence)
+        return (match.authority_fit_key(), evidence,
+                len(match.entry.source), match.entry.name)
+
+    graded.sort(key=_rank)
 
     assumptions = list(_ASSUMPTIONS)
     assumptions.append(
@@ -1232,6 +1495,31 @@ def resolve(registry, need, manifest: dict | None = None,
         assumptions.append(
             "verify-required: a candidate without a cryptographically valid "
             "attestation was filtered, not merely ranked lower")
+    if adapt:
+        adapted = [m for m, _ in graded if m.bridge is not None]
+        assumptions.append(
+            "candidates the §5 filter refused were additionally probed for a "
+            "SAFE adapter (item 296): one carrying an `adapter` block is "
+            "`compatible-with-adapter`, PROPOSED and never wired - it ranks "
+            "below every directly compatible candidate at equal authority, a "
+            "deeper chain below a shallower one, and a plan that merges "
+            "outcomes has its error-semantics evidence discounted")
+        if adapted:
+            assumptions.append(
+                f"{len(adapted)} candidate"
+                f"{'' if len(adapted) == 1 else 's'} need"
+                f"{'s' if len(adapted) == 1 else ''} an adapter: the composition "
+                "is NOT derivable from the registry source alone until the "
+                "`adapt` declaration is committed and re-admitted")
+        if not opt_ins:
+            assumptions.append(
+                "no `adapt` opt-in map was supplied, so every transformation "
+                "needing one (an outcome merge, a non-canonical default) "
+                "refused; see `nearMisses` for the named positions")
+    else:
+        assumptions.append(
+            "adapter probing was disabled: only directly §5-compatible "
+            "candidates were considered")
 
     candidates = []
     for match, assessment in graded[:max(0, limit)]:
@@ -1252,11 +1540,20 @@ def resolve(registry, need, manifest: dict | None = None,
         if assessment.sweep_coverage is not None:
             candidate["evidence"]["faultSweepCoverage"] = list(
                 assessment.sweep_coverage)
+        if match.bridge is not None:
+            candidate["adapter"] = _adapter_block(match)
+            if match.bridge.merges:
+                candidate["evidence"]["discounted"] = ["fault-sweep"]
+                candidate["evidence"]["discountReason"] = (
+                    "the proposed plan merges outcomes "
+                    f"({', '.join(match.bridge.merges)}), inverting any "
+                    "fault-sweep conclusion that errors surface as `Err`; the "
+                    "facet status above is unchanged, its RANK is discounted")
         if entry.dossier is not None:
             candidate["dossier"] = entry.dossier
         candidates.append(candidate)
 
-    return {
+    result = {
         "ok": True,
         "query": "resolve",
         "question": "who provides a service admissible for this need?",
@@ -1265,6 +1562,19 @@ def resolve(registry, need, manifest: dict | None = None,
         "candidates": candidates,
         "refused": refused,
     }
+    if adapt:
+        # capped like `candidates`: a near miss is a repair to act on, not a
+        # log, and an unbounded list would quietly become the bulk of the
+        # answer on a large registry. The truncation is stated, never silent.
+        cap = max(0, limit)
+        result["nearMisses"] = near_misses[:cap]
+        if len(near_misses) > cap:
+            assumptions.append(
+                f"{len(near_misses) - cap} further near-miss adapter "
+                f"refusal{'s were' if len(near_misses) - cap != 1 else ' was'} "
+                f"omitted: `nearMisses` is capped at `limit` ({cap}) the same "
+                "way `candidates` is")
+    return result
 
 
 __all__ = ["Registry", "RegistryEntry", "EvidenceBundle", "EvidenceAssessment",

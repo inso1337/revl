@@ -1,0 +1,9 @@
+service Parse {
+  fn numeric(text: Str) -> Bool
+}
+
+component DigitTool provides parse: Parse {
+  provide parse {
+    fn numeric(text) = text.is_digit()
+  }
+}

@@ -89,7 +89,7 @@ _IDEMPOTENT_EMISSION_METHODS = ("put", "delete")
 #: every method an OpenAPI 3.x path item may carry.
 _METHODS = (*_SAFE_METHODS, "put", "post", "delete", "patch")
 
-#: item 254 (compensate-grade network effects, Slice 1). A COMPENSATE-grade
+#: item 254 (compensate-grade network effects). A COMPENSATE-grade
 #: reversal is item 247's best-effort follow-up to a one-way emission, NOT a
 #: proof-surface witness: it emits through the compensate slot at teardown,
 #: lands on the AUDIT surface, and never contributes to a `noResidue`/witness
@@ -97,16 +97,65 @@ _METHODS = (*_SAFE_METHODS, "put", "post", "delete", "patch")
 #: mirror the `x-revl-emission` override family; the engineer `--compensate`/
 #: `--preimage`/`--undo` flags are their out-of-band equivalents.
 #:
-#: Slice 1 honours the promotion ONLY on `PUT` (the verb gate): `PUT` is
-#: idempotent by RFC 9110 §9.2.2, so the annotation can only NARROW within an
-#: already-idempotent verb, never invent idempotence on a `POST`/`PATCH`. The
-#: `DELETE`-recreate form is Slice 2. Absent the annotation, a `PUT` imports
-#: exactly as item 44 makes it (`emission idempotent fn`), byte-identically.
-_COMPENSATE_METHODS = ("put",)
+#: Slice 1 honoured the promotion only on `PUT` (the verb gate). Slice 2 adds
+#: the two other forms the design defers (§7), and each is gated on a DOCUMENTED
+#: reversal route rather than on the verb alone — the verb decides which route
+#: SHAPE is admissible, and a missing piece of that route is a hard refusal,
+#: never a half-emitted compensation:
+#:
+#:   * `PUT`    -> `restore`        : GET the preimage, PUT it back (Slice 1).
+#:   * `DELETE` -> `recreate`       : GET the preimage, re-issue it through a
+#:                                    documented CREATE op (`x-revl-undo`).
+#:   * `POST`   -> `delete-created` : DELETE the resource the POST created,
+#:                                    addressed by a documented response key
+#:                                    (`x-revl-undo-key`).
+#:
+#: `POST` becomes admissible in Slice 2 *only* in the `delete-created` form, and
+#: the verb-gate reasoning (attack 3) is unchanged rather than relaxed. The gate
+#: exists so an annotation can never INVENT idempotence for a reversal that
+#: RE-ISSUES the forward request. A `delete-created` reversal re-issues nothing —
+#: it removes one named resource — so it never rests on the forward `POST` being
+#: idempotent. What it rests on instead is being KEYED, and that is checked, not
+#: assumed (`_validate_compensations`): a `POST` whose response cannot name the
+#: resource it created is REFUSED, the same posture the recovery machinery takes
+#: when it refuses an unkeyed spent inverse rather than guessing at it.
+#:
+#: `PATCH` stays a hard error in every form: it is neither idempotent by RFC
+#: 9110 §9.2.2 nor addressable by a documented reversal route — a partial merge
+#: has no inverse the document can name.
+#:
+#: Absent the annotation every verb imports exactly as item 44 makes it,
+#: byte-identically.
+_COMPENSATE_FORMS = {"put": "restore", "delete": "recreate", "post": "delete-created"}
 _COMPENSATE_KEY = "x-revl-compensate"
 _PREIMAGE_KEY = "x-revl-preimage"
 _UNDO_KEY = "x-revl-undo"
+_UNDO_KEY_KEY = "x-revl-undo-key"
 _IF_MATCH_KEY = "x-revl-if-match"
+
+#: item 254 Slice 2, the concurrency-token policy (design HIGH 1). HIGH 1 asks
+#: for "a refusal path plus an explicit may-clobber path, never a silent
+#: clobber". Slice 1 shipped the may-clobber path and made the header state it;
+#: this is the refusal path, selected document-wide by the importing engineer
+#: (`--require-if-match`) or by the document author (root-level
+#: `x-revl-require-if-match: true`). Under it, a compensate-grade promotion on an
+#: endpoint that claims no version/ETag token is a HARD ERROR instead of a
+#: best-effort reversal: fail closed rather than race a concurrent writer.
+_REQUIRE_IF_MATCH_KEY = "x-revl-require-if-match"
+
+#: The concurrency token each reversal FORM issues its request under, and the
+#: hazard failing that precondition protects against (HIGH 1, per form). A
+#: `recreate` is a create, so its token is `If-None-Match: *`: the reversal must
+#: fail loudly if the resource is already back, rather than overwrite whatever
+#: took its place.
+_FORM_TOKEN = {
+    "restore": ("`If-Match`",
+                "a reversal that would clobber an intervening write"),
+    "recreate": ("`If-None-Match: *`",
+                 "a recreate that would clobber a resource that came back"),
+    "delete-created": ("`If-Match`",
+                       "a reversal that would delete an intervening write"),
+}
 
 #: path-item fields that are not operations.
 _PATH_ITEM_FIELDS = {"summary", "description", "servers", "parameters"}
@@ -321,6 +370,12 @@ class _TypeSpace:
         self.origin: dict[str, str] = {}     # revl type name -> defining pointer
         self.owner: dict[str, str] = {}      # revl type name -> owning schema name
         self.pending: set[str] = set()       # names mid-declaration (recursion)
+        # item 254 Slice 2: the REQUIRED (non-`Opt`) field names of every record
+        # type this space declares. The `delete-created` form needs to check that
+        # a `POST`'s response can actually name the resource it created, and an
+        # `Opt[T]` field cannot: a key that may be absent is an unkeyed
+        # compensation, which is refused rather than guessed at.
+        self.required_fields: dict[str, set[str]] = {}
         self.notes: list[str] = []
 
     # -- bookkeeping -------------------------------------------------------
@@ -524,6 +579,7 @@ class _TypeSpace:
 
         fields: list[str] = []
         seen: dict[str, str] = {}
+        mandatory: set[str] = set()
         for prop, sub in properties.items():
             field_name = _snake(prop)
             if field_name in seen:
@@ -542,8 +598,14 @@ class _TypeSpace:
                 self.note("a property that is both optional and `nullable` is one "
                           "`Opt[T]`: revl's `Opt` does not nest, so \"absent\" and "
                           "\"null\" are the same value on this side")
+            if prop in required and not revl_type.startswith("Opt["):
+                # required AND non-nullable: the only shape that can key a
+                # compensation (item 254 Slice 2). A `required` but `nullable`
+                # field is an `Opt[T]` here and is deliberately excluded.
+                mandatory.add(field_name)
             fields.append(f"{field_name}: {revl_type}")
 
+        self.required_fields[hint] = mandatory
         return self.declare(hint, f"type {hint} = {{ {', '.join(fields)} }}", pointer)
 
     def resolve_enum(self, schema: dict, pointer: str, hint: str,
@@ -654,16 +716,25 @@ class _Operation:
     emission: bool
     reason: str                     # why it is (or is not) an emission
     idempotent: bool = False        # RFC 9110 §9.2.2, spec's claim (item 44)
-    # item 254 (compensate-grade network effect, Slice 1). `compensate` records
-    # that this PUT was promoted to carry an item-247 COMPENSATE slot on its
-    # emission extern; `preimage`/`undo` name the operations the reversal reads
-    # and re-issues; `if_match` records whether the author claims a version/ETag
-    # token for the reversal (HIGH 1). None/False leaves the operation exactly
-    # as item 44 emits it.
+    # item 254 (compensate-grade network effect). `compensate` records that this
+    # write was promoted to carry an item-247 COMPENSATE slot on its emission
+    # extern; `preimage`/`undo` name the operations the reversal reads and
+    # issues; `if_match` records whether the author claims a version/ETag token
+    # for the reversal (HIGH 1). None/False leaves the operation exactly as
+    # item 44 emits it.
     compensate: bool = False
     preimage: str | None = None     # the safe GET op that reads the preimage
     undo: str | None = None         # the op that writes the preimage back (the PUT)
     if_match: bool = False          # author claims a version/ETag concurrency token
+    # item 254 Slice 2: which reversal ROUTE SHAPE this promotion took —
+    # `restore` (PUT), `recreate` (DELETE) or `delete-created` (POST). The form
+    # decides what the route must name, what is checked, and what the generated
+    # header claims; see `_COMPENSATE_FORMS`.
+    form: str | None = None
+    # `delete-created` only: the REQUIRED response field naming the resource the
+    # POST created, which the reversal DELETE is addressed by. Without it the
+    # compensation is unkeyed and the promotion is refused.
+    undo_key: str | None = None
 
 
 class _Generator:
@@ -672,7 +743,9 @@ class _Generator:
                  compensate: set[str] | None = None,
                  preimage: dict[str, str] | None = None,
                  undo: dict[str, str] | None = None,
-                 if_match: set[str] | None = None) -> None:
+                 if_match: set[str] | None = None,
+                 undo_key: dict[str, str] | None = None,
+                 require_if_match: bool = False) -> None:
         self.doc = doc
         self.filename = filename
         self.backend = backend
@@ -688,6 +761,12 @@ class _Generator:
         self.preimage_requested = preimage or {}
         self.undo_requested = undo or {}
         self.if_match_requested = if_match or set()
+        # item 254 Slice 2: `--undo-key OP=FIELD` (the `delete-created` route
+        # key), and the HIGH 1 refusal policy, which either the engineer
+        # (`--require-if-match`) or the document root may turn on.
+        self.undo_key_requested = undo_key or {}
+        self.require_if_match = bool(require_if_match) or (
+            doc.get(_REQUIRE_IF_MATCH_KEY) is True)
         # item 254: set once any operation is promoted compensate-grade, so the
         # header gains its claim-vs-proof paragraph ONLY then — a document with
         # no `x-revl-compensate` annotation emits byte-identically to before.
@@ -830,37 +909,45 @@ class _Generator:
         # emission — a verb the author weakened to plain `fn` has no delivery.
         idempotent = emission and method in _IDEMPOTENT_EMISSION_METHODS
 
-        compensate, preimage, undo, if_match = self.compensation(
-            method, path, pointer, operation, name, operation_id, emission)
+        route = self.compensation(method, path, pointer, operation, name,
+                                  operation_id, emission)
 
         return _Operation(method=method, path=path, name=name, pointer=pointer,
                           summary=summary, params=params, returns=returns,
                           emission=emission, reason=reason, idempotent=idempotent,
-                          compensate=compensate, preimage=preimage, undo=undo,
-                          if_match=if_match)
+                          **route)
 
     # -- item 254: the compensate-grade promotion -------------------------
     def compensation(self, method: str, path: str, pointer: str, operation: dict,
-                     name: str, operation_id: object,
-                     emission: bool) -> tuple[bool, str | None, str | None, bool]:
-        """`(compensate, preimage, undo, if_match)` — the item-254 Slice 1
-        promotion of a `PUT` to a COMPENSATE-grade network effect.
+                     name: str, operation_id: object, emission: bool) -> dict:
+        """The item-254 promotion of a write to a COMPENSATE-grade network
+        effect, as `_Operation` keyword arguments.
 
         The promotion attaches an item-247 `compensate` slot (a best-effort,
         audit-surface reversal) to the operation's `emission` extern. It is NOT
         a proof-surface witness: it never claims `noResidue`, and the endpoint
-        stays an `emission`. Two guards keep optimism out, exactly as the
-        `emission` override family does:
+        stays an `emission`.
 
-          * the VERB GATE (item 254 verb gate / attack 3): the promotion is
-            honoured ONLY on `PUT`. `PUT` is idempotent by RFC 9110 §9.2.2, so
-            the annotation NARROWS within an already-idempotent verb; it cannot
-            invent idempotence on a `POST`/`PATCH`, which is a HARD ERROR. The
-            `DELETE`-recreate form is Slice 2, refused here rather than
-            half-emitted;
+        Slice 2 admits three reversal FORMS, one per verb (`_COMPENSATE_FORMS`),
+        and every one of them is gated on a route the DOCUMENT names. What keeps
+        optimism out is unchanged from Slice 1 and applies to all three:
+
+          * the VERB GATE (attack 3) — the verb decides which route shape is
+            admissible at all, and `PATCH` is admissible in none of them. A
+            promotion can only ever NARROW within a shape the RFC already
+            supports; it can never invent one;
+          * the ROUTE must be spelled out — a preimage, an undo operation, a
+            response key — in concrete other operations of this same document,
+            never a mood. A route with a piece missing is a HARD ERROR, so the
+            failure mode is a refusal an engineer reads, not a compensation that
+            fires against the wrong resource;
           * the operation must import as an `emission` — a verb weakened to a
             plain `fn` (`--pure`) crosses no boundary, so there is nothing to
             compensate.
+
+        Cross-operation facts (does the preimage exist, is it safe, can the
+        recreate carry the preimage, does the response key exist) need the whole
+        operation table and are checked in `_validate_compensations`.
         """
         handles = {name, f"{method.upper()} {path}"}
         if isinstance(operation_id, str) and operation_id.strip():
@@ -871,31 +958,26 @@ class _Generator:
         requested = bool(forced) or ext_compensate is True
         if forced:
             self.used |= forced
+        none = {"compensate": False, "preimage": None, "undo": None,
+                "if_match": False, "form": None, "undo_key": None}
         if not requested:
-            return False, None, None, False
+            return none
 
-        # the verb gate — a HARD ERROR off `PUT`, never a silent drop
-        if method not in _COMPENSATE_METHODS:
-            if method in ("post", "patch"):
+        # the verb gate — a HARD ERROR off the three routed verbs, never a
+        # silent drop
+        form = _COMPENSATE_FORMS.get(method)
+        if form is None:
+            if method == "patch":
                 raise self.report.bad(
                     pointer,
-                    f"`{method.upper()} {path}` is asked to carry a compensate "
-                    f"reversal, but `{method.upper()}` is not idempotent by RFC "
-                    f"9110 §9.2.2",
-                    hint="the compensate promotion is honoured only on `PUT`, a "
-                         "verb the RFC defines idempotent; it can NARROW within "
-                         "an already-idempotent verb but cannot invent "
-                         "idempotence on a POST/PATCH. Drop the annotation, or "
-                         "model the offset as a plain emission")
-            if method == "delete":
-                raise self.report.bad(
-                    pointer,
-                    f"`DELETE {path}` compensate-grade removal (recreate-on-abort) "
-                    "is Slice 2, not Slice 1",
-                    hint="Slice 1 ships only the `PUT`-with-`GET`-preimage form; a "
-                         "`DELETE` reversal recreates via a documented create op "
-                         "and rides the same audit surface in a later slice "
-                         "(docs/design/254-witnessed-network.md §7)")
+                    f"`PATCH {path}` is asked to carry a compensate reversal, but "
+                    "`PATCH` is not idempotent by RFC 9110 §9.2.2 and has no "
+                    "documented reversal route",
+                    hint="a partial merge has no inverse this document can name: "
+                         "the pre-state of a merged field is not recoverable from "
+                         "the request, and re-issuing the `PATCH` is not a "
+                         "reversal. Model the offset as a plain emission, or "
+                         "expose the write as a `PUT` with a `GET` preimage")
             raise self.report.bad(
                 pointer,
                 f"`{method.upper()} {path}` cannot carry a compensate reversal — "
@@ -912,34 +994,119 @@ class _Generator:
                      "operation that crosses nothing has nothing to compensate. "
                      "Drop one of the two conflicting claims")
 
-        # the reversal route: `preimage` (the safe GET read) and `undo` (the op
-        # that writes the captured preimage back — the PUT itself, by default).
-        preimage = self.preimage_requested.get(name)
-        if preimage is None:
-            ext_preimage = operation.get(_PREIMAGE_KEY)
-            preimage = ext_preimage if isinstance(ext_preimage, str) else None
-        if not preimage:
-            raise self.report.bad(
-                pointer,
-                f"`{name}` is compensate-grade but names no preimage source",
-                hint=f"declare `{_PREIMAGE_KEY}: <getOp>` (or `--preimage "
-                     f"{name}=<getOp>`) — the safe `GET` whose response the "
-                     "reversal `PUT`s back to restore server state (item 254 §1.2)")
+        preimage = self._route_target(operation, name, _PREIMAGE_KEY,
+                                      self.preimage_requested)
+        undo = self._route_target(operation, name, _UNDO_KEY, self.undo_requested)
+        undo_key = self._route_target(operation, name, _UNDO_KEY_KEY,
+                                      self.undo_key_requested)
 
-        undo = self.undo_requested.get(name)
-        if undo is None:
-            ext_undo = operation.get(_UNDO_KEY)
-            undo = ext_undo if isinstance(ext_undo, str) else None
-        if not undo:
-            # for a PUT the undo IS the PUT itself (item 254 §1.2)
-            undo = name
+        if form == "restore":
+            # PUT: GET the preimage, PUT it back. The undo IS the PUT itself
+            # unless the author names another writer (item 254 §1.2).
+            if not preimage:
+                raise self.report.bad(
+                    pointer,
+                    f"`{name}` is compensate-grade but names no preimage source",
+                    hint=f"declare `{_PREIMAGE_KEY}: <getOp>` (or `--preimage "
+                         f"{name}=<getOp>`) — the safe `GET` whose response the "
+                         "reversal `PUT`s back to restore server state "
+                         "(item 254 §1.2)")
+            undo = undo or name
+        elif form == "recreate":
+            # DELETE: GET the preimage BEFORE the delete, re-issue it through a
+            # documented create operation. Both halves are required and neither
+            # has a default: a `DELETE` is not its own inverse, so there is
+            # nothing to fall back to.
+            if not preimage:
+                raise self.report.bad(
+                    pointer,
+                    f"`{name}` is a compensate-grade `DELETE` but names no "
+                    "preimage source",
+                    hint=f"declare `{_PREIMAGE_KEY}: <getOp>` (or `--preimage "
+                         f"{name}=<getOp>`) — the safe `GET` read BEFORE the "
+                         "delete, whose body the recreate consumes")
+            if not undo:
+                raise self.report.bad(
+                    pointer,
+                    f"`{name}` is a compensate-grade `DELETE` but names no "
+                    "recreate operation",
+                    hint=f"declare `{_UNDO_KEY}: <createOp>` (or `--undo "
+                         f"{name}=<createOp>`) — the documented create this "
+                         "reversal re-issues the preimage through. A `DELETE` is "
+                         "not its own inverse, so there is no default")
+        else:  # delete-created
+            # POST: remove the resource the POST created. This form never
+            # re-issues the POST, so it does not rest on POST idempotence — it
+            # rests on being KEYED, and an unkeyed compensation is refused.
+            if preimage:
+                raise self.report.bad(
+                    pointer,
+                    f"`{name}` is a compensate-grade `POST` and also names a "
+                    f"preimage `{_comment_safe(preimage)}`",
+                    hint="the `POST` route is `delete-created`: it removes the "
+                         "resource the POST created, so there is no pre-state to "
+                         f"restore. Drop `{_PREIMAGE_KEY}`, or model the write as "
+                         "a `PUT` if it really does overwrite something")
+            if not undo:
+                raise self.report.bad(
+                    pointer,
+                    f"`{name}` is a compensate-grade `POST` but names no delete "
+                    "operation",
+                    hint=f"declare `{_UNDO_KEY}: <deleteOp>` (or `--undo "
+                         f"{name}=<deleteOp>`) — the documented `DELETE` that "
+                         "removes what this `POST` created")
+            if not undo_key:
+                raise self.report.bad(
+                    pointer,
+                    f"`{name}` is a compensate-grade `POST` but names no response "
+                    "key, so the reversal has nothing to address",
+                    hint=f"declare `{_UNDO_KEY_KEY}: <field>` (or `--undo-key "
+                         f"{name}=<field>`) — the REQUIRED response field holding "
+                         "the identity of the resource the `POST` created. A "
+                         "compensation that cannot name its target is refused, "
+                         "not guessed at")
 
         if_match = (bool(handles & self.if_match_requested)
                     or operation.get(_IF_MATCH_KEY) is True)
         if handles & self.if_match_requested:
             self.used |= handles & self.if_match_requested
 
-        return True, _snake(preimage), _snake(undo), if_match
+        if not if_match and self.require_if_match:
+            # HIGH 1's refusal path, selected document-wide. Slice 1's
+            # may-clobber path is still the default and still says so on the
+            # generated surface; this makes the stricter choice available
+            # instead of only documenting the weaker one.
+            token, hazard = _FORM_TOKEN[form]
+            raise self.report.bad(
+                pointer,
+                f"`{name}` is compensate-grade but claims no version/ETag token, "
+                "and this import requires one",
+                hint=f"a `{form}` reversal issues its request under {token}, so "
+                     f"{hazard} fails loudly instead of succeeding silently. "
+                     f"Declare `{_IF_MATCH_KEY}: true` (or `--if-match {name}`) "
+                     "once the endpoint really does expose the token, or drop "
+                     "`--require-if-match`/`x-revl-require-if-match` to accept "
+                     "the best-effort-may-clobber reversal the header describes")
+
+        return {"compensate": True, "form": form,
+                "preimage": _snake(preimage) if preimage else None,
+                "undo": _snake(undo) if undo else None,
+                "undo_key": _snake(undo_key) if undo_key else None,
+                "if_match": if_match}
+
+    def _route_target(self, operation: dict, name: str, key: str,
+                      requested: dict) -> str | None:
+        """One leg of a compensate route: the engineer flag if it named this
+        operation, else the `x-revl-*` annotation on the operation, else None.
+        The engineer's out-of-band claim wins, exactly as `--pure`/`--emission`
+        do — but neither can be a bare `true`: a route leg names an operation or
+        a field, and anything that is not a non-empty string is no claim."""
+        value = requested.get(name)
+        if value is None:
+            annotation = operation.get(key)
+            value = annotation if isinstance(annotation, str) else None
+        value = value.strip() if isinstance(value, str) else None
+        return value or None
 
     def op_name(self, method: str, path: str, operation_id: object,
                 pointer: str) -> str:
@@ -1229,38 +1396,282 @@ class _Generator:
         host = _snake(host) if host else self.key
         return f"net.{host}"
 
+    # -- item 254: the per-form generated prose ----------------------------
+    #
+    # Every string below states a CLAIM, never a proof, and each form states the
+    # residue that its own shape leaves. The rules the wording must keep, in all
+    # three forms: the ceiling is `compensate`, never `witnessed`; the reversal
+    # is best-effort and lands on the AUDIT surface; the reversal is itself an
+    # outbound crossing enumerated at teardown; and reversal never un-observes
+    # (§3), which over a network is the common case, not the edge.
+
+    def _reversal_route(self, op) -> str:
+        """What the reversal actually issues, in one clause, per form."""
+        if op.form == "restore":
+            return (f"it PUTs the `{op.preimage}` preimage back via `{op.undo}` "
+                    "on abort")
+        if op.form == "recreate":
+            return (f"it recreates the deleted resource by sending the "
+                    f"`{op.preimage}` preimage through `{op.undo}` on abort")
+        return (f"it DELETEs the resource this POST created, via `{op.undo}` "
+                f"addressed by the response key `{op.undo_key}`, on abort")
+
+    def _form_residue(self, op) -> str | None:
+        """The residue this form leaves that the others do not — stated on the
+        operation, because it is the part a reader is most likely to assume
+        away. Both are OPEN by nature: neither is detectable from a document."""
+        if op.form == "recreate":
+            return ("  // OPEN (§6 attack 2): a recreate restores a resource the "
+                    "API author calls equivalent, on the author's notion of "
+                    "equivalence. A soft delete, a re-stamped server-assigned id "
+                    "or a dropped audit history is not visible in this document.")
+        if op.form == "delete-created":
+            return ("  // OPEN: deleting the created resource does not undo what "
+                    "creating it set in motion — a welcome email, a charge, a "
+                    "queued job. The reversal removes the row, not the "
+                    "consequences.")
+        return None
+
+    def _concurrency_posture(self, op) -> str:
+        """The HIGH 1 posture line: the token this form issues its reversal
+        under, or an explicit best-effort-may-clobber admission. Never silent."""
+        token, hazard = _FORM_TOKEN[op.form]
+        if op.if_match:
+            return (f"with {token}/`ETag` (the author claims a version token), "
+                    f"so {hazard} FAILS LOUDLY")
+        return ("best-effort-may-clobber: this endpoint exposes no version/ETag "
+                f"token, so the reversal cannot detect a racing writer and "
+                f"{hazard} succeeds silently")
+
+    def _compensation_claim(self, op, net_cap: str) -> list[str]:
+        """The per-operation claim-vs-proof block: the classification ceiling,
+        the §3 observability caveat, this form's own residue, and the HIGH 1
+        concurrency posture."""
+        lines = [
+            f"  // COMPENSATE-grade (item 247), `{op.form}` route: a best-effort "
+            f"reversal is attached to the emission — {self._reversal_route(op)}. "
+            "It lands on the AUDIT surface, NOT a proof surface: it makes NO "
+            "`noResidue`/witness claim and restores SERVER STATE only.",
+            f"  // a rewound `{op.method.upper()}` does not unsend what a webhook "
+            "subscriber already saw. The reversal is itself an outbound crossing "
+            f"on the `{net_cap}` cap, enumerated at teardown.",
+        ]
+        residue = self._form_residue(op)
+        if residue:
+            lines.append(residue)
+        lines.append(f"  // reversal issued {self._concurrency_posture(op)}.")
+        return lines
+
+    def _token_note(self, op) -> str:
+        """The one-clause instruction the host stub needs about the token."""
+        token, _hazard = _FORM_TOKEN[op.form]
+        if op.if_match:
+            return f"issue the reversal request WITH {token}/`ETag`"
+        return "no version token: best-effort, may clobber a concurrent write"
+
+    def _forward_stub(self, op, target: str) -> str:
+        """What the FORWARD host body must do — including capturing whatever the
+        reversal will need, which differs per form and is the half an
+        implementer is most likely to leave out."""
+        head = f"{op.method.upper()} {target} — "
+        if op.form == "restore":
+            return (head + f"GET the {op.preimage} preimage, send the request, "
+                    "decode the JSON, and stash the preimage for the compensation")
+        if op.form == "recreate":
+            return (head + f"GET the {op.preimage} preimage FIRST, then send the "
+                    "delete, and stash the preimage for the compensation")
+        return (head + "send the request, decode the JSON, and stash the "
+                f"response key {op.undo_key} for the compensation")
+
+    def _reversal_stub(self, op, target: str) -> str:
+        """What the REVERSAL host body must do."""
+        tail = (f" ({self._token_note(op)}). Lands on the audit surface; "
+                "never claims noResidue")
+        if op.form == "restore":
+            return (f"best-effort reversal: PUT the stashed preimage back via "
+                    f"{op.undo} to {target}{tail}")
+        if op.form == "recreate":
+            return (f"best-effort reversal: recreate the deleted resource by "
+                    f"sending the stashed preimage through {op.undo}{tail}")
+        return (f"best-effort reversal: DELETE the created resource via "
+                f"{op.undo}, addressed by the stashed {op.undo_key}{tail}")
+
     def _validate_compensations(self, operations: list) -> None:
-        """Cross-op checks for the item-254 compensate route (§1.2): the
-        `preimage` names a real, SAFE operation (an emission read is not a safe
-        read), and the `undo` names a real operation. Runs after `collect` so
-        the whole operation table is visible."""
+        """Cross-operation checks for the item-254 compensate routes (§1.2).
+
+        `compensation` checked that the route was SPELLED; this checks that it
+        RESOLVES — that every leg names a real operation of the right kind, and
+        that the reversal it describes could actually carry the resource back.
+        It runs after `collect`, so the whole operation table is visible.
+
+        Every failure here is a hard refusal. That is the point: a compensation
+        whose route does not resolve would fire at teardown against the wrong
+        resource, or against nothing, and report success either way. The
+        importer refuses to emit it rather than emit a reversal it cannot show
+        is addressed at what the forward effect touched.
+        """
         by_name = {op.name: op for op in operations}
         for op in operations:
             if not op.compensate:
                 continue
-            pre = by_name.get(op.preimage)
-            if pre is None:
-                raise self.report.bad(
-                    op.pointer,
-                    f"`{op.name}` names preimage `{op.preimage}`, which is not an "
-                    "operation in this document",
-                    hint="the preimage is the safe `GET` the reversal reads; spell "
-                         "it as the generated revl name or `operationId`")
-            if pre.emission:
-                raise self.report.bad(
-                    op.pointer,
-                    f"`{op.name}`'s preimage `{op.preimage}` is an `emission`, not "
-                    "a safe read",
-                    hint="a preimage must be a SAFE operation (a `GET`): an "
-                         "emission read cannot serve as the pre-state the reversal "
-                         "restores (item 254 §1.2)")
-            if op.undo not in by_name:
-                raise self.report.bad(
-                    op.pointer,
-                    f"`{op.name}` names undo `{op.undo}`, which is not an operation "
-                    "in this document",
-                    hint="the undo writes the captured preimage back; for a `PUT` "
-                         "it is the operation itself")
+            self._check_undo(op, by_name)
+            if op.form == "delete-created":
+                self._check_created_key(op, by_name)
+                continue
+            self._check_preimage(op, by_name)
+            if op.form == "recreate":
+                self._check_recreate_carries(op, by_name)
+
+    def _check_preimage(self, op, by_name: dict) -> None:
+        """The preimage names a real, SAFE operation that returns something.
+        An `emission` read is not a safe read, and a read with no response body
+        is no preimage at all."""
+        pre = by_name.get(op.preimage)
+        if pre is None:
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}` names preimage `{op.preimage}`, which is not an "
+                "operation in this document",
+                hint="the preimage is the safe `GET` the reversal reads; spell "
+                     "it as the generated revl name or `operationId`")
+        if pre.emission:
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}`'s preimage `{op.preimage}` is an `emission`, not "
+                "a safe read",
+                hint="a preimage must be a SAFE operation (a `GET`): an "
+                     "emission read cannot serve as the pre-state the reversal "
+                     "restores (item 254 §1.2)")
+        if pre.returns is None:
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}`'s preimage `{op.preimage}` decodes no response "
+                "body, so it captures no pre-state",
+                hint="the reversal re-sends what the preimage read; a `GET` with "
+                     "no described JSON response has nothing to send back. Give "
+                     "it a response schema, or drop the compensate promotion")
+
+    def _check_undo(self, op, by_name: dict) -> None:
+        """The undo names a real operation whose VERB matches the route form: a
+        `restore` puts, a `recreate` creates, a `delete-created` deletes. A
+        reversal wired to the wrong verb is not a weaker reversal, it is a
+        second forward effect, so this is a refusal and not a note."""
+        undo = by_name.get(op.undo)
+        if undo is None:
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}` names undo `{op.undo}`, which is not an operation "
+                "in this document",
+                hint="the undo is the operation the reversal issues; for a `PUT` "
+                     "it is the operation itself, for a `DELETE` the documented "
+                     "create, for a `POST` the documented delete")
+        expected = {"restore": ("put",), "recreate": ("post", "put"),
+                    "delete-created": ("delete",)}[op.form]
+        if undo.method not in expected:
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}` is a `{op.form}` compensation, but its undo "
+                f"`{op.undo}` is a `{undo.method.upper()}`",
+                hint=f"a `{op.form}` reversal issues "
+                     f"{' or '.join(v.upper() for v in expected)}; another verb "
+                     "there is a second forward effect wearing a reversal's "
+                     "name, not an offset of this one")
+        if not undo.emission:
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}`'s undo `{op.undo}` is a plain `fn`, not an "
+                "`emission`",
+                hint="the reversal crosses the network exactly as the forward "
+                     "effect does — that is why it is enumerated at teardown. An "
+                     "operation weakened with `--pure` cannot be one")
+
+    def _check_recreate_carries(self, op, by_name: dict) -> None:
+        """Attack 2, the detectable half: the recreate must be able to CARRY the
+        preimage. If the create's request body cannot hold what the preimage
+        `GET` returns, the "recreate" builds a different resource, so the
+        promotion is refused rather than downgraded silently.
+
+        The undetectable half stays OPEN and stays stated on the generated
+        surface: a server that soft-deletes, renames or re-stamps a
+        server-assigned field produces a resource that is observably not the
+        original even when the schemas line up exactly.
+        """
+        pre = by_name[op.preimage]
+        undo = by_name[op.undo]
+        body = [ptype for pname, ptype in undo.params
+                if pname in ("body", "request_body")]
+        if not body:
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}`'s recreate `{op.undo}` takes no request body, so it "
+                "cannot carry the preimage back",
+                hint="a recreate re-sends the body the preimage `GET` read; a "
+                     "create with no request body builds something else. Name a "
+                     "create that accepts the resource")
+        # a create whose body is optional (`requestBody` without `required:
+        # true`) accepts the preimage type as well: the reversal always sends
+        # one, and a `T` fits an `Opt[T]` slot. The converse does NOT hold — a
+        # preimage that may decode to nothing cannot fill a required body — so
+        # this widens on the create's side only.
+        if body[0] not in (pre.returns, f"Opt[{pre.returns}]"):
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}`'s recreate `{op.undo}` accepts `{body[0]}`, but its "
+                f"preimage `{op.preimage}` returns `{pre.returns}`",
+                hint="the schema gap is exactly the residue a recreate hides "
+                     "(item 254 §6 attack 2): a create that cannot hold a field "
+                     "the original had restores a DIFFERENT resource. Line the "
+                     "two schemas up, or drop the compensate promotion and keep "
+                     "the honest emission")
+
+    def _check_created_key(self, op, by_name: dict) -> None:
+        """The `delete-created` route must be KEYED: the `POST` response has to
+        name the resource the reversal deletes, and the reversal has to have
+        exactly one place to put that name.
+
+        This is the fail-closed hinge of the `POST` form. An unkeyed
+        compensation would delete whatever the undo's default target happens to
+        be — the wrong resource, or nothing, reporting success either way — so
+        it is refused, exactly as the recovery machinery refuses an unkeyed
+        spent inverse rather than guessing at its outcome.
+        """
+        if op.returns is None:
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}` is a compensate-grade `POST` that decodes no "
+                "response body, so nothing can identify what it created",
+                hint="the reversal deletes the resource this `POST` created and "
+                     "is addressed by a response field. A `POST` that returns "
+                     "nothing cannot be compensated: keep it an honest emission")
+        fields = self.types.required_fields.get(op.returns)
+        if fields is None:
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}` returns `{op.returns}`, which is not a record, so "
+                f"`{op.undo_key}` cannot be read from it",
+                hint="the response key is a field of a JSON object response; a "
+                     "scalar, list or `Opt` response has no field to name the "
+                     "created resource")
+        if op.undo_key not in fields:
+            known = ", ".join(f"`{f}`" for f in sorted(fields)) or "(none)"
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}` names undo key `{op.undo_key}`, which is not a "
+                f"required field of its response `{op.returns}`",
+                hint=f"required, non-nullable fields of `{op.returns}`: {known}. "
+                     "A key that may be absent is an unkeyed compensation, and "
+                     "an unkeyed compensation is refused, not guessed at")
+        undo = by_name[op.undo]
+        if len(undo.params) != 1:
+            raise self.report.bad(
+                op.pointer,
+                f"`{op.name}`'s reversal `{op.undo}` takes "
+                f"{len(undo.params)} parameters, so one response key cannot "
+                "address it",
+                hint="the `delete-created` reversal passes exactly one captured "
+                     "value — the key — to the delete. A delete that needs more "
+                     "inputs than the response names cannot be addressed from "
+                     "this `POST` alone")
 
     def emit(self) -> str:
         self.check_version()
@@ -1306,29 +1717,7 @@ class _Generator:
                     "server, letting the runtime auto-retry a transient failure")
             if operation.compensate:
                 self._has_compensation = True
-                # item 254: the per-operation claim-vs-proof block for a
-                # compensate-grade reversal. It states the classification
-                # ceiling (compensate, NOT witnessed / NOT a proof surface), the
-                # §3 observability caveat verbatim, and the HIGH 1 concurrency
-                # posture (If-Match required, or best-effort-may-clobber).
-                clobber = ("with `If-Match`/`ETag` (the author claims a version "
-                           "token), so a reversal that would clobber an "
-                           "intervening write FAILS LOUDLY"
-                           if operation.if_match else
-                           "best-effort-may-clobber: this endpoint exposes no "
-                           "version/ETag token, so a reversal cannot detect a "
-                           "racing writer and may clobber an intervening write")
-                ops.append(
-                    f"  // COMPENSATE-grade (item 247): a best-effort reversal is "
-                    f"attached to the emission — it PUTs the `{operation.preimage}` "
-                    f"preimage back via `{operation.undo}` on abort. It lands on "
-                    "the AUDIT surface, NOT a proof surface: it makes NO "
-                    "`noResidue`/witness claim and restores SERVER STATE only.")
-                ops.append(
-                    "  // a rewound `PUT` does not unsend what a webhook "
-                    "subscriber already saw. The reversal is itself an outbound "
-                    f"crossing on the `{net_cap}` cap, enumerated at teardown.")
-                ops.append(f"  // reversal issued {clobber}.")
+                ops.extend(self._compensation_claim(operation, net_cap))
 
             modifiers = ""
             if operation.emission:
@@ -1343,32 +1732,29 @@ class _Generator:
             target = (f"{_redact_userinfo(server)}{operation.path}" if server
                       else operation.path)
             if operation.compensate:
-                # item 254 Slice 1: the forward emission carries a NETWORK cap
-                # scope and an item-247 `compensate` slot. The reversal extern is
-                # NULLARY — the extern-level `compensate` slot binds no variables
-                # (not `result`, not the forward parameters; lower.py
-                # `_check_extern_undo`), so the captured preimage (resolved URL +
-                # bytes + reversal method/headers) rides the compensation closure
-                # at runtime, not the call. This LOWERS cleanly precisely because
-                # it is a `compensate` on an `emission`, never a witnessed
-                # `undo` — the rule-3 `_check_witnessed_inverse` (lower.py:2153)
-                # is not on this path.
+                # item 254: the forward emission carries a NETWORK cap scope and
+                # an item-247 `compensate` slot. The reversal extern is NULLARY —
+                # the extern-level `compensate` slot binds no variables (not
+                # `result`, not the forward parameters; lower.py
+                # `_check_extern_undo`), so everything the reversal needs (the
+                # resolved URL, the captured preimage or response key, the
+                # reversal method and headers) rides the compensation closure at
+                # runtime, not the call. This LOWERS cleanly precisely because it
+                # is a `compensate` on an `emission`, never a witnessed `undo` —
+                # the rule-3 `_check_witnessed_inverse` (lower.py:2153) is not on
+                # this path.
                 reversal = f"{extern}_compensate"
-                if_match_note = ("issue the reversal PUT WITH `If-Match`/`ETag`"
-                                 if operation.if_match else
-                                 "no version token: best-effort, may clobber a "
-                                 "concurrent write")
                 externs.append(
                     f"extern emission[{net_cap}] fn "
                     f"{extern}({signature}){returns}\n"
                     f"  compensate {reversal}()\n"
                     f"  = @{self.backend} {{ "
-                    f"{self._host_comment(f'{operation.method.upper()} {target} — GET the {operation.preimage} preimage, send the request, decode the JSON, and stash the preimage for the compensation')}"
+                    f"{self._host_comment(self._forward_stub(operation, target))}"
                     f" }}")
                 externs.append(
                     f"extern emission[{net_cap}] fn {reversal}() -> Unit\n"
                     f"  = @{self.backend} {{ "
-                    f"{self._host_comment(f'best-effort reversal: PUT the stashed preimage back via {operation.undo} to {target} ({if_match_note}). Lands on the audit surface; never claims noResidue')}"
+                    f"{self._host_comment(self._reversal_stub(operation, target))}"
                     f" }}")
             else:
                 externs.append(
@@ -1451,22 +1837,41 @@ class _Generator:
             lines += [
                 "//",
                 "// item 254 (compensate-grade network effects). An operation marked",
-                "// `x-revl-compensate` (a `PUT`, honoured on that verb only) carries an",
-                "// item-247 COMPENSATE slot on its `emission[net.<host>]` extern: a",
-                "// best-effort reversal that PUTs the captured GET preimage back on",
-                "// abort. This is a THIRD, narrower claim on top of safe/idempotent, and",
-                "// it is the CEILING — compensate-grade, NOT witnessed. The reversal",
-                "// lands on the AUDIT surface (intention), never a PROOF surface",
-                "// (guarantee): it makes NO `noResidue`/witness claim, restores SERVER",
-                "// STATE only, and is best-effort — it may 5xx or time out.",
+                "// `x-revl-compensate` carries an item-247 COMPENSATE slot on its",
+                "// `emission[net.<host>]` extern: a best-effort reversal fired on abort.",
+                "// This is a THIRD, narrower claim on top of safe/idempotent, and it is",
+                "// the CEILING — compensate-grade, NOT witnessed. The reversal lands on",
+                "// the AUDIT surface (intention), never a PROOF surface (guarantee): it",
+                "// makes NO `noResidue`/witness claim, restores SERVER STATE only, and is",
+                "// best-effort — it may 5xx or time out.",
                 "//",
-                "// A rewound `PUT` does not unsend what a webhook subscriber, a replica,",
-                "// a cache, or a human already saw. The reversal is itself an outbound",
-                "// crossing on the `net.<host>` cap and is enumerated at teardown as its",
-                "// own event — never a silent un-crossing. Where the endpoint exposes a",
-                "// version/ETag token, mark `x-revl-if-match: true` so the reversal PUTs",
-                "// with `If-Match` and fails loudly on a racing writer; without one the",
-                "// reversal is best-effort-may-clobber, and the header says which.",
+                "// The promotion is honoured on three verbs, and each one takes a",
+                "// DOCUMENTED route, never the verb alone:",
+                "//   PUT    `restore`        — GET the `x-revl-preimage`, PUT it back.",
+                "//   DELETE `recreate`       — GET the preimage first, re-send it through",
+                "//                             the create named by `x-revl-undo`.",
+                "//   POST   `delete-created` — DELETE what the POST created, via",
+                "//                             `x-revl-undo`, addressed by the required",
+                "//                             response field `x-revl-undo-key`.",
+                "// PATCH is refused in every form: a partial merge has no inverse this",
+                "// document can name. A POST is admissible only because a delete-created",
+                "// reversal re-issues nothing, so it never rests on POST idempotence — it",
+                "// rests on being KEYED, and a POST whose response cannot name what it",
+                "// created is refused rather than compensated at a guess.",
+                "//",
+                "// A rewound write does not unsend what a webhook subscriber, a replica,",
+                "// a cache, or a human already saw; deleting a created resource does not",
+                "// undo the email that creating it sent. The reversal is itself an",
+                "// outbound crossing on the `net.<host>` cap and is enumerated at",
+                "// teardown as its own event — never a silent un-crossing.",
+                "//",
+                "// Where the endpoint exposes a version/ETag token, mark",
+                "// `x-revl-if-match: true` so the reversal issues under `If-Match`",
+                "// (`If-None-Match: *` for a recreate) and fails loudly on a racing",
+                "// writer. Without one the reversal is best-effort-may-clobber, and each",
+                "// operation says which it is. Import with `--require-if-match` (or set",
+                "// `x-revl-require-if-match: true` at the document root) to refuse the",
+                "// promotion outright on any endpoint that claims no token.",
             ]
         for note in self.notes + self.types.notes + self.types.names.renames:
             # notes interpolate document-derived names (`$ref` targets, schema
@@ -1480,7 +1885,8 @@ class _Generator:
 
 def _pair_map(items: object, flag: str) -> dict[str, str]:
     """Parse a list of engineer `OP=TARGET` strings into an `{OP: TARGET}` map
-    (item 254 `--preimage`/`--undo`). A dict passes through unchanged."""
+    (item 254 `--preimage`/`--undo`/`--undo-key`). A dict passes through
+    unchanged."""
     if isinstance(items, dict):
         return dict(items)
     out: dict[str, str] = {}
@@ -1501,15 +1907,20 @@ def import_openapi(document: object, *, filename: str = "<openapi>",
                    service: str | None = None, pure: object = (),
                    emission: object = (), compensate: object = (),
                    preimage: object = (), undo: object = (),
-                   if_match: object = ()) -> str:
+                   if_match: object = (), undo_key: object = (),
+                   require_if_match: bool = False) -> str:
     """Project an already-parsed OpenAPI 3.x `document` to revl source.
 
     Raises `RevlError` — naming the construct, its JSON pointer and the way
     forward — for anything this importer refuses to translate.
 
-    `compensate`/`preimage`/`undo`/`if_match` are the item-254 engineer
-    equivalents of the `x-revl-compensate`/`x-revl-preimage`/`x-revl-undo`/
-    `x-revl-if-match` annotations (Slice 1, `PUT` only).
+    `compensate`/`preimage`/`undo`/`undo_key`/`if_match` are the item-254
+    engineer equivalents of the `x-revl-compensate`/`x-revl-preimage`/
+    `x-revl-undo`/`x-revl-undo-key`/`x-revl-if-match` annotations, honoured on
+    `PUT` (`restore`), `DELETE` (`recreate`) and `POST` (`delete-created`).
+    `require_if_match` is the HIGH 1 refusal policy: with it, a compensate-grade
+    promotion on an endpoint claiming no version/ETag token is refused instead
+    of emitted best-effort-may-clobber.
     """
     if backend not in _BACKEND_COMMENT:
         raise RevlError(filename, 0, f"unknown host backend {backend!r}",
@@ -1527,7 +1938,9 @@ def import_openapi(document: object, *, filename: str = "<openapi>",
                       compensate=set(compensate or ()),
                       preimage=_pair_map(preimage, "--preimage"),
                       undo=_pair_map(undo, "--undo"),
-                      if_match=set(if_match or ())).emit()
+                      if_match=set(if_match or ()),
+                      undo_key=_pair_map(undo_key, "--undo-key"),
+                      require_if_match=require_if_match).emit()
 
 
 def load_document(text: str, *, filename: str = "<openapi>") -> object:
@@ -1570,11 +1983,13 @@ def import_openapi_file(path: str, *, backend: str = "ts",
                         service: str | None = None, pure: object = (),
                         emission: object = (), compensate: object = (),
                         preimage: object = (), undo: object = (),
-                        if_match: object = ()) -> str:
+                        if_match: object = (), undo_key: object = (),
+                        require_if_match: bool = False) -> str:
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
     document = load_document(text, filename=path)
     return import_openapi(document, filename=path, source=text, backend=backend,
                           service=service, pure=pure, emission=emission,
                           compensate=compensate, preimage=preimage, undo=undo,
-                          if_match=if_match)
+                          if_match=if_match, undo_key=undo_key,
+                          require_if_match=require_if_match)
