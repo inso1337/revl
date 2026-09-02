@@ -166,6 +166,10 @@ def test_n1_ledger_records_the_bound_host_not_a_hash(sink, tmp_path):
     the structured target the distiller and the blast-radius render read."""
     ir = compile_source(_src(sink), "biller.rvl")
     session = _session(operator="alice")
+    # `host` is a CALLER argument here, so recording it is the operator's opt-in
+    # since roadmap 427 F8 flipped the default to `withheld`. N1 is what that
+    # opt-in buys, and this pins that it still buys it.
+    session.approval_record_values = "bound"
     session.load(copy.deepcopy(ir), record=True)
     _open_wal(session, tmp_path)
     with pytest.raises(ApprovalRequired) as exc:

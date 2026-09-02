@@ -176,18 +176,38 @@ def two_step_payload(ticket: dict, *, how_to_approve: str) -> dict:
 # the author that naming a parameter `path` changes where its values end up, and
 # nothing told the operator that a yes persists this one. Same move item 425 F1
 # made with `unreviewedHostCode`: the ticket must not understate what a yes means.
-_CALLER_VALUE_DURABILITY = (
+#
+# The sentence is written per MODE, because a disclosure that describes the other
+# session's behaviour is worse than none: under the default the value does NOT
+# reach the log, and telling an operator it does would train them to ignore the
+# field. `_CALLER_VALUE_PROVENANCE` is the half both modes share.
+_CALLER_VALUE_PROVENANCE = (
     "this crossing's resource target is a value the CALLER passed in, not a "
-    "literal the author wrote. Approving binds that value into the durable "
-    "approval log (`record_approval_granted` -> the cross-session WAL, plaintext "
-    "at rest), where the rest of this call's arguments only ever appear as the "
-    "`argsDigest` hash. To keep a sensitive value out of it, declare the "
-    "parameter `Secret[Str]` — it then binds to the redacted placeholder "
-    "everywhere (item 416c), at the cost of the resource fold, since every "
-    "secret-valued crossing binds to the SAME placeholder and a standing grant "
-    "scoped to it is refused. An operator can withhold caller values from the log "
-    "for the whole session instead with `revl mcp serve "
-    "--approval-record-values withheld`.")
+    "literal the author wrote. It is the one argument of this call that is not "
+    "merely hashed into `argsDigest`: because the parameter is named for a "
+    "resource kind (`path`/`host`/`table`), its runtime value is lifted out and "
+    "bound into the capability spelling you are approving. ")
+_CALLER_VALUE_DURABILITY_BOUND = _CALLER_VALUE_PROVENANCE + (
+    "This session runs `--approval-record-values bound`, so approving ALSO "
+    "writes that value verbatim into the durable approval log "
+    "(`record_approval_granted` -> the cross-session WAL, plaintext at rest). To "
+    "keep a sensitive value out of it, declare the parameter `Secret[Str]` — it "
+    "then binds to the redacted placeholder everywhere (item 416c), at the cost "
+    "of the resource fold, since every secret-valued crossing binds to the SAME "
+    "placeholder and a standing grant scoped to it is refused. An operator can "
+    "withhold caller values from the log for the whole session instead with "
+    "`revl mcp serve --approval-record-values withheld` (the default).")
+_CALLER_VALUE_DURABILITY_WITHHELD = _CALLER_VALUE_PROVENANCE + (
+    "This session runs `--approval-record-values withheld` (the default), so the "
+    "value stays in this ticket and does NOT reach the durable cross-session "
+    "approval log — it is recorded there as UNRECORDED. The cost is that this "
+    "approval cannot fold into a distilled `auto-approve` rule naming the target, "
+    "so a repeated crossing keeps prompting; `revl mcp serve "
+    "--approval-record-values bound` records it verbatim and restores that fold.")
+_MODE_DURABILITY = {
+    "bound": _CALLER_VALUE_DURABILITY_BOUND,
+    "withheld": _CALLER_VALUE_DURABILITY_WITHHELD,
+}
 
 
 class ClassMap:
@@ -724,7 +744,8 @@ class ClassMap:
 
     # -- the ticket ---------------------------------------------------------
 
-    def build_ticket(self, reach: dict, args=None) -> dict:
+    def build_ticket(self, reach: dict, args=None,
+                     record_values: str = "withheld") -> dict:
         """The class-(c) ticket: what a yes would mean. Names the component, key,
         method, an args digest, the capabilities reached, the crossing list, the
         reach-closure candidate hash, and `hash` — a sha256 over all of it, the
@@ -799,7 +820,11 @@ class ClassMap:
             body["resourceScopeRefusals"] = refusals
         if caller_valued:
             body["resourceScopesFromCallerArgs"] = sorted(caller_valued)
-            body["resourceScopeDurability"] = _CALLER_VALUE_DURABILITY
+            # the sentence has to match the durability this session actually
+            # applies — an unknown mode falls back to the recording one, so a
+            # miswired caller over-discloses rather than under-discloses.
+            body["resourceScopeDurability"] = _MODE_DURABILITY.get(
+                record_values, _CALLER_VALUE_DURABILITY_BOUND)
         # item 251 Slice 2: the crossing's realm and its post-endorsement taint,
         # for the ledger's shape key (the distiller reads these; a recorded taint
         # set is KNOWN, closing the Slice-1 "taint-unknown" fail-close) and for the

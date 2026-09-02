@@ -288,13 +288,26 @@ class Session:
         self.approval_policy = None
         # roadmap 425 F3 / 427 F5: whether a CALLER-SUPPLIED resource valuation
         # may be written into the durable, cross-session approval WAL when a
-        # crossing is approved. "bound" (the default, and what shipped) records
-        # it — item 251's N1, what lets a distilled rule name a target. "withheld"
-        # records it as UNRECORDED instead, closing the durable disclosure at the
-        # cost of the distiller's fold over caller-argument targets. Author-written
-        # literals are recorded under both. Set at serve time (`revl mcp serve
-        # --approval-record-values`); see `_distillation_ledger_fields`.
-        self.approval_record_values = "bound"
+        # crossing is approved. "withheld" (the DEFAULT) records it as UNRECORDED
+        # — the resource-bearing-but-unrecorded shape `distill._project_resource`
+        # already fails closed on. "bound" records it verbatim, which is what lets
+        # a distilled rule name the target it crossed (item 251's N1).
+        #
+        # The default is `withheld` because the two mistakes are not symmetric.
+        # Recording is IRREVERSIBLE and SILENT: the value lands in a cross-session
+        # plaintext log on disk, it belongs to the caller rather than the operator
+        # who said yes, and which values land there is decided by whether a
+        # parameter happens to be NAMED `path`/`host`/`table`. Withholding is
+        # neither: its only cost is that approvals whose target came from a caller
+        # argument no longer fold into a distilled rule, the operator is TOLD when
+        # that bites (`distill.Reason.RESOURCE_SCOPE_UNRECORDED` names this flag),
+        # and `--approval-record-values bound` gets the fold back. Everywhere else
+        # in this machinery the unset default is the fail-closed one; this is that
+        # rule applied here. Author-written LITERAL targets are recorded under both
+        # modes, so a composition that names its destinations in source pays
+        # nothing. Set at serve time (`revl mcp serve --approval-record-values`);
+        # see `_distillation_ledger_fields`.
+        self.approval_record_values = "withheld"
         # the per-generation class map (item 246, Decision 2): rebuilt atomically
         # at every load/swap so a call decided against a stale map is impossible.
         # None when nothing is loaded or the policy is off.
@@ -395,6 +408,13 @@ class Session:
         # the operator/test before load to control the location.
         self._wal_path: str | None = None
         self._clock_ms = None   # injectable ms clock (invariant 3); None = wall
+        # roadmap 427 F8: the session clock is MONOTONIC-ANCHORED and RATCHETED.
+        # `_clock_anchor` is the (wall_ms, monotonic_ns) pair `_now_ms` measures
+        # elapsed time from, taken once on first read; `_clock_floor_ms` is the
+        # high-water mark no later read may fall below. An expiry that a wall-clock
+        # step backwards can un-expire is not an expiry. See `_now_ms`.
+        self._clock_anchor: tuple[int, int] | None = None
+        self._clock_floor_ms: int = 0
         # roadmap item 330: per-turn sources admitted THROUGH the in-language
         # crossing while a call is driving the loop, queued for wiring the moment
         # that call returns (a turn is never wired mid-call, exactly as the
@@ -2667,8 +2687,7 @@ class Session:
                 continue
             if g.get("consumed") or g.get("revoked"):
                 return False
-            exp = g.get("expiresAt")
-            if exp is not None and now > exp:
+            if self._expired(g, now):
                 return False
             return True
         return False
@@ -2684,11 +2703,12 @@ class Session:
         if entry["generation"] != self._generation:
             return False
         now = self._now_ms()
-        exp = entry.get("expiresAt")
-        if exp is not None and now > exp:
+        if self._expired(entry, now):
             return False
-        aexp = entry.get("approvalExpiresAt")
-        if aexp is not None and now > aexp:
+        # the covering approval's deadline is a SECOND, independent one on the
+        # same dict, so it latches under its own key (roadmap 427 F8).
+        if self._expired(entry, now, field="approvalExpiresAt",
+                         latch="approvalExpiredAt"):
             return False
         for token, epoch in (entry.get("invalEpochs") or {}).items():
             if self._cache_inval_epoch.get(token, 0) != epoch:
@@ -2969,20 +2989,82 @@ class Session:
                 continue  # candidate-invalidates: the closure changed under it
             if entry["component"] != ticket["component"]:
                 continue  # non-replayable: minted for another component
-            exp = entry.get("expiresAt")
-            if exp is not None and self._now_ms() > exp:
+            if self._expired(entry):
                 continue  # expiring: checked at the crossing, not at mint (inv. 3)
             return entry
         return None
 
     def _now_ms(self) -> int:
-        """The session clock in ms (item 246, invariant 3). Injectable so expiry
-        is testable without sleeping; defaults to the wall clock."""
+        """The session clock in ms (item 246, invariant 3; roadmap 427 F8).
+
+        Epoch-milliseconds, but NOT a bare `time.time()` read. Two properties the
+        expiry checks depend on:
+
+        * MONOTONIC-ANCHORED. The wall clock is sampled ONCE (the anchor); every
+          later reading is that sample plus the elapsed `time.monotonic_ns()`,
+          which is immune to a settimeofday, an NTP step and a DST/timezone
+          change. So the ms a grant's `expiresAt` was computed against and the ms
+          it is checked against advance at the same rate no matter what the
+          machine's notion of "now" does in between.
+        * RATCHETED. The reading is clamped to a high-water floor, so it never
+          decreases — including through the INJECTED clock, which stays injectable
+          for tests but cannot be used to wind time back. An injectable clock that
+          can rewind is a grant-resurrection primitive; every test that has ever
+          used it only ever advanced.
+
+        The floor is the second half of the fix, not the whole of it: it stops a
+        REREAD from going backwards, while `_expired`'s dead latch stops an
+        already-observed expiry from being reopened at all. Both are needed —
+        without the latch a grant checked before its expiry and again after a
+        rewind-plus-genuine-advance would still be live in the window between.
+        """
+        anchor = getattr(self, "_clock_anchor", None)
         clock = getattr(self, "_clock_ms", None)
         if clock is not None:
-            return clock()
-        import time  # noqa: PLC0415
-        return int(time.time() * 1000)
+            reading = int(clock())
+        else:
+            import time  # noqa: PLC0415
+            if anchor is None:
+                anchor = (int(time.time() * 1000), time.monotonic_ns())
+                self._clock_anchor = anchor
+            wall_ms, mono_ns = anchor
+            reading = wall_ms + (time.monotonic_ns() - mono_ns) // 1_000_000
+        floor = getattr(self, "_clock_floor_ms", 0)
+        if reading < floor:
+            return floor          # a rewind reads as "no time passed", never less
+        self._clock_floor_ms = reading
+        return reading
+
+    # roadmap 427 F8: the dead latch. Every expiry site goes through here.
+    def _expired(self, record: dict, now: int | None = None, *,
+                 field: str = "expiresAt", latch: str = "expiredAt") -> bool:
+        """Whether `record` is past `field`, LATCHING the answer the first time it
+        is yes (roadmap 427 F8).
+
+        A bare `now > exp` test is a re-derivation: it asks the clock again on
+        every crossing, so anything that moves the clock below `exp` makes a dead
+        grant live again for its remaining uses. Death is not a function of the
+        current time — it is an event, and this records it. Once the record
+        carries `expiredAt` no later reading of any clock, injected or not,
+        revives it: the check short-circuits on the latch before it ever looks at
+        `now`. `field`/`latch` are parameters only because a cache entry carries
+        two independent deadlines (its own ttl and its covering approval's).
+
+        The latch is in-memory, which is exactly its scope: grants, ledger entries
+        and distilled rules are session-scoped (invariant 5) and none of them
+        survives a restart, so there is no expired record for a later process to
+        resurrect."""
+        if record.get(latch) is not None:
+            return True
+        exp = record.get(field)
+        if exp is None:
+            return False
+        if now is None:
+            now = self._now_ms()
+        if now > exp:
+            record[latch] = now
+            return True
+        return False
 
     def _consume_approval(self, entry: dict) -> None:
         """Spend the token durably BEFORE the crossing fires (Decision 3,
@@ -3049,7 +3131,8 @@ class Session:
             return
         # class (c): a standing approval, or a fresh ticket.
         from .approval import ApprovalRequired  # noqa: PLC0415
-        ticket = self._class_map.build_ticket(reach, args)
+        ticket = self._class_map.build_ticket(
+            reach, args, record_values=self.approval_record_values)
         standing = self._find_standing_approval(ticket)
         if standing is not None:
             self._consume_approval(standing)   # durable spend before the fire
@@ -3108,7 +3191,8 @@ class Session:
                 continue
             if components is not None and reach.get("component") not in components:
                 continue
-            ticket = cm.build_ticket(reach)
+            ticket = cm.build_ticket(
+                reach, record_values=self.approval_record_values)
             standing = self._find_standing_approval(ticket)
             if standing is not None:
                 self._consume_approval(standing)
@@ -3423,8 +3507,7 @@ class Session:
                 continue                 # invariant 4: the closure changed under it
             if g["session"] != self._session_id:
                 continue                 # invariant 5: cross-session replay
-            exp = g.get("expiresAt")
-            if exp is not None and now > exp:
+            if self._expired(g, now):
                 continue                 # invariant 3: expired at the crossing
             remaining = g.get("remainingUses")
             if remaining is not None and remaining <= 0:
@@ -3568,8 +3651,7 @@ class Session:
         floor. Liveness (uses/expiry) and the H1 suspend are checked here too."""
         if entry["consumed"]:
             return False
-        exp = entry.get("expiresAt")
-        if exp is not None and now > exp:
+        if self._expired(entry, now):
             return False
         remaining = entry.get("remainingUses")
         if remaining is not None and remaining <= 0:

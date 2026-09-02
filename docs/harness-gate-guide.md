@@ -46,26 +46,41 @@ A class-(c) ticket names the crossing's resource target where the compiler can
 prove it (`fs.write(path="/var/spool/out")`). That target is the one part of a
 call's arguments that is not merely hashed: the rest reach the ticket only as
 `argsDigest`, while a parameter named `path`, `host` or `table` has its runtime
-VALUE bound into the capability spelling, and approving writes that spelling to
-the durable, cross-session approval log in plaintext.
+VALUE bound into the capability spelling, and under `--approval-record-values
+bound` approving writes that spelling to the durable, cross-session approval log
+in plaintext.
 
 When the target came from a caller ARGUMENT rather than a literal the author
 wrote, the ticket says so: `resourceScopesFromCallerArgs` names the tokens and
-`resourceScopeDurability` explains what approving persists. Two ways to change
-it:
+`resourceScopeDurability` states what approving persists IN THIS SESSION'S
+posture. Two ways to change it:
 
 - **the author's**, per parameter: declare it `Secret[Str]` and it binds to the
   redacted placeholder everywhere (item 416c). The cost is the resource fold,
   since every secret-valued crossing binds to the SAME placeholder and a
   standing grant scoped to a placeholder is refused;
-- **the operator's**, per session: `revl mcp serve --approval-record-values
-  withheld` records a caller-supplied target as UNRECORDED instead of writing it
-  down. The cost is that a series of such approvals no longer folds into a
-  distilled standing rule. Author-written literal targets are recorded either
-  way, so a composition that names its destinations in source keeps the fold.
+- **the operator's**, per session: `revl mcp serve --approval-record-values`
+  chooses between `withheld` (the default: a caller-supplied target is recorded
+  as UNRECORDED, never written down) and `bound` (recorded verbatim).
+  Author-written literal targets are recorded either way, so a composition that
+  names its destinations in source keeps the fold under both.
 
-The default is `bound` — what shipped, and what lets a distilled rule name a
-target rather than compare an opaque hash.
+**The default is `withheld`.** The two mistakes are not symmetric. Recording a
+caller value is irreversible and silent — it lands in a plaintext log on disk, it
+is somebody else's value rather than the operator's, and which values land there
+is decided by whether a parameter happens to be NAMED `path`, `host` or `table`.
+Withholding is neither: its whole cost is that approvals whose target came from a
+caller argument no longer fold into a distilled rule, the distiller SAYS SO when
+that bites (`RESOURCE_SCOPE_UNRECORDED` names this flag in its refusal), and
+re-serving with `--approval-record-values bound` gets the fold back. Everywhere
+else in this gate the unset default is the fail-closed one; this is that rule
+applied here.
+
+So: **turn `bound` on deliberately**, for a workspace whose crossing targets are
+routine (an internal hostname, a spool directory) and where you want a series of
+approvals to distil into one reviewed rule. Leave it off wherever a caller's
+`path=` or `host=` could carry a tenant identifier, a token, or a customer's
+data — those are exactly the values a durable cross-session log should not hold.
 
 Self-approval is the default identity model's hole: with no operator profile
 bound, every verb including `approve` is ungated, so the calling agent could
