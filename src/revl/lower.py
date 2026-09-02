@@ -559,6 +559,13 @@ class Env:
         # why-trace support for the above (why.py); None when unavailable,
         # in which case rejections carry no derivation but are unchanged
         self.emission_evidence: "_EmissionEvidence | None" = None
+        # extern name -> its classification (`pure`/`acquire`/`emission`/
+        # `witnessed`/`deferred`), the same table `_lower_externs` builds. Read
+        # by `_check_site_inverse_emission` so a SITE-spelled bracket inverse is
+        # held to the G5 no-emission-in-teardown bound the DECLARED inverse of a
+        # witnessed extern already obeys. Set by `_lower_component`; an empty
+        # table simply means no callee is classified, so the walk is inert.
+        self.extern_class: dict[str, str] = {}
         # names of `witnessed`-classified externs in scope (item 243, Slice 2,
         # docs/design/243-witnessed-externs.md): set by `_lower_component` so
         # an effect-position acquisition calling one of these lowers to the
@@ -2335,6 +2342,139 @@ def _check_deferred_not_in_teardown(program, filename: str) -> None:
             _scan(decl.compensate, decl.name, "compensate")
 
 
+def _service_emission_op(binding: str, method: str, env) -> str | None:
+    """`<binding>.<method>` when it names an `emission` operation of a service
+    this body requires, else None.
+
+    The AST twin of `_is_emission_call`'s `req` arm: a service operation
+    crossing is spelled `db.execute(...)`, an `ExprCall` whose callee is an
+    `ExprField`, so the extern-name walk below (which only reads `ExprVar`
+    callees) cannot see it. Both readings consult the same
+    `ServiceDecl.methods[...].emission` bit, so they cannot disagree."""
+    svc_name = (getattr(env, "requires", None) or {}).get(binding)
+    if svc_name is None:
+        return None
+    svc = (getattr(env, "services", None) or {}).get(svc_name)
+    if svc is None:
+        return None
+    decl = (getattr(svc, "methods", None) or {}).get(method)
+    if decl is not None and getattr(decl, "emission", False):
+        return f"{binding}.{method}"
+    return None
+
+
+def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
+                            emitting_witness: dict, *, refuse, env=None) -> None:
+    """The ONE teardown-slot emission walk (G5), shared by every inverse.
+
+    Two callers, one traversal: `_check_witnessed_inverse` holds a witnessed
+    extern's DECLARED inverse to rule 3 (docs/design/243-witnessed-externs.md),
+    and `_check_site_inverse_emission` holds a SITE-spelled bracket inverse
+    (`effect … undo …`, `subscribe … undo …`) to the same no-emission-in-
+    teardown bound (docs/design/teardown-contract.md: a bracket inverse "may
+    emit in teardown: no (G5)"). The rule is one rule, so it is one walker;
+    only the diagnostic differs, which is what `refuse` supplies.
+
+    Three shapes reach a boundary and all three are found here:
+
+    * a direct call to an `emission`/`witnessed` extern (`extern_class`);
+    * a call to a plain top-level `fn` whose body transitively reaches one —
+      `emitting_fns` is the emission-reach fixed point over the fn call graph
+      (emission_analysis.py), so one membership test follows the whole chain,
+      and `_emission_chain` renders the derivation;
+    * a call to an `emission` service operation off a required binding, when
+      an `env` is supplied (`_service_emission_op`).
+
+    `refuse(node, name, terminal_class, chain)` is called with the offending
+    call, the callee as written, the classification of the boundary actually
+    reached, and the fn path to it; it must raise."""
+    from .parser import ExprCall, ExprField, ExprVar
+
+    def _walk(e):
+        if e is None:
+            return
+        if isinstance(e, ExprCall):
+            callee = e.callee
+            if isinstance(callee, ExprVar):
+                name = callee.name
+                bad = extern_class.get(name)
+                if bad in ("emission", "witnessed"):
+                    refuse(e, name, bad, [name])
+                elif bad is None and name in emitting_fns:
+                    chain = _emission_chain(name, emitting_witness)
+                    refuse(e, name, extern_class.get(chain[-1]), chain)
+            elif env is not None and isinstance(callee, ExprField) \
+                    and isinstance(callee.target, ExprVar):
+                op = _service_emission_op(callee.target.name, callee.name, env)
+                if op is not None:
+                    refuse(e, op, "emission", [op])
+            for a in e.args:
+                _walk(a)
+            return
+        for f in type(e).__dataclass_fields__:
+            v = getattr(e, f)
+            if hasattr(v, "__dataclass_fields__"):
+                _walk(v)
+            elif isinstance(v, (list, tuple)):
+                for x in v:
+                    if hasattr(x, "__dataclass_fields__"):
+                        _walk(x)
+
+    _walk(expr)
+
+
+def _check_site_inverse_emission(undo_expr, env, filename: str, line: int,
+                                 *, slot: str = "undo") -> None:
+    """G5 for a SITE-spelled bracket inverse (docs/design/teardown-contract.md,
+    "may emit in teardown | no (G5)").
+
+    `_check_witnessed_inverse` closed exactly this hole for a witnessed extern's
+    DECLARED inverse and named the remaining gap in its own docstring: the
+    inverse an author writes at the acquisition site (`let p = effect
+    Pool.open(…) undo send_email(…)`, and the subscription bracket's `undo`)
+    got no such walk, so a direct, fn-wrapped, or service-operation emission ran
+    during teardown. A bracket inverse replays on clean unload AND on abort,
+    at or after the session verdict, so a crossing there is unanswerable: it is
+    invisible to the emission fold, to the capability declarations, and to the
+    246 approval gate, and it cannot be rolled back. The same walk, the same
+    bound, at the second slot that has one.
+
+    Inert for every inverse that reaches no boundary (`p.close()`, a pure fn),
+    so a program with an honest teardown is byte-identical."""
+    if undo_expr is None:
+        return
+    extern_class = getattr(env, "extern_class", None) or {}
+    emitting = getattr(env, "emitting_fns", None) or set()
+    witness = getattr(getattr(env, "emission_evidence", None), "witness", None) or {}
+
+    def _refuse(node, name, terminal, chain):
+        kind = "itself witnessed" if terminal == "witnessed" else "an emission"
+        if len(chain) > 1:
+            reached = chain[-1]
+            path = " -> ".join(chain)
+            message = (f"the `{slot}` of this bracket calls `{name}`, a fn that "
+                       f"reaches {kind} `{reached}` (through {path}) — a bracket "
+                       f"inverse runs in teardown and may not cross a boundary "
+                       f"(G5)")
+        else:
+            message = (f"the `{slot}` of this bracket calls `{name}`, which is "
+                       f"{kind} — a bracket inverse runs in teardown and may not "
+                       f"cross a boundary (G5)")
+        raise RevlError(
+            filename, getattr(node, "line", 0) or line, message,
+            hint="a bracket inverse replays on clean unload and on abort, at or "
+                 "after the session verdict, so a crossing there is unanswerable "
+                 "and invisible to the emission fold and the approval gate; keep "
+                 "the inverse a host-local release, and move the crossing into "
+                 "the forward path (an `emit`) or a `compensate` slot, which is "
+                 "the audit surface that MAY emit in teardown "
+                 "(docs/design/teardown-contract.md)",
+            code="G5", category="teardown")
+
+    _walk_inverse_emissions(undo_expr, extern_class, emitting, witness,
+                            refuse=_refuse, env=env)
+
+
 def _check_witnessed_inverse(decl, extern_class: dict, emitting_fns: set,
                              emitting_witness: dict, filename: str) -> None:
     """Rule 3 (docs/design/243-witnessed-externs.md): a witnessed extern's
@@ -2362,69 +2502,55 @@ def _check_witnessed_inverse(decl, extern_class: dict, emitting_fns: set,
     an inverse is refused exactly like a direct one. `compensate` is walked
     alongside `undo` so the same escape cannot open on that slot when a backend
     wires it. A pure/local fn (no emission reach) is in neither table and still
-    passes."""
-    from .parser import ExprCall, ExprVar
+    passes.
 
-    def _walk(e):
-        if isinstance(e, ExprCall):
-            if isinstance(e.callee, ExprVar):
-                name = e.callee.name
-                bad = extern_class.get(name)
-                if bad in ("emission", "witnessed"):
-                    kind = ("an emission" if bad == "emission"
-                            else "itself witnessed")
-                    why = ("emissions are one-way boundary crossings and may not "
-                           "run in teardown (G5)" if bad == "emission"
-                           else "a witnessed inverse would need its own inverse "
-                                "registered — infinite regress")
-                    raise RevlError(
-                        filename, e.line,
-                        f"the inverse of witnessed extern `{decl.name}` calls "
-                        f"`{name}`, which is {kind} — a witnessed inverse must be "
-                        f"a host-local restore (G5)",
-                        hint=f"{why}; declare the inverse `pure` or `acquire` "
-                             f"(docs/design/243-witnessed-externs.md)",
-                        code="G5", category="witnessed",
-                    )
-                if bad is None and name in emitting_fns:
-                    # a plain top-level `fn` whose body transitively reaches an
-                    # emission: the same boundary crossing as a direct emission
-                    # inverse, one `fn` indirection later. Name the reached
-                    # boundary and the fn path so the author reads the derivation.
-                    chain = _emission_chain(name, emitting_witness)
-                    reached = chain[-1]
-                    term = extern_class.get(reached)
-                    kind = ("an emission" if term == "emission"
-                            else "itself witnessed")
-                    path = " -> ".join(chain)
-                    raise RevlError(
-                        filename, e.line,
-                        f"the inverse of witnessed extern `{decl.name}` calls "
-                        f"`{name}`, a fn that reaches {kind} `{reached}` "
-                        f"(through {path}), so a witnessed inverse must be a "
-                        f"host-local restore (G5)",
-                        hint="emissions are one-way boundary crossings and may "
-                             "not run in teardown, even through a fn wrapper "
-                             "(G5); declare the inverse `pure` or `acquire`, or "
-                             "route no emission through it "
-                             "(docs/design/243-witnessed-externs.md)",
-                        code="G5", category="witnessed",
-                    )
-            for a in e.args:
-                _walk(a)
-            return
-        for f in type(e).__dataclass_fields__:
-            v = getattr(e, f)
-            if hasattr(v, "__dataclass_fields__"):
-                _walk(v)
-            elif isinstance(v, (list, tuple)):
-                for x in v:
-                    if hasattr(x, "__dataclass_fields__"):
-                        _walk(x)
+    The walk itself now lives in `_walk_inverse_emissions`, shared with the SITE
+    inverse check (`_check_site_inverse_emission`) so the two teardown slots
+    cannot drift apart; this function supplies only the rule-3 phrasing. A
+    declared inverse is checked with no `env`: an extern declaration requires no
+    services, so there is no service-operation arm to read."""
 
-    _walk(decl.undo)
+    def _refuse(node, name, terminal, chain):
+        kind = "itself witnessed" if terminal == "witnessed" else "an emission"
+        if len(chain) > 1:
+            # a plain top-level `fn` whose body transitively reaches an
+            # emission: the same boundary crossing as a direct emission
+            # inverse, one `fn` indirection later. Name the reached
+            # boundary and the fn path so the author reads the derivation.
+            reached = chain[-1]
+            path = " -> ".join(chain)
+            raise RevlError(
+                filename, node.line,
+                f"the inverse of witnessed extern `{decl.name}` calls "
+                f"`{name}`, a fn that reaches {kind} `{reached}` "
+                f"(through {path}), so a witnessed inverse must be a "
+                f"host-local restore (G5)",
+                hint="emissions are one-way boundary crossings and may "
+                     "not run in teardown, even through a fn wrapper "
+                     "(G5); declare the inverse `pure` or `acquire`, or "
+                     "route no emission through it "
+                     "(docs/design/243-witnessed-externs.md)",
+                code="G5", category="witnessed",
+            )
+        why = ("emissions are one-way boundary crossings and may not "
+               "run in teardown (G5)" if terminal == "emission"
+               else "a witnessed inverse would need its own inverse "
+                    "registered — infinite regress")
+        raise RevlError(
+            filename, node.line,
+            f"the inverse of witnessed extern `{decl.name}` calls "
+            f"`{name}`, which is {kind} — a witnessed inverse must be "
+            f"a host-local restore (G5)",
+            hint=f"{why}; declare the inverse `pure` or `acquire` "
+                 f"(docs/design/243-witnessed-externs.md)",
+            code="G5", category="witnessed",
+        )
+
+    _walk_inverse_emissions(decl.undo, extern_class, emitting_fns,
+                            emitting_witness, refuse=_refuse)
     if decl.compensate is not None:
-        _walk(decl.compensate)
+        _walk_inverse_emissions(decl.compensate, extern_class, emitting_fns,
+                                emitting_witness, refuse=_refuse)
 
 
 # item 309: the idempotency register partial order (design §2, §"question 4").
@@ -5451,6 +5577,8 @@ def check_and_lower(program: Program, ambient: dict | None = None,
                                             async_colored, witnessed_externs,
                                             colour_polymorphic, sync_monomorphs,
                                             poly_extern_names, extern_colour_instances,
+                                            extern_class={e["name"]: e.get("class")
+                                                          for e in externs},
                                             errors=errors, untrusted=untrusted)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
@@ -7410,6 +7538,17 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
     # `sub.next()` / `sub.close()` are checked against that verb surface (item
     # 401) and `next` is recognised as a suspension in a teardown slot (§3.4).
     env.host_locals[safe] = "Subscription"
+    # G5, same bound as every other bracket inverse: the subscription's teardown
+    # slot may not cross a boundary (docs/design/teardown-contract.md). Walked on
+    # the AST, before the undo is lowered, so an emitting inverse is named for
+    # what it is rather than only for the `close` it is missing (the shape check
+    # further down).
+    _check_site_inverse_emission(stmt.undo, env, filename, stmt.line)
+    # ... and lowered through the site-inverse entry, so the same expression also
+    # gets item 423's construction-time argument judgment with the `undo` slot
+    # named on `env` (item 420). The three judgments are disjoint and all three
+    # are needed here: G5 reads the callee's CLASSIFICATION, 423 reads its
+    # SIGNATURE, and the shape check below reads the IR the lowering produced.
     undo = _lower_site_inverse(stmt.undo, env, slot="undo")
     acquire = {"kind": "subscribe", "stream": stream_ir, "policy": sub_expr.policy}
     step = {
@@ -7444,6 +7583,48 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
             hint="teardown never suspends (docs/design/teardown-contract.md, the "
                  "bound rule) — the inverse of a subscription is `sub.close()`, "
                  "which trips the cancel token and returns; it must not `next`",
+            code="lifecycle", category="lifecycle")
+    # rule 3.6, the subscription half: the inverse must CLOSE THIS subscription.
+    # The source's inverse is already shape-checked this way (a `Stream.source()`
+    # whose undo does not `close` it is not recorded as terminal-delivering, so
+    # `subscribe` refuses it); the bracket on the other end of the same wire had
+    # no such check, so `undo nop("x")`, `undo src.close()` and a copy-pasted
+    # sibling `undo a.close()` all passed while leaving THIS subscription open
+    # and still attached to its source after the owner is DISPOSED. That is item
+    # 130's core guarantee inverted: unloading the owner must CLOSE the stream
+    # before the owner disappears (G7, R4).
+    #
+    # The required shape is literal and syntactic on purpose. A transitive close
+    # through a helper fn is REFUSED, not admitted: proving a helper closes THIS
+    # subscription needs alias tracking through fn bodies that the frontend does
+    # not have, and admitting the call on faith would restore the same hole one
+    # indirection later (the shape `_check_witnessed_inverse` had to close on the
+    # emission side). The language already forbids the workaround anyway — a
+    # `Subscription` is a host-local with no nominal type, so it cannot be passed
+    # to a fn at all — so the rule refuses nothing an author can write today.
+    #
+    # Slice 3's `subscribe merge(a, b)` needs no separate clause and gets the
+    # rule for free. The fan-in is DERIVED and owned by this one bracket, so
+    # `sub.close()` is still the whole teardown; closing any single operand of
+    # the merge instead is the same escape as closing the source of a plain
+    # subscribe, and the required shape refuses it the same way.
+    u = step["undo"]
+    ut = u.get("target") if isinstance(u, dict) else None
+    if not (isinstance(u, dict) and u.get("kind") == "call"
+            and u.get("method") == "close" and not u.get("args")
+            and isinstance(ut, dict) and ut.get("kind") == "name"
+            and ut.get("id") == safe):
+        raise RevlError(
+            filename, stmt.line,
+            f"the `undo` of a subscription must close THAT subscription — this "
+            f"inverse does not `close` `{stmt.bind}`",
+            hint=f"write `let {stmt.bind} = subscribe <stream> undo "
+                 f"{stmt.bind}.close()` exactly (item 130 §3.6). Closing the "
+                 "SOURCE, closing a sibling subscription, or doing nothing all "
+                 "leave this listener attached after its owner is disposed, and "
+                 "unloading the owner must CLOSE the stream before the owner "
+                 "disappears (the core guarantee, G7/R4); a helper fn cannot "
+                 "stand in, since nothing proves it closes THIS subscription",
             code="lifecycle", category="lifecycle")
     env.subscribed_sources.update(consumed)
     return step
@@ -7519,12 +7700,21 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
             code="G4", category="witnessed",
         )
     else:
+        # G5 (docs/design/teardown-contract.md): a bracket inverse may NOT emit
+        # in teardown. Checked before the undo is lowered so the refusal names
+        # the callee the author wrote, and here rather than at each caller so
+        # every site-spelled inverse (activation body and provide-method body
+        # alike) is held to the same bound the DECLARED inverse of a witnessed
+        # extern already obeys.
+        _check_site_inverse_emission(undo_expr, env, filename, line)
         # the site slot's argument judgment (`_lower_site_inverse`): the code
         # that runs on abort, while the activation is already unwinding, is
         # held to the same declared signature the extern's own slot is, and
         # refuses with the slot named. Lowering through this one entry covers
         # the bound and unbound activation-body forms and both provide-method
-        # acquire forms, since every one of them builds its step here.
+        # acquire forms, since every one of them builds its step here. It is a
+        # SIGNATURE judgment and the walk above is a CLASSIFICATION one, so
+        # neither stands in for the other: `undo send_email(addr)` type-checks.
         undo = _lower_site_inverse(undo_expr, env, slot="undo")
         step = {"step": step_kind, "acquire": acquire, "undo": undo}
     if bind is not None:
@@ -8035,11 +8225,13 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      sync_monomorphs: dict | None = None,
                      poly_externs: set | None = None,
                      extern_colour_instances: dict | None = None,
+                     extern_class: dict | None = None,
                      errors: list | None = None,
                      untrusted: bool = False) -> dict:
     env = Env(comp, services, filename, types)
     env.untrusted = untrusted
     env.emitting_fns = emitting_fns or set()
+    env.extern_class = extern_class or {}
     env.emitting_caps = emitting_caps or {}
     env.emission_evidence = emission_evidence
     env.witnessed_externs = witnessed_externs or set()

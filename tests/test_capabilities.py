@@ -160,8 +160,11 @@ def test_the_plain_declaration_rule_is_untouched():
     assert excinfo.value.category == "emission-propagation"
 
 
-def test_a_teardown_position_emission_counts_against_the_scope():
-    """Calling the method *schedules* the undo, so it is in scope too."""
+def test_a_teardown_position_emission_is_refused_before_it_is_scored():
+    """A teardown-position emission used to be admitted and merely counted
+    against the declared scope. It is now refused outright: a bracket inverse
+    "may emit in teardown: no (G5)" (docs/design/teardown-contract.md), and the
+    capability arithmetic never has to score a crossing that cannot run."""
     source = """
     service Database { emission fn execute(sql: Str) -> Int }
     service Bus { emission fn publish(topic: Str, payload: Str) }
@@ -174,6 +177,31 @@ def test_a_teardown_position_emission_counts_against_the_scope():
           emit   db.execute(key)
           effect store.insert(key, value)
           undo   bus.publish("rollback", key)
+        }
+      }
+    }
+    """
+    with pytest.raises(RevlError, match=r"may not cross a boundary \(G5\)"):
+        compile_source(source)
+
+
+def test_a_forward_position_emission_counts_against_the_scope():
+    """The scope arithmetic itself is unchanged: the same `bus` crossing on the
+    FORWARD path (where it is legal) is still scored against the method's
+    declared `emission[db]` and refused for exceeding it."""
+    source = """
+    service Database { emission fn execute(sql: Str) -> Int }
+    service Bus { emission fn publish(topic: Str, payload: Str) }
+    service Cache { emission[db] fn put(key: Str, value: Str) }
+
+    component LeakyCache requires db: Database, bus: Bus provides cache: Cache {
+      let store = effect Map.new() undo store.drop()
+      provide cache {
+        fn put(key, value) {
+          emit   db.execute(key)
+          emit   bus.publish("rollback", key)
+          effect store.insert(key, value)
+          undo   store.remove(key)
         }
       }
     }

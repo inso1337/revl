@@ -71,13 +71,24 @@ component C {
 """
 
 # the audit's stream variant: an async body (so the guard is proven on
-# `_async_tracked` too), where a raising subscription inverse starves BOTH the
-# source and the pool below it.
+# `_async_tracked` too), where a raising inverse in the subscription's teardown
+# chain starves BOTH the source and the pool below it.
+#
+# The raise sat on the SUBSCRIPTION bracket itself until item 130 rule 3.6 grew
+# its subscription half: a subscription's `undo` must now be literally
+# `sub.close()`, so a fallible inverse can no longer be spelled in that slot at
+# all. The runtime property under test is unchanged and is not about which
+# bracket faults — it is that ONE Phase-1 raise inside an async body must not
+# starve the inverses registered below it. So the raise moves one bracket down,
+# between the source and the subscription, where it still disposes after
+# `sub.close()` and still stands between the fault and both `src.close()` and
+# `a.close()`.
 _STREAM = _BLOW + """
 component C {
   let a = effect Pool.open("A", 1) undo a.close()
   let src = effect Stream.source() undo src.close()
-  let sub = subscribe src undo blow("x")
+  let b = effect Pool.open("B", 1) undo blow("x")
+  let sub = subscribe src undo sub.close()
   await sub.next()
 }
 """
@@ -227,14 +238,14 @@ async def test_the_fault_test_judge_calls_the_reproducer_residue(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-async def test_a_raising_subscription_inverse_does_not_strand_the_source_and_pool():
+async def test_a_raising_inverse_in_a_stream_body_does_not_strand_the_source_and_pool():
     run = await _drive(_STREAM, "phase1_stream", deliver=True)
 
     assert run.probe.never_ran() == [], "every registered inverse must be reached"
     assert run.probe.lifo_violation() is None
 
     ops = _ops(run.events)
-    # before the fix the subscription's raise starved BOTH inverses below it:
+    # before the fix the raise starved BOTH inverses below it in the async body:
     # neither `stream.source close` nor `pool.close A` appeared.
     assert "stream.source close" in ops
     assert "pool.close A" in ops
