@@ -1,0 +1,35 @@
+// item 435(b): a callback ARROW inside an async provide method whose body is
+// nothing but a req-keyed async-op emission (`msgs => emit model.complete(msgs)`).
+//
+// The await-seed is suppressed inside an arrow, so the body renders as the bare
+// un-awaited Promise `ctx.model.complete(msgs)`. That makes the arrow's own
+// `async` a pure resolution hop over a Promise the body already returns, and it
+// is dropped: `((msgs: any) => (ctx.model.complete(msgs)))`. The two spellings
+// carry the identical TS type `(p) => Promise<T>`, so the arrow stays assignable
+// to `describe`'s `(Str) -> Async[Str]` parameter.
+//
+// The corpus needs this shape explicitly: no other fixture puts an emission call
+// in an arrow body, so without it the port of 435(b) would be invisible to the
+// byte-agreement oracle (item 429's trap, where both sides go silently untested).
+//
+// `describe` deliberately does NOT call its callback, so it stays UNCOLORED and
+// the provide method's call to it needs no `await`. Calling a colored module fn
+// from a provide method is the deferred component-dialect async call surface
+// (this file's slice-5 note), which must stay out of the corpus.
+service Model {
+  emission async fn complete(msgs: Str) -> Str
+}
+
+service Runner {
+  emission async fn run(prompt: Str) -> Str
+}
+
+fn describe(complete: (Str) -> Async[Str], prompt: Str) -> Str {
+  return prompt.concat("!")
+}
+
+component Agent requires model: Model provides runner: Runner {
+  provide runner {
+    async fn run(prompt) = describe(msgs => emit model.complete(msgs), prompt)
+  }
+}

@@ -214,10 +214,57 @@ This goes in the compiler spec, not the runtimes.
   - **rust** derived only `Clone` on v3 records and variants, so `==` on a
     record did not compile at all (rustc E0369). Legal revl, refused by one
     tier. `PartialEq` is now derived alongside `Clone` and `Debug`.
-  - **java** was already correct — `java.util.Objects.equals` on emitted
-    records, whose `equals` is structural by construction — and is the
-    precedent the other two now follow. **wasm** is unaffected: its values are
-    i32 and compound equality is a documented tier limit.
+  - **java** *(this bullet used to read "was already correct, the precedent
+    the other two now follow". That was wrong, and it was wrong about the
+    load-bearing part.)* `java.util.Objects.equals` is structural only for a
+    class that DEFINES `equals`, and the emitted classes did not.
+    `backends/java/emit.py::_emit_v3_types` emitted a v3 record as a class
+    with public final fields and a ctor and no `equals`/`hashCode`, and each
+    sealed-variant case class the same, so both inherited `Object.equals`,
+    which is reference identity. `{ id: 1, name: "a" } == { id: 1, name: "a" }` lowered
+    to `revlEq(new Row(1L, "a"), new Row(1L, "a"))` and answered **`false`**,
+    alone against python, TypeScript, rust and go. The `revlEq` helper could
+    not have fixed this from outside: its fallback *is* that inherited method.
+    Each record class and each case class now carries a generated
+    `equals`/`hashCode`: primitive components compared with `==` (so a
+    `Float` keeps the IEEE rule recorded below), references routed through
+    `revlEq` (so a nested record recurses into its own generated `equals`, and
+    a `Float` inside a `List`/`Map`/`Opt` keeps the same rule), and a
+    `revlHash` that agrees with `revlEq` in the places `Objects.hashCode` does
+    not. **wasm** is unaffected: its values are i32 and compound equality is a
+    documented tier limit.
+
+    One consequence is worth stating rather than leaving to be discovered.
+    revl's `==` on `Float` is IEEE, so `NaN != NaN`, so a value carrying a
+    `NaN` is not equal to *itself* and does not satisfy `Object.equals`'s
+    reflexivity requirement. That is deliberate: matching every other tier is
+    the requirement, and IEEE equality is not an equivalence relation. It does
+    mean such a value is not a well-behaved hash key on this tier. Measured on
+    openjdk 26.0.2, not reasoned about:
+
+    | expression | result |
+    |---|---|
+    | `wt(nan).equals(wt(nan))`, distinct objects | `false` |
+    | `x.equals(x)` where `x = wt(nan)`, SAME reference | `false` (reflexivity gone) |
+    | `map.get(x)` after `map.put(x, v)`, same reference | `v` (HashMap short-circuits on `key == k`) |
+    | `map.get(wt(nan))`, a structurally identical key | `null` |
+    | `set.add(x)` twice, then `set.add(wt(nan))` | size 2, two "equal" NaN values held at once |
+    | `list.contains(x)` where `list` holds `x` itself | **`false`** |
+    | `wt(-0.0).equals(wt(0.0))` and their hashes | `true`, `true` |
+    | `bag(-0.0).equals(bag(0.0))` (Float inside a `List`) and their hashes | `true`, `true` |
+    | `map.get(seg(p, q))` for a distinct but equal nested record | found |
+
+    The `ArrayList` row is the sharp one: `contains`/`indexOf`/`remove` call
+    `equals` with no identity short-circuit, so a NaN-carrying value is not
+    found in a list it is literally in. Every non-NaN value, `-0.0` and nested
+    records included, round-trips through `HashMap` correctly.
+
+    The generated `equals` also has no `if (this == o) return true` fast path,
+    for the same reason: it would make the answer depend on aliasing, and the
+    reflexivity row above would then read `true` for an aliased value and
+    `false` for a copy. rust, the tier fixed just above, derives `PartialEq`,
+    which is a plain field-by-field `==` with no such shortcut, and java now
+    matches it.
 
   How it survived: `tests/test_cross_tier.py` checks that every emitter
   *accepts* a construct, which catches a tier that refuses and cannot catch a
@@ -225,9 +272,37 @@ This goes in the compiler spec, not the runtimes.
   recurring lesson one level up — "the emitter did not raise" never implied
   "the code is right", and "every emitter agreed on a shape" never implied
   "every tier agrees on a value". `tests/test_cross_tier_execution.py` closes
-  the class by *running* the probe on each tier; python and TypeScript execute
-  by default, rust and java behind `REVL_CROSS_TIER_SLOW=1`, with cheap static
-  guards for all three lowerings.
+  the class by *running* the probe on each tier.
+
+  How the java half survived a second time, in that same file: the executed
+  probes for rust and java sit behind `REVL_CROSS_TIER_SLOW`, and that
+  variable is set NOWHERE in this repository (not in `.github/workflows/`,
+  not in the Makefile, not in `ci/`), so every `*_slow` test there has run in
+  no CI job at all, and the runner adds a second gate on top, where "no
+  working JDK" is recorded as a skip and reads as a pass. `PROBES["structural
+  equality"]` asserted the record defect the whole time and never once
+  executed. This is roadmap item 430's shape exactly: a test that exists, runs
+  nowhere, and whose skip looks like green.
+
+  Both halves of that gate are now confirmed by running it. With
+  `REVL_CROSS_TIER_SLOW=1` and a JDK on PATH, the pre-fix emitter FAILS
+  `PROBES["structural equality"]` on a real JVM with
+  `java.lang.AssertionError` at `testRecordsCompareByValue`, and passes after
+  the fix. So this defect was always one environment variable away from being
+  a red build, and the environment variable is the thing nothing sets.
+
+  A caution that cost this repository real time: on macOS, `java` and `javac`
+  exist on PATH as `/usr/bin/*` stubs that error with "Unable to locate a
+  Java Runtime", so `shutil.which("java")` succeeds while the JDK check
+  fails, and a keg-only Homebrew install (`/opt/homebrew/opt/openjdk/bin`) is
+  invisible to both. Roadmap item 433's header records "NO JDK ON THE AUDIT
+  MACHINE" on the strength of exactly that stub, and it was wrong. Check
+  `/opt/homebrew/opt/openjdk` and `/usr/libexec/java_home -V` before
+  concluding a machine cannot run java.
+
+  Until the switch is on in CI, the guards that hold this line are the STATIC
+  ones, which need no toolchain and run in the `frontend` job; there is now
+  one per lowering per tier, and four of them for this defect specifically.
 
 ## Arithmetic divergences (open, pinned — one root cause)
 

@@ -6664,45 +6664,78 @@ def _async_reached_outside_provide(node, async_names: set, acc: set) -> None:
             _async_reached_outside_provide(value, async_names, acc)
 
 
-def _req_op_is_async(node, env) -> bool:
-    """A lowered call/emit node that reaches an async service operation through
-    a required key — rule 3 of the item-92 async-reach (a suspension source the
-    name-based `_calls_in` is blind to)."""
+def _async_service_op(node, env):
+    """The async service operation a lowered call/emit node reaches directly, as
+    `(display_name, method, op_decl)` — else `None`.
+
+    Two receiver shapes reach one, and both are suspension sources the name-based
+    `_calls_in` is blind to (rule 3 of the item-92 async-reach):
+
+      * a REQUIRED KEY — `emit model.complete(x)`, whose `req` receiver sits in
+        the node's `target` slot;
+      * a SPAWN HANDLE's provision — `emit w1.wtask.run(x)` (roadmap item 98,
+        harness finding #27). The pure stratum lowers `w1.wtask` to an
+        `instance-get` carrying the service its key yields, and the trailing
+        `.run(...)` wraps it in a `field` callee, so the receiver arrives through
+        `callee`, not `target` (`_instance_get_call`, the same detour
+        `_is_emission_call` already takes for the G4 emission marker).
+
+    Reading only the `req` shape left the handle shape uncoloured: an arrow
+    delegating to a spawned async worker was neither refused for carrying no
+    async colour nor coloured, and the py tier handed its caller an unawaited
+    coroutine. A spawned instance's async op suspends exactly as a required
+    service's does, so both answer here.
+
+    `display_name` is what a diagnostic names as the culprit's receiver:
+    `model` for a required key, `w1.wtask` for a handle provision."""
     if not isinstance(node, dict):
-        return False
+        return None
     target = node.get("target")
     method = node.get("method")
     if isinstance(target, dict) and target.get("kind") == "req" and method:
         svc = env.services.get(env.requires.get(target.get("name")) or "")
         decl = svc.methods.get(method) if svc is not None else None
-        return bool(decl is not None and getattr(decl, "async_", False))
-    return False
+        if decl is not None and getattr(decl, "async_", False):
+            return (target.get("name"), method, decl)
+        return None
+    inst = _instance_get_call(node, env)
+    if inst is not None and getattr(inst[1], "async_", False):
+        recv, decl = inst
+        handle = recv.get("target") or {}
+        holder = handle.get("id") if isinstance(handle, dict) else None
+        key = recv.get("key")
+        name = ".".join(part for part in (holder, key) if part)
+        return (name, node["callee"]["name"], decl)
+    return None
+
+
+def _req_op_is_async(node, env) -> bool:
+    """A lowered call/emit node that reaches an async service operation — through
+    a required key or a spawn handle's provision (`_async_service_op`)."""
+    return _async_service_op(node, env) is not None
 
 
 def _reached_async_req_ops(node, env, acc: list) -> None:
-    """Collect req-target async service ops (`req.method` whose op is `async
-    fn`) a lowered method body reaches DIRECTLY — in statement OR expression
-    position (a ternary arm, a nested expression), the blind spot item 117
-    closes. The name-based `_calls_in` the A1 provide-method check runs sees
-    async *callables* (externs, colored fns) but never an async *service
-    operation* reached through a required key (rule 3 of the item-92 async-
-    reach), so a sync method whose ternary returns `emit m.op(x)` slipped
-    through as admitted (finding #40).
+    """Collect the async service ops (`req.method`, or a spawn handle's
+    `h.<key>.<op>`, whose op is `async fn`) a lowered method body reaches
+    DIRECTLY — in statement OR expression position (a ternary arm, a nested
+    expression), the blind spot item 117 closes. The name-based `_calls_in` the
+    A1 provide-method check runs sees async *callables* (externs, colored fns)
+    but never an async *service operation* reached through a required key or a
+    spawned instance (rule 3 of the item-92 async-reach), so a sync method whose
+    ternary returns `emit m.op(x)` slipped through as admitted (finding #40).
 
     Any nested arrow is pruned: an arrow value's async-reach is the concern of
     `_refuse_leaky_arrow`/`_refuse_leaky_pure_arrow` (finding #21), which raise
     the arrow-color diagnostic instead — this walk owns only the ops the method
     body reaches without an intervening arrow. Each hit is
-    `(req_name, method, op_decl)`."""
+    `(receiver_name, method, op_decl)`."""
     if isinstance(node, dict):
         if node.get("kind") == "arrow":
             return
-        if _req_op_is_async(node, env):
-            target = node.get("target")
-            method = node.get("method")
-            svc = env.services.get(env.requires.get(target.get("name")) or "")
-            op_decl = svc.methods.get(method) if svc is not None else None
-            acc.append((target.get("name"), method, op_decl))
+        hit = _async_service_op(node, env)
+        if hit is not None:
+            acc.append(hit)
         for value in node.values():
             _reached_async_req_ops(value, env, acc)
     elif isinstance(node, list):

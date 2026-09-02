@@ -120,8 +120,8 @@ component, rebuilds it through revl's own compiler, and compares the recomputed
 hashes against the recorded ones, tier by tier:
 
 ```console
-$ truc reproduce user_cache@1.2.0
-truc reproduce user_cache@1.2.0
+$ truc reproduce user_cache
+truc reproduce user_cache
 
   source            OK        sha256 b882efdce4fb4930
   dependency lock   OK        provides={"cache": "Cache"} requires={"db": "Database"}
@@ -142,9 +142,16 @@ Each tier reports one of three outcomes, honestly:
   A single divergence is named precisely: `NOT reproduced: user_cache diverged
   on IR`, not a bare pass/fail.
 - **cannot verify** means nothing was recorded for that tier (no attestation, no
-  recorded emitted artifact, no version), or the toolchain needed to rebuild it
-  is absent. A tier with no recorded evidence cannot be a mismatch, and it never
-  silently reads as OK.
+  recorded emitted artifact), or the toolchain needed to rebuild it is absent. A
+  tier with no recorded evidence cannot be a mismatch, and it never silently
+  reads as OK.
+
+A `@version` you ask for is a different case, because you asked about it. The
+registry index records no per-component version, so there is nothing to check
+`@1.2.0` against: that is a MISMATCH on the `version` tier and a non-zero exit,
+not a "cannot verify". Reproducing whatever `user_cache` is today would answer a
+different question than the one you asked. Ask that question with
+`truc reproduce user_cache`.
 
 The reproduction reuses truc's existing machinery, not a new hash scheme: the
 source and manifest hashes are the exact bytes `registry.build_index` records,

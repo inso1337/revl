@@ -102,7 +102,7 @@ export async function agent_loop(prompt: string, decode: ((a0: string) => Step),
     return (await (async ($revl_match_1) => {
   switch ($revl_match_1.kind) {
     case "Final":
-      return (await (async (answer) => ({ kind: "Final", value: answer }))($revl_match_1.value))
+      return ((answer) => ({ kind: "Final", value: answer }))($revl_match_1.value)
     case "NeedTool":
       return (await (async (req) => ((await agent_loop(req.name, decode, revlI64(n - 1n)))))($revl_match_1.value))
     default:

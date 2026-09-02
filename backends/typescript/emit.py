@@ -919,6 +919,21 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         # (Wrapping the arrow *body* instead would re-snapshot on every call
         # and observe the rebound `var` — a silent wrong answer.) An arrow
         # with no captures is emitted exactly as before.
+        # item 435(b): the `async` here follows the declared type, not the
+        # rendered body, so `(msgs) => model.complete(msgs)` emitted `async
+        # (msgs: any) => (ctx.model.complete(msgs))`, a resolution hop over a
+        # Promise the body already returns, measured at 2 excess microtask
+        # turns and 2 excess Promise allocations per operation call
+        # (`bench/codegen/typescript/cases/async_arrow.ts`). Drop the keyword
+        # when the body renders no `await` AND the body IS that un-awaited
+        # emission Promise: `async (p) => e` and `(p) => e` then have the same
+        # TS type, `(p) => Promise<T>`, so the arrow stays assignable wherever
+        # it was before. Any other body keeps `async`, because an arrow over a
+        # plain value would otherwise return `T` where the callee's parameter
+        # type says `Promise<T>`.
+        if is_async and not _renders_await(body) \
+                and _v3_emission_call_node(node.get("body"), body_ctx):
+            is_async = False
         prefix = "async " if is_async else ""
         captures = node.get("captures") or []
         if captures:
@@ -2417,6 +2432,48 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
     raise EmitError(f"unknown builtin method {method!r}")
 
 
+def _renders_await(text: str) -> bool:
+    """Does this rendered fragment actually contain an `await` operator?
+
+    Item 435(a)/(b): the async colour has to follow what was RENDERED, because
+    `ctx.in_async` answers a question about the ENCLOSING function and not
+    about this expression.
+
+    The test is the literal `"await "`, not a word-boundary regex, for two
+    reasons. Every `await` this emitter writes is followed by a space
+    (`(await {rendered})`, `(await (async (…`), so the substring is exact for
+    the operator; and `selfhost/emit_ts.rvl` has to mirror this predicate
+    byte-for-byte with no regex engine, where `Str.indexOf` is the whole
+    implementation. It errs in one direction only: a stray `await ` inside a
+    string literal, or one belonging to a nested `async` arrow that already
+    flattens its own Promise, keeps an `async` that is not strictly needed.
+    That is exactly the shape emitted before this change, so a false positive
+    costs a microtask turn and can never cost correctness.
+    """
+    return "await " in text
+
+
+def _v3_emission_call_node(node, ctx: "_Ctx") -> bool:
+    """Is this IR node a call to an ASYNC service operation through a `req`?
+
+    That is the one expression the emitter renders as a bare, un-awaited
+    Promise: the `call` branch of `_expr` suppresses its await-seed inside an
+    arrow (`ctx.in_async and not ctx.in_arrow`). Item 435(b) needs to tell that
+    node apart from a body that evaluates to a plain value, because dropping
+    `async` from an arrow is only type-preserving when the body is already the
+    Promise the arrow was going to return.
+    """
+    if not isinstance(node, dict) or node.get("kind") != "call":
+        return False
+    target = node.get("target")
+    if not (isinstance(target, dict) and target.get("kind") == "req"):
+        return False
+    scope = ctx.component_scope
+    if scope is None:
+        return False
+    return (scope.requires.get(target.get("name")), node.get("method")) in ctx.async_ops
+
+
 def _v3_arm_body(arm: dict, ctx: "_Ctx") -> str:
     """Render one match arm's body with that arm's payload binding in scope.
 
@@ -2473,19 +2530,48 @@ def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
     # fn, docs/design/async-extern.md §3) an arm body may `await` an async
     # callable. The IIFE-and-arm-arrows the match lowers to must then be
     # `async`, and their invocations awaited, or the `await` lands in a sync
-    # arrow — a tsc error. When nothing inside suspends, the extra `async`
-    # wrapper is harmless (tsc does not require an `await`), so the whole
-    # match is uniformly async-shaped whenever the surrounding body may await.
-    # `(await ( <fn> )( <scrut> ))` when async — the await wraps the whole
-    # *invocation*, not the function object — else the plain `( <fn> )( <scrut> )`.
-    a = "async " if ctx.in_async else ""
-    pre = "(await (" if ctx.in_async else "("
-    post_tail = ")" if ctx.in_async else ""
+    # arrow, a tsc error.
+    #
+    # Item 435(a): the colour follows the RENDERED body, not the enclosing
+    # function. `ctx.in_async` is true for the whole body of an async-coloured
+    # `fn`, so colouring by it wrapped a match whose every arm is a bound
+    # variable or a literal in a Promise that was allocated, resolved and
+    # awaited around a value already in hand, measured at 2 excess microtask
+    # turns and 4 excess Promise allocations per evaluation
+    # (`bench/codegen/typescript/cases/match_sync_arms.ts`). An arm arrow is
+    # now `async` only when that arm's body renders an `await`, and the IIFE
+    # only when the assembled body does; the `await` at each call site follows
+    # the same decision. The py tier reached this from the other direction
+    # (`backends/python/emit.py` `_match_expr(..., awaited=…)`, item 263).
+    #
+    # `colour_by_text` is False inside an ARROW, where the unconditional
+    # colour stays. The await-seed for a `req` emission is deliberately
+    # suppressed there (`ctx.in_async and not ctx.in_arrow`, the `call` branch
+    # of `_expr`), so an arm body can be an un-awaited Promise with no `await`
+    # in its text and the arm arrow's own `async`/`await` pair is what resolves
+    # it. De-colouring there would hand the caller a Promise for a value.
+    colour_by_text = ctx.in_async and not ctx.in_arrow
+
+    def arm_async(body: str) -> bool:
+        if not ctx.in_async:
+            return False
+        return (not colour_by_text) or _renders_await(body)
+
+    def wrap(body_lines: list[str]) -> str:
+        # `(await ( <fn> )( <scrut> ))` when async: the await wraps the whole
+        # *invocation*, not the function object. Else `( <fn> )( <scrut> )`.
+        outer = ctx.in_async and (
+            (not colour_by_text) or _renders_await("\n".join(body_lines)))
+        a = "async " if outer else ""
+        pre = "(await (" if outer else "("
+        post_tail = ")" if outer else ""
+        return "\n".join(
+            [f"{pre}{a}({tmp}) => {{", *body_lines, f"}})({scrutinee}){post_tail}"])
 
     # Opt is `value | undefined` (not tagged): Some/None discriminate on
     # undefined, and Some binds the scrutinee itself.
     if any(arm.get("pattern") in ("Some", "None") for arm in arms):
-        lines = [f"{pre}{a}({tmp}) => {{"]
+        lines: list[str] = []
         wildcard = None
         for arm in arms:
             pattern = arm.get("pattern")
@@ -2499,17 +2585,16 @@ def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
                 bind = arm.get("bind")
                 if bind:
                     b = _ident(bind, "match bind")
-                    lines.append(f"  if ({tmp} !== undefined) return (await ({a}({b}) => ({body}))({tmp}))"
-                                 if ctx.in_async
+                    lines.append(f"  if ({tmp} !== undefined) return (await (async ({b}) => ({body}))({tmp}))"
+                                 if arm_async(body)
                                  else f"  if ({tmp} !== undefined) return (({b}) => ({body}))({tmp})")
                 else:
                     lines.append(f"  if ({tmp} !== undefined) return ({body})")
         lines.append(wildcard if wildcard is not None
                      else '  throw new TypeError("non-exhaustive match")')
-        lines.append(f"}})({scrutinee}){post_tail}")
-        return "\n".join(lines)
+        return wrap(lines)
 
-    lines = [f"{pre}{a}({tmp}) => {{", f"  switch ({tmp}.kind) {{"]
+    lines = [f"  switch ({tmp}.kind) {{"]
     wildcard = None
     for arm in node.get("arms") or []:
         pattern = arm.get("pattern")
@@ -2522,8 +2607,8 @@ def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
         bind = arm.get("bind")
         if bind:
             bind = _ident(bind, "match bind")
-            lines.append(f"      return (await ({a}({bind}) => ({body}))({tmp}.value))"
-                         if ctx.in_async
+            lines.append(f"      return (await (async ({bind}) => ({body}))({tmp}.value))"
+                         if arm_async(body)
                          else f"      return (({bind}) => ({body}))({tmp}.value)")
         else:
             lines.append(f"      return ({body})")
@@ -2534,8 +2619,7 @@ def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
         lines.append("    default:")
         lines.append(wildcard)
     lines.append("  }")
-    lines.append(f"}})({scrutinee}){post_tail}")
-    return "\n".join(lines)
+    return wrap(lines)
 
 
 

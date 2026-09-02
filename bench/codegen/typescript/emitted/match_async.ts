@@ -96,7 +96,7 @@ export async function drive(prompt: string, n: bigint): Promise<string> {
     return (await (async ($revl_match_1) => {
   switch ($revl_match_1.kind) {
     case "Final":
-      return (await (async (answer) => (answer))($revl_match_1.value))
+      return ((answer) => (answer))($revl_match_1.value)
     case "NeedTool":
       return (await (async (req) => ((await drive(req, revlI64(n - 1n)))))($revl_match_1.value))
     default:

@@ -1,0 +1,29 @@
+// Item 435(a) exit fixture: an async-coloured `fn` whose `match` has no
+// suspending arm.
+//
+// `classify` is coloured async because it calls an async extern once, at the
+// top. The match that follows is entirely synchronous: every arm body is a
+// bound variable or a literal, so the emitted IIFE and the per-arm arrows
+// must carry no `async` and their call sites no `await`. Colouring them by
+// `ctx.in_async` (a property of the enclosing function) instead allocated a
+// Promise around an already-computed value and awaited it, measured at 2
+// excess microtask turns and 4 excess Promise allocations per evaluation
+// (`bench/codegen/typescript/cases/match_sync_arms.ts`).
+type Step = Final(Str) | NeedTool(Str) | Retry
+
+extern emission async fn fetch_one(p: Str) -> Str = @ts { return p }
+
+pub fn decode(resp: Str) -> Step {
+  if (resp == "f") { return Final("done") }
+  if (resp == "r") { return Retry }
+  return NeedTool(resp)
+}
+
+pub fn classify(p: Str) -> Str {
+  let resp = fetch_one(p)
+  return match decode(resp) {
+    Final(a) => a,
+    NeedTool(t) => t,
+    Retry => "retry",
+  }
+}

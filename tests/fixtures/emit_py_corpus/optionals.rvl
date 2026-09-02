@@ -1,2 +1,14 @@
 fn call_chain(s: Opt[Str]) -> Opt[Int] { return s?.length() }
 fn call_chain2(s: Opt[Str]) -> Opt[Str] { return s?.concat("!") }
+
+// item 436: the `?.` receiver and the `??` left operand are evaluated ONCE, so
+// an operand that is not a bare local is bound with a walrus. `Map.lookup` is
+// the non-trivial operand here.
+fn defaulted(m: Map[Str, Str], k: Str, d: Str) -> Str { return m.lookup(k) ?? d }
+
+// A chain whose ARGUMENT carries a second chain, against a builtin that
+// renders the argument BEFORE the receiver (`join`): the two temps must not
+// collide.
+fn joined(m: Map[Str, List[Str]], k: Str, sep: Opt[Str]) -> Opt[Str] {
+  return m.lookup(k)?.join(sep ?? "-")
+}
