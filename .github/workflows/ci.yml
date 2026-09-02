@@ -359,6 +359,16 @@ jobs:
 
   backend-wasm:
     runs-on: ubuntu-latest
+    # The cordis-wasm checkout this job provisions below. Declared as a JOB env
+    # rather than exported into $GITHUB_ENV so that
+    # tests/test_env_gated_skips_run_somewhere.py can read WHICH job sets it and
+    # check that this job actually collects the files that gate on it — an
+    # audit a `>> $GITHUB_ENV` assignment is invisible to. Spelled absolutely
+    # because `env:` values are not shell-expanded; the step after the clone
+    # asserts it is the runner's own ~/Projects path, which is what
+    # tests/test_wasm_backend.py resolves independently.
+    env:
+      CORDIS_WASM: /home/runner/Projects/cordis-wasm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -396,11 +406,36 @@ jobs:
       # `.[test]`. Without it those 29 tests skip — and the no-skip guard below
       # then reds the job, correctly. Pin it to the same 47.x series as the CLI.
       - run: pip install "wasmtime==47.0.1"
-      # installing the runtime is only half of it: if the download ever
-      # breaks, the tests would go back to skipping and the job would still
-      # be green. Prove the binaries are there, then make their absence fatal.
+      # THE THIRD DEPENDENCY the widened root needs, and the one that was still
+      # missing: nineteen of the newly-included tests drive emitted modules on
+      # the first-party cordis-wasm substrate prototype, which lives in its own
+      # repo and was never provisioned here, so they skipped with "cordis-wasm
+      # runtime not found" and the guard below reddened the job — correctly.
+      # Clone it at a PIN (not the branch's moving HEAD, the rule
+      # backends/python/setup.sh's CORDIS_PY_PIN follows for the same reason)
+      # and give it the venv `tests/test_wasm_backend.py` looks for by an
+      # absolute ~/Projects path. Its only dependency is the wasmtime package.
+      - name: Install the cordis-wasm runtime (pinned)
+        run: |
+          git clone https://github.com/inso1337/cordis-wasm.git "$CORDIS_WASM"
+          git -C "$CORDIS_WASM" checkout --quiet f5c05629f395496ec2bb7e0d3da45a43a874cd37
+          python3 -m venv "$CORDIS_WASM/.venv"
+          "$CORDIS_WASM/.venv/bin/pip" install --quiet "wasmtime==47.0.1"
+      # installing the runtimes is only half of it: if a download ever breaks,
+      # the tests would go back to skipping and the job would still be green.
+      # Prove each one is there, then make its absence fatal.
       - run: wasmtime --version
       - run: wasm-tools --version
+      - run: python3 -c "import wasmtime; print('wasmtime python', wasmtime.__file__)"
+      # both halves of the cordis-wasm provisioning, and the assumption joining
+      # them: tests/test_wasm_backend.py resolves ~/Projects/cordis-wasm/.venv
+      # itself and cannot be pointed elsewhere, so if the runner's home ever
+      # stops being /home/runner this fails HERE rather than turning that test
+      # back into a silent skip.
+      - run: |
+          test "$CORDIS_WASM" = "$HOME/Projects/cordis-wasm"
+          test -f "$CORDIS_WASM/runtime.py"
+          test -x "$CORDIS_WASM/.venv/bin/python"
       # THE ROOT, not one named file (issue #183). `test_v3_emit.py` was the
       # only wasm file CI ran; the other twelve — canonical ABI, heap growth
       # and reclaim, lifecycle driver, router/spawn/accessor execution,
@@ -418,19 +453,32 @@ jobs:
         if: always()
         run: |
           python3 - <<'PY'
-          import pathlib, re, sys
+          import html, pathlib, re, sys
           report = pathlib.Path("/tmp/wasm-junit.xml")
           if not report.is_file():
               print("::error::pytest wrote no junit report - the run did not start")
               sys.exit(1)
           text = report.read_text(encoding="utf-8", errors="replace")
-          # The guard exists for WASMTIME coverage. One skip is legitimately
-          # about a *different* optional runtime - the cordis-wasm substrate
-          # prototype, a separate repo CI does not provision. Exempt exactly
-          # that reason and fail on every other skip, so the exemption cannot
-          # quietly widen.
-          ALLOWED = ("cordis-wasm venv not available",)
-          reasons = re.findall(r'<skipped\b[^>]*?\bmessage="([^"]*)"', text)
+          # The cordis-wasm substrate IS provisioned now (see the pinned clone
+          # above), so "runtime not found" and "venv not available" are no
+          # longer exempt: they would mean the provisioning step broke.
+          #
+          # What remains are two VERSION gates. The pinned cordis-wasm commit
+          # predates two runtime primitives the emitted modules use, and no
+          # change in THIS repo can make them run - the feature has to land in
+          # the runtime and the pin has to be bumped. They are enumerated
+          # verbatim, so a bumped pin makes them fail as unexpected-and-stale
+          # rather than silently keeping an exemption alive, and so no OTHER
+          # skip can hide behind them.
+          ALLOWED = (
+              "cordis-wasm runtime predates the instance accessor (no _instance_get)",
+              "cordis-wasm runtime predates the route:<key> primitive (item 173)",
+          )
+          # `html.unescape`: a reason carrying `<` or `>` (the `route:<key>`
+          # primitive below) reaches the report as `&lt;`/`&gt;`, and comparing
+          # the escaped form against a plain string silently never matches.
+          reasons = [html.unescape(r) for r in
+                     re.findall(r'<skipped\b[^>]*?\bmessage="([^"]*)"', text)]
           counted = sum(int(n) for n in re.findall(r'<testsuite\b[^>]*?\bskipped="(\d+)"', text))
           if len(reasons) != counted:
               print(f"::error::junit reports {counted} skip(s) but {len(reasons)} "
@@ -444,8 +492,9 @@ jobs:
                     "runtime coverage is not actually running")
               sys.exit(1)
           for reason in reasons:
-              print(f"exempt (not a wasmtime gate): {reason}")
-          print(f"no wasmtime-gated wasm tests skipped ({len(reasons)} exempt)")
+              print(f"exempt (a cordis-wasm PIN gate, not a wasmtime one): {reason}")
+          print(f"no wasm test skipped outside the enumerated pin gates "
+                f"({len(reasons)} exempt)")
           PY
 
   backend-rust:

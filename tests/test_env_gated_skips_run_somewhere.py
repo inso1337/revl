@@ -74,15 +74,6 @@ _AMBIENT = frozenset({
 # if an entry stops being read, or starts being set in CI, so a name cannot
 # quietly rot here after the gap it describes is closed.
 _INTENTIONALLY_LOCAL: dict[str, str] = {
-    "CORDIS_WASM": (
-        "Points at a checkout of the cordis-wasm substrate, which is a "
-        "SEPARATE REPOSITORY and an explicit prototype, not a pinned "
-        "dependency of this one. CI provisions the wasm tier through wasmtime "
-        "plus backends/wasm instead, and the `backend-wasm` job already names "
-        "this skip's exact reason string in its ALLOWED list so the exemption "
-        "cannot widen silently. Setting it in CI would mean pinning a "
-        "prototype's revision, which is a decision, not an oversight."
-    ),
     "REVL_CONFORMANCE_PY": (
         "An OVERRIDE, not a gate. `_python_with_cordis` falls back to "
         "backends/python/.venv, which `sh backends/python/setup.sh` creates in "
