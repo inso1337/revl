@@ -425,6 +425,17 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   `--placement`, run probes across processes first; with a non-py backend,
   boot the tier's process, prove no residue, exit).
 
+Under `--placement` the conductor waits for each child's own `[<name>] DOWN`
+line - the runner's statement that its LIFO unwind covered every registered
+entry and its no-residue proof printed - rather than for a fixed number of
+seconds. A wedged child is still SIGKILLed after a backstop, so the conductor
+cannot hang, but that kill is **reported and the run exits non-zero**: a child
+killed mid-unwind leaves its entries STRANDED and its residue UNKNOWN, the same
+verdict [`revl estop`](design/443-estop.md) gives a halted session, and it is
+never a clean exit. Reconcile a durable run with `revl recover --wal FILE`. Set
+`REVL_TEARDOWN_GRACE=<seconds>` (default 30) when a teardown is legitimately
+long rather than wedged.
+
 `run --record` opens the replay REPL (`:timeline`, `:back`, `:forward`,
 `:inspect`, `:bisect`; see [replay.md](replay.md)).
 

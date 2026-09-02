@@ -2004,9 +2004,59 @@ def _build_java_real(ir: dict, tmp: Path, jdk_bin: str, cordis_classes: str) -> 
 # --------------------------------------------------------------------------
 
 
-def _stop_all(children: dict) -> None:
-    """children: name -> (proc, stop_mode). rust holds on stdin (close it to
-    stop gracefully); py/node/java tear down on SIGTERM."""
+# The hang BACKSTOP, in seconds: how long the conductor keeps waiting after a
+# child has been asked to stop and has still not said `DOWN`. It is not a
+# teardown budget -- the wait below is on the child's own DOWN line -- so it is
+# only ever reached by a child that is genuinely wedged. Operators with a
+# legitimately long unwind raise it with `REVL_TEARDOWN_GRACE=<seconds>`.
+_TEARDOWN_GRACE = 30.0
+# Once a child HAS said DOWN its unwind is complete and proven; all that is
+# outstanding is its own exit (a flush, a socket close), which is bounded.
+_TEARDOWN_EXIT_GRACE = 5.0
+
+
+def _teardown_grace() -> float:
+    raw = os.environ.get("REVL_TEARDOWN_GRACE")
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return _TEARDOWN_GRACE
+        if value > 0:
+            return value
+    return _TEARDOWN_GRACE
+
+
+def _stop_all(children: dict, is_down=None, grace: float | None = None) -> list[str]:
+    """Stop every child and wait for it to finish unwinding.
+
+    children: name -> (proc, stop_mode). rust holds on stdin (close it to
+    stop gracefully); py/node/java tear down on SIGTERM.
+
+    THE WAIT IS ON THE CHILD'S OWN `DOWN` LINE (issue 239), not on a wall
+    clock. `[<name>] DOWN` is the runner's own statement that its LIFO unwind
+    ran over every registered entry (G7) and its no-residue proof printed (R4),
+    and every tier's runner prints it (py, ts, rust, go, java). A wall-clock
+    budget is a proxy for that event, and a bad one: it scales with the machine
+    rather than with the teardown, which is how a consumer with a map inverse
+    and a residue proof to run lost a five-second race on a slow CI runner
+    while the provider next to it, with strictly less to do, finished.
+
+    `grace` survives as a HANG BACKSTOP so a wedged child can never hang the
+    conductor forever -- the kill exists for a reason. Because it is no longer
+    racing an ordinary teardown it is generous, and, the half that matters,
+    tripping it is REPORTED: this returns the name of every child that had to
+    be SIGKILLed before it said DOWN. Such a child is `halted` in item 443's
+    sense -- its entries are stranded (registered, not run, not dropped) and
+    its residue is UNKNOWN -- and the caller must say so. A kill is never a
+    clean exit.
+    """
+    if grace is None:
+        grace = _teardown_grace()
+
+    def said_down(name: str) -> bool:
+        return is_down is not None and bool(is_down(name))
+
     for proc, stop_mode in children.values():
         if proc.poll() is not None:
             continue
@@ -2017,11 +2067,56 @@ def _stop_all(children: dict) -> None:
                 proc.terminate()
         except OSError:
             pass
-    for proc, _ in children.values():
+    # ONE shared deadline for the group: the children were asked to stop
+    # concurrently and unwind concurrently, so n children must not buy n * grace
+    # of conductor hang.
+    deadline = time.monotonic() + grace
+    stranded: list[str] = []
+    for name, (proc, _stop_mode) in children.items():
+        exit_by: float | None = None
+        while proc.poll() is None:
+            now = time.monotonic()
+            if exit_by is None and said_down(name):
+                exit_by = now + _TEARDOWN_EXIT_GRACE
+            if now >= (deadline if exit_by is None else exit_by):
+                break
+            time.sleep(0.02)
+        if proc.poll() is not None:
+            continue
+        proc.kill()
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=_TEARDOWN_EXIT_GRACE)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            pass
+        if not said_down(name):
+            # Killed before it could say DOWN: what it had already unwound, and
+            # what it still owes, are both unknown from here.
+            stranded.append(name)
+    return stranded
+
+
+def _stranded_teardown_report(names: list[str]) -> str:
+    """What the conductor says about a child it had to SIGKILL mid-teardown.
+
+    Deliberately the E-Stop verdict's vocabulary (`_render_estop` in
+    `cli/change.py`), because it is the same epistemic position: the unwind
+    stopped part-way, so entries are STRANDED and residue is UNKNOWN. Nothing
+    here is a new word for an old state.
+    """
+    listed = ", ".join(names)
+    plural = "es" if len(names) > 1 else ""
+    return (
+        f"error: teardown HALTED -- {len(names)} process{plural} had to be "
+        f"SIGKILLed before saying DOWN: {listed}\n"
+        "  The unwind was cut mid-flight. The LIFO walk did not reach every\n"
+        "  registered entry (G7) and no no-residue proof printed (R4), so every\n"
+        "  entry those processes still held is STRANDED -- registered, not run,\n"
+        "  not dropped -- and their residue is UNKNOWN. This run did NOT tear\n"
+        "  down cleanly, whatever the trace above got as far as printing.\n"
+        "  Reconcile a durable run with `revl recover --wal <file>`. If the\n"
+        "  teardown is legitimately slow rather than wedged, give it room with\n"
+        f"  REVL_TEARDOWN_GRACE=<seconds> (currently {_teardown_grace():g})."
+    )
 
 
 def run_placement(files, placement_path: str, once: bool = False) -> int:
@@ -2900,6 +2995,12 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     up: set[str] = set()
     repointed: set[tuple[str, str]] = set()
     down: set[str] = set()
+    # issue 239: children SIGKILLed before they said DOWN. Their unwind was cut
+    # mid-flight, so their residue is UNKNOWN; the conductor must never report
+    # that as a clean exit. Accumulated across EVERY teardown this run performs
+    # (a refused swap successor, a swapped-out provider, the final teardown),
+    # because any one of them can be the one that was cut.
+    stranded: list[str] = []
     threads: list[threading.Thread] = []
     _re_repoint = re.compile(r"^\[(?P<p>[^\]]+)\] REPOINTED (?P<k>\S+) ->")
 
@@ -2942,6 +3043,13 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 return True
             time.sleep(0.05)
         return pred()
+
+    def stop_all(group: dict) -> None:
+        """`_stop_all` with this conductor's DOWN tracker wired in, recording
+        any child that had to be killed before it finished unwinding."""
+        for name in _stop_all(group, is_down=lambda n: n in down):
+            if name not in stranded:
+                stranded.append(name)
 
     swap_seq = [0]
 
@@ -3117,7 +3225,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                   f"back down; running composition untouched.", flush=True)
             sproc, smode = children.pop(succ, (None, None))
             if sproc is not None:
-                _stop_all({succ: (sproc, smode)})
+                stop_all({succ: (sproc, smode)})
             return
 
         # --- re-point every consumer of these keys onto the successor socket.
@@ -3152,8 +3260,13 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         # --- drain + tear the old provider down (LIFO inside its process), and
         # let it prove no residue, then adopt the successor into placement state
         oldproc, oldmode = children.pop(old)
-        _stop_all({old: (oldproc, oldmode)})
-        _wait_for(lambda: old in down, 10)
+        stop_all({old: (oldproc, oldmode)})
+        # `stop_all` already waited on the DOWN line, so this only settles the
+        # pump thread's last read. A provider that had to be killed will never
+        # say it, and waiting the full ten seconds for a line that cannot come
+        # is just a stall.
+        if old not in stranded:
+            _wait_for(lambda: old in down, 10)
         for key in serve_keys:
             owner[key] = succ
         placed[component] = succ
@@ -3162,8 +3275,15 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         backends[succ] = to_backend
         specs[succ] = succ_spec
         specs.pop(old, None)
-        print(f"swap: {component} now on {to_backend} ({succ}); the old provider "
-              f"unwound with a no-residue proof above.", flush=True)
+        if old in stranded:
+            # issue 239: the drain was cut short, so the sentence below would be
+            # a lie. Say what is actually known instead.
+            print(f"swap: {component} now on {to_backend} ({succ}), but the old "
+                  f"provider {old} was SIGKILLed before it said DOWN: its unwind "
+                  f"is INCOMPLETE and its residue is UNKNOWN.", flush=True)
+        else:
+            print(f"swap: {component} now on {to_backend} ({succ}); the old provider "
+                  f"unwound with a no-residue proof above.", flush=True)
 
     def swap_repl() -> None:
         print("(placement up — `swap <component> --to <backend>`, `:keys`, "
@@ -3203,7 +3323,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 rc = 1
             elif net_seams:
                 report_network_latency()
-            _stop_all(children)
+            stop_all(children)
         elif _interactive():
             if net_seams and _wait_for(lambda: len(up) == len(children), 60):
                 report_network_latency()
@@ -3225,7 +3345,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        _stop_all(children)
+        stop_all(children)
         # item 411 Slice 2: `--rm` already fires on a clean exit; this is the
         # belt, so a torn-down placement never leaves a confined process (or a
         # container holding its granted mounts) behind it.
@@ -3239,4 +3359,10 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         # the placement dir holds only sockets and spec files, both dead once
         # the children are; leaving it behind leaked a 0700 tmpdir per run.
         shutil.rmtree(tmp, ignore_errors=True)
+    if stranded:
+        # issue 239: this is the half that turns a visible failure into a silent
+        # one. A child killed mid-teardown used to be indistinguishable from a
+        # clean exit here, so a partial teardown passed as success.
+        print(_stranded_teardown_report(stranded), file=sys.stderr)
+        rc = rc or 1
     return rc
