@@ -93,9 +93,16 @@ than inheriting a host rule:
 
 All eight identities in `tests/test_cross_tier_execution.py`
 (`INTEGER_ARITHMETIC`) are asserted by **executing** the emitted code, not by
-comparing emitter output — python and TypeScript on every run, rust and java
-behind `REVL_CROSS_TIER_SLOW=1`, and the wasm helpers verified on real
-`wasmtime`.
+comparing emitter output — python and go on every run, TypeScript wherever
+`backends/typescript/node_modules` is installed, rust and java behind
+`REVL_CROSS_TIER_SLOW=1`, and the wasm helpers verified on real `wasmtime`.
+
+Every later mention of `REVL_CROSS_TIER_SLOW` on this page carries the same
+caveat, so it is worth stating once: **a tier that is gated off is unmeasured,
+not passing.** Only the `conformance` job installs every toolchain and runs
+these files, and the `REVL_CROSS_TIER_SLOW` half of it is still staged rather
+than live (roadmap item 445). Everywhere else, some of the tiers named above
+skip.
 
 
 ### What the Go tier needed
