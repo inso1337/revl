@@ -3389,6 +3389,49 @@ fn ends_expr(t: Token) -> Bool {
                    ")", "]", "}"], t.kind)
 }
 
+// A BOUNDS-SAFE token lookup. `tkc` guards only the upper bound, so a negative
+// index reads from the END of the list under the python backend (silently
+// wrong) and PANICS under the rust tier the gate crate ships — which is how
+// the crate's own cargo test caught `def foo() ...`, whose `def` sits at index
+// 0 and looks one token back. Every backward look in this scanner goes through
+// this. `tkc` itself is left alone: its other callers never index backwards,
+// and widening it would be a behaviour change outside this slice.
+fn tkl(ts: List[Token], i: Int) -> Token {
+  if (i < 0) { return { kind: "eof", text: "", line: 0 } }
+  return tkc(ts, i)
+}
+
+// Positions where a VALUE — or a prefix operator applied to one — is expected.
+// A POSITIVE allow-list, not `!ends_expr`: `@@@ not revl @@@` is a parse
+// failure (the reference says "expected a top-level declaration, found '@'"),
+// NOT a Python `not`, and reading a redirect out of a malformed adjacency
+// would replace an honest BAD with a confident wrong answer. `@` is a real
+// revl token (item 396's `@py file "..."`, a composition row label `@db`), so
+// it cannot simply abort the scan the way an `error` token does — it just
+// never precedes a value.
+fn value_pos(ts: List[Token], i: Int) -> Bool {
+  if (i == 0) { return true }
+  let p = tkl(ts, i - 1)
+  if (p.kind == "kw") {
+    return contains(["return", "if", "while", "assert", "fail", "emit",
+                     "await", "else", "of", "in", "spawn", "match", "effect",
+                     "undo", "every", "after", "subscribe", "handoff"], p.text)
+  }
+  return contains(["(", "[", "{", ",", "=", ":", "?", "=>", "->", "!", "+",
+                   "-", "*", "/", "%", "==", "!=", "===", "!==", "<", ">",
+                   "<=", ">=", "&&", "||", "??", "&", "|", "^", "~", "<<",
+                   ">>", ";"], p.kind)
+}
+
+// Positions where a STATEMENT may start: the open/close of a block, an
+// explicit separator, the start of input, or straight after a statement that
+// ended in a complete expression.
+fn stmt_pos(ts: List[Token], i: Int) -> Bool {
+  if (i == 0) { return true }
+  let p = tkl(ts, i - 1)
+  return contains(["{", "}", ";"], p.kind) || ends_expr(p)
+}
+
 // Every identifier the file could possibly BIND, over-approximated: a name in
 // this set never triggers a name redirect (it is shadowed, as in the
 // reference, where the resolver reaches the table only after a scope miss).
@@ -3398,7 +3441,7 @@ fn bound_idents(ts: List[Token]) -> List[Str] {
   var j = 0
   while (j < ts.length()) {
     if (atk(ts, j, "ident")) {
-      let prev = tkc(ts, j - 1)
+      let prev = tkl(ts, j - 1)
       let nxt = tkc(ts, j + 1)
       let binder = prev.kind == "kw" && contains(
         ["let", "var", "fn", "type", "service", "component", "extern", "use",
@@ -3496,10 +3539,12 @@ fn tuple_at(ts: List[Token], i: Int) -> Bool {
 // reference's other tuple diagnostic), or after a binary/prefix operator.
 // `->` is deliberately absent: `-> (Int, Int)` is a type position.
 fn value_paren(ts: List[Token], i: Int) -> Bool {
-  let prev = tkc(ts, i - 1)
+  let prev = tkl(ts, i - 1)
   if (prev.kind == "=") {
-    return atk(ts, i - 2, "ident")
-      && (atw(ts, i - 3, "let") || atw(ts, i - 3, "var"))
+    let p2 = tkl(ts, i - 2)
+    let p3 = tkl(ts, i - 3)
+    return p2.kind == "ident"
+      && p3.kind == "kw" && (p3.text == "let" || p3.text == "var")
   }
   if (prev.kind == "kw") { return prev.text == "return" }
   return contains(["+", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=",
@@ -3513,8 +3558,8 @@ fn foreign_name_at(ts: List[Token], i: Int, bound: List[Str]) -> Str {
   let n = t.text
   if (!contains(foreign_names(), n)) { return "" }
   if (contains(bound, n)) { return "" }
-  if (atk(ts, i - 1, ".")) { return "" }
-  let prev = tkc(ts, i - 1)
+  if (tkl(ts, i - 1).kind == ".") { return "" }
+  let prev = tkl(ts, i - 1)
   let nxt = tkc(ts, i + 1)
   let nxt2 = tkc(ts, i + 2)
   // infix word operators: two juxtaposed primaries around the word.
@@ -3522,16 +3567,20 @@ fn foreign_name_at(ts: List[Token], i: Int, bound: List[Str]) -> Str {
     return ends_expr(prev) && starts_expr(nxt) ? foreign_name_msg(n) : ""
   }
   if (n == "not") {
-    return !ends_expr(prev) && starts_expr(nxt) ? foreign_name_msg(n) : ""
+    return value_pos(ts, i) && starts_expr(nxt) ? foreign_name_msg(n) : ""
   }
-  if (n == "True" || n == "False") { return foreign_name_msg(n) }
+  if (n == "True" || n == "False") {
+    return value_pos(ts, i) ? foreign_name_msg(n) : ""
+  }
   if (n == "const") {
     return nxt.kind == "ident" && nxt2.kind == "=" ? foreign_name_msg(n) : ""
   }
   if (n == "len" || n == "print") {
     return nxt.kind == "(" ? foreign_name_msg(n) : ""
   }
-  if (n == "throw") { return starts_expr(nxt) ? foreign_name_msg(n) : "" }
+  if (n == "throw") {
+    return stmt_pos(ts, i) && starts_expr(nxt) ? foreign_name_msg(n) : ""
+  }
   if (n == "def") {
     return nxt.kind == "ident" && nxt2.kind == "(" ? foreign_name_msg(n) : ""
   }
@@ -3573,11 +3622,13 @@ fn foreign_form_at(ts: List[Token], i: Int) -> Str {
   if (t.kind == "kw" && t.text == "if" && nxt.kind != "(") {
     return "revl has no Python-style `a if c else b` conditional expression"
   }
-  if (t.kind == "ident" && nxt.kind == "(" && !atw(ts, i - 1, "fn")
+  let pv = tkl(ts, i - 1)
+  if (t.kind == "ident" && nxt.kind == "("
+      && !(pv.kind == "kw" && pv.text == "fn")
       && kwarg_at(ts, i + 1)) {
     return "revl has no keyword arguments — `f(k=v)` is not a call"
   }
-  if (t.kind == "[" && ends_expr(tkc(ts, i - 1)) && slice_at(ts, i)) {
+  if (t.kind == "[" && ends_expr(pv) && slice_at(ts, i)) {
     return "revl has no slice syntax `xs[a:b]`"
   }
   if (t.kind == "{" && nxt.kind == "string" && atk(ts, i + 2, ":")) {
@@ -6079,6 +6130,14 @@ test "foreign statement and expression FORMS redirect" {
   // this reference refusal as `OUT:<message>` and fail on the tag alone.
   let thrower = "fn f(n: Int) -> Int { throw n }"
   assert admit_tag(thrower) == "FOREIGN"
+  // ...and the position rules that keep it OFF malformed input. `@@@ not revl
+  // @@@` is a parse failure ("expected a top-level declaration, found '@'"),
+  // not a Python `not`: a redirect read out of a malformed adjacency would
+  // replace an honest BAD with a confident wrong answer, and any consumer
+  // matching the gate's BAD code would silently stop matching. (Bound to a
+  // `let` for the same harvester reason as above.)
+  let garbage = "@@@ not revl @@@"
+  assert admit_tag(garbage) == "BAD"
 }
 
 test "a redirect never fires on a valid program (no false refusal)" {

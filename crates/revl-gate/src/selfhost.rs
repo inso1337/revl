@@ -3140,12 +3140,38 @@ fn ends_expr(t: Token) -> bool {
     return contains(vec![String::from("ident"), String::from("int"), String::from("float"), String::from("string"), String::from("template"), String::from(")"), String::from("]"), String::from("}")], &t.kind);
 }
 
+fn tkl(ts: Vec<Token>, i: i64) -> Token {
+    if (i < 0i64) {
+        return Token { kind: String::from("eof"), text: String::from(""), line: 0i64 };
+    }
+    return tkc(ts.clone(), i);
+}
+
+fn value_pos(ts: Vec<Token>, i: i64) -> bool {
+    if (i == 0i64) {
+        return true;
+    }
+    let p = tkl(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow"));
+    if (p.kind == "kw") {
+        return contains(vec![String::from("return"), String::from("if"), String::from("while"), String::from("assert"), String::from("fail"), String::from("emit"), String::from("await"), String::from("else"), String::from("of"), String::from("in"), String::from("spawn"), String::from("match"), String::from("effect"), String::from("undo"), String::from("every"), String::from("after"), String::from("subscribe"), String::from("handoff")], &p.text);
+    }
+    return contains(vec![String::from("("), String::from("["), String::from("{"), String::from(","), String::from("="), String::from(":"), String::from("?"), String::from("=>"), String::from("->"), String::from("!"), String::from("+"), String::from("-"), String::from("*"), String::from("/"), String::from("%"), String::from("=="), String::from("!="), String::from("==="), String::from("!=="), String::from("<"), String::from(">"), String::from("<="), String::from(">="), String::from("&&"), String::from("||"), String::from("??"), String::from("&"), String::from("|"), String::from("^"), String::from("~"), String::from("<<"), String::from(">>"), String::from(";")], &p.kind);
+}
+
+fn stmt_pos(ts: Vec<Token>, i: i64) -> bool {
+    if (i == 0i64) {
+        return true;
+    }
+    let p = tkl(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow"));
+    return (contains(vec![String::from("{"), String::from("}"), String::from(";")], &p.kind) || ends_expr(p.clone()));
+}
+
 fn bound_idents(ts: Vec<Token>) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     let mut j = 0i64;
     while (j < ts.revl_length()) {
         if atk(ts.clone(), j, "ident") {
-            let prev = tkc(ts.clone(), (j).checked_sub(1i64).expect("revl: Int overflow"));
+            let prev = tkl(ts.clone(), (j).checked_sub(1i64).expect("revl: Int overflow"));
             let nxt = tkc(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"));
             let binder = ((prev.kind == "kw") && contains(vec![String::from("let"), String::from("var"), String::from("fn"), String::from("type"), String::from("service"), String::from("component"), String::from("extern"), String::from("use"), String::from("spawn"), String::from("provide"), String::from("handoff"), String::from("isolate"), String::from("intercept")], &prev.text));
             let shape = ((((nxt.kind == ":") || (nxt.kind == "=>")) || (((prev.kind == "(") && (nxt.kind == "kw")) && (nxt.text == "of"))) || (((prev.kind == "(") || (prev.kind == ",")) && ((nxt.kind == ",") || (nxt.kind == ")"))));
@@ -3259,9 +3285,11 @@ fn tuple_at(ts: Vec<Token>, i: i64) -> bool {
 }
 
 fn value_paren(ts: Vec<Token>, i: i64) -> bool {
-    let prev = tkc(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow"));
+    let prev = tkl(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow"));
     if (prev.kind == "=") {
-        return (atk(ts.clone(), (i).checked_sub(2i64).expect("revl: Int overflow"), "ident") && (atw(ts.clone(), (i).checked_sub(3i64).expect("revl: Int overflow"), "let") || atw(ts.clone(), (i).checked_sub(3i64).expect("revl: Int overflow"), "var")));
+        let p2 = tkl(ts.clone(), (i).checked_sub(2i64).expect("revl: Int overflow"));
+        let p3 = tkl(ts.clone(), (i).checked_sub(3i64).expect("revl: Int overflow"));
+        return (((p2.kind == "ident") && (p3.kind == "kw")) && ((p3.text == "let") || (p3.text == "var")));
     }
     if (prev.kind == "kw") {
         return (prev.text == "return");
@@ -3281,20 +3309,20 @@ fn foreign_name_at(ts: Vec<Token>, i: i64, bound: Vec<String>) -> String {
     if contains(bound.clone(), &n) {
         return String::from("");
     }
-    if atk(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow"), ".") {
+    if (tkl(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow")).kind == ".") {
         return String::from("");
     }
-    let prev = tkc(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow"));
+    let prev = tkl(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow"));
     let nxt = tkc(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
     let nxt2 = tkc(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"));
     if ((n == "and") || (n == "or")) {
         return if (ends_expr(prev.clone()) && starts_expr(nxt.clone())) { foreign_name_msg(&n) } else { String::from("") };
     }
     if (n == "not") {
-        return if ((!ends_expr(prev.clone())) && starts_expr(nxt.clone())) { foreign_name_msg(&n) } else { String::from("") };
+        return if (value_pos(ts.clone(), i) && starts_expr(nxt.clone())) { foreign_name_msg(&n) } else { String::from("") };
     }
     if ((n == "True") || (n == "False")) {
-        return foreign_name_msg(&n);
+        return if value_pos(ts.clone(), i) { foreign_name_msg(&n) } else { String::from("") };
     }
     if (n == "const") {
         return if ((nxt.kind == "ident") && (nxt2.kind == "=")) { foreign_name_msg(&n) } else { String::from("") };
@@ -3303,7 +3331,7 @@ fn foreign_name_at(ts: Vec<Token>, i: i64, bound: Vec<String>) -> String {
         return if (nxt.kind == "(") { foreign_name_msg(&n) } else { String::from("") };
     }
     if (n == "throw") {
-        return if starts_expr(nxt.clone()) { foreign_name_msg(&n) } else { String::from("") };
+        return if (stmt_pos(ts.clone(), i) && starts_expr(nxt.clone())) { foreign_name_msg(&n) } else { String::from("") };
     }
     if (n == "def") {
         return if ((nxt.kind == "ident") && (nxt2.kind == "(")) { foreign_name_msg(&n) } else { String::from("") };
@@ -3337,10 +3365,11 @@ fn foreign_form_at(ts: Vec<Token>, i: i64) -> String {
     if (((t.kind == "kw") && (t.text == "if")) && (nxt.kind != "(")) {
         return String::from("revl has no Python-style `a if c else b` conditional expression");
     }
-    if ((((t.kind == "ident") && (nxt.kind == "(")) && (!atw(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow"), "fn"))) && kwarg_at(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"))) {
+    let pv = tkl(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow"));
+    if ((((t.kind == "ident") && (nxt.kind == "(")) && (!((pv.kind == "kw") && (pv.text == "fn")))) && kwarg_at(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"))) {
         return String::from("revl has no keyword arguments — `f(k=v)` is not a call");
     }
-    if (((t.kind == "[") && ends_expr(tkc(ts.clone(), (i).checked_sub(1i64).expect("revl: Int overflow")))) && slice_at(ts.clone(), i)) {
+    if (((t.kind == "[") && ends_expr(pv.clone())) && slice_at(ts.clone(), i)) {
         return String::from("revl has no slice syntax `xs[a:b]`");
     }
     if (((t.kind == "{") && (nxt.kind == "string")) && atk(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"), ":")) {
@@ -7405,6 +7434,8 @@ fn foreign_statement_and_expression_forms_redirect() {
     assert!((foreign_scan(String::from("fn f() -> Int { let t = (1, 2) return 0 }")) == "revl has no tuples — `(a, b)` is not a value"));
     let thrower = String::from("fn f(n: Int) -> Int { throw n }");
     assert!((admit_tag(thrower.clone()) == "FOREIGN"));
+    let garbage = String::from("@@@ not revl @@@");
+    assert!((admit_tag(garbage.clone()) == "BAD"));
 }
 
 #[test]
