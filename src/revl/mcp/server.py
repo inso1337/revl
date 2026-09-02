@@ -264,6 +264,17 @@ def _tool_call(arguments: dict) -> dict:
         return {"ok": True, **SESSION.call(key, method, arguments.get("args") or [])}
     except SessionError as error:
         return _session_error(str(error))
+    except ApprovalRequired:
+        # F4: `ApprovalRequired` is not a `SessionError` (Session.call raises it
+        # from the single chokepoint the same way load/swap's activation gate
+        # does), so it must NOT be caught by the broad `except Exception` below —
+        # that swallowed it into a generic "raised" diagnostic with no
+        # `ticket`/`hash`, so a class-(c) call through `revl_call` could never be
+        # approved (the model never received a hash to approve). Let it propagate
+        # to `handle()`'s dedicated `except ApprovalRequired`, which renders the
+        # ticket two-step exactly as `_tool_load`/`_tool_swap`/
+        # `_tool_replay_forward` already do by only catching `SessionError`.
+        raise
     except Exception as exc:  # the callee raised — that is a result, not a crash
         return _session_error(f"{type(exc).__name__}: {exc}", raised=True,
                               trace=SESSION.state().get("trace", []))
