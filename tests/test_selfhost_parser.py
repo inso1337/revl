@@ -117,9 +117,12 @@ def _render(n) -> str:
     if isinstance(n, P.ExprList):
         return f"(list {_seq(n.items)})"
     if isinstance(n, P.ExprArrow):
+        # the *written* annotations. This renders a freshly parsed AST, and
+        # since item 75(a) `param_types` is the checker's resolved field, still
+        # unset here (docs/design/75a-arrow-parameter-annotations.md §2.4).
         params = " ".join(
             f"(p {name} {ty if ty else '_'})"
-            for name, ty in zip(n.params, n.param_types))
+            for name, ty in zip(n.params, n.written_param_types))
         return f"(arrow {params} {_render(n.body)})"
     if isinstance(n, P.ExprMatch):
         arms = " ".join(

@@ -64,6 +64,20 @@ decided on its own list). This is what closes the hygiene hole the implicit
 rule could not turn off: `[T]` is how an author says "these and only these
 are the parameters".
 
+**Rule G: an arrow never quantifies (roadmap 75(a)).** An arrow is an
+expression, not a signature, so a type name written in one of its parameter or
+return annotations is resolved, never collected. It means, in order: a type
+parameter of the **enclosing** `fn`/`extern` signature (implicit or explicit),
+so `fn id[T](x: T) -> T { let f = (v: T): T => v  return f(x) }` means that
+`T`; else a declared type, record, variant or alias; else an ordinary opaque
+nominal, which types its own positions consistently and unifies with nothing.
+Never a fresh type parameter — otherwise `(x: Q): Q => x` would wildcard at
+every call site and reopen exactly the hygiene hole above, this time with no
+`[T]` list anywhere for an author to reach for. Locked by
+`examples/rejections/t35_arrow_annotation_not_quantified.rvl`. Bounds are
+deferred here too: an arrow annotation is a plain type, and there is no place
+on an arrow to write one.
+
 **Bounds stay deferred.** `[T: Ord]` is not accepted — the list remains a
 plain name list, and there is no constraint machinery anywhere. No consumer
 demands bounds yet; when one does, the parameter list is where they will

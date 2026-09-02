@@ -27,6 +27,8 @@ from .typecheck import (
     FNS_KEY,
     _SIZED_HEADS,
     check_ast,
+    refuse_self_declared_async,
+    _mentions_async,
     collect_tparams,
     validate_explicit_tparams,
     render_type,
@@ -892,7 +894,12 @@ def _subst_body_annotations(stmts: list, subst) -> None:
     survived here would reach the checker as an undeclared type name."""
     def walk_expr(expr) -> None:
         if isinstance(expr, ExprArrow):
-            expr.param_types = [subst(t) for t in expr.param_types]
+            # the author's annotations — `(v: Handler): Handler => …`. The
+            # checker's resolved fields are still empty here (alias expansion
+            # runs before checking, which is the whole point: an alias must not
+            # reach the checker as an undeclared type name).
+            expr.written_param_types = [subst(t) for t in expr.written_param_types]
+            expr.written_returns = subst(expr.written_returns)
             walk_expr(expr.body)
         elif isinstance(expr, ExprBin):
             walk_expr(expr.left)
@@ -1522,9 +1529,45 @@ def _arrow_param_types(expr) -> list:
     (`typecheck.py::_resolve_arrow`), so this is either the author's `(v: Int)`
     annotations, the types the expected function type supplied, or Nones when
     the arrow is still on the unchecked frontier."""
-    written = list(getattr(expr, "param_types", None) or [])
-    written += [None] * (len(expr.params) - len(written))
-    return written[:len(expr.params)]
+    resolved = list(getattr(expr, "param_types", None) or [])
+    resolved += [None] * (len(expr.params) - len(resolved))
+    return resolved[:len(expr.params)]
+
+
+def _arrow_signature_known(expr) -> bool:
+    """May this arrow's signature go into the IR?
+
+    item 75(a) §4 — "the frontend gets stricter, the IR does not move". The two
+    keys go in iff EVERY parameter type is known, which keeps the node
+    byte-identical for every arrow that carries one today, keeps an arrow with
+    no signature carrying neither key, and stops a *partially* annotated arrow
+    from emitting `"param_types": ["Int", null], "returns": null` — a shape
+    docs/backend-ir-v3.md's "absent together" contract never admitted, and
+    which no emitter is written against.
+
+    The checker's richer partial knowledge stays in the frontend. Carrying a
+    partial signature into the IR is a separate, demand-driven change: it needs
+    a contract edit plus a decision per tier, and two tiers (java, wasm) have no
+    representation for `Any` at all."""
+    if getattr(expr, "param_types", None) is None:
+        return False  # the checker never resolved this arrow
+    return all(p is not None for p in _arrow_param_types(expr))
+
+
+def _assert_colour_is_positional(expr, filename: str | None) -> None:
+    """Rule C2, enforced where the `async` flag is set.
+
+    `node["async"]` is derived from `expr.returns`, which only the checker
+    writes and only from a checking position, so the flag stays the certificate
+    the leak scan and the callee-collection stop set read it as. The author's
+    `written_returns` must never be able to reach it. Rule C1 refuses the
+    annotation in the checker, but the component path (stratum 3) does not run
+    the checker over arrows at all, so the refusal is restated here rather than
+    assumed — an `assert` alone would strip under `-O` and would not cover that
+    path in the first place."""
+    refuse_self_declared_async(expr, filename)
+    assert not (filename and _mentions_async(getattr(expr, "written_returns", None))), (
+        "C2: a written arrow return annotation must never reach the async flag")
 
 
 def _expr_static_type(expr, type_env: dict, types: dict) -> str | None:
@@ -4681,15 +4724,26 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         _b1_capture_check(expr, type_env, types, filename, expr.line)
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": _lower_pure_expr(expr.body, inner, callables, alias_fns, filename, inner_type_env, types)}
-        # IR v3: an arrow that the checker typed carries its signature, so a
-        # backend can declare it instead of guessing (docs/function-types.md).
-        # Both keys are absent together when the arrow is still untyped.
-        if any(p is not None for p in param_types) or expr.returns:
+        # IR v3: an arrow whose signature the checker knows *completely* carries
+        # it, so a backend can declare it instead of guessing
+        # (docs/function-types.md). Both keys are absent together otherwise —
+        # including for a partially annotated arrow (item 75(a) §4, R3).
+        if _arrow_signature_known(expr):
             node["param_types"] = param_types
-            node["returns"] = expr.returns
+            node["returns"] = expr.returns or "Any"
         # item 92: an arrow the checker typed against `(…) -> Async[T]` carries
         # the async color into the IR, so every emitter reads one shape
         # (`.get("async")`) instead of parsing the `returns` string.
+        #
+        # item 75(a) rule C2: the colour comes from `expr.returns`, which only
+        # the checker writes and only from a checking position — never from the
+        # author's `written_returns`. The flag is a certificate that a
+        # declaration promised to await this arrow (`_refuse_leaky_pure_arrow`
+        # skips a flagged arrow; `_calls_in(stop_async_arrows=True)` stops
+        # descending at one), so a self-declared colour would forge it. Rule C1
+        # refuses the annotation in the checker; this is the invariant restated
+        # where the flag is actually set, so the two cannot drift apart.
+        _assert_colour_is_positional(expr, filename)
         if expr.returns and parse_type(expr.returns)[0] == "Async":
             node["async"] = True
         return node
@@ -6051,9 +6105,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": _lower_component_pure_expr(expr.body, env, inner, callables,
                                                    pure_only)}
-        if any(p is not None for p in param_types) or expr.returns:
+        # item 75(a) §4/§5.3: the same complete-signature condition as the
+        # pure-fn path. Stratum 3 does not *check* an arrow yet (slice 3), but
+        # the grammar and the R3 fix land everywhere at once — there is one
+        # parser and one lowering contract.
+        _assert_colour_is_positional(expr, filename)
+        if _arrow_signature_known(expr):
             node["param_types"] = param_types
-            node["returns"] = expr.returns
+            node["returns"] = expr.returns or "Any"
         return node
     if isinstance(expr, ExprOptField):
         return {

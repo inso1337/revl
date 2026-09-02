@@ -844,8 +844,11 @@ def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
         for item in expr.items:
             recur(item)
     elif isinstance(expr, _ast.ExprArrow):
-        expr.param_types = [_subst_type(t, type_renames) for t in expr.param_types]
-        expr.returns = _subst_type(expr.returns, type_renames)
+        # the author's annotations; the module-merge rename runs before
+        # checking, so the checker's resolved fields are still unset
+        expr.written_param_types = [_subst_type(t, type_renames)
+                                    for t in expr.written_param_types]
+        expr.written_returns = _subst_type(expr.written_returns, type_renames)
         recur(expr.body, bound | set(expr.params))
     elif isinstance(expr, _ast.ExprMatch):
         recur(expr.scrutinee)
