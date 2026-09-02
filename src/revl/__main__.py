@@ -493,8 +493,8 @@ def _run_audit(args, ir: dict) -> int:
         # audit_report; the interchange body must carry them too so it stays the
         # byte-for-byte unstamped audit report (test_version_is_additive_body_unchanged).
         from .audit_diff import (  # noqa: PLC0415
-            _capability_registers, _recovery_surface, _retention_surface,
-            _secrets_surface)
+            _capability_registers, _env_surface, _recovery_surface,
+            _retention_surface, _secrets_surface)
         from .cardinality import cardinality  # noqa: PLC0415
         print(json.dumps(stamp(
             {"manifest": manifest, "boundary": boundary,
@@ -511,6 +511,12 @@ def _run_audit(args, ir: dict) -> int:
              # audit_report byte-for-byte (test_version_is_additive_body_unchanged);
              # `_secrets_surface` spreads `{}` for a secret-free composition.
              **_secrets_surface(ir),
+             # item 350: the environment-contract table (the `boot` component's
+             # config schema — name/type/required/secret/bound, never a value).
+             # ADDITIVE and present only when a boot component is declared, so
+             # this must match audit_report byte-for-byte
+             # (test_version_is_additive_body_unchanged).
+             **_env_surface(ir),
              # item 308 F10: the report-only retaining-extern surface. ADDITIVE
              # and present only when a resource handle reaches a non-inverse
              # callee; must match audit_report byte-for-byte
@@ -518,6 +524,28 @@ def _run_audit(args, ir: dict) -> int:
              **_retention_surface(ir)}), indent=2))
         return 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
+    # item 350: the environment contract, printed before the components — it is
+    # what the host must inject BEFORE any of them can load. Name, type,
+    # requiredness and the author-written bound only; a value never reaches the
+    # audit (it arrives at `revl run --env` time and never enters the IR).
+    from .audit_diff import _env_table  # noqa: PLC0415
+    contract = _env_table(ir)
+    if contract:
+        print(f"\nenvironment contract (boot component {contract['component']}):")
+        for row in contract["fields"] or []:
+            bound = row.get("bound")
+            if not bound:
+                shape = "unbounded"
+            elif bound.get("kind") == "under":
+                shape = f'under "{bound.get("prefix")}"'
+            else:
+                shape = "in [" + ", ".join(repr(v) for v in bound.get("values") or []) + "]"
+            marks = ["required" if row["required"] else "optional", shape]
+            if row["secret"]:
+                marks.append("secret")
+            print(f"  {row['name']}: {row['type']}  ({', '.join(marks)})")
+        if not contract["fields"]:
+            print("  — (declares no fields: the host injects nothing)")
     for entry in manifest.get("components") or []:
         name = entry["name"]
         isolate = entry.get("isolate") or {}

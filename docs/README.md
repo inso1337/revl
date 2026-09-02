@@ -40,6 +40,7 @@ table, or **[vision.md](vision.md)** for what this is *for*. The
 - [deploy.md](deploy.md) — attested admission with re-hash-on-receive, peer-authenticated seam correlation, and the coordinated cross-process commit/abort
 - [composition-rows.md](composition-rows.md) — the composition as declared ROWS: a stable label per row, the claim assertion checked against the component header, typed row config
 - [composition-bootstrap.md](composition-bootstrap.md) — a composition manifest that declares its own file list, and the two-stage host bootstrap that gets it running
+- [environment-binding.md](environment-binding.md) — the `boot` component: the declared, bounded, audited contract for the values (port, token, data dir, model provider) the host must inject before the composition exists
 - [queries.md](queries.md) — ask the composition questions
 - [why-traces.md](why-traces.md) — derivations behind a rejection · [why-runtime.md](why-runtime.md) — cause chains for a recorded run
 - [crash-recovery.md](crash-recovery.md) — WAL roll-forward/back · [persistence.md](persistence.md) — snapshot/restore an evolved session · [erase-report.md](erase-report.md) — right-to-erasure evidence
