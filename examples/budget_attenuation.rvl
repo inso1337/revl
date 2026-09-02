@@ -1,0 +1,35 @@
+// Budget attenuation on spawn (item 260, docs/capability-attenuation.md).
+//
+// `tenant_attenuation.rvl` narrows WHICH boundary a child may reach. This one
+// narrows HOW MUCH of it: a ceiling parameter (`requests`, canonically
+// `calls`) is a count, and a spawn may lower it but never raise it.
+//
+// `Supervisor` holds `net(calls=100)` - it requires a network boundary
+// declared at 100 calls per activation. It spawns `Worker`, which requires the
+// SAME boundary declared at 50. 50 <= 100, so the spawn narrows and is
+// admitted; a `Worker` requiring `NetWide` instead is the rejection twin
+// (`rejections/g4_spawn_widens_budget.rvl`).
+//
+// This is the only accepted file in the corpus that declares an integer
+// ceiling, which is why it exists: the formal differential oracle's `W` row
+// decides `RevL.CapCeilings.Attenuates`, whose ceiling half (`ceilingOKB`,
+// `RevL.Lemmas.budgetOf`) is entered ONLY when some capability binds one. With
+// no such file the row agreed over the resource half alone and the ceiling
+// half was never reached (issue 210).
+
+service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }
+service NetNarrow { emission[net(requests=50)] fn call(u: Str) -> Int }
+service Worker { emission[net] fn go() -> Int }
+
+component Child requires net: NetNarrow provides worker: Worker {
+  provide worker {
+    fn go() -> Int {
+      emit net.call("row")
+      return 0
+    }
+  }
+}
+
+component Supervisor requires net: NetTight {
+  let w = effect spawn Child with { } undo w.dispose()
+}

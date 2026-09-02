@@ -153,7 +153,7 @@ def txnLog : Log :=
 
 /-- The trace `emitBody` accumulates. -/
 def emitLog : Log :=
-  [.descriptor 1 .transactional true, .effect 2 true false]
+  [.descriptor 1 .transactional true, .effect 2 true false false]
 
 /-- The step relation really takes these runs: the logs above are traces,
 not hand-written inputs. -/
