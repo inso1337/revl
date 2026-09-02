@@ -94,8 +94,10 @@ against the tree, which is where the remaining decay lives.
       speaks about a guarantee this project states language-wide, and never
       names a second tier anywhere in its own text. Naming the second tier is
       the escape hatch, and it is also the discipline: if a fix really is one
-      tier wide, the finding has to say so. See TIER_SUBJECTS and
-      tier_parity_findings for the exact bound and its known blind spots.
+      tier wide, the finding has to say so. It does NOT see the self-host
+      tier, which is not a `backends/` directory, so the taint case above is
+      outside it. See TIER_SUBJECTS and tier_parity_findings for the exact
+      bound and all three blind spots.
 
 None of the four decides whether a fix is CORRECT, and none of them rewrites
 anything, for the same reason the staleness gate does not: a gate that edits
@@ -1247,10 +1249,20 @@ def tier_parity_findings(text: str, backends: set[str]) -> list[str]:
     performance audits (432-437) out: those are about one emitter's output by
     construction, and none of them is about a language-wide guarantee.
 
-    THE BLIND SPOT, stated so nobody trusts this further than it goes: a
-    finding that names a second tier merely to say "the ts tier is out of
-    scope" is exempt here, and so is a guarantee whose subject word is not in
-    TIER_SUBJECTS. This finds a SHAPE. Parity is still decided by reading.
+    THREE BLIND SPOTS, stated so nobody trusts this further than it goes.
+      - A finding that names a second tier merely to say "the ts tier is out
+        of scope" is exempt, by design: that IS the discipline being asked
+        for, and whether the scope call was right is not a textual question.
+      - A guarantee whose subject word is not in TIER_SUBJECTS is invisible.
+      - The SELF-HOST tier is not a `backends/<tier>/` directory, so a gap
+        between `src/revl/` and `selfhost/` is structurally outside this
+        check. That is where the third of the three 2026-09-02 cases lives:
+        `Untrusted`, `Trusted` and `Secret` appear zero times in
+        `selfhost/lower.rvl` and `selfhost/checker.rvl` while
+        `src/revl/taint.py` stamps all three. Item 429 records it in prose
+        with a strict xfail, and nothing here would have found it.
+
+    This finds a SHAPE. Parity is still decided by reading.
     """
     findings: list[str] = []
     for it in items(text):
