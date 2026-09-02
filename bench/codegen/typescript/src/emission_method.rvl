@@ -1,0 +1,17 @@
+// Benchmark: an emission provide-method that performs a witnessed mutation.
+// Every call allocates a fresh `ctx.effect` closure plus the disposer it
+// returns, even though neither captures anything that varies per component.
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+component MemCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value) undo store.remove(key)
+    }
+  }
+}
