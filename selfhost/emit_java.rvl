@@ -908,14 +908,14 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, counter: Int) -> Sout {
 // -------------------------------------------------------------- type decls
 // `_JAVA_PRIMITIVE_COMPONENTS`: a component with one of these Java types is a
 // primitive, so the generated `equals` compares it with `==` directly instead
-// of boxing it through `revlEq` — and for `double` that primitive `==` IS the
+// of boxing it through `revlEq`, and for `double` that primitive `==` IS the
 // IEEE rule the language wants.
 fn is_primitive_component(jt: Str) -> Bool {
   return jt == "long" || jt == "int" || jt == "double" || jt == "boolean"
 }
 
 // `_v3_component_eq`: `double` compares with the PRIMITIVE `==`, never
-// `Double.equals`/`Double.compare` — both hash doubleToLongBits, which makes
+// `Double.equals`/`Double.compare`. Both hash doubleToLongBits, which makes
 // NaN equal to itself and 0.0 unequal to -0.0, the inversion item 433 rider R2
 // fixed at the top level. Every reference goes through `revlEq`, so a nested
 // record recurses into its own generated `equals`.
@@ -2028,7 +2028,7 @@ fn revl_eq_helper() -> List[Str] {
 }
 
 // `_emit_hash_helper`: the hash that agrees with `revlEq`. `Objects.hashCode`
-// disagrees with it in three places — `Double.hashCode` hashes
+// disagrees with it in three places. `Double.hashCode` hashes
 // doubleToLongBits, so it separates 0.0 from -0.0, and List/Map/Optional
 // delegate to the ELEMENT's hashCode, so a Float nested in one is hashed by
 // doubleToLongBits again. This mirrors `revlEq` arm for arm.

@@ -214,10 +214,40 @@ This goes in the compiler spec, not the runtimes.
   - **rust** derived only `Clone` on v3 records and variants, so `==` on a
     record did not compile at all (rustc E0369). Legal revl, refused by one
     tier. `PartialEq` is now derived alongside `Clone` and `Debug`.
-  - **java** was already correct — `java.util.Objects.equals` on emitted
-    records, whose `equals` is structural by construction — and is the
-    precedent the other two now follow. **wasm** is unaffected: its values are
-    i32 and compound equality is a documented tier limit.
+  - **java** *(this bullet used to read "was already correct, the precedent
+    the other two now follow". That was wrong, and it was wrong about the
+    load-bearing part.)* `java.util.Objects.equals` is structural only for a
+    class that DEFINES `equals`, and the emitted classes did not.
+    `backends/java/emit.py::_emit_v3_types` emitted a v3 record as a class
+    with public final fields and a ctor and no `equals`/`hashCode`, and each
+    sealed-variant case class the same, so both inherited `Object.equals`,
+    which is reference identity. `{ id: 1, name: "a" } == { id: 1, name: "a" }` lowered
+    to `revlEq(new Row(1L, "a"), new Row(1L, "a"))` and answered **`false`**,
+    alone against python, TypeScript, rust and go. The `revlEq` helper could
+    not have fixed this from outside: its fallback *is* that inherited method.
+    Each record class and each case class now carries a generated
+    `equals`/`hashCode`: primitive components compared with `==` (so a
+    `Float` keeps the IEEE rule recorded below), references routed through
+    `revlEq` (so a nested record recurses into its own generated `equals`, and
+    a `Float` inside a `List`/`Map`/`Opt` keeps the same rule), and a
+    `revlHash` that agrees with `revlEq` in the places `Objects.hashCode` does
+    not. **wasm** is unaffected: its values are i32 and compound equality is a
+    documented tier limit.
+
+    One consequence is worth stating rather than leaving to be discovered.
+    revl's `==` on `Float` is IEEE, so `NaN != NaN`, so a value carrying a
+    `NaN` is not equal to *itself* and does not satisfy `Object.equals`'s
+    reflexivity requirement. That is deliberate: matching every other tier is
+    the requirement, and IEEE equality is not an equivalence relation. It does
+    mean such a value is not a well-behaved hash key on this tier.
+    `HashMap`/`HashSet` compare `key == k || key.equals(k)`, so a lookup with
+    the identical reference still finds it, but a lookup with a structurally
+    identical NaN-carrying value never will, and
+    `List.contains`/`List.indexOf`/`Set.remove` on one can miss. The generated
+    `equals` also has no `if (this == o) return true` fast path, for the same
+    reason: it would make the answer depend on aliasing. rust, the tier fixed
+    just above, derives `PartialEq`, which is a plain field-by-field `==` with
+    no such shortcut, and java now matches it.
 
   How it survived: `tests/test_cross_tier.py` checks that every emitter
   *accepts* a construct, which catches a tier that refuses and cannot catch a
@@ -225,9 +255,20 @@ This goes in the compiler spec, not the runtimes.
   recurring lesson one level up — "the emitter did not raise" never implied
   "the code is right", and "every emitter agreed on a shape" never implied
   "every tier agrees on a value". `tests/test_cross_tier_execution.py` closes
-  the class by *running* the probe on each tier; python and TypeScript execute
-  by default, rust and java behind `REVL_CROSS_TIER_SLOW=1`, with cheap static
-  guards for all three lowerings.
+  the class by *running* the probe on each tier.
+
+  How the java half survived a second time, in that same file: the executed
+  probes for rust and java sit behind `REVL_CROSS_TIER_SLOW`, and that
+  variable is set NOWHERE in this repository (not in `.github/workflows/`,
+  not in the Makefile, not in `ci/`), so every `*_slow` test there has run in
+  no CI job at all, and the runner adds a second gate on top, where "no
+  working JDK" is recorded as a skip and reads as a pass. `PROBES["structural
+  equality"]` asserted the record defect the whole time and never once
+  executed. This is roadmap item 430's shape exactly: a test that exists, runs
+  nowhere, and whose skip looks like green. So the guards that actually hold
+  this line are the STATIC ones, which need no toolchain and run in the
+  `frontend` job; there is now one per lowering per tier, and four of them for
+  this defect specifically.
 
 ## Arithmetic divergences (open, pinned — one root cause)
 
