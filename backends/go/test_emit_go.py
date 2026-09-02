@@ -117,8 +117,11 @@ def test_user_cache_shapes():
     # config defaults
     assert "func DefaultPgDatabaseConfig() PgDatabaseConfig {" in src
     assert "PoolSize: 10," in src
-    # format -> Sprintf
-    assert 'fmt.Sprintf("INSERT INTO cache_log VALUES (%v)", key)' in src
+    # format -> a `+` chain of string-typed pieces, not fmt.Sprintf: `%v`
+    # takes ...any and boxes each operand, and the operand types are known at
+    # emit time (item 434 (f))
+    assert '("INSERT INTO cache_log VALUES (" + key + ")")' in src
+    assert "INSERT INTO cache_log VALUES (%v)" not in src
 
 
 def test_tenants_isolate_at_load_site():
@@ -275,8 +278,12 @@ def test_v3_stdlib_emit_shapes():
     # stdlib builtins dispatch Str vs List
     _has(src, "revlStrLen(s)")
     _has(src, "revlListPush(xs, x)")
-    # template -> fmt.Sprintf; arrow -> Go closure; Result construction
-    _has(src, 'fmt.Sprintf("hi %v#%v!", name, n)')
+    # template -> a `+` chain over the inferred operand types (item 434 (f)):
+    # a Str part concatenates as-is and an Int part renders through
+    # strconv.FormatInt, so nothing is boxed into an `any` and the module needs
+    # no `fmt` import at all; arrow -> Go closure; Result construction
+    _has(src, '("hi " + name + "#" + strconv.FormatInt(n, 10) + "!")')
+    assert '"hi %v#%v!"' not in src
     _has(src, "func(y int64) int64 { return (y + 1) }")
     _has(src, "RevlOk[int64, string]{Value: n}")
 
@@ -493,8 +500,12 @@ def test_host_map_backs_keys_and_size():
     assert "func (m *Map[V]) Size() int {" in src
     assert "func (m *Map[V]) Keys() []string {" in src
     # canonical (code-point) order: go's `string <` is UTF-8 byte lexicographic,
-    # exactly code-point order (an import-free insertion sort, like revlMapKeys)
-    assert "for j := i; j > 0 && ks[j] < ks[j-1]; j--" in src
+    # exactly code-point order, and slices.Sort on []string orders by `<`: the
+    # same order the hand-rolled insertion sort produced, in O(n log n)
+    # (item 434 (h); keys() is the Map iteration surface, so it is on the path
+    # of every map traversal, not just small symbol tables)
+    assert "\tslices.Sort(ks)" in src
+    assert "for j := i; j > 0 && ks[j] < ks[j-1]; j--" not in src
     # provide body lowers to method calls on the host object
     assert "return revlSelf.store.Size()" in src
     assert "return revlSelf.store.Keys()" in src
@@ -859,3 +870,81 @@ def test_jsonwire_scenario_ir_emits_encoding_json_backed_bodies():
     assert "json.Unmarshal([]byte(s), &v)" in src
     assert "json.Marshal(v)" in src
     assert '"encoding/json"' in src
+
+
+# ---------------------------------------------------------------------------
+# Roadmap item 434 (a)/(b): the self-rebind (unique-ownership) analysis.
+#
+# `out = out.push(x)` and `m = m.set(k, v)` copy through revlListPush /
+# revlMapSet, which is the correct lowering for a persistent value and a
+# quadratic for the loop idiom (measured: 1001 allocs / 4,274,103 B to build a
+# 1000-element list, against a hand-written `append`'s 1 / 8,192). The
+# destructive lowering is sound only where nothing can observe the write, so
+# these tests pin BOTH halves: the idiom is rewritten, and every shape that
+# could alias the old value keeps the copying helper.
+
+
+def test_self_rebind_list_and_map_lower_in_place():
+    src = emit.emit(_compile("""
+fn collect(n: Int) -> List[Int] {
+  var out: List[Int] = []
+  var i = 0
+  while (i < n) {
+    out = out.push(i)
+    i += 1
+  }
+  return out
+}
+fn tally(words: List[Str]) -> Int {
+  var m: Map[Str, Int] = Map.empty()
+  for (w of words) { m = m.set(w, 1) }
+  return m.size()
+}
+fn drop(words: List[Str]) -> Int {
+  var m: Map[Str, Int] = Map.empty()
+  for (w of words) { m = m.set(w, 1) }
+  for (w of words) { m = m.remove(w) }
+  return m.size()
+}
+"""))
+    _has(src, "out = append(out, i)")
+    _has(src, "m[w] = 1")
+    _has(src, "delete(m, w)")
+    assert "revlListPush(out, i)" not in src
+    assert "revlMapSet(m, w, 1)" not in src
+    assert "revlMapRemove(m, w)" not in src
+
+
+def test_self_rebind_refused_when_the_old_value_can_be_observed():
+    """Each function here writes the binding exactly as `collect` does, and
+    each adds one way for the previous value to survive the rebind. None may
+    lower in place: `append` would write into a slice a second name still
+    holds, and `m[k] = v` is visible through every reference to the map."""
+    src = emit.emit(_compile("""
+fn size_of(xs: List[Int]) -> Int { return xs.length() }
+fn aliased(n: Int) -> List[Int] {
+  var out: List[Int] = []
+  out = out.push(n)
+  var snap = out
+  out = out.push(n)
+  return snap
+}
+fn passed(n: Int) -> Int {
+  var out: List[Int] = []
+  out = out.push(n)
+  return size_of(out)
+}
+fn nested(n: Int) -> List[List[Int]] {
+  var out: List[Int] = []
+  var rows: List[List[Int]] = []
+  out = out.push(n)
+  rows = rows.push(out)
+  out = out.push(n)
+  return rows
+}
+"""))
+    assert src.count("revlListPush(out, n)") == 5
+    # `rows` is written from `rows.push(out)`, a self-rebind, but `out` is an
+    # ARGUMENT there, which is what disqualifies `out`, not `rows`. `rows` is
+    # never aliased, so it still lowers in place.
+    _has(src, "rows = append(rows, out)")
