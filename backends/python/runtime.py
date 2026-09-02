@@ -36,6 +36,7 @@ import json
 import os
 import re
 import time
+import types
 import weakref
 from typing import Any, Callable, Optional
 
@@ -978,13 +979,21 @@ class FaultProbe:
     the same composition run exactly as they normally would.
     """
 
-    __slots__ = ("component", "accumulated", "ran", "_n")
+    __slots__ = ("component", "accumulated", "ran", "_n", "frame")
 
     def __init__(self, component: str) -> None:
         self.component = component
         self.accumulated: list = []   # accumulation indices, in order
         self.ran: list = []           # the same indices, in disposal order
         self._n = 0
+        # the activation frame this probe instrumented, so the harness can
+        # read the merged residue (`compensation_residue`) the teardown
+        # recorded. A Phase-1 inverse that RAISED is residue the probe's own
+        # `ran`/`never_ran` counters cannot see: continue-and-record means the
+        # inverse DID run, it just did not land (docs/design/teardown-
+        # contract.md). Without this the judge would call such a teardown
+        # clean — strictly less honest than the pre-guard skip it replaces.
+        self.frame: Optional["Frame"] = None
 
     # -- instrumentation ---------------------------------------------------
 
@@ -1002,6 +1011,10 @@ class FaultProbe:
             self.ran.append(_index)
             return _undo()
 
+        # keep the underlying entry reachable through the wrapper: `Frame`'s
+        # Phase-1 guard (which sits OUTSIDE this instrumentation) reads it to
+        # pick the residue severity and name the inverse.
+        _instrumented._revl_entry = value
         return _instrumented
 
     def instrument(self, body: Callable, frame: "Frame") -> Callable:
@@ -1011,6 +1024,7 @@ class FaultProbe:
         never ``send``s or ``throw``s into it (see cordis fiber ``_execute``),
         so a re-yielding wrapper is protocol-faithful.
         """
+        self.frame = frame
         if inspect.isasyncgenfunction(body):
             async def _async_wrapper():
                 async for value in body():
@@ -1046,6 +1060,14 @@ class FaultProbe:
         """Accumulation indices whose inverse was never disposed."""
         ran = set(self.ran)
         return [index for index in self.accumulated if index not in ran]
+
+    def residue(self) -> list:
+        """The merged residue records the instrumented activation's teardown
+        left behind — a Phase-1 inverse that raised (`bracket-fault` /
+        `restore-residue`) or a Phase-2 offset that did not land
+        (`compensation-residue`). Empty for a teardown that landed clean."""
+        frame = self.frame
+        return list(frame.compensation_residue) if frame is not None else []
 
 
 _fault_probe: Optional[FaultProbe] = None
@@ -1109,13 +1131,20 @@ class _Transactional:
     known when the effect runs — it depends on whether a LATER step aborts."""
 
     __slots__ = ("frame", "witness", "_undo", "discharged", "replayed", "seq",
-                 "_escrowed", "stamp", "undo_idempotent")
+                 "_escrowed", "stamp", "undo_idempotent", "component", "method")
 
     def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any,
                  undo_idempotent: bool = False) -> None:
         self.frame = frame
         self._undo = undo
         self.witness = witness
+        # the crossing's identity, captured HERE at registration and never
+        # re-read at teardown (teardown-contract.md, "No data hazard") — the
+        # compensation entry's own `component`/`method` pair, so a Phase-1
+        # `restore-residue` record can NAME the restore that failed even
+        # though `__call__` has already dropped `_undo` by then.
+        self.component: Optional[str] = frame.name
+        self.method: Optional[str] = _named_call_method(undo)
         # item 309: whether the author declared `undo idempotent`. A declared
         # inverse replays freely and needs NO fence; an undeclared one is fenced
         # before its Phase-1 apply so recover cannot double-apply it after an
@@ -1199,29 +1228,82 @@ def _read_bound_seconds(env_name: str, default_ms: int) -> Optional[float]:
     return ms / 1000.0
 
 
-def _residue_record(entry: "_Compensation", *, outcome: str,
+#: The merged residue schema's `kind` discriminator (docs/design/teardown-
+#: contract.md, "The merged residue schema"), one spelling per tier. Phase 1
+#: has two severities — a failed BRACKET inverse is contract-grade
+#: (`bracket-fault`: the inverse claimed G5 infallibility and lied), a failed
+#: WITNESSED restore is the anticipated case (`restore-residue`, 243 rule 6).
+#: Phase 2's best-effort offset is `compensation-residue`.
+_BRACKET_FAULT = "bracket-fault"
+_RESTORE_RESIDUE = "restore-residue"
+_COMPENSATION_RESIDUE = "compensation-residue"
+
+
+def _residue_record(entry: Any, *, outcome: str,
                     attempted_flag: bool, attempted: Optional[dict],
-                    error: dict) -> dict:
-    """One `compensation-residue` fact (item 247 gap 2, design Decision 2).
+                    error: dict, kind: str = _COMPENSATION_RESIDUE,
+                    component: Optional[str] = None,
+                    method: Optional[str] = None) -> dict:
+    """One merged-residue fact (item 247 gap 2, design Decision 2).
 
     A best-effort offset that raised (`failed`) or never got to run under the
     Phase-2 budget (`not-attempted`) is residue: a crossing whose compensation
-    was OWED but did not land. Every such record carries `state: "unresolved"`
-    — the third audit state joining `bare`/`compensated` — and NAMES the
-    crossing it was offsetting (`component`, `method`, WAL `seq`), so the audit
-    surface (`revl.query`/`revl.erase_report`) and the 246 session-boundary
-    report can enumerate it rather than let an in-memory list silently grow."""
+    was OWED but did not land. So is a Phase-1 inverse that RAISED — the
+    bracket/witnessed arm, `kind` `bracket-fault`/`restore-residue`. Every
+    such record carries `state: "unresolved"` — the third audit state joining
+    `bare`/`compensated` — and NAMES the crossing it was offsetting or
+    reverting (`component`, `method`, WAL `seq`), so the audit surface
+    (`revl.query`/`revl.erase_report`) and the 246 session-boundary report can
+    enumerate it rather than let an in-memory list silently grow.
+
+    `component`/`method` default to the entry's own identity; a Phase-1
+    BRACKET disposer is a bare closure with no entry object behind it, so the
+    frame passes its own name and a best-effort inverse label instead."""
     return {
-        "kind": "compensation-residue",
+        "kind": kind,
         "state": "unresolved",
-        "component": entry.component,
-        "method": entry.method,
-        "seq": entry.seq,
+        "component": getattr(entry, "component", None) if component is None else component,
+        "method": getattr(entry, "method", None) if method is None else method,
+        "seq": getattr(entry, "seq", None),
         "attemptedFlag": attempted_flag,
         "attempted": attempted,
         "outcome": outcome,
         "error": error,
     }
+
+
+def _inverse_label(disposer: Any) -> Optional[str]:
+    """A best-effort name for the inverse a Phase-1 disposer runs, for the
+    residue record's `method` field.
+
+    An emitted bracket disposer is a bare `lambda: <undo>` (backends/python/
+    emit.py), so there is no entry object carrying an identity. The lambda's
+    own code object does carry one: the undo is a call, and the callee's name
+    is the last global/attribute the closure loads (`lambda: a.close()` ->
+    `close`, `lambda: blow('x')` -> `blow`). Best-effort by construction —
+    `None` when nothing is readable — but it is what lets the record NAME the
+    inverse that faulted instead of reporting an anonymous failure."""
+    entry = getattr(disposer, "_revl_entry", disposer)
+    method = getattr(entry, "_revl_method", None) or getattr(entry, "method", None)
+    if method is not None:
+        return method
+    code = getattr(entry, "__code__", None)
+    names = getattr(code, "co_names", ()) if code is not None else ()
+    return names[-1] if names else None
+
+
+def _phase1_kind(disposer: Any) -> str:
+    """The residue severity for a Phase-1 disposer that raised. A witnessed
+    (transactional) restore is the ANTICIPATED failure (`restore-residue`,
+    243 rule 6); anything else on the Phase-1 stack is a bracket inverse that
+    claimed G5 infallibility, so its raise is contract-grade
+    (`bracket-fault`) — teardown-contract.md, "the two severities"."""
+    entry = getattr(disposer, "_revl_entry", disposer)
+    if isinstance(entry, _Transactional):
+        return _RESTORE_RESIDUE
+    if isinstance(entry, _Compensation):
+        return _COMPENSATION_RESIDUE
+    return _BRACKET_FAULT
 
 
 class _Compensation:
@@ -1596,10 +1678,85 @@ class Frame:
                     error={"type": type(entry.error).__name__,
                            "message": str(entry.error)}))
 
+    def _record_phase1_residue(self, disposer: Any, error: BaseException) -> None:
+        """Record ONE Phase-1 inverse that raised, into the merged residue
+        schema (`compensation_residue`, the per-frame half of the audit
+        surface `SessionOwner.collect_compensation_residue` merges).
+
+        The severity is the entry's (`_phase1_kind`): contract-grade
+        `bracket-fault` for a bracket inverse that claimed G5 infallibility
+        and lied, `restore-residue` for the anticipated witnessed-restore
+        failure. Same catch, same shape, different tag — teardown-contract.md,
+        "Phase-1 failure: continue-and-record, uniform, two severities"."""
+        self.compensation_residue.append(_residue_record(
+            getattr(disposer, "_revl_entry", disposer),
+            kind=_phase1_kind(disposer),
+            component=self.name,
+            method=_inverse_label(disposer),
+            outcome="failed", attempted_flag=True,
+            attempted={"phase": 1},
+            error={"type": type(error).__name__, "message": str(error)}))
+
+    def _guard(self, value: Any) -> Any:
+        """Wrap one disposer the activation body yielded so a raise out of it
+        is CAUGHT, RECORDED and does not abort the rest of Phase 1.
+
+        This is the contract's uniform Phase-1 rule (docs/design/teardown-
+        contract.md): "A failed inverse never skips the remaining Phase-1
+        inverses. Skipping strictly increases residue ... catch, record into
+        the merged residue schema, continue." cordis disposes the entries of
+        one effect strictly sequentially, so an uncaught raise out of ONE
+        disposer starves every earlier-registered (later-disposed) entry —
+        G7 (LIFO completeness) and R4 (no unreported residue) both break, and
+        the fiber still lands DISPOSED, silently.
+
+        The guard lives HERE rather than in the emitted `lambda: <undo>`
+        because `_tracked` is the single chokepoint every emitted shape
+        already passes through — plain brackets, result-guarded CAS inverses,
+        witnessed `_Transactional` entries, `_Compensation` entries, and any
+        future one — so a later emitter change cannot forget it.
+
+        ONLY an author's own inverse is wrapped — a plain function (the
+        emitted `lambda: <undo>`, a timer's cancel closure, a method-body
+        `acquire` inverse, the fault probe's tag around any of them) or a
+        `_Transactional`/`_Compensation` entry. Everything else passes through
+        BY IDENTITY, which is load-bearing, not cosmetic:
+
+        * `yield _revl_ctx.provide(...)` yields a cordis `FiberEffect`, and
+          cordis's own unwind branches on `isinstance(d, FiberEffect)` to join
+          an in-flight cleanup (`d._join`) instead of re-entering it. Wrapping
+          it in a plain function hides that type and silently changes the
+          withdrawal ordering (R3: a dependent must fully deactivate before
+          its provider's own inverses run).
+        * the frame's sentinels (`begin`/`drain`) are runtime code, not an
+          author's inverse; they guard their own internal per-entry loops
+          (see `drain`).
+        * a non-callable yield (an A1 iteration boundary) is not a disposer.
+        """
+        if getattr(value, "__self__", None) is self:
+            return value
+        if not (isinstance(value, types.FunctionType)
+                or isinstance(value, (_Transactional, _Compensation))):
+            return value
+        frame = self
+
+        def _guarded(_disposer=value):
+            try:
+                return _disposer()
+            except BaseException as error:  # noqa: BLE001 — recorded, never re-raised
+                frame._record_phase1_residue(_disposer, error)
+                return None
+
+        _guarded._revl_entry = getattr(value, "_revl_entry", value)
+        return _guarded
+
     def _tracked(self, body: Callable) -> Callable:
         """Wrap `body` so `self` is the top activation frame while its code
         runs between yields. Preserves sync-vs-async-generator identity, which
-        cordis's effect dispatch switches on."""
+        cordis's effect dispatch switches on.
+
+        Also the Phase-1 continue-and-record seam: every disposer the body
+        yields is routed through `_guard` on its way to cordis (see there)."""
         frame = self
 
         if inspect.isasyncgenfunction(body):
@@ -1613,7 +1770,7 @@ class Frame:
                         break
                     finally:
                         _ACTIVATING.pop()
-                    yield value
+                    yield frame._guard(value)
             return _async_tracked
 
         def _tracked_gen():
@@ -1626,7 +1783,7 @@ class Frame:
                     break
                 finally:
                     _ACTIVATING.pop()
-                yield value
+                yield frame._guard(value)
         return _tracked_gen
 
     def adopt(self, effect: Any) -> Any:
@@ -1639,9 +1796,23 @@ class Frame:
         acquisition through the effect protocol, adopt it, return the value."""
         holder: list = []
 
+        frame = self
+
         def _setup():
             holder.append(get())
-            yield lambda: undo(holder[0])
+
+            def _inverse():
+                return undo(holder[0])
+
+            # the residue record names the effect this inverse belongs to;
+            # the closure itself references only free variables, so there is
+            # no callee name in its code object to recover.
+            _inverse._revl_method = label
+            # same Phase-1 continue-and-record guard the activation body's
+            # yields get (`_guard`): a method-registered bracket inverse that
+            # raises must not break `_dispose_adopted`'s sequential unwind and
+            # starve every earlier-adopted effect.
+            yield frame._guard(_inverse)
 
         self.adopt(self.ctx.effect(_setup, label))
         return holder[0]
@@ -2114,9 +2285,15 @@ class Frame:
         # runs the oldest inverse first, finds nothing, silently no-ops, and the
         # newer inverse then undoes into the hole — residue or DESTROYED
         # pre-session data with `noResidue: true` still reported (G7, 243 §2).
+        # continue-and-record, same Phase-1 rule the cordis-yielded entries get
+        # through `_guard`: a raising restore here must not skip the remaining
+        # deferred entries (nor `_dispose_adopted` below).
         deferred, self._deferred_transactional = self._deferred_transactional, []
         for entry in reversed(deferred):
-            entry()
+            try:
+                entry()
+            except BaseException as error:  # noqa: BLE001 — recorded, never re-raised
+                self._record_phase1_residue(entry, error)
         # item 247 (method-body compensate remainder): dispose the method-registered COMPENSATION entries, now that
         # the commit-vs-abort bit is settled — the compensation analog of the
         # `_deferred_transactional` disposal above, and the method-body analog of
@@ -2129,7 +2306,10 @@ class Frame:
         # the activation-body path (cordis unwinds its disposer stack LIFO).
         deferred_comp, self._deferred_compensations = self._deferred_compensations, []
         for entry in reversed(deferred_comp):
-            entry()
+            try:
+                entry()
+            except BaseException as error:  # noqa: BLE001 — recorded, never re-raised
+                self._record_phase1_residue(entry, error)
         # item 247 second-pass (F1): Phase 2 is NOT drained here. This `drain`
         # is disposed FIRST (yielded last), at the TOP of the unwind stack; the
         # activation-body `_Compensation` disposers are yielded BEFORE it, so
@@ -2149,10 +2329,19 @@ class Frame:
             return None
 
         async def run() -> None:
+            # continue-and-record: one adopted effect whose disposal raises
+            # must not starve the effects adopted BEFORE it (which unwind
+            # after it — `reversed`). The inverses themselves are already
+            # guarded (`acquire`/`_guard`), so anything reaching here is a
+            # failure of the effect machinery, recorded at the same severity
+            # rather than silently truncating the unwind.
             for effect in reversed(adopted):
-                result = effect()
-                if inspect.isawaitable(result):
-                    await result
+                try:
+                    result = effect()
+                    if inspect.isawaitable(result):
+                        await result
+                except BaseException as error:  # noqa: BLE001 — recorded, never re-raised
+                    self._record_phase1_residue(effect, error)
 
         return run()
 

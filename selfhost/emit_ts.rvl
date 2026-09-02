@@ -1661,7 +1661,21 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
       out = out.push(`${pad}${ar.text}`)
     }
     let ur = expr(value_field(step, "undo"), ar.counter, a)
-    out = out.push(`${pad}yield () => ${ur.text}`)
+    // Phase-1 continue-and-record (docs/design/teardown-contract.md): a bracket
+    // inverse routes through `Frame.bracket`, which CATCHES a raise and records
+    // a contract-grade `bracket-fault` instead of letting it break cordis'
+    // sequential disposal chain and starve every earlier-registered
+    // (later-disposed) inverse. A bare `yield () => <undo>` does not catch, so
+    // an emitted program had the hole even though runtime.ts's `Frame.bracket`
+    // was already correct and unit-tested. Mirrors `_bracket_yield` in the
+    // reference emitter, byte-for-byte.
+    let b_method = call_method_name(value_field(step, "acquire"))
+    var b_key = b_method
+    if (kind == "let-effect") { b_key = value_str(value_field(step, "bind")) }
+    let b_site = `${comp_name}.body:${b_key}`
+    let b_undo = call_method_name(value_field(step, "undo"))
+    let b_crossing = `{ key: ${json_dumps(b_key)}, method: ${json_dumps(b_method)}, args: [], site: ${json_dumps(b_site)} }`
+    out = out.push(`${pad}yield ${frame_var}.bracket(${b_crossing}, ${json_dumps(b_undo)}, () => ${ur.text})`)
     return { lines: out, counter: ur.counter }
   }
   if (kind == "await") {
@@ -1885,7 +1899,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
   let raw_name = value_str(value_field(comp, "name"))
   let needs_frame = component_needs_frame(comp)
   var frame_var = ""
-  if (needs_frame) {
+  if (needs_frame || component_has_bracket(comp)) {
     frame_var = "$revl_frame"
     out = out.push(`    const ${frame_var} = new Frame(ctx, ${json_dumps(name)})`)
   }
@@ -2227,6 +2241,68 @@ fn component_needs_frame(comp: Any) -> Bool {
   return body_needs_frame(value_list(value_field(comp, "body")))
 }
 
+// `_has_bracket`: true iff this component's activation body yields at least one
+// BRACKET disposer. Such a component needs a `Frame` too — not for the
+// `begin`/`drain` sentinels (`needs_frame` still governs those, so teardown
+// SEMANTICS are unchanged), but purely as the accumulator `Frame.bracket`
+// records a Phase-1 `bracket-fault` into (docs/design/teardown-contract.md).
+fn body_has_bracket(steps: List[Any]) -> Bool {
+  for (step of steps) {
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "let-effect" || kind == "effect") { return true }
+    if (kind == "if") {
+      if (body_has_bracket(value_list(value_field(step, "then")))) { return true }
+      if (body_has_bracket(value_list(value_field(step, "else")))) { return true }
+    }
+  }
+  return false
+}
+
+fn component_has_bracket(comp: Any) -> Bool {
+  return body_has_bracket(value_list(value_field(comp, "body")))
+}
+
+// `_uses_bracket_frame`: document-level gate for the import line — true iff any
+// component yields a bracket disposer, so the module needs `Frame`.
+fn uses_bracket_frame(ir: Any) -> Bool {
+  for (comp of value_list(value_field(ir, "components"))) {
+    if (component_has_bracket(comp)) { return true }
+  }
+  return false
+}
+
+// `_call_method_name`: best-effort callee name for a `Frame.bracket` crossing /
+// `undoMethod`, from any call shape a component body uses. Never fails — falls
+// back to a generic label.
+fn call_method_name(node: Any) -> Str {
+  let m = value_field(node, "method")
+  if (!value_is_null(m)) {
+    let s = value_str(m)
+    if (s == "") { return "undo" }
+    return s
+  }
+  let k = node_kind(node)
+  if (k == "fn") {
+    let nm = value_field(node, "name")
+    if (value_is_null(nm) || value_str(nm) == "") { return "undo" }
+    return value_str(nm)
+  }
+  if (k == "host") {
+    let hf = value_field(node, "fn")
+    if (value_is_null(hf) || value_str(hf) == "") { return "undo" }
+    return value_str(hf)
+  }
+  if (k == "call") {
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) == "var") {
+      let cn = value_field(callee, "name")
+      if (value_is_null(cn) || value_str(cn) == "") { return "undo" }
+      return value_str(cn)
+    }
+  }
+  return "undo"
+}
+
 // `_uses_frame`: document-level gate for the import line — true iff any component
 // registers a compensation entry.
 fn uses_frame(ir: Any) -> Bool {
@@ -2244,6 +2320,12 @@ fn uses_frame(ir: Any) -> Bool {
 fn runtime_imports(ir: Any) -> Str {
   var names = ["host"]
   if (uses_frame(ir)) { names = names.push("Frame"); names = names.push("record") }
+  else {
+    // a bracket-only document imports `Frame` alone: its brackets record a
+    // Phase-1 `bracket-fault` into one, but nothing here reaches a
+    // witnessed/compensating extern's `@ts` body, so `record` stays out.
+    if (uses_bracket_frame(ir)) { names = names.push("Frame") }
+  }
   if (uses_spawn(value_field(ir, "components"))) { names = names.push("spawn") }
   return `import { ${names.join(", ")} } from '../runtime.ts'`
 }
