@@ -52,7 +52,7 @@ shipped rule that produces strictly better evidence than the proposed check.
 
 ## 1. What the tier is, and every place it is read
 
-Measured on `afd0e144`. The register is one string per extern declaration,
+Measured on `fdbe6107`. The register is one string per extern declaration,
 produced by `lower.py::_idempotent_register` (`src/revl/lower.py:2609`) and
 written onto the IR at `lower.py:3526`.
 
@@ -399,7 +399,7 @@ a second spelling becomes permanent.
 
 ### 7.3 Deleting the tier
 
-Counted on `afd0e144`:
+Counted on `fdbe6107`:
 
 | where | occurrences | kind |
 |---|---|---|
@@ -450,7 +450,7 @@ in the section that specifies this evaluator:
 > behind it. One bare `declared` inverse beside three keyed ones fails a `keyed`
 > floor.
 
-The reproducer, run on `afd0e144`:
+The reproducer, run on `fdbe6107`:
 
 ```
 extern emission[db] idempotent(key: k) fn push(k: Str) -> Unit = @py { pass }
@@ -530,7 +530,7 @@ number, and the first question it must answer is why it is better than the
 
 ## 10. Exit tests
 
-All in `tests/test_207_checkable_extern_body.py`, green on `afd0e144` except the
+All in `tests/test_207_checkable_extern_body.py`, green on `fdbe6107` except the
 declared xfail.
 
 1. **C1.** An extern with no `@backend` body is refused, and the `undo` slot
