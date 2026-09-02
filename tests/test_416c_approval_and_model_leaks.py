@@ -347,3 +347,158 @@ def test_a_short_or_default_registered_value_never_over_redacts():
     with pytest.raises(runtime.ResponseValidationError) as exc:
         runtime.validate_response("no", schema, "Agent.run")
     assert "no" in str(exc.value)
+
+
+# ===========================================================================
+# ROADMAP 425 F3 / 427 F5 — the UNDECLARED half of LEAK 1
+#
+# 416c fixed the DECLARED half: a `Secret[T]` resource dimension binds to the
+# placeholder before any sink. An UNDECLARED one binds verbatim, by design, so a
+# sensitive value passed through a plain `Str` parameter named `path`/`host`/
+# `table` still reached the ticket, `_approval_records` and the durable WAL.
+# Reproduced above by `test_an_ordinary_host_still_renders_verbatim_in_the_wal`,
+# which is that behaviour asserted deliberately: it IS item 251's N1, the reason
+# a distilled rule can name a target instead of comparing an opaque args hash.
+#
+# So the residual is not closed by redacting harder. Blanket redaction would make
+# every ticket unanswerable (an operator who cannot see the target cannot decide),
+# and a placeholder in the ledger would be WORSE than the leak, because every
+# distinct target would fold to one shape and a rule minted over it would cover
+# all of them — the over-authorization `mint_standing_grant` already refuses a
+# placeholder-scoped grant for.
+#
+# What is resolved here instead:
+#   * the promotion stops being INVISIBLE. A call's arguments are only ever
+#     hashed into the ticket (`argsDigest`) EXCEPT at a parameter whose name sits
+#     in `cap_order._REGISTRY`, whose runtime value is lifted out and, on a yes,
+#     written verbatim to a durable cross-session log. The ticket now says so, and
+#     names the `Secret[Str]` declaration that changes it;
+#   * and the durability becomes an OPERATOR decision
+#     (`--approval-record-values`), defaulting to what shipped so N1 is unchanged.
+# ===========================================================================
+
+_CALLER_TARGET = "/var/secrets/tenant-9f2c/prod-db-dump.sql"
+_LITERAL_TARGET = "/var/spool/outbox"
+
+_DURABILITY_SOURCE = (
+    'extern emission[fs.write] fn arch(path: Str, body: Str) = @py { return }\n'
+    'extern emission[fs.spool] fn spool(path: Str, body: Str) = @py { return }\n'
+    "service Ops {\n"
+    "  emission fn store(path: Str, body: Str)\n"
+    "  emission fn park(body: Str)\n"
+    "}\n"
+    "component Filer provides ops: Ops {\n"
+    "  provide ops {\n"
+    "    fn store(path, body) { emit arch(path, body) }\n"
+    f'    fn park(body) {{ emit spool("{_LITERAL_TARGET}", body) }}\n'
+    "  }\n"
+    "}\n"
+)
+
+
+def _durability_session(mode: str = "bound") -> Session:
+    session = _session()
+    session.approval_record_values = mode
+    session.load(compile_source(_DURABILITY_SOURCE, "filer.rvl"), record=True)
+    return session
+
+
+@needs_cordis
+def test_the_ticket_discloses_that_the_target_is_a_caller_value(tmp_path):
+    """The operator's yes is what persists the value, so the prompt says so —
+    the same move item 425 F1 made with `unreviewedHostCode`. The target itself
+    is NOT hidden: the caller just sent it, and an operator who cannot see it
+    cannot answer."""
+    session = _durability_session()
+    _open_wal(session, tmp_path)
+    with pytest.raises(ApprovalRequired) as exc:
+        session.call("ops", "store", [_CALLER_TARGET, "hi"])
+    ticket = exc.value.ticket
+    assert ticket["resourceScopesFromCallerArgs"] == ["fs.write"]
+    disclosure = ticket["resourceScopeDurability"]
+    assert "durable approval log" in disclosure
+    assert "`Secret[Str]`" in disclosure          # item 274: the fix is named
+    assert "--approval-record-values withheld" in disclosure
+    assert _CALLER_TARGET in json.dumps(ticket)   # the decision is still legible
+    session.unload()
+
+
+@needs_cordis
+def test_an_author_written_literal_target_is_not_a_caller_value(tmp_path):
+    """The distinction the whole rule rests on: a literal is in the source
+    already and discloses nothing about the caller, so it is neither marked nor
+    withheld."""
+    session = _durability_session(mode="withheld")
+    _open_wal(session, tmp_path)
+    with pytest.raises(ApprovalRequired) as exc:
+        session.call("ops", "park", ["hi"])
+    ticket = exc.value.ticket
+    assert "resourceScopesFromCallerArgs" not in ticket
+    assert "resourceScopeDurability" not in ticket
+    session.approve_ticket(ticket["hash"])
+    granted = [r for r in _wal_records(session)
+               if r.get("record") == "approval-granted"]
+    assert granted[-1]["resourceScopes"] == \
+        {"fs.spool": f'fs.spool(path="{_LITERAL_TARGET}")'}
+
+
+@needs_cordis
+def test_bound_is_the_default_so_n1_records_the_caller_target(tmp_path):
+    """A guard against a silent flip: the default posture is what shipped, so
+    item 251's N1 keeps recording the destination that actually crossed."""
+    assert Session().approval_record_values == "bound"
+    session = _durability_session()
+    _open_wal(session, tmp_path)
+    with pytest.raises(ApprovalRequired) as exc:
+        session.call("ops", "store", [_CALLER_TARGET, "hi"])
+    session.approve_ticket(exc.value.ticket["hash"])
+    granted = [r for r in _wal_records(session)
+               if r.get("record") == "approval-granted"]
+    assert granted[-1]["resourceScopes"] == \
+        {"fs.write": f'fs.write(path="{_CALLER_TARGET}")'}
+
+
+@needs_cordis
+def test_withheld_keeps_the_caller_target_out_of_the_durable_log(tmp_path):
+    """The operator's other option. Both channels have to drop it: the
+    distiller reads an inline-parameterised `classCCapabilities` entry in
+    PREFERENCE to the `resourceScopes` map, so withholding one and not the other
+    would leave the value in the log anyway."""
+    session = _durability_session(mode="withheld")
+    _open_wal(session, tmp_path)
+    with pytest.raises(ApprovalRequired) as exc:
+        session.call("ops", "store", [_CALLER_TARGET, "hi"])
+    session.approve_ticket(exc.value.ticket["hash"])
+    records = _wal_records(session)
+    assert _CALLER_TARGET not in json.dumps(records)
+    granted = [r for r in records if r.get("record") == "approval-granted"]
+    # the fail-closed "resource-bearing but UNRECORDED" shape `distill` already
+    # understands, not a placeholder that would fold every target into one
+    assert granted[-1]["resourceScopes"] == {"fs.write": None}
+    assert granted[-1]["classCCapabilities"] == ["fs.write"]
+
+
+@needs_cordis
+def test_a_restored_session_replays_no_earlier_principals_arguments(tmp_path):
+    """NEGATIVE RESULT, pinned so it cannot rot. The finding also named
+    `replay_forward` echoing raw `item["args"]` into a later response as a route
+    into the model's context. It is not a cross-principal one: a snapshot carries
+    SOURCES, not recorded calls, and `restore` boots a fresh runtime with a fresh
+    recorder, so every step a session can replay was recorded by a call that
+    session's own driver made. The args it echoes are the driver's own."""
+    session = _session()
+    session.approval_policy = None
+    session.load(compile_source(_DURABILITY_SOURCE, "filer.rvl"), record=True,
+                 origin={"source": _DURABILITY_SOURCE})
+    session.call("ops", "park", ["hi"])
+    snap = session.snapshot()
+    assert "hi" not in json.dumps(snap.get("meta") or {})
+    session.unload()
+
+    restored = Session()
+    restored.restore(snap)
+    try:
+        plan = restored.replay_forward("Filer", 0)
+        assert plan["replay"] == []          # nothing earlier to replay at all
+    finally:
+        restored.unload()

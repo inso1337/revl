@@ -573,6 +573,23 @@ def build_parser() -> argparse.ArgumentParser:
                                 "per call via the ticket two-step. Requires "
                                 "`record: true` at load. Omit for no policy "
                                 "(today's behaviour)")
+    # roadmap 425 F3 / 427 F5: whether an approved crossing's CALLER-SUPPLIED
+    # resource value (`host=`, `path=`, `table=`) is written into the durable
+    # cross-session approval WAL. Defaults to `bound` — item 251's N1, and what
+    # shipped; `withheld` closes the durable disclosure and gives up the
+    # distiller's fold over caller-argument targets. The ticket discloses that a
+    # target is caller-supplied either way, so the operator's yes is informed.
+    mcp_serve.add_argument("--approval-record-values", default="bound",
+                           choices=("bound", "withheld"),
+                           help="whether an approved class-(c) crossing's "
+                                "caller-supplied resource value is recorded in "
+                                "the durable approval log. `bound` (default) "
+                                "records it, so a distilled rule can name the "
+                                "target (item 251 N1). `withheld` records it as "
+                                "UNRECORDED, keeping caller values out of the "
+                                "cross-session WAL at the cost of that fold. An "
+                                "author-written literal target is recorded under "
+                                "both")
     # authoring trust: whether the AGENT driving this server may author host
     # code, and what filesystem it may name. Defaults CLOSED — an inline `@py`
     # body sent to revl_load/check/swap used to compile and RUN as host Python
