@@ -311,8 +311,30 @@ type Prog = { fns: List[FnD], svcs: List[SvcD], comps: List[CompD], bad: Str }
 // checker.rvl established: declarations are brace-structural, statements are
 // line-based (the lexer's tokens carry line numbers).
 
+// The token at `i`, or a synthetic eof when there is none — the total read
+// every scan in this file leans on so it can look ahead without first proving
+// the stream is long enough.
+//
+// BOTH bounds, not just the upper one. This guard used to test `i <
+// ts.length()` alone, which reads as total but is not: a scan that backs up
+// past the start (a `hi - 1` on an empty span, an `i - 1` at the head of a
+// declaration) arrives with a negative `i`, and `i < length` is happily true
+// for it. What happened next was tier-dependent, which is the worst shape a
+// defect can have in a language whose whole claim is that one program means
+// one thing everywhere:
+//
+//   python   ts[-1]  -> the LAST token, silently, and the scan carries on
+//                       reading a stream that has nothing to do with where it
+//                       is. A wrong answer, no diagnostic.
+//   rust     ts[(-1) as usize] -> index out of bounds: len is 11 but the index
+//                       is 18446744073709551615. `crates/revl-gate` is emitted
+//                       rust, so this is the shipped gate panicking.
+//   go/java  index out of range / IndexOutOfBoundsException.
+//
+// Testing `i >= 0` costs one comparison and makes the total read total. Found
+// by tools/fuzz_frontend.py; the reproducer is `fn t])->t[`.
 fn tkc(ts: List[Token], i: Int) -> Token {
-  if (i < ts.length()) { return ts[i] }
+  if (i >= 0 && i < ts.length()) { return ts[i] }
   return { kind: "eof", text: "", line: 0 }
 }
 

@@ -478,7 +478,7 @@ pub struct AtPars {
 pub type AtTy = TyR;
 
 fn tkc(ts: Vec<Token>, i: i64) -> Token {
-    if (i < ts.revl_length()) {
+    if ((i >= 0i64) && (i < ts.revl_length())) {
         return (ts)[(i) as usize].clone();
     }
     return Token { kind: String::from("eof"), text: String::from(""), line: 0i64 };
@@ -5606,11 +5606,16 @@ fn digit_val(cc: i64) -> i64 {
 }
 
 fn radix_value(digits: &str, base: i64) -> i64 {
+    let max = 9223372036854775807i64;
     let mut v = 0i64;
     let mut i = 0i64;
     let n = digits.revl_length();
     while (i < n) {
-        v = ((v).checked_mul(base).expect("revl: Int overflow")).checked_add(digit_val({ digits.chars().nth((i) as usize).unwrap() as u32 as i64 })).expect("revl: Int overflow");
+        let d = digit_val({ digits.chars().nth((i) as usize).unwrap() as u32 as i64 });
+        if (v > ((((max).checked_sub(d).expect("revl: Int overflow"))) / (base))) {
+            return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        v = ((v).checked_mul(base).expect("revl: Int overflow")).checked_add(d).expect("revl: Int overflow");
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return v;
@@ -5686,6 +5691,17 @@ fn scan_triple(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
 
 fn esc(s: &str) -> String {
     return (((s.revl_split("%")).revl_join("%%")).revl_split("|")).revl_join("%p");
+}
+
+fn dollar_interp(text: &str) -> bool {
+    let at = text.revl_index_of("${");
+    if (at == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return false;
+    }
+    if (text.revl_index_of("`") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return false;
+    }
+    return ((text.revl_slice((at).checked_add(2i64).expect("revl: Int overflow"), text.revl_length())).revl_index_of(&String::from("}")) != (0i64).checked_sub(1i64).expect("revl: Int overflow"));
 }
 
 fn is_ws(c: &str) -> bool {
@@ -5912,6 +5928,9 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
         if (ss.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated string"), line: line } };
         }
+        if dollar_interp(&ss.out) {
+            return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("plain string does not interpolate"), line: line } };
+        }
         return Step { i: ss.j, line: line, tok: Token { kind: String::from("string"), text: ss.out.clone(), line: line } };
     }
     if (cc == 96i64) {
@@ -5930,6 +5949,9 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
         let sq = scan_quoted(source, (i).checked_add(1i64).expect("revl: Int overflow"), 39i64, source_revl_cs);
         if (sq.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated string"), line: line } };
+        }
+        if dollar_interp(&sq.out) {
+            return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("plain string does not interpolate"), line: line } };
         }
         return Step { i: sq.j, line: line, tok: Token { kind: String::from("string"), text: sq.out.clone(), line: line } };
     }
@@ -5951,6 +5973,9 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
                 return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
             }
             let val = radix_value(&g.out, base);
+            if (val == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("int literal out of 64-bit range"), line: line } };
+            }
             let gj = g.j;
             return Step { i: gj, line: line, tok: Token { kind: String::from("int"), text: (val).to_string(), line: line } };
         }
@@ -5996,6 +6021,9 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
             return Step { i: jj, line: line, tok: Token { kind: String::from("float"), text: ftext, line: line } };
         }
         let ival = radix_value(&ip.out, 10i64);
+        if (ival == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("int literal out of 64-bit range"), line: line } };
+        }
         return Step { i: jj, line: line, tok: Token { kind: String::from("int"), text: (ival).to_string(), line: line } };
     }
     if (cc == 64i64) {
