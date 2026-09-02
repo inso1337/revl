@@ -162,3 +162,159 @@ component Sup { let w = effect spawn Worker with { tag: "x" } undo w.dispose() }
     edge = ir["manifest"]["instances"][0]
     assert edge["granted"] == []
     assert edge["attenuated"] == []
+
+
+# ---------------------------------------------------------------------------
+# F1: the fold compares BOUNDARIES, never wiring-key spellings.
+#
+# A `requires` key is a per-component spelling; the boundary is the DECLARED
+# capability token on the emission method the key resolves to. Keying the fold
+# element by the wiring key made `covers` clause 1 compare two identifiers that
+# name nothing in common, so renaming a key silently laundered a boundary. Each
+# test below ADMITS if the fold is keyed by the wiring key.
+# ---------------------------------------------------------------------------
+
+FIXTURE = (ROOT / "examples" / "rejections"
+           / "g4_spawn_widens_capability.rvl").read_text()
+
+
+def test_renaming_the_wiring_key_cannot_launder_a_boundary():
+    """The project's OWN g4 fixture, with the CHILD's `requires` key renamed
+    from `kv_b` to `kv_a`. `StoreB` is untouched, its declared emission is still
+    `kv_b`, and the child still writes to it — only the local spelling moved.
+    The verdict must not move with it."""
+    attack = (FIXTURE
+              .replace("requires kv_b: StoreB", "requires kv_a: StoreB")
+              .replace("emit kv_b.write_b(", "emit kv_a.write_b("))
+    assert "emission[kv_b]" in attack          # the declaration is unchanged
+    assert "requires kv_b" not in attack       # only the wiring key moved
+    with pytest.raises(RevlError) as exc:
+        compile_source(attack, "g4.rvl")
+    msg = str(exc.value)
+    assert "granting it `kv_b`" in msg         # the boundary, not the key
+    assert "never widen them" in msg
+
+
+def test_a_pure_key_cannot_be_widened_into_a_host_crossing():
+    """The strongest form: the parent holds a PURE, non-emission service under
+    key `notes`; the child wires the SAME key to a service declaring
+    `fs.write(path="/etc")` and actually crosses it. The parent holds no
+    `fs.write` at all, so this is amplification, not attenuation."""
+    src = """
+service Notes { fn read(k: Str) -> Str }
+service Etc { emission[fs.write(path="/etc")] fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+component Child requires notes: Etc provides task: Task {
+  provide task { fn go() { emit notes.write("pwned") return 0 } }
+}
+component Parent requires notes: Notes {
+  let c = effect spawn Child with { } undo c.dispose()
+}
+"""
+    with pytest.raises(RevlError) as exc:
+        compile_source(src, "w.rvl")
+    msg = str(exc.value)
+    assert 'granting it `fs.write(path="/etc")`' in msg
+    assert "holds only `notes`" in msg
+
+
+def test_a_parent_bounded_to_tmp_refuses_a_child_writing_etc():
+    """The parent's ONLY `fs.write` authority is bounded to `/tmp`; it also
+    wires an unrelated pure `notes` key. The child crosses `fs.write` at
+    `/etc` under the `notes` spelling. The unrelated key must not launder the
+    crossing, and `/etc` is outside the parent's `/tmp` cone."""
+    src = """
+service Tmp { emission[fs.write(path="/tmp")] fn write(row: Str) -> Int }
+service Notes { fn read(k: Str) -> Str }
+service Etc { emission[fs.write(path="/etc")] fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+component Child requires notes: Etc provides task: Task {
+  provide task { fn go() { emit notes.write("pwned") return 0 } }
+}
+component Parent requires store: Tmp requires notes: Notes {
+  let c = effect spawn Child with { } undo c.dispose()
+}
+"""
+    with pytest.raises(RevlError) as exc:
+        compile_source(src, "w.rvl")
+    msg = str(exc.value)
+    assert 'granting it `fs.write(path="/etc")`' in msg
+    assert 'holds only `fs.write(path="/tmp")`, `notes`' in msg
+
+
+def test_a_key_named_boundary_is_not_a_declared_token_of_the_same_name():
+    """A method declaring `emission` with NO capability list names no token, so
+    the G2 wiring key names that boundary. That element lives in its own token
+    namespace: a key spelled `notes` must not cover — nor be covered by — a
+    DECLARED token spelled `notes`, in either direction. Both halves use the
+    SAME wiring key on both sides, so a fold that compares spellings admits
+    them."""
+    key_held = """
+service Plain { emission fn get(k: Str) -> Str }
+service Declared { emission[notes] fn put(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+component Child requires notes: Declared provides task: Task {
+  provide task { fn go() { emit notes.put("x") return 0 } }
+}
+component Parent requires notes: Plain {
+  let c = effect spawn Child with { } undo c.dispose()
+}
+"""
+    with pytest.raises(RevlError, match="never widen them"):
+        compile_source(key_held, "k1.rvl")
+
+    token_held = """
+service Plain { emission fn get(k: Str) -> Str }
+service Declared { emission[notes] fn put(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+component Child requires notes: Plain provides task: Task {
+  provide task { fn go() { emit notes.get("x") return 0 } }
+}
+component Parent requires notes: Declared {
+  let c = effect spawn Child with { } undo c.dispose()
+}
+"""
+    with pytest.raises(RevlError, match="never widen them"):
+        compile_source(token_held, "k2.rvl")
+
+
+# --------------------------------------------------------------- no false alarms
+
+
+def test_the_same_boundary_under_different_keys_still_admits():
+    """The dual of the bypass: two components may wire the SAME declared
+    boundary under different local keys. Comparing spellings refused this; the
+    boundary comparison admits it."""
+    src = """
+service Fs { emission[fs.write(path="/tmp")] fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+component Child requires sink: Fs provides task: Task {
+  provide task { fn go() { emit sink.write("x") return 0 } }
+}
+component Parent requires store: Fs {
+  let c = effect spawn Child with { } undo c.dispose()
+}
+"""
+    edge = compile_source(src, "ok.rvl")["manifest"]["instances"][0]
+    assert edge["holds"] == ['fs.write(path="/tmp")']
+    assert edge["granted"] == ['fs.write(path="/tmp")']
+    assert edge["attenuated"] == []
+
+
+def test_a_narrowing_child_under_a_different_key_admits():
+    """A genuine attenuation — `/tmp` down to `/tmp/job` — reached through a
+    differently spelled key. Admitted, and the chain shows the narrowing."""
+    src = """
+service Wide { emission[fs.write(path="/tmp")] fn write(row: Str) -> Int }
+service Narrow { emission[fs.write(path="/tmp/job")] fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+component Child requires sink: Narrow provides task: Task {
+  provide task { fn go() { emit sink.write("x") return 0 } }
+}
+component Parent requires store: Wide {
+  let c = effect spawn Child with { } undo c.dispose()
+}
+"""
+    edge = compile_source(src, "ok.rvl")["manifest"]["instances"][0]
+    assert edge["granted"] == ['fs.write(path="/tmp/job")']
+    assert edge["attenuated"] == ['fs.write(path="/tmp")']
