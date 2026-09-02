@@ -122,14 +122,31 @@ provide   := 'provide' IDENT '{' ('fn' IDENT '(' IDENT* ')' ('=' expr | block))*
 -- an activation body never takes a plain binding (G6: nothing there to revert).
 
 --- compositions (a composition is a set of ROWS; docs/composition-rows.md) ---
-composition := 'composition' IDENT '{' (use | row)* '}'   -- contextual keyword
+composition := 'composition' IDENT '{' (use | row | stack | site)* '}'  -- contextual kw
 row       := 'row' '@' IDENT 'from' STRING 'provides' ('nothing' | IDENT (',' IDENT)*)
              ['component' IDENT]            -- disambiguator; provenance, not identity
              ['config' '{' (IDENT ':' literal)* '}']  -- checked against the header
              ['granted' '{' IDENT (',' IDENT)* '}']   -- reach allowlist, empty default
+stack     := 'stack' STRING          -- a level-1 peer layer; conflicts REFUSE
+site      := 'site' STRING           -- the level-2 layer; exactly one, resolves
 -- `@label` is the row's IDENTITY, scoped to its origin (`.::@db`, `acme_pg::@db`).
 -- `provides` is an ASSERTION checked against the component header; a lost key
 -- refuses, a gained one is reported. Resolve with `revl composition FILE`.
+
+--- layers (a patch over a row table; docs/composition-layers.md) ---
+layer     := ['site'] 'layer' IDENT 'for' IDENT '{' (touches | op)* '}'  -- contextual
+touches   := 'touches' address (',' address)*   -- enforced; a layer's reach, readable
+op        := 'add' row | 'remove' address | 'replace' address 'with' row
+           | 'configure' address 'with' '{' (IDENT ':' literal)* '}'
+           | 'resolve' address 'to' label 'over' label     -- site layer only
+address   := 'key' '(' STRING [',' 'realm' ':' STRING] ')' | label
+label     := [(IDENT | '.') '::'] '@' IDENT
+-- Four operations and no more; NO positional operation (load order is derived
+-- by Kahn over the wiring, not declared). `replace` is CLAIM-PRESERVING.
+-- `configure @db with { ... }`, never `configure @db { ... }`: a brace after a
+-- label lexes as an `@db` HOST BODY. Peer conflicts between stack layers
+-- REFUSE (precedence never chooses a provider); only the site layer resolves,
+-- by naming both sides. A layer document contains ONLY layer operations.
 
 --- host blocks (extern; typed boundary, opaque verbatim body) ---
 extern    := 'extern' ('pure'|'acquire'|'emission') 'fn' IDENT '(' (IDENT ':' type)* ')'

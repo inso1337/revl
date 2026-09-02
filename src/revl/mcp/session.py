@@ -3158,6 +3158,90 @@ class Session:
         if wal is not None:
             wal.record_approval_consumed(entry["requestId"])
 
+    # -- item 204: the two-phase spend the activation gate walks under --------
+    #
+    # `_consume_approval` / `_consume_grant` / `_consume_auto_rule` above are the
+    # one-shot spend every per-call crossing uses: decide, spend, fire, with
+    # nothing between them. The activation gate cannot use it, because it decides
+    # for EVERY activation body before ANY of them fires and any one of them can
+    # refuse — so a one-shot spend there charges the operator for an attempt that
+    # never boots. These three split that spend in half at exactly the line
+    # between what can be taken back and what cannot.
+    #
+    # `_reserve_spend` does the IN-MEMORY half: the record is marked spent
+    # (`consumed`, or one use decremented) so that for the rest of the walk it is
+    # invisible to `_find_standing_approval`, `_live_grant_for` and
+    # `_auto_rule_covers` exactly as a real spend would make it. That is the
+    # property that keeps the walk honest: a reservation only ever makes
+    # authority SCARCER, never more available, so two activation bodies can never
+    # both be covered by one single-use token or by the last use of one grant.
+    # `_commit_spends` does the DURABLE half — the `approval-consumed` WAL record
+    # and the spend counters — and `_release_spends` undoes the in-memory half.
+    #
+    # Why an abandoned reservation cannot leak authority:
+    #   * the walk is straight-line synchronous Python with no `await`, no
+    #     callback and no reentrancy, and it runs before the generation is
+    #     plugged, so NO crossing can fire between a reservation and its commit
+    #     or release — there is no window in which a reserved token is spendable;
+    #   * every exit from the walk is covered: cleared -> commit, refused ->
+    #     release then raise, any other exception -> release then re-raise;
+    #   * a release restores exactly the fields the reservation wrote and writes
+    #     nothing durable, so the ledger after an abandoned walk is the ledger
+    #     before it. A token that survives an abandoned walk is one that was
+    #     never spent, and it is still spendable exactly ONCE, at one crossing —
+    #     which is the invariant, not a hole in it;
+    #   * a release never touches the `expiredAt` / `suspended` LATCHES those
+    #     finders may set while deciding. Death is an event (F8): a walk that
+    #     observed a record dead leaves it dead.
+    # A crash mid-walk loses the whole reservation set with the process — the
+    # ledger is session-scoped and durable only through the WAL, and no WAL
+    # record is written until commit, so the restart re-asks. Fail-closed.
+
+    def _reserve_spend(self, kind: str, record: dict) -> dict:
+        """Earmark `record` (kind `"approval"`, `"grant"` or `"auto"`) for a spend
+        this walk has not committed. Applies the in-memory half of the matching
+        `_consume_*` and returns the release token that undoes it."""
+        release = {"kind": kind, "record": record,
+                   "consumed": record.get("consumed", False),
+                   "remainingUses": record.get("remainingUses")}
+        if kind == "approval":
+            record["consumed"] = True          # single-use (Decision 3)
+        else:
+            remaining = record.get("remainingUses")
+            if remaining is not None:          # uses-bounded grant / rule
+                record["remainingUses"] = remaining - 1
+                if record["remainingUses"] <= 0:
+                    record["consumed"] = True
+        return release
+
+    def _release_spends(self, plan: list) -> None:
+        """Undo every reservation in `plan`, newest first, and empty it. Nothing
+        durable was written for a reservation, so this leaves the records exactly
+        as the walk found them (bar the one-way expiry/suspend latches, which are
+        deliberately not rolled back)."""
+        for release in reversed(plan):
+            record = release["record"]
+            record["consumed"] = release["consumed"]
+            if release["kind"] != "approval":
+                record["remainingUses"] = release["remainingUses"]
+        plan.clear()
+
+    def _commit_spends(self, plan: list) -> None:
+        """Make every reservation in `plan` real: the durable `approval-consumed`
+        record and the spend counters the one-shot `_consume_*` helpers write.
+        Called only once the walk has cleared, and still before any crossing
+        fires, so consume-before-fire holds for each spend in the set."""
+        wal = self._approval_wal()
+        for release in plan:
+            record = release["record"]
+            if release["kind"] == "grant":
+                self._grants_consumed += 1
+            elif release["kind"] == "auto":
+                self._auto_consumed += 1
+            if wal is not None:
+                wal.record_approval_consumed(record["requestId"])
+        plan.clear()
+
     def _count_posture(self, action_class: str | None) -> None:
         """Count a decided boundary call by posture (Decision 6). Class none is
         not a boundary call — it stays out of every bucket and the percent
@@ -3261,33 +3345,58 @@ class Session:
         activation body is about to run). An admitted turn (item 330) is ADDITIVE
         — only its own components activate, the running ones already booted and
         were gated then — so `_wire_turn` names the turn's components and the
-        base is not re-prompted for an activation it already ran."""
+        base is not re-prompted for an activation it already ran.
+
+        ALL-OR-NOTHING over the walk (item 204). The walk RESERVES whatever
+        covers each body and commits the whole set only once every body is
+        covered, so an attempt that raises on the k-th body spends nothing for
+        the k-1 bodies before it. Consuming as it went made every un-booted
+        attempt eat the answers it had already been given, and the retry re-asked
+        them: a clean N-body load cost 2**N - 1 prompts where N would do
+        (measured — the issue's "roughly N**2/2" was an under-estimate). It now
+        costs exactly N. See `_reserve_spend` for why a reservation cannot leak
+        authority."""
         cm = class_map if class_map is not None else self._class_map
         if self.approval_policy is None or cm is None:
             return
         from .approval import ApprovalRequired  # noqa: PLC0415
-        for reach in cm.activation_reaches():
-            if reach["class"] != "c":
-                continue
-            if components is not None and reach.get("component") not in components:
-                continue
-            ticket = cm.build_ticket(
-                reach, record_values=self.approval_record_values)
-            standing = self._find_standing_approval(ticket)
-            if standing is not None:
-                self._consume_approval(standing)
-                continue
-            grants = self._find_standing_grant(ticket)   # item 344
-            if grants is not None:
-                for g in grants:            # every class-(c) cap is covered
-                    self._consume_grant(g)
-                continue
-            auto = self._find_auto_approve(ticket)        # item 251 Slice 2
-            if auto is not None:
-                self._consume_auto_rule(auto)
-                continue
-            self._issue_ticket(ticket)
-            raise ApprovalRequired(ticket)
+        plan: list = []
+        try:
+            for reach in cm.activation_reaches():
+                if reach["class"] != "c":
+                    continue
+                if components is not None \
+                        and reach.get("component") not in components:
+                    continue
+                ticket = cm.build_ticket(
+                    reach, record_values=self.approval_record_values)
+                standing = self._find_standing_approval(ticket)
+                if standing is not None:
+                    plan.append(self._reserve_spend("approval", standing))
+                    continue
+                grants = self._find_standing_grant(ticket)   # item 344
+                if grants is not None:
+                    for g in grants:        # every class-(c) cap is covered
+                        plan.append(self._reserve_spend("grant", g))
+                    continue
+                auto = self._find_auto_approve(ticket)        # item 251 Slice 2
+                if auto is not None:
+                    plan.append(self._reserve_spend("auto", auto))
+                    continue
+                # Nothing covers this activation body, so this attempt cannot
+                # boot and nothing it reserved is owed. Release the reservations
+                # BEFORE the ticket is raised, so `_issue_ticket` decides the
+                # answer round against the ledger the operator comes back to.
+                self._release_spends(plan)
+                self._issue_ticket(ticket)
+                raise ApprovalRequired(ticket)
+        except BaseException:
+            self._release_spends(plan)   # a no-op after the release above
+            raise
+        # every body is covered, so this walk has cleared and the generation
+        # boots: spend now — durably, and still strictly BEFORE any activation
+        # crossing can fire (consume-before-fire, Decision 3).
+        self._commit_spends(plan)
 
     # -- item 294 Slice 2: the capability-lease gate ------------------------
 

@@ -5,8 +5,8 @@
 // providers of one key at admission (G2, examples/rejections/
 // v2_same_realm_conflict.rvl), so to exercise the RUNTIME's enforcement the
 // two providers must reach the runtime without being co-linked. The bodies
-// are stateless and i32-only so the one fixture lowers on every tier,
-// including the i32-only cordis-wasm substrate.
+// are stateless and Int-shaped so the one fixture lowers on every tier,
+// including the cordis-wasm substrate.
 //
 // Contract (docs/design-v2-realms.md):
 //   "A realm label is a static string literal. Equal strings = same realm"
