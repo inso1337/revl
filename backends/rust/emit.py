@@ -307,9 +307,17 @@ def _borrow_str_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     The callee only reads the string, so the caller lends a borrow instead of
     cloning it. A bare borrowed `&str` parameter passed straight through is
     already a `&str`, so it goes untouched (no needless re-borrow); every other
-    string expression — an owned `String` local, a literal, a call result — is
-    borrowed with `&`, and `&String`/`&&str` both coerce to the `&str` slot.
+    string expression — an owned `String` local, a call result — is borrowed
+    with `&`, and `&String`/`&&str` both coerce to the `&str` slot.
+
+    A `Str` LITERAL is the exception: `&String::from("lit")` put the literal on
+    the heap purely so the `&` had something to point at, and the bare
+    `&'static str` fills the slot exactly (item 437b, 588 of the 633 remaining
+    sites in the emitted self-host compiler).
     """
+    lit = _v3_borrowed_str_lit(arg_node)
+    if lit is not None:
+        return lit
     name = _arg_ref_name(arg_node)
     if name is not None and name in ctx.borrowed_params:
         return rendered
@@ -847,6 +855,28 @@ def _rust_v3_lit(node: dict) -> str:
     if isinstance(value, float):
         return f"{value}f64"
     raise EmitError(f"unsupported literal node: {node!r}")
+
+
+def _v3_borrowed_str_lit(node: object) -> str | None:
+    """The bare `&'static str` rendering of a `Str` literal node, else None.
+
+    `_rust_v3_lit` renders every `Str` literal as an owned `String::from(..)`,
+    which is right for a slot that STORES the string and pure waste for one
+    that only READS it: the heap copy is taken, looked at once and dropped.
+    Item 437(b) measured 2,223 such sites in the 13,891 lines emitted for the
+    self-host stages, 57% of every `String::from` the emitter writes.
+
+    This is the read-only rendering. It is only ever substituted where the slot
+    is known to accept a `&str` (`_STR_READONLY_ARG_BUILTINS` argument slots and
+    the `==`/`!=` operands handled by `_v3_str_eq_borrow`); everywhere else the
+    owned form still applies, because a `&'static str` in an owned slot is a
+    type error, not a slower program.
+    """
+    if isinstance(node, dict) and node.get("kind") == "lit":
+        value = node.get("value")
+        if isinstance(value, str):
+            return _string(value)
+    return None
 
 
 def _default_for_rust_type(ftype: str) -> str:
@@ -3766,6 +3796,42 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
     return False
 
 
+def _v3_str_eq_borrow(node: dict, left: str, right: str,
+                      ctx: "_V3Ctx") -> tuple[str, str]:
+    """Compare a `Str` against a literal without allocating it (item 437b).
+
+    `x == "lit"` rendered as `x == String::from("lit")` put the literal on the
+    heap purely to compare it and drop it again: measured at 240,000 heap
+    allocations against ZERO for the same comparison written by hand. std
+    carries both `impl PartialEq<&str> for String` and `impl PartialEq<String>
+    for &str`, so the bare `&'static str` compares in place in EITHER operand
+    order and on a borrowed `&str` operand (item 282) alike.
+
+    The literal is borrowed unless the emitter POSITIVELY knows the other
+    operand is some other surface type. That is wider than "certainly `Str`",
+    and deliberately so: the other operand of a `Str` literal is a `Str` by the
+    checker, so the only open question is its RUST rendering, and the operands
+    the emitter cannot type (a `for` binding, an extern result) are the common
+    case in real code. The rule stays total on code that compiles today. A site
+    spelled `X == String::from("lit")` only builds when `X: PartialEq<String>`,
+    which on this tier means `X` renders as `String` or as a borrowed `&str`,
+    and both of those also carry `PartialEq<&str>`. A positively-known non-`Str`
+    surface type is the one case where the IR would disagree with that
+    reasoning, so it keeps the owned form.
+
+    Two literals compared to each other are both borrowed, which is
+    `&str == &str`.
+    """
+    lnode, rnode = node.get("left"), node.get("right")
+    l_lit = _v3_borrowed_str_lit(lnode)
+    r_lit = _v3_borrowed_str_lit(rnode)
+    if r_lit is not None and _v3_infer_type(lnode, ctx) in (None, "Str"):
+        right = r_lit
+    if l_lit is not None and _v3_infer_type(rnode, ctx) in (None, "Str"):
+        left = l_lit
+    return left, right
+
+
 def _list_element_type(surface: object) -> str | None:
     """The element surface type of a `List[T]` surface type, else None."""
     if isinstance(surface, str):
@@ -4384,6 +4450,8 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # declared. Widen both sides; IEEE division on f64 follows, so a
             # zero divisor gives +/-inf rather than the i64 panic.
             return f"(({left}) as f64 / ({right}) as f64)"
+        if node.get("op") in ("==", "!="):
+            left, right = _v3_str_eq_borrow(node, left, right, ctx)
         return f"({left} {op} {right})"
 
     if kind == "un":
@@ -4618,7 +4686,8 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
                     and isinstance(a0, dict) and a0.get("kind") in ("var", "name", "req")
                     and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
                 args[0] = f"{args[0]}.to_string()"
-        return _v3_builtin(method, target, args, node.get("recv"))
+        borrowed_lits = _v3_borrowed_lit_args(method, target_node, arg_nodes, args, ctx)
+        return _v3_builtin(method, target, args, node.get("recv"), borrowed_lits)
 
     if kind == "match":
         return _v3_match_expr(node, ctx, rename)
@@ -4742,19 +4811,67 @@ def _v3_checked_div(method: str, target: str, arg: str) -> str:
             f'else {{ Ok::<i64, String>({ok}) }} }}')
 
 
+def _v3_borrowed_lit_args(method: str, target_node: object, arg_nodes: list,
+                          args: list[str], ctx: "_V3Ctx") -> frozenset:
+    """Rewrite `Str` literal arguments bound for a `&str` helper slot to the
+    bare `&'static str`, in place, and answer the indexes rewritten (item 437b).
+
+    `_v3_builtin` lowers these methods to a helper-trait call whose argument is
+    declared `&str`, so `&String::from("lit")` allocated a whole String purely
+    to take a reference to it: measured at 400,000 heap allocations against
+    40,000 for the same four calls written by hand, and 1,235 sites in the
+    emitted self-host compiler.
+
+    Two of the six methods are overloaded on the receiver, and the List
+    overloads take `&T` / `&Vec<T>` rather than `&str`:
+
+    - `indexOf` on a `List[Str]` takes `&String`, and `List[Str].indexOf("a")`
+      is legal revl, so the borrowed rendering needs the receiver to be
+      certainly `Str`. An un-inferable receiver keeps the owned form.
+    - `concat` on a `List[T]` takes `&Vec<T>`, which a `Str` literal argument
+      can never be. So a `Str` literal in that slot already PROVES the `Str`
+      overload and needs no receiver check of its own.
+
+    The remaining four (`split`, `join`, `startsWith`, `endsWith`) have a single
+    overload whose argument is `&str` on every receiver.
+    """
+    if method not in _STR_READONLY_ARG_BUILTINS:
+        return frozenset()
+    if method == "indexOf" and _v3_infer_type(target_node, ctx) != "Str":
+        return frozenset()
+    borrowed = set()
+    for i, arg_node in enumerate(arg_nodes):
+        lit = _v3_borrowed_str_lit(arg_node)
+        if lit is not None:
+            args[i] = lit
+            borrowed.add(i)
+    return frozenset(borrowed)
+
+
 def _v3_builtin(method: str, target: str, args: list[str],
-                recv: str | None = None) -> str:
+                recv: str | None = None,
+                borrowed_lits: frozenset = frozenset()) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), dispatched via the Revl*Ops
     helper traits so every (method, Str|List) pair from the spec table
     compiles — Rust resolves the receiver type statically. `recv` carries
     the receiver's static type only where the lowering must dispatch on it
-    (`to_int`: the Int32 widen vs the Str parse)."""
+    (`to_int`: the Int32 widen vs the Str parse). `borrowed_lits` names the
+    argument indexes `_v3_borrowed_lit_args` already rendered as a bare
+    `&'static str`, so the `&str` helper slots below hand them straight over
+    instead of taking a second reference (item 437b)."""
+
+    def ref(i: int) -> str:
+        """An argument in a `&str` helper slot: already a `&'static str`, or
+        borrowed here. `&&str` would coerce, but writing the `&` on a literal
+        only leaves the reader a deref to resolve."""
+        return args[i] if i in borrowed_lits else f"&{args[i]}"
+
     if method == "length":
         return f"{target}.revl_length()"
     if method == "push":
         return f"{target}.revl_push({args[0]})"
     if method == "concat":
-        return f"{target}.revl_concat(&{args[0]})"
+        return f"{target}.revl_concat({ref(0)})"
     if method == "slice":
         return f"{target}.revl_slice({args[0]}, {args[1]})"
     if method == "charAt":
@@ -4768,20 +4885,20 @@ def _v3_builtin(method: str, target: str, args: list[str],
     if method == "codepoint_at":
         return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap() as u32 as i64 }}"
     if method == "indexOf":
-        return f"{target}.revl_index_of(&{args[0]})"
+        return f"{target}.revl_index_of({ref(0)})"
     if method == "split":
-        return f"{target}.revl_split(&{args[0]})"
+        return f"{target}.revl_split({ref(0)})"
     if method == "join":
-        return f"{target}.revl_join(&{args[0]})"
+        return f"{target}.revl_join({ref(0)})"
     if method == "repeat":
         return f"{target}.revl_repeat({args[0]})"
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
     # `str::starts_with`/`ends_with` match on char-boundary patterns, so a
     # code-point prefix of a UTF-8 string is exactly a prefix here.
     if method == "startsWith":
-        return f"{target}.revl_starts_with(&{args[0]})"
+        return f"{target}.revl_starts_with({ref(0)})"
     if method == "endsWith":
-        return f"{target}.revl_ends_with(&{args[0]})"
+        return f"{target}.revl_ends_with({ref(0)})"
     # The Map value type (docs/stdlib-2.0.md §Map): a std HashMap, cloned on
     # write. Every revl value type derives Clone on this tier, so the copy
     # is total; `lookup` answers Option<V> (the tier's Opt) via cloned().

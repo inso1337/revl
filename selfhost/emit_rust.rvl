@@ -591,6 +591,29 @@ fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
   return ""
 }
 
+// `_v3_borrowed_str_lit`: the bare `&'static str` rendering of a `Str` literal
+// node, else "". `rust_v3_lit` renders every `Str` literal as an owned
+// `String::from(..)`, which is right for a slot that STORES the string and pure
+// waste for one that only READS it (item 437b).
+fn borrowed_str_lit(node: Any) -> Str {
+  if (node_kind(node) != "lit") { return "" }
+  let v = value_field(node, "value")
+  if (value_kind(v) != "str") { return "" }
+  return string_lit(v)
+}
+
+// `_v3_str_eq_borrow`'s guard: may the literal on the OTHER side of this `==`
+// be borrowed? Yes unless the emitter positively knows this operand is some
+// other surface type. The other operand of a `Str` literal is a `Str` by the
+// checker, so the only open question is its rust rendering, and a site spelled
+// `X == String::from("lit")` only builds when `X: PartialEq<String>` — on this
+// tier `String` or a borrowed `&str`, both of which also carry
+// `PartialEq<&str>`. An un-inferable operand is therefore borrowable.
+fn eq_operand_borrowable(node: Any, ctx: Ctx) -> Bool {
+  let t = v3_infer_type(node, ctx)
+  return t == "" || t == "Str"
+}
+
 // `_by_value_arg`: wrap a by-value free-function/constructor argument so the call
 // cannot consume a value the caller still needs (E0382). A bare non-Copy variable
 // is `.clone()`d; a function-typed one is passed `&`; Copy scalars and fresh
@@ -668,8 +691,16 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
   }
   let opr = v3_bin_ops(op)
   if (opr == "") { return `<<UNSUPPORTED-BIN:${op}>>` }
-  let left = render_expr(value_field(node, "left"), ctx)
-  let right = render_expr(value_field(node, "right"), ctx)
+  let ln = value_field(node, "left")
+  let rn = value_field(node, "right")
+  var left = render_expr(ln, ctx)
+  var right = render_expr(rn, ctx)
+  if (op == "==" || op == "!=") {
+    let llit = borrowed_str_lit(ln)
+    let rlit = borrowed_str_lit(rn)
+    if (rlit != "" && eq_operand_borrowable(ln, ctx)) { right = rlit }
+    if (llit != "" && eq_operand_borrowable(rn, ctx)) { left = llit }
+  }
   let opnd = node_operands(node)
   if (is_addsubmul(op) && opnd == "Int") {
     return `(${left}).${checked_method(op)}(${right}).expect("revl: Int overflow")`
