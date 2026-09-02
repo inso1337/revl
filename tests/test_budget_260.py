@@ -272,3 +272,82 @@ component C requires db: DB provides svc: Svc {
     assert "calls=" not in blob and "time=" not in blob and "size=" not in blob
     assert rep["cardinality"]["C"]["per_capability"] == {
         "db": {"bound": 1, "kind": "bounded"}}
+
+
+# ---------------------------------------------------------------------------
+# F2: a budget is scoped to a RESOURCE CONE, never to a bare token.
+#
+# Aggregating the parent's ceilings per token with `max` let a generous budget
+# on one cone license a crossing on a sibling cone the parent barely holds.
+# ---------------------------------------------------------------------------
+
+def test_a_budget_on_a_sibling_cone_cannot_license_another_cone():
+    """One service, two emission methods under one wiring key: `/a` capped at
+    `calls=1`, `/b` at `calls=100`. The child takes 100 calls on `/a` — a 100x
+    budget on the cone the parent holds one call of. Per-token `max` admits it;
+    per-cone refuses it."""
+    src = """
+service Fs {
+  emission[fs(calls=1,path="/a")] fn wa(row: Str) -> Int
+  emission[fs(calls=100,path="/b")] fn wb(row: Str) -> Int
+}
+service ChildFs { emission[fs(calls=100,path="/a")] fn wa(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+component Child requires store: ChildFs provides task: Task {
+  provide task { fn go() { emit store.wa("x") return 0 } }
+}
+component Parent requires store: Fs {
+  let c = effect spawn Child with { } undo c.dispose()
+}
+"""
+    with pytest.raises(RevlError) as exc:
+        compile_source(src, "b.rvl")
+    msg = str(exc.value)
+    assert "wider resource budget" in msg
+    assert '`fs(calls=100,path="/a")` widens `calls` to 100 over the parent\'s 1' in msg
+
+
+def test_the_cone_rule_is_existential_not_a_per_parameter_max():
+    """A parent holding `(calls=1,size=100)` and `(calls=100,size=1)` on the SAME
+    cone holds neither `calls=100` AND `size=100` together. One held cap must
+    license the WHOLE crossing, so a per-parameter `max` over the covering caps
+    would be unsound too."""
+    from revl import cap_order as co
+    from revl.lower import _ceiling_attenuation_check
+
+    held = {co.parse_cap('fs(path="/a",calls=1,size=100)'),
+            co.parse_cap('fs(path="/a",calls=100,size=1)')}
+    bad = _ceiling_attenuation_check(
+        held, {co.parse_cap('fs(path="/a",calls=100,size=100)')})
+    assert bad, "no single held cap licenses calls=100 AND size=100"
+    # either held cap fails exactly one parameter; the closest one is reported
+    assert len(bad) == 1
+    assert bad[0]["param"] in ("calls", "size")
+
+
+def test_a_ceiling_free_covering_cap_still_licenses_the_crossing():
+    """The no-false-alarm direction of the same rule: a parent holding an
+    UNBOUNDED `fs` (no ceiling at all) genuinely holds every budget under it, so
+    a capped sibling cone must not make the crossing look like a widening."""
+    from revl import cap_order as co
+    from revl.lower import _ceiling_attenuation_check
+
+    held = {co.parse_cap("fs"), co.parse_cap('fs(path="/a",calls=1)')}
+    assert _ceiling_attenuation_check(
+        held, {co.parse_cap('fs(path="/a",calls=100)')}) == []
+    # and a crossing on a cone the parent caps nowhere is likewise licensed
+    held2 = {co.parse_cap('fs(path="/a",calls=1)'), co.parse_cap('fs(path="/b")')}
+    assert _ceiling_attenuation_check(
+        held2, {co.parse_cap('fs(path="/b",calls=100)')}) == []
+
+
+def test_a_dropped_ceiling_on_the_covering_cone_is_still_refused():
+    """Cone-scoping must not weaken the dropped-clause rule: a child that binds
+    no ceiling on a cone the parent caps reads as `+inf`, hence wider."""
+    from revl import cap_order as co
+    from revl.lower import _ceiling_attenuation_check
+
+    held = {co.parse_cap('fs(path="/a",calls=1)'), co.parse_cap('fs(path="/b",calls=100)')}
+    bad = _ceiling_attenuation_check(held, {co.parse_cap('fs(path="/a")')})
+    assert len(bad) == 1
+    assert bad[0]["child"] is None and bad[0]["parent"] == 1

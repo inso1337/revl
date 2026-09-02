@@ -5,10 +5,15 @@
 // lineage; `/etc` is not within `/tmp`, so the spawn would widen authority and
 // is refused (attenuation, item 66 extended by item 294).
 //
+// The refusal names the DECLARED boundary (`fs.write`), never the local wiring
+// key it was reached through (here both components happen to spell it `fs`):
+// the key is a per-component spelling, the token is the boundary itself, and
+// both sides of the comparison live in the token's namespace.
+//
 // expected error:
-//   `Router` spawns `Kid`, granting it `fs(path="/etc")`, but `Router` holds
-//   only `fs(path="/tmp")` - a spawn may narrow a child's capabilities, never
-//   widen them
+//   `Router` spawns `Kid`, granting it `fs.write(path="/etc")`, but `Router`
+//   holds only `fs.write(path="/tmp")` - a spawn may narrow a child's
+//   capabilities, never widen them
 
 service TmpStore { emission[fs.write(path="/tmp")] fn ingest(row: Str) -> Int }
 service EtcStore { emission[fs.write(path="/etc")] fn ingest(row: Str) -> Int }
