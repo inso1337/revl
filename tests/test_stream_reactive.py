@@ -780,3 +780,275 @@ def test_blocking_tiers_honour_a_declared_buffer(tier):
         "  await sub.next()\n"
         "}\n", "s.rvl"))
     assert ('"error", 3)' in src) or ('"error", 3usize)' in src)
+
+
+# ===========================================================================
+# Slice 4 — `every <x> in <sub> { … }`, the async-iteration form (§1, §4.7)
+# ===========================================================================
+#
+# The form the roadmap's v1 spec names, built out of the three operations
+# Slice 1 shipped: each turn awaits `<sub>.next()`, a `Closed` terminal ends the
+# loop, a `Faulted` one raises out of it. Nothing about the lifecycle is new —
+# the bracket is the `subscribe`'s, the teardown is the same LIFO stack — so
+# what this suite pins is the parse (the `every` collision, §1 judgment call 1),
+# the step IR, and the refusals that keep the loop from weakening the guarantee.
+# The RUNTIME proof (an item per body turn, a terminal that is not an item, a
+# handler failure closing the subscription) is the py suite at
+# backends/python/tests/test_stream_runtime.py.
+
+_ITER = """
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+"""
+
+
+def _iter_step(src: str = _ITER) -> dict:
+    body = compile_source(src, "s.rvl")["components"][0]["body"]
+    return next(s for s in body if s.get("step") == "stream-iter")
+
+
+# ---------------------------------------------------------------------------
+# Parse + lowering: the `every` collision, and the step IR (§1, §5)
+# ---------------------------------------------------------------------------
+
+def test_stream_iteration_lowers_to_its_own_step_carrying_bind_subject_and_body():
+    step = _iter_step()
+    assert step["bind"] == "o"
+    assert step["subject"] == {"kind": "name", "id": "sub"}
+    assert [inner["step"] for inner in step["body"]] == ["emit"]
+    assert step["body"][0]["expr"]["method"] == "write"
+    # the item reaches the body as an ordinary local
+    assert step["body"][0]["expr"]["args"] == [{"kind": "name", "id": "o"}]
+
+
+def test_the_every_collision_is_one_token_of_lookahead():
+    """§1, judgment call 1: `every <n><unit>` stays the timer, `every <x> in`
+    is stream iteration. Both parse in one component, neither shadows the
+    other."""
+    ir = compile_source("""
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      every 30s { emit sink.write("tick") }
+      every o in sub { emit sink.write(o) }
+    }
+    """, "s.rvl")
+    kinds = [s.get("step") for s in ir["components"][0]["body"]]
+    assert "timer" in kinds and "stream-iter" in kinds
+
+
+def test_a_non_stream_program_grows_no_stream_iter_step():
+    """Byte-identity (§10.9): the additive step never appears in a program that
+    does not iterate a stream."""
+    ir = compile_source("""
+    service L { emission fn note(v: Str) }
+    component C requires log: L {
+      let pool = effect Pool.open("u", 4) undo pool.close()
+      every 30s { emit log.note("tick") }
+    }
+    """, "s.rvl")
+    assert all(s.get("step") != "stream-iter"
+               for s in ir["components"][0]["body"])
+
+
+def test_the_body_emission_is_enumerated_on_the_component_boundary():
+    """§4.7: the body is a setup-mode effect context — its emissions are
+    capability-checked (G1) and reach the G8 audit as component reach, exactly
+    as an activation-body `emit` does, because that is what they are."""
+    step = _iter_step()
+    emit_expr = step["body"][0]["expr"]
+    assert emit_expr["target"] == {"kind": "req", "name": "sink"}
+
+
+def test_an_undeclared_requirement_in_the_body_is_refused_g1():
+    assert "not a declared requirement" in _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      every o in sub { emit sink.write(o) }
+    }
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Admission: the rules the loop is its own owner of (§3.1, §4.7)
+# ---------------------------------------------------------------------------
+
+def test_iterating_something_that_is_not_a_subscription_is_refused():
+    """The loop pulls the handle a `subscribe` bracket bound — not the SOURCE,
+    whose own bracket is a different entry on the stack."""
+    msg = _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      every o in src { emit sink.write(o) }
+    }
+    """)
+    assert "needs a live subscription" in msg
+    assert "let sub = subscribe" in msg
+
+
+def test_a_second_iteration_of_one_subscription_is_refused_rule_3_1():
+    msg = _refusal("""
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      every o in sub { emit sink.write(o) }
+      every p in sub { emit sink.write(p) }
+    }
+    """)
+    assert "already iterated" in msg and "single-consumer" in msg
+    assert "bridge" in msg
+
+
+def test_an_acquisition_in_the_body_is_refused_naming_the_unbounded_stack():
+    """§4.7: an `effect … undo …` per delivered item is one accumulator entry
+    per item, unbounded in the length of the stream, and the per-iteration
+    discharge that would bound it does not exist. Acquire before the loop."""
+    msg = _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      every o in sub {
+        let p = effect Pool.open("u", 1) undo p.close()
+      }
+    }
+    """)
+    assert "records emissions (and `fail`) only" in msg
+    assert "unbounded in the length of the stream" in msg
+
+
+def test_a_per_item_compensation_is_refused():
+    msg = _refusal("""
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      every o in sub { emit sink.write(o) compensate sink.write("undo") }
+    }
+    """)
+    assert "cannot declare `compensate`" in msg
+    assert "per delivered item" in msg
+
+
+def test_a_nested_await_in_the_body_is_refused():
+    """The loop IS the pull: a second `next` inside its own iteration would be a
+    second consumer racing a single-consumer subscription (rule 3.1)."""
+    msg = _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      every o in sub { await sub.next() }
+    }
+    """)
+    assert "cannot `await`" in msg and "second consumer" in msg
+
+
+def test_an_empty_iteration_body_is_refused():
+    assert "is empty" in _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      every o in sub { }
+    }
+    """)
+
+
+def test_iteration_after_provide_is_refused():
+    """The loop runs to the stream's terminal, so a provision below it would be
+    reached only once the stream ended (linker rule A2)."""
+    msg = _refusal("""
+    service Sink { emission fn write(v: Str) }
+    service Q { fn v() -> Int }
+    component C requires sink: Sink provides q: Q {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      provide q { fn v() -> Int { return 1 } }
+      every o in sub { emit sink.write(o) }
+    }
+    """)
+    assert "after `provide`" in msg
+
+
+def test_iteration_is_refused_in_a_provide_method():
+    """Rule 3.3: `next` is a suspension and lives only where a suspension is
+    legal; a provide method runs while the component is ACTIVE."""
+    msg = _refusal("""
+    service Sink { emission fn write(v: Str) }
+    service Q { fn v() -> Int }
+    component C requires sink: Sink provides q: Q {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      provide q {
+        fn v() -> Int {
+          every o in sub { emit sink.write(o) }
+          return 1
+        }
+      }
+    }
+    """)
+    assert "activation body" in msg
+
+
+def test_iterating_a_name_that_is_not_an_identifier_is_refused():
+    assert "needs the name of a subscription" in _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      every o in 3 { emit sink.write(o) }
+    }
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Emission: py renders the loop; every other tier REFUSES by name (§4.6)
+# ---------------------------------------------------------------------------
+
+def test_python_emits_the_cancellation_first_loop():
+    emit = _tier_emit("python")
+    code = emit.emit(compile_source(_ITER, "s.rvl"))
+    assert "async def _body():" in code, "the loop is a suspension: async body"
+    assert "while True:" in code
+    assert "o = await sub.next()" in code
+    # the await LANDS, then the yield closes the iteration (A1 inertia) — this
+    # is what lets a divert abandon the loop instead of running one more turn
+    assert "yield None  # iteration boundary (A1)" in code
+    # a `Closed` terminal ends the loop and never enters the body
+    assert "if Stream.is_closed(o):" in code
+    assert "break" in code
+    assert code.index("break") < code.index("_revl_ctx.sink.write(o)")
+    # a `Faulted` terminal is not caught: it raises out of `next`, the
+    # activation fails, and the prefix reverts LIFO with the bracket on it (A8)
+    assert "StreamFaulted" not in code and "except" not in code
+
+
+@pytest.mark.parametrize("tier", ["go", "rust"])
+def test_the_blocking_tiers_refuse_the_iteration_form_by_name(tier):
+    """go/rust lower the Slice 1/3 protocol but not the iteration form. A
+    refusal that named nothing — or worse, a subscription emitted with its body
+    silently dropped — is the outcome the honest EmitError exists to prevent."""
+    emit = _tier_emit(tier)
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_ITER, "s.rvl"))
+    msg = str(excinfo.value)
+    assert "unsupported component step" not in msg
+    assert "`every … in`" in msg and "backend py" in msg
+
+
+@pytest.mark.parametrize("tier", ["java", "typescript", "wasm"])
+def test_the_unlowered_tiers_still_refuse_the_iteration_program(tier):
+    """These three refuse the whole stream surface, and the subscription the
+    loop needs is refused before the loop is reached — so an iteration program
+    gets the same honest refusal a Slice 1 one does."""
+    emit = _tier_emit(tier)
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_ITER, "s.rvl"))
+    assert "suspends a fiber" in str(excinfo.value)
