@@ -176,18 +176,38 @@ def two_step_payload(ticket: dict, *, how_to_approve: str) -> dict:
 # the author that naming a parameter `path` changes where its values end up, and
 # nothing told the operator that a yes persists this one. Same move item 425 F1
 # made with `unreviewedHostCode`: the ticket must not understate what a yes means.
-_CALLER_VALUE_DURABILITY = (
+#
+# The sentence is written per MODE, because a disclosure that describes the other
+# session's behaviour is worse than none: under the default the value does NOT
+# reach the log, and telling an operator it does would train them to ignore the
+# field. `_CALLER_VALUE_PROVENANCE` is the half both modes share.
+_CALLER_VALUE_PROVENANCE = (
     "this crossing's resource target is a value the CALLER passed in, not a "
-    "literal the author wrote. Approving binds that value into the durable "
-    "approval log (`record_approval_granted` -> the cross-session WAL, plaintext "
-    "at rest), where the rest of this call's arguments only ever appear as the "
-    "`argsDigest` hash. To keep a sensitive value out of it, declare the "
-    "parameter `Secret[Str]` — it then binds to the redacted placeholder "
-    "everywhere (item 416c), at the cost of the resource fold, since every "
-    "secret-valued crossing binds to the SAME placeholder and a standing grant "
-    "scoped to it is refused. An operator can withhold caller values from the log "
-    "for the whole session instead with `revl mcp serve "
-    "--approval-record-values withheld`.")
+    "literal the author wrote. It is the one argument of this call that is not "
+    "merely hashed into `argsDigest`: because the parameter is named for a "
+    "resource kind (`path`/`host`/`table`), its runtime value is lifted out and "
+    "bound into the capability spelling you are approving. ")
+_CALLER_VALUE_DURABILITY_BOUND = _CALLER_VALUE_PROVENANCE + (
+    "This session runs `--approval-record-values bound`, so approving ALSO "
+    "writes that value verbatim into the durable approval log "
+    "(`record_approval_granted` -> the cross-session WAL, plaintext at rest). To "
+    "keep a sensitive value out of it, declare the parameter `Secret[Str]` — it "
+    "then binds to the redacted placeholder everywhere (item 416c), at the cost "
+    "of the resource fold, since every secret-valued crossing binds to the SAME "
+    "placeholder and a standing grant scoped to it is refused. An operator can "
+    "withhold caller values from the log for the whole session instead with "
+    "`revl mcp serve --approval-record-values withheld` (the default).")
+_CALLER_VALUE_DURABILITY_WITHHELD = _CALLER_VALUE_PROVENANCE + (
+    "This session runs `--approval-record-values withheld` (the default), so the "
+    "value stays in this ticket and does NOT reach the durable cross-session "
+    "approval log — it is recorded there as UNRECORDED. The cost is that this "
+    "approval cannot fold into a distilled `auto-approve` rule naming the target, "
+    "so a repeated crossing keeps prompting; `revl mcp serve "
+    "--approval-record-values bound` records it verbatim and restores that fold.")
+_MODE_DURABILITY = {
+    "bound": _CALLER_VALUE_DURABILITY_BOUND,
+    "withheld": _CALLER_VALUE_DURABILITY_WITHHELD,
+}
 
 
 class ClassMap:
@@ -724,7 +744,8 @@ class ClassMap:
 
     # -- the ticket ---------------------------------------------------------
 
-    def build_ticket(self, reach: dict, args=None) -> dict:
+    def build_ticket(self, reach: dict, args=None,
+                     record_values: str = "withheld") -> dict:
         """The class-(c) ticket: what a yes would mean. Names the component, key,
         method, an args digest, the capabilities reached, the crossing list, the
         reach-closure candidate hash, and `hash` — a sha256 over all of it, the
@@ -799,7 +820,11 @@ class ClassMap:
             body["resourceScopeRefusals"] = refusals
         if caller_valued:
             body["resourceScopesFromCallerArgs"] = sorted(caller_valued)
-            body["resourceScopeDurability"] = _CALLER_VALUE_DURABILITY
+            # the sentence has to match the durability this session actually
+            # applies — an unknown mode falls back to the recording one, so a
+            # miswired caller over-discloses rather than under-discloses.
+            body["resourceScopeDurability"] = _MODE_DURABILITY.get(
+                record_values, _CALLER_VALUE_DURABILITY_BOUND)
         # item 251 Slice 2: the crossing's realm and its post-endorsement taint,
         # for the ledger's shape key (the distiller reads these; a recorded taint
         # set is KNOWN, closing the Slice-1 "taint-unknown" fail-close) and for the
@@ -815,3 +840,206 @@ class ClassMap:
             if taint:
                 body["taintOrigins"] = sorted(taint)
         return body
+
+
+# ------------------------------------------------------- item 310, surface H
+# The cache APPLICABILITY fold: "is this callee's reach cacheable?".
+#
+# The 414 matrix gives it a column of its own because it is itself an
+# authority-derivation surface, and "plausibly correct if implemented over the
+# ClassMap closure" is exactly the hand-wave the matrix exists to eliminate. So
+# it is a worst-over-reach fold over the SAME provider closure the ClassMap
+# folds (`Composition.closure`), which is what makes it follow the
+# spawn/instance-get seam (crossing kind 2), the transitive service closure
+# (kind 4) and the `*` first-class-value widening (kind 8) without a second
+# reach walk that could disagree with the class fold.
+#
+# It runs at LOAD, not at compile: the compile-time admission checks in
+# `lower._check_cache_declarations` see only the DECLARING method's declared
+# reach shape (`emission` or not), and a service method's cache clause is an
+# interface contract every provider inherits. Which component actually provides
+# the key — and therefore what the cached reach really crosses — is a fact about
+# the composition, known only once the manifest is linked.
+
+
+def _cache_walk_kinds(node, kinds: set) -> bool:
+    """Whether any node in `node` carries one of `kinds` in its `kind` slot."""
+    for inner in _walk(node):
+        if isinstance(inner, dict) and inner.get("kind") in kinds:
+            return True
+    return False
+
+
+def _component_state_names(comp: dict) -> set:
+    """The component-level bindings that are STATE — a name whose value can
+    differ between two calls with equal arguments.
+
+    A `let-effect` binding is the component's effect-created world (the
+    `examples/handoff_cache.rvl` `Map`), a `let mut` is mutable by spelling, and
+    a `let` of a `spawn` is a live instance. Everything else at component level
+    is a closed constant expression evaluated once at activation, so reading it
+    keeps a method a function of its arguments.
+
+    Read only by the `pure_fn` arm of the fold below: `cache capability` /
+    `cache external` name a BOUNDARY read, and the connection handle that read
+    goes through is exactly such a binding — refusing those would refuse the
+    feature. A purity claim is the one that a state read falsifies."""
+    names: set = set()
+    for step in comp.get("body") or []:
+        if not isinstance(step, dict):
+            continue
+        kind = step.get("step")
+        if kind == "let-effect" and isinstance(step.get("bind"), str):
+            names.add(step["bind"])
+        elif kind == "let" and isinstance(step.get("name"), str):
+            if step.get("mutable") or _cache_walk_kinds(step.get("value"),
+                                                        {"spawn", "host"}):
+                names.add(step["name"])
+    return names
+
+
+def _cache_referenced_names(nodes) -> set:
+    """Every name a lowered scope mentions. Deliberately does not model
+    shadowing: a method parameter that reuses a state binding's name reads here
+    as a state reference and REFUSES. That is the conservative direction (a
+    refusal, never a silent cache over state), and the fold says so."""
+    out: set = set()
+    for node in _walk(nodes):
+        if not isinstance(node, dict):
+            continue
+        if node.get("kind") == "name" and isinstance(node.get("id"), str):
+            out.add(node["id"])
+        elif node.get("kind") == "var" and isinstance(node.get("name"), str):
+            out.add(node["name"])
+    return out
+
+
+def _cache_scope_findings(index, sid: str, cls: str):
+    """Every reason this ONE scope makes a reach uncacheable, as
+    `(token, what, why)` triples.
+
+    ALL of them, not the first: the refusal below reports one, but the 414
+    per-kind differential (tests/test_reach_completeness.py) needs the fold's
+    whole visit set — a fold that stopped visiting one crossing kind while
+    another in the same scope still reported would look identical from the
+    outside, which is exactly the blind spot the matrix exists to catch.
+
+    `token` names the crossing machine-readably (the extern name, the emitted
+    `key.method`, `*` for the widening, the state binding); `what`/`why` are the
+    human halves of the diagnostic."""
+    scope = index.scopes.get(sid)
+    if scope is None:
+        return
+    facts = scope["facts"]
+    label = scope.get("label") or sid
+    pure = cls == "pure_fn"
+
+    for fact in facts["externs"]:
+        name = fact["name"]
+        klass = fact.get("class")
+        decl = index.externs.get(name) or {}
+        via = f" (through `{'`, `'.join(fact['through'])}`)" if fact.get("through") else ""
+        if klass == "witnessed":
+            yield (name, f"{label} reaches the `witnessed` extern `{name}`{via}",
+                   "a witnessed crossing registers its inverse in the escrow at "
+                   "fire time; a hit skips the firing and therefore the "
+                   "registration, so an abort would replay an incomplete "
+                   "history (G7)")
+        elif klass == "acquire":
+            yield (name, f"{label} reaches the `acquire` extern `{name}`{via}",
+                   "an acquisition registers an undo in the escrow at fire "
+                   "time; a hit skips the firing and therefore the "
+                   "registration, so teardown would leak the resource (G7)")
+        elif klass == "emission" and fact.get("deferred"):
+            yield (name,
+                   f"{label} reaches the `deferred` emission extern `{name}`{via}",
+                   "a deferred emission is a QUEUED write; a hit that skips the "
+                   "firing skips the enqueue, so the commit would flush an "
+                   "incomplete history (G7)")
+        elif klass == "emission" and decl.get("compensate") is not None:
+            yield (name,
+                   f"{label} reaches the `compensate`-declaring emission extern "
+                   f"`{name}`{via}",
+                   "a compensated emission registers a compensation escrow "
+                   "entry at fire time; a hit skips the registration, so an "
+                   "abort after it replays an incomplete offset history (G7)")
+        elif klass == "emission" and pure:
+            yield (name, f"{label} reaches the emission extern `{name}`{via}",
+                   "`cache pure` claims the result is a function of the "
+                   "arguments alone, and a boundary crossing is not")
+
+    for fact in facts["emissions"]:
+        token = f"{fact['key']}.{fact['method']}"
+        if fact.get("compensated"):
+            yield (token, f"{label} emits `{token}` under a `compensate`",
+                   "the compensation escrow entry is registered at fire time; "
+                   "a hit skips the registration, so an abort after it replays "
+                   "an incomplete offset history (G7)")
+        elif pure:
+            yield (token, f"{label} emits `{token}`",
+                   "`cache pure` claims the result is a function of the "
+                   "arguments alone, and a boundary crossing is not")
+
+    if index.value_widens(scope["nodes"]):
+        yield ("*", f"{label} hands an emitting callable on as a VALUE",
+               "the boundary it may reach cannot be named (`*`), so an entry "
+               "cannot be scoped to the authority that covered its miss and a "
+               "hit could re-deliver a result the caller was never authorized "
+               "to obtain")
+
+    if pure:
+        comp = index.components.get(scope["component"]) or {}
+        for name in sorted(_component_state_names(comp)
+                           & _cache_referenced_names(scope["nodes"])):
+            yield (name, f"{label} reads the component state `{name}`",
+                   "`cache pure` claims the result is a function of the "
+                   "arguments alone; a method over mutable component state is "
+                   "not, so an entry would serve a value the state has since "
+                   "moved past")
+
+
+def cache_applicability_findings(class_map, cache_index):
+    """Every `(key, method, class, token, what, why)` the applicability fold
+    finds over the whole cache index, in a deterministic order: by declaring
+    method, then by closure depth, then by scope id. The refusal below reports
+    the first; the 414 differential reads them all."""
+    index = class_map.index
+    for key, method in sorted(cache_index):
+        cls = (cache_index[(key, method)] or {}).get("class")
+        reach = class_map.classify_call(key, method)
+        if reach is None:
+            # an unresolved classification, which the per-call decision refuses
+            # outright: the call never runs, so no entry can ever be born and
+            # there is nothing to fold over.
+            continue
+        sid = reach["scopeId"]
+        order = [sid] + [hop["scope"] for hop in
+                         sorted(index.closure(sid),
+                                key=lambda hop: (hop["depth"], hop["scope"]))]
+        for scope_id in order:
+            for token, what, why in _cache_scope_findings(index, scope_id, cls):
+                yield (key, method, cls, token, what, why)
+
+
+def cache_applicability_refusal(class_map, cache_index) -> str | None:
+    """Surface H: refuse a `cache`-declaring seam method whose PROVIDER CLOSURE
+    is not cacheable, or None. Runs at load, over the linked composition.
+
+    Worst-over-reach: the declaring scope plus every scope it reaches across the
+    service and spawn seams, in a deterministic order, so the same composition
+    always names the same crossing. Inert for a composition that declares no
+    `cache` (the index is empty)."""
+    for key, method, cls, _token, what, why in cache_applicability_findings(
+            class_map, cache_index):
+        spelling = {"pure_fn": "cache pure",
+                    "capability_result": "cache capability",
+                    "external_effect": "cache external"}.get(cls, "cache")
+        return (
+            f"`{spelling}` on `{key}.{method}` is refused: {what}; {why}. "
+            f"The applicability fold is worst-over-reach over the provider "
+            f"closure `{key}` resolves to, not over the declaration alone — "
+            f"the clause is an interface contract every provider inherits, "
+            f"so the reach that actually runs is what decides (item 310, "
+            f"surface H). Move the clause to a method whose whole reach is "
+            f"cacheable, or drop it.")
+    return None

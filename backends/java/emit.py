@@ -56,6 +56,13 @@ CRATE = "cordis4j"
 # shifts). Mirrors backends/go/emit.py's `_RECORD_MODE`.
 _RECORD_MODE = False
 
+# The placeholder a confidential witness is written as in the durable WAL. Must
+# equal `revl.taint.REDACTED_SECRET` / `confidential.REDACTED`: it is part of the
+# log's on-disk contract, and `revl recover` reads it back to refuse a replay it
+# cannot honestly perform (src/revl/recovery.py `_has_redacted_arg`) rather than
+# addressing the wrong referent and reporting the miss as a clean rollback.
+_REDACTED_SECRET = "<redacted:secret>"
+
 TYPE_MAP = {
     "Str": "String",
     "Int": "long",
@@ -631,6 +638,19 @@ class _V3Ctx:
                         )
                     self.case_owners[cname] = tname
         self._match_counter = 0
+        # Monotonic index handed to the destructure temporary and to a
+        # witnessed step's Result/Ok temporaries, so their names are a
+        # deterministic property of emission order rather than of object
+        # identity. They used to be `id(node)` — a host address — so the SAME
+        # IR emitted twice produced two different Java sources
+        # (`__revl_destructure_4313623040` vs `__revl_destructure_4391233664`),
+        # which is why backends/java/scenarios/crashproof/revl/Components.java
+        # had to be exempted from the golden drift check. Same rule and same
+        # remedy as item 179 on the reference tier
+        # (backends/python/emit.py's `_Lines._destructure_seq`) and as the rust
+        # tier's `env.wit_counter`. Kept separate from `_match_counter` so the
+        # existing `__revl_ignored_N` numbering is untouched.
+        self._gensym_counter = 0
         # local `let`s bound to an arrow literal, in the body being emitted:
         # {binding name: {"arrow": <arrow node>, "captures": {name: snapshot}}}.
         # See `_inline_arrow` for why an arrow has no Java declaration.
@@ -639,6 +659,11 @@ class _V3Ctx:
     def new_match_ignored(self) -> str:
         self._match_counter += 1
         return f"__revl_ignored_{self._match_counter}"
+
+    def next_gensym(self) -> int:
+        """The next emission-order index for a generated local name."""
+        self._gensym_counter += 1
+        return self._gensym_counter
 
     def record_type_for_fields(self, field_names: list[str]) -> str:
         wanted = set(field_names)
@@ -2028,7 +2053,7 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         out.append(f"{pad}continue;")
     elif step == "let_pattern":
         value = _expr(node.get("value"), ctx)
-        tmp = f"__revl_destructure_{id(node)}"
+        tmp = f"__revl_destructure_{ctx.next_gensym()}"
         keyword = "var" if node.get("mutable") else "final var"
         out.append(f"{pad}{keyword} {tmp} = {value};")
         names = [_ident(n, "binding") for n in node.get("names") or []]
@@ -4159,7 +4184,7 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
         out.append(f"{pad}continue;")
     elif kind == "let_pattern":
         value = _expr(step.get("value"), v3_ctx, None, env)
-        tmp = f"__revl_destructure_{id(step)}"
+        tmp = f"__revl_destructure_{v3_ctx.next_gensym()}"
         keyword = "var" if step.get("mutable") else "final var"
         out.append(f"{pad}{keyword} {tmp} = {value};")
         names = [_ident(n, "binding") for n in step.get("names") or []]
@@ -4258,7 +4283,7 @@ def _emit_witnessed_step(
     `rename` maps requires/binds to `this.<name>` in method bodies (mirroring
     the bracket path); it is `None` in the activation body."""
     assert frame_expr is not None  # invariant: witnessed acquire => needs_frame
-    tag = id(step)
+    tag = v3_ctx.next_gensym()
     result_var = f"_revl_wit{tag}"
     ok_var = f"_revl_ok{tag}"
     witness_type = _java_v3_type(ext.get("witness"))
@@ -4280,9 +4305,18 @@ def _emit_witnessed_step(
         # way). Byte-identical default output: emitted only under `--record`.
         receiver = _string(_call_label(step["acquire"]))
         method = _string(_call_label(ext["undo"]))
+        # ...unless the author declared the witness position confidential
+        # (`Result[Secret[W], E]`, the shape a fallible lease has to use), in
+        # which case the descriptor carries the placeholder instead: the WAL is
+        # a plaintext file at rest, and a `Secret[T]` declaration authorises
+        # disclosure to the declared receiver, never a durable copy. The stamp
+        # is the compiler's (`secret_witness`), so the decision is made once,
+        # here, at the point that writes the record — never at each reader.
+        referent = (_string(_REDACTED_SECRET) if ext.get("secret_witness")
+                    else "String.valueOf(result)")
         out.append(
             f"{pad}    revlRecordTransactional({receiver}, {method}, "
-            f"new String[]{{String.valueOf(result)}});"
+            f"new String[]{{{referent}}});"
         )
     out.append(
         f"{pad}    fx.track({frame_expr}.{entry}({crossing}, {attempted}, "

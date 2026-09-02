@@ -1368,6 +1368,13 @@ def _component_needs_teardown(component: dict, witnessed: dict) -> bool:
 # backends/go/emit.py's `_RECORD_MODE`.
 _RECORD_MODE = False
 
+# The placeholder a confidential witness is written as in the durable WAL. Must
+# equal `revl.taint.REDACTED_SECRET` / `confidential.REDACTED`: it is part of the
+# log's on-disk contract, and `revl recover` reads it back to refuse a replay it
+# cannot honestly perform (src/revl/recovery.py `_has_redacted_arg`) rather than
+# addressing the wrong referent and reporting the miss as a clean rollback.
+_REDACTED_SECRET = "<redacted:secret>"
+
 
 def _witnessed_extern_for(env: "_Env", acquire: object) -> dict | None:
     """The witnessed extern descriptor a step's acquisition calls, or None.
@@ -3738,9 +3745,18 @@ def _emit_witnessed_step(env: "_Env", step: dict, ext: dict, out: list[str],
         # `revlRecordTransactional` call at the same point.
         undo_callee = (ext.get("undo") or {}).get("callee") or {}
         undo_name = str(undo_callee.get("name") or undo_callee.get("id") or "undo")
+        # ...unless the author declared the witness position confidential
+        # (`Result[Secret[W], E]`, the shape a fallible lease has to use), in
+        # which case the descriptor carries the placeholder instead: the WAL is
+        # a plaintext file at rest, and a `Secret[T]` declaration authorises
+        # disclosure to the declared receiver, never a durable copy. The stamp
+        # is the compiler's (`secret_witness`), so the decision is made once,
+        # here, at the point that writes the record — never at each reader.
+        referent = (f'{_string(_REDACTED_SECRET)}.to_string()'
+                    if ext.get("secret_witness") else 'format!("{}", result)')
         out.append(
             f'{pad}    revl_record_transactional({_string(ext.get("name"))}, '
-            f'{_string(undo_name)}, vec![format!("{{}}", result)]);')
+            f'{_string(undo_name)}, vec![{referent}]);')
     out.append(f"{pad}    let _revl_state = _revl_teardown.clone();")
     undo = _expr(ext["undo"], env)
     out.append(f"{pad}    ctx.effect({label}, move || {{")

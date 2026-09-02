@@ -498,6 +498,56 @@ Gated on 332 shipping the `revl-gate` crate v0 (the `admit`-only native cut) plu
 Do not start Slice 2 until the crate lands; do not build a bespoke rust admission
 path inside 333.
 
+### Slice 2 LANDED: what the rust embed actually measured
+
+The `revl-gate` crate landed (item 332 Stage 3), so Slice 2 was built:
+`bench/inprocess_gate_rust` (a standalone consumer whose only dependency is the
+crate, no Python anywhere) plus the driver `tests/test_inprocess_gate_rust.py`,
+which re-derives the py verdict for each candidate's exact source bytes and
+holds the two harnesses against each other. Numbers and the full batch table:
+`bench/results/inprocess-gate-rust.md`.
+
+Three findings, all of which contradict something this design assumed, and all
+of which are the reason the slice was worth running rather than declaring:
+
+1. **The crate has no admission arm at all, so "differential agreement" is a
+   weaker claim than planned.** Point 3 above ("rust may refuse what py admits;
+   rust must never admit what py refuses") is now closed STRUCTURALLY rather
+   than statistically: the self-host gate decides the composition/guarantee
+   layer and runs no type layer, so `Verdict` is `Refused` / `NoObjection` /
+   `OutsideFrontier` and `to_json` reports `"admitted": false` on every arm.
+   There is nothing for a differential to catch in the dangerous direction.
+2. **The screen catches much less than the design implied.** Of the seven batch
+   candidates the py admission gate refuses, the rust gate refuses TWO (`G2`
+   provision conflict, `G4` undeclared emission) - and where it does refuse, the
+   tag and the why-trace are the reference's byte for byte. The other five (an
+   unresolved `requires`, an incomplete `provide`, a genuine parse failure, a
+   hole draft, a type error) come back as no-objections. All five are in the
+   tolerated direction, but together they are why an embedder who reads a
+   no-objection as a green ships an unsafe host. The `cache_layer` candidate
+   prices the missing `admit_into` concretely: py ADMITS it into the running
+   composition, and the only question rust can be asked is the standalone one.
+3. **The cost does NOT transfer from the py tier, and the design should not have
+   assumed it would.** Section "The cost measurement" reports py at a median
+   0.165 ms and warns against reprinting it as universal. The rust screen is
+   MILLISECONDS at 218 bytes and grows roughly with the SQUARE of the source: an
+   ordinary few-kilobyte model-authored component costs on the order of a second
+   per screen. A same-byte-count shape probe (declaration-heavy vs
+   statement-heavy vs comment-padded) attributes the cost to TOKEN count - the
+   emitted lexer/parser - not to source bytes and not to the composition gate
+   walking declarations. That is a performance defect in the emitted self-host
+   front end (items 391/336), not in the crate shim, and it is left as a
+   measurement for that lane rather than patched here.
+
+So the honest summary of the rust in-process embed today: it is a real,
+Python-free, in-process REFUSAL path that agrees with the reference verbatim
+wherever it speaks at all; it speaks on two of the seven programs the py gate
+refuses; it cannot be asked the running-composition question at all; and it
+costs two to four orders of magnitude more per candidate than the py embed,
+depending on candidate size. An agent loop can use it as a local pre-filter only
+if "cheap" is being measured against a network round-trip rather than against
+`revl.gate.admit`.
+
 ## Exit tests
 
 - **Slice 1 (py, this item):** an example py agent harness embeds the gate, admits
@@ -506,9 +556,14 @@ path inside 333.
   oracle is the admission verb, not `revl compile`), the batch verdicts are
   order-independent, and the in-process round-trip cost is measured as a
   distribution over realistic sizes and recorded. Guard test in CI.
-- **Slice 2 (rust, deferred):** the same harness as a standalone rust binary
-  against the published `revl-gate` crate, verdicts differentially agreeing with
-  the reference fail-closed, cost measured. Gated on 332's rust crate.
+- **Slice 2 (rust, LANDED):** the same harness as a standalone rust binary
+  against the `revl-gate` crate (`bench/inprocess_gate_rust`), every refusal it
+  issues agreeing with the py admission gate's tag AND message verbatim, no arm
+  readable as an admission, verdicts order-independent, the fail-closed paths
+  held from the consumer side, and the cost measured across candidate sizes and
+  shapes. Guard test `tests/test_inprocess_gate_rust.py`, run by the
+  `backend-rust` CI job. See "Slice 2 LANDED" above for what the measurement
+  said, including the two places it contradicts this design's expectations.
 
 ## The honest hard part (consolidated)
 

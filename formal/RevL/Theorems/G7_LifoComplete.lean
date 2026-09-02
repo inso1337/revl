@@ -140,12 +140,22 @@ theorem abort_replays_every_transactional (log : List LogEntry) (w : LogEntry)
     (hw : w ∈ log) (hk : w.kind = .transactional) : w ∈ replayed .abort log :=
   replayed_complete .abort log w hw (by rw [hk]; rfl)
 
-/-- A bracket replays under every verdict: releasing an acquired handle is
-always right. -/
+/-- A bracket replays under every SETTLING verdict: releasing an acquired
+handle is always right when the activation actually settles.
+
+Roadmap item 443 added the hypothesis. Pre-443 this quantified over every
+verdict, because every verdict settled; the E-Stop is the verdict at which
+it does not, and `estop_strands_the_bracket` below proves the E-Stop
+counter-instance rather than leaving the weakening unexplained. The
+settling case is untouched, and this is NOT a weakening of G7's
+completeness theorem (`teardown_replays_all`), which was already stated
+relative to `replaysUnder v` and needs no hypothesis at all. -/
 theorem bracket_replays_under_every_verdict (v : Verdict) (log : List LogEntry)
-    (w : LogEntry) (hw : w ∈ log) (hk : w.kind = .bracket) :
+    (w : LogEntry) (hw : w ∈ log) (hk : w.kind = .bracket)
+    (hv : v.settles = true) :
     w ∈ replayed v log :=
-  replayed_complete v log w hw (by rw [hk]; cases v <;> rfl)
+  replayed_complete v log w hw (by
+    rw [hk]; cases v <;> simp_all [Verdict.settles, EntryKind.replaysUnder])
 
 /-! ### Order: the LIFO equation, the phase split, LIFO within a phase -/
 
@@ -195,6 +205,118 @@ theorem phase2_is_lifo (v : Verdict) (log : List LogEntry) :
     (phase2 v log).reverse.Sublist log := by
   simp only [phase2, List.reverse_reverse]
   exact List.filter_sublist
+
+/-! ### Item 443: the E-Stop column
+
+`docs/design/443-estop.md`. An operator halt is a THIRD column in the
+contract's table, not a second model. The theorems above are already
+stated relative to `replaysUnder v`, so they cover `.halted` unchanged and
+hold with an empty replay set — G7 does not become conditional. What the
+halt needs on top is the honest accounting: the entries it did not replay
+are not discharged either, they are OWED, and the inventory names every
+one of them.
+
+The halt can also arrive DURING a teardown that was already running under
+`commit` or `abort`. That case is a CUT into that verdict's replay order:
+what completed, the at-most-one inverse that was in flight and is
+therefore AMBIGUOUS (item 440's tier, item 309's spent at-most-once
+attempt), and what was never attempted. -/
+
+/-- The E-Stop replays nothing. Not "replays the brackets and skips the
+rest": a halt whose first act is to release two hundred handles is not a
+halt (item 443, the guarantee). -/
+theorem estop_replays_nothing (log : List LogEntry) :
+    teardown .halted log = [] := by
+  have h1 : log.filter
+      (fun e => e.kind.inPhase1 && e.kind.replaysUnder .halted) = [] := by
+    rw [List.filter_eq_nil_iff]
+    intro w _
+    cases w.kind <;> simp [EntryKind.replaysUnder, EntryKind.inPhase1]
+  have h2 : log.filter
+      (fun e => e.kind.inPhase2 && e.kind.replaysUnder .halted) = [] := by
+    rw [List.filter_eq_nil_iff]
+    intro w _
+    cases w.kind <;> simp [EntryKind.replaysUnder, EntryKind.inPhase2,
+      EntryKind.inPhase1]
+  simp [teardown, replayed, phase1, phase2, h1, h2]
+
+/-- The E-Stop discharges nothing either. Discharge RELEASES the inverse
+and the witness; doing that at a halt would destroy exactly the state the
+reconciliation path reads back. -/
+theorem estop_discharges_nothing (log : List LogEntry) :
+    discharged .halted log = [] := by
+  rw [discharged, List.filter_eq_nil_iff]
+  intro w _
+  cases w.kind <;> simp [EntryKind.dischargedUnder]
+
+/-- **The honest counterpart of R4.** R4 is "no residue"; the E-Stop is
+"all residue, all of it reported". Every registered entry — every kind,
+in registration order, none dropped — is on the halt's inventory. This is
+what lets the runtime record what it did NOT unwind instead of pretending
+a teardown ran. -/
+theorem estop_strands_everything (log : List LogEntry) :
+    stranded .halted log = log := by
+  rw [stranded, List.filter_eq_self]
+  intro w _
+  cases w.kind <;> rfl
+
+/-- The E-Stop counter-instance for `bracket_replays_under_every_verdict`:
+the bracket row really does change in the third column, so the settling
+hypothesis that theorem now carries is load-bearing and not decoration. -/
+theorem estop_strands_the_bracket :
+    EntryKind.bracket.replaysUnder .halted = false ∧
+    EntryKind.bracket.strandedUnder .halted = true ∧
+    Verdict.halted.settles = false := by decide
+
+/-! #### The halt cut: what was in flight
+
+`k` is how many inverses of the interrupted verdict's replay order had
+recorded their completion when the latch was read. -/
+
+/-- The inverses that provably ran before the halt. -/
+def haltCompleted (v : Verdict) (k : Nat) (log : List LogEntry) : List LogEntry :=
+  (replayed v log).take k
+
+/-- The at-most-one inverse that was DISPATCHED and whose completion was
+never recorded. It may or may not have landed, and the runtime says so
+(`outcome: "unknown"`) rather than guessing — item 440's ambiguous tier,
+reached deliberately instead of by accident. -/
+def haltAmbiguous (v : Verdict) (k : Nat) (log : List LogEntry) : List LogEntry :=
+  ((replayed v log).drop k).take 1
+
+/-- The inverses the halt never attempted at all. -/
+def haltUnattempted (v : Verdict) (k : Nat) (log : List LogEntry) : List LogEntry :=
+  (replayed v log).drop (k + 1)
+
+/-- The cut is a partition of the interrupted replay order: nothing is
+counted twice and nothing is lost between the three books. -/
+theorem halt_inventory_is_total (v : Verdict) (k : Nat) (log : List LogEntry) :
+    haltCompleted v k log ++ haltAmbiguous v k log ++ haltUnattempted v k log
+      = replayed v log := by
+  simp only [haltCompleted, haltAmbiguous, haltUnattempted, List.append_assoc]
+  rw [← List.drop_drop, List.take_append_drop, List.take_append_drop]
+
+/-- **At most one thing is ambiguous.** The halt creates exactly the
+ambiguity of the single crossing it interrupted, never a fog over the
+whole stack — which is what makes the record actionable (open question 2
+of item 443: the bracket whose own inverse was in flight IS this entry). -/
+theorem halt_ambiguity_is_at_most_one (v : Verdict) (k : Nat)
+    (log : List LogEntry) : (haltAmbiguous v k log).length ≤ 1 := by
+  simp only [haltAmbiguous, List.length_take]
+  omega
+
+/-- **The books balance across the halt.** Completed + ambiguous +
+unattempted + discharged + stranded is the whole stack, under every
+verdict and at every cut. An entry cannot fall off the accounting by
+being halted. -/
+theorem halt_books_are_total (v : Verdict) (k : Nat) (log : List LogEntry) :
+    (haltCompleted v k log).length + (haltAmbiguous v k log).length
+      + (haltUnattempted v k log).length + (discharged v log).length
+      + (stranded v log).length = log.length := by
+  have h := congrArg List.length (halt_inventory_is_total v k log)
+  simp only [List.length_append] at h
+  have hb := book_lengths_add v log
+  omega
 
 /-! ### Non-vacuity: the verdict and the phase split are both load-bearing
 
@@ -255,5 +377,32 @@ theorem commit_discharge_is_not_vacuous :
   · intro h
     exact commit_discharges_transactional stack mutateEntry h rfl
   · exact abort_replays_every_transactional stack mutateEntry (by simp [stack]) rfl
+
+
+/-! ### Item 443 non-vacuity: the halt is load-bearing on a real stack -/
+
+/-- One stack, three verdicts. The abort replays three inverses and owes
+nothing; the E-Stop replays NONE and owes all three. So the third column
+is not a relabelling of an existing one, and `estop_strands_everything` is
+not a claim about an empty stack. -/
+theorem estop_is_load_bearing :
+    (teardown .abort stack).length = 3 ∧
+    (teardown .halted stack).length = 0 ∧
+    (discharged .halted stack).length = 0 ∧
+    (stranded .halted stack).length = 3 ∧
+    (stranded .abort stack).length = 0 := by
+  refine ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- A halt that arrives mid-abort, after the witnessed mutation's inverse
+has run and with the handle release in flight: one completed, one
+ambiguous, one never attempted. The cut is a real three-way split on a
+real stack, not a definition with no instance. -/
+theorem mid_abort_halt_cut_is_not_vacuous :
+    haltCompleted .abort 1 stack = [mutateEntry] ∧
+    (haltAmbiguous .abort 1 stack).length = 1 ∧
+    (haltUnattempted .abort 1 stack).length = 1 ∧
+    (haltCompleted .abort 1 stack).length + (haltAmbiguous .abort 1 stack).length
+      + (haltUnattempted .abort 1 stack).length = 3 := by
+  refine ⟨rfl, rfl, rfl, rfl⟩
 
 end RevL.G7
