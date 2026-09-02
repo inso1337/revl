@@ -152,6 +152,11 @@ CORPUS = [
                             # bodies (`effect`/`undo`/`emit` through the `this.sink`
                             # rename; the `Context.EffectScope fx` provider shape, the A8
                             # self-revert `apply` try/catch returning `fx`)
+    "comp_config_provide.rvl",  # item 433 rider R3: a provide method that READS
+                                # `config.<f>`. Forces the modern path (the legacy
+                                # provider class has no config field, so the bare
+                                # `prefix` did not compile) and pins the provider's
+                                # config field/ctor-param/ctor-arg threading.
     # comp_multi_effect.rvl (a NO-config, MULTI-provision modern component: the
     # no-arg-only `<Comp>Plugin` ctor, two provider classes routed in one
     # `apply`, an `emit ... compensate` pair, and an `effect`/`undo` body in a
