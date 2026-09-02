@@ -26,7 +26,7 @@ import tempfile
 import types
 from pathlib import Path
 
-from ._paths import backends_root
+from ._paths import backends_root, stdlib_root
 
 BACKENDS = backends_root()
 
@@ -261,7 +261,34 @@ def run_ts(ir: dict) -> tuple[str, str]:
     generated.mkdir(parents=True, exist_ok=True)
     path = generated / f"revl_test_{os.getpid()}.test.ts"
     try:
-        path.write_text(source, encoding="utf-8")
+        # item 410 two-root scheme: a stdlib-origin `@ts ref` thunk (e.g. every
+        # stdlib/fs.rvl consumer since item 410 stage 5) resolves lazily, at
+        # first call, against `globalThis.__REVL_STDLIB_REF_ROOT__` — the
+        # install tree — and throws loudly when it is unset (backends/
+        # typescript/emit.py's `_revl_ref_path_stdlib`). Every OTHER ts runner
+        # sets this before any host call can run: the node placement runner
+        # self-derives it two directories up from its own location
+        # (backends/typescript/placement_runner.ts), and `revl run --backend
+        # ts` passes the same value explicitly (src/revl/run_ts.py's
+        # `stdlibRefRoot: str(stdlib_root().parent)`). This runner has no
+        # separate boot process to stamp the global on — it hands the emitted
+        # test module straight to vitest — so it stamps it as the first
+        # statement of the generated file itself, computed the same way
+        # run_ts.py does (`stdlib_root().parent`) rather than re-deriving a
+        # relative path in JS: the generated file's own directory depth is
+        # this function's implementation detail, so a JS-side relative
+        # derivation (as backends/typescript/tests/ts_witnessed_fs.test.ts
+        # hand-writes for its fixed location) would be one more thing to keep
+        # in sync. The assignment runs during module evaluation, before any
+        # `it()`/`test()` body executes, so it is set well before a lazy ref
+        # thunk's first call regardless of where it sits relative to the
+        # generated file's own `import` lines. Harmless when the composition
+        # has no stdlib ref.
+        stdlib_ref_root_stmt = (
+            "(globalThis as any).__REVL_STDLIB_REF_ROOT__ = "
+            f"{json.dumps(str(stdlib_root().parent))}\n\n"
+        )
+        path.write_text(stdlib_ref_root_stmt + source, encoding="utf-8")
         result = subprocess.run(
             [str(vitest), "run", str(path)],
             cwd=BACKENDS / "typescript",
