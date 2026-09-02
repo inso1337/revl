@@ -1297,6 +1297,35 @@ def _crossing_literal(key_str: str, method: str, arg_temps: list[str], site: str
            f"args: [{args}], site: {_string(site)} }}")
 
 
+def _bracket_yield(frame_var: Optional[str], key: str, method: str, site: str,
+                   undo_method: str, arrow: str) -> str:
+    """One bracket disposer, routed through `Frame.bracket` so a Phase-1 raise
+    is CAUGHT and RECORDED (`bracket-fault`) instead of breaking cordis'
+    sequential disposal chain and starving every earlier-registered
+    (later-disposed) inverse — docs/design/teardown-contract.md, "A failed
+    inverse never skips the remaining Phase-1 inverses".
+
+    runtime.ts's own Frame doc states the Phase-1 guarantee holds only
+    "PROVIDED each disposer catches its own failure"; a bare `yield () =>
+    <undo>` does not, so an EMITTED program had the hole even though the
+    hand-built `Frame.bracket` API was already correct and unit-tested. The
+    guard cannot sit in the runtime on this tier the way it does on py: the
+    one value every disposer passes through also carries `ctx.provide`'s
+    cordis effect object, whose identity the unwind branches on.
+
+    The crossing's `args` stay empty on purpose — a bracket's acquisition
+    arguments are not bound to temps (binding them would move every
+    acquisition's emitted shape), and the record's job here is to NAME the
+    inverse that faulted, which `key`/`method`/`undoMethod` already do.
+
+    `frame_var` is `None` only where this component has no accumulator; the
+    bare arrow is kept there, unchanged."""
+    if frame_var is None:
+        return f"yield {arrow}"
+    crossing = _crossing_literal(key, method, [], site)
+    return f"yield {frame_var}.bracket({crossing}, {_string(undo_method)}, {arrow})"
+
+
 def _witnessed_extern(acquire: Any, ctx: "_Ctx") -> Optional[dict]:
     """The witnessed extern descriptor a step's acquisition calls, or `None`
     (mirrors backends/python/emit.py `_ComponentEmitter._witnessed_extern`).
@@ -1466,6 +1495,35 @@ def _needs_frame(component: dict, ctx: "_Ctx") -> bool:
     return walk(component.get("body") or [])
 
 
+def _has_bracket(component: dict) -> bool:
+    """True iff this component's activation body yields at least one BRACKET
+    disposer (an ordinary `let-effect`/`effect` acquisition, or a `timer`'s
+    cancel inverse).
+
+    Such a component needs a `Frame` too — not for the `begin`/`drain`
+    sentinels (`_needs_frame` still governs those, so teardown SEMANTICS are
+    unchanged), but purely as the accumulator `Frame.bracket` records a
+    Phase-1 `bracket-fault` into. Without one a raising inverse breaks cordis'
+    sequential disposal chain and silently starves every earlier-registered
+    entry (docs/design/teardown-contract.md; see `_bracket_yield`).
+
+    A witnessed acquisition is NOT a bracket — it registers through
+    `Frame.transactional`, which `_needs_frame` already covers."""
+    def walk(steps: list) -> bool:
+        for step in steps or []:
+            kind = step.get("step")
+            if kind in ("let-effect", "effect"):
+                return True
+            if kind == "timer":
+                return True
+            if kind == "if":
+                if walk(step.get("then") or []) or walk(step.get("else") or []):
+                    return True
+        return False
+
+    return walk(component.get("body") or [])
+
+
 def _component_body(component: dict, services: dict, indent: str, doc_ctx: "_Ctx",
                     frame_var: Optional[str]) -> list[str]:
     """The activation body, lowered into one ctx.effect generator."""
@@ -1589,14 +1647,21 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                 else:
                     lines.append(f"{indent}{acquire}")
             undo = _expr(step["undo"], ctx)
+            acquire_node = step.get("acquire") or {}
+            b_key = step.get("bind") or _call_method_name(acquire_node)
+            b_method = _call_method_name(acquire_node)
+            b_site = f"{component['name']}.body:{b_key}"
+            b_undo = _call_method_name(step.get("undo"))
             if cas_bind is not None and _is_map_cas(step.get("acquire")):
                 # item 397: result-guarded undo. A `false` CAS registers the
                 # identity inverse (a no-op disposer), so teardown never removes
                 # the winning claimant's entry. Mirrors py's `yield lambda:
                 # (<undo> if <bind> else None)`.
-                lines.append(f"{indent}yield {cas_bind} ? () => {undo} : () => {{}}")
+                arrow = f"{cas_bind} ? () => {undo} : () => {{}}"
             else:
-                lines.append(f"{indent}yield () => {undo}")
+                arrow = f"() => {undo}"
+            lines.append(indent + _bracket_yield(
+                frame_var, b_key, b_method, b_site, b_undo, arrow))
     elif kind == "emit":
         # item 131: `await emit …` awaits the boundary crossing so the emission
         # actually fires — a bare async emit would leave a floating, unordered
@@ -1710,7 +1775,9 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                 lines.append(f"{indent}  {_expr(emission['expr'], ctx)}")
             lines.append(f"{indent}}}")
             lines.append(f"{indent}const {handle} = host.{verb}({interval}, {fn})")
-            lines.append(f"{indent}yield () => {handle}.cancel()")
+            lines.append(indent + _bracket_yield(
+                frame_var, handle, verb, f"{component['name']}.body:{handle}",
+                "cancel", f"() => {handle}.cancel()"))
             return
         # async in-flight window (item 170): a timer body the frontend coloured
         # `async` reaches an async op, whose emission returns a `Promise`. Each
@@ -1746,7 +1813,9 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                 lines.append(f"{indent}  {rendered}")
         lines.append(f"{indent}}}")
         lines.append(f"{indent}const {handle} = host.{verb}({interval}, {fn})")
-        lines.append(f"{indent}yield () => {{ {handle}.cancel(); {inflight}.clear() }}")
+        lines.append(indent + _bracket_yield(
+            frame_var, handle, verb, f"{component['name']}.body:{handle}",
+            "cancel", f"() => {{ {handle}.cancel(); {inflight}.clear() }}"))
     elif kind == "return":
         raise EmitError("return steps are only allowed inside method bodies")
     else:
@@ -1857,18 +1926,19 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     else:
         lines.append(f"  {apply_kw}(ctx: Context) {{")
 
-    # item 243 Slice 2b: the activation's teardown accumulator for its
-    # transactional (witnessed) and compensation entries — the ONLY two entry
-    # kinds that need it; an ordinary bracket stays the bare, pre-existing
-    # `yield () => <undo>` (see `_component_step`), matching
-    # backends/python/emit.py byte-for-byte, so `Frame` itself is built ONLY
-    # when this component actually registers one of those two kinds
-    # (`_needs_frame`). A component using brackets only — the overwhelming
-    # majority of existing programs — emits with NO `Frame`, no `begin`/
-    # `drain` sentinel, byte-identical to before this slice.
+    # item 243 Slice 2b: the activation's teardown accumulator. `_needs_frame`
+    # is the SENTINEL gate — only a transactional (witnessed) or compensation
+    # entry needs `begin`/`drain`, and that is unchanged. `_has_bracket` is
+    # the RESIDUE gate: a bracket-only component still builds the Frame, with
+    # no sentinels, purely so `Frame.bracket` has somewhere to record a
+    # Phase-1 `bracket-fault` (see `_bracket_yield`). Building it is
+    # side-effect-free (the constructor reads two env bounds and joins a
+    # WeakMap), so teardown behaviour is unchanged for those components except
+    # that a raising inverse is now caught instead of starving every
+    # earlier-registered entry.
     needs_frame = _needs_frame(component, doc_ctx)
-    frame_var = "$revl_frame" if needs_frame else None
-    if needs_frame:
+    frame_var = "$revl_frame" if (needs_frame or _has_bracket(component)) else None
+    if frame_var is not None:
         lines.append(f"    const {frame_var} = new Frame(ctx, {_string(name)})")
 
     # item 167: build one router proxy per routed key before the body, so a
@@ -3439,9 +3509,16 @@ def _uses_frame(ir: dict, doc_ctx: "_Ctx") -> bool:
     compensation entry (item 243 Slice 2b), reusing `_needs_frame` per
     component — the document-level check the import line needs, ahead of any
     per-component rendering. A document with neither feature imports no
-    `Frame`/`record` and emits every component's brackets exactly as before
-    this slice (see `_component_step`'s bracket branch)."""
+    `record`; `Frame` itself is imported whenever any component brackets at
+    all (`_uses_bracket_frame`), because a bracket's Phase-1 guard records
+    into it."""
     return any(_needs_frame(c, doc_ctx) for c in ir.get("components") or [])
+
+
+def _uses_bracket_frame(ir: dict) -> bool:
+    """True iff some component yields a bracket disposer, so the module needs
+    the `Frame` import for `Frame.bracket`'s Phase-1 guard (`_has_bracket`)."""
+    return any(_has_bracket(c) for c in ir.get("components") or [])
 
 
 def _runtime_imports(ir: dict, runtime_import: str, doc_ctx: "_Ctx") -> str:
@@ -3458,6 +3535,12 @@ def _runtime_imports(ir: dict, runtime_import: str, doc_ctx: "_Ctx") -> str:
         # document using neither feature imports neither name — byte-identical
         # to before this slice.
         names += ["Frame", "record"]
+    elif _uses_bracket_frame(ir):
+        # a bracket-only document imports `Frame` alone: its brackets record a
+        # Phase-1 `bracket-fault` into one (see `_bracket_yield`), but nothing
+        # here reaches a witnessed/compensating extern's `@ts` body, so
+        # `record` stays out.
+        names.append("Frame")
     if _uses_routes(ir):
         # item 167: the router resolves its worker realms by label.
         names.append("realmLabel")

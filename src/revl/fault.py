@@ -214,6 +214,11 @@ class _Outcome:
         self.ran: list = []
         self.never_ran: list = []
         self.lifo_violation = None
+        # the merged residue the teardown recorded (docs/design/teardown-
+        # contract.md): a Phase-1 inverse that RAN and RAISED is residue the
+        # `never_ran` counter cannot see, because continue-and-record means it
+        # ran. Read after the handle is dropped, so a Phase-2 offset counts too.
+        self.residue: list = []
         self.labels: list = []
         self.emissions: list = []
         self.async_body = False   # the body has an `await` step (A1 boundary)
@@ -304,6 +309,7 @@ async def _drive(ir: dict, unit: dict, emit, runtime_mod, Context, FiberState,
                 await fiber.dispose()
                 await _flush()
                 outcome.settled = _snapshot(root)
+                outcome.residue = probe.residue()
             finally:
                 forget_trace()
             outcome.events = events
@@ -379,6 +385,18 @@ def _judge(unit: dict, outcome: _Outcome, FiberState) -> list:
             failures.append(
                 f"residue in the service registry after teardown: {settled['provisions']}, "
                 f"baseline {base['provisions']}")
+        for record in outcome.residue:
+            # continue-and-record (docs/design/teardown-contract.md): a Phase-1
+            # inverse that raised still RAN, so `never_ran` above is silent
+            # about it — the record is the only witness that the revert did not
+            # land, and a `bracket-fault` is contract-grade: the inverse claimed
+            # G5 infallibility and lied.
+            error = record.get("error") or {}
+            failures.append(
+                f"residue recorded by the teardown: {record.get('kind')} — the inverse "
+                f"`{record.get('method') or 'unknown'}` of `{record.get('component')}` "
+                f"{'was not attempted' if not record.get('attemptedFlag') else 'raised'}"
+                f" ({error.get('type', 'unknown')}: {error.get('message', '')})")
         unreleased = _unreleased_host_resources(outcome.events)
         if unreleased:
             failures.append(
@@ -425,6 +443,14 @@ def _judge(unit: dict, outcome: _Outcome, FiberState) -> list:
 def _notes(outcome: _Outcome) -> list:
     """Lines printed for every fault test, pass or fail."""
     notes: list[str] = []
+    for record in outcome.residue:
+        # printed whether or not the unit asserted `no residue`: a teardown
+        # that continued past a failed inverse is honest ONLY if the record it
+        # kept is visible.
+        error = record.get("error") or {}
+        notes.append(
+            f"teardown residue ({record.get('kind')}): `{record.get('method') or 'unknown'}` "
+            f"— {error.get('type', 'unknown')}: {error.get('message', '')}")
     for text, compensated, conditional in outcome.emissions:
         qualifier = " (conditional — inside an `if`, may not have run)" if conditional else ""
         if compensated:
