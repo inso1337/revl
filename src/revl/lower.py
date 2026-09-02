@@ -8088,15 +8088,15 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
 #     are reserved contextual keywords, not implemented in v1.
 #   TODO(308-followup): explicit `transfer` (a source marker that moves the
 #     bracket; the only honest future for a handoff of resource-carrying state).
-#   TODO(308-followup): the retaining-extern audit (F10) — a report-only `revl
-#     audit` listing of resource-typed arguments reaching a non-inverse extern
-#     or bridge service (the declaration-is-the-proof-surface limitation).
-#   TODO(308-followup): the method-scope acquire early-release surface (F9). v1
-#     does NOT refuse method-scope acquires wholesale — the corpus admits them
-#     (item 399, provide-method acquisitions), so refusing them here would break
-#     additivity. Their escape hazards (return/store/capture of the method-scoped
-#     handle) ARE caught by B1; the residual leak-until-unload lifetime concern
-#     is the deferred F9 decision.
+#
+# F10 (the retaining-extern audit) SHIPPED as `resources.retention_surface`,
+# read by `revl audit` and its `--json` document: report-only, because the
+# declaration does not say "retains" and no clause here can refuse what a host
+# body keeps.
+#
+# F9 (method-scope early release) is DECIDED, and the decision is that revl
+# already has the surface, spelled with the grammar it already had. See
+# `_f9_instance_scope_scan` below and the design doc's "F9, decided".
 # ---------------------------------------------------------------------------
 
 
@@ -8399,6 +8399,7 @@ def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
             _ownership_check_expr(st.get("value"), env, filename, line, seam=True)
         elif stp in ("return", "await"):
             _ownership_check_expr(st.get("expr"), env, filename, line, seam=True)
+    _f9_instance_scope_scan(steps, env, filename, line)
 
 
 def _b1_witnessed_check(acquire, env: "Env", filename: str, line: int) -> None:
@@ -8422,6 +8423,155 @@ def _b1_witnessed_check(acquire, env: "Env", filename: str, line: int) -> None:
                             hint=_b1_hint("witnessed"), code="G7",
                             category="ownership",
                             navigate=_b1_navigate(env, "witnessed", mode, rt))
+
+
+# ---------------------------------------------------------------------------
+# F9: method-scope early release (item 308, design "F9, decided").
+# ---------------------------------------------------------------------------
+#
+# THE DECISION. The design left this open behind a corpus count: if some
+# program acquires at method scope, either an explicit-release surface lands or
+# v1 refuses the form. The count came back ZERO general method-scope acquires,
+# because the language already refuses them — `_lower_provide` admits exactly
+# two acquisition forms in a provide-method body, `spawn` and a result-declared
+# host verb (item 397), and the second binds a checked `Bool`, not a handle. So
+# there is exactly ONE method-scope acquisition that yields a live resource, and
+# it is the one that already has an early release: a `spawn` is a CHILD FIBER —
+# its own nested teardown scope — and `w.dispose()` unloads it now, mid-method,
+# with the grammar revl already had (`effect w.dispose() undo w.dispose()`).
+# No new surface is added, and none is owed.
+#
+# WHY THAT DOES NOT DISTURB TEARDOWN, which is the whole reason a general
+# release surface stayed deferred. Early release here RELEASES A SCOPE; it does
+# not DISCHARGE AN ENTRY. The frame-adopted safety net (`Frame.acquire`'s
+# `lambda w: w.dispose()`) stays registered on the enclosing activation's LIFO
+# for its whole life, and `SpawnHandle.dispose` is idempotent, so:
+#
+#   * fault mid-scope BEFORE the release — the entry is registered and unrun;
+#     the fault propagates out of the method (a method fault is NOT an
+#     activation abort: `Frame._aborting` stays clear), and the entry runs at
+#     activation teardown in LIFO position, guarded. Nothing is missed.
+#   * fault mid-scope AFTER the release — the entry is registered and runs, and
+#     the second dispose is a no-op on `_disposed`. Nothing runs twice.
+#   * E-Stop mid-scope (item 443's `halted`) — the entry is STRANDED either
+#     way: registered, not run, not dropped, kept for `revl recover`. Where the
+#     release already happened the stranded record OVER-reports one entry whose
+#     replay is a no-op. That is the R4-safe direction (residue is never
+#     under-reported) and it is why early release must not discharge: a
+#     discharge would drop the very descriptor the halt is required to keep, and
+#     THAT would contradict `estop_strands_everything`.
+#
+# So G7 LIFO-completeness is untouched: the entry set is exactly what it was.
+#
+# WHAT THIS ADDS. The promise the nested scope makes — "a request-scoped
+# instance is reclaimed when the request ends" — was unenforced: an
+# `Instance[C]` handle is not an `extern acquire` return, so it is not in the
+# resource-taint base and B1's clauses never bound it. A provide method could
+# RETURN the handle, park it in activation state, or close over it, and the
+# instance then outlived the request it was scoped to while its safety-net entry
+# sat on the activation frame. This is B1's does-not-escape rule applied to the
+# one handle B1 could not see, keyed on the BINDING (spawn is syntactically
+# evident at the acquiring step) rather than on a type, since `Instance[C]` in
+# the taint base would also bind the activation-scope owner pool that the
+# owner carve-out deliberately admits.
+#
+# The admitted positions are a whitelist, not a blacklist: a handle is READ and
+# not retained as the receiver of a host method call (`w.dispose()`) and as the
+# base of a provision read (`w.task.run(..)`), which are the two things the
+# instance surface is for. Every other occurrence is refused.
+
+#: How an escaping instance handle got out, for the diagnostic.
+_F9_ESCAPE = "may not leave the provide method that spawned it"
+
+_F9_HINT = (
+    "a spawned instance is a child fiber — its own nested teardown scope — so "
+    "it is reclaimed when the request ends (`effect w.dispose() undo "
+    "w.dispose()`), or by the activation frame's safety net at the latest. A "
+    "holder outside the method would outlive that scope. Hand out a VALUE read "
+    "off the instance instead, or spawn at ACTIVATION scope and lend the "
+    "instance per call (the owner pool pattern, which the owner carve-out "
+    "admits)")
+
+
+def _f9_spawn_binds(steps) -> set:
+    """The safe-names a provide-method body binds by `spawn` — the only
+    method-scope acquisition that yields a live handle."""
+    binds: set = set()
+    for st in steps or []:
+        if not isinstance(st, dict) or st.get("step") != "let-effect":
+            continue
+        acq = st.get("acquire")
+        if isinstance(acq, dict) and acq.get("kind") == "spawn" and st.get("bind"):
+            binds.add(st["bind"])
+    return binds
+
+
+def _f9_reads_not_retains(node) -> str | None:
+    """The child slot in which `node` READS a handle without being able to keep
+    it, or None. A host method call's receiver (`w.dispose()`) and a provision
+    read's base (`w.task`) both consume the handle on the spot; every other slot
+    may leave a second holder, so the default is "retains"."""
+    kind = node.get("kind")
+    if kind == "instance-get":
+        return "target"
+    if kind == "call" and node.get("method") and isinstance(node.get("target"), dict):
+        return "target"
+    return None
+
+
+def _f9_walk(node, binds: set, env: "Env", filename: str, line: int,
+             captured: bool = False) -> None:
+    """Refuse any occurrence of a method-scope spawn handle outside the two
+    slots that read it without retaining it.
+
+    `captured` is set once the walk is INSIDE an arrow body, where the two
+    read-only slots stop being read-only: an arrow's type (`() -> Int`) erases
+    what it closes over, so a closure reading the instance carries it wherever
+    the closure goes. That is B1 clause 2's reasoning, and clause 2's outright
+    refusal is the shape adopted here for the same reason."""
+    if isinstance(node, list):
+        for item in node:
+            _f9_walk(item, binds, env, filename, line, captured)
+        return
+    if not isinstance(node, dict):
+        return
+    if node.get("kind") == "arrow":
+        captured = True
+    name = _node_local_name(node)
+    if name is not None and name in binds:
+        from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
+        raise RevlError(
+            filename, node.get("line") or line,
+            f"the request-scoped instance handle `{name}` {_F9_ESCAPE}: it is "
+            f"spawned into its own nested teardown scope and reclaimed when the "
+            f"request ends, so a holder outside the method would outlive the "
+            f"instance (item 308, F9)",
+            hint=_F9_HINT, code="G7", category="ownership",
+            navigate=_nav.ownership_navigate(
+                kind="f9", mode="owned", binding=name,
+                profile=(_UntrustedMark if env.untrusted else None)))
+    skip = None if captured else _f9_reads_not_retains(node)
+    for key, child in node.items():
+        if key == skip:
+            # the receiver/base itself is fine; anything NESTED under it (an
+            # argument, an index) is not, so recurse past only the bare name
+            if _node_local_name(child) in binds:
+                continue
+        _f9_walk(child, binds, env, filename, line, captured)
+
+
+def _f9_instance_scope_scan(steps, env: "Env", filename: str, line: int) -> None:
+    """F9: a `spawn` handle bound in a provide-method body does not escape it."""
+    binds = _f9_spawn_binds(steps)
+    if not binds:
+        return
+    for st in steps or []:
+        if not isinstance(st, dict):
+            continue
+        for key, child in st.items():
+            if key == "bind":
+                continue  # the acquiring binding itself, a bare string
+            _f9_walk(child, binds, env, filename, st.get("line") or line)
 
 
 def _all_free_names(expr, bound: set[str]) -> set[str]:
