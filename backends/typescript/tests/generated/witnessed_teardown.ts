@@ -46,7 +46,7 @@ export const WorkflowCommit = {
     ctx.effect(function* () {
       yield $revl_frame.begin
       const store = host.Map.new()
-      yield () => store.drop()
+      yield $revl_frame.bracket({ key: "store", method: "Map.new", args: [], site: "WorkflowCommit.body:store" }, "drop", () => store.drop())
       const $revl_wit2 = wit_stash()
       if ($revl_wit2.kind === 'Ok') {
         yield $revl_frame.transactional({ key: "wit_stash", method: "wit_stash", args: [], site: "WorkflowCommit.body#1" }, "wit_unstash", (result) => wit_unstash(result), $revl_wit2.value)
@@ -67,7 +67,7 @@ export const WorkflowAbort = {
     ctx.effect(function* () {
       yield $revl_frame.begin
       const store = host.Map.new()
-      yield () => store.drop()
+      yield $revl_frame.bracket({ key: "store", method: "Map.new", args: [], site: "WorkflowAbort.body:store" }, "drop", () => store.drop())
       const $revl_wit5 = wit_stash()
       if ($revl_wit5.kind === 'Ok') {
         yield $revl_frame.transactional({ key: "wit_stash", method: "wit_stash", args: [], site: "WorkflowAbort.body#4" }, "wit_unstash", (result) => wit_unstash(result), $revl_wit5.value)

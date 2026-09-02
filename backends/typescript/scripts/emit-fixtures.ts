@@ -90,6 +90,13 @@ export function emitFixtures(): void {
   // `generated_coverage.test.ts`'s scan, like the fixtures above.
   const emitAsyncEffectComposition = emitFixture
   emitAsyncEffectComposition('async_effect_composition.ir.json', 'async_effect_composition.ts')
+  // Phase-1 continue-and-record: a raising BRACKET inverse must not break
+  // cordis' sequential disposal chain and starve every earlier-registered
+  // (later-disposed) inverse (phase1_bracket_fault.test.ts). Carries no `test`
+  // blocks, so the alias keeps the pair off `generated_coverage.test.ts`'s
+  // scan, like the fixtures above.
+  const emitPhase1BracketFault = emitFixture
+  emitPhase1BracketFault('phase1_bracket_fault.ir.json', 'phase1_bracket_fault.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone
