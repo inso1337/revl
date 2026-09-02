@@ -232,3 +232,184 @@ def test_truc_assemble_cli_refuses_a_g2_break_in_trucs_own_set(tmp_path):
     assert r.returncode == 1, r.stdout
     assert "G2" in r.stdout and "plan" in r.stdout
     assert not (proj / "build" / "assembly.json").exists()
+
+
+# ========================================================= the stage-0 lock
+# truc's own `truc.lock` is what stage 0 compiles from, and it is the only
+# thing standing between "truc boots the composition that was released" and
+# "truc boots whatever .rvl files are on disk". Roadmap 428 F3: the pin
+# requirement landed for a *project's* trucs, but truc's own lock was a bare
+# file list with no hashes, no containment check, and a glob fallback that made
+# the whole thing opt-out by deleting one file. These pin the refusals.
+
+LOCK = TRUC / "truc.lock"
+
+
+@pytest.fixture
+def package(tmp_path, monkeypatch):
+    """A throwaway copy of truc's package directory, with the launcher pointed
+    at it, so a test may tamper with the lock or a component without touching
+    the installed one."""
+    import shutil
+
+    from revl.truc import _launcher
+
+    dst = tmp_path / "truc"
+    shutil.copytree(TRUC, dst)
+    monkeypatch.setattr(_launcher, "_HERE", dst)
+    return dst
+
+
+def _read_lock(package: Path) -> dict:
+    return json.loads((package / "truc.lock").read_text())
+
+
+def _write_lock(package: Path, doc: dict) -> None:
+    (package / "truc.lock").write_text(json.dumps(doc, indent=2))
+
+
+def test_the_committed_lock_is_current():
+    """Regenerate-or-red, the same discipline as the golden composition above.
+    Every hash in the committed `truc.lock` is the sha256 of the file it names,
+    so an edit to a component that does not carry the lock with it turns CI red
+    rather than silently shipping an unpinned boot."""
+    from revl.truc._launcher import lock_document
+
+    assert json.loads(LOCK.read_text()) == lock_document(), (
+        "src/revl/truc/truc.lock drifted from truc's components.\n"
+        "If this change to truc's components is intended, regenerate the lock "
+        "(`python -m revl.truc._relock`) and commit it.")
+
+
+def test_the_lock_pins_every_stage0_source(package):
+    """The happy path: all eight components resolve, inside the package, with
+    matching pins."""
+    from revl.truc import _launcher
+
+    files = _launcher.component_files()
+    assert len(files) == 8
+    assert all(Path(f).is_file() for f in files)
+    assert all(str(package) in f for f in files)
+
+
+def test_a_deleted_lock_refuses_instead_of_globbing(package):
+    """428 F3, the bootstrap half. Deleting the lock is no harder than
+    corrupting it, and it used to be *better*: a missing lock fell back to
+    `components/*.rvl`, so a planted component joined truc's own composition
+    and every boot compiled it. A check that is turned off by deleting its
+    input is not a check, so a missing lock now refuses to boot."""
+    from revl.truc import _launcher
+
+    (package / "components" / "rogue.rvl").write_text(ROGUE_PLAN)
+    (package / "truc.lock").unlink()
+    with pytest.raises(_launcher.BootstrapLockError) as excinfo:
+        _launcher.component_files()
+    assert "truc.lock is missing" in str(excinfo.value)
+
+
+def test_a_component_the_lock_does_not_name_is_never_compiled(package):
+    """The lock is the composition, not a hint: a file dropped into
+    `components/` that no row names is simply not part of stage 0."""
+    from revl.truc import _launcher
+
+    (package / "components" / "rogue.rvl").write_text(ROGUE_PLAN)
+    assert len(_launcher.component_files()) == 8
+
+
+def test_drifting_component_bytes_refuse_to_boot(package):
+    """The pin itself. A component whose bytes moved without the lock moving
+    with them refuses, naming both hashes."""
+    from revl.truc import _launcher
+
+    (package / "components" / "planner.rvl").write_text("// tampered\n")
+    with pytest.raises(_launcher.BootstrapLockError) as excinfo:
+        _launcher.component_files()
+    assert "hash drift" in str(excinfo.value)
+    assert "components/planner.rvl" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "not-a-hash", None, 64 * "z"])
+def test_a_row_with_no_usable_pin_refuses(package, blank):
+    """A pin is required, not optional — the same rule `planner.plan_drift`
+    applies to a project's trucs. A blank or malformed `sha256` refuses exactly
+    like a drifting one, so blanking a row is not a way to opt out."""
+    from revl.truc import _launcher
+
+    doc = _read_lock(package)
+    doc["files"][0]["sha256"] = blank
+    _write_lock(package, doc)
+    with pytest.raises(_launcher.BootstrapLockError) as excinfo:
+        _launcher.component_files()
+    assert "no usable pin" in str(excinfo.value)
+
+
+def test_a_path_leaving_the_package_refuses(package, tmp_path):
+    """Containment. The lock's trust root is the installed package's own
+    integrity, and that claim only holds if every byte stage 0 compiles is
+    actually inside the package. A `..` row used to be resolved and compiled."""
+    from revl.truc import _launcher
+
+    outside = tmp_path / "evil.rvl"
+    outside.write_text(ROGUE_PLAN)
+    doc = _read_lock(package)
+    doc["files"].append({"path": "../evil.rvl", "sha256": 64 * "0"})
+    _write_lock(package, doc)
+    with pytest.raises(_launcher.BootstrapLockError) as excinfo:
+        _launcher.component_files()
+    assert "leaves truc's package" in str(excinfo.value)
+
+
+def test_a_symlinked_component_refuses(package, tmp_path):
+    """The same containment, reached the other way. `Path.resolve()` follows a
+    link planted in `components/` straight out of the package, so the pinned
+    name would have described bytes the package does not own."""
+    from revl.truc import _launcher
+
+    outside = tmp_path / "evil.rvl"
+    outside.write_text(ROGUE_PLAN)
+    target = package / "components" / "planner.rvl"
+    target.unlink()
+    target.symlink_to(outside)
+    with pytest.raises(_launcher.BootstrapLockError) as excinfo:
+        _launcher.component_files()
+    assert "symlink" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("doc", [
+    {"lockVersion": 0, "files": ["components/cli.rvl"]},   # the pre-fix format
+    {"lockVersion": 2, "files": []},
+    {"files": [{"path": "components/cli.rvl", "sha256": 64 * "0"}]},
+])
+def test_an_unknown_lock_version_refuses(package, doc):
+    """A version-0 lock is a bare file list carrying no hashes, so honouring it
+    would be honouring no pins at all; an unknown future version may mean
+    something this launcher cannot check. Both refuse rather than guess."""
+    from revl.truc import _launcher
+
+    _write_lock(package, doc)
+    with pytest.raises(_launcher.BootstrapLockError) as excinfo:
+        _launcher.component_files()
+    assert "lockVersion" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("text", ["{not json", "[]", '{"lockVersion": 1}'])
+def test_an_unusable_lock_refuses(package, text):
+    """Unparseable, not an object, or naming no files: each is a tampering
+    signal, and none of them degrades to compiling what is on disk."""
+    from revl.truc import _launcher
+
+    (package / "truc.lock").write_text(text)
+    with pytest.raises(_launcher.BootstrapLockError):
+        _launcher.component_files()
+
+
+def test_the_launcher_exits_cleanly_on_a_refusal(package, capsys):
+    """A stage-0 refusal is an exit code and a message naming the fix, not a
+    traceback, and truc does not boot."""
+    from revl.truc import _launcher
+
+    (package / "truc.lock").unlink()
+    assert _launcher.main(["assemble"]) == 70
+    err = capsys.readouterr().err
+    assert "refusing to boot" in err
+    assert "_relock" in err
