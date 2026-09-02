@@ -121,6 +121,16 @@ class ConfigField:
     # parameter), and this flag is what survives into the IR — the only channel
     # by which the runtime learns the field must not be externalised.
     secret: bool = False
+    # item 350: the declared ADMISSION BOUND on a host-injected environment
+    # value, legal only inside a `boot component`'s config block (the
+    # environment contract). `None` everywhere else, so every existing config
+    # field lowers byte-identically. Two shapes:
+    #   {"kind": "under", "prefix": <str>}  -- a Str path confined to a prefix
+    #   {"kind": "in", "values": [<lit>, ...]} -- an enumerated admissible set
+    # The bound is checked at ADMISSION against the value the host injects, so
+    # an environment-supplied path or provider identity cannot silently widen
+    # what the composition reaches at run time (docs/environment-binding.md).
+    bound: dict | None = None
 
 
 @dataclass
@@ -477,6 +487,14 @@ class ComponentDecl:
     # the feature are byte-identical. This is a GENERAL wiring feature (a
     # hand-written wrapper uses it too, not an adapter special case).
     require_carry: dict = field(default_factory=dict)
+    # item 350: the composition's BOOT component (`boot component X { ... }`) —
+    # the one declared arrival point for host-injected environment values. Its
+    # `config {}` block is the ENVIRONMENT CONTRACT: the exhaustive, typed list
+    # of what the host must inject before the composition can boot. At most one
+    # per composition. False for every ordinary component, so a composition that
+    # declares no boot component is byte-identical through parse, IR and every
+    # emitted tier (docs/environment-binding.md).
+    boot: bool = False
 
 
 # --- v2.0: types & pure functions (docs/syntax-2.0.md §2–§3) ----------------
@@ -1430,6 +1448,16 @@ class Parser:
                 program.services.append(self.service(commutative=True))
             elif self.at("kw", "component"):
                 program.components.append(self.component())
+            elif self.at("ident", "boot") and self.toks[self.pos + 1].kind == "kw" \
+                    and self.toks[self.pos + 1].value == "component":
+                # item 350: `boot` is a *contextual* keyword, the same discipline
+                # `secret`/`fault`/`prop`/`lifecycle` use — it heads a declaration
+                # ONLY immediately before `component`, so no program that already
+                # used `boot` as an ordinary identifier breaks and the self-hosted
+                # lexer's KEYWORDS table (and with it the generated gate crate's
+                # frontier table) needs no sync.
+                self.next()
+                program.components.append(self.component(boot=True))
             elif self.at("kw", "type"):
                 program.type_decls.append(self.type_decl(False))
             elif self.at("kw", "pub"):
@@ -2312,7 +2340,7 @@ class Parser:
             return f"{first}::{local}"
         return first
 
-    def component(self) -> ComponentDecl:
+    def component(self, boot: bool = False) -> ComponentDecl:
         line = self.expect("kw", "component").line
         name = self.expect("ident").value
         requires: list[tuple[str, str, int]] = []
@@ -2349,12 +2377,12 @@ class Parser:
             if self.at("kw", "config"):
                 if config:
                     raise self.err(self.peek().line, f"duplicate `config` block in component {name}")
-                config = self.config_block()
+                config = self.config_block(boot=boot, owner=name)
             else:
                 body.append(self.stmt(in_method=False))
         self.expect("}")
         return ComponentDecl(name, config, requires, provides, body, line,
-                             require_carry=require_carry)
+                             require_carry=require_carry, boot=boot)
 
     def _carry_tokens(self) -> tuple[str, ...]:
         """`(cache, log)` after `carrying` on a require binding (item 296) — the
@@ -2382,7 +2410,7 @@ class Parser:
                      "drop the `carrying(...)` clause (item 296)")
         return tuple(names)
 
-    def config_block(self) -> list[ConfigField]:
+    def config_block(self, boot: bool = False, owner: str = "") -> list[ConfigField]:
         self.expect("kw", "config")
         self.expect("{")
         fields: list[ConfigField] = []
@@ -2391,15 +2419,67 @@ class Parser:
             fname = self._name()
             self.expect(":")
             ftype = self.type_()
+            bound = self._config_bound(boot, owner, fname)
             default = None
             if self.at("="):
                 self.next()
                 default = self.literal()
-            fields.append(ConfigField(fname, ftype, default, fline))
+            fields.append(ConfigField(fname, ftype, default, fline, bound=bound))
             if self.at(","):
                 self.next()
         self.expect("}")
         return fields
+
+    def _config_bound(self, boot: bool, owner: str, fname: str) -> dict | None:
+        """The optional ADMISSION BOUND on a `boot component` config field
+        (item 350): `under "<prefix>"` or `in [lit, ...]`, between the declared
+        type and the `=` default.
+
+        A bound is a check applied to the value the HOST injects, so it is legal
+        only where host injection is contract-declared — inside a `boot`
+        component. Allowing it on an ordinary component's config would ship
+        grammar nothing enforces, which is the fail-open shape this item exists
+        to remove, so it is refused there with the reason.
+
+        `in` is already a keyword (realm placement); `under` is contextual and is
+        recognised only in this slot, so the lexer (and the generated gate
+        crate's frontier table) is untouched."""
+        if not (self.at("ident", "under") or self.at("kw", "in")):
+            return None
+        tok = self.peek()
+        if not boot:
+            raise self.err(
+                tok.line,
+                f"config field `{fname}` declares a bound outside a `boot` component",
+                hint="a bound is checked against the value the HOST injects, and host "
+                     "injection is contract-declared only for the boot component — "
+                     f"move `{fname}` into `boot component {owner or '<Boot>'}`'s config "
+                     "block, or drop the bound (item 350)",
+            )
+        if self.at("ident", "under"):
+            self.next()
+            prefix = self.expect("string", what="a path prefix string after `under`").value
+            if not prefix:
+                raise self.err(tok.line, "`under` prefix cannot be empty",
+                               hint="an empty prefix confines nothing — name the directory "
+                                    "the injected path must stay inside (item 350)")
+            return {"kind": "under", "prefix": prefix}
+        self.next()  # `in`
+        self.expect("[", what="`[` after `in` in a config bound")
+        values: list = []
+        while not self.at("]"):
+            values.append(self.literal())
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        if not values:
+            raise self.err(
+                tok.line,
+                f"config field `{fname}` declares an empty `in [...]` bound",
+                hint="an empty admissible set admits nothing, so the composition could "
+                     "never boot — list the values the host may inject (item 350)",
+            )
+        return {"kind": "in", "values": values}
 
     def literal(self):
         tok = self.peek()

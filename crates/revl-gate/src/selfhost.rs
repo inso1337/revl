@@ -493,6 +493,37 @@ fn atw(ts: Vec<Token>, i: i64, w: &str) -> bool {
     return ((t.kind == "kw") && (t.text == w));
 }
 
+fn at_boot(ts: Vec<Token>, i: i64) -> bool {
+    let t = tkc(ts.clone(), i);
+    return (((t.kind == "ident") && (t.text == "boot")) && atw(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), "component"));
+}
+
+fn boot_names(ts: Vec<Token>) -> Vec<String> {
+    let mut i = 0i64;
+    let mut depth = 0i64;
+    let mut out: Vec<String> = vec![];
+    while ((i < ts.revl_length()) && (!atk(ts.clone(), i, "eof"))) {
+        if atk(ts.clone(), i, "{") {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if atk(ts.clone(), i, "}") {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        if ((depth == 0i64) && at_boot(ts.clone(), i)) {
+            out.push(tkc(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow")).text);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn join_comma(xs: Vec<String>, i: i64, acc: String) -> String {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return join_comma(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), if (acc == "") { (xs)[(i) as usize].clone() } else { (acc.revl_concat(", ")).revl_concat(&(xs)[(i) as usize].clone()) });
+}
+
 fn skip_line(ts: Vec<Token>, i: i64) -> i64 {
     if (i >= ts.revl_length()) {
         return i;
@@ -1548,6 +1579,9 @@ fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
         return pg;
     }
     let t = tkc(ts.clone(), i);
+    if at_boot(ts.clone(), i) {
+        return p_top(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), pg.clone());
+    }
     if (t.kind != "kw") {
         return p_top(ts.clone(), skip_line(ts.clone(), i), bad_prog(pg.clone(), String::from("unexpected token at top level")));
     }
@@ -3116,6 +3150,10 @@ pub fn admit_src(src: String) -> String {
     let sv = check_spawn(pg.clone(), base.clone());
     if (sv != "") {
         return sv;
+    }
+    let boots = boot_names(lex_src(src.clone()));
+    if (boots.revl_length() > 1i64) {
+        return tagged("BOOT", &(String::from("a composition declares at most one `boot` component, found ").revl_concat(&join_comma(boots.clone(), 0i64, String::from("")))));
     }
     return link_g2_g3(pg.clone());
 }
@@ -4762,6 +4800,9 @@ fn fns_walk(ts: Vec<Token>, i: i64, acc: String) -> String {
         return acc;
     }
     let t = tkc(ts.clone(), i);
+    if at_boot(ts.clone(), i) {
+        return fns_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone());
+    }
     if (t.kind != "kw") {
         return fns_walk(ts.clone(), skip_line(ts.clone(), i), acc.clone());
     }
@@ -4857,6 +4898,9 @@ fn externs_walk(ts: Vec<Token>, i: i64, acc: String, ok: bool) -> ExAcc {
         return ExAcc { js: acc.clone(), ok: ok };
     }
     let t = tkc(ts.clone(), i);
+    if at_boot(ts.clone(), i) {
+        return externs_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone(), ok);
+    }
     if (t.kind != "kw") {
         return externs_walk(ts.clone(), skip_line(ts.clone(), i), acc.clone(), ok);
     }
@@ -5000,6 +5044,9 @@ fn types_walk(ts: Vec<Token>, i: i64, acc: String) -> String {
         return acc;
     }
     let t = tkc(ts.clone(), i);
+    if at_boot(ts.clone(), i) {
+        return types_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone());
+    }
     if (t.kind != "kw") {
         return types_walk(ts.clone(), skip_line(ts.clone(), i), acc.clone());
     }
@@ -5037,6 +5084,9 @@ fn ir_walk(ts: Vec<Token>, i: i64, a: IrAcc) -> IrAcc {
         return a;
     }
     let t = tkc(ts.clone(), i);
+    if at_boot(ts.clone(), i) {
+        return ir_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone());
+    }
     if (t.kind != "kw") {
         return ir_walk(ts.clone(), skip_line(ts.clone(), i), a.clone());
     }

@@ -246,7 +246,10 @@ def _run_serve(args) -> int:
     `revl mcp serve`, whose tool set is the fixed compiler surface. `--mcp`
     names the transport, leaving room for other serve frontends later.
     """
-    from ..run import _load_config, _required_config_problem  # noqa: PLC0415
+    from ..run import (  # noqa: PLC0415
+        _env_contract_problem, _load_config, _load_env, _merge_env,
+        _required_config_problem,
+    )
 
     if not getattr(args, "mcp", False):
         print("error: `revl serve` needs a transport — pass --mcp to serve over "
@@ -261,12 +264,22 @@ def _run_serve(args) -> int:
         # running composition, however it was compiled (docs/holes.md)
         refuse_admission(ir)
         config = _load_config(getattr(args, "config", None))
+        env = _load_env(getattr(args, "env", None))
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     except OSError as error:
         print(f"error: cannot read config: {error}", file=sys.stderr)
         return 1
+
+    # item 350: the environment contract, checked with the same rules `revl run`
+    # applies — serving a composition is booting it, so the boot component's
+    # `--env` door and its declared bounds hold here too.
+    problem = _env_contract_problem(ir, env, config)
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
+    config = _merge_env(ir, env, config)
 
     if not (ir.get("components") or []):
         print("nothing to serve: no components in the composition", file=sys.stderr)

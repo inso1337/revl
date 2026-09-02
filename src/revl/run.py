@@ -143,6 +143,213 @@ def _components(ir: dict) -> list[dict]:
     return ir.get("components") or []
 
 
+# ── item 350: the environment contract (`boot component`) ───────────────────
+#
+# The host must know the port, the auth token, the data dir and the model
+# provider BEFORE it can compile the composition, so those values are read
+# outside revl by construction (docs/composition-bootstrap.md is the floor).
+# What was missing was a place to WRITE THAT DOWN: the arrival point was an
+# undeclared host-authored `--config` map that could rewrite any field of any
+# component, and nothing in the source, the IR or the audit said which values
+# were environment.
+#
+# A `boot component` is that place. Its `config {}` block is the ENVIRONMENT
+# CONTRACT — the exhaustive, typed list of what the host must inject — and
+# `revl run --env FILE` is its one door. Four rules make the contract closed
+# rather than decorative, all enforced HERE, before any runtime is imported:
+#
+#   1. one door      — with a boot component declared, a `--config` table
+#                      naming it is refused; its values arrive only via `--env`.
+#   2. no silent     — an `--env` key the contract does not declare is refused,
+#      arrival         not carried through and not dropped.
+#   3. no missing    — a required (non-defaulted) contract field with no
+#      value           injected value is refused (the existing config rule).
+#   4. bounds        — a value outside a field's declared `under "<prefix>"` /
+#                      `in [...]` bound is refused, naming the field and the
+#                      bound, NEVER the value.
+#
+# Rule 4 is the authority close. An environment value is DATA, so it cannot add
+# a capability — but where it lands in a resource-scoped position it is the
+# thing that SPELLS the scope: a data dir becomes the fs path a component
+# actually reaches, a provider identity becomes the network destination an
+# emission actually posts to. Both widen the real reach while the declared
+# `fs.*` / `net.*` capability set is unchanged, so nothing in the audit moves.
+# A declared bound puts that widening back under admission.
+
+
+def _boot_component(ir: dict) -> dict | None:
+    """The composition's `boot` component, or None. At most one exists (the
+    linker refuses a second), so the first match is the contract."""
+    for comp in _components(ir):
+        if comp.get("boot"):
+            return comp
+    return None
+
+
+def _load_env(path: str | None) -> dict:
+    """The environment values the host injects, from a TOML or JSON file
+    (optional): a FLAT `name = value` map, not a table of component tables.
+
+    Flat on purpose — the contract belongs to exactly one component, so a
+    component key here would be a second, undeclared arrival point."""
+    if not path:
+        return {}
+    source = Path(path)
+    text = source.read_text(encoding="utf-8")
+    if source.suffix == ".json":
+        data = json.loads(text)
+    else:
+        import tomllib  # stdlib, py3.11+
+
+        data = tomllib.loads(text)
+    if not isinstance(data, dict) or any(isinstance(v, dict) for v in data.values()):
+        raise RevlError(
+            path, 0,
+            "expected a flat table of `name = value` entries",
+            hint="the environment contract belongs to the boot component, so "
+                 "there is no component key here (item 350)",
+        )
+    return data
+
+
+_ENV_TYPE_CHECKS = {
+    "Str": (str,),
+    "Int": (int,),
+    "Float": (int, float),
+    "Bool": (bool,),
+}
+
+
+def _bound_render(bound: dict) -> str:
+    """A bound, as the author wrote it — for a diagnostic. Author-written source,
+    never an injected value, so it is always safe to print."""
+    if bound.get("kind") == "under":
+        return f'under "{bound.get("prefix")}"'
+    values = ", ".join(json.dumps(v) for v in bound.get("values") or [])
+    return f"in [{values}]"
+
+
+def _under_violation(value, prefix: str) -> str | None:
+    """Why `value` escapes the `under "<prefix>"` confinement, or None.
+
+    LEXICAL, deliberately: the preflight runs before any runtime and must not
+    consult the filesystem (same reason the required-config check does not), so
+    this normalizes the spelling rather than resolving it. A `..` segment is
+    refused outright rather than normalized away, and an absolute value under a
+    relative prefix (or the reverse) is unrelatable and refused. What this does
+    NOT cover, stated: a SYMLINK inside the prefix still points wherever it
+    points. Confining that needs an enforcer that holds the filesystem at run
+    time (roadmap item 411's sandbox lane, whose container runtime is a trusted
+    enforcer for exactly this reason), not a check in the frontend."""
+    if not isinstance(value, str):
+        return "the value is not a string, so it cannot be a path"
+    parts = [p for p in value.replace("\\", "/").split("/") if p]
+    if any(part == ".." for part in parts):
+        return "the value walks up out of the prefix with `..`"
+    v_abs = os.path.isabs(value)
+    p_abs = os.path.isabs(prefix)
+    if v_abs != p_abs:
+        kind = "absolute" if v_abs else "relative"
+        other = "relative" if v_abs else "absolute"
+        return f"the value is {kind} and the prefix is {other}, so it cannot be inside it"
+    norm_v = os.path.normpath(value)
+    norm_p = os.path.normpath(prefix)
+    if norm_v == norm_p or norm_v.startswith(norm_p.rstrip(os.sep) + os.sep):
+        return None
+    return "the value resolves outside the prefix"
+
+
+def _env_contract_problem(ir: dict, env: dict, config: dict) -> str | None:
+    """The environment-contract violations, as one diagnostic, or ``None``.
+
+    Enforces rules 1, 2 and 4 above (rule 3 is the existing
+    :func:`_required_config_problem`, which sees the merged config). Never
+    echoes an injected value: a contract field may be a credential, and a
+    diagnostic is the one place a preflight could leak one. Field names, types
+    and author-written bounds are source, so they are named freely."""
+    boot = _boot_component(ir)
+    if boot is None:
+        if env:
+            return (
+                "invalid env:\n"
+                "  - this composition declares no `boot` component, so it has no "
+                "environment contract to inject into\n"
+                "  declare one (`boot component <Name> { config { … } }`) or drop "
+                "--env (item 350)."
+            )
+        return None
+    name = boot["name"]
+    fields = {f["name"]: f for f in (boot.get("config") or [])}
+    problems: list[str] = []
+    # rule 1 — one door.
+    if config.get(name):
+        problems.append(
+            f"{name} is the boot component: its values arrive through --env, not --config"
+        )
+    # rule 2 — no silent arrival.
+    for key in sorted(env):
+        if key not in fields:
+            problems.append(
+                f'the environment contract does not declare "{key}"'
+                f" — {name} declares "
+                + (", ".join(sorted(fields)) if fields else "no fields")
+            )
+    # rule 4 — declared bounds.
+    for key in sorted(env):
+        field = fields.get(key)
+        if field is None:
+            continue
+        value = env[key]
+        expected = _ENV_TYPE_CHECKS.get(field.get("type") or "")
+        # `bool` is an `int` subclass in python; an Int field must not accept one
+        if expected and (not isinstance(value, expected)
+                         or (field.get("type") != "Bool" and isinstance(value, bool))):
+            problems.append(
+                f'"{key}" is declared {field.get("type")} and the injected value is not'
+            )
+            continue
+        bound = field.get("bound")
+        if not bound:
+            continue
+        if bound.get("kind") == "under":
+            why = _under_violation(value, bound.get("prefix") or "")
+            if why is not None:
+                problems.append(
+                    f'"{key}" is declared `{_bound_render(bound)}` and the injected '
+                    f"value is outside it: {why}"
+                )
+        elif value not in (bound.get("values") or []):
+            problems.append(
+                f'"{key}" is declared `{_bound_render(bound)}` and the injected '
+                "value is not one of them"
+            )
+    if not problems:
+        return None
+    rendered = "\n".join(f"  - {entry}" for entry in problems)
+    return (
+        "invalid env:\n"
+        f"{rendered}\n"
+        f"  `boot component {name}` is this composition's environment contract — "
+        "the exhaustive, typed list of what the host must inject (item 350)."
+    )
+
+
+def _merge_env(ir: dict, env: dict, config: dict) -> dict:
+    """The config map with the injected environment values seated in the boot
+    component's table. Returns `config` unchanged when the composition declares
+    no boot component, so a boot-free run is byte-identical.
+
+    Called only AFTER :func:`_env_contract_problem` returned None, so every value
+    here is declared, typed and within its bound."""
+    boot = _boot_component(ir)
+    if boot is None or not env:
+        return config
+    merged = dict(config)
+    merged[boot["name"]] = {**(merged.get(boot["name"]) or {}), **env}
+    return merged
+
+
+
 def _required_config_problem(ir: dict, config: dict) -> str | None:
     """The mis-hosted required-config fields, as a diagnostic, or ``None``.
 
@@ -162,14 +369,20 @@ def _required_config_problem(ir: dict, config: dict) -> str | None:
     required-ness carried in the IR itself.
     """
     by_name = {c["name"]: c for c in _components(ir)}
+    boot = _boot_component(ir)
+    boot_name = boot["name"] if boot else None
     missing: list[str] = []
     for name in _load_order(ir):
         fields = (by_name.get(name) or {}).get("config") or []
         supplied = config.get(name) or {}
         for field in fields:
             if field.get("default") is None and field["name"] not in supplied:
+                # item 350: a boot component's fields arrive through `--env`, the
+                # environment contract's one door, so the diagnostic must not
+                # send the host to `--config` — which rule 1 refuses for it.
+                door = "--env" if name == boot_name else "config"
                 missing.append(
-                    f'{name} is missing required config "{field["name"]}"'
+                    f'{name} is missing required {door} "{field["name"]}"'
                     f" ({field.get('type') or '?'})"
                 )
     # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md: a
@@ -188,12 +401,12 @@ def _required_config_problem(ir: dict, config: dict) -> str | None:
     if not missing:
         return None
     rendered = "\n".join(f"  - {entry}" for entry in missing)
-    return (
-        "invalid config:\n"
-        f"{rendered}\n"
-        "  components are declarations — supply their config with "
-        "--config <file>."
+    tail = (
+        "  components are declarations — supply their config with --config <file>"
+        + (f"; `boot component {boot_name}` is the environment contract, so its "
+           "fields are injected with --env <file> (item 350)." if boot_name else ".")
     )
+    return "invalid config:\n" + rendered + "\n" + tail
 
 
 def _config_externs(ir: dict) -> list[dict]:
@@ -1294,12 +1507,24 @@ def run_command(args) -> int:
         # running composition, however it was compiled (docs/holes.md)
         refuse_admission(ir)
         config = _load_config(getattr(args, "config", None))
+        env = _load_env(getattr(args, "env", None))
     except RevlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
         print(f"error: cannot read config: {exc}", file=sys.stderr)
         return 1
+
+    # item 350: the environment contract is checked BEFORE the plan is printed
+    # and before a runtime is imported — an undeclared key, a missing required
+    # field, or a value outside its declared bound refuses the boot here, with
+    # the diagnostic available on an interpreter that has no cordis at all (the
+    # same reason the required-config preflight lives here).
+    problem = _env_contract_problem(ir, env, config)
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
+    config = _merge_env(ir, env, config)
 
     if getattr(args, "plan", False):
         _print_plan(ir, config, backend)
