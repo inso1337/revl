@@ -1,0 +1,11 @@
+// Accumulate a string in a loop. The canonical `s = s + part` shape:
+// every revl emitter, and every real revl program that builds output text,
+// runs this. Item 284 fixed the LIST version of self-append; this is the
+// Str version.
+pub fn str_append(parts: List[Str]) -> Int {
+  var s = ""
+  for (p of parts) {
+    s = s + p
+  }
+  return s.length()
+}

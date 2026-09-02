@@ -1,0 +1,12 @@
+// `while (i < s.length())` — a loop bound that does not change across the
+// loop. `Str.length` is codepoint length, so on rust it is `chars().count()`,
+// an O(n) walk. Evaluated per iteration this is O(n^2).
+pub fn loop_length(s: Str) -> Int {
+  var n = 0
+  var i = 0
+  while (i < s.length()) {
+    n = n + i
+    i = i + 1
+  }
+  return n
+}

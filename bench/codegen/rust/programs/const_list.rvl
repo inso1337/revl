@@ -1,0 +1,18 @@
+// A function whose body is a constant list of string literals, called from a
+// hot loop. This is not hypothetical: `selfhost/lexer.rvl` defines exactly
+// this (`fn keywords() -> List[Str]`) and consults it per identifier token.
+fn keywords() -> List[Str] {
+  return ["service", "component", "requires", "provides", "config", "let",
+    "effect", "undo", "emit", "emission", "provide", "fn", "return",
+    "true", "false", "null", "isolate", "intercept", "realm", "in", "with",
+    "handoff", "spawn", "every", "after", "subscribe", "type", "use", "pub",
+    "var", "while", "for", "of", "if", "else"]
+}
+
+pub fn const_list(words: List[Str]) -> Int {
+  var n = 0
+  for (w of words) {
+    if (keywords().indexOf(w) >= 0) { n = n + 1 }
+  }
+  return n
+}
