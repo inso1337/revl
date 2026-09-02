@@ -19,10 +19,19 @@ Design (see the "type safety" milestone discussion):
       itself has no type. An arrow in checking position, or one whose
       parameters are annotated, is typed and checked (see "function types");
     * function *values* inside a component body (stratum 3): `infer_ir`
-      types no arrow and no call through one, so an arrow that reaches a
-      `provide` method body is unchecked even where the surrounding service
-      signature names a function type. Stratum 1 (`fn`/`test` bodies) is
-      where function types are checked (docs/function-types.md §limits).
+      names an arrow whose signature the lowering proved complete, but does
+      not walk its body and types no call through one, so an arrow that
+      reaches a `provide` method body is still unchecked inside. Stratum 1
+      (`fn`/`test` bodies) is where function types are checked
+      (docs/function-types.md §limits);
+    * a `let x: T` annotation in a `provide` method body: the annotation is
+      recorded so later reads are typed against it, but the bound value is
+      not checked against it (same §limits).
+- `Any` and `Value` launder in both directions by design (the gradual
+  frontier and the erased dynamic document of stdlib/value.rvl, item 180).
+  `Never` does NOT: it is the checker's inferred bottom (`List[Never]`), a
+  two-way wildcard, and uninhabited, so it is non-denotable as a written
+  annotation — writing it would be an unchecked cast with no cast syntax.
 - Function types (docs/function-types.md): `(Int, Str) -> Bool` is a type
   like any other. `parse_type` normalises it to the head `FN_HEAD` with
   `[param..., return]`, so the whole algebra below — unify, substitute,
@@ -47,6 +56,11 @@ Two expression dialects are covered:
 - `infer_ast`   — parser AST (Expr*) used by pure fn bodies (stratum 1);
   raises on definite operator/branch mismatches when `filename` is given.
 - `infer_ir`    — lowered IR nodes used by component bodies (stratum 3).
+- `check_ast` / `check_ir` are the CHECK positions of each dialect: an
+  expectation pushed inward (a record literal named against a declared
+  record's field set, each `if`/`match` arm checked on its own) rather than
+  one `compatible` call on a joined inferred type. Both strata have one, and
+  they must refuse the same programs (the item 392/404/405 parity contract).
 """
 
 from __future__ import annotations
@@ -168,6 +182,14 @@ def parse_type(name: str | None) -> tuple[str | None, list[str]]:
 # recursion, since `Never` is already a wildcard there. `render_type` carries the
 # shape verbatim (stripping only the `?T` marker), so a diagnostic reads it back
 # as the author wrote it.
+#
+# "Unifies field-wise with the nominal record it meets" is now a CHECK, not a
+# comment: `compatible` resolves the nominal side through the declared-type
+# table (`nominal_record_fields`) and compares field sets and field types. It
+# used to return True for EVERY structural-vs-anything pair on the theory that
+# the boundary would catch a real mismatch; it did not, and a record literal was
+# admitted as `Str`, `Bool`, an ADT, `List[Int]`, `(Int) -> Int` and `Int` — in
+# both directions. An unresolvable head now fails CLOSED.
 
 def structural_fields(name: str | None) -> dict[str, str | None] | None:
     """`"{a: Int, h: Str}"` -> `{"a": "Int", "h": "Str"}`; None if not one."""
@@ -199,7 +221,8 @@ _GENERIC_ARITY = {"Opt": 1, "List": 1, "Map": 2, "Result": 2}
 
 
 def check_type_wellformed(filename: str, line: int, type_name: str | None,
-                          *, allow_async_param: bool = False) -> None:
+                          *, allow_async_param: bool = False,
+                          allow_never: bool = False) -> None:
     """Reject a malformed declared type annotation (a builtin generic head
     used with the wrong number of arguments, e.g. bare `Opt` or `List`).
     Recurses into type arguments. User/nominal heads are not arity-checked.
@@ -210,15 +233,37 @@ def check_type_wellformed(filename: str, line: int, type_name: str | None,
     (`allow_async_param=True`). Every other declaration site leaves the flag
     False, so an async function type there is refused with a "not yet" hint."""
     _check_type_wf(filename, line, type_name, type_name,
-                   allow_async=allow_async_param, in_fn_return=False)
+                   allow_async=allow_async_param, in_fn_return=False,
+                   allow_never=allow_never)
 
 
 def _check_type_wf(filename: str, line: int, type_name: str | None,
                    root: str | None, *, allow_async: bool,
-                   in_fn_return: bool) -> None:
+                   in_fn_return: bool, allow_never: bool = False) -> None:
     if not type_name:
         return
     head, args = parse_type(type_name)
+    if head == "Never" and not allow_never:
+        # `Never` is the checker's INFERRED bottom (`List[Never]` for `[]`,
+        # `Map[Str, Never]` for `Map.empty()`), and `_is_wildcard` makes it
+        # compatible with everything in BOTH directions. Written into an
+        # annotation it is therefore an unchecked-cast primitive with no cast
+        # syntax — `pub fn nv(x: Never) -> Int { return x }` admits `nv("s")`
+        # and hands the body a `Str` as an `Int`. It is also uninhabited, so no
+        # honest caller could ever supply one. Like `Approval[C]` above, it is
+        # produced by the checker and non-denotable by the author; the
+        # inference-only spellings never reach this check because it runs on
+        # *written* annotations.
+        raise RevlError(
+            filename, line,
+            f"`Never` cannot be written as a type (`{root}`) — it is the "
+            "checker's inferred bottom (the element type of `[]`), and no "
+            "value inhabits it",
+            hint="use `Any` for a deliberately unchecked position, `Value` for "
+                 "an erased dynamic document (stdlib/value.rvl), or a type "
+                 "parameter (`fn f[T](x: T)`) for a genuinely generic one",
+            code="G4", category="type-mismatch",
+        )
     if head == "Approval":
         # item 246, Decision 3, invariant 5 (non-persistence): `Approval[C]` is
         # produced ONLY by `await approval[C]` and is non-denotable as a written
@@ -266,7 +311,8 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
             )
         # inside the wrapped T, `Async` may not appear again.
         _check_type_wf(filename, line, args[0], root,
-                       allow_async=False, in_fn_return=False)
+                       allow_async=False, in_fn_return=False,
+                       allow_never=allow_never)
         return
     arity = _GENERIC_ARITY.get(head or "")
     if arity is not None and len(args) != arity:
@@ -287,10 +333,11 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
             is_return = i == len(args) - 1
             _check_type_wf(filename, line, arg, root,
                            allow_async=allow_async and is_return,
-                           in_fn_return=is_return)
+                           in_fn_return=is_return, allow_never=allow_never)
         else:
             _check_type_wf(filename, line, arg, root,
-                           allow_async=False, in_fn_return=False)
+                           allow_async=False, in_fn_return=False,
+                           allow_never=allow_never)
 
 
 # ------------------------------------------------- config is data, not a capability
@@ -304,17 +351,38 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
 # arrives at plug/spawn/load time (or through the embedding API) and is invoked
 # past every authority fold. This makes the assertion a CHECK: a config value is
 # injected as static data, so its declared type must be built, transitively, out
-# of data. The only heads a config field may NOT reach are a function (arrow)
-# type (which carries a live callable) and a `service` reference (a capability
-# channel). Scalars, records/ADTs/aliases, and `Opt`/`List`/`Map` of data are all
+# of data. Scalars, records/ADTs/aliases, and `Opt`/`List`/`Map` of data are all
 # fine, so the legitimate data-config feature (`config { url: Str, retries: Int,
 # opts: Options }`) is untouched.
+#
+# The walk is an ALLOWLIST, not a denylist of two forbidden heads. Enumerating
+# "not an arrow, not a service" left `Any` (and `Value`, `Never`, and every
+# opaque nominal) passing: none of them is an arrow head or a declared service
+# name, none resolves in `type_defs`, and none has type arguments — so the walk
+# fell off its own end and admitted the field. `compatible` then treats `Any`
+# as a wildcard, so `config.v("payload")` typechecks as a CALL and emits
+# `_revl_config['v']('payload')`: a live callable injected at plug/spawn/load
+# time is invoked past every authority fold, which is item 378 verbatim. A head
+# that is not *provably* data is now refused, so a new denotable type cannot
+# reopen the hole merely by not being on a list.
 
 _CONFIG_DATA_HINT = (
     "a config field must be static data (a scalar, or a record/list/Opt of "
     "data); an arrow type / a service cannot be a config field, because config "
     "is not a capability channel (item 378)"
 )
+
+# Every head a config field may reach. Anything else is refused: a config value
+# is deserialised from a static table, so its type must name a shape that table
+# can hold.
+_CONFIG_DATA_SCALARS = {"Int", "Int32", "Float", "Str", "Bool", "Bytes", "Unit"}
+_CONFIG_DATA_CONTAINERS = {"Opt", "List", "Map", "Result"}
+# The erased/dynamic and bottom types. Each is a `compatible` wildcard in at
+# least one direction, so admitting one as a config field would hand the body a
+# value of *any* runtime shape — a callable included — with no refusal left
+# downstream. `Never` is additionally uninhabited, so a `Never` config field
+# could never be supplied honestly in the first place.
+_CONFIG_ERASED = {"Any", "Value", "Never"}
 
 
 def check_config_field_is_data(filename: str, line: int, field_name: str,
@@ -329,7 +397,7 @@ def check_config_field_is_data(filename: str, line: int, field_name: str,
     nominal record/ADT/alias into its component types."""
     _walk_config_type(filename, line, field_name, owner, type_name, type_name,
                       service_names=service_names, type_defs=type_defs,
-                      visited=frozenset())
+                      visited=frozenset(), tparams=frozenset())
 
 
 def _config_data_error(filename: str, line: int, field_name: str, owner: str,
@@ -343,21 +411,43 @@ def _config_data_error(filename: str, line: int, field_name: str, owner: str,
     )
 
 
+def _is_type_expression(name: str | None, type_defs: dict,
+                        tparams: frozenset) -> bool:
+    """Is this "case name" actually an alias RHS rather than a nullary tag?
+
+    `type Rows = List[Row]` and `type H = (Str) -> Str` both parse into a
+    single "case" whose *name* is the aliased type; `type Color = Red | Green`
+    parses into nullary tags that name nothing. A spelling that carries type
+    arguments, a function arrow, a record shape, a builtin type name, a type
+    parameter in scope, or a declared type is the former."""
+    if not name:
+        return False
+    if structural_fields(name) is not None:
+        return True
+    head, args = parse_type(name)
+    return bool(args) or head == FN_HEAD or head in _BUILTIN_TYPE_NAMES \
+        or head in tparams or head in type_defs
+
+
 def _walk_config_type(filename: str, line: int, field_name: str, owner: str,
                       type_name: str | None, root: str | None, *,
                       service_names: set[str], type_defs: dict,
-                      visited: frozenset) -> None:
+                      visited: frozenset, tparams: frozenset) -> None:
     if not type_name:
         return
     type_name = type_name.strip()
+
+    def walk(target, *, visited=visited, tparams=tparams):
+        _walk_config_type(filename, line, field_name, owner, target, root,
+                          service_names=service_names, type_defs=type_defs,
+                          visited=visited, tparams=tparams)
+
     # A structural record literal type `{a: T, ...}` (item 71) carries its field
     # types inline; recurse into each so a smuggled arrow field is caught.
     sfields = structural_fields(type_name)
     if sfields is not None:
         for ftype in sfields.values():
-            _walk_config_type(filename, line, field_name, owner, ftype, root,
-                              service_names=service_names, type_defs=type_defs,
-                              visited=visited)
+            walk(ftype)
         return
     head, args = parse_type(type_name)
     if head == FN_HEAD:
@@ -366,34 +456,53 @@ def _walk_config_type(filename: str, line: int, field_name: str, owner: str,
     if head in service_names:
         raise _config_data_error(filename, line, field_name, owner, root,
                                  f"the service `{head}`")
+    if head in tparams:
+        # A type parameter of the record/ADT currently being resolved
+        # (`type Box[T] = { v: T }` reached from `config { b: Box[Int] }`). Its
+        # binding is the type argument at the use site, which this walk visits
+        # in its own right, so the parameter itself carries nothing.
+        return
+    if head in _CONFIG_DATA_CONTAINERS or head in _CONFIG_DATA_SCALARS:
+        for arg in args:
+            walk(arg)
+        return
     info = type_defs.get(head or "")
-    if info is not None:
-        # A nominal record/ADT/alias: resolve it and walk its component types.
-        # Guard against a recursive type (`type Tree = Node(Tree)`) with the
-        # visited set (a cycle through data heads is still data).
-        if head not in visited:
-            child_visited = visited | {head}
-            if info.get("kind") == "record":
-                for ftype in (info.get("fields") or {}).values():
-                    _walk_config_type(filename, line, field_name, owner, ftype,
-                                      root, service_names=service_names,
-                                      type_defs=type_defs, visited=child_visited)
-            else:
-                for case in info.get("cases") or []:
-                    # A variant case carries either a parenthesised payload
-                    # (`Hit(Row)`) or, for an alias RHS (`type Rows = List[Row]`),
-                    # the target type spelled as the sole case name.
-                    target = case.get("payload") or case.get("name")
-                    _walk_config_type(filename, line, field_name, owner, target,
-                                      root, service_names=service_names,
-                                      type_defs=type_defs, visited=child_visited)
-    # A parametric head (builtin `Opt`/`List`/`Map`/`Result` or a user generic)
-    # carries its data in the type arguments; walk them regardless of whether the
-    # head itself resolved above.
+    if info is None:
+        # Not a scalar, not a container, not a declared record/ADT/alias, not a
+        # type parameter in scope: nothing here proves the field is data, so the
+        # walk refuses rather than falling off its end (item 378).
+        offender = (f"the erased type `{head}`" if head in _CONFIG_ERASED
+                    else f"the opaque type `{head}`")
+        raise _config_data_error(filename, line, field_name, owner, root,
+                                 offender)
+    # A nominal record/ADT/alias: resolve it and walk its component types.
+    # Guard against a recursive type (`type Tree = Node(Tree)`) with the
+    # visited set (a cycle through data heads is still data).
+    if head not in visited:
+        child_visited = visited | {head}
+        child_tparams = frozenset(info.get("params") or ())
+        if info.get("kind") == "record":
+            for ftype in (info.get("fields") or {}).values():
+                walk(ftype, visited=child_visited, tparams=child_tparams)
+        else:
+            for case in info.get("cases") or []:
+                # A variant case carries either a parenthesised payload
+                # (`Hit(Row)`) or, for an alias RHS (`type Rows = List[Row]`),
+                # the target type spelled as the sole case name. A NULLARY tag
+                # (`type Color = Red | Green`) carries no data at all, so it is
+                # not a type to walk — telling the two apart matters now that an
+                # unresolvable head is refused instead of ignored.
+                payload = case.get("payload")
+                if payload is not None:
+                    walk(payload, visited=child_visited, tparams=child_tparams)
+                    continue
+                name = case.get("name")
+                if _is_type_expression(name, type_defs, child_tparams):
+                    walk(name, visited=child_visited, tparams=child_tparams)
+    # A user generic head carries data in its type arguments too; walk them with
+    # the OUTER type-parameter scope (they are written at this use site).
     for arg in args:
-        _walk_config_type(filename, line, field_name, owner, arg, root,
-                          service_names=service_names, type_defs=type_defs,
-                          visited=visited)
+        walk(arg)
 
 
 # ------------------------------------------------- type parameters
@@ -544,7 +653,8 @@ def render_type(type_name: str | None) -> str | None:
     return type_name.replace(_TPARAM, "") if type_name else type_name
 
 
-def unify(param: str | None, actual: str | None, subst: dict) -> bool:
+def unify(param: str | None, actual: str | None, subst: dict,
+          types: dict | None = None) -> bool:
     """Match a (marked) parameter type against an argument type, growing
     `subst`. Returns False only on a *definite* conflict; unknowns pass."""
     if param is None or actual is None:
@@ -562,17 +672,17 @@ def unify(param: str | None, actual: str | None, subst: dict) -> bool:
         if prior is None:
             subst[head] = actual
             return True
-        widened = join(prior, actual)
+        widened = join(prior, actual, types)
         if widened is None:
             return False
         subst[head] = widened
         return True
     ahead, aargs = parse_type(actual)
     if head == "Opt" and args and ahead != "Opt":
-        return unify(args[0], actual, subst)  # T -> Opt[T] injection
+        return unify(args[0], actual, subst, types)  # T -> Opt[T] injection
     if head == ahead and len(args) == len(aargs):
-        return all(unify(p, a, subst) for p, a in zip(args, aargs))
-    return compatible(param, actual)
+        return all(unify(p, a, subst, types) for p, a in zip(args, aargs))
+    return compatible(param, actual, types)
 
 
 def substitute(type_name: str | None, subst: dict) -> str | None:
@@ -595,8 +705,45 @@ def _is_wildcard(name: str | None) -> bool:
     )
 
 
-def compatible(expected: str | None, actual: str | None) -> bool:
-    """May a value of type `actual` flow into a position typed `expected`?"""
+def nominal_record_fields(type_name: str | None,
+                          types: dict | None) -> dict | None:
+    """`{field: type}` of a DECLARED nominal record type, else None.
+
+    A generic record resolves at its instantiation: `Box[Int]` against
+    `type Box[T] = { v: T }` yields `{v: Int}`, the declared field types with
+    the type arguments substituted. A wrong arity, or a head that is not a
+    declared record, stays unresolved — and an unresolved head is REFUSED
+    where a structural record meets it, never admitted."""
+    if not types or not type_name:
+        return None
+    head, args = parse_type(type_name)
+    if not head:
+        return None
+    spec = types.get(head)
+    if not (isinstance(spec, dict) and spec.get("kind") == "record"):
+        return None
+    fields = spec.get("fields") or {}
+    params = list(spec.get("params") or ())
+    if not params:
+        return fields if not args else None
+    if len(args) != len(params):
+        return None
+    subst = dict(zip(params, args))
+    return {name: substitute(ftype, subst) for name, ftype in fields.items()}
+
+
+def compatible(expected: str | None, actual: str | None,
+               types: dict | None = None) -> bool:
+    """May a value of type `actual` flow into a position typed `expected`?
+
+    `types` is the declared-type table, when the caller has one. It is what
+    lets a STRUCTURAL record type (`{id: Int}`, item 71) be resolved against
+    the nominal record it meets. Without it a structural type meeting anything
+    but another structural type is refused: the pre-fix `return True` there was
+    a two-way unchecked cast reachable from any unannotated expression
+    position (F3), admitting a record literal as `Str`, `Bool`, an ADT,
+    `List[Int]`, `(Int) -> Int` and `Int`, and admitting a scalar into a
+    structural field. Fail closed, and give every real boundary the table."""
     if _is_wildcard(expected) or _is_wildcard(actual):
         return True
     # `Value` is the stdlib erased-dynamic type (stdlib/value.rvl, roadmap item
@@ -616,20 +763,26 @@ def compatible(expected: str | None, actual: str | None) -> bool:
         return True
     e_struct = structural_fields(expected)
     a_struct = structural_fields(actual)
+    # A structural record meets a NOMINAL record field-wise (item 71). That is
+    # the ONE mixed case that may be admitted, and it needs the declared-type
+    # table to resolve the nominal's fields; resolution is one-sided on purpose,
+    # so two *nominal* records never become structurally interchangeable.
+    if e_struct is not None and a_struct is None:
+        a_struct = nominal_record_fields(actual, types)
+    elif a_struct is not None and e_struct is None:
+        e_struct = nominal_record_fields(expected, types)
     if e_struct is not None and a_struct is not None:
-        # Two structural records unify field-wise: the same field set, each
-        # value type compatible (the `List[Never]` bottom rule is the
-        # elementwise recursion, `Never` being a wildcard).
+        # Two record shapes unify field-wise: the same field set, each value
+        # type compatible (the `List[Never]` bottom rule is the elementwise
+        # recursion, `Never` being a wildcard).
         if set(e_struct) != set(a_struct):
             return False
-        return all(compatible(e_struct[k], a_struct[k]) for k in e_struct)
-    if e_struct is not None or a_struct is not None:
-        # A structural record meets a NOMINAL one only at a declared boundary,
-        # where `check_ast` has the `types` table to resolve the nominal's
-        # fields and refuses a definite mismatch by name. Here, with no table
-        # to resolve, stay permissive exactly as the pre-fix anonymous `None`
-        # did — a structural type is never a false rejection on its own.
-        return True
+        return all(compatible(e_struct[k], a_struct[k], types) for k in e_struct)
+    # An unresolved mixed case falls through to the head algebra below. A
+    # structural type's canonical spelling (`{a: Int}`) is its own head with no
+    # arguments, so it matches no scalar, container, arrow or ADT head and the
+    # tail returns False — while `Opt`/`Async` on the *expected* side still get
+    # their injection/coercion rules first, and can reach the record inside.
     ehead, eargs = parse_type(expected)
     ahead, aargs = parse_type(actual)
     if ehead == "Float" and ahead == "Int":
@@ -650,7 +803,7 @@ def compatible(expected: str | None, actual: str | None) -> bool:
         # Two async returns (`Async[T]` vs `Async[U]`) meet elementwise via the
         # generic same-head rule at the tail of this function.
         if ahead != "Async":
-            return compatible(eargs[0] if eargs else None, actual)
+            return compatible(eargs[0] if eargs else None, actual, types)
     if ehead == FN_HEAD:
         # A function value flows where a function type is expected only if it
         # accepts everything that position will pass it and returns something
@@ -660,25 +813,25 @@ def compatible(expected: str | None, actual: str | None) -> bool:
         # hands the callee a Float.
         if ehead != ahead or len(eargs) != len(aargs):
             return False
-        return (all(compatible(a, e) for e, a in zip(eargs[:-1], aargs[:-1]))
-                and compatible(eargs[-1], aargs[-1]))
+        return (all(compatible(a, e, types) for e, a in zip(eargs[:-1], aargs[:-1]))
+                and compatible(eargs[-1], aargs[-1], types))
     if ehead == "Opt":
         einner = eargs[0] if eargs else None  # bare `Opt` degrades to wildcard
         if ahead == "Opt":
-            return compatible(einner, aargs[0] if aargs else None)
-        return compatible(einner, actual)  # T -> Opt[T] injection
+            return compatible(einner, aargs[0] if aargs else None, types)
+        return compatible(einner, actual, types)  # T -> Opt[T] injection
     if ehead == ahead and len(eargs) == len(aargs):
-        return all(compatible(e, a) for e, a in zip(eargs, aargs))
+        return all(compatible(e, a, types) for e, a in zip(eargs, aargs))
     return False
 
 
-def join(a: str | None, b: str | None) -> str | None:
+def join(a: str | None, b: str | None, types: dict | None = None) -> str | None:
     """Common type of two branches, or None when unknown."""
     if a is None or b is None:
         return None
-    if compatible(a, b):
+    if compatible(a, b, types):
         return a
-    if compatible(b, a):
+    if compatible(b, a, types):
         return b
     return None
 
@@ -1129,8 +1282,15 @@ def host_family_check(family: str, method: str, arg_types: list,
 
 
 def builtin_check(method: str, target_type: str | None, arg_types: list,
-                  filename: str | None, line: int) -> str | None:
-    """Type a stdlib method call; raises on definite mismatches."""
+                  filename: str | None, line: int,
+                  types: dict | None = None) -> str | None:
+    """Type a stdlib method call; raises on definite mismatches.
+
+    `types` is the declared-type table, passed through to `compatible` so a
+    structural record literal argument still meets the nominal element type of
+    the receiver (`xs: List[Row]` then `xs.push({ id: 1 })`). Without it that
+    comparison fails closed, which is right for an unresolvable head and wrong
+    for a resolvable one."""
     # item 386, Stage 2: a poisoned receiver (a binding whose initializer was a
     # recovered type error) is folded to the unknown receiver here, so the
     # receiver-family refusals below stay silent — `compatible` already treats
@@ -1189,7 +1349,8 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
         elem = targs[1]
     for spec, actual in zip(params, arg_types):
         expected = {"@elem": elem, "@member": elem if thead == "List" else ("Str" if thead == "Str" else None), "@self": target_type}.get(spec, spec)
-        if filename and expected and actual and not compatible(expected, actual):
+        if filename and expected and actual \
+                and not compatible(expected, actual, types):
             raise mismatch(filename, line, f"builtin `{method}` argument", expected, actual)
     if ret == "@self" and elem == "Never":
         # Bottom-typed receiver — the empty literal `[]` / `Map.empty()`.
@@ -1456,7 +1617,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         inner = targs[0] if targs else None
         if isinstance(expr, ExprOptCall):
             args = [infer_ast(a, tenv, types, filename) for a in expr.args]
-            result = builtin_check(expr.method, inner, args, filename, line)
+            result = builtin_check(expr.method, inner, args, filename, line, types)
         else:
             spec = types.get(inner or "")
             ihead, _ = parse_type(inner)
@@ -1508,15 +1669,15 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         infer_ast(expr.cond, tenv, types, filename)
         a = infer_ast(expr.then, tenv, types, filename)
         b = infer_ast(expr.otherwise, tenv, types, filename)
-        if filename and a and b and join(a, b) is None:
+        if filename and a and b and join(a, b, types) is None:
             raise RevlError(filename, line,
                             f"ternary branches disagree: `{render_type(a)}` vs `{render_type(b)}`")
-        return join(a, b)
+        return join(a, b, types)
     if isinstance(expr, ExprList):
         item = None
         for e in expr.items:
             t = infer_ast(e, tenv, types, filename)
-            item = t if item is None else join(item, t)
+            item = t if item is None else join(item, t, types)
         return f"List[{item}]" if item else "List[Never]"
     if isinstance(expr, ExprRecord):
         # An anonymous literal infers a STRUCTURAL record type from its fields
@@ -1613,7 +1774,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             case = (types.get(CASES_KEY) or {}).get(name)
             if case is not None:
                 if filename and case["payload"] and arg_types and arg_types[0] and \
-                        not compatible(case["payload"], arg_types[0]):
+                        not compatible(case["payload"], arg_types[0], types):
                     raise mismatch(filename, line, f"`{name}(...)` payload",
                                    case["payload"], arg_types[0])
                 if name == "Some":
@@ -1660,7 +1821,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                                       f"`{name}(...)`")
                     if filename:
                         for i, (p, a) in enumerate(zip(params, arg_types)):
-                            if p and a and not compatible(p, a):
+                            if p and a and not compatible(p, a, types):
                                 raise mismatch(filename, line,
                                                f"argument {i + 1} of `{name}(...)`", p, a)
                     return sig["returns"]
@@ -1668,7 +1829,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                 # arguments rather than letting every `T` position pass
                 subst: dict = {}
                 for i, (p, a) in enumerate(zip(params, arg_types)):
-                    if unify(p, a, subst):
+                    if unify(p, a, subst, types):
                         continue
                     if not filename:
                         return None
@@ -1714,7 +1875,8 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                     and target_t not in _HOST_FAMILIES):
                 return infer_ast(desugar_list_transform(expr), tenv, types,
                                  filename)
-            return builtin_check(expr.callee.name, target_t, arg_types, filename, line)
+            return builtin_check(expr.callee.name, target_t, arg_types, filename,
+                                 line, types)
         # any other callee expression: an arrow applied in place, a function
         # value read out of a `let` chain, …
         callee_t = infer_ast(expr.callee, tenv, types, filename)
@@ -1739,7 +1901,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                 else:
                     inner.pop(bind, None)
             t = infer_ast(body, inner, types, filename)
-            result = t if result is None else join(result, t)
+            result = t if result is None else join(result, t, types)
         return result
     if isinstance(expr, ExprArrow):
         # item 75(a) §3.1 — an arrow in *inference* position has no expected
@@ -1996,7 +2158,7 @@ def call_function_value(expr, fn_type: str, what: str, arg_types: list,
     _check_arrow_args(expr.args, params, tenv, types, filename, what)
     if filename:
         for i, (p, a) in enumerate(zip(params, arg_types)):
-            if p and a and not compatible(p, a):
+            if p and a and not compatible(p, a, types):
                 raise mismatch(filename, line, f"argument {i + 1} of {what}", p, a)
     # Elimination: calling an async-typed value yields the *unwrapped* `T` — the
     # tier-level await is implicit (item 92 §2). No expression ever has type
@@ -2054,7 +2216,7 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
     resolved: list = []
     inner = dict(tenv)
     for name, written, want in zip(expr.params, annotations, want_params):
-        if written and not compatible(written, want):
+        if written and not compatible(written, want, types):
             raise mismatch(filename, line,
                            f"parameter `{name}` of this arrow (from {where})",
                            want, written)
@@ -2076,7 +2238,7 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
     # the position is async — rule C3, an annotation on an arrow that will be
     # coerced into an `Async[T]` slot names the sync inner type `T`.
     written_return = getattr(expr, "written_returns", None)
-    if written_return and body_return and not compatible(body_return, written_return):
+    if written_return and body_return and not compatible(body_return, written_return, types):
         raise mismatch(filename, line,
                        f"the return type of this arrow (from {where})",
                        body_return, written_return)
@@ -2185,7 +2347,7 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
                     )
                 check_ast(value, declared.get(name), tenv, types, filename,
                           f"update of field `{name}` of `{render_type(base_t)}`")
-        if base_t and not compatible(expected, base_t):
+        if base_t and not compatible(expected, base_t, types):
             raise mismatch(filename, line, where, expected,
                            render_type(base_t) or base_t)
         return
@@ -2220,12 +2382,12 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
                             f"{where} expects `{expected}`, but the record has "
                             f"{'; '.join(parts)}")
         for name, ftype in struct.items():
-            if ftype and not compatible(declared.get(name), ftype):
+            if ftype and not compatible(declared.get(name), ftype, types):
                 raise mismatch(filename, line,
                                f"field `{name}` of `{expected}`",
                                declared.get(name), ftype)
         return
-    if actual and not compatible(expected, actual):
+    if actual and not compatible(expected, actual, types):
         raise mismatch(filename, line, where, expected, actual)
 
 
@@ -2312,7 +2474,7 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         subst: dict = {}
         for i, (p, a) in enumerate(zip(sig["params"], args)):
             at = infer_ir(a, tenv, types, services, filename, line)
-            if unify(p, at, subst):
+            if unify(p, at, subst, types):
                 continue
             if filename:
                 raise mismatch(filename, line, f"argument {i + 1} of `{name}(...)`",
@@ -2322,7 +2484,8 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
     if kind == "builtin":
         target_t = infer_ir(node.get("target"), tenv, types, services, filename, line)
         args = [infer_ir(a, tenv, types, services, filename, line) for a in node.get("args") or []]
-        return builtin_check(node.get("method"), target_t, args, filename, line)
+        return builtin_check(node.get("method"), target_t, args, filename, line,
+                             types)
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map): bottom-typed empty value.
         return "Map[Str, Never]"
@@ -2332,7 +2495,7 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         item = None
         for e in node.get("items") or []:
             t = infer_ir(e, tenv, types, services, filename, line)
-            item = t if item is None else join(item, t)
+            item = t if item is None else join(item, t, types)
         return f"List[{item}]" if item else "List[Never]"
     if kind == "record":
         # item 405: an anonymous record literal infers a STRUCTURAL record type
@@ -2347,6 +2510,96 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         for name, value in node.get("fields") or []:
             shape[name] = infer_ir(value, tenv, types, services, filename, line)
         return format_structural(shape)
+    if kind == "record_update":
+        # F4: `infer_ir` had NO case for a record update, so stratum 3 accepted
+        # `{ r | nope = 1 }` and `{ r | id = "not an int" }` that a `fn` body
+        # (stratum 1, `infer_ast`'s `ExprRecordUpdate`) refuses by name and by
+        # type. Mirror the same three docs/records.md §3 rules — the field must
+        # exist, its replacement must match, the result is the base's type — on
+        # the lowered dialect. The base's shape is resolved either structurally
+        # (an anonymous literal, item 71) or nominally through `types`.
+        base_t = infer_ir(node.get("base"), tenv, types, services, filename, line)
+        struct = structural_fields(base_t)
+        declared = struct if struct is not None \
+            else nominal_record_fields(base_t, types)
+        for name, value in node.get("updates") or []:
+            vt = infer_ir(value, tenv, types, services, filename, line)
+            if declared is None:
+                # a host-frontier or otherwise unrecoverable base: stay silent,
+                # exactly as `infer_ast` does when the base type is unknown
+                continue
+            if filename and name not in declared:
+                raise RevlError(
+                    filename, line,
+                    f"record update names `{name}`, which is not a field of "
+                    f"`{render_type(base_t)}`",
+                    hint=f"fields: {', '.join(f'`{f}`' for f in sorted(declared))}",
+                )
+            ftype = declared.get(name)
+            if filename and vt and ftype and not compatible(ftype, vt, types):
+                raise mismatch(filename, line, f"update of field `{name}`",
+                               ftype, vt)
+        return base_t
+    if kind == "adt":
+        # F4: ADT-case construction had no `infer_ir` case, so a provide body
+        # accepted `P("str")` where `type P = P(Int)` — refused in a `fn` body
+        # by `infer_ast`'s case-table payload check. Same diagnostic here.
+        tname = node.get("type")
+        case_name = node.get("case")
+        args = node.get("args") or []
+        spec = types.get(tname or "")
+        generic = isinstance(spec, dict) and bool(spec.get("params"))
+        payload = None
+        if isinstance(spec, dict) and spec.get("kind") == "variant" and not generic:
+            for case in spec.get("cases") or []:
+                if case.get("name") == case_name:
+                    payload = case.get("payload")
+                    break
+        for i, arg in enumerate(args):
+            at = infer_ir(arg, tenv, types, services, filename, line)
+            if i == 0 and filename and payload and at \
+                    and not compatible(payload, at, types):
+                raise mismatch(filename, line, f"`{case_name}(...)` payload",
+                               payload, at)
+        # A GENERIC ADT's construction names the bare head (`Box`), not the
+        # instantiation (`Box[Int]`) — the case table carries the declaration's
+        # own spelling. Reporting the bare head would make an honest
+        # `-> Box[Int] = B(1)` a head-arity mismatch, so a generic ADT stays
+        # unknown here (stratum 1 has its own separate gap on the same shape,
+        # filed; this is not the place to invent an answer it does not give).
+        return None if generic else tname
+    if kind == "match":
+        # F4: `infer_ir` had no `match` case, so every arm body escaped the
+        # raising sweep and the eliminator's own type was unknown. Each arm is
+        # inferred with its payload binding in scope (the lowering writes the
+        # bound name and `payload_type` onto the arm) and the arm types join,
+        # mirroring `infer_ast`'s `ExprMatch`.
+        result = None
+        first = True
+        for arm in node.get("arms") or []:
+            inner = dict(tenv)
+            bind = arm.get("bind")
+            if bind is not None:
+                payload_type = arm.get("payload_type")
+                if payload_type is not None:
+                    inner[bind] = payload_type
+                else:
+                    inner.pop(bind, None)
+            t = infer_ir(arm.get("body"), inner, types, services, filename, line)
+            result, first = (t if first else join(result, t, types)), False
+        return result
+    if kind == "arrow":
+        # An arrow whose signature the lowering proved complete carries it in
+        # the IR (`param_types` + `returns`); that is exactly the case where a
+        # function type is known, so name it. A partially annotated arrow keeps
+        # both keys absent and stays untyped — stratum 3 still does not CHECK an
+        # arrow body (docs/function-types.md §limits, item 75(a) §5.3).
+        param_types = node.get("param_types")
+        returns = node.get("returns")
+        if param_types is not None and returns:
+            return format_type(FN_HEAD,
+                               [p or "Any" for p in param_types] + [returns])
+        return None
 
     if kind == "bin":
         lt = infer_ir(node.get("left"), tenv, types, services, filename, line)
@@ -2463,7 +2716,8 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         if kind == "optcall":
             args = [infer_ir(a, tenv, types, services, filename, line)
                     for a in node.get("args") or []]
-            result = builtin_check(node.get("method"), inner, args, filename, line)
+            result = builtin_check(node.get("method"), inner, args, filename,
+                                   line, types)
         else:
             spec = types.get(inner or "")
             ihead, _ = parse_type(inner)
@@ -2512,5 +2766,109 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         return None
     if kind == "if":
         return join(infer_ir(node.get("then"), tenv, types, services, filename, line),
-                    infer_ir(node.get("else"), tenv, types, services, filename, line))
+                    infer_ir(node.get("else"), tenv, types, services, filename, line),
+                    types)
     return None
+
+
+def check_ir(node, expected: str | None, tenv: dict, types: dict,
+             services: dict, filename: str, line: int, where: str) -> None:
+    """Bidirectional check of a lowered IR expression against `expected`.
+
+    F4: stratum 1 (`fn`/`test`) has `check_ast`; stratum 3 (component and
+    `provide` method bodies) had only `compatible(declared, infer_ir(...))` —
+    inference, never a check position. So the shapes whose refusal lives in
+    CHECK position (a record literal against a declared record's field set)
+    were admitted inside a `provide` body while the identical `fn` body refused
+    them, breaking the item 392/404/405 parity contract at a declared service
+    boundary. This is `check_ast`'s structure over the IR dialect: the same
+    positions push the expectation inward, and the tail is the same
+    structural-meets-nominal resolution followed by `compatible`."""
+    if expected is None or not isinstance(node, dict):
+        infer_ir(node, tenv, types, services, filename, line)
+        return
+    kind = node.get("kind")
+    if kind == "hole":
+        # a lowered hole was already pinned with the type it was admitted at
+        return
+    spec = types.get(expected or "")
+    if kind == "record" and isinstance(spec, dict) and spec.get("kind") == "record":
+        declared = spec.get("fields", {})
+        given = {name for name, _ in node.get("fields") or []}
+        missing = sorted(set(declared) - given)
+        extra = sorted(given - set(declared))
+        if missing or extra:
+            parts = []
+            if missing:
+                parts.append(f"missing {', '.join(f'`{m}`' for m in missing)}")
+            if extra:
+                parts.append(f"unknown {', '.join(f'`{e}`' for e in extra)}")
+            raise RevlError(filename, line,
+                            f"record literal for `{expected}` has {'; '.join(parts)}")
+        for name, value in node.get("fields") or []:
+            check_ir(value, declared.get(name), tenv, types, services, filename,
+                     line, f"field `{name}` of `{expected}`")
+        return
+    ehead, eargs = parse_type(expected)
+    if kind == "list" and ehead == "List":
+        for item in node.get("items") or []:
+            check_ir(item, eargs[0] if eargs else None, tenv, types, services,
+                     filename, line, f"element of `{expected}`")
+        return
+    if kind == "if":
+        infer_ir(node.get("cond"), tenv, types, services, filename, line)
+        check_ir(node.get("then"), expected, tenv, types, services, filename,
+                 line, where)
+        check_ir(node.get("else"), expected, tenv, types, services, filename,
+                 line, where)
+        return
+    if kind == "match":
+        # per-arm check position, for the reason `check_ast` gives: the JOIN of
+        # disagreeing arms is None (unknown), so one `compatible` on the joined
+        # type passes silently where each arm individually would be refused.
+        infer_ir(node.get("scrutinee"), tenv, types, services, filename, line)
+        for arm in node.get("arms") or []:
+            inner = dict(tenv)
+            bind = arm.get("bind")
+            if bind is not None:
+                payload_type = arm.get("payload_type")
+                if payload_type is not None:
+                    inner[bind] = payload_type
+                else:
+                    inner.pop(bind, None)
+            check_ir(arm.get("body"), expected, inner, types, services,
+                     filename, line, where)
+        return
+    if kind == "record_update":
+        # docs/records.md §3: the result is the base's type. `infer_ir` runs the
+        # per-field update checks; the expectation is checked against the base.
+        base_t = infer_ir(node, tenv, types, services, filename, line)
+        if base_t and not compatible(expected, base_t, types):
+            raise mismatch(filename, line, where, expected,
+                           render_type(base_t) or base_t)
+        return
+    actual = infer_ir(node, tenv, types, services, filename, line)
+    struct = structural_fields(actual)
+    if struct is not None and isinstance(spec, dict) \
+            and spec.get("kind") == "record":
+        # the declared boundary where a structural record meets the nominal one
+        # (item 71) — named field-wise, exactly as `check_ast` names it
+        declared = spec.get("fields", {})
+        missing = sorted(set(declared) - set(struct))
+        extra = sorted(set(struct) - set(declared))
+        if missing or extra:
+            parts = []
+            if missing:
+                parts.append(f"missing {', '.join(f'`{m}`' for m in missing)}")
+            if extra:
+                parts.append(f"unknown {', '.join(f'`{e}`' for e in extra)}")
+            raise RevlError(filename, line,
+                            f"{where} expects `{expected}`, but the record has "
+                            f"{'; '.join(parts)}")
+        for name, ftype in struct.items():
+            if ftype and not compatible(declared.get(name), ftype, types):
+                raise mismatch(filename, line, f"field `{name}` of `{expected}`",
+                               declared.get(name), ftype)
+        return
+    if actual and not compatible(expected, actual, types):
+        raise mismatch(filename, line, where, expected, actual)

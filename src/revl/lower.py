@@ -40,6 +40,7 @@ from .typecheck import (
     host_check,
     _HOST_FAMILIES,
     _HOST_RESULT_SIG,
+    check_ir,
     infer_ast,
     infer_ir,
     mismatch,
@@ -1046,12 +1047,12 @@ def _validate_declared_types(program: Program, filename: str) -> None:
         if decl.fields:
             config_type_defs.setdefault(
                 decl.name,
-                {"kind": "record",
+                {"kind": "record", "params": list(decl.params or ()),
                  "fields": {f.name: f.type for f in decl.fields}})
         else:
             config_type_defs.setdefault(
                 decl.name,
-                {"kind": "variant",
+                {"kind": "variant", "params": list(decl.params or ()),
                  "cases": [{"name": c.name, "payload": c.payload}
                            for c in decl.cases]})
 
@@ -4207,7 +4208,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
             check_ast(value, declared, type_env, types, filename,
                       f"assignment to `{stmt.name}` (a `{render_type(declared)}` variable)")
         inferred = infer_ast(value, type_env, types, filename)
-        if declared and inferred and not compatible(declared, inferred):
+        if declared and inferred and not compatible(declared, inferred, types):
             raise mismatch(filename, stmt.line,
                            f"assignment to `{stmt.name}` (a `{render_type(declared)}` variable)",
                            declared, inferred)
@@ -4438,7 +4439,11 @@ def _lower_hole(expr: ExprHole, filename: str) -> dict:
                  "an argument of a declared function (docs/holes.md)",
             code="T3", category="hole",
         )
-    check_type_wellformed(filename, expr.line, type_name)
+    # a hole's type is either written (`hole[T]`) or PINNED from the position it
+    # sits in, and a pinned type may be an inferred bottom (`List[Never]`), which
+    # the author never wrote — so the non-denotable-`Never` rule does not apply
+    check_type_wellformed(filename, expr.line, type_name,
+                          allow_never=expr.known_type is None)
     node = {"kind": "hole", "type": type_name, "file": filename, "line": expr.line}
     if expr.message is not None:
         node["message"] = expr.message
@@ -5028,7 +5033,7 @@ def _validate_default_params(program: Program, types: dict,
                     code="G6", category="purity",
                 )
             dt = infer_ast(default, {}, types, program.filename)
-            if dt is not None and not compatible(p.type, dt):
+            if dt is not None and not compatible(p.type, dt, types):
                 raise mismatch(program.filename, p.line,
                                f"default for parameter `{p.name}`", p.type, dt)
 
@@ -5766,7 +5771,7 @@ def _component_req_call(env: Env, root: str, method: str, args: list, line: int)
         )
     for arg, (pname, ptype) in zip(args, decl.params):
         actual = infer_ir(arg, env.type_env, env.types, env.services)
-        if ptype and actual and not compatible(ptype, actual):
+        if ptype and actual and not compatible(ptype, actual, env.types):
             raise mismatch(env.filename, line,
                            f"`{root}.{method}` argument `{pname}`", ptype, actual)
     return {"kind": "call", "target": {"kind": "req", "name": root},
@@ -8460,8 +8465,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             if annotation is None:
                 continue
             check_type_wellformed(filename, method.line, annotation)
-            if svc_ptype and not (compatible(svc_ptype, annotation)
-                                  and compatible(annotation, svc_ptype)):
+            if svc_ptype and not (compatible(svc_ptype, annotation, env.types)
+                                  and compatible(annotation, svc_ptype, env.types)):
                 raise mismatch(
                     filename, method.line,
                     f"parameter `{surface}` of `{method.name}` (from service `{svc.name}`)",
@@ -8469,8 +8474,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # optional `-> T` return annotation, checked against the service
         if method.returns is not None:
             check_type_wellformed(filename, method.line, method.returns)
-            if decl.returns and not (compatible(decl.returns, method.returns)
-                                     and compatible(method.returns, decl.returns)):
+            if decl.returns and not (compatible(decl.returns, method.returns, env.types)
+                                     and compatible(method.returns, decl.returns, env.types)):
                 raise mismatch(
                     filename, method.line,
                     f"return type of `{method.name}` (from service `{svc.name}`)",
@@ -8710,9 +8715,15 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 # with a `fn`/`test` body, not only the return-type mismatch.
                 actual = _sweep(lowered_return, mstmt.line)
                 if decl.returns:
-                    if actual and not compatible(decl.returns, actual):
-                        raise mismatch(filename, mstmt.line,
-                                       f"`{method.name}` returns", decl.returns, actual)
+                    # F4: the service's declared return is a CHECK position, not
+                    # just a `compatible` comparison against an inferred type.
+                    # `check_ir` pushes it inward — a record literal is named
+                    # against the declared record's field set, each `if`/`match`
+                    # arm is checked on its own — so a `provide` body refuses
+                    # exactly what a `fn` body refuses (items 392/404/405).
+                    check_ir(lowered_return, decl.returns, env.type_env,
+                             env.types, env.services, filename, mstmt.line,
+                             f"`{method.name}` returns")
                     lowered_return = _inject_opt(decl.returns, actual, lowered_return)
                 mbody.append({"step": "return", "expr": lowered_return})
                 returned = True
@@ -9506,7 +9517,7 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
             lowered = [_lower_expr(a, env, mode) for a in op.args]
             for arg, (pname, ptype) in zip(lowered, decl.params):
                 actual = infer_ir(arg, env.type_env, env.types, env.services)
-                if ptype and actual and not compatible(ptype, actual):
+                if ptype and actual and not compatible(ptype, actual, env.types):
                     raise mismatch(env.filename, op.line,
                                    f"`{node['name']}.{op.name}` argument `{pname}`",
                                    ptype, actual)
