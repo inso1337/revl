@@ -78,11 +78,24 @@ driven by `test_java_method_witnessed_h1_on_stub_runtime`).
 
 ## Verify
 
-The suite (`test_emit_java.py`) asserts emitted structure at the string
-level everywhere, and — when a working JDK is present (CI pins Temurin 21)
-— **compiles emitted sources with `javac` against the assumed cordis4j API
-in [stubs/](stubs/)** and runs an emitted `test` block on the JVM
-(`REVL_TESTS`). The stdlib surface lowers through typed `revl*` static
+Every emission in this tier's suite goes through
+[`javac_gate.py`](javac_gate.py), which **compiles the emitted unit with
+`javac` against the assumed cordis4j API in [stubs/](stubs/)** before the test
+asserts anything about it, and some tests go on to run an emitted `test` block
+on the JVM (`REVL_TESTS`). So a string-level assertion here is a claim about a
+program javac has already accepted, which it was not before issue #154: two
+uncompilable-output defects shipped under substring matches that all passed.
+
+The gate resolves a JDK through `revl.run_java`'s resolver rather than bare
+`shutil.which`, because `/usr/bin/javac` on macOS is a shim that answers before
+a keg-only Homebrew JDK and made javac look absent on a machine that had one.
+It is a no-op where no JDK is reachable, so the suite still runs on a
+toolchain-free checkout; that this cannot happen in CI is asserted statically
+by `tests/test_java_javac_gate_runs_in_ci.py`, which fails unless the
+`backend-java` job both installs a JDK and collects the whole
+`backends/java/` root (issue #183).
+
+The stdlib surface lowers through typed `revl*` static
 overloads so every (method, Str|List) pair from docs/stdlib-2.0.md resolves
 at compile time; revl `Map.new()` is emitted as `Map.create()` (`new` is a
 Java reserved word).
