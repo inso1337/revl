@@ -1043,3 +1043,102 @@ def test_v3_test_block_strings_are_pooled_and_run_on_wasmtime(tmp_path):
     assert out.returncode == 0, out.stderr
     # 1 = every assert held (a failed assert traps before the tail)
     assert int(out.stdout.strip().splitlines()[-1]) == 1
+
+
+# --- item 432(b)/(d)/(g): the codegen-audit remainder -------------------------
+
+def test_432b_the_prelude_is_swept_to_what_the_module_reaches():
+    """An `Int` doubler used to ship the codepoint walkers, the list helpers and
+    the string readers it can never call. The sweep keeps what an export
+    reaches, transitively, and nothing else."""
+    module = _emitter().emit(compile_source(
+        "fn dbl(n: Int) -> Int { return n + n }"))["functions"]
+    assert "(func $int_add" in module        # reached from `dbl`
+    assert "(func $alloc " not in module     # nothing allocates
+    for dead in ("$str_cp_slice", "$list_push", "$str_to_int", "$int_to_str",
+                 "$int_div_euclid", "$int32_narrow"):
+        assert f"(func {dead}" not in module, dead
+
+
+def test_432b_a_reached_helper_keeps_its_own_callees():
+    """`$str_concat` allocates, so sweeping it in has to sweep `$alloc_str`,
+    `$alloc`, `$__heap_grow` and `$__heap_exhausted` in with it."""
+    module = _emitter().emit(compile_source(
+        'fn cat(a: Str, b: Str) -> Str { return a + b }'))["functions"]
+    for live in ("$str_concat", "$alloc_str", "$alloc", "$__heap_grow",
+                 "$__heap_exhausted"):
+        assert f"(func {live}" in module, live
+    assert "(func $str_eq" not in module     # nothing compares strings
+
+
+def test_432b_the_sweep_declines_a_module_it_cannot_see_every_edge_of():
+    """The sweep is sound only while `(call $…)` is every edge of the call
+    graph. A module carrying an indirect call, a table, an element segment, a
+    function reference or a start function is left ALONE rather than swept on
+    an incomplete graph."""
+    emit = _emitter()
+    swept = (
+        '(module\n'
+        '  (func $used (export "e") (call $helper))\n'
+        '  (func $helper)\n'
+        '  (func $dead)\n)\n'
+    )
+    assert "(func $dead)" not in emit.prune_unreachable_funcs(swept)
+    assert "(func $helper)" in emit.prune_unreachable_funcs(swept)
+    for construct in ('  (table 1 funcref)', '  (elem (i32.const 0) $dead)',
+                      '  (start $dead)'):
+        guarded = swept.replace('(module\n', f'(module\n{construct}\n', 1)
+        assert emit.prune_unreachable_funcs(guarded) == guarded
+    reffed = swept.replace('(call $helper)', '(drop (ref.func $dead))', 1)
+    assert emit.prune_unreachable_funcs(reffed) == reffed
+
+
+def test_432d_a_k_part_template_is_one_concat():
+    """The pairwise left-fold recopied the accumulated prefix at every step, so
+    a k-part template moved O(k*n) bytes. One k-ary concat moves n."""
+    module = _emitter().emit(compile_source(
+        'fn banner(a: Str, b: Str) -> Str { return `<<${a}|${b}|${a}>>` }'
+    ))["functions"]
+    assert module.count("(call $str_concat7)") == 1
+    assert "(call $str_concat)" not in module
+    assert "(func $str_concat " not in module   # the pairwise helper is now dead
+    # one allocation and one copy per part, not one allocation per step
+    body = module[module.index("(func $str_concat7"):]
+    body = body[:body.index("\n  (func")] if "\n  (func" in body else body
+    assert body.count("(call $alloc_str") == 1
+    assert body.count("memory.copy") == 7
+
+
+def test_432d_a_two_part_template_still_uses_the_pairwise_helper():
+    """k=2 already IS one allocation and two copies, so it keeps calling
+    `$str_concat` and every existing two-part golden is unmoved."""
+    module = _emitter().emit(compile_source(
+        'fn greet(n: Str) -> Str { return `Hello, ${n}` }'))["functions"]
+    assert "(call $str_concat)" in module
+    assert "(call $str_concat3)" not in module
+
+
+def test_432g_constant_arithmetic_is_folded():
+    module = _emitter().emit(compile_source(
+        "fn scaled(n: Int) -> Int { return n * 1000 + 7 * 6 }\n"
+        "fn nested() -> Int { return 2 * 3 * 4 + 5 - 6 }\n"
+        "fn neg() -> Int { return -5 }"))["functions"]
+    assert "(i64.const 42)" in module
+    assert "(i64.const 23)" in module         # folded the whole way down
+    assert "(i64.const -5)" in module
+    assert "(call $int_sub)" not in module    # the unary minus folded too
+
+
+def test_432g_an_overflowing_constant_expression_is_not_folded():
+    """Folding an overflowing constant would turn a documented RUNTIME trap
+    (docs/arithmetic.md) into a compile-time refusal this tier alone makes. The
+    fold declines instead, so the checked helper and its trap stay put."""
+    emit = _emitter()
+    module = emit.emit(compile_source(
+        "fn over() -> Int { return 9223372036854775807 + 1 }\n"
+        "fn ok() -> Int { return 4611686018427387904 * (0 - 2) }"))["functions"]
+    assert "(i64.const 9223372036854775807)\n      (i64.const 1)\n      (call $int_add)" in module
+    # exactly Int.MIN, which DOES fit, so it folds
+    assert "(i64.const -9223372036854775808)" in module
+    assert emit._fold_int_const("*", "Int", "(i64.const 3)", "(local.get $x)") is None
+    assert emit._fold_int_const("/", "Int", "(i64.const 6)", "(i64.const 3)") is None

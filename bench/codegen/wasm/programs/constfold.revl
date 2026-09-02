@@ -1,0 +1,1 @@
+fn scaled(n: Int) -> Int { return n * 1000 + 7 * 6 }

@@ -68,7 +68,7 @@ use "../stdlib/value.rvl" {
   value_list, value_str, value_int, value_bool,
   value_keys, value_children
 }
-use "../stdlib/list.rvl" { list_sort, list_dedup }
+use "../stdlib/list.rvl" { list_sort, list_dedup, list_contains }
 
 // ------------------------------------------------- host formatting (kept @py)
 // The literal-body host numeral: `_expr` renders an Int literal's numeral as
@@ -688,6 +688,84 @@ fn body_max_depth(nodes: List[Any]) -> Int {
 // -------------------------------------------------------------- expressions
 // `depth` is the allocation-nesting level (for the scratch-pointer name); scalar
 // operands never allocate, so they are lowered at the same depth with no expected.
+// -------------------------------------------------- item 432(g): constant folding
+// `7 * 6` is `(i64.const 42)`, not two constants and a call to the checked
+// multiply. Mirrors the reference's `_fold_int_const`: the operands are matched
+// as EMITTED WAT, which makes the fold compositional (the left operand of
+// `2 * 3 * 4` has already become `(i64.const 6)`), and a fold that would
+// overflow is DECLINED so the checked helper -- and its runtime trap -- stays.
+
+fn i64_hi() -> Int { return 9223372036854775807 }
+fn i64_lo() -> Int { return 0 - 9223372036854775807 - 1 }
+fn iabs(x: Int) -> Int { return x < 0 ? 0 - x : x }
+
+// The numeral inside `(<width>.const N)`, or "" when `wat` is not exactly that.
+fn const_numeral(wat: Str, width: Str) -> Str {
+  let head = `(${width}.const `
+  if (!wat.startsWith(head)) { return "" }
+  if (!wat.endsWith(")")) { return "" }
+  let inner = wat.slice(head.length(), wat.length() - 1)
+  var i = 0
+  if (inner.length() > 0 && inner.charCodeAt(0) == 45) { i = 1 }
+  if (i >= inner.length()) { return "" }
+  while (i < inner.length()) {
+    let c = inner.charCodeAt(i)
+    if (c < 48 || c > 57) { return "" }
+    i = i + 1
+  }
+  return inner
+}
+
+// `a <op> b` as a numeral, or "" when it does not fit [lo, hi]. Every guard is
+// written so that the CHECK itself cannot overflow -- this tier's `+ - *` trap,
+// so the fold cannot be decided by computing the answer first.
+fn fold_numeral(op: Str, a: Int, b: Int, lo: Int, hi: Int) -> Str {
+  if (op == "+") {
+    if (b > 0 && a > hi - b) { return "" }
+    if (b < 0 && a < lo - b) { return "" }
+    return num_str(a + b)
+  }
+  if (op == "-") {
+    if (b < 0 && a > hi + b) { return "" }
+    if (b > 0 && a < lo + b) { return "" }
+    return num_str(a - b)
+  }
+  if (a == 0 || b == 0) { return "0" }
+  // `lo` has no positive counterpart, so it is the one magnitude `iabs` cannot
+  // take: it survives multiplication only by 1.
+  if (a == lo) { return b == 1 ? num_str(lo) : "" }
+  if (b == lo) { return a == 1 ? num_str(lo) : "" }
+  let aa = iabs(a)
+  let bb = iabs(b)
+  // |a*b| <= hi, except that a NEGATIVE product may reach hi+1 (= |lo|).
+  // floor((hi+1)/bb) is floor(hi/bb)+1 exactly when hi % bb == bb-1.
+  var limit = hi.div_trunc(bb)
+  if ((a < 0) != (b < 0) && hi % bb == bb - 1) { limit = limit + 1 }
+  if (aa > limit) { return "" }
+  return num_str(a * b)
+}
+
+// The folded operand for `<left> <op> <right>`, or "" to emit the call.
+fn fold_const(op: Str, opnd: Str, left: Str, right: Str) -> Str {
+  if (op != "+" && op != "-" && op != "*") { return "" }
+  if (opnd != "Int" && opnd != "Int32") { return "" }
+  let width = opnd == "Int" ? "i64" : "i32"
+  let ln = const_numeral(left, width)
+  let rn = const_numeral(right, width)
+  if (ln == "" || rn == "") { return "" }
+  var lo = i64_lo()
+  var hi = i64_hi()
+  if (opnd == "Int32") {
+    lo = 0 - 2147483648
+    hi = 2147483647
+  }
+  // `to_int` is total-by-Opt; the digit scan above already guarantees both
+  // numerals parse, so the `?? 0` fallbacks are unreachable.
+  let v = fold_numeral(op, ln.to_int() ?? 0, rn.to_int() ?? 0, lo, hi)
+  if (v == "") { return "" }
+  return `(${width}.const ${v})`
+}
+
 fn render_bin(node: Any, s: Scope, depth: Int) -> E {
   let op = node_op(node)
   let ln = value_field(node, "left")
@@ -708,6 +786,8 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> E {
   let instr = bin_instr(op, opnd)
   var result_ty = opnd
   if (is_comparison(op)) { result_ty = "Bool" }
+  let folded = fold_const(op, opnd, left.wat, right.wat)
+  if (folded != "") { return { wat: folded, ty: result_ty } }
   let wat = `${left.wat}
       ${right.wat}
       (${instr})`
@@ -729,6 +809,10 @@ fn render_un(node: Any, s: Scope, depth: Int) -> E {
       (i32.xor)`, ty: "Int32" }
   }
   // `-`: a checked subtract-from-zero at the operand's width (`0 - MIN` traps).
+  // item 432(g): a constant operand folds, which is why `-5` is one `i64.const`.
+  let zw = operand.ty == "Int32" ? "i32" : "i64"
+  let negfold = fold_const("-", operand.ty, `(${zw}.const 0)`, operand.wat)
+  if (negfold != "") { return { wat: negfold, ty: operand.ty } }
   if (operand.ty == "Int32") {
     return { wat: `(i32.const 0)
       ${operand.wat}
@@ -1934,6 +2018,92 @@ fn type_comments(rectypes: Any) -> List[Str] {
   return out
 }
 
+// ------------------------------------------------- item 432(b): the dead sweep
+// The reference emits the whole helper preamble and then drops every function
+// no export can reach (`prune_unreachable_funcs`). The preamble here is one
+// verbatim block, so the same sweep is done over its pieces: split it into its
+// top-level `(func …)` forms, keep the ones a rendered function body reaches
+// (directly, or through another kept helper), and drop the rest. Same set, same
+// order, so the emitted bytes agree with the reference's post-pass.
+
+// Split the verbatim preamble into its top-level `(func …)` forms. Every helper
+// starts a line at indent 2 and every body line is indented deeper, so the
+// separator is exact.
+fn preamble_chunks(pre: Str) -> List[Str] {
+  let head = `${newline()}  (func `
+  let parts = pre.split(head)
+  var out = []
+  var first = true
+  for (p of parts) {
+    if (first) { out = out.push(p) } else { out = out.push(`  (func ${p}`) }
+    first = false
+  }
+  return out
+}
+
+// `$name` of a chunk: the identifier right after the 8-character `  (func `.
+fn chunk_name(c: Str) -> Str {
+  var i = 8
+  var out = ""
+  var go = true
+  while (go && i < c.length()) {
+    let ch = c.charCodeAt(i)
+    if (ch == 32 || ch == 10 || ch == 40 || ch == 41) { go = false }
+    else {
+      out = out.concat(c.charAt(i))
+      i = i + 1
+    }
+  }
+  return out
+}
+
+// Does `hay` contain a call to `name`? The three characters that can end a
+// `$name` here are checked explicitly -- a closing paren for a folded call, a
+// space for an inline argument, a newline for an argument on its own line --
+// so that `$alloc` is never read out of `(call $alloc_str …)`.
+fn calls_name(hay: Str, name: Str) -> Bool {
+  if (hay.indexOf(`(call ${name})`) >= 0) { return true }
+  if (hay.indexOf(`(call ${name} `) >= 0) { return true }
+  return hay.indexOf(`(call ${name}${newline()}`) >= 0
+}
+
+// The preamble with every unreachable helper removed. `rendered` is the emitted
+// function bodies, which are the roots (every one of them is exported).
+fn prune_preamble(pre: Str, rendered: Str) -> Str {
+  let chunks = preamble_chunks(pre)
+  var names = []
+  for (c of chunks) { names = names.push(chunk_name(c)) }
+  var live = []
+  var again = true
+  while (again) {
+    again = false
+    var i = 0
+    for (c of chunks) {
+      let n = names[i]
+      i = i + 1
+      if (!list_contains(live, n)) {
+        var reached = calls_name(rendered, n)
+        var j = 0
+        for (d of chunks) {
+          if (list_contains(live, names[j]) && calls_name(d, n)) { reached = true }
+          j = j + 1
+        }
+        if (reached) {
+          live = live.push(n)
+          again = true
+        }
+      }
+    }
+  }
+  var keep = []
+  var k = 0
+  for (c of chunks) {
+    if (list_contains(live, names[k])) { keep = keep.push(c) }
+    k = k + 1
+  }
+  return keep.join(newline())
+}
+
 // The document assembly for a FUNCTION-ONLY v3 document (`emit` -> `_emit_v3` ->
 // `_V3Emitter.emit`, subset): banner, `(module`, the exported memory, the pooled
 // string `data` segments, the hp global at the 8-aligned heap start, the helper
@@ -1974,11 +2144,16 @@ pub fn emit_src(ir: Any) -> Str {
   lines = lines.push("""  (memory (export "memory") 1)""")
   for (d of dataLines) { lines = lines.push(d) }
   lines = lines.push(`  (global $__hp (mut i32) (i32.const ${num_str(heap)}))`)
-  lines = lines.push(helper_preamble())
+  // item 432(b): the bodies are rendered BEFORE the preamble is placed, because
+  // which helpers survive the sweep is read off what the bodies actually call.
+  var blocks = []
+  for (f of functions) { blocks = blocks.push(emit_function(f, strs, rectypes)) }
+  let pruned = prune_preamble(helper_preamble(), blocks.join(newline()))
+  if (pruned != "") { lines = lines.push(pruned) }
   for (c of type_comments(rectypes)) { lines = lines.push(c) }
   if (functions.length() > 0) { lines = lines.push("") }
-  for (f of functions) {
-    lines = lines.push(emit_function(f, strs, rectypes))
+  for (b of blocks) {
+    lines = lines.push(b)
     lines = lines.push("")
   }
   lines = lines.push(")")
