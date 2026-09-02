@@ -176,8 +176,10 @@ def test_requested_version_with_no_recorded_version_is_unverifiable(registry):
 def _attest_the_entry(registry: Path, key: bytes) -> None:
     """Sign the entry's rebuilt (canonical) IR with `key` and drop the
     attestation next to the component, the way a publish would."""
-    ir = compile_files([str(_entry(registry) / "component.rvl")])
-    att = attest.make_attestation(R._normalized_ir(ir), key)
+    verdict = attest.run_gate(paths=[str(_entry(registry) / "component.rvl")],
+                              normalize=R._normalized_ir)
+    att = attest.make_attestation(R._normalized_ir(verdict.ir), key,
+                                  verdict=verdict)
     (_entry(registry) / "attestation.json").write_text(json.dumps(att, indent=2))
 
 

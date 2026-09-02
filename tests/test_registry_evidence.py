@@ -99,9 +99,12 @@ def _attestation_for(comp_dir: str, *, tamper: bool = False) -> dict:
     """A real attestation for the component at `comp_dir`, signed over its
     rebuilt IR with the fixture key. `tamper` flips a signed field so the
     signature no longer matches - the `invalid` grade."""
-    ir = registry._normalize_ir_for_attest(
-        compile_files([os.path.join(comp_dir, "component.rvl")]))
-    att = attest.make_attestation(ir, KEY, now=NOW, signer="revl-ci")
+    verdict = attest.run_gate(
+        paths=[os.path.join(comp_dir, "component.rvl")],
+        normalize=registry._normalize_ir_for_attest)
+    ir = registry._normalize_ir_for_attest(verdict.ir)
+    att = attest.make_attestation(ir, KEY, verdict=verdict, now=NOW,
+                                  signer="revl-ci")
     if tamper:
         att = dict(att)
         att["verdict"] = "tampered"   # signed field altered after signing

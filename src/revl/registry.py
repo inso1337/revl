@@ -595,7 +595,16 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
         name = entry_dir.name
         source_path = entry_dir / "component.rvl"
         source = _read(source_path)
-        ir = compile_files([str(source_path)])
+        # ONE frontend run, kept as a verdict rather than discarded: the
+        # attestation below records what this run measured (item 127 F2). A
+        # refusal is re-raised verbatim, so publishing an inadmissible component
+        # fails with the compiler's own diagnostic, as before.
+        from .attest import run_gate  # noqa: PLC0415
+        gate_verdict = run_gate(paths=[str(source_path)],
+                                normalize=_normalize_ir_for_attest)
+        if gate_verdict.error is not None:
+            raise gate_verdict.error
+        ir = gate_verdict.ir
         manifest = _audit_document(ir)
         manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         facets: list[str] = []
@@ -643,6 +652,7 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
         if key is not None:
             from .attest import make_attestation  # noqa: PLC0415
             att = make_attestation(_normalize_ir_for_attest(ir), bytes(key),
+                                   verdict=gate_verdict,
                                    now=now, signer=signer,
                                    evidence_bindings=bindings or None)
             _write_evidence_file(entry_dir, EVIDENCE_ATTESTATION, att,

@@ -64,8 +64,16 @@ OTHER_KEY = b"a-different-secret-value-9876"
 NOW = "2026-08-25T00:00:00+00:00"
 
 
+def _gate(src: str = BASE):
+    """The gate run an attestation records. `filename` matches `compile_source`'s
+    default so the verdict's hash is the hash of `compile_source(src)` — the
+    document these tests compare against."""
+    return A.run_gate(source=src, filename="<string>")
+
+
 def _att(src: str = BASE, key: bytes = KEY, **kw) -> dict:
-    return A.make_attestation(compile_source(src), key, now=NOW, **kw)
+    verdict = _gate(src)
+    return A.make_attestation(verdict.ir, key, verdict=verdict, now=NOW, **kw)
 
 
 # ------------------------------------------------------------- canonical hash
@@ -146,17 +154,22 @@ def test_attestation_shape_and_guarantees():
     att = _att(BASE, signer="ci@revl")
     assert att["kind"] == "revl.attestation"
     assert att["verdict"] == "admitted"
+    assert att["version"] == "2.0"
     assert att["hash_alg"] == "sha256"
     assert att["sign_alg"] == "hmac-sha256"
     assert att["composition_hash"] == A.canonical_hash(compile_source(BASE))
     assert att["timestamp"] == NOW
     assert att["signer"] == "ci@revl"
     assert len(att["signature"]) == 64
-    # the guarantees an admitted verdict proves: the composition G-rules. G9
-    # (item 249, information-flow / taint) joins the family — a compile-time
-    # admission refusal like the rest, vacuously proven when a composition
-    # declares no taint qualifier.
+    # the guarantees the admitted verdict discharged: the composition G-rules
+    # the shipped frontend ruleset cites. G9 (item 249, information-flow /
+    # taint) is in the family — a compile-time admission refusal like the rest,
+    # vacuously proven when a composition declares no taint qualifier.
     assert att["guarantees"] == ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9"]
+    assert att["guarantees"] == A.discharged_guarantees()
+    # and WHICH checker asserted it is in the signed body
+    assert att["checker"] == {"compiler": A.compiler_version(),
+                              "ruleset": A.ruleset_digest()}
     # key_id is a non-secret fingerprint — never the key itself
     assert att["key_id"] == A.key_id(KEY)
     assert KEY.decode() not in json.dumps(att)
@@ -171,14 +184,16 @@ def test_draft_with_open_holes_is_not_attestable():
     )
     ir = compile_source(draft)
     assert ir.get("holes")  # it compiled, but it is a draft
+    verdict = _gate(draft)
+    assert verdict.admitted is False        # the gate is what says so
     with pytest.raises(Exception) as exc:
-        A.make_attestation(ir, KEY, now=NOW)
+        A.make_attestation(ir, KEY, verdict=verdict, now=NOW)
     assert "hole" in str(exc.value)
 
 
 def test_empty_key_is_rejected():
     with pytest.raises(Exception):
-        A.make_attestation(compile_source(BASE), b"", now=NOW)
+        A.make_attestation(compile_source(BASE), b"", verdict=_gate(), now=NOW)
     ok, reason = A.verify_attestation(_att(), b"")
     assert ok is False
 
