@@ -228,17 +228,40 @@ component C provides s: S {
     assert "host:C:rm" in crossings(audit_report(compile_source(source)))
 
 
-def test_a_teardown_position_emission_is_surfaced_not_refused():
-    """The canonical 'surfaced, not refused' case: an emission reached from a
-    teardown (`undo`) body is sound to admit — calling the method schedules it
-    — and it lands on the G8 audit surface as a reached host extern."""
+def test_a_teardown_position_emission_is_refused():
+    """This attack was SURFACED and is now REFUSED. Hiding the crossing in the
+    bracket's `undo` slot puts it at or after the session verdict, where it
+    cannot be answered, rolled back, or reviewed by the 246 approval gate — so
+    the contract bounds it instead of merely reporting it: a bracket inverse
+    "may emit in teardown: no (G5)" (docs/design/teardown-contract.md), and the
+    runtime tags a failed bracket inverse contract-grade precisely because the
+    inverse claimed to be host-local and non-emitting."""
     source = SHIP + """
 component Logger {
   let h = effect Map.new() undo ship("closing")
 }
 """
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(source)
+    assert "(G5)" in str(excinfo.value)
+    assert excinfo.value.code == "G5"
+
+
+def test_a_forward_position_emission_is_still_surfaced_not_refused():
+    """The bound above is positional, not a ban on the extern: the same
+    emission on the FORWARD path is admitted and lands on the G8 audit surface
+    as a reached host crossing. `compensate` is the teardown slot that MAY
+    emit (item 247); the bracket inverse is not."""
+    source = SHIP + """
+service S { emission fn note(x: Str) -> Str }
+component Logger provides s: S {
+  let h = effect Map.new() undo h.drop()
+  provide s { fn note(x) = ship(x) }
+}
+"""
     stats = _boundary(source, "Logger")
     assert "ship" in {e["name"] for e in stats["externs"]}
+    assert "host:Logger:ship" in crossings(audit_report(compile_source(source)))
 
 
 def test_an_unclassified_extern_is_refused():

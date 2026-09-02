@@ -160,6 +160,67 @@ def test_subscribe_refuses_a_non_source_operand():
     assert "stream source" in msg
 
 
+def test_rule_3_6_subscription_undo_that_closes_nothing_is_refused():
+    """The subscription half of rule 3.6, and the one the SOURCE half never
+    covered: the source's inverse was shape-checked (it must `close` the
+    source), the subscription's was not. A pure no-op `undo` left the listener
+    attached to a live source after its owner reached DISPOSED — the core
+    guarantee ("unloading its owner CLOSES the stream before the owner
+    disappears") read backwards."""
+    msg = _refusal("""
+    extern pure fn nop(x: Str) -> Unit = @py { return None }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo nop("x")
+      await sub.next()
+    }
+    """)
+    assert "must close THAT subscription" in msg
+    assert "`sub`" in msg
+
+
+def test_rule_3_6_subscription_undo_that_closes_the_source_is_refused():
+    """Closing the SOURCE is not closing the subscription. It looks plausible
+    (the trace even shows a `stream.source close`) and it is exactly wrong:
+    `stream.close` never runs, the subscription stays `_closed = False`, and it
+    is still attached to the source it just tore down under itself."""
+    msg = _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo src.close()
+      await sub.next()
+    }
+    """)
+    assert "must close THAT subscription" in msg
+
+
+def test_rule_3_6_subscription_undo_closing_a_SIBLING_is_refused():
+    """The copy-paste shape: a second subscription whose `undo` still names the
+    first one's handle. Both brackets typecheck, one subscription is closed
+    twice and the other never."""
+    msg = _refusal("""
+    component C {
+      let s1 = effect Stream.source() undo s1.close()
+      let a = subscribe s1 undo a.close()
+      let s2 = effect Stream.source() undo s2.close()
+      let b = subscribe s2 undo a.close()
+      await b.next()
+    }
+    """)
+    assert "must close THAT subscription" in msg
+    assert "`b`" in msg
+
+
+def test_the_correct_subscription_inverse_still_admits():
+    """No over-refusal: `undo <sub>.close()` — the one shape the design
+    specifies — lowers exactly as before."""
+    ir = compile_source(_CONSUMER, "s.rvl")
+    sub = next(s for s in ir["components"][0]["body"] if s.get("subscribe"))
+    assert sub["undo"] == {"kind": "call",
+                           "target": {"kind": "name", "id": "sub"},
+                           "method": "close", "args": []}
+
+
 def test_bare_subscribe_must_be_bound():
     msg = _refusal("""
     component C {
