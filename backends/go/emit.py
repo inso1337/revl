@@ -1390,6 +1390,21 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
             sig += " " + ret
         sig += " {"
         out.append(sig)
+        # item 421 F6: a parameter the service declared `Secret[T]` is a declared
+        # DISCLOSURE RECEIVER. `taint.py` strips the qualifier before lowering,
+        # so `params[i]["secret"]` is the only surviving record that this
+        # position is confidential — the same stamp the py and ts emitters read.
+        # Registering the value at the head of the receiver is what lets
+        # `hostRecord` scrub it out of the host trace when the body goes on to
+        # use it as a `pool.query` sql or a stream item. Emitted ONLY for a
+        # method that actually declares one.
+        secret_params = [
+            _safe_local(p["name"]) for p in params_decl
+            if isinstance(p, dict) and p.get("secret")
+            and p.get("name") in (m.get("params") or [])
+        ]
+        if secret_params:
+            out.append("\trevlMarkSecret(%s)" % ", ".join(secret_params))
         env = _Env(binds, reqs, _config_fields_flag(has_config),
                    params=m.get("params", []), receiver=_METHOD_RECEIVER)
         for pn in m.get("params", []):
@@ -3132,6 +3147,13 @@ def _host_runtime() -> str:
     ir-v3.md §v3 — a type name the host already owns)."""
     int_ty = "int64" if _V3_MODE else "int"
     src = _HOST_RUNTIME.replace("@INT@", int_ty)
+    # item 421 F6: the confidentiality funnel, present only for a document that
+    # actually declares a `Secret[T]`. Both substitutions collapse to nothing
+    # otherwise, so a secret-free document emits byte-identically.
+    src = src.replace("@SECRET_PREAMBLE@",
+                      _SECRET_PREAMBLE if _SECRET_MODE else "")
+    src = src.replace("@SECRET_SCRUB@", _SECRET_SCRUB if _SECRET_MODE else "")
+    src = src.replace("@SECRET_RESET@", _SECRET_RESET if _SECRET_MODE else "")
     if _V3_TYPED_COMPONENTS:
         for name in _HOST_RUNTIME_RENAMES:
             if name in _V3_TYPES:
@@ -3147,6 +3169,133 @@ def _needs_sync(ir) -> bool:
 # record. Placement mode renames the HOST side to `Revl<Name>` so the declared
 # record struct keeps its name (see _host_runtime / _host_type_of_acquire).
 _HOST_RUNTIME_RENAMES = ("Row", "Map", "Pool")
+
+
+# item 421 F6: the go tier's confidentiality funnel, the peer of
+# backends/python/confidential.py and backends/typescript/runtime.ts.
+#
+# A `Secret[T]` declaration authorises disclosure TO THE DECLARED RECEIVER. It
+# does not authorise the host trace to keep a copy: `hostRecord` interpolates a
+# `pool.query` / `pool.execute` sql and a stream item straight into `_hostLog`,
+# which `HostMarks` hands to anything embedding this package.
+#
+# The scrub sits at `hostRecord`, the ONE choke point every event passes
+# through, not at each call site: an event is a string already interpolated
+# into, so a value funnel cannot reach it, and per-printer redaction is the
+# discipline this funnel exists to replace. The match is EXACT against the
+# values a declared marking registered, never a pattern.
+#
+# The whole block is emitted ONLY for a document that actually declares a
+# `Secret[T]` somewhere (`_SECRET_MODE`), so every existing golden — none of
+# which declares one — stays byte-identical.
+_SECRET_PREAMBLE = r"""// ---- declared Secret[T] confidentiality (item 421 F6) -----------------
+//
+// A declared marking registers its value here, at both ends: revlMarkSecret at
+// the head of a provide method that declares a Secret[T] parameter (the
+// receiver), revlSecretResult around an extern whose declared return was
+// Secret[T] (the origin, where the value enters the value world). hostRecord
+// then scrubs it out of every trace event, so a sink added later reads an
+// already-redacted line.
+
+// RevlRedactedSecret must equal confidential.REDACTED on the py tier: a
+// polyglot composition redacts to the SAME marker whichever tier wrote the line.
+const RevlRedactedSecret = "<redacted:secret>"
+
+// A remembered value has to be long enough that an exact match means something.
+// Below this it is a coin flip against ordinary trace data ("", "1", "ok"), and
+// blanket-erasing those would gut the trace for no confidentiality gain. Same
+// bound as the py tier's _MIN_MARKABLE.
+const revlMinMarkable = 4
+
+var _revlSecretMu sync.Mutex
+
+// Longest first, so a needle containing another leaves no tail behind.
+var _revlSecretValues []string
+
+func revlRememberSecret(v any) {
+	text := fmt.Sprintf("%v", v)
+	if len(text) < revlMinMarkable {
+		return
+	}
+	_revlSecretMu.Lock()
+	defer _revlSecretMu.Unlock()
+	for _, known := range _revlSecretValues {
+		if known == text {
+			return
+		}
+	}
+	_revlSecretValues = append(_revlSecretValues, text)
+	slices.SortFunc(_revlSecretValues, func(a, b string) int { return len(b) - len(a) })
+}
+
+// revlMarkSecret registers each declared-Secret value (the receiver end).
+func revlMarkSecret(values ...any) {
+	for _, v := range values {
+		revlRememberSecret(v)
+	}
+}
+
+// revlSecretResult registers a declared-Secret return and hands it back
+// unchanged, so a call site wraps with no change in meaning (the origin end).
+func revlSecretResult[T any](v T) T {
+	revlRememberSecret(v)
+	return v
+}
+
+// revlRedactText replaces every registered secret in free-form host text.
+func revlRedactText(text string) string {
+	_revlSecretMu.Lock()
+	defer _revlSecretMu.Unlock()
+	for _, needle := range _revlSecretValues {
+		if needle != "" && strings.Contains(text, needle) {
+			text = strings.ReplaceAll(text, needle, RevlRedactedSecret)
+		}
+	}
+	return text
+}
+
+// RevlForgetSecrets drops every remembered value (test isolation).
+func RevlForgetSecrets() {
+	_revlSecretMu.Lock()
+	_revlSecretValues = nil
+	_revlSecretMu.Unlock()
+}
+
+"""
+
+_SECRET_SCRUB = "\top = revlRedactText(op)\n"
+
+_SECRET_RESET = "\tRevlForgetSecrets()\n"
+
+# True when this document declares a `Secret[T]` anywhere the emitter can see
+# it: a service-method parameter, an extern return, or a component config
+# field. Off by default, so a secret-free document emits byte-identically.
+_SECRET_MODE = False
+
+
+def _declares_secret(ir: dict) -> bool:
+    """Does this IR carry a surviving `Secret[T]` marking?
+
+    `taint.py` strips the qualifier before lowering, so the markings ARE the
+    declaration: `params[i]["secret"]` on a service method (the receiver),
+    `secret_return` on an extern (the origin) and `secret` on a config field.
+    """
+    for service in (ir.get("services") or {}).values():
+        for method in (service.get("methods") or {}).values():
+            for param in method.get("params") or []:
+                if isinstance(param, dict) and param.get("secret"):
+                    return True
+    for ext in ir.get("externs") or []:
+        if ext.get("secret_return"):
+            return True
+        for param in ext.get("params") or []:
+            if isinstance(param, dict) and param.get("secret"):
+                return True
+    for comp in ir.get("components") or []:
+        for field in comp.get("config") or []:
+            if isinstance(field, dict) and field.get("secret"):
+                return True
+    return False
 
 
 _HOST_RUNTIME = r'''// ---- host runtime (minimal, recording) --------------------------------
@@ -3172,8 +3321,8 @@ func revlHostLive() int {
 var _hostMu sync.Mutex
 var _hostLog []string
 
-func hostRecord(op string) {
-	_hostMu.Lock()
+@SECRET_PREAMBLE@func hostRecord(op string) {
+@SECRET_SCRUB@	_hostMu.Lock()
 	_hostLog = append(_hostLog, op)
 	_hostMu.Unlock()
 }
@@ -3192,7 +3341,7 @@ func HostReset() {
 	_hostMu.Lock()
 	_hostLog = nil
 	_hostMu.Unlock()
-}
+@SECRET_RESET@}
 
 // Row is a query result row.
 type Row = map[string]string
@@ -5152,6 +5301,24 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx) -> list[str]:
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         body = bodies["go"].strip()
+        # item 421 F6: an extern whose DECLARED return was `Secret[T]` is the
+        # ORIGIN — where the value enters the value world, the case a
+        # receiver-end marking misses (`let t = emit mint(); effect
+        # pool.execute(t)`). `taint.py` strips the qualifier before lowering, so
+        # `secret_return` is the only surviving record of it. The verbatim @go
+        # body owns its own `return` statements, so it moves into an inner
+        # function and the declared name becomes the one-line marking wrapper —
+        # every call site is covered without the body being rewritten. Absent
+        # unless the author declared it.
+        arg_list = ", ".join(
+            _v3_ident(p.get("name"), "extern parameter")
+            for p in ext.get("params") or [])
+        if ext.get("secret_return") and ret:
+            out.append(f"func {name}({params}){sig_ret} {{")
+            out.append(f"\treturn revlSecretResult(revlSecret_{name}({arg_list}))")
+            out.append("}")
+            out.append("")
+            name = f"revlSecret_{name}"
         out.append(f"func {name}({params}){sig_ret} {{")
         # item 378 Stage 5: a config extern binds `_revl_config` as the first
         # body line; None for a no-config extern (byte-identical body splice).
@@ -7215,6 +7382,8 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET, _COMP_NEEDS_STREAM
+    global _SECRET_MODE
+    _SECRET_MODE = _declares_secret(ir)
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
@@ -7327,6 +7496,10 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     if _COMP_NEEDS_STDLIB:
         out.append('\t"strings"')
         out.append('\t"unicode/utf8"')
+    if _SECRET_MODE and not _COMP_NEEDS_STDLIB:
+        # item 421 F6: the confidentiality funnel's exact-match replace.
+        # (`slices` is imported unconditionally below; Go rejects a repeat.)
+        out.append('\t"strings"')
     if _COMP_NEEDS_TEARDOWN:
         # `runCompensationPhase`'s budget/deadline (`time` — already imported
         # above when `has_lifecycle`, so guarded to keep Go's single-import
@@ -7890,6 +8063,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_STRCONV
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
+    global _SECRET_MODE
+    _SECRET_MODE = _declares_secret(ir)
     _V3_MODE = True
     _V3_TYPES = types
     _V3_TYPED_COMPONENTS = True
@@ -7963,6 +8138,9 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     if ctx.used_stdlib or _COMP_NEEDS_STDLIB:
         imports.append('\t"strings"')
         imports.append('\t"unicode/utf8"')
+    if _SECRET_MODE:
+        # item 421 F6: the confidentiality funnel's exact-match replace.
+        imports.append('\t"strings"')
     if ctx.needs_ftoa:
         imports.append('\t"math"')
         imports.append('\t"strconv"')
