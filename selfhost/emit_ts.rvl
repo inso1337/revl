@@ -254,9 +254,14 @@ fn async_ops_of(req_map: Any, services: Any) -> List[Str] {
 }
 
 // ---------------------------------------------------- JS/TS keyword mangle (A3)
-// `_mangle`: append `_` until a valid revl identifier that is a JS/TS reserved
-// word is free, so it emits and RUNS instead of crashing (item 165). A pure
-// function of the name — declaration and use sites agree without a table.
+// `_mangle`: rename a valid revl identifier that is a JS/TS reserved word, so
+// it emits and RUNS instead of crashing (item 165). A pure function of the name
+// — declaration and use sites agree without a table — and INJECTIVE, so two
+// distinct revl identifiers never land on one JS identifier. Escape a name iff
+// the name or any name reachable from it by dropping trailing `_` is reserved,
+// by exactly one `_`: that shifts the whole `kw`/`kw_`/`kw__` ladder up a rung
+// (`function` -> `function_`, `function_` -> `function__`) and leaves every
+// other name verbatim, so nothing collapses.
 fn is_js_reserved(name: Str) -> Bool {
   let words = ["await", "break", "case", "catch", "class", "const", "continue",
     "debugger", "default", "delete", "do", "else", "enum", "export", "extends",
@@ -270,9 +275,13 @@ fn is_js_reserved(name: Str) -> Bool {
 }
 
 fn mangle(name: Str) -> Str {
-  var n = name
-  while (is_js_reserved(n)) { n = n.concat("_") }
-  return n
+  var root = name
+  while (root.length() > 0) {
+    if (is_js_reserved(root)) { return name.concat("_") }
+    if (root.charAt(root.length() - 1) != "_") { return name }
+    root = root.slice(0, root.length() - 1)
+  }
+  return name
 }
 
 // `_ident` on the happy path: validation + emitter-scaffolding rejection are
@@ -2454,6 +2463,17 @@ test "the JS-keyword mangle appends underscores" {
   assert mangle("class") == "class_"
   assert mangle("new") == "new_"
   assert mangle("total") == "total"
+}
+
+test "the JS-keyword mangle is injective" {
+  // `class` and the equally legal revl identifier `class_` must not both land
+  // on `class_`: the ladder shifts up a rung instead of collapsing.
+  assert mangle("class_") == "class__"
+  assert mangle("class__") == "class___"
+  assert mangle("new_") == "new__"
+  // a name with no reserved root is verbatim, trailing underscores and all
+  assert mangle("total_") == "total_"
+  assert mangle("classic") == "classic"
 }
 
 test "the binary-operator map lowers to JS operators" {

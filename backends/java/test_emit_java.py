@@ -1235,9 +1235,16 @@ def test_keyword_named_extern_is_renamed_at_declaration_and_call():
     assert "return native_(n);" in src
 
 
-def test_renaming_collision_is_refused():
-    """A3 renaming is table-free, so `double` and `double_` would both land on
-    `double_`. That is the one lossy case and it must refuse, not pick one."""
+def test_renaming_collision_is_no_longer_lossy():
+    """A3 renaming is table-free but now INJECTIVE, so `double` and `double_`
+    land on two distinct Java names instead of one.
+
+    This case used to be REFUSED: the rename appended `_` while the name was
+    reserved, which sent both onto `double_`, and refusing beat silently
+    emitting one method twice. The rename now shifts the whole `kw`/`kw_`/`kw__`
+    ladder up one rung, so the program is accepted and both callables survive.
+    `_check_fn_name_collisions` stays as a belt-and-braces assertion of the
+    property (see its docstring); it can no longer fire on a keyword rename."""
     ir = compile_source(
         """
         fn double(n: Int) -> Int { return n * 2 }
@@ -1245,8 +1252,10 @@ def test_renaming_collision_is_refused():
         fn use_both(n: Int) -> Int { return double(n) + double_(n) }
         """
     )
-    with pytest.raises(emit.EmitError, match="both lower to the Java name"):
-        emit.emit(ir)
+    src = emit.emit(ir)
+    assert src.count("long double_(long n)") == 1
+    assert src.count("long double__(long n)") == 1
+    assert "return Math.addExact(double_(n), double__(n));" in src
 
 
 def test_match_in_a_component_method_body():
