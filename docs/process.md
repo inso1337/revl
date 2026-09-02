@@ -58,6 +58,37 @@ belongs.
   main belongs to the orchestrator. Say you saw it and leave it alone.
 - Do not merge your own branch.
 
+## Changing logic that `selfhost/*.rvl` mirrors
+
+`selfhost/emit_*.rvl`, `selfhost/lower.rvl` and `selfhost/checker.rvl` are ports
+of `backends/<tier>/emit.py` and `src/revl/`. The oracles in
+`tests/test_selfhost_*.py` hold the two sides to byte agreement over a corpus.
+
+**A green oracle is not evidence about a construct the corpus never spells.** It
+catches divergence, and only on inputs the corpus reaches. It cannot tell you
+which side is right when both agree and both are wrong, it cannot demand a fix
+on a case the corpus never reaches, and it cannot see that the two sides mirror
+different source-of-truth sets. Item 429 records five same-day defects of those
+kinds, two of which the SELF-HOST had right and the reference had wrong.
+
+So, whenever you change logic that a `selfhost/*` file mirrors:
+
+1. **Open the self-host file and read the mirrored function.** Directly. Do not
+   infer its state from a green oracle, and do not infer it from a sibling port
+   that already landed — item 429(c) is a rule that was ported while its
+   source-of-truth SET was not, which reads as done at a glance.
+2. **Say in the PR body what you found there**: ported, already correct, or a
+   gap you are leaving open and why.
+3. **If the two sides disagree, decide which is right.** Do not assume it is the
+   reference. It lost twice in one day.
+4. **Add the corpus case before the fix, and watch it FAIL.** A corpus entry
+   that was never seen red proves nothing.
+
+`tools/selfhost_coverage.py --check` (run by `tests/test_selfhost_coverage.py`)
+measures what the corpus does not reach and refuses to let that set grow
+silently. It is a floor, not a substitute for the rule above: it cannot see
+inside a branch the corpus already reaches.
+
 ## What CI covers
 
 `lint`, `frontend`, `frontend-cordis`, `backend-python`, `backend-typescript`,
