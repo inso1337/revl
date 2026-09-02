@@ -7,6 +7,7 @@ blocks) when a working JDK is present.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,12 @@ _spec = importlib.util.spec_from_file_location("revl_java_emit", Path(__file__).
 emit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(emit)
 from revl import compile_files, compile_source  # noqa: E402
+# A red golden is a REVIEW prompt, not a wall: the goldens are snapshot tests
+# (docs/conformance.md, "Golden policy: snapshot, not freeze"), so regenerating
+# and reviewing the diff is always an acceptable resolution. Every golden
+# assertion says which command regenerates it.
+_TAIL = ("If the change is intended: python3 tools/regen_goldens.py {t}, then review "
+         "the diff. Goldens are snapshots, not a freeze (docs/conformance.md).")
 
 HERE = Path(__file__).resolve().parent
 STUB_SOURCES = sorted((HERE / "stubs").rglob("*.java"))
@@ -88,7 +95,7 @@ def test_user_cache_emits_java_structure():
     assert 'UnsupportedOperationException("effectful method body")' not in src
 
 
-def test_format_emits_string_format():
+def test_format_emits_a_concatenation_chain():
     ir = {
         "ir_version": 1,
         "services": {"Bus": {"methods": {"send": {
@@ -101,7 +108,15 @@ def test_format_emits_string_format():
         }],
     }
     src = emit.emit(ir)
-    assert 'String.format("hi %s", x)' in src
+    # item 433 F1: a `format` node is a concatenation chain, not String.format.
+    # The only conversion this emitter ever produced was `%s`, which is
+    # `String.valueOf` for every non-Formattable argument (and no revl value is
+    # Formattable), so the two are output-identical while the concatenation
+    # compiles to one `invokedynamic makeConcatWithConstants` instead of
+    # allocating a varargs array, a Formatter and a re-parsed specifier list on
+    # every call.
+    assert '"hi " + x' in src
+    assert "String.format(" not in src
 
 
 def test_rejects_unknown_ir_version():
@@ -263,7 +278,9 @@ def test_version_gate_accepts_ir_1_2_3():
 def test_user_cache_golden_byte_equality():
     src = emit.emit(_ir("user_cache"))
     golden = (Path(__file__).resolve().parent / "golden" / "user_cache.java").read_text()
-    assert src == golden
+    assert src == golden, (
+        "backends/java/golden/user_cache.java drifted from the emitter. "
+        + _TAIL.format(t="java"))
 
 
 def test_host_objects_are_real_java_runtime_classes():
@@ -410,9 +427,12 @@ def test_v3_extern_requires_java_body():
         emit.emit(missing)
 
 
-def test_percent_in_template_is_escaped_for_string_format():
-    """Review finding: a literal `%` reached String.format unescaped and
-    threw UnknownFormatConversionException at runtime (SQL LIKE patterns)."""
+def test_percent_in_template_needs_no_escaping():
+    """A literal `%` used to reach String.format unescaped and throw
+    UnknownFormatConversionException at runtime (SQL LIKE patterns), so the
+    emitter doubled it. item 433 F1 renders a `format` node as a concatenation
+    chain, which has no conversion syntax at all, so the `%` is carried
+    verbatim and the whole hazard is gone."""
     ir = compile_source(
         """
         service Db { emission fn ex(s: Str) -> Int }
@@ -423,7 +443,8 @@ def test_percent_in_template_is_escaped_for_string_format():
         """
     )
     src = emit.emit(ir)
-    assert 'String.format("SELECT 100%% of %s", m)' in src
+    assert '"SELECT 100% of " + m' in src
+    assert "100%%" not in src
 
 
 def test_stdlib_builtins_use_typed_overloads():
@@ -1419,8 +1440,11 @@ def test_map_value_type_lowers_to_persistent_hashmaps():
     assert "revlMapHas(m, k)" in src
     # the copying helper itself is emitted exactly once per file
     assert src.count("private static <V> java.util.Map<String, V> revlMapSet(") == 1
-    # the empty map is a diamond-inferred HashMap
-    assert "return new java.util.HashMap<>();" in src
+    # item 433 F8: the empty map is the preallocated immutable singleton, not
+    # a fresh mutable HashMap — every writer above copies before it mutates, so
+    # nothing ever writes through it (48 B per escaping evaluation, against 0).
+    assert "return java.util.Map.of();" in src
+    assert "new java.util.HashMap<>()" not in src
 
 
 @pytest.mark.skipif(JAVAC is None, reason="no working javac")
@@ -1609,3 +1633,111 @@ def test_java_runs_non_string_map_values_on_the_stub_runtime(tmp_path):
     )
     assert run.returncode == 0, run.stderr + run.stdout
     assert "HOST_MAPS_OK" in run.stdout
+
+
+# ---------------------------------------------------------------------------
+# Emission determinism: no host address may reach the emitted Java.
+#
+# The emitter used to name a destructure temporary and a witnessed step's
+# Result/Ok temporaries from the AST node's `id()`. That is a host memory
+# address, so emitting the SAME IR twice produced two different Java sources
+# (`__revl_destructure_4313623040` in one process, `__revl_destructure_4391233664`
+# in the next) — an irreproducible build, and the reason
+# scenarios/crashproof/revl/Components.java had to be exempted from the golden
+# drift check (`tools/regen_goldens.py`'s `unstable`). The reference tier hit
+# the same bug and fixed it the same way (item 179,
+# backends/python/emit.py's `_Lines._destructure_seq`); the rust tier has always
+# indexed by emission order (`env.wit_counter`). These pin the property so no
+# future gensym reaches for `id()` again.
+# ---------------------------------------------------------------------------
+
+_DESTRUCTURE_SRC = """
+type Row = { id: Int, name: Str }
+
+fn one(row: Row) -> Int {
+  let {id, name} = row
+  return id + name.length
+}
+
+fn two(row: Row) -> Int {
+  let {id, name} = row
+  return id * 2
+}
+
+fn three(xs: List[Int]) -> Int {
+  let [head, ...rest] = xs
+  return head + rest.length
+}
+"""
+
+_ADDRESSY = re.compile(r"__revl_destructure_(\d+)|_revl_wit(\d+)|_revl_ok(\d+)")
+
+
+def _emitted_gensym_indices(java: str) -> list[int]:
+    return [int(next(g for g in m.groups() if g is not None))
+            for m in _ADDRESSY.finditer(java)]
+
+
+def test_destructure_temporaries_are_indexed_by_emission_order():
+    java = emit.emit(compile_source(_DESTRUCTURE_SRC))
+    names = sorted(set(re.findall(r"__revl_destructure_\d+", java)))
+    assert names == ["__revl_destructure_1", "__revl_destructure_2",
+                     "__revl_destructure_3"], (
+        "a destructure temporary is not named from its emission order. If it is "
+        f"named from `id(node)` the emitted Java is irreproducible: {names}")
+
+
+def test_no_generated_local_carries_a_host_address():
+    """A gensym index is a small ordinal. An `id()` is a 10-plus digit address —
+    the shape this refuses, for every generated local in one sweep."""
+    for java in (emit.emit(compile_source(_DESTRUCTURE_SRC)),
+                 emit.emit(_crashproof_ir(), "revl", record=True)):
+        oversized = [i for i in _emitted_gensym_indices(java) if i > 10_000]
+        assert not oversized, (
+            "a generated local is named from a host address, not an emission "
+            f"index: {oversized}")
+
+
+def _crashproof_ir() -> dict:
+    return json.loads(
+        (HERE / "scenarios" / "crashproof" / "crashproof.ir.json").read_text(
+            encoding="utf-8"))
+
+
+def test_emission_is_byte_identical_in_a_fresh_process():
+    """The property the indices exist for: two processes, one IR, one output.
+
+    A fresh interpreter lays the heap out differently, so an `id()`-derived name
+    differs between the two runs while an emission-order index does not."""
+    script = (
+        "import importlib.util, json, sys\n"
+        f"sys.path.insert(0, {str(ROOT / 'src')!r})\n"
+        f"spec = importlib.util.spec_from_file_location('revl_java_emit_subproc', {str(HERE / 'emit.py')!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "from revl import compile_source\n"
+        f"src = mod.emit(compile_source({_DESTRUCTURE_SRC!r}))\n"
+        f"ir = json.loads(open({str(HERE / 'scenarios' / 'crashproof' / 'crashproof.ir.json')!r}, encoding='utf-8').read())\n"
+        "src += mod.emit(ir, 'revl', record=True)\n"
+        "sys.stdout.write(src)\n"
+    )
+    other = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                           text=True, timeout=600)
+    assert other.returncode == 0, other.stderr
+    here = (emit.emit(compile_source(_DESTRUCTURE_SRC))
+            + emit.emit(_crashproof_ir(), "revl", record=True))
+    assert other.stdout == here, (
+        "the java emitter is not reproducible: the same IR emitted in a second "
+        "process produced different bytes")
+
+
+def test_crashproof_scenario_matches_the_emitter():
+    """`scenarios/crashproof/revl/Components.java` is a committed emitted file
+    that used to be regenerated but never byte-compared, because the emitter
+    could not reproduce it. It can now, so it is checked like every other
+    golden."""
+    committed = (HERE / "scenarios" / "crashproof" / "revl" / "Components.java").read_text(
+        encoding="utf-8")
+    assert emit.emit(_crashproof_ir(), "revl", record=True) == committed, (
+        "backends/java/scenarios/crashproof/revl/Components.java drifted from "
+        "the emitter. " + _TAIL.format(t="java"))

@@ -18,8 +18,14 @@ on:
 # Runs on main are NOT cancelled: main's history is the signal, and dropping a
 # run there would leave a landed commit with no verdict.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # The group carries the SHA on push, so a push to main is unique per commit
+  # and has nothing to cancel. A pull_request keeps a stable per-ref group, so a
+  # new push to the PR cancels the superseded run. Encoding the distinction in
+  # the GROUP rather than in cancel-in-progress is deliberate: the expression
+  # form cancelled main's runs anyway, which cost three merge commits their
+  # verdict.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: true
 
 # Go module resolution resilience. The go cross-tier tests download the pinned
 # stc-go module during `go test`, which intermittently fails verifying it against
@@ -52,12 +58,26 @@ jobs:
       # pass closed the seven landed-branch markers, and the three that survived
       # it (items 392 and 406 naming deleted branches, item 425 F3 citing a sha
       # only on an unmerged branch) were reworded in this same commit.
-      # --check-contradiction is on because it is GREEN on main today. The
-      # other three new checks are RED on main as of 2026-09-02 and every
-      # finding is a real unowned finding, so they stay off in THIS line only:
-      # turn each on here as its findings are dispatched. Never add `|| true`.
-      # `make roadmap-check-all` runs all four locally.
-      - run: python3 tools/check_roadmap_markers.py --check-contradiction
+      # A (contradiction), B (delegation), C (orphan) and E (duplicate
+      # headers) are all ON, and all four are GREEN on main as of this merge.
+      # C joins the line here: every open or delegated finding in the file now
+      # names a branch, an issue, a fix sha or an owner (item 427 F8 is issue
+      # #174), so a new unowned finding is a new red rather than one more line
+      # in a backlog.
+      #
+      # D (--check-tier-parity) is the only one still off: it has two real
+      # findings on main (items 421 F6 and 422 F6, python-only fixes to a
+      # language-wide guarantee). Turn it on here as its findings are
+      # dispatched.
+      #
+      # Never add `|| true`, and never narrow a check to make this line pass.
+      # `make roadmap-check-all` runs all five locally.
+      - run: |
+          python3 tools/check_roadmap_markers.py \
+            --check-contradiction \
+            --check-delegation \
+            --check-duplicate-headers \
+            --check-orphan
 
   frontend:
     runs-on: ubuntu-latest
@@ -267,6 +287,20 @@ jobs:
       # rides this job. The drift gate needs no toolchain and already runs in
       # the frontend job's plain `pytest tests/ -q`.
       - run: pytest tests/test_gate_crate_admit.py -q
+      # item 333 slice 2: the rust in-process gate harness
+      # (bench/inprocess_gate_rust) builds a standalone consumer of the gate
+      # crate and runs it, so it needs cargo and rides this job too. It has to
+      # be named HERE: its skip is a toolchain probe, not an env switch, and
+      # tests/test_env_gated_skips_run_somewhere.py only catches env-var gates —
+      # so without this line the skip would be the only thing that ever ran.
+      - run: pytest tests/test_inprocess_gate_rust.py -q
+      # item 338: the committed rust CONSUMER example
+      # (examples/ecosystem-consumer-rs), built from outside the checkout with
+      # the crate as its only dependency. Its source-level contract checks run
+      # in the frontend job's plain `pytest tests/ -q`; the build-and-run half
+      # is toolchain-gated, so it rides this job or it executes nowhere (the
+      # item-445 rule: a skip is not a pass).
+      - run: pytest tests/test_gate_consumer_example_rs.py -q
       # item 336 slice 1: the rust LSP binary's byte-identity agreement against
       # `python -m revl.lsp`. REVL_LSP_PYTHON points it at this job's python.
       - run: PYTHONPATH=src REVL_LSP_PYTHON=$(which python) cargo test --manifest-path crates/revl-lsp/Cargo.toml

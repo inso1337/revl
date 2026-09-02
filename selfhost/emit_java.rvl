@@ -86,8 +86,8 @@
 //     excluded, since it also pulls in the `_emit_ftoa_helper` block);
 //   * java-specific NUANCES — the `_reject_fn_type` refusal of a declared function
 //     type, local `let`-bound arrows and their `_inline_arrow` beta-reduction, and
-//     `let_pattern` (its temp name is `__revl_destructure_{id(node)}`, a host
-//     identity no port reproduces).
+//     `let_pattern` (the reference threads a per-`_V3Ctx` emission-order index
+//     through its temp name, which this port does not carry yet).
 //
 // ------------------------------------------------------ the erased-IR boundary
 // Navigation of the IR is PURE revl through stdlib/value.rvl's `value_*` (items
@@ -613,11 +613,21 @@ fn render_interp(node: Any, ctx: Ctx, counter: Int) -> Rendered {
       if (is_float_expr(v)) {
         segs = segs.push(`revlFtoa(${r.text})`)
       } else {
-        segs = segs.push(`String.valueOf(${r.text})`)
+        // item 433 F9: no `String.valueOf` wrapper — Java string concatenation
+        // already applies it to every operand, and the wrapper only built an
+        // intermediate `String` for the surrounding chain to copy again.
+        // Parenthesized unless the node is already atomic.
+        if (is_postfix_safe(node_kind(v))) {
+          segs = segs.push(r.text)
+        } else {
+          segs = segs.push(`(${r.text})`)
+        }
       }
     }
   }
   if (segs.length() == 0) { return { text: json_dumps(""), counter: c } }
+  // The chain must open in String position or `+` reads as arithmetic.
+  if (!starts_with(segs[0], "\"")) { segs = [json_dumps("")].concat(segs) }
   return { text: segs.join(" + "), counter: c }
 }
 
@@ -788,7 +798,9 @@ fn render_inner(node: Any, ctx: Ctx, counter: Int) -> Rendered {
     return { text: `(${cr.text} ? ${tr.text} : ${er.text})`, counter: er.counter }
   }
   if (kind == "list") { return render_list(node, ctx, counter) }
-  if (kind == "maplit") { return { text: "new java.util.HashMap<>()", counter: counter } }
+  // item 433 F8: `Map.empty()` is the preallocated immutable singleton, not a
+  // fresh mutable `HashMap` — every value-map writer copies before it mutates.
+  if (kind == "maplit") { return { text: "java.util.Map.of()", counter: counter } }
   if (kind == "interp") { return render_interp(node, ctx, counter) }
   return { text: `<<UNSUPPORTED-EXPR:${kind}>>`, counter: counter }
 }

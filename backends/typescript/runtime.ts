@@ -149,6 +149,95 @@ export const hostLog: string[] = []
 
 const listeners = new Set<(entry: string) => void>()
 
+// ---------------------------------------------------------------------------
+// confidentiality: what a declared `Secret[T]` may look like in the host trace
+// (roadmap item 421 F6, the typescript peer of backends/python/confidential.py)
+//
+// A `Secret[T]` declaration authorises disclosure TO THE DECLARED RECEIVER. It
+// does not authorise the host trace to keep a copy: `record` interpolates a Map
+// key, a `pool.query` sql, a stream item and a component's resolved config
+// straight into `hostLog`, which is this tier's shared observability channel —
+// exported, and forwarded to any `onHostEvent` subscriber a host installs.
+//
+// The scrub is placed at `record`, the ONE choke point every trace event passes
+// through, not at each call site: an event is a string this file has already
+// interpolated into, so a VALUE funnel cannot reach it, and per-printer
+// redaction is the discipline this funnel exists to replace. The match is EXACT
+// against the values a declared marking registered, never a pattern, so ordinary
+// trace is byte-identical and a composition that declares no secret pays one
+// empty-set test.
+
+/** Must equal `confidential.REDACTED` / `taint.REDACTED_SECRET` on the py tier:
+ *  a polyglot composition should redact to the SAME marker whichever tier
+ *  produced the line. */
+export const REDACTED_SECRET = '<redacted:secret>'
+
+// A remembered confidential value has to be long enough that an exact match
+// means something. Below this a value is a coin flip against ordinary trace
+// data ('', '1', 'ok'), and blanket-erasing those would gut the trace for no
+// confidentiality gain. Same bound as the py tier's `_MIN_MARKABLE`.
+const MIN_MARKABLE = 4
+
+const secretValues = new Set<string>()
+
+/** Remember one already-rendered value as confidential. Walks a container so a
+ *  `Secret[List[Str]]` receiver marks its elements, mirroring py's
+ *  `register_secret_tree`. */
+function rememberSecret(value: unknown): void {
+  if (value === null || value === undefined || typeof value === 'boolean') return
+  if (typeof value === 'string') {
+    if (value.length >= MIN_MARKABLE) secretValues.add(value)
+    return
+  }
+  if (typeof value === 'number' || typeof value === 'bigint') {
+    const form = String(value)
+    if (form.length >= MIN_MARKABLE) secretValues.add(form)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) rememberSecret(item)
+    return
+  }
+  if (typeof value === 'object') {
+    // Values only: a record's KEYS are field names the author wrote, not the
+    // declared secret, and erasing them would destroy the trace's shape.
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      rememberSecret(item)
+    }
+  }
+}
+
+/** The RECEIVER end of a declared crossing: called at the head of a provide
+ *  method whose service declares that parameter `Secret[T]`. The emitter reads
+ *  the same `params[i].secret` stamp the py tier reads. */
+export function markSecret(...values: unknown[]): void {
+  for (const value of values) rememberSecret(value)
+}
+
+/** The ORIGIN end: the return of an extern whose declared return type was
+ *  `Secret[T]`, where the value first enters the value world. Returns its
+ *  argument, so a call site wraps with no change in meaning. */
+export function secretResult<T>(value: T): T {
+  rememberSecret(value)
+  return value
+}
+
+/** Drop every remembered value (test isolation; also called by `resetHost`). */
+export function forgetSecrets(): void {
+  secretValues.clear()
+}
+
+/** Replace every registered secret in free-form host text by the placeholder.
+ *  Longest needle first, so one that contains another leaves no tail behind. */
+export function redactText(text: string): string {
+  if (secretValues.size === 0 || !text) return text
+  let out = text
+  for (const needle of [...secretValues].sort((a, b) => b.length - a.length)) {
+    if (needle && out.includes(needle)) out = out.split(needle).join(REDACTED_SECRET)
+  }
+  return out
+}
+
 /** Subscribe to host events (returns an unsubscribe function). */
 export function onHostEvent(listener: (entry: string) => void): () => void {
   listeners.add(listener)
@@ -158,6 +247,7 @@ export function onHostEvent(listener: (entry: string) => void): () => void {
 /** Reset host state between tests. */
 export function resetHost(): void {
   hostLog.length = 0
+  forgetSecrets()
   liveResources.clear()
   poolCounter = 0
   mapCounter = 0
@@ -173,8 +263,12 @@ export function resetHost(): void {
  * assertions alongside `Pool`/`Map`/`Job` events, without inventing a second
  * ad hoc channel. */
 export function record(entry: string): void {
-  hostLog.push(entry)
-  for (const listener of listeners) listener(entry)
+  // The confidentiality funnel (item 421 F6). Every event passes here before it
+  // can reach `hostLog` or any subscriber, so a sink added tomorrow reads an
+  // already-scrubbed line and cannot leak.
+  const scrubbed = redactText(entry)
+  hostLog.push(scrubbed)
+  for (const listener of listeners) listener(scrubbed)
 }
 
 /** Labels of currently-open host resources (empty ⇔ no residue, R4). */
@@ -1285,6 +1379,10 @@ export class Frame {
 export interface ConfigFieldSpec {
   required?: boolean
   default?: unknown
+  /** The author declared this field `Secret[T]` (item 256 Slice 3 / 421 F6).
+   *  The component still receives the real value — it was granted it; the
+   *  `<Component>.config` trace line does not. */
+  secret?: boolean
 }
 
 /** component name -> the configuration it last actually ran with, after
@@ -1311,6 +1409,14 @@ function applyConfigDefaults(
     }
   }
   resolvedConfig.set(component, config)
+  // item 256 Slice 3 / 421 F6: a field the author declared `Secret[T]` is a
+  // credential the component was granted and the trace was not. Remember the
+  // value (so it is scrubbed wherever else it surfaces) and render the field as
+  // the placeholder — still named, still in position, so the line keeps saying
+  // which fields resolved and which defaulted.
+  const secretFields = new Set(
+    Object.entries(spec).filter(([, f]) => f.secret).map(([field]) => field))
+  for (const field of secretFields) rememberSecret(config[field])
   // `JSON.stringify` THROWS on a BigInt, and an `Int` config field is a bigint
   // on this tier — so the trace line has to render one itself. Digits with no
   // `n` suffix and no quotes: the same text python/rust/java/go write for the
@@ -1319,7 +1425,8 @@ function applyConfigDefaults(
     typeof value === 'bigint' ? value.toString() : JSON.stringify(value)
   const body = Object.keys(config)
     .sort()
-    .map((key) => `${key}=${show(config[key])}`)
+    .map((key) => `${key}=`
+      + (secretFields.has(key) ? JSON.stringify(REDACTED_SECRET) : show(config[key])))
     .join(', ')
   const tail = defaulted.length ? ` [defaults: ${defaulted.sort().join(', ')}]` : ''
   record(`${component}.config {${body}}${tail}`)
@@ -1367,6 +1474,12 @@ export const host = {
   clockAdvance: (ms: number): number => Clock.advance(ms),
   clockReset: (): void => Clock.reset(),
   applyConfigDefaults,
+  // item 421 F6: the two ends of a declared `Secret[T]` marking, called by
+  // emitted code — `markSecret` at the head of a provide method that declares a
+  // `Secret[T]` parameter (the receiver), `secretResult` around the return of an
+  // extern whose declared return was `Secret[T]` (the origin).
+  markSecret,
+  secretResult,
 }
 
 // ---------------------------------------------------------------------------

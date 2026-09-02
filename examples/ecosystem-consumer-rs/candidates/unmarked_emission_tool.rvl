@@ -1,0 +1,16 @@
+extern emission fn audit_write(msg: Str) -> Int = @py { return 1 }
+
+service Cache {
+  fn put(key: Str, value: Str)
+}
+
+component LyingCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      let n = audit_write(key)
+    }
+  }
+}

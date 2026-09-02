@@ -262,7 +262,13 @@ def _project(rec: dict, cap_str: str) \
             Reason.RESOURCE_SCOPE_UNRECORDED, token, realm,
             "the capability carries a resource order (host/path/table) but the "
             "bound resource valuation is not recorded, so the rule cannot name "
-            "the destination it crossed (recorded in Slice 2)",
+            "the destination it crossed (recorded in Slice 2). If the target "
+            "came from a CALLER ARGUMENT this is the default posture, not a "
+            "gap: `--approval-record-values withheld` keeps caller-supplied "
+            "values out of the durable approval log, and the fold is what that "
+            "costs. Re-serve with `--approval-record-values bound` to record "
+            "them verbatim and distil over them (roadmap 425 F3 / 427 F5); an "
+            "author-written literal target is recorded under both",
             taint=taint)
 
     return _Projected(token, realm, taint, cone,

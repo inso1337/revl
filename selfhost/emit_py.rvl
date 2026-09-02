@@ -16,7 +16,7 @@
 // an IR with module `fn`s (a revl library) and no components/services:
 //
 //   * the module scaffold — the generated-header docstring, the always-emitted
-//     `_revl_field` helper, and the empty `SERVICES`/`COMPONENTS` trailers;
+//     the empty `SERVICES`/`COMPONENTS` trailers;
 //   * the conditional arithmetic preludes — the i64/i32 overflow-trap helpers
 //     and the IEEE true-division helper, each gated exactly as the reference
 //     gates them (`_uses_bounded_int` / `_uses_bounded_int32` /
@@ -174,6 +174,38 @@ fn is_div_method(m: Str) -> Bool {
   return m == "div_trunc" || m == "div_floor" || m == "div_euclid"
 }
 
+// The reference's `_bounded` (item 436 F5): impose the Int/Int32 bound INLINE.
+// `_revl_i64(a + b)` entered a python frame for every bounded `+`/`-`/`*`, and
+// the calls nest; the range test is two comparisons against module constants,
+// so it inlines and the frame is paid only on the trapping path. One temp name
+// serves ANY nesting depth — the walrus sits in a conditional expression's
+// condition, which python evaluates before either branch, so an inner operation
+// has finished reading `_bi` before an outer one rebinds it.
+fn bounded(operation: Str, width: Str) -> Str {
+  return `(_bi if _REVL_I${width}_MIN <= (_bi := ${operation}) <= _REVL_I${width}_MAX else _revl_i${width}(_bi))`
+}
+
+// The reference's `_field_read` (item 436 F4): `p.x` INLINE, not through a
+// `_revl_field` call. Record literals are dicts and ADT payloads are objects, so
+// the read dispatches on the receiver's shape — but one `isinstance` needs no
+// python frame around it. `rereadable` says the caller already bound the target
+// to a name (the `?.` chain has), so no temp is needed.
+fn field_read(target: Str, name: Str, rereadable: Bool) -> Str {
+  var tmp = "_fv"
+  var got = `(_fv := ${target})`
+  if (rereadable) {
+    tmp = target
+    got = target
+  }
+  return `(${tmp}[${name}] if isinstance(${got}, dict) else getattr(${tmp}, ${name}))`
+}
+
+// Is this node the bare `Some` constructor? (item 436 F8)
+fn is_some_var(n: Any) -> Bool {
+  if (node_kind(n) != "var") { return false }
+  return value_str(value_field(n, "name")) == "Some"
+}
+
 fn is_cmp_op(op: Str) -> Bool {
   if (op == "==") { return true }
   if (op == "===") { return true }
@@ -243,6 +275,45 @@ fn uses_true_division(n: Any) -> Bool {
 // `_uses_i32_shl`: left shift is the one bitwise op whose result can leave the
 // 32-bit range (a bit op, not a trap), so python re-wraps it through
 // `_revl_i32_wrap`; `& | ^ >> ~` all stay in range and need no helper.
+// The reference's `_uses_builtin` (item 436 F6): does the IR call this stdlib
+// builtin? `?.m(..)` is an `optcall` node, not a `builtin` one, but it goes
+// through the very same render table, so it needs the very same helper.
+fn uses_builtin_method(n: Any, name: Str) -> Bool {
+  let k = node_kind(n)
+  if ((k == "builtin" || k == "optcall") && value_str(value_field(n, "method")) == name) {
+    return true
+  }
+  for (c of value_children(n)) {
+    if (uses_builtin_method(c, name)) { return true }
+  }
+  return false
+}
+
+// `_uses_opt_to_int`: a `to_int` reached through `?.`, whose node carries no
+// receiver type, so the payload-dispatching wrapper is emitted too.
+fn uses_opt_to_int(n: Any) -> Bool {
+  if (node_kind(n) == "optcall" && value_str(value_field(n, "method")) == "to_int") {
+    return true
+  }
+  for (c of value_children(n)) {
+    if (uses_opt_to_int(c)) { return true }
+  }
+  return false
+}
+
+// `_uses_trunc_rem`: a truncated remainder (`%` on Int or Float). Python's own
+// `%` floors, so this is the one operator the tier has to build.
+fn uses_trunc_rem(n: Any) -> Bool {
+  if (node_kind(n) == "bin" && node_op(n) == "%") {
+    let opnd = node_operands(n)
+    if (opnd == "Int" || opnd == "Float") { return true }
+  }
+  for (c of value_children(n)) {
+    if (uses_trunc_rem(c)) { return true }
+  }
+  return false
+}
+
 fn uses_i32_shl(n: Any) -> Bool {
   if (node_kind(n) == "bin" && node_op(n) == "<<") { return true }
   for (c of value_children(n)) {
@@ -320,12 +391,10 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "charAt") { return `${target}[${args[0]}]` }
   if (method == "charCodeAt") { return `ord(${target}[${args[0]}])` }
   if (method == "concat") { return `(${target} + ${args[0]})` }
-  if (method == "indexOf") {
-    return `(lambda _v, _n: _v.find(_n) if isinstance(_v, str) else (_v.index(_n) if _n in _v else -1))(${target}, ${args[0]})`
-  }
-  if (method == "split") {
-    return `(lambda _v, _s: list(_v) if _s == "" else _v.split(_s))(${target}, ${args[0]})`
-  }
+  // A preamble helper, not a lambda built and applied at every evaluation
+  // (item 436 F6): one frame, no function-object allocation.
+  if (method == "indexOf") { return `_revl_index_of(${target}, ${args[0]})` }
+  if (method == "split") { return `_revl_split(${target}, ${args[0]})` }
   if (method == "join") { return `${args[0]}.join(${target})` }
   if (method == "repeat") { return `(${target} * ${args[0]})` }
   if (method == "startsWith") { return `${target}.startswith(${args[0]})` }
@@ -336,14 +405,14 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "size") { return `len(${target})` }
   if (method == "keys") { return `sorted(${target})` }
   if (method == "remove") {
-    return `(dict((kk, vv) for kk, vv in ${target}.items() if kk != ${args[0]}))`
+    return "{".concat(`kk: vv for kk, vv in ${target}.items() if kk != ${args[0]}`).concat("}")
   }
   if (method == "div_trunc") {
-    return `_revl_i64((lambda _a, _b: abs(_a) // abs(_b) if (_a < 0) == (_b < 0) else -(abs(_a) // abs(_b)))(${target}, ${args[0]}))`
+    return bounded(`_revl_div_trunc(${target}, ${args[0]})`, "64")
   }
-  if (method == "div_floor") { return `_revl_i64(${target} // ${args[0]})` }
+  if (method == "div_floor") { return bounded(`${target} // ${args[0]}`, "64") }
   if (method == "div_euclid") {
-    return `_revl_i64((lambda _a, _b: _a // _b if _b > 0 else -(_a // -_b))(${target}, ${args[0]}))`
+    return bounded(`_revl_div_euclid(${target}, ${args[0]})`, "64")
   }
   if (method == "mod") { return `(${target} % abs(${args[0]}))` }
   if (method == "to_int") {
@@ -351,9 +420,8 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
     // whose node carries no receiver tag, so the Int32-widen and Str-parse
     // rows are told apart at runtime instead.
     if (recv == "Str" || recv == "?") {
-      let parse = `(None if (_s == "" or _s == "-" or not _s.isascii() or not (_s.isdigit() or (_s[0] == "-" and _s[1:].isdigit())) or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) else _n)`
-      if (recv == "?") { return `(lambda _s: ${parse} if isinstance(_s, str) else _s)(${target})` }
-      return `(lambda _s: ${parse})(${target})`
+      if (recv == "?") { return `_revl_opt_to_int(${target})` }
+      return `_revl_str_to_int(${target})`
     }
     return `(${target})`
   }
@@ -363,21 +431,21 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
 }
 
 // `_match_expr` one arm: nested conditional inside a one-shot `lambda match: …`.
-fn match_branch(arm: Any, rest: Str, has_rest: Bool) -> Str {
+fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   let pattern = value_str(value_field(arm, "pattern"))
   var body = expr(value_field(arm, "body"))
   if (pattern == "_") { return body }
   let bind = value_str(value_field(arm, "bind"))
   var cond = ""
   if (pattern == "None") {
-    cond = "match is None"
+    cond = `${head} is None`
   } else {
     if (pattern == "Some") {
-      cond = "match is not None"
+      cond = `${head} is not None`
       if (bind != "") { body = `(lambda ${bind}: ${body})(match)` }
     } else {
       if (bind != "") { body = `(lambda ${bind}: ${body})(match.value)` }
-      cond = `isinstance(match, ${pattern})`
+      cond = `isinstance(${head}, ${pattern})`
     }
   }
   if (!has_rest) {
@@ -386,20 +454,37 @@ fn match_branch(arm: Any, rest: Str, has_rest: Bool) -> Str {
   return `(${body} if ${cond} else ${rest})`
 }
 
+// The scrutinee bind rides the FIRST arm's test rather than a one-shot
+// `lambda match: …` (item 436 F3): the lambda was a function object built and a
+// frame entered at every evaluation, to bind one name. `match` is a revl
+// keyword, so no user binding collides with the walrus target, and a nested
+// match inside an arm body may reuse the name — the outer chain has finished
+// reading `match` before any body runs. A leading wildcard arm (or no arm at
+// all) has no test to carry the bind, so those keep the `(<bind>, <body>)[1]`
+// tuple the awaited path uses.
+fn match_folds(arms: List[Any]) -> Bool {
+  if (arms.length() == 0) { return false }
+  return value_str(value_field(arms[0], "pattern")) != "_"
+}
+
 fn match_expr(scrutinee: Str, arms: List[Any]) -> Str {
+  let folds = match_folds(arms)
   var result = ""
   var has = false
   var i = arms.length() - 1
   while (i >= 0) {
     let arm = arms[i]
-    result = match_branch(arm, result, has)
+    var head = "match"
+    if (folds && i == 0) { head = `(match := ${scrutinee})` }
+    result = match_branch(arm, result, has, head)
     has = true
     i -= 1
   }
   if (!has) {
     result = "(_ for _ in ()).throw(TypeError('non-exhaustive match'))"
   }
-  return `(lambda match: ${result})(${scrutinee})`
+  if (folds) { return result }
+  return `((match := ${scrutinee}), ${result})[1]`
 }
 
 // `_interp_fstring`: a `${…}` template as a Python string concatenation.
@@ -474,18 +559,16 @@ fn render_bin(node: Any) -> Str {
   }
   let opnd = node_operands(node)
   if (is_addsubmul(op) && opnd == "Int") {
-    return `_revl_i64(${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))})`
+    return bounded(`${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))}`, "64")
   }
   if (is_addsubmul(op) && opnd == "Int32") {
-    return `_revl_i32(${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))})`
+    return bounded(`${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))}`, "32")
   }
   if (op == "/") {
     return `_revl_div(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
   }
   if (op == "%" && (opnd == "Int" || opnd == "Float")) {
-    let lhs = expr(value_field(node, "left"))
-    let rhs = expr(value_field(node, "right"))
-    return `(lambda _a, _b: abs(_a) % abs(_b) if _a >= 0 else -(abs(_a) % abs(_b)))(${lhs}, ${rhs})`
+    return `_revl_rem(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
   }
   if (op == "&" || op == "|" || op == "^") {
     // Int32 bitwise AND/OR/XOR (item 366): for operands already in i32 range,
@@ -537,12 +620,18 @@ fn expr_inner(node: Any) -> Str {
   if (kind == "bin") { return render_bin(node) }
   if (kind == "un") { return render_un(node) }
   if (kind == "call") {
-    let callee = expr(value_field(node, "callee"))
-    let args = commajoin(value_list(value_field(node, "args")))
+    // `Some(x)` is the identity on this tier (item 436 F8): rendering the
+    // callee would build `(lambda _v: _v)` and apply it to hand back its
+    // argument. A BARE `Some` still needs the lambda (the `var` arm above).
+    let callee_node = value_field(node, "callee")
+    let call_args = value_list(value_field(node, "args"))
+    if (is_some_var(callee_node) && call_args.length() == 1) { return expr(call_args[0]) }
+    let callee = expr(callee_node)
+    let args = commajoin(call_args)
     return `${callee}(${args})`
   }
   if (kind == "field") {
-    return `_revl_field(${expr(value_field(node, "target"))}, ${py_repr(value_field(node, "name"))})`
+    return field_read(expr(value_field(node, "target")), py_repr(value_field(node, "name")), false)
   }
   if (kind == "index") {
     return `${expr(value_field(node, "target"))}[${expr(value_field(node, "index"))}]`
@@ -570,7 +659,7 @@ fn expr_inner(node: Any) -> Str {
   if (kind == "optfield") {
     let tgt = value_field(node, "target")
     let t = expr(tgt)
-    return `(None if ${opt_binder(node, tgt, t)} is None else _revl_field(${opt_reader(node, tgt, t)}, ${py_repr(value_field(node, "name"))}))`
+    return `(None if ${opt_binder(node, tgt, t)} is None else ${field_read(opt_reader(node, tgt, t), py_repr(value_field(node, "name")), true)})`
   }
   if (kind == "optcall") {
     // the method is a STDLIB builtin (the checker types an optcall through
@@ -597,184 +686,44 @@ fn expr(node: Any) -> Str {
 }
 
 // ------------------------------------------- in-place accumulation (436 F1)
-// The reference's `_py_self_rebind` / `_py_escaped_names` / `_py_inplace_locals`
-// / `_py_inplace_stmts`. `xs.push(v)` renders `(xs + [v])`, a WHOLE copy of the
-// receiver, so `var out = []; for (..) { out = out.push(..) }` is emitted O(n^2)
-// where the developer wrote O(n). The rewrite is `out.append(v)` and its whole
-// difficulty is proving the copy unobservable: the local must be BORN here
-// (a fresh literal, or another name materialised as one defensive copy) and
-// must never ESCAPE into a second holder.
-fn is_fresh_kind(k: Str) -> Bool {
-  return k == "list" || k == "maplit" || k == "record"
-}
+// `xs.push(v)` renders `(xs + [v])`, a WHOLE copy of the receiver, so
+// `var out = []; for (..) { out = out.push(..) }` is emitted O(n^2) where the
+// developer wrote O(n). The rewrite is `out.append(v)` and its whole difficulty
+// is proving the copy unobservable.
+//
+// THAT PROOF IS NO LONGER HERE. It was the reference's `_py_self_rebind` /
+// `_py_escaped_names` / `_py_inplace_locals`, ported into this file — and the
+// go tier had derived the same aliasing rule independently for its own emitter.
+// Item 445 lifted the single answer into the frontend (`src/revl/ownership.py`),
+// where it is also flow-sensitive, and it now rides the IR:
+//
+//   `assign` step, `"unique": true`     — the binding owns its object outright
+//                                          at this write.
+//   `assign` step, `"unique": "copy"`,  — the local is born off ANOTHER name,
+//   `let` step, `"unique_birth"`          owned because this tier materialises
+//                                          one defensive copy at that birth.
+//
+// So this file reads two markers where it used to carry ~130 lines of analysis,
+// which is the whole argument for the frontend decision in one file.
 
-// the persistent methods with an in-place equivalent, and their arity; -1 for
-// anything else. `concat` is absent: its receiver type is not known at this
-// node and a python `str` cannot be mutated at all.
-fn inplace_arity(method: Str) -> Int {
-  if (method == "push") { return 1 }
-  if (method == "set") { return 2 }
-  if (method == "remove") { return 1 }
-  return -1
-}
-
-// slots in which a bare `var` is READ but not RETAINED
-fn non_retaining_slots(kind: Str) -> List[Str] {
-  if (kind == "builtin") { return ["target"] }
-  if (kind == "index") { return ["target", "index"] }
-  if (kind == "len") { return ["target"] }
-  if (kind == "field") { return ["target"] }
-  if (kind == "optfield") { return ["target"] }
-  if (kind == "optcall") { return ["target"] }
-  if (kind == "bin") { return ["left", "right"] }
-  if (kind == "un") { return ["operand"] }
-  if (kind == "interp") { return ["parts"] }
-  if (kind == "record_update") { return ["base"] }
-  return []
-}
-
-// the `out = out.push(v)` shape: a persistent copy of the target rebound over
-// its own receiver
-fn self_rebind(name: Str, value: Any) -> Bool {
-  let k = node_kind(value)
-  if (k == "builtin") {
-    let arity = inplace_arity(value_str(value_field(value, "method")))
-    if (arity < 0) { return false }
-    if (value_list(value_field(value, "args")).length() != arity) { return false }
-    let tgt = value_field(value, "target")
-    return node_kind(tgt) == "var" && value_str(value_field(tgt, "name")) == name
-  }
-  if (k == "record_update") {
-    if (value_list(value_field(value, "updates")).length() == 0) { return false }
-    let base = value_field(value, "base")
-    return node_kind(base) == "var" && value_str(value_field(base, "name")) == name
-  }
-  return false
-}
-
-// every name whose object could outlive the expression that reads it, plus
-// every name a nested binder shadows
-fn escaped_names(node: Any, escapes: Bool) -> List[Str] {
-  var found: List[Str] = []
-  if (value_is_list(node)) {
-    for (item of value_list(node)) { found = found.concat(escaped_names(item, escapes)) }
-    return found
-  }
-  if (!value_is_object(node)) { return found }
-  // a `return` ENDS the function: nothing it hands out can be observed
-  // changing afterwards
-  if (value_str(value_field(node, "step")) == "return") { return found }
-  let kind = node_kind(node)
-  if (kind == "var") {
-    if (escapes) { found = found.push(value_str(value_field(node, "name"))) }
-    return found
-  }
-  if (kind == "arrow") {
-    // a lambda captures by default-argument, snapshotting the OBJECT
-    for (c of value_list(value_field(node, "captures"))) { found = found.push(value_str(c)) }
-    for (p of value_list(value_field(node, "params"))) { found = found.push(value_str(p)) }
-  }
-  if (kind == "match") {
-    for (arm of value_list(value_field(node, "arms"))) {
-      let b = value_field(arm, "bind")
-      if (!value_is_null(b)) { found = found.push(value_str(b)) }
-    }
-  }
-  // `a ?? b` YIELDS `a`, so that operand IS retained
-  let safe = (kind == "bin" && node_op(node) == "??") ? [] : non_retaining_slots(kind)
-  for (key of value_keys(node)) {
-    found = found.concat(escaped_names(value_field(node, key), !list_contains(safe, key)))
-  }
-  return found
-}
-
-// One walk over the statement tree, tagging each write: `fresh:` / `alias:` a
-// birth, `spoil:` a write the rewrite cannot own, `accum:` a self-rebind,
-// `push:` a self-rebind that names the List container.
-fn scan_locals(steps: List[Any]) -> List[Str] {
-  var out: List[Str] = []
-  for (node of steps) {
-    let step = value_str(value_field(node, "step"))
-    let name = value_str(value_field(node, "name"))
-    if (step == "let") {
-      let k = node_kind(value_field(node, "value"))
-      if (is_fresh_kind(k)) { out = out.push(`fresh:${name}`) }
-      else if (k == "var") { out = out.push(`alias:${name}`) }
-      else { out = out.push(`spoil:${name}`) }
-    }
-    if (step == "assign") {
-      let value = value_field(node, "value")
-      if (self_rebind(name, value)) {
-        out = out.push(`accum:${name}`)
-        if (value_str(value_field(value, "method")) == "push") { out = out.push(`push:${name}`) }
-      } else {
-        out = out.push(`spoil:${name}`)
-      }
-    }
-    if (step == "for") {
-      out = out.push(`spoil:${value_str(value_field(node, "bind"))}`)
-      out = out.concat(scan_locals(value_list(value_field(node, "body"))))
-    }
-    if (step == "while") { out = out.concat(scan_locals(value_list(value_field(node, "body")))) }
-    if (step == "if") {
-      out = out.concat(scan_locals(value_list(value_field(node, "then"))))
-      out = out.concat(scan_locals(value_list(value_field(node, "else"))))
-    }
-  }
-  return out
-}
-
-fn tag_count(tags: List[Str], tag: Str) -> Int {
-  var n = 0
-  for (t of tags) { if (t == tag) { n = n + 1 } }
-  return n
-}
-
-fn tag_name(t: Str) -> Str { return t.slice(t.indexOf(":") + 1, t.length()) }
-
-// the locals a persistent write may update in place
-fn inplace_locals(fnode: Any) -> List[Str] {
-  let body = value_field(fnode, "body")
-  let tags = scan_locals(value_list(body))
-  let escaped = escaped_names(body, true)
-  var params: List[Str] = []
-  for (p of value_list(value_field(fnode, "params"))) {
-    params = params.push(value_str(value_field(p, "name")))
-  }
-  var out: List[Str] = []
-  for (t of tags) {
-    if (!t.startsWith("fresh:") && !t.startsWith("alias:")) { continue }
-    let nm = tag_name(t)
-    if (list_contains(out, nm)) { continue }
-    // one python scope per fn, so a second declaration is a rebind
-    if (tag_count(tags, `fresh:${nm}`) + tag_count(tags, `alias:${nm}`) > 1) { continue }
-    if (tag_count(tags, `accum:${nm}`) == 0) { continue }
-    if (tag_count(tags, `spoil:${nm}`) > 0) { continue }
-    if (list_contains(params, nm)) { continue }
-    if (list_contains(escaped, nm)) { continue }
-    out = out.push(nm)
-  }
-  return out
-}
-
-// `name=list` / `name=dict` for each eligible local born off ANOTHER name: it
-// takes one defensive copy at birth, where the persistent form took one per
-// write. The container is named by the methods that rebind the local.
-fn inplace_births(fnode: Any, eligible: List[Str]) -> List[Str] {
-  let tags = scan_locals(value_list(value_field(fnode, "body")))
-  var out: List[Str] = []
-  for (nm of eligible) {
-    if (tag_count(tags, `alias:${nm}`) == 0) { continue }
-    out = out.push(tag_count(tags, `push:${nm}`) > 0 ? `${nm}=list` : `${nm}=dict`)
-  }
-  return out
-}
-
-fn birth_container(births: List[Str], name: Str) -> Str {
-  for (b of births) {
-    if (b.startsWith(`${name}=`)) { return b.slice(name.length() + 1, b.length()) }
-  }
+// the container a `unique_birth` shape materialises as
+fn birth_container(shape: Str) -> Str {
+  if (shape == "List") { return "list" }
+  if (shape == "Map") { return "dict" }
   return ""
+}
+
+// is this `assign` a write the frontend proved unique AND this tier renders
+// destructively? `concat` is never marked: its receiver type is not known at
+// that node and a python `str` cannot be mutated at all.
+fn is_inplace_write(node: Any) -> Bool {
+  if (value_str(value_field(node, "step")) != "assign") { return false }
+  let mark = value_field(node, "unique")
+  if (value_is_null(mark)) { return false }
+  let value = value_field(node, "value")
+  if (node_kind(value) == "record_update") { return true }
+  let m = value_str(value_field(value, "method"))
+  return m == "push" || m == "set" || m == "remove"
 }
 
 // the in-place statements replacing a proven-unique persistent copy; operand
@@ -823,26 +772,22 @@ fn emit_assert(e: Any, indent: Int) -> List[Str] {
 }
 
 // `_fn_stmt`: one fn-body step -> its emitted lines (already indented).
-// `inplace`/`births` are item 436 F1's per-fn analysis, computed once in
-// `emit_functions` and threaded down (the reference keeps them in a module
-// global for the same reason: `fn_stmt` sees one step, the proof needs the
-// whole body).
-fn fn_stmt(node: Any, indent: Int, inplace: List[Str], births: List[Str]) -> List[Str] {
+fn fn_stmt(node: Any, indent: Int) -> List[Str] {
   let step = value_str(value_field(node, "step"))
   var out = []
   if (step == "let" || step == "assign") {
     let nm = value_str(value_field(node, "name"))
     let value = value_field(node, "value")
-    if (list_contains(inplace, nm)) {
-      if (step == "assign" && self_rebind(nm, value)) {
-        for (s of inplace_stmts(nm, value)) { out = out.push(line(indent, s)) }
-        return out
-      }
-      let container = step == "let" ? birth_container(births, nm) : ""
-      if (container != "") {
-        out = out.push(line(indent, `${mangle(nm)} = ${container}(${expr(value)})`))
-        return out
-      }
+    if (is_inplace_write(node)) {
+      for (s of inplace_stmts(nm, value)) { out = out.push(line(indent, s)) }
+      return out
+    }
+    let container = step == "let" ? birth_container(value_str(value_field(node, "unique_birth"))) : ""
+    if (container != "") {
+      // born off another name: ONE copy here, where the persistent form made
+      // one per write
+      out = out.push(line(indent, `${mangle(nm)} = ${container}(${expr(value)})`))
+      return out
     }
     out = out.push(line(indent, `${mangle(nm)} = ${expr(value)}`))
     return out
@@ -858,11 +803,11 @@ fn fn_stmt(node: Any, indent: Int, inplace: List[Str], births: List[Str]) -> Lis
   }
   if (step == "if") {
     out = out.push(line(indent, `if ${expr(value_field(node, "cond"))}:`))
-    for (s of value_list(value_field(node, "then"))) { out = out.concat(fn_stmt(s, indent + 1, inplace, births)) }
+    for (s of value_list(value_field(node, "then"))) { out = out.concat(fn_stmt(s, indent + 1)) }
     let els = value_list(value_field(node, "else"))
     if (els.length() > 0) {
       out = out.push(line(indent, "else:"))
-      for (s of els) { out = out.concat(fn_stmt(s, indent + 1, inplace, births)) }
+      for (s of els) { out = out.concat(fn_stmt(s, indent + 1)) }
     }
     return out
   }
@@ -872,7 +817,7 @@ fn fn_stmt(node: Any, indent: Int, inplace: List[Str], births: List[Str]) -> Lis
     if (body.length() == 0) {
       out = out.push(line(indent + 1, "pass"))
     } else {
-      for (s of body) { out = out.concat(fn_stmt(s, indent + 1, inplace, births)) }
+      for (s of body) { out = out.concat(fn_stmt(s, indent + 1)) }
     }
     return out
   }
@@ -882,7 +827,7 @@ fn fn_stmt(node: Any, indent: Int, inplace: List[Str], births: List[Str]) -> Lis
     if (body.length() == 0) {
       out = out.push(line(indent + 1, "pass"))
     } else {
-      for (s of body) { out = out.concat(fn_stmt(s, indent + 1, inplace, births)) }
+      for (s of body) { out = out.concat(fn_stmt(s, indent + 1)) }
     }
     return out
   }
@@ -921,11 +866,7 @@ fn emit_functions(functions: List[Any]) -> List[Str] {
     out = out.push(`def ${name}(${params}):`)
     let body = value_list(value_field(fnode, "body"))
     if (body.length() == 0) { out = out.push(line(1, "pass")) }
-    // item 436 F1: the accumulation locals whose persistent copies are
-    // provably unobservable, computed once over the whole body
-    let inplace = inplace_locals(fnode)
-    let births = inplace_births(fnode, inplace)
-    for (s of body) { out = out.concat(fn_stmt(s, 1, inplace, births)) }
+    for (s of body) { out = out.concat(fn_stmt(s, 1)) }
     out = out.push("")
   }
   return out
@@ -1049,6 +990,82 @@ fn i32_wrap_block() -> List[Str] {
   return o
 }
 
+// The stdlib lowerings that need more than one expression: a MODULE-LEVEL
+// `def`, gated on use, rather than a lambda built and applied at every
+// evaluation (item 436 F6). Same shape as `_revl_div` — one frame, no
+// function-object allocation.
+fn rem_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_rem(a, b):")
+  o = o.push(`    """The TRUNCATED remainder: it takes the sign of the DIVIDEND, as in"""`)
+  o = o.push("    \"\"\"TypeScript. python's own `%` floors and takes the divisor's sign.\"\"\"")
+  o = o.push("    return abs(a) % abs(b) if a >= 0 else -(abs(a) % abs(b))")
+  o = o.push("")
+  return o
+}
+
+fn div_trunc_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_div_trunc(a, b):")
+  o = o.push(`    """Division that TRUNCATES toward zero (docs/arithmetic.md)."""`)
+  o = o.push("    return (abs(a) // abs(b) if (a < 0) == (b < 0)")
+  o = o.push("            else -(abs(a) // abs(b)))")
+  o = o.push("")
+  return o
+}
+
+fn div_euclid_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_div_euclid(a, b):")
+  o = o.push(`    """Euclidean division: the remainder is never negative (docs/arithmetic.md)."""`)
+  o = o.push("    return a // b if b > 0 else -(a // -b)")
+  o = o.push("")
+  return o
+}
+
+fn index_of_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_index_of(v, n):")
+  o = o.push("    \"\"\"First index of `n`, -1 when absent — a Str receiver or a List one.\"\"\"")
+  o = o.push("    if isinstance(v, str):")
+  o = o.push("        return v.find(n)")
+  o = o.push("    return v.index(n) if n in v else -1")
+  o = o.push("")
+  return o
+}
+
+fn split_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_split(v, s):")
+  o = o.push(`    """JS-shape split: an empty separator yields 1-char strings (py raises)."""`)
+  o = o.push(`    return list(v) if s == "" else v.split(s)`)
+  o = o.push("")
+  return o
+}
+
+fn str_to_int_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_str_to_int(s):")
+  o = o.push("    \"\"\"Str.to_int: the ASCII digits with an optional leading `-`, else None.\"\"\"")
+  o = o.push(`    if s == "" or s == "-" or not s.isascii():`)
+  o = o.push("        return None")
+  o = o.push(`    if not (s.isdigit() or (s[0] == "-" and s[1:].isdigit())):`)
+  o = o.push("        return None")
+  o = o.push("    n = int(s)")
+  o = o.push("    return n if -(2**63) <= n <= 2**63 - 1 else None")
+  o = o.push("")
+  return o
+}
+
+fn opt_to_int_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_opt_to_int(v):")
+  o = o.push("    \"\"\"`?.to_int()`: the node carries no receiver type, so dispatch on the payload.\"\"\"")
+  o = o.push("    return _revl_str_to_int(v) if isinstance(v, str) else v")
+  o = o.push("")
+  return o
+}
+
 fn div_block() -> List[Str] {
   var o = []
   o = o.push("import math as _revl_math")
@@ -1061,15 +1078,6 @@ fn div_block() -> List[Str] {
   o = o.push("        return float('nan')")
   o = o.push("    return (_revl_math.copysign(float('inf'), a)")
   o = o.push("            * _revl_math.copysign(1.0, b))")
-  o = o.push("")
-  return o
-}
-
-fn field_block() -> List[Str] {
-  var o = []
-  o = o.push("def _revl_field(v, name):")
-  o = o.push(`    """Record literals are dicts, ADT payloads are objects."""`)
-  o = o.push("    return v[name] if isinstance(v, dict) else getattr(v, name)")
   o = o.push("")
   return o
 }
@@ -1179,21 +1187,21 @@ fn cun(node: Any) -> Str {
   return `<<UNSUPPORTED-UN:${op}>>`
 }
 
-fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool) -> Str {
+fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   let pattern = value_str(value_field(arm, "pattern"))
   var body = cexpr(value_field(arm, "body"))
   if (pattern == "_") { return body }
   let bind = value_str(value_field(arm, "bind"))
   var cond = ""
   if (pattern == "None") {
-    cond = "match is None"
+    cond = `${head} is None`
   } else {
     if (pattern == "Some") {
-      cond = "match is not None"
+      cond = `${head} is not None`
       if (bind != "") { body = `(lambda ${bind}: ${body})(match)` }
     } else {
       if (bind != "") { body = `(lambda ${bind}: ${body})(match.value)` }
-      cond = `isinstance(match, ${pattern})`
+      cond = `isinstance(${head}, ${pattern})`
     }
   }
   if (!has_rest) {
@@ -1203,18 +1211,22 @@ fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool) -> Str {
 }
 
 fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
+  let folds = match_folds(arms)
   var result = ""
   var has = false
   var i = arms.length() - 1
   while (i >= 0) {
-    result = cmatch_branch(arms[i], result, has)
+    var head = "match"
+    if (folds && i == 0) { head = `(match := ${scrutinee})` }
+    result = cmatch_branch(arms[i], result, has, head)
     has = true
     i -= 1
   }
   if (!has) {
     result = "(_ for _ in ()).throw(TypeError('non-exhaustive match'))"
   }
-  return `(lambda match: ${result})(${scrutinee})`
+  if (folds) { return result }
+  return `((match := ${scrutinee}), ${result})[1]`
 }
 
 // The component/method-body expression dispatcher (`_ComponentEmitter._expr`).
@@ -1239,11 +1251,15 @@ fn cexpr(node: Any) -> Str {
       let m = value_str(value_field(node, "method"))
       return `${t}.${m}(${ccommajoin(value_list(value_field(node, "args")))})`
     }
-    let callee = cexpr(value_field(node, "callee"))
-    return `${callee}(${ccommajoin(value_list(value_field(node, "args")))})`
+    // `Some(x)` is the identity here too (item 436 F8)
+    let callee_node = value_field(node, "callee")
+    let call_args = value_list(value_field(node, "args"))
+    if (is_some_var(callee_node) && call_args.length() == 1) { return cexpr(call_args[0]) }
+    let callee = cexpr(callee_node)
+    return `${callee}(${ccommajoin(call_args)})`
   }
   if (kind == "field") {
-    return `_revl_field(${cexpr(value_field(node, "target"))}, ${py_repr(value_field(node, "name"))})`
+    return field_read(cexpr(value_field(node, "target")), py_repr(value_field(node, "name")), false)
   }
   if (kind == "index") {
     return `${cexpr(value_field(node, "target"))}[${cexpr(value_field(node, "index"))}]`
@@ -1271,7 +1287,7 @@ fn cexpr(node: Any) -> Str {
   if (kind == "optfield") {
     let tgt = value_field(node, "target")
     let t = cexpr(tgt)
-    return `(None if ${opt_binder(node, tgt, t)} is None else _revl_field(${opt_reader(node, tgt, t)}, ${py_repr(value_field(node, "name"))}))`
+    return `(None if ${opt_binder(node, tgt, t)} is None else ${field_read(opt_reader(node, tgt, t), py_repr(value_field(node, "name")), true)})`
   }
   if (kind == "optcall") {
     let tgt = value_field(node, "target")
@@ -2059,8 +2075,16 @@ pub fn emit_py_src(ir: Any) -> Str {
   if (uses_bounded_int32(ir)) { out = out.concat(i32_block()) }
   if (uses_i32_shl(ir)) { out = out.concat(i32_wrap_block()) }
   if (uses_true_division(ir)) { out = out.concat(div_block()) }
+  if (uses_trunc_rem(ir)) { out = out.concat(rem_block()) }
+  if (uses_builtin_method(ir, "div_trunc")) { out = out.concat(div_trunc_block()) }
+  if (uses_builtin_method(ir, "div_euclid")) { out = out.concat(div_euclid_block()) }
+  if (uses_builtin_method(ir, "indexOf")) { out = out.concat(index_of_block()) }
+  if (uses_builtin_method(ir, "split")) { out = out.concat(split_block()) }
+  if (uses_builtin_method(ir, "to_int")) {
+    out = out.concat(str_to_int_block())
+    if (uses_opt_to_int(ir)) { out = out.concat(opt_to_int_block()) }
+  }
   if (uses_float_interp(ir)) { out = out.concat(ftoa_block()) }
-  out = out.concat(field_block())
   // Built-in Result classes (gated), each suppressed if a user variant case
   // shadows the name.
   let types = value_field(ir, "types")
@@ -2139,7 +2163,7 @@ test "builtin surface renders portable python" {
 
 test "empty match is the non-exhaustive throw" {
   let empty = []
-  assert match_expr("o", empty) == "(lambda match: (_ for _ in ()).throw(TypeError('non-exhaustive match')))(o)"
+  assert match_expr("o", empty) == "((match := o), (_ for _ in ()).throw(TypeError('non-exhaustive match')))[1]"
 }
 
 test "py_type maps the surface types" {
