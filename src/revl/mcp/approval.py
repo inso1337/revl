@@ -37,6 +37,7 @@ import json
 from .. import cap_order
 from ..policy import TAINT_FOLD_ORIGINS, component_realms
 from ..query import Composition, SHARED_REALM
+from ..taint import REDACTED_SECRET
 
 # worst-class ordering: (c) > (b) > (a) > none. One prompt covers the whole call
 # or none of it — the same all-or-nothing rule admission and the operator gate
@@ -335,12 +336,23 @@ class ClassMap:
         at that parameter's index. Returns the canonical spelling, or None when the
         token exposes no resource param or no arg is bound (it then keys bare, byte
         for byte as before). Only the registered-resource projection is bound, NOT
-        the whole argsDigest, so the ledger carries a STRUCTURED target."""
+        the whole argsDigest, so the ledger carries a STRUCTURED target.
+
+        Item 416c: a resource dimension the author declared `Secret[T]` is bound
+        to the REDACTED placeholder, never the runtime value. This spelling is
+        the ticket body, and the ticket is what `record_approval_granted` writes
+        to the durable WAL and what `replay_forward` echoes back into a later
+        response — both externalization sinks item 256 Slice 3 already fences
+        for an ordinary crossing argument. An UNDECLARED resource param (the
+        common case — `host="api.stripe.com"` is not a secret) is bound exactly
+        as before: only a param the program itself marked confidential is
+        touched, so the N1 ledger and the distiller keep reading real targets."""
         ext = self._declaring_extern(token)
         if ext is None or not args:
             return None
+        params = ext.get("params") or []
         pairs: list[tuple[str, object]] = []
-        for index, param in enumerate(ext.get("params") or []):
+        for index, param in enumerate(params):
             name = param.get("name")
             if name is None or not cap_order.is_registered(name) \
                     or cap_order.is_ceiling(name):
@@ -350,6 +362,8 @@ class ClassMap:
             value = args[index]
             if not isinstance(value, str):
                 continue        # a resource value is a string literal; skip else
+            if isinstance(param, dict) and param.get("secret"):
+                value = REDACTED_SECRET
             pairs.append((name, value))
         if not pairs:
             return None
