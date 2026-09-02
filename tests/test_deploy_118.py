@@ -913,10 +913,15 @@ component Billing {
 """
 
 
+# `host_put` is `deferred` so these two stay about the CONTRACT: since item
+# 419b `reached_emissions` sees a tail-position `fn put(..) = emit host_put(..)`
+# (which lowers to a `return` step, dropping the `emit` marker), so a bare
+# emission extern here would make both versions inadmissible for an unrelated
+# (and correct) reason and the contract assertion below would prove nothing.
 PROVIDER_V1 = """\
 service Store { emission[host_put] fn put(key: Str, value: Str) }
 
-extern emission fn host_put(line: Str) = @py { pass }
+extern emission deferred fn host_put(line: Str) = @py { pass }
 
 component Db provides store: Store {
   provide store {
@@ -928,7 +933,7 @@ component Db provides store: Store {
 PROVIDER_V2 = """\
 service Store { emission[host_put] fn erase(key: Str) }
 
-extern emission fn host_put(line: Str) = @py { pass }
+extern emission deferred fn host_put(line: Str) = @py { pass }
 
 component Db provides store: Store {
   provide store {
@@ -971,7 +976,7 @@ def test_a_deferrable_crossing_is_admitted_and_held(tmp_path):
     assert verdict["admitted"] is True
     assert verdict["deferred"] == [
         {"composition": "billing", "component": "Billing", "extern": "charge",
-         "deferrable": True, "idempotency_key": None}]
+         "deferrable": True, "idempotency_key": None, "via": None}]
 
 
 def test_a_federation_refuses_as_one_unit_when_any_member_is_inadmissible(tmp_path):
@@ -1000,6 +1005,87 @@ def test_a_contract_break_refuses_the_whole_federation_update(tmp_path):
                                          contracts=[(surface, "db")])
     assert broken["admitted"] is False
     assert broken["refusals"][0]["kind"] == deploy.REFUSE_CONTRACT
+
+
+# --- roadmap 419b: the two shapes `reached_emissions` used to walk past ------
+
+_MEDIATED = """\
+service Store { emission[host_put] fn put(key: Str, value: Str) }
+
+component App requires store: Store {
+  emit store.put("a", "b")
+}
+"""
+
+_TAIL_EMIT = """\
+service Store { emission[host_put] fn put(key: Str, value: Str) }
+
+extern emission fn host_put(line: Str) = @py { pass }
+
+component Db provides store: Store {
+  provide store {
+    fn put(key, value) = emit host_put(value)
+  }
+}
+"""
+
+_LOCAL_DEFERRED = """\
+service Store { emission[host_put] fn put(key: Str, value: Str) }
+
+extern emission deferred fn host_put(line: Str) = @py { pass }
+
+component Db provides store: Store {
+  provide store {
+    fn put(key, value) = emit host_put(value)
+  }
+}
+
+component App requires store: Store {
+  emit store.put("a", "b")
+}
+"""
+
+
+def test_a_service_mediated_emission_is_a_counted_crossing(tmp_path):
+    """419b: the consumer writes `emit store.put(..)` and never names the extern.
+    The key resolves to no provider in this composition, so the crossing fires
+    against an external provider during this composition's local commit, and
+    deferral is not spellable on a service method, so PREPARE cannot hold it."""
+    ir = _ir(_MEDIATED, tmp_path, "m.rvl")
+    assert deploy.reached_emissions(ir) == [
+        {"component": "App", "extern": "host_put", "deferrable": False,
+         "idempotency_key": None, "via": "store.put"}]
+    verdict = deploy.federation_admission({"app": ir})
+    assert verdict["admitted"] is False
+    (refusal,) = verdict["refusals"]
+    assert refusal["kind"] == deploy.REFUSE_IRREVERSIBLE
+    # the refusal names what the AUTHOR wrote, not only the far side's extern
+    assert "store.put" in refusal["reason"]
+
+
+def test_a_tail_position_provide_method_emit_is_a_counted_crossing(tmp_path):
+    """419b: `fn put(k, v) = emit host_put(v)` lowers to a `return` step (the
+    `emit` marker does not survive), so the old step-keyed walk missed it and
+    admitted a provider that necessarily crosses an irreversible emission."""
+    ir = _ir(_TAIL_EMIT, tmp_path, "t.rvl")
+    assert deploy.reached_emissions(ir) == [
+        {"component": "Db", "extern": "host_put", "deferrable": False,
+         "idempotency_key": None, "via": None}]
+    assert deploy.federation_admission({"db": ir})["admitted"] is False
+
+
+def test_a_locally_provided_deferred_crossing_is_counted_once_and_held(tmp_path):
+    """The other half of 419b, and the reason the mediated row is skipped when
+    the key resolves locally: counting the consumer's call as well would
+    downgrade a genuinely `deferred` extern to class (c) and refuse a plan
+    PREPARE can hold perfectly well."""
+    ir = _ir(_LOCAL_DEFERRED, tmp_path, "l.rvl")
+    assert deploy.reached_emissions(ir) == [
+        {"component": "Db", "extern": "host_put", "deferrable": True,
+         "idempotency_key": None, "via": None}]
+    verdict = deploy.federation_admission({"shop": ir})
+    assert verdict["admitted"] is True
+    assert [row["component"] for row in verdict["deferred"]] == ["Db"]
 
 
 # --- a stranded participant settles by the durable record, never a guess ----

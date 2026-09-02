@@ -125,6 +125,25 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+def _refuse_stream_host(fn: str) -> None:
+    """Refuse a `Stream.*` host builtin on this tier (roadmap item 419e).
+
+    `subscribe` already refuses honestly, but the ACQUISITION that opens the
+    stream (`let src = effect Stream.source() undo src.close()`) did not:
+    `Stream` is not in `_HOST_ROOTS` and has no entry in `_HOST_STUBS`, so the
+    emitter rendered `Stream src = Stream.source();` against a class it never
+    emits and the file did not compile. Refuse at emit time with a message that
+    names the tiers which do lower streams, the way wasm already does."""
+    if fn.split(".", 1)[0] == "Stream":
+        raise EmitError(
+            f"`{fn}` opens a stream; a stream subscription suspends a fiber "
+            "and the java blocking-tier lowering (a `BlockingQueue.poll` "
+            "interruptible by the cancel signal) is not implemented, so this "
+            "tier has no `Stream` runtime class; streams run on py, go and "
+            "rust (item 130 §4.6); try `--backend py`"
+        )
+
+
 # Dispatcher conformance (roadmap item 76a). This tier converged to ONE
 # expression renderer (`_expr`) covering both IR dialects, so the table below
 # has a single entry: every kind the frontend can produce in either position
@@ -1280,6 +1299,7 @@ def _expr(
     if kind == "host":
         fn = node.get("fn")
         host, _, method = fn.partition(".")
+        _refuse_stream_host(fn)
         args = ", ".join(
             _expr(a, ctx, rename, env) for a in node.get("args") or []
         )

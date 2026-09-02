@@ -8,14 +8,14 @@ parent-chain fallback). Per the runtime-ownership split:
 - **wasm — first-party, built + tested here.** The primitive lives in the
   `cordis-wasm` substrate (`route:<key>` host op); the emitter
   (`backends/wasm/emit.py`) routes through it. Proven on the real Python +
-  wasmtime host by `backends/wasm/test_router_exec.py`. No fork here — it is
+  wasmtime host by `backends/wasm/test_router_exec_wasm.py`. No fork here — it is
   revl's own runtime.
 
 - **go — upstream fork + PR, built + tested here against the fork.** See
   [`stc-go/REVL-FORK.md`](stc-go/REVL-FORK.md). `stc-go/` is a writable fork of
   `github.com/0xdenny218/stc-go` adding `ServiceInRealm`/`LiveInRealm`
   (`stc-go/route.go` + `route_test.go`). The go emitter emits a router struct
-  that consumes it; `backends/go/test_router_exec.py` emits the scenario, wires
+  that consumes it; `backends/go/test_router_exec_go.py` emits the scenario, wires
   it to this fork via a `go.mod replace`, and runs — round-robin, failover and
   G2 all green with go1.26.5. Upstream PR pending; once released, bump the pin
   and drop the `replace`.

@@ -232,6 +232,38 @@ The "v1 goldens are byte-identical" promise previously stated in
 stays frozen (the frontend is the single producer; a v1 source compiles to
 the same IR), but the goldens are snapshots.
 
+## v1 IR input support: frozen, not retired
+
+Roadmap item 73(d) asked whether the two-dialect emitter bodies every backend
+carries for `ir_version` 1 (`_emit_v1` and kin) should be frozen or retired, on
+the premise that their only remaining consumers might be the goldens and the
+emitters' own self-tests. **They are not.** `lower.py` picks the version from
+the features a program actually uses (`IR_VERSION_V3 if uses_v3 else
+(IR_VERSION_V2 if uses_v2 else IR_VERSION)`), so a program that declares no
+type, function, extern, timer or `spawn`, and no `isolate`/`intercept`/`routes`,
+still compiles to `ir_version: 1` today. Thirteen of the shipped
+`examples/*.rvl` do, `user_cache.rvl` among them.
+
+**The decision is FREEZE.** v1 and v2 stay supported *input* dialects, because
+the shipped frontend still mints them; the v1 emitter bodies are the live path
+for that class of programs, not a fixture-propped fossil. Frozen means:
+
+- no new v1-only feature, and no new v1-only code path;
+- no second dialect written into an emitter for byte stability; that is the
+  golden policy above, and it is what item 73(b) already collapsed in rust's
+  `_string`;
+- an emitter change that touches shared code must keep the v1 path correct, not
+  merely keep the v1 golden green.
+
+**Retiring is a separate, later decision with a precondition: the frontend must
+stop minting v1 first.** Until then, deleting `_emit_v1` would break programs
+the compiler still produces, and "retire the dialect" would silently mean "bump
+every existing document's version", which changes what a stored IR means for
+every consumer that reads `ir_version`. `tests/test_goldens.py` pins the mint
+side of this (`test_the_frontend_still_mints_ir_version_1`), so if the version
+selection is ever changed to always emit v3, that test reds and this decision is
+reopened deliberately rather than the v1 bodies quietly becoming dead code.
+
 ## What the sweep closed
 
 Starting from 12/5/5/32 (ts/rust/java/wasm) plus two frontend gaps:

@@ -88,3 +88,35 @@ def test_wasm_functions_golden_from_v3_source():
     wat = emitter.emit(ir)["functions"]
     golden = (ROOT / "backends" / "wasm" / "golden" / "functions.wat").read_text()
     assert wat == golden
+
+
+def test_the_frontend_still_mints_ir_version_1():
+    """Roadmap 73(d) / 419d: the v1 emitter bodies (`_emit_v1` and kin) are NOT
+    propped up by fixtures: the shipped frontend still MINTS `ir_version: 1`
+    for a program that uses no v2 or v3 feature, so they are the live path for
+    that whole class of programs.
+
+    That fact is the whole premise of the decision recorded in
+    docs/conformance.md ("v1 IR input support: frozen, not retired"): retiring
+    the dialect has a precondition, and the precondition is that the frontend
+    stops minting it. Pin the premise. If version selection is ever changed to
+    always emit v3, this reds and the freeze is reopened deliberately instead of
+    the v1 bodies quietly becoming dead code.
+
+    The reference IR the goldens above are emitted from is itself a v1 document,
+    which is why this belongs here rather than in a lowering test."""
+    ir = compile_source(
+        """
+        service Cache { fn get(key: Str) -> Opt[Str] }
+
+        component Memo provides cache: Cache {
+          provide cache {
+            fn get(key) { return None }
+          }
+        }
+        """
+    )
+    assert ir["ir_version"] == 1, (
+        "the frontend no longer mints ir_version 1; re-open the FREEZE decision "
+        "in docs/conformance.md before assuming the `_emit_v1` bodies are dead")
+    assert json.loads(REFERENCE_IR.read_text(encoding="utf-8"))["ir_version"] == 1
