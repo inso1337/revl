@@ -21,6 +21,18 @@
 #
 # Seams covered here (all placement runtimes - py/node/rust/java/go - are
 # installed in the conformance job that calls this script):
+#   py<->py     cordis-py    both ends. Not a tier crossing, so it looks
+#                            redundant next to the four below - it is not. Every
+#                            other entry places py as the PROVIDER, and item 337
+#                            Seam 2 (the consumer re-admitting its provider
+#                            before it wires the proxy) runs only in a PY
+#                            CONSUMER. Until this entry existed no job executed
+#                            that seam at all, and a py consumer that refused
+#                            every legitimate provider shipped green: the proxy
+#                            went unwired, both probes failed with "'cache' has
+#                            no method ...", and `--once` still exited 0. This
+#                            is the py-consumer coverage; the probe-ERROR grep
+#                            below is what makes it bite.
 #   py<->node   cordis-ts    reactive
 #   py<->rust   cordis-rs    reactive
 #   py<->go     cordis-go    reactive
@@ -43,6 +55,7 @@ PY="${REVL_PY:-backends/python/.venv/bin/python}"
 APP="${REVL_SMOKE_APP:-examples/user_cache.rvl}"
 
 DEFAULT_SEAMS="
+py-py:examples/placement/user_cache.toml
 py-node:examples/placement/user_cache_pynode.toml
 py-rust:examples/placement/user_cache_pyrust.toml
 py-go:examples/placement/user_cache_pygo.toml
