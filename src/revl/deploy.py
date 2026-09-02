@@ -355,9 +355,19 @@ RECEIPT_DOMAIN = b"revl.deploy.receipt/v1\x00"
 
 def _receipt_mac(body: Mapping, host_key: bytes) -> str:
     """The receipt MAC: domain-tagged HMAC-SHA256 over the canonical body bytes
-    (`body` is the receipt with its `signature` member removed)."""
-    payload = json.dumps({k: v for k, v in body.items() if k != "signature"},
-                         sort_keys=True, separators=(",", ":")).encode("utf-8")
+    (`body` is the receipt with its `signature` member removed).
+
+    `ensure_ascii=True` here, unlike the attestation spelling, so a lone
+    surrogate escapes rather than failing to encode. It can still meet a value
+    that will not serialize at all, which is why this raises
+    `attest.NotCanonicalizable` and :func:`verify_receipt` refuses on it."""
+    try:
+        payload = json.dumps(
+            {k: v for k, v in body.items() if k != "signature"},
+            sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise attest.NotCanonicalizable(
+            f"the receipt has no canonical byte spelling: {error}") from error
     return hmac.new(bytes(host_key), RECEIPT_DOMAIN + payload,
                     hashlib.sha256).hexdigest()
 
@@ -510,7 +520,17 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
         ir = staged_ir(root)
     except RevlError as error:
         return _refusal(LINK_COMPOSITION, str(error))
-    recomputed_ir = attest.canonical_hash(ir)
+    try:
+        recomputed_ir = attest.canonical_hash(ir)
+    except attest.NotCanonicalizable as error:
+        # Staged bytes this receiver cannot canonicalize are unmeasurable, and
+        # an unmeasurable input refuses (roadmap 428 F10/F11). `json.loads`
+        # will build a lone surrogate out of a `"\ud800"` escape, so a staged
+        # `ir/ir.json` can reach this.
+        return _refusal(LINK_COMPOSITION,
+                        f"the staged {IR_DOCUMENT} cannot be canonically "
+                        f"hashed, so it cannot be compared with the signed "
+                        f"composition: {error}")
     bound_ir = attestation.get("composition_hash")
     if not hmac.compare_digest(recomputed_ir, str(bound_ir)):
         return _refusal(
@@ -762,7 +782,11 @@ def verify_receipt(receipt: Mapping, host_key: bytes) -> tuple[bool, str]:
     given = receipt.get("signature")
     if not isinstance(given, str):
         return False, "receipt carries no signature"
-    if not hmac.compare_digest(_receipt_mac(receipt, host_key), given):
+    try:
+        expected = _receipt_mac(receipt, host_key)
+    except attest.NotCanonicalizable as error:
+        return False, f"receipt cannot be verified: {error}"
+    if not hmac.compare_digest(expected, given):
         return False, "receipt signature mismatch"
     if receipt.get("kind") != RECEIPT_KIND:
         return False, (f"not a {RECEIPT_KIND} record: kind is "
@@ -854,12 +878,15 @@ class Correlation:
 
 
 def _envelope_bytes(wire: Mapping) -> bytes:
-    """Canonical bytes of an envelope, excluding its own auth tag. Same
-    sorted-keys/compact spelling `attest._canonical_bytes` uses, so the tag is a
-    pure function of the envelope's content and not of member order."""
-    body = {k: v for k, v in wire.items() if k != AUTH_FIELD}
-    return json.dumps(body, sort_keys=True, ensure_ascii=False,
-                      separators=(",", ":")).encode("utf-8")
+    """Canonical bytes of an envelope, excluding its own auth tag. Literally
+    `attest._canonical_bytes`, so the tag is a pure function of the envelope's
+    content and not of member order — and so an envelope with no canonical
+    spelling raises `attest.NotCanonicalizable` here rather than a raw
+    `UnicodeEncodeError` out of a guard whose contract is `(ok, reason)`
+    (roadmap 428 F10). This used to inline the same `json.dumps`, which is how
+    the two copies drifted into having the same defect twice."""
+    return attest._canonical_bytes({k: v for k, v in wire.items()
+                                    if k != AUTH_FIELD})
 
 
 def seal(correlation: Correlation, secret: bytes) -> dict:
@@ -948,8 +975,16 @@ class CorrelationGuard:
         given = wire.get(AUTH_FIELD)
         if not isinstance(given, str):
             return False, REJECT_FORGED
-        expected = hmac.new(bytes(secret), _envelope_bytes(wire),
-                            hashlib.sha256).hexdigest()
+        # An envelope with no canonical byte spelling (a lone surrogate, a
+        # value that will not serialize) cannot be authenticated, so it is
+        # MALFORMED. It is peer-supplied, and this method's contract is
+        # `(ok, reason)`: a crash here would escape past every caller written
+        # to read a verdict and take the seam down (roadmap 428 F10).
+        try:
+            envelope = _envelope_bytes(wire)
+        except attest.NotCanonicalizable:
+            return False, REJECT_MALFORMED
+        expected = hmac.new(bytes(secret), envelope, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, given):
             return False, REJECT_FORGED
         if (transport_identity is not None
