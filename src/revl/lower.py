@@ -5711,6 +5711,40 @@ def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
     return {"kind": "do", "stmts": stmts, "tail": tail}
 
 
+def _check_component_call(node: dict, env: Env, filename: str, line: int) -> None:
+    """Item 423: a component-body call to a declared `fn` or extern is held to
+    the callee's declared arity and argument types.
+
+    The judgment is not new and nothing here re-implements it. `infer_ir`'s
+    `fn` arm already renders both refusals off the one signature table
+    (`FNS_KEY`), the one arity rule and the one `unify`, and a `fn` body has
+    always got them. What the component stratum was missing was the FILENAME:
+    `infer_ir` is documented to raise on a definite mismatch only when handed
+    one, and every component caller ran it in its non-raising oracle mode. So
+    `let s = effect secret_put(42)` against `secret_put(v: Str)` compiled, and
+    so did `secret_put("v", "w")`.
+
+    Item 404 handed the filename over for a provide-method `let`, and item 420
+    for the site `undo` slot. This is the general case, and it sits at the one
+    place a component-stratum `fn` node is ever built, so no position can be
+    forgotten: `_lower_expr` funnels every component expression here (setup and
+    undo alike), which makes acquire expressions, site `undo`/`compensate`
+    slots, `emit` and `await` expressions, `fail` messages, guard conditions,
+    effect-block setup and provide-method bodies one covered surface rather
+    than a list of slots to keep patching.
+
+    Checking at construction also reaches what a root sweep cannot: an
+    `infer_ir` walk from a step's root does not descend into an opaque `call`
+    or `host` node's arguments, so `undo db.rollback(release(h))` hides its
+    inner call from a root-only check. Here every call is judged as it is
+    built, bottom-up, at its own line.
+
+    Leniency is unchanged and load-bearing: an argument of unknown or
+    host-frontier provenance infers to `None`, `unify` accepts it, and the
+    call stays admitted. Only a DEFINITE mismatch raises."""
+    infer_ir(node, env.type_env, env.types, env.services, filename, line)
+
+
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
                                pure_only: bool = False) -> dict:
     filename = env.filename
@@ -5991,8 +6025,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                     name, args, env.types,
                     lambda d: _lower_component_pure_expr(d, env, scope,
                                                          callables, pure_only))
-                return {"kind": "fn", "name": name,
+                node = {"kind": "fn", "name": name,
                         "args": _coerce_async_args(name, filled, env, line)}
+                _check_component_call(node, env, filename, line)
+                return node
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
             # the same sliver guard as the var-root path above: a non-var
