@@ -793,6 +793,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--record", action="store_true",
                      help="record the effect accumulator so the REPL can step "
                           "backwards over it (`:timeline`, `:back k`) — see docs/replay.md")
+    run.add_argument("--estop-latch", default=None, metavar="FILE",
+                     help="watch FILE for an operator E-Stop (item 443). While "
+                          "armed, every boundary-crossing seam checks the latch, "
+                          "so `revl estop --latch FILE` from another terminal "
+                          "halts this run immediately — no unwind, an honest "
+                          "in-flight inventory instead. Equivalent to the "
+                          "REVL_ESTOP_LATCH environment variable")
     run.add_argument("--wal", default=None, metavar="FILE",
                      help="persist the effect accumulator as a durable write-ahead "
                           "log (implies --record). On restart, `revl recover --wal "
@@ -848,6 +855,41 @@ def build_parser() -> argparse.ArgumentParser:
                               "33) the snapshot was taken under, so its `requires "
                               "approval` gate re-arms on recovery")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
+
+    estop = sub.add_parser(
+        "estop",
+        help="E-STOP (item 443): the operator's emergency halt. Arm the latch a "
+             "running composition watches, so it stops dispatching NEW boundary "
+             "crossings immediately and reports what was in flight — instead of "
+             "the graceful two-phase LIFO unwind every other stop performs "
+             "(docs/design/443-estop.md)")
+    estop.add_argument("--latch", default=None, metavar="FILE",
+                       help="the latch file the running process watches "
+                            "(`revl run --estop-latch FILE`, or the ambient "
+                            "REVL_ESTOP_LATCH). Required unless --wal is given, "
+                            "which derives FILE.estop")
+    estop.add_argument("--wal", default=None, metavar="FILE",
+                       help="the running session's write-ahead log. Derives the "
+                            "latch as FILE.estop when --latch is omitted, and "
+                            "names the log `revl recover` reconciles from")
+    estop.add_argument("--reason", default="operator halt", metavar="TEXT",
+                       help="why the button was hit. Carried into the halt "
+                            "record and into every residue record it produces")
+    estop.add_argument("--operator", default=None, metavar="TOKEN",
+                       help="the operator token accountable for the halt. An "
+                            "E-Stop is an operator authority (item 55's `estop` "
+                            "verb): it is never something a composition or an "
+                            "agent may invoke on itself")
+    estop.add_argument("--report", action="store_true",
+                       help="read the latch back and print what was halted, "
+                            "WITHOUT arming anything or touching the world")
+    estop.add_argument("--clear", action="store_true",
+                       help="remove the latch so a FRESH process may boot. This "
+                            "is not a resume: the halted instance stays dead and "
+                            "its stranded entries stay owed until `revl recover` "
+                            "reconciles them (item 443, open question 3)")
+    estop.add_argument("--json", action="store_true",
+                       help="machine-readable output")
 
     why = sub.add_parser(
         "why",

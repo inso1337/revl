@@ -11,7 +11,7 @@ The verb set, in the order the parser declares it:
 ```text
 compile  explain  doctor  scaffold  audit  diff  version  contract
 erase-report  plan  apply  undo  canary  query  fmt  quarantine  test
-mcp  import  export  serve  run  recover  why  metrics  profile  attest
+mcp  import  export  serve  run  recover  estop  why  metrics  profile  attest
 dash  repair  truc
 ```
 
@@ -363,6 +363,10 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
 - `--wal FILE` - persist the effect accumulator as a durable write-ahead log
   (implies `--record`). On restart, `revl recover --wal FILE` rolls forward or
   back with a checked verdict ([crash-recovery.md](crash-recovery.md)).
+- `--estop-latch FILE` - watch FILE for an operator E-Stop, so `revl estop
+  --latch FILE` from another terminal halts this run immediately
+  ([443-estop.md](design/443-estop.md)). Unarmed by default; an unarmed run
+  checks nothing.
 - `--trace FILE` - write a causal lifecycle trace (JSONL); every transition
   carries the cause chain, queryable with `revl why` ([why-runtime.md](why-runtime.md)).
 - `--withdraw COMPONENT` - one-shot: boot, withdraw this live component while
@@ -392,6 +396,41 @@ LIFO), ending in a checked verdict + residue proof
 - `--restore SNAPSHOT.json` - on roll-forward, the item-15 snapshot to
   re-admit so recovery resumes the persisted generation.
 - `--json` - machine-readable output.
+
+### `revl estop`
+
+The operator's **emergency halt** ([443-estop.md](design/443-estop.md)). Arms a
+latch that a running composition watches, so it stops dispatching NEW boundary
+crossings immediately and reports what was in flight, instead of performing the
+graceful two-phase LIFO unwind every other stop performs.
+
+This is not `revl_abort` with a shorter name. Abort is a verdict on the work
+and pays for a full unwind; estop pays for a latch flip. The price is stated,
+not hidden: **nothing is unwound.** No inverse runs, no compensation runs,
+nothing is discharged; every registered entry is left stranded (still owed) and
+every acquired handle stays held. The instance is dead afterwards — there is no
+resume, and the way back is `revl recover --wal FILE`.
+
+- `--latch FILE` - the latch file the running process watches (`revl run
+  --estop-latch FILE`, or the ambient `REVL_ESTOP_LATCH`). Required unless
+  `--wal` is given.
+- `--wal FILE` - the running session's write-ahead log. Derives the latch as
+  `FILE.estop` when `--latch` is omitted, and names the log the outstanding
+  inventory is read from.
+- `--reason TEXT` - why the button was hit; carried into the halt record and
+  every residue record it produces.
+- `--operator TOKEN` - the operator accountable for the halt. An E-Stop is an
+  operator authority (item 55's `estop` verb), never something a composition or
+  an agent may invoke on itself.
+- `--report` - read the latch back and print what was halted, without arming
+  anything or touching the world.
+- `--clear` - remove the latch so a *fresh* process may boot. Not a resume: the
+  halted instance stays dead and its stranded entries stay owed.
+- `--json` - machine-readable output.
+
+Exit status follows the residue, as `revl recover` does: 0 when nothing is
+outstanding, 1 when a halt is engaged and entries are owed. An E-Stop is never
+clean.
 
 ### `revl why`
 

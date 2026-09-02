@@ -11,7 +11,7 @@ running composition. Some of its verbs are read-only; others **rewrite a
 running system**:
 
     revl_swap  revl_unload  revl_restore  revl_rollback  revl_undo
-    revl_edit  revl_load    revl_snapshot
+    revl_edit  revl_load    revl_snapshot  revl_estop
 
 Nothing in the session authenticates or scopes the caller. Anyone who reaches
 the transport is **root over the composition** — it can unload the system,
@@ -58,7 +58,8 @@ Grammar (blank lines and `#` comments ignored):
     operator <token> may     <verb>[, ...]                        # on *
 
 * **verbs** — `load`, `swap`, `edit`, `unload`, `restore`, `snapshot`, `undo`
-  (`rollback` is accepted as an alias for `undo`). `*` matches every verb.
+  (`rollback` is accepted as an alias for `undo`), `commit`, `approve`, and
+  `estop`. `*` matches every verb.
 * **subjects** — globs (`fnmatch`) matched against a target component's **name**
   *or* any **realm** it is isolated into. `tenant_a*` matches the realm
   `tenant_a` and the component `tenant_a_cache` alike; `*` matches anything.
@@ -127,6 +128,17 @@ The target set is computed **before** the action runs, from the session's IR:
 * **restore** — every component named in the snapshot manifest.
 * **unload / edit / snapshot / undo / rollback** — the whole running
   composition (each operates on all of it).
+* **estop** (item 443) — the whole running composition too, and deliberately:
+  a halt that stopped one component would not be a halt. So a subject-scoped
+  `may estop on tenant_a*` authorizes only while every live component is in
+  `tenant_a*`; an operator who must always be able to hit the button needs
+  `may estop on *`.
+
+`estop` is its own verb and is never folded into `unload` or `commit`. An
+operator trusted to unload a composition cleanly is not automatically trusted
+to strand two hundred brackets and leave every handle held — and the E-Stop is
+the one verb a composition or an agent must never be able to invoke on itself,
+which is what holding it here buys ([443-estop.md](design/443-estop.md)).
 
 When the target set cannot be determined without running the action — a
 candidate that does not compile, or a verb with nothing loaded — the gate
