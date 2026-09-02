@@ -1,0 +1,213 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "types": {
+    "Step": {
+      "params": [],
+      "kind": "variant",
+      "cases": [
+        {
+          "name": "Final",
+          "payload": "Str"
+        },
+        {
+          "name": "NeedTool",
+          "payload": "Str"
+        },
+        {
+          "name": "Retry",
+          "payload": null
+        }
+      ]
+    }
+  },
+  "functions": [
+    {
+      "name": "decode",
+      "params": [
+        {
+          "name": "resp",
+          "type": "Str"
+        }
+      ],
+      "returns": "Step",
+      "public": true,
+      "body": [
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "resp"
+            },
+            "right": {
+              "kind": "lit",
+              "value": "f"
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "adt",
+                "type": "Step",
+                "case": "Final",
+                "args": [
+                  {
+                    "kind": "lit",
+                    "value": "done"
+                  }
+                ]
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "resp"
+            },
+            "right": {
+              "kind": "lit",
+              "value": "r"
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "adt",
+                "type": "Step",
+                "case": "Retry",
+                "args": []
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "adt",
+            "type": "Step",
+            "case": "NeedTool",
+            "args": [
+              {
+                "kind": "var",
+                "name": "resp"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "classify",
+      "params": [
+        {
+          "name": "p",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "resp",
+          "value": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "fetch_one"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "p"
+              }
+            ]
+          },
+          "mutable": false
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "match",
+            "scrutinee": {
+              "kind": "call",
+              "callee": {
+                "kind": "var",
+                "name": "decode"
+              },
+              "args": [
+                {
+                  "kind": "var",
+                  "name": "resp"
+                }
+              ]
+            },
+            "arms": [
+              {
+                "pattern": "Final",
+                "bind": "a",
+                "body": {
+                  "kind": "var",
+                  "name": "a"
+                },
+                "payload_type": "Str"
+              },
+              {
+                "pattern": "NeedTool",
+                "bind": "t",
+                "body": {
+                  "kind": "var",
+                  "name": "t"
+                },
+                "payload_type": "Str"
+              },
+              {
+                "pattern": "Retry",
+                "bind": null,
+                "body": {
+                  "kind": "lit",
+                  "value": "retry"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "async": true
+    }
+  ],
+  "externs": [
+    {
+      "name": "fetch_one",
+      "class": "emission",
+      "params": [
+        {
+          "name": "p",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "ts": " return p "
+      },
+      "async": true
+    }
+  ]
+}

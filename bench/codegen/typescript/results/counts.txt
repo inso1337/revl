@@ -2,11 +2,11 @@ node v26.7.0   cases: 7
 all default numbers are COUNTS, not durations: they do not move with machine load
 
 ## async-arrow-value
-  a service op passed as a function value is wrapped in a fresh `async` arrow per call; the closure is activation-invariant and the `async` adds a resolution hop over the promise the body already returns
-  emitted     microtask turns       6.0   promise allocs       9.0 per logical op
+  a service op passed as a function value is wrapped in a fresh arrow per call; the arrow is no longer `async` (item 435(b)), so what is left is the activation-invariant closure allocation
+  emitted     microtask turns       4.0   promise allocs       7.0 per logical op
   de-coloured microtask turns       4.0   promise allocs       7.0 per logical op
   hand        microtask turns       4.0   promise allocs       7.0 per logical op
-  EXCESS vs hand: 2 microtask turns, 2 promise allocations (2.0 / 2.0 per op)
+  EXCESS vs hand: 0 microtask turns, 0 promise allocations (0.0 / 0.0 per op)
   shape metric (read off the emitted text, not executed): emitted 1 closures / 2 awaits per call, hand 0 / 2
 
 ## emission-method-effect
@@ -24,19 +24,19 @@ all default numbers are COUNTS, not durations: they do not move with machine loa
   shape metric (read off the emitted text, not executed): emitted 0 closures / 0 awaits per call, hand 0 / 0
 
 ## match-in-async-fn
-  a match in an async body lowers to an awaited async IIFE plus one awaited async arrow per bound arm, even when no arm suspends
+  a match in an async body colours each arm arrow by its own rendered body: the suspending arm stays async, the sync arm does not (item 435(a))
   emitted     microtask turns       4.2   promise allocs       8.3 per logical op
   hand        microtask turns       2.2   promise allocs       4.3 per logical op
   EXCESS vs hand: 24 microtask turns, 48 promise allocations (2.0 / 4.0 per op)
   shape metric (read off the emitted text, not executed): emitted 2 closures / 3 awaits per call, hand 0 / 2
 
 ## match-sync-arms-in-async-fn
-  a match whose arms never suspend still lowers to an awaited async IIFE plus one awaited async identity arrow per bound arm
-  emitted     microtask turns       5.0   promise allocs       9.0 per logical op
+  a match whose arms never suspend must lower to a PLAIN IIFE and plain arm arrows: no async, no await (item 435(a))
+  emitted     microtask turns       3.0   promise allocs       5.0 per logical op
   de-coloured microtask turns       3.0   promise allocs       5.0 per logical op
   hand        microtask turns       3.0   promise allocs       5.0 per logical op
-  EXCESS vs hand: 2 microtask turns, 4 promise allocations (2.0 / 4.0 per op)
-  shape metric (read off the emitted text, not executed): emitted 3 closures / 3 awaits per call, hand 0 / 1
+  EXCESS vs hand: 0 microtask turns, 0 promise allocations (0.0 / 0.0 per op)
+  shape metric (read off the emitted text, not executed): emitted 3 closures / 1 awaits per call, hand 0 / 1
 
 ## scalar-ops-control
   NEGATIVE CONTROL: the Int overflow guard, revlEq on scalars, record literals and the character-class predicate IIFE are all cheap

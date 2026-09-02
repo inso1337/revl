@@ -149,6 +149,11 @@ CORPUS = [
     "async_module_match.rvl",   # async `match` (Opt form): async IIFE + awaited binding arm-arrow
     "async_module_switch.rvl",  # async `match` (tagged switch over built-in `Result`): case-bind await
     "async_module_arrow.rvl",   # async ARROW (`async (y) => …`) + awaited call to a colored fn
+    # item 435(b): an arrow whose body IS the un-awaited emission Promise, so the
+    # `async` is dropped: `((msgs: any) => (ctx.model.complete(msgs)))`. No other
+    # fixture puts an emission call in an arrow body, so without this one the
+    # 435(b) port would be invisible to the oracle (item 429's trap).
+    "async_arrow_emission.rvl",
     # slice 6 (item 234) — spawn/instances + realm placements, byte-exact:
     "spawn.rvl",            # a supervisor spawning a Worker template: the `spawn` expr node
                             # (`spawn(ctx, Worker, {cfg}, [realms])`) + the `_uses_spawn` import gate

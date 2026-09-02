@@ -5,9 +5,10 @@
 // same leaf functions (`decode`, `fetch_one`, `revlI64` semantics) and changes
 // only the SHAPE of the match, so the delta is attributable to the lowering.
 //
-// Emitter site: backends/typescript/emit.py `_v3_match_expr` (the `a = "async
-// " if ctx.in_async else ""` block and the per-arm `(await (async (bind) =>
-// ...)(tmp.value))` lines).
+// Emitter site: backends/typescript/emit.py `_v3_match_expr`. Item 435(a)
+// made the colour follow the rendered arm body, so the sync `Final` arm is now
+// a plain arrow and the awaiting `NeedTool` arm keeps its `async`; the IIFE
+// stays async because the assembled body still renders an `await`.
 
 import { drive as emittedDrive, decode, fetch_one } from '../emitted/match_async.ts'
 
@@ -40,14 +41,15 @@ export async function handDrive(prompt: string, n: bigint): Promise<string> {
 
 export const name = 'match-in-async-fn'
 export const summary =
-  'a match in an async body lowers to an awaited async IIFE plus one awaited ' +
-  'async arrow per bound arm, even when no arm suspends'
+  'a match in an async body colours each arm arrow by its own rendered body: ' +
+  'the suspending arm stays async, the sync arm does not (item 435(a))'
 
 // fragments that must still be present in the emitted file, else the hand
 // comparison is measuring a shape the compiler no longer produces
 export const provenance = [
   { file: 'match_async.ts', snippet: 'return (await (async ($revl_match_1) => {' },
-  { file: 'match_async.ts', snippet: 'return (await (async (answer) => (answer))($revl_match_1.value))' },
+  { file: 'match_async.ts', snippet: 'return ((answer) => (answer))($revl_match_1.value)' },
+  { file: 'match_async.ts', snippet: 'return (await (async (req) => ((await drive(req, revlI64(n - 1n)))))($revl_match_1.value))' },
 ]
 
 const DEPTH = 12n
@@ -62,6 +64,6 @@ export const handHot = async () => { for (let i = 0; i < 200; i++) await handDri
 
 // shape metric, read off emitted/match_async.ts (not executed)
 export const shape = {
-  emitted: { closuresPerCall: 2, awaitsPerCall: 3 },  // IIFE + arm arrow; extern/recursive await
+  emitted: { closuresPerCall: 2, awaitsPerCall: 3 },  // IIFE + arm arrow; the sync arm no longer awaits
   hand: { closuresPerCall: 0, awaitsPerCall: 2 },
 }
