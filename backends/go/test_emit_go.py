@@ -92,11 +92,11 @@ def test_advance_generated_test_file_is_current():
     formatted = _gofmt(fresh)
     if formatted is not None:
         assert formatted == committed, (
-            "advance/gen_advance_test.go is stale — run backends/go/regen.sh")
+            "advance/gen_advance_test.go is stale — run `python3 tools/regen_goldens.py go`")
         return
     norm = lambda s: " ".join(s.split())
     assert norm(fresh) == norm(committed), (
-        "advance/gen_advance_test.go is stale — run backends/go/regen.sh")
+        "advance/gen_advance_test.go is stale — run `python3 tools/regen_goldens.py go`")
 
 
 def test_user_cache_shapes():
@@ -360,9 +360,9 @@ def test_v3_checked_in_generated_is_current(ir_path, pkg, rel):
     committed = (HERE / rel).read_text(encoding="utf-8")
     if formatted is None:  # no gofmt: fall back to a whitespace-insensitive check
         assert _ws(emit.emit(_load(ir_path), package=pkg)) == _ws(committed), (
-            f"{rel} is stale — run backends/go/regen.sh")
+            f"{rel} is stale — run `python3 tools/regen_goldens.py go`")
         return
-    assert formatted == committed, f"{rel} is stale — run backends/go/regen.sh"
+    assert formatted == committed, f"{rel} is stale — run `python3 tools/regen_goldens.py go`"
 
 
 MEMKV = HERE / "scenarios" / "emitted" / "memkv" / "memkv.ir.json"
@@ -391,11 +391,11 @@ def test_checked_in_generated_is_current(ir_path, pkg):
     formatted = _gofmt(fresh)
     if formatted is not None:
         assert formatted == committed, (
-            f"{pkg}/gen.go is stale — run backends/go/regen.sh")
+            f"{pkg}/gen.go is stale — run `python3 tools/regen_goldens.py go`")
         return
     norm = lambda s: " ".join(s.split())
     assert norm(fresh) == norm(committed), (
-        f"{pkg}/gen.go is stale — run backends/go/regen.sh")
+        f"{pkg}/gen.go is stale — run `python3 tools/regen_goldens.py go`")
 
 
 # --- scenarios/emitted freshness gate --------------------------------------
@@ -450,11 +450,11 @@ def test_scenario_checked_in_generated_is_current(ir_path, pkg, rel):
     formatted = _gofmt(fresh)
     if formatted is not None:  # gofmt present: compare gofmt-to-committed
         assert formatted == committed, (
-            f"scenarios/emitted/{rel} is stale — run backends/go/regen.sh")
+            f"scenarios/emitted/{rel} is stale — run `python3 tools/regen_goldens.py go`")
         return
     # no gofmt: fall back to a whitespace-insensitive check
     assert _ws(fresh) == _ws(committed), (
-        f"scenarios/emitted/{rel} is stale — run backends/go/regen.sh")
+        f"scenarios/emitted/{rel} is stale — run `python3 tools/regen_goldens.py go`")
 
 
 # host `Map.new()` iteration surface — `keys()` / `size()` (roadmap item 88).
