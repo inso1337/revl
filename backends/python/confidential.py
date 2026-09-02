@@ -226,3 +226,28 @@ def is_redacted(value: Any) -> bool:
     the thing itself — what `revl recover` checks before it tries to re-issue a
     call from a durable descriptor."""
     return value == REDACTED
+
+
+def redact_value(value: Any) -> Any:
+    """Render one value with every already-registered secret scrubbed, nested
+    containers included — the single funnel a capture point with no positional
+    marking of its own (item 256 Slice 3, §7b) passes a value through before it
+    is kept anywhere durable or handed back to a caller: a WAL record's `repr`
+    detail, a discharge descriptor's witness, and — item 416c — a validation
+    fault raised over an untrusted model response, which may carry a secret the
+    program fed into the prompt back out verbatim.
+
+    Exact-value match against :func:`is_secret_value`, never a heuristic: an
+    ordinary value, including one nested deep in a container, is still rendered
+    verbatim. A value this funnel has never seen registered is not redacted —
+    this is belt-and-braces on top of the positional marking, not a substitute
+    for it."""
+    if is_secret_value(value):
+        return REDACTED
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [redact_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): redact_value(v) for k, v in value.items()}
+    return repr(value)

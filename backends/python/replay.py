@@ -1050,16 +1050,10 @@ def _describe(value: Any) -> Any:
     replaced by the placeholder wherever it turns up, nested containers included
     (item 256 Slice 3, §7b). That is an exact-value match against what a marking
     redacted earlier in this process, not a heuristic: an ordinary argument is
-    still described verbatim."""
-    if confidential.is_secret_value(value):
-        return confidential.REDACTED
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_describe(v) for v in value]
-    if isinstance(value, dict):
-        return {str(k): _describe(v) for k, v in value.items()}
-    return repr(value)
+    still described verbatim. Delegates to `confidential.redact_value`, the
+    same recursive funnel `runtime.py` routes a validation fault's response
+    through (item 416c) — one scrub, not a copy of it per file."""
+    return confidential.redact_value(value)
 
 
 # ---------------------------------------------------------------------------

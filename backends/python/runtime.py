@@ -157,7 +157,15 @@ class ResponseValidationError(RuntimeError):
         super().__init__(message)
         self.where = where
         self.schema = schema
-        self.value = value
+        # item 416c: `value` is the raw model response — untrusted, not itself
+        # secret, but it may carry a secret the program's OWN prompt fed the
+        # model back out verbatim. A host that logs this exception (a bare
+        # `logger.exception`, a crash reporter serializing `__dict__`) reads
+        # `.value` the same as it reads `str(exc)`, so the SAME scrub applies
+        # here as to the message: exact-match only, never a heuristic, so an
+        # ordinary malformed response — the common case a retry loop or a
+        # developer needs to see in full — is retained verbatim.
+        self.value = confidential.redact_value(value)
 
 
 def _json_type_ok(value, json_type: str) -> bool:
@@ -191,12 +199,21 @@ def _json_schema_error(value, schema, path: str = "$"):
 
     if "const" in schema:
         if value != schema["const"]:
-            return f"{path}: expected const {schema['const']!r}, got {value!r}"
+            # item 416c: `value` is the raw, UNTRUSTED model response — never a
+            # declared secret itself, but a secret the program fed into the
+            # prompt can come back out of the model verbatim (§7b's model-
+            # context sink again, from the return side). `schema["const"]` is
+            # the program's OWN declared literal, never response content, so
+            # it is left as-is; only the observed value goes through the same
+            # exact-value scrub the WAL and the timeline already apply.
+            return (f"{path}: expected const {schema['const']!r}, got "
+                    f"{confidential.redact_value(value)!r}")
         return None
 
     if "enum" in schema:
         if value not in schema["enum"]:
-            return f"{path}: {value!r} is not one of {schema['enum']!r}"
+            return (f"{path}: {confidential.redact_value(value)!r} is not one "
+                    f"of {schema['enum']!r}")
         return None
 
     if "oneOf" in schema:
