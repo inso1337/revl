@@ -55,6 +55,20 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.CapCeilings.derivation_non_vacuous` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | derived sets carry valuations; `g4_spawn_widens_parameter` refused from the text |
 | `RevL.CapCeilings.derivation_refuses_unnameable` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | a handle emission derives `*` and is not folded into the held key |
 | `RevL.CapCeilings.derived_ceiling_check_not_subsumed` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | both relations still load-bearing once the sets are derived |
+| `RevL.G9.origin_persists_or_is_declassified` | G9 (item 249) — the core lemma | **proved** | `propext` | an origin survives a flow, or a declassifier on that path cleared it |
+| `RevL.G9.no_authority_from_untrusted` | G9 — untrusted data gains no authority | **proved** | `propext` | a `Trusted[T]` sink admits a tainted value only after an explicit declassification of that origin |
+| `RevL.G9.untrusted_gains_no_authority` | G9 — the refusal | **proved** | `propext` | a declassifier-free path cannot reach an authority sink |
+| `RevL.G9.declassification_is_the_only_escape` | G9 (item 249, Decision 2) | **proved** | `propext` | the label is monotone along every non-declassifying step |
+| `RevL.G9.secret_persists` | item 256 §4a.3 | **proved** | `propext` | a bound provider key has no declassifier, so it survives every admitted path |
+| `RevL.G9.secret_confined` | item 256 — secret confinement | **proved** | `propext` | a bound key reaches no sink, `Secret[T]` receivers included (the A8 disjointness) |
+| `RevL.G9.confidential_needs_declassification` | item 256 Slice 3 §7 | **proved** | `propext` | a `Secret[T]` value reaches a disclosure sink only through a declared `endorse[confidential]` |
+| `RevL.G9.flow_declassifiers_granted` | item 249 Slice C | **proved** | `propext` | under `no_declassify` every declassifier on an admitted path is pre-granted |
+| `RevL.G9.untrusted_author_needs_granted_declassifier` | items 249/329 | **proved** | `propext` | a self-minted declassifier does not count for a model-authored turn |
+| `RevL.G9.declassifier_must_be_declared` | item 249 Slice C | **proved** | none | an undeclared `endorse[o]`, and `endorse[secret]` at all, are refused |
+| `RevL.G9.taint_surface_within_declared_context` | G9 + G6 | **proved** | `propext, Classical.choice, Quot.sound` | origins are derived from the declared capability scope; reach bounds them |
+| `RevL.G9.no_untrusted_without_a_declared_source` | G9 + G6 | **proved** | `propext, Classical.choice, Quot.sound` | with no untrusted-scoped requirement, untrusted data is unwritable |
+| `RevL.G9.g9_not_vacuous` | G9 — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | admits the endorsed path, refuses the bare one and the foreign-origin endorse |
+| `RevL.G9.secret_rules_not_vacuous` | item 256 — non-vacuity | **proved** | `propext` | `confidential` downgrades, `secret` never does, self-minted flips to refused |
 
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
@@ -82,6 +96,58 @@ real emitters realise a conformant profile is the differential conformance
 matrix's empirical obligation, not a Lean theorem; and map values are
 modelled one level deep (nested maps are a mechanical extension of
 `entries_agree`).
+
+## G9 — untrusted data gains no authority (`RevL.Theorems.G9_NoAuthorityFromUntrusted`)
+
+`src/revl/taint.py`, first line: "untrusted input cannot DIRECTLY create
+authority." The model: a `Label` is a set of `Origin`s (the closed class
+set `taint._ORIGIN_CLASSES`, plus `Origin.custom` for `_origin_of`'s
+unclassified-scope residual), ordered by inclusion with bottom `{}` =
+trusted and join = union. A `Flow` is one data-flow path as a list of
+`Step`s: a crossing minting its *derived* origin, a join, an opaque hop,
+and the one weakening step — an admitted `Declassifier`. Every label
+operation the reference performs is one of those four.
+
+Two declassifiers ship and both are modelled: the scoped
+`endorse[<origin>](v, reason = "...")`, which clears **only** its own
+declared origin (item 249, Finding 1) and only where the enclosing
+declaration granted the slot; and the checked parser (a `verified fn`
+returning `Trusted[T]`). The ambient originless `endorse(v)` is a *parse
+error* in the reference (`parser._endorse_expr`), so it is deliberately
+not a constructor — every declassification in a parseable program is
+scoped and reasoned. `endorse[secret]` is refused before the
+declared-slot check and a checked parser is refused on a
+`secret`-carrying value, which together are why `secret_persists` holds
+with no side conditions: a capability-bound provider key has no
+declassifier anywhere in the language.
+
+Four sink rules, kept distinct because they are genuinely different
+predicates: `authority` (a `Trusted[T]` parameter, or a
+shell/exec/terminal/policy scope under `taint_strict`) refuses any dirty
+label; `disclosure` (an emission crossing, a plain extern call, a
+provide-method return) refuses `secret` and `confidential`;
+`secretReceiver` (a declared `Secret[T]` position) admits `confidential`
+but still refuses `secret` — the A8 / CRITICAL 1 disjointness;
+`unnameable` refuses everything.
+
+Non-vacuity, per the `CrossTier.annotation_necessary` convention:
+`g9_not_vacuous` computes `mintedBy ["web.fetch"] = web` from the real
+scope string, admits the path carrying a declared `endorse[web]`, refuses
+the same path without it, and refuses it again when the endorse names a
+*foreign* origin. `secret_rules_not_vacuous` admits an
+`endorse[confidential]` downgrade, refuses `secret` at every sink over
+every path, and flips the same declared `endorse[web]` from admitted to
+refused purely because the untrusted author minted it itself.
+
+Deliberately out of scope, documented rather than smuggled as axioms:
+the runtime tag (Slice B, item 243) — nothing here claims a runtime
+property; the interprocedural fixed point (`_Signature`,
+`_infer_signatures`) that discovers *which* paths exist, the model
+proving what follows once a path is exhibited; and that the checker
+labels the right positions as sinks, which is extraction, not theorem.
+The origin half of that labelling **is** proved:
+`taint_surface_within_declared_context` composes with G6 to show every
+origin a statement can mint is one its declared context already declares.
 
 ## Differential oracle (wired)
 
@@ -226,10 +292,18 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    integer-valued capability parameter is compared the way the checker
    compares it. The corpus has no such parameter today, so the two agree
    vacuously; this closes that gap rather than resting on it.
-3. **L3, deliberately deferred**: `Trusted[T]`/`Secret[T]`
-   non-interference and WAL commit/abort discharge. Both extend L0 (taint
-   is a checker feature, not part of the current core; commit/abort is a
-   runtime state-machine refinement). Not near-term work.
+3. **L3**: `Trusted[T]`/`Secret[T]` non-interference — **done**, see
+   *G9* below — and WAL commit/abort discharge, still deferred (a runtime
+   state-machine refinement). The taint half turned out **not** to need an
+   L0 change: taint is a property of a value flowing along a path, L0's
+   `Ctx`/`ReachIn` is a property of which keys a statement touches, and
+   the two meet at one bridge (`taint._origin_of`: the origin a crossing
+   mints is read off its declared capability scope). So the label algebra
+   went into the new L1 farm `RevL.Lemmas.TaintLemmas` and the guarantees
+   into the new L2 file `RevL.Theorems.G9_NoAuthorityFromUntrusted`,
+   exactly as items 294/66/260 went into `CapLemmas` + `CapCeilings`.
+   **L0 is untouched and every pre-existing theorem's axiom set is
+   unchanged.**
 
 ## Conventions for worker sessions
 
