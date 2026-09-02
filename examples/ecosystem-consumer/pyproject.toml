@@ -1,0 +1,19 @@
+[project]
+name = "agent-ci-gate"
+version = "0.1.0"
+description = "A CI gate for agent-authored revl tools, built as a THIRD-PARTY consumer of revl (roadmap item 338)."
+requires-python = ">=3.11"
+# The only revl dependency this project takes: the published wheel, imported
+# as `revl.gate` and nothing else (see ci_gate.py and README.md). A real
+# out-of-tree project pins a range on `gate_version().api`, not on the
+# language version, since the api is what this project's code depends on.
+dependencies = [
+    "revl>=2.0,<3",
+]
+
+[project.scripts]
+agent-ci-gate = "ci_gate:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
