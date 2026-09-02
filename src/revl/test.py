@@ -464,21 +464,35 @@ def _timer_follow_on(tier: str) -> tuple[str, str]:
 
 
 def _lifecycle_refusal(ir: dict, error: Exception) -> bool:
-    """True when the emit refusal is the by-design lifecycle-test refusal.
+    """True when the emit refusal is a by-design lifecycle-test refusal.
 
-    java and wasm still refuse `lifecycle test` blocks by name (documented
-    follow-ups, FR-5); that refusal is a skip-with-reason, never a tier
-    failure — exactly the signal `--all`'s verdict column exists for. Any
-    other emit error is a real bug and stays a fail.
+    A tier that cannot express a `lifecycle test` refuses it BY NAME rather
+    than dropping it; that refusal is a skip-with-reason, never a tier failure
+    — exactly the signal `--all`'s verdict column exists for. Any other emit
+    error is a real bug and stays a fail.
+
+    Both remaining refusals are per-construct, not per-tier: java drives
+    lifecycle tests on ir_version 3 (item 178(b)) and refuses only the older
+    dialects and an `advance` step (timers are the item-57 follow-on), and wasm
+    refuses what its scalar substrate cannot express.
     """
     return (any(t.get("lifecycle") for t in (ir.get("tests") or []))
             and "lifecycle test" in str(error)
             and "not lowerable" in str(error))
 
 
+def _lifecycle_count(ir: dict) -> int:
+    return sum(1 for t in (ir.get("tests") or []) if t.get("lifecycle"))
+
+
 def run_java(ir: dict) -> tuple[str, str]:
     """Compile the emitted cordis4j plugin against the stubs (or the real
-    classes on ``REVL_CORDIS4J_CLASSES``) and run ``REVL_TESTS`` on a JVM."""
+    classes on ``REVL_CORDIS4J_CLASSES``) and run ``REVL_TESTS`` on a JVM.
+
+    ``REVL_TESTS`` carries the document's `lifecycle test` blocks alongside its
+    plain ones (item 178(b)): each drives a live composition on a cordis4j
+    ``Context`` — load -> call -> unload -> `assert no_residue` — so the R4/R1
+    no-residue proof runs on the JVM rather than being skipped there."""
     if _has_timers(ir):
         return _timer_follow_on("java")
     javac = _java_tool("javac")
@@ -538,7 +552,12 @@ def run_java(ir: dict) -> tuple[str, str]:
         return ("fail", run.stderr.strip() or f"JVM exited {run.returncode}")
     if "REVL_TESTS_OK" not in run_output:
         return ("fail", "REVL_TESTS did not complete")
-    return ("pass", "JVM: all REVL_TESTS ran" + note)
+    lifecycle = _lifecycle_count(ir)
+    detail = "JVM: all REVL_TESTS ran"
+    if lifecycle:
+        detail += (f", including {lifecycle} lifecycle test(s) "
+                   "(load -> call -> unload -> no-residue)")
+    return ("pass", detail + note)
 
 
 def _wasm_lifecycle_module() -> types.ModuleType:

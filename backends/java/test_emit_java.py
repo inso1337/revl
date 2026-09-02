@@ -1158,6 +1158,87 @@ def test_java_runs_emitted_stdlib_semantics(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# lifecycle tests on the JVM (docs/v2.0-roadmap.md item 178(b), FR-5)
+# --------------------------------------------------------------------------
+
+def _run_revl_tests(tmp_path: Path, source: str):
+    """Compile emitted Components.java against the stubs, run REVL_TESTS on a
+    JVM, and hand back the completed process."""
+    out = _javac_compile(tmp_path, source)
+    runner = tmp_path / "RunRevlTests.java"
+    runner.write_text(
+        "public class RunRevlTests {\n"
+        "    public static void main(String[] args) {\n"
+        "        revl.Components.REVL_TESTS.forEach(Runnable::run);\n"
+        "        System.out.println(\"REVL_TESTS_OK\");\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    compile_runner = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", str(out), "-d", str(out), str(runner)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_runner.returncode == 0, compile_runner.stderr
+    return subprocess.run(
+        [JAVA, "-cp", str(out), "RunRevlTests"],
+        capture_output=True, text=True, timeout=600,
+    )
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_lifecycle_tests_run_on_the_jvm(tmp_path):
+    """item 178(b): a `lifecycle test` RUNS on this tier — it is no longer a
+    by-design refusal. examples/lifecycle_cache.rvl loads a composition on a
+    live cordis4j Context, calls through its provision keys, unloads it, and
+    proves R4 (no provision still resolves) + R1 (every host resource
+    released). Not a compile gate: the JVM has to complete the round-trip."""
+    ir = compile_files([str(ROOT / "examples" / "lifecycle_cache.rvl")])
+    source = emit.emit(ir)
+    # load/unload go through the runtime's own pair and the root through the
+    # real cordis4j factory, so this source runs unchanged on cordis4j-core
+    assert "Contexts.create()" in source
+    assert "_revlRoot.plugin(new PgDatabasePlugin(" in source
+    run = _run_revl_tests(tmp_path, source)
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "REVL_TESTS_OK" in run.stdout
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_lifecycle_no_residue_catches_a_real_leak(tmp_path):
+    """The negative half, without which the positive one proves nothing:
+    examples/lifecycle_leak.rvl's `undo` runs a query instead of closing the
+    pool, so the composition leaves a live host resource behind. R1 must catch
+    it — a lifecycle test that cannot fail is not a test."""
+    ir = compile_files([str(ROOT / "examples" / "lifecycle_leak.rvl")])
+    run = _run_revl_tests(tmp_path, emit.emit(ir))
+    assert run.returncode != 0, run.stdout
+    assert "host resource(s) never released (R1)" in run.stderr
+    assert "a leaky undo leaves residue" in run.stderr
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_lifecycle_no_residue_catches_a_component_left_loaded(tmp_path):
+    """The R4 half: a composition that is never unloaded still holds its
+    fiber, so `assert no_residue` has to fail on that too, not only on a
+    host-resource leak."""
+    text = (ROOT / "examples" / "lifecycle_leak.rvl").read_text(encoding="utf-8")
+    ir = compile_source(text.replace("  unload LeakyDatabase\n", ""),
+                        "left_loaded.rvl")
+    run = _run_revl_tests(tmp_path, emit.emit(ir))
+    assert run.returncode != 0, run.stdout
+    assert "still loaded: [LeakyDatabase] (R4)" in run.stderr
+
+
+def test_lifecycle_free_document_carries_no_r1_counter():
+    """The R1 accounting is gated on the document actually having a lifecycle
+    test to answer: without one the host runtimes emit exactly what they always
+    did, which is what keeps this tier's goldens byte-identical."""
+    ir = compile_files([str(ROOT / "examples" / "user_cache.rvl")])
+    assert "REVL_LIVE_HOST_RESOURCES" not in emit.emit(ir)
+
+
+# --------------------------------------------------------------------------
 # Conformance gaps closed on this tier (docs/conformance.md). Each construct
 # below used to raise instead of lowering; the matrix now reports java as
 # clean apart from the deliberate extern refusals.
