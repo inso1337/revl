@@ -512,6 +512,21 @@ class Session:
         self.recorder = replay_module().Recorder(ir) if record else None
         self._generation = 1
         self._history = []
+        # item 246, Decision 2 (F6): make the refusal above TRUE. It refuses a
+        # policy load without recording because "without a WAL there is no
+        # durable approval spend and no audit join" — but recording alone never
+        # opened one: the only opener was `_configure_owner_approvals`, gated on
+        # `_typed_approval_active`, so a composition with no typed-approval edge
+        # and no `requires approval` rule ran the WHOLE ticket two-step against a
+        # dict. `_consume_approval` and `_consume_grant` document
+        # consume-before-fire as crash-safe BECAUSE the spend is durable, so open
+        # the WAL for every policy-enabled session, here, before any activation
+        # body can cross. `_ensure_wal_open` is idempotent, so the typed-approval
+        # path below finds it open and is unchanged.
+        if self.recorder is not None and (
+                self.approval_policy is not None or policy_requires_approval
+                or _ir_has_approval_edges(ir)):
+            self._ensure_wal_open()
         # item 245: register the session commit-state owner before the
         # composition loads, so every activation frame joins its live-frame
         # registry (the commit verb's gate target). Installed through the shared
@@ -2217,11 +2232,44 @@ class Session:
         own; its granted-emission and witnessed-fs crossings execute in the
         granted PROVIDERS' frames (already in the owner registry). Plugging the
         turn is what makes those providers reachable from the turn and its own
-        provided keys callable, all inside the one 245 frame."""
+        provided keys callable, all inside the one 245 frame.
+
+        Wiring WIDENS the callable surface, so it is a generation change and it
+        rebuilds every per-generation index the same way `load` and `swap` do —
+        the class map first of all. Skipping that rebuild was a TOTAL class-(c)
+        approval bypass: the turn's keys became callable immediately, but
+        `ClassMap.classify_call(turnKey, m)` found no provider in the STALE map,
+        the per-call decision read that as "not a boundary call", and a crossing
+        that prompts when called directly fired through the turn with no ticket,
+        no ledger entry and no posture counter. The turn needs no host code of
+        its own for that — the item-329 untrusted-author profile is not a
+        mitigation, because the turn only forwards to a GRANTED provider whose
+        emission is class (c).
+
+        The gates that decide BEFORE the runtime is touched therefore run before
+        the plug, against the composition that WILL be live: the activation gate
+        over the turn's own activation bodies (a class-(c) emission moved into
+        the turn's activation body fires at wire time, before any call exists to
+        gate), and the lease gate over the turn's acquisitions. A refusal there
+        leaves the running composition untouched — nothing is plugged, nothing
+        is adopted."""
         driver = self._driver
         runtime_mod = driver.runtime
-        module = self._prepare_module(turn_doc)
         turn_components = list(turn_doc["components"])
+
+        # the post-admission composition, built BEFORE anything is plugged so the
+        # pre-boot gates decide against the surface the turn actually creates.
+        merged = self._merged_turn_ir(turn_doc)
+        turn_names = {c["name"] for c in turn_components}
+        new_map = self._build_class_map(merged)
+        # item 294: an admitted turn may not self-mint a lease either. Scoped to
+        # the turn's own acquisitions — the base's were satisfied at load.
+        self._enforce_lease_gate({"components": turn_components})
+        # item 246, Fix 1: the turn's ACTIVATION body answers for its class-(c)
+        # crossings before it runs, exactly as a loaded/swapped generation does.
+        self._enforce_activation_gate(merged, new_map, components=turn_names)
+
+        module = self._prepare_module(turn_doc)
 
         async def _plug() -> None:
             for comp in turn_components:
@@ -2256,10 +2304,50 @@ class Session:
         self.ir["manifest"] = turn_doc["manifest"]
         driver.ir = self.ir
 
+        # the per-generation indexes go live with the widened surface, atomically
+        # and in the same order `load` and `swap` install them, so no call is ever
+        # decided against a map that predates the keys it is deciding about.
+        self._class_map = self._build_class_map(self.ir)
+        self._install_auto_approve_rules()
+        self._install_cache_index(self.ir)
+        # invariant 4: the runtime frame check compares a typed `Approval[C]`
+        # against the LIVE reach-closure candidate hash. The turn joins the
+        # closure of anything it reaches, so re-seed the owner's candidates or a
+        # `with a` crossing checks against a hash the generation no longer has.
+        if self._owner is not None and self._typed_approval_active(self.ir):
+            self._owner.approval_enforced = True
+            self._owner.approval_candidates = \
+                self._approval_candidate_hashes(self.ir)
+
         keys: list[str] = []
         for comp in turn_components:
             keys.extend((comp.get("provides") or {}).keys())
         return tuple(keys)
+
+    def _merged_turn_ir(self, turn_doc: dict) -> dict:
+        """The composition that WILL be live once `turn_doc` is wired: the running
+        ir widened by the turn's components, services and externs, over the turn's
+        manifest (which already describes base + turn). A fresh dict over fresh
+        containers, so building it cannot mutate the running composition — a gate
+        that refuses leaves nothing behind."""
+        base = self.ir or {}
+        merged = dict(base)
+        merged["components"] = list(base.get("components") or []) \
+            + list(turn_doc.get("components") or [])
+        services = dict(base.get("services") or {})
+        for name, spec in (turn_doc.get("services") or {}).items():
+            services.setdefault(name, spec)
+        merged["services"] = services
+        # the untrusted-author profile forbids the turn declaring an extern of
+        # its own, so this is normally the base's set unchanged; folded anyway so
+        # the class map never classifies against a missing extern declaration.
+        externs = list(base.get("externs") or [])
+        known = {e.get("name") for e in externs}
+        externs += [e for e in (turn_doc.get("externs") or [])
+                    if e.get("name") not in known]
+        merged["externs"] = externs
+        merged["manifest"] = turn_doc["manifest"]
+        return merged
 
     # -- interaction -------------------------------------------------------
 
@@ -2498,7 +2586,13 @@ class Session:
     def _drain_pending_admits(self) -> None:
         """Wire every turn admitted (and queued) during the call that just
         returned. Kept off the hot path: a session that never admits has an empty
-        queue and pays nothing."""
+        queue and pays nothing.
+
+        The queue is taken before wiring, so an `ApprovalRequired` from the
+        turn's activation gate leaves NOTHING queued: nothing was wired and
+        nothing fired, and the caller re-admits after answering the ticket (the
+        retry then consumes the standing approval). Re-queuing instead would
+        double-wire the turn on that retry."""
         if not self._pending_admits:
             return
         pending, self._pending_admits = self._pending_admits, []
@@ -2685,7 +2779,25 @@ class Session:
             return
         reach = self._class_map.classify_call(key, method)
         if reach is None:
-            return  # no crossing (or unresolved) — not a boundary call
+            # UNRESOLVED, not "not a boundary call". `Session.call` already
+            # proved the key is provided and the method callable, so reaching
+            # here means the live class map cannot answer for a call that is
+            # about to fire: a stale map (a generation whose surface widened
+            # without a rebuild), or a key whose provider is ambiguous across
+            # realms. Either way the policy has no class for the crossing, and
+            # "I could not classify it" is not "it is harmless" — proceeding was
+            # the total class-(c) bypass. Refuse (fail closed); the caller
+            # reloads or disambiguates.
+            raise SessionError(
+                f"cannot decide `{key}.{method}`: the approval policy is "
+                f"enabled and the live class map resolves no crossing class for "
+                f"this call, so its irreversibility is unknown. An unclassified "
+                f"call is refused, never auto-approved — an unresolved "
+                f"classification is not a proof of class none (item 246, "
+                f"refuse-don't-degrade). This means the key resolves to no "
+                f"single provider in the live generation (an ambiguous "
+                f"multi-realm key), or the map is stale against the running "
+                f"composition")
         klass = reach["class"]
         if klass in (None, "a", "b"):
             self._count_posture(klass)
@@ -2730,18 +2842,28 @@ class Session:
         self._count_posture("c")
         raise ApprovalRequired(ticket)
 
-    def _enforce_activation_gate(self, ir: dict, class_map=None) -> None:
+    def _enforce_activation_gate(self, ir: dict, class_map=None,
+                                 components: set | None = None) -> None:
         """The activation gate (Fix 1): under an enabled policy, a candidate whose
         ACTIVATION reach is class (c) turns the load/swap response itself into the
         ticket two-step before boot. class (a)/(b) activation reach follows the
         table (proceed / enqueue, both activation-safe). Raises `ApprovalRequired`
-        naming the activation crossing, unless a standing approval covers it."""
+        naming the activation crossing, unless a standing approval covers it.
+
+        `components` restricts the gate to the named components' activation
+        bodies. `load`/`swap` boot a whole generation and pass None (every
+        activation body is about to run). An admitted turn (item 330) is ADDITIVE
+        — only its own components activate, the running ones already booted and
+        were gated then — so `_wire_turn` names the turn's components and the
+        base is not re-prompted for an activation it already ran."""
         cm = class_map if class_map is not None else self._class_map
         if self.approval_policy is None or cm is None:
             return
         from .approval import ApprovalRequired  # noqa: PLC0415
         for reach in cm.activation_reaches():
             if reach["class"] != "c":
+                continue
+            if components is not None and reach.get("component") not in components:
                 continue
             ticket = cm.build_ticket(reach)
             standing = self._find_standing_approval(ticket)

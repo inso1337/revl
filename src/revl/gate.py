@@ -533,11 +533,18 @@ class Gate:
         """Admit a model-authored per-turn `source` reaching only the `granted`
         service names, into the running composition (the item-330 crossing). A
         refusal is the repair signal handed back as data (running system
-        untouched); an admission hands back a `Handle`, never the artifact."""
+        untouched); an admission hands back a `Handle`, never the artifact.
+
+        Routed through the approver seam, exactly as `load`/`swap`/`call` are: a
+        turn whose ACTIVATION body carries a class-(c) crossing raises its ticket
+        at wire time, before the body runs, and the embedder answers it (or the
+        gate refuses fail-closed and nothing is wired). Without the routing that
+        ticket would escape `Gate.admit` unhandled."""
+        from functools import partial  # noqa: PLC0415
         try:
-            verdict = self._session.admit(
-                source, list(granted),
-                modules=dict(modules) if modules else None)
+            verdict = self._invoke_with_approval(partial(
+                self._session.admit, source, list(granted),
+                modules=dict(modules) if modules else None))
         except _session_error() as error:
             raise GateError(str(error)) from error
         if not verdict.admitted:
