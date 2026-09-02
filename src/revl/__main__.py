@@ -24,7 +24,7 @@ from .test import test_command
 
 from .cli.parser import build_parser
 from .cli.change import (
-    _run_apply, _run_branch, _run_canary, _run_compare, _run_plan,
+    _run_apply, _run_branch, _run_canary, _run_compare, _run_estop, _run_plan,
     _run_quarantine, _run_recover, _run_repair, _run_undo)
 from .cli.interop import (
     _run_contract, _run_export, _run_fmt, _run_import, _run_mcp, _run_serve)
@@ -974,6 +974,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_dash(args)
     if args.command == "recover":
         return _run_recover(args)
+    if args.command == "estop":
+        return _run_estop(args)
     if args.command == "branch":
         return _run_branch(args)
     if args.command == "compare":
