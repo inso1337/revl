@@ -1119,6 +1119,30 @@ def _tool_abort(_arguments: dict) -> dict:
         return _session_error(str(error))
 
 
+def _tool_estop(arguments: dict) -> dict:
+    """E-STOP the running composition (item 443, docs/design/443-estop.md).
+
+    Not `revl_abort` with a shorter name: abort is a VERDICT on the work and
+    pays for a full two-phase LIFO unwind; estop is the operator's EMERGENCY
+    and runs nothing at all. It stops dispatching new crossings, reports what
+    was in flight, and leaves every registered entry owed."""
+    try:
+        return {"ok": True, **SESSION.estop(
+            arguments.get("reason") or "operator halt",
+            arguments.get("operator") or getattr(
+                getattr(SESSION, "operator", None), "token", None))}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_estop_report(_arguments: dict) -> dict:
+    """Read the E-Stop inventory back without touching the world (item 443)."""
+    try:
+        return {"ok": True, **SESSION.estop_report()}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
 def _tool_state(_arguments: dict) -> dict:
     return {"ok": True, **SESSION.state(drain=True)}
 
@@ -2177,6 +2201,42 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_abort,
+    },
+    {
+        "name": "revl_estop",
+        "description": "E-STOP (item 443): the operator's emergency halt. STOP "
+                       "DISPATCHING new boundary crossings immediately, run "
+                       "NOTHING, and report what was in flight. This is NOT "
+                       "revl_abort: abort is a verdict on the work and pays for a "
+                       "full two-phase LIFO unwind; estop pays for a latch flip. "
+                       "The price is stated, not hidden — every registered entry "
+                       "is left STRANDED (owed, never discharged) and every "
+                       "acquired handle stays held, so the report says what was "
+                       "NOT unwound. The instance is dead afterwards: there is no "
+                       "resume, and the way back is `revl recover --wal <file>`. "
+                       "Held as an operator authority (verb `estop`) precisely so "
+                       "a composition or an agent cannot invoke it on itself.",
+        "inputSchema": {"type": "object", "properties": {
+            "reason": {"type": "string",
+                       "description": "why the button was hit; carried into every "
+                                      "residue record and the halt report"},
+            "operator": {"type": "string",
+                         "description": "the operator token accountable for the "
+                                        "halt; defaults to the session's bound "
+                                        "operator"}}},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_estop,
+    },
+    {
+        "name": "revl_estop_report",
+        "description": "Read the item-443 E-Stop inventory back WITHOUT touching "
+                       "the world: what was in flight and therefore AMBIGUOUS (at "
+                       "most one crossing, outcome unknown), and what was stranded "
+                       "— registered, never unwound, still owed. Read-only, and "
+                       "never `clean`: an E-Stop leaves residue by design.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True},
+        "handler": _tool_estop_report,
     },
     {
         "name": "revl_fork",
