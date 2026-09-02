@@ -110,12 +110,26 @@ def guarantees() -> dict[str, str]:
     return dict(GUARANTEES)
 
 
+# Docs the inventory deliberately does not cover.
+#
+# DOC-STATUS.md itself, which would otherwise have to describe its own em-dash
+# count as it is being written.
+#
+# v2.0-roadmap.md, because it is the reasoning-of-record rather than
+# reader-facing prose: it is appended to by nearly every PR, so an exact
+# em-dash column on it would redden this gate on almost every commit. A gate
+# that fails constantly gets routinely bypassed, and a bypassed gate is the
+# failure this one exists to prevent. The style column serves docs people
+# read; the roadmap is not one of them.
+DOC_STATUS_EXCLUDED = frozenset({"DOC-STATUS.md", "v2.0-roadmap.md"})
+
+
 def doc_files() -> list[str]:
-    """Every doc the DOC-STATUS inventory covers: `docs/*.md` minus the
-    inventory itself, which would otherwise have to describe its own em-dash
-    count as it is being written."""
+    """Every doc the DOC-STATUS inventory covers: `docs/*.md` minus
+    `DOC_STATUS_EXCLUDED`."""
     return sorted(
-        p.name for p in (ROOT / "docs").glob("*.md") if p.name != "DOC-STATUS.md"
+        p.name for p in (ROOT / "docs").glob("*.md")
+        if p.name not in DOC_STATUS_EXCLUDED
     )
 
 
