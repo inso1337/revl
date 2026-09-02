@@ -134,8 +134,15 @@ def _load_config(path: str | None) -> dict:
 
         data = tomllib.loads(text)
     if not isinstance(data, dict) or any(not isinstance(v, dict) for v in data.values()):
+        # `RevlError` is a diagnostic, not a bare message: its signature is
+        # (filename, line, message) and it renders `<file>:<line>: <message>`.
+        # Handing it a single string raises `TypeError` instead — and this
+        # branch only runs once the config is ALREADY malformed, so the bug
+        # surfaced as a traceback that the `except RevlError` in
+        # `run_command` could never catch.
         raise RevlError(
-            f"config {path}: expected a table of `component-name = {{ ... }}` entries"
+            path, 0,
+            "expected a table of `component-name = { ... }` entries",
         )
     return data
 
@@ -482,7 +489,8 @@ class _Driver:
     def __init__(self, ir, config, emit, runtime_mod, Context, FiberState,
                  record: bool = False, trace_path: str | None = None,
                  withdraw: str | None = None, wal_path: str | None = None,
-                 root_dirs: list | None = None, secrets: dict | None = None):
+                 root_dirs: list | None = None, secrets: dict | None = None,
+                 estop_latch: str | None = None):
         self.ir = ir
         self.config = config
         # item 256 Slice 1: an optional caller-supplied secret store (name ->
@@ -530,6 +538,13 @@ class _Driver:
         # this list (name, from_state, to_state), in the order they settle
         self._observing: dict | None = None
         self._settled: list[tuple] = []
+
+        # item 443: arm the operator E-Stop latch this run watches, so
+        # `revl estop --latch FILE` from another terminal halts it immediately —
+        # no unwind, an honest in-flight inventory instead
+        # (docs/design/443-estop.md). Unarmed by default, and a run with no
+        # latch never stats anything, so nothing changes for an existing run.
+        self.runtime.arm_estop_latch(estop_latch)
 
         self.runtime.set_trace(self._on_host)
         self.root.on("internal/status", self._on_fiber)
@@ -1257,8 +1272,13 @@ class _Driver:
             problem = _required_config_problem(ir, self.config)
             if problem is not None:
                 # a new/changed requirement the host's config cannot meet is
-                # an edit the running composition refuses, not a boot failure
-                raise RevlError(problem)
+                # an edit the running composition refuses, not a boot failure.
+                # (filename, line, message) — a one-argument `RevlError` is a
+                # `TypeError` the `except RevlError` below would not catch,
+                # which would kill the watch loop on a bad edit instead of
+                # rejecting it.
+                raise RevlError(files[0] if files else "<composition>", 0,
+                                problem)
         except RevlError as exc:
             for i, text in enumerate(str(exc).splitlines()):
                 self._log("reject", "REJECTED" if i == 0 else "", text)
@@ -1411,6 +1431,7 @@ def run_command(args) -> int:
                      trace_path=getattr(args, "trace", None),
                      withdraw=withdraw,
                      wal_path=getattr(args, "wal", None),
+                     estop_latch=getattr(args, "estop_latch", None),
                      root_dirs=root_dirs)
     try:
         if withdraw is not None:

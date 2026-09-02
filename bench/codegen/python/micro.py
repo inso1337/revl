@@ -58,63 +58,91 @@ def _rem(a, b):
     return abs(a) % abs(b) if a >= 0 else -(abs(a) % abs(b))
 
 
+# The preamble helpers the emitter now hoists each multi-expression builtin
+# into (item 436 F6), copied verbatim from `backends/python/emit.py`.
+def _revl_rem(a, b):
+    return abs(a) % abs(b) if a >= 0 else -(abs(a) % abs(b))
+
+
+def _revl_index_of(v, n):
+    if isinstance(v, str):
+        return v.find(n)
+    return v.index(n) if n in v else -1
+
+
+def _revl_split(v, s):
+    return list(v) if s == "" else v.split(s)
+
+
 # ---------------------------------------------------------------- the pairs
 # (label, emitted spelling, hand-written spelling, argument sample)
+#
+# The E arm is the CURRENT emitted spelling, kept in step with
+# `backends/python/emit.py` by hand. A row that reads 1.0/1.0 is a finding that
+# has been closed: the emitter now writes what the developer writes.
 def pairs():
     rec = {"x": 3, "y": 4}
     return [
-        ("bounded Int `a + b`  (emit.py:2302)",
-         lambda a, b: _revl_i64(a + b),
+        # item 436 F5: the bound is imposed inline, so the in-range answer —
+        # every answer a correct program produces — costs no Python frame.
+        ("bounded Int `a + b`  (emit.py::_bounded)",
+         lambda a, b: (_bi if I64_MIN <= (_bi := a + b) <= I64_MAX
+                       else _revl_i64(_bi)),
          lambda a, b: (v if I64_MIN <= (v := a + b) <= I64_MAX else _trap(v)),
          [(3, 4), (-9, 2), (1 << 40, 1 << 40)]),
 
-        ("truncated `a % b`  (emit.py:2322)",
-         lambda a, b: (lambda _a, _b: abs(_a) % abs(_b) if _a >= 0
-                       else -(abs(_a) % abs(_b)))(a, b),
+        # item 436 F6: a preamble `def`, not a lambda built and applied here.
+        ("truncated `a % b`  (emit.py::_render_builtin)",
+         lambda a, b: _revl_rem(a, b),
          lambda a, b: _rem(a, b),
          [(7, 3), (-7, 3), (7, -3)]),
 
-        ("record field read `p.x`  (emit.py:2394/1173)",
-         lambda p: _revl_field(p, 'x'),
+        # item 436 F4: the shape dispatch is inline, so the frame is gone; the
+        # `isinstance` that is left is what only a frontend marker can remove.
+        ("record field read `p.x`  (emit.py::_field_read)",
+         lambda p: (_fv['x'] if isinstance((_fv := p), dict)
+                    else getattr(_fv, 'x')),
          lambda p: p['x'],
          [(rec,)]),
 
-        ("match Some/None  (emit.py:2256)",
-         lambda o: (lambda match: (
-             (lambda v: v)(match) if match is not None
-             else (0 if match is None
-                   else (_ for _ in ()).throw(TypeError('x')))))(o),
+        # item 436 F3: the scrutinee bind rides the first arm's test. The
+        # PAYLOAD bind still rides a lambda — see the item for why.
+        ("match Some/None  (emit.py::_match_expr)",
+         lambda o: ((lambda v: v)(match) if (match := o) is not None
+                    else (0 if match is None
+                          else (_ for _ in ()).throw(TypeError('x')))),
          lambda o: (match if (match := o) is not None else 0),
          [(5,), (None,)]),
 
-        # `??` duplicates its LEFT OPERAND textually, so the cost (and the
-        # observable double effect) only appears when that operand is a call.
-        ("`f(x) ?? b`  (emit.py:2295/1182)",
-         lambda x, b: (b if _side(x) is None else _side(x)),
+        # item 436 C1/F7: the left operand is bound once by a walrus, so it is
+        # evaluated once — `_side` counts its own invocations to prove it.
+        ("`f(x) ?? b`  (emit.py::_opt_bind)",
+         lambda x, b: (_ov1 if (_ov1 := _side(x)) is not None else b),
          lambda x, b: (v if (v := _side(x)) is not None else b),
          [(5, 0), (None, 0)]),
 
-        # `Opt[T]` is `T | None`, so `Some` IS the identity; the emitter still
-        # builds a function object for it and enters a frame to apply it.
-        ("`Some(x)`  (emit.py:2285/1155)",
-         lambda x: (lambda _v: _v)(x),
+        # item 436 F8: `Opt[T]` is `T | None`, so the argument IS the answer.
+        ("`Some(x)`  (emit.py::_expr call arm)",
+         lambda x: x,
          lambda x: x,
          [(5,)]),
 
-        ("Map.remove  (emit.py:658)",
-         lambda m, k: dict((kk, vv) for kk, vv in m.items() if kk != k),
+        # item 436 F2: a dict comprehension, not `dict(<generator>)`.
+        ("Map.remove  (emit.py::_render_builtin)",
+         lambda m, k: {kk: vv for kk, vv in m.items() if kk != k},
          lambda m, k: {kk: vv for kk, vv in m.items() if kk != k},
          [({"a": 1, "b": 2, "c": 3}, "b")]),
 
-        ("Str.indexOf  (emit.py:604)",
-         lambda v, n: (lambda _v, _n: _v.find(_n) if isinstance(_v, str)
-                       else (_v.index(_n) if _n in _v else -1))(v, n),
+        # item 436 F6: a preamble `def`. The frame that is LEFT is the receiver
+        # dispatch (Str or List), which the IR node does not carry a type for.
+        ("Str.indexOf  (emit.py::_render_builtin)",
+         lambda v, n: _revl_index_of(v, n),
          lambda v, n: v.find(n) if isinstance(v, str) else (
              v.index(n) if n in v else -1),
          [("hello world", "wor"), ("abc", "z")]),
 
-        ("Str.split  (emit.py:608)",
-         lambda v, s: (lambda _v, _s: list(_v) if _s == "" else _v.split(_s))(v, s),
+        ("Str.split  (emit.py::_render_builtin)",
+         lambda v, s: _revl_split(v, s),
          lambda v, s: list(v) if s == "" else v.split(s),
          [("a,b,c", ","), ("abc", "")]),
     ]
@@ -123,7 +151,7 @@ def pairs():
 def main() -> int:
     print("per-construct cost, ONE evaluation, deterministic counters")
     print("E = the cordis-py emitter's spelling, H = the hand-written one\n")
-    print(f"{'construct':<44}{'ops E/H':>18}{'calls E/H':>16}")
+    print(f"{'construct':<48}{'ops E/H':>14}{'calls E/H':>16}")
     for label, emitted, hand, samples in pairs():
         for args in samples:
             if emitted(*args) != hand(*args):
@@ -137,10 +165,12 @@ def main() -> int:
         oh = (count_ops(drive(hand)) - count_ops(drive(lambda *a: None))) / REPS
         ce = count_calls(drive(emitted)) / REPS
         ch = count_calls(drive(hand)) / REPS
-        print(f"{label:<44}{f'{oe:.1f}/{oh:.1f}':>18}{f'{ce:.1f}/{ch:.1f}':>16}")
+        print(f"{label:<48}{f'{oe:.1f}/{oh:.1f}':>14}{f'{ce:.1f}/{ch:.1f}':>16}")
+    # item 436 C1/F7 stays pinned: the emitted `??` binds its left operand
+    # ONCE. This ran 200 for 100 uses before the walrus landed.
     SIDE_EFFECTS[0] = 0
     for _ in range(100):
-        (0 if _side(7) is None else _side(7))
+        (_ov1 if (_ov1 := _side(7)) is not None else 0)
     emitted_evals = SIDE_EFFECTS[0]
     SIDE_EFFECTS[0] = 0
     for _ in range(100):

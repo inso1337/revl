@@ -146,12 +146,28 @@ Each tier reports one of three outcomes, honestly:
   tier with no recorded evidence cannot be a mismatch, and it never silently
   reads as OK.
 
-A `@version` you ask for is a different case, because you asked about it. The
-registry index records no per-component version, so there is nothing to check
-`@1.2.0` against: that is a MISMATCH on the `version` tier and a non-zero exit,
-not a "cannot verify". Reproducing whatever `user_cache` is today would answer a
-different question than the one you asked. Ask that question with
-`truc reproduce user_cache`.
+`@version` is a pin, not a label. A registry entry declares its version in a
+one-line `version` file, `build_index` records it in the index row, and `truc
+add` copies it into your `truc.lock`, so there is a value on both sides for a
+request to be checked against:
+
+- ask for the version the registry records and the `version` tier is **OK**;
+- ask for one it does not record and the resolution refuses outright, because
+  rebuilding a different release under the name you asked for answers a
+  different question;
+- ask a registry that declares no version at all and the tier is a **MISMATCH**
+  with a non-zero exit, since there is nothing for `@1.2.0` to pin against;
+- ask for **no** version and the tier is **cannot verify**. That run reproduced
+  whatever the registry serves right now, which is a real claim but a much
+  weaker one than reproducing a named release, so it is never *fully*
+  reproduced. It is not a failure: nothing diverged, so the exit code is 0
+  unless you passed `--strict`.
+
+The version a registry records is publisher metadata, and every tier above it
+compares the registry with itself. The independent check is the `version` your
+own `truc.lock` recorded when you added the component: a registry that
+relabels a release under a name you pinned diverges on the `independent pin`
+tier even when the bytes never moved.
 
 The reproduction reuses truc's existing machinery, not a new hash scheme: the
 source and manifest hashes are the exact bytes `registry.build_index` records,
