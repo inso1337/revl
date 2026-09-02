@@ -92,6 +92,11 @@ from .errors import RevlError
 #: Bundle-relative locations of every facet the chain binds (item 305's layout).
 IR_DOCUMENT = "ir/ir.json"
 EMITTED_ROOT = "emitted"
+#: the bundled `.rvl` sources and the bundle's own manifest — the two the signer
+#: re-runs the frontend over, so an attestation is signed over a composition
+#: this toolchain admitted rather than over an IR document someone handed it.
+SOURCE_ROOT = "source"
+RUNTIME_MANIFEST = "runtime-manifest.json"
 POLICY_NAME = "policy.json"
 LOCK_NAME = "components.lock"
 GAUNTLET_NAME = "gauntlet.json"
@@ -120,6 +125,11 @@ def conformance_facet(backend: str) -> str:
 #: claims to have emitted. Admission NEVER reads them: the chain is checked
 #: against the bytes in hand (Addendum 3a). Named as data so the refusal to
 #: trust them is a stated property and a test can pin it.
+#:
+#: `sign_alg` is deliberately NOT on this list and never was — but it also is no
+#: longer self-declared in any meaningful sense: `attest.verify_attestation`
+#: refuses any value but `attest.SIGN_ALG`, and admission's cross-domain refusal
+#: reads the algorithm off THIS build rather than off the record.
 SELF_DECLARED_IGNORED = ("backend", "artifact_hash", "artifact_sha256",
                          "emitted_hash", "ir_hash")
 
@@ -204,6 +214,46 @@ def staged_ir(bundle_dir: Path | str) -> dict:
                         f"cannot read the staged IR document: {error}") from error
 
 
+def staged_sources(bundle_dir: Path | str) -> list[str]:
+    """The bundle's `.rvl` sources, in the order the bundle recorded them.
+
+    Order matters: `compile_files` composes the files in the order given, so the
+    recompile must use the recorded order to reproduce the staged IR. Falls back
+    to sorted basenames for a bundle with no readable manifest.
+    """
+    root = Path(bundle_dir)
+    names: list = []
+    manifest_path = root / RUNTIME_MANIFEST
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            manifest = {}
+        names = [rec.get("name")
+                 for rec in ((manifest.get("source") or {}).get("files") or [])]
+    source_dir = root / SOURCE_ROOT
+    if not names and source_dir.is_dir():
+        names = sorted(path.name for path in source_dir.iterdir()
+                       if path.suffix == ".rvl")
+    return [str(source_dir / name) for name in names if name]
+
+
+def gate_bundle(bundle_dir: Path | str) -> attest.GateVerdict:
+    """Run the reference frontend over the bundle's OWN staged source and return
+    the verdict, hashed in the bundle's normalized IR spelling.
+
+    This is the measurement an attestation over a bundle records. It is also
+    what makes `attest.make_attestation`'s hash equality meaningful here: the
+    verdict's hash is the recompile's, so signing succeeds only when the staged
+    `ir/ir.json` is REPRODUCED by compiling the staged source — the same
+    property `revl verify` reports, enforced at signing time.
+    """
+    from .bundle import _canonical_ir  # noqa: PLC0415 — lazy, avoids an import cycle
+
+    return attest.run_gate(paths=staged_sources(bundle_dir),
+                           normalize=_canonical_ir)
+
+
 def make_deploy_attestation(bundle_dir: Path | str, key: bytes, *,
                             backends: Optional[Iterable[str]] = None,
                             now=None, signer: str | None = None) -> dict:
@@ -211,11 +261,18 @@ def make_deploy_attestation(bundle_dir: Path | str, key: bytes, *,
     over the bundle's IR, with the whole chain folded into `evidence_bindings`.
 
     A thin composition on purpose — the signature primitive, the canonical IR
-    hash and the bindings member are all item 127/290's, unchanged.
+    hash and the bindings member are all item 127/290's, unchanged. What is NOT
+    thin, and is the point: the gate verdict comes from :func:`gate_bundle`, a
+    real frontend run over the staged source. A bundle whose source no longer
+    admits, or whose staged IR is not what its source compiles to, is REFUSED
+    signing rather than signed with a guarantee list nothing measured.
     """
     ir = staged_ir(bundle_dir)
+    verdict = gate_bundle(bundle_dir)
+    if not verdict.admitted and verdict.error is not None:
+        raise verdict.error
     return attest.make_attestation(
-        ir, key, now=now, signer=signer,
+        ir, key, verdict=verdict, now=now, signer=signer,
         evidence_bindings=chain_bindings(bundle_dir, backends=backends))
 
 
@@ -240,6 +297,23 @@ REFUSE = "REFUSE"
 RECEIPT_KIND = "revl.deploy.receipt"
 RECEIPT_VERSION = "1.0"
 
+#: The domain-separation prefix folded into every receipt MAC, distinct from
+#: `attest.SIGN_DOMAIN`. Both MACs are `hmac(key, canonical(body-minus-
+#: signature))` over the same canonical spelling, so without a per-protocol tag
+#: an ACCEPT receipt verified as a valid attestation and an attestation verified
+#: as a valid receipt — cross-protocol confusion between two records that mean
+#: entirely different things ("I admitted this" vs "this was admitted").
+RECEIPT_DOMAIN = b"revl.deploy.receipt/v1\x00"
+
+
+def _receipt_mac(body: Mapping, host_key: bytes) -> str:
+    """The receipt MAC: domain-tagged HMAC-SHA256 over the canonical body bytes
+    (`body` is the receipt with its `signature` member removed)."""
+    payload = json.dumps({k: v for k, v in body.items() if k != "signature"},
+                         sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(bytes(host_key), RECEIPT_DOMAIN + payload,
+                    hashlib.sha256).hexdigest()
+
 
 @dataclass(frozen=True)
 class TrustStore:
@@ -258,6 +332,15 @@ class TrustStore:
     fiction. Slice 1 is single-host — one trust domain — so the default is
     False and HMAC is honest; the flag is the place the Ed25519 prerequisite
     lands when Slice 2 crosses a domain.
+
+    `recheck_source` is the receiver's answer to "a signature is not a check".
+    Off (the default), admission trusts the SIGNER's gate run: the attestation
+    is only issuable from a real admitted verdict over this exact
+    `composition_hash`, so admission inherits that transitively, and what it
+    leaves open is a signer whose frontend was older, patched, or lying. On, the
+    receiver re-runs its OWN frontend over the bundle's staged source and
+    refuses unless that run admits AND reproduces the staged IR — the receiver
+    stops taking the signer's word for the verdict as well as for the bytes.
     """
 
     keys: Mapping[str, bytes]
@@ -266,6 +349,7 @@ class TrustStore:
     capability_ceiling: Optional[frozenset] = None
     evidence_ttl_seconds: Optional[float] = None
     cross_domain: bool = False
+    recheck_source: bool = False
 
     def key_for(self, kid: str | None) -> Optional[bytes]:
         if not isinstance(kid, str):
@@ -334,14 +418,24 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
 
     # (a) signer: is this key_id one this receiver trusts, and not revoked?
     kid = attestation.get("key_id")
-    if trust.cross_domain and attestation.get("sign_alg") == attest.SIGN_ALG:
+    # The cross-domain refusal reads NOTHING off the attestation. It used to
+    # gate on `attestation["sign_alg"] == SIGN_ALG`, which made a self-declared
+    # member the decider of the trust-domain question: relabel it `ed25519` and
+    # the refusal evaporated, while `verify_attestation` went on MAC-ing with
+    # the symmetric key regardless. The algorithm this build can verify is a
+    # property of THIS code, so it is read from this code: every attestation
+    # `attest.verify_attestation` accepts is HMAC (it now refuses any other
+    # `sign_alg`), and a symmetric verifier is a forger, so a declared
+    # cross-domain deploy is refused outright.
+    if trust.cross_domain:
         return _refusal(
             LINK_SIGNER,
-            "this receiver declares the signer a different trust domain, but the "
-            f"attestation is signed with the symmetric {attest.SIGN_ALG!r}. A "
-            "verifier that holds the secret is also a forger, so `signer "
-            "untrusted` would be a fiction. Refusing until the asymmetric "
-            "(Ed25519) upgrade lands (docs/design/118-revl-deploy.md §2.4).")
+            "this receiver declares the signer a different trust domain, but "
+            f"every attestation this build verifies is the symmetric "
+            f"{attest.SIGN_ALG!r}. A verifier that holds the secret is also a "
+            "forger, so `signer untrusted` would be a fiction. Refusing until "
+            "the asymmetric (Ed25519) upgrade lands "
+            "(docs/design/118-revl-deploy.md §2.4).")
     key = trust.key_for(kid)
     if key is None:
         known = ", ".join(sorted(trust.keys)) or "(none)"
@@ -368,6 +462,26 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
             "the staged IR is not the attested composition: the signature binds "
             f"{str(bound_ir)[:12]}…, the bytes on this receiver hash to "
             f"{recomputed_ir[:12]}…")
+
+    # (c2) optionally, RE-RUN the frontend here. `admit` re-hashes the IR but a
+    # hash is not a verdict: without this the receiver still takes the signer's
+    # word that some checker ever admitted the composition. With it, this
+    # receiver's own frontend must admit the staged source AND reproduce the
+    # staged IR (docs/design/118-revl-deploy.md §2.4, TrustStore.recheck_source).
+    if trust.recheck_source:
+        local = gate_bundle(root)
+        if not local.admitted:
+            return _refusal(
+                LINK_COMPOSITION,
+                "this receiver re-ran its own frontend over the staged source "
+                f"and it was NOT admitted: {local.reason}")
+        if not hmac.compare_digest(str(local.composition_hash), recomputed_ir):
+            return _refusal(
+                LINK_COMPOSITION,
+                "the staged source does not compile to the staged IR on this "
+                f"receiver: its own frontend produced "
+                f"{str(local.composition_hash)[:12]}…, the staged ir/ir.json "
+                f"hashes to {recomputed_ir[:12]}…")
 
     bindings = attestation.get("evidence_bindings") or {}
 
@@ -476,26 +590,33 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
         "admitted_at": attest._now_iso(None) if now is None else str(now),
     }
     if host_key is not None:
-        receipt["signature"] = hmac.new(
-            bytes(host_key),
-            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-            hashlib.sha256).hexdigest()
+        receipt["signature"] = _receipt_mac(receipt, host_key)
     return receipt
 
 
 def verify_receipt(receipt: Mapping, host_key: bytes) -> tuple[bool, str]:
     """Check a receipt's own signature — the receiver signed what it claims to
-    hold, so an audit can attribute a lie rather than only notice one."""
+    hold, so an audit can attribute a lie rather than only notice one.
+
+    The MAC is domain-tagged and the envelope is checked, so an item-127
+    attestation signed with this key is NOT a receipt: it fails the MAC (a
+    different domain) and, were it not for that, would fail on `kind`. A record
+    saying "this composition was admitted" and a record saying "I admitted it"
+    are different claims by different parties, and neither may stand in for the
+    other."""
     given = receipt.get("signature")
     if not isinstance(given, str):
         return False, "receipt carries no signature"
-    body = {k: v for k, v in receipt.items() if k != "signature"}
-    expected = hmac.new(
-        bytes(host_key),
-        json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-        hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, given):
+    if not hmac.compare_digest(_receipt_mac(receipt, host_key), given):
         return False, "receipt signature mismatch"
+    if receipt.get("kind") != RECEIPT_KIND:
+        return False, (f"not a {RECEIPT_KIND} record: kind is "
+                       f"{receipt.get('kind')!r}")
+    if receipt.get("version") != RECEIPT_VERSION:
+        return False, (f"receipt version is {receipt.get('version')!r}, "
+                       f"expected {RECEIPT_VERSION!r}")
+    if receipt.get("verdict") not in (ACCEPT, REFUSE):
+        return False, f"receipt verdict is {receipt.get('verdict')!r}"
     return True, "receipt is authentic"
 
 

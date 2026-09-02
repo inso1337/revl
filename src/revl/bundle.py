@@ -292,12 +292,17 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
     if not sources:
         raise RevlError("<bundle>", 0, "no source files given to bundle")
 
-    from .compiler import compile_files  # noqa: PLC0415
+    from . import attest  # noqa: PLC0415
 
-    try:
-        ir = compile_files(list(sources))
-    except RevlError:
-        raise
+    # ONE frontend run, and it is the gate run the attestation records. The
+    # compile used to happen here and the provenance was thrown away, so
+    # `make_attestation` signed a guarantee list nothing had measured; the
+    # verdict now travels to the signature (item 127 F2). A compile refusal is
+    # re-raised verbatim, so `revl bundle`'s diagnostics are unchanged.
+    gate_verdict = attest.run_gate(paths=list(sources), normalize=_canonical_ir)
+    if gate_verdict.error is not None and gate_verdict.ir is None:
+        raise gate_verdict.error
+    ir = gate_verdict.ir
     holes = ir.get("holes") or []
     if holes:
         raise RevlError(
@@ -409,7 +414,6 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
         backend_records[backend] = {"files": recs}
 
     # attestation.json, the item-127 signed record, when a key is available.
-    from . import attest  # noqa: PLC0415
     composition_hash = attest.canonical_hash(norm_ir)
     attested = False
     try:
@@ -418,7 +422,8 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
         key = None
     if key is not None:
         signer = env.get(attest.SIGNER_ENV)
-        att = attest.make_attestation(norm_ir, key, signer=signer)
+        att = attest.make_attestation(norm_ir, key, verdict=gate_verdict,
+                                      signer=signer)
         (out_dir / ATTESTATION_NAME).write_text(
             json.dumps(att, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         attested = True

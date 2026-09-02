@@ -247,7 +247,8 @@ to bind every link:
 ```
 deploy attestation body (signed, HMAC or Ed25519 - see S2.4):
   composition_hash        # attest.canonical_hash(IR)              [source+IR link]
-  guarantees              # G1..G9, drawn from diagnostics.GUARANTEES
+  guarantees              # the G-codes the signer's gate verdict discharged
+  checker                 # {compiler, ruleset}: WHICH frontend reached it
   evidence_bindings:      # per-facet sha256, folded into the signature (item 290)
     artifact/<backend>    # sha256 of emitted/<backend>/... bytes    [artifact link]
     policy                # sha256 of policy.json (item 305)         [capability link]
@@ -256,6 +257,12 @@ deploy attestation body (signed, HMAC or Ed25519 - see S2.4):
     conformance/<backend> # sha256 of the item-306 cert for <backend>[runtime-target link]
   verdict, timestamp, signer, key_id
 ```
+
+`guarantees` and `checker` are not self-descriptions: `attest.make_attestation`
+refuses to sign without a `GateVerdict` from a real frontend run whose own
+composition hash equals the one being signed, so `make_deploy_attestation`
+re-runs the gate over the bundle's staged `source/` and a bundle whose staged
+IR is not what its source compiles to cannot be signed at all.
 
 Every one of these hashes is already computed by `bundle.py` when it writes the
 bundle (`components.lock`, `policy.json`, `emitted/<backend>`, `gauntlet.json`)
@@ -311,6 +318,29 @@ the signer holds a private key, the host's trust store holds only public verify
 keys, and `signer untrusted` becomes a real cross-domain check. Shipping deploy
 on HMAC would make the "signer untrusted" rejection rule a fiction (S5-C1's
 sibling; see S5-A1). This is a hard prerequisite, recorded in Slice 1.
+
+**The refusal reads this build, not the record.** Until that upgrade lands,
+`admit` REFUSES a `cross_domain` trust store outright. It used to gate that
+refusal on `attestation["sign_alg"] == attest.SIGN_ALG`, which made a member the
+SENDER writes the decider of the trust-domain question, while
+`verify_attestation` never checked `sign_alg` at all and MAC-ed with the
+symmetric key regardless. Relabelling the field `ed25519` therefore bought a
+cross-domain ACCEPT with a receipt, and so did `''`, `'HMAC-SHA256'` and `null`.
+Two changes close it: `verify_attestation` refuses any `sign_alg` but
+`hmac-sha256` (the algorithm this build can actually verify is a property of
+this build), and the cross-domain refusal reads nothing off the attestation.
+
+**A signature is not a check (`TrustStore.recheck_source`).** `admit` re-hashes
+`ir/ir.json` but never re-runs the gate, so with the flag off the receiver still
+takes the SIGNER's word that a checker ever admitted the composition. What makes
+that word worth something is upstream: an attestation cannot be issued without
+an admitted `GateVerdict` over this exact `composition_hash`, and it names the
+`checker` that produced it. What it leaves open is a signer whose frontend was
+older, patched or lying, which is a property of the signer, not of the bytes.
+`recheck_source=True` closes that: the receiver runs its OWN frontend over the
+bundle's staged `source/` and refuses unless that run admits and reproduces the
+staged IR. It is opt-in because it costs a compile on the receiving path and
+requires the bundle's source, which a source-stripped bundle would not carry.
 
 ---
 
