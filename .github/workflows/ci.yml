@@ -150,11 +150,20 @@ jobs:
       # the other generated-artifact gates. Emit-only + self-host are pure
       # Python, so this needs no backend toolchain and runs here.
       - run: python3 tools/conformance.py --check-readme
-      # roadmap 110c: the playground/site wheel freshness is checked by
-      # `make pre-merge` (run per merge) and at release, NOT on every push. The
-      # wheel vendors the whole of src/revl, so a per-push gate reddened CI on
-      # every source change to a bundled module (an outage class, not a defect);
-      # it is a deploy artifact, so the check belongs at merge/release time.
+      # roadmap 110c: the playground/site wheel freshness is NOT checked here,
+      # and must not be. The wheel vendors the whole of src/revl, so a per-push
+      # gate reddened CI on every source change to a bundled module (an outage
+      # class, not a defect); it is a deploy artifact, so a PR that edits
+      # parser.py is not wrong for not having rebuilt it.
+      #
+      # Issue #252: the merge-time assignment that replaced the gate had no
+      # owner in practice -- nobody runs `make pre-merge`, and the wheel was
+      # found stale three times in one day. It has one now that cannot forget:
+      # `.github/workflows/site-wheel.yml` runs `tools/check_site_wheel.py`
+      # after every merge to main (and weekly) and fails THERE, which keeps the
+      # detection automatic and this path clear.
+      # `tests/test_site_wheel_gate_runs_in_ci.py`, in the plain `pytest tests/`
+      # below, is what keeps both halves of that true.
       # `python3 tools/check_site_wheel.py --write` rebuilds it.
       # the frontend suite includes the pure-Python halves of all three
       # backends (emitter goldens, IR contract, manifest/admission, audit);
