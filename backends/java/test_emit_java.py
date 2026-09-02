@@ -1358,6 +1358,39 @@ def test_javac_compiles_adt_matches_and_arrows(tmp_path):
     _javac_compile(tmp_path, emit.emit(compile_source(_ADT_MATCH_SRC + _ARROW_SRC)))
 
 
+# A wildcarded payload (`Found(_) => ..`) has no name to bind. The parser
+# records that as `bind == "_"` (a real, non-empty string), not `None` — the
+# same shape the cordis-rs backend hit (roadmap item 186 / the Rust
+# wildcard-payload fix). Before this fix every case-bind site here (the plain
+# sealed-interface switch, the built-in Result switch, and the built-in Opt
+# `.map` lambda) treated any truthy bind as a real name and declared
+# `final var _ = ..;` / `.map(_ -> ..)` — a literal `_` local or lambda
+# parameter, which `javac --release 21` refuses without --enable-preview
+# ("as of release 9, '_' is a keyword, and may not be used as an identifier";
+# JEP 443/456 only lifts that under the preview flag this tier does not pass).
+_WILDCARD_PAYLOAD_SRC = """
+type Outcome = Found(Int) | Missing
+fn has(o: Outcome) -> Bool { return match o { Found(_) => true, Missing => false } }
+fn firstOpt(x: Opt[Int]) -> Bool { return match x { Some(_) => true, None => false } }
+fn firstRes(x: Result[Int, Str]) -> Bool { return match x { Ok(_) => true, Err(_) => false } }
+"""
+
+
+def test_wildcard_payload_arm_does_not_declare_a_literal_underscore():
+    src = emit.emit(compile_source(_WILDCARD_PAYLOAD_SRC))
+    assert "case Outcome.Found" in src
+    # the malformed constructs this regression guards against, verbatim.
+    assert "final var _ " not in src
+    assert "final var _=" not in src
+    assert "(_ ->" not in src
+    assert "map(_ ->" not in src
+
+
+@pytest.mark.skipif(JAVAC is None, reason="no working javac")
+def test_javac_compiles_wildcard_payload_match(tmp_path):
+    _javac_compile(tmp_path, emit.emit(compile_source(_WILDCARD_PAYLOAD_SRC)))
+
+
 # ---- Map value type (docs/stdlib-2.0.md §Map) ------------------------------
 
 MAP_SRC = """

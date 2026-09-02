@@ -679,7 +679,11 @@ def _go_comp_match(node, env: _Env, expected) -> str:
             payload = _v3_case_payload(adt, pattern)
             case_type = "%s%s" % (_v3_ident(adt, "type name"), pattern)
             lines.append("\tcase %s:" % case_type)
-            if bind:
+            # `bind == "_"` is a wildcarded payload (`Case(_) => ..`): there is
+            # no name to hold the value, so it is discarded exactly like an
+            # unbound arm rather than assigned to and read back from a literal
+            # `_` (Go: "cannot use _ as value").
+            if bind and bind != "_":
                 if payload is None:
                     raise EmitError(
                         f"match arm binds {bind!r} but case {pattern!r} of "
@@ -733,7 +737,10 @@ def _go_comp_match_tuple(node, env: _Env, expected, st, is_opt, is_result,
             if ok_arm is not None:
                 bind = ok_arm.get("bind")
                 lines.append("\tif _ok {")
-                if bind:
+                # `bind == "_"` (`Some(_) => ..`) has no name to hold the
+                # value; discard it the same way an unbound arm does instead
+                # of assigning to and reading back a literal `_`.
+                if bind and bind != "_":
                     env.var_types[bind] = inner
                     lines.append("\t\t%s := _v" % _safe_local(bind))
                     lines.append("\t\t_ = %s" % _safe_local(bind))
@@ -748,7 +755,7 @@ def _go_comp_match_tuple(node, env: _Env, expected, st, is_opt, is_result,
             lines.append("\t_ = _v")
             if err_arm is not None:
                 bind = err_arm.get("bind")
-                if bind:
+                if bind and bind != "_":
                     env.var_types[bind] = inner
                     lines.append("\t%s := _v; _ = %s" % (_safe_local(bind), _safe_local(bind)))
                 lines.append("\treturn %s" % _expr(err_arm.get("body"), env, expected))
@@ -764,7 +771,10 @@ def _go_comp_match_tuple(node, env: _Env, expected, st, is_opt, is_result,
         if ok_arm is not None:
             bind = ok_arm.get("bind")
             lines.append("\tif _ok {")
-            if bind:
+            # `bind == "_"` (`Ok(_) => ..`) has no name to hold the value;
+            # discard it the same way an unbound arm does instead of
+            # assigning to and reading back a literal `_`.
+            if bind and bind != "_":
                 env.var_types[bind] = ok
                 lines.append("\t\t%s := _v" % _safe_local(bind))
                 lines.append("\t\t_ = %s" % _safe_local(bind))
@@ -779,7 +789,7 @@ def _go_comp_match_tuple(node, env: _Env, expected, st, is_opt, is_result,
         lines.append("\t_ = _e")
         if err_arm is not None:
             bind = err_arm.get("bind")
-            if bind:
+            if bind and bind != "_":
                 env.var_types[bind] = err
                 lines.append("\t%s := _e; _ = %s" % (_safe_local(bind), _safe_local(bind)))
             lines.append("\treturn %s" % _expr(err_arm.get("body"), env, expected))
@@ -4102,7 +4112,9 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
         if wild is not None:
             lines = [f"func() {exp_t} {{"]
             wbind = wild.get("bind")
-            if wbind:
+            # `wbind == "_"` has no name to hold the value; discard it the
+            # same way an unbound arm does (Go: "cannot use _ as value").
+            if wbind and wbind != "_":
                 ctx.var_types[wbind] = st
                 lines.append(f"\t{_v3_ident(wbind, 'match bind')} := {scrutinee}")
                 lines.append(f"\t_ = {_v3_ident(wbind, 'match bind')}")
@@ -4168,7 +4180,10 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
             case_type = f"{_v3_ident(adt, 'type name')}{pattern}"
             payload_surface = ctx.case_payload.get(pattern)
         lines.append(f"\tcase {case_type}:")
-        if bind:
+        # `bind == "_"` (`Case(_) => ..`) has no name to hold the value;
+        # discard it the same way an unbound arm does, rather than declaring
+        # and reading back a literal `_` (Go: "cannot use _ as value").
+        if bind and bind != "_":
             ctx.var_types[bind] = payload_surface
             gobind = _v3_ident(bind, "match bind")
             lines.append(f"\t\t{gobind} := _m.Value")
