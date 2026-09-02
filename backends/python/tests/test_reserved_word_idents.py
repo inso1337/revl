@@ -100,3 +100,152 @@ def test_non_keyword_idents_unchanged():
     assert "def g(value):" in source
     assert "out = value" in source
     assert "value_" not in source and "out_" not in source
+
+
+# --------------------------------------------------------------------------
+# Injectivity: the rename must never merge two distinct revl identifiers.
+#
+# The item-165 rename was "append `_` while the name is a keyword". That is a
+# pure function of the name, which is what the decl/use agreement needs, but it
+# is NOT injective: `lambda` maps to `lambda_` and the equally legal revl
+# identifier `lambda_` maps to itself, so both reach `lambda_`. On this tier
+# that is SILENT — the second binding captures the first and the function
+# returns the wrong value. These tests pin the injective rule.
+# --------------------------------------------------------------------------
+
+import keyword  # noqa: E402
+
+ALL_PY_KEYWORDS = sorted(set(keyword.kwlist) | set(keyword.softkwlist))
+
+
+def test_mangle_is_injective_over_the_keyword_ladder():
+    """For every Python keyword `kw`, the whole `kw`/`kw_`/`kw__` ladder maps to
+    distinct Python identifiers, and none of the images is itself a keyword."""
+    seen: dict[str, str] = {}
+    for kw in ALL_PY_KEYWORDS:
+        for name in (kw, kw + "_", kw + "__", kw + "___"):
+            out = emit._mangle(name)
+            assert not keyword.iskeyword(out) and not keyword.issoftkeyword(out), (
+                f"{name!r} mangled to the keyword {out!r}"
+            )
+            assert out not in seen, (
+                f"{name!r} and {seen[out]!r} both mangle to {out!r}"
+            )
+            seen[out] = name
+
+
+def test_mangle_is_injective_over_a_wide_identifier_sample():
+    """The identity half of the map may not collide with the shifted half."""
+    sample = [
+        kw + tail
+        for kw in ALL_PY_KEYWORDS
+        for tail in ("", "_", "__")
+    ] + ["value", "value_", "out", "out_", "_v", "_v_", "_", "__", "___",
+         "lambda_x", "classic", "fromage"]
+    images = [emit._mangle(n) for n in sample]
+    assert len(set(images)) == len(set(sample))
+
+
+def test_keyword_local_does_not_capture_its_underscore_twin():
+    """The reported exploit: two distinct revl locals, `lambda` and `lambda_`.
+
+    Before the fix the emitted body was two assignments to one name and `probe`
+    returned 'SEKRIT-CANARY-416'. It must return the value revl bound to
+    `lambda`."""
+    src = """
+fn probe() -> Str {
+  let lambda = "PUBLIC-VALUE"
+  let lambda_ = "SEKRIT-CANARY-416"
+  return lambda
+}
+"""
+    source = _emit(src)
+    module = load_module(source, "revl_injective_local")
+    assert module.probe() == "PUBLIC-VALUE"
+    assert "lambda_ = 'PUBLIC-VALUE'" in source
+    assert "lambda__ = 'SEKRIT-CANARY-416'" in source
+
+
+def test_top_level_fn_pair_stays_two_definitions():
+    """Two top-level fns whose names differ only by a trailing `_` stay two
+    `def`s — the module's exported API keeps both, and neither overwrites the
+    other."""
+    src = """
+pub fn lambda() -> Str { return "PUBLIC-VALUE" }
+pub fn lambda_() -> Str { return "SEKRIT-CANARY-416" }
+fn pick(flag: Bool) -> Str { if (flag) { return lambda() } return lambda_() }
+"""
+    source = _emit(src)
+    assert source.count("def lambda_(") == 1
+    assert source.count("def lambda__(") == 1
+    module = load_module(source, "revl_injective_fn")
+    assert module.pick(True) == "PUBLIC-VALUE"
+    assert module.pick(False) == "SEKRIT-CANARY-416"
+
+
+def test_record_field_pair_stays_two_dataclass_fields():
+    """A record with `from` and `from_` keeps TWO fields on the emitted
+    dataclass. Before the fix both annotations were `from_`, the second
+    overwrote the first, and `dataclasses.fields()` reported one field for a
+    two-field revl record while the record VALUE (a dict) still carried both
+    raw keys."""
+    import dataclasses
+
+    src = """
+type Transfer = { from: Str, from_: Str }
+
+fn mk(a: Str, b: Str) -> Transfer {
+  return { from: a, from_: b }
+}
+"""
+    source = _emit(src)
+    module = load_module(source, "revl_injective_record")
+    names = [f.name for f in dataclasses.fields(module.Transfer)]
+    assert names == ["from_", "from__"]
+    # the runtime value keeps the RAW revl keys, unchanged by the rename
+    assert module.mk("a", "b") == {"from": "a", "from_": "b"}
+
+
+def test_ordinary_keyword_rename_is_unchanged():
+    """False-positive guard: a keyword rename with no twin in the program is
+    exactly what it always was — one `_`, not two."""
+    src = "fn f(from: Str) -> Str { let class = from\n  return class }"
+    source = _emit(src)
+    assert "def f(from_):" in source
+    assert "class_ = from_" in source
+    assert "return class_" in source
+    assert "from__" not in source and "class__" not in source
+
+
+def test_non_keyword_underscore_names_are_untouched():
+    """False-positive guard: `value_`/`out_` have no keyword root, so they are
+    emitted byte-for-byte."""
+    src = "fn g(value_: Str) -> Str { let out_ = value_\n  return out_ }"
+    source = _emit(src)
+    assert "def g(value_):" in source
+    assert "out_ = value_" in source
+    assert "value__" not in source and "out__" not in source
+
+
+def test_underscore_wildcard_does_not_capture_its_twin():
+    """A second live instance of the same defect, in the most idiomatic corner
+    of the space: `_` is a Python SOFT keyword, so it escapes to `__`, and the
+    equally legal revl binding `__` used to be left alone — both landed on `__`
+    and `probe()` returned 'SEKRIT-CANARY-416'.
+
+    This is why the ladder shift has to reach ALL-underscore names too: because
+    `_` escapes, `__` must escape as well or the two collide. The nine emitted
+    lines that move across the whole `.rvl` corpus are exactly this, a `let _ =`
+    discard going from `__ =` to `___ =`."""
+    src = """
+pub fn probe() -> Str {
+  let _ = "PUBLIC-VALUE"
+  let __ = "SEKRIT-CANARY-416"
+  return _
+}
+"""
+    source = _emit(src)
+    module = load_module(source, "revl_injective_underscore")
+    assert module.probe() == "PUBLIC-VALUE"
+    assert "__ = 'PUBLIC-VALUE'" in source
+    assert "___ = 'SEKRIT-CANARY-416'" in source

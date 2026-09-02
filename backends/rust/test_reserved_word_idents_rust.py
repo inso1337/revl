@@ -68,3 +68,82 @@ def test_keyword_field_record_is_consistent():
     assert "impl_: String," in out          # struct field decl
     assert "impl_:" in out                   # construction
     assert "return b.impl_;" in out          # field access
+
+
+# --------------------------------------------------------------------------
+# Injectivity. `_mangle` was "append `_` while reserved" and `_mname` was a
+# plain table lookup: both pure functions of the name, neither injective —
+# `match`/`match_` both landed on `match_`, and a method named `drop_` collided
+# with the `drop` -> `drop_` destructor rename. rustc catches most of that
+# loudly; the python tier silently captures on the same shape, so the rule is
+# injective on every tier now.
+# --------------------------------------------------------------------------
+
+
+def test_mangle_is_injective_over_the_reserved_ladder():
+    reserved = emit._RUST_RESERVED | emit._EMITTER_RESERVED
+    for word in sorted(reserved):
+        ladder = [word, word + "_", word + "__", word + "___"]
+        images = [emit._mangle(n) for n in ladder]
+        assert len(set(images)) == len(ladder), f"{word!r} ladder collapsed: {images}"
+        assert not set(images) & reserved
+
+
+def test_method_rename_is_injective():
+    """`drop` -> `drop_` must not swallow a method actually named `drop_`."""
+    assert emit._mname("drop") == "drop_"
+    assert emit._mname("drop_") == "drop__"
+    assert emit._mname("drop__") == "drop___"
+    assert emit._mname("run") == "run"
+    assert len({emit._mname(n) for n in ("drop", "drop_", "drop__")}) == 3
+
+
+def test_keyword_local_does_not_collide_with_its_underscore_twin():
+    out = _emit(
+        'pub fn probe() -> Str {\n'
+        '  let const = "PUBLIC-VALUE"\n'
+        '  let const_ = "SEKRIT-CANARY-416"\n'
+        '  return const\n'
+        '}\n'
+    )
+    assert 'let const_ = String::from("PUBLIC-VALUE");' in out
+    assert 'let const__ = String::from("SEKRIT-CANARY-416");' in out
+    assert "return const_;" in out
+    assert out.count("let const_ =") == 1
+
+
+def test_top_level_fn_pair_stays_two_functions():
+    out = _emit(
+        'pub fn const() -> Str { return "PUBLIC-VALUE" }\n'
+        'pub fn const_() -> Str { return "SEKRIT-CANARY-416" }\n'
+    )
+    assert out.count("pub fn const_()") == 1
+    assert out.count("pub fn const__()") == 1
+
+
+def test_record_field_pair_stays_two_fields():
+    out = _emit(
+        "type Box = { const: Str, const_: Str }\n"
+        "fn mk(a: Str, b: Str) -> Box { return { const: a, const_: b } }\n"
+        "fn r1(b: Box) -> Str { return b.const }\n"
+        "fn r2(b: Box) -> Str { return b.const_ }\n"
+    )
+    assert "const_: String," in out
+    assert "const__: String," in out
+    assert "return b.const_;" in out
+    assert "return b.const__;" in out
+
+
+def test_ordinary_reserved_rename_is_unchanged():
+    """False-positive guard: one `_`, not two, when there is no twin."""
+    out = _emit("pub fn f(impl: Str) -> Str { let struct = impl\n  return struct }")
+    assert "impl_: " in out
+    assert "let struct_ = impl_" in out
+    assert "impl__" not in out and "struct__" not in out
+
+
+def test_non_reserved_underscore_names_are_untouched():
+    out = _emit("pub fn g(value_: Str) -> Str { let out_ = value_\n  return out_ }")
+    assert "value_: " in out
+    assert "let out_ = value_" in out
+    assert "value__" not in out and "out__" not in out
