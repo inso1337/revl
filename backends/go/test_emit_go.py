@@ -240,6 +240,29 @@ def test_v3_types_functions_emit_shapes():
     _has(src, "func greet(name string) string")
 
 
+# A wildcarded payload (`Found(_) => ..`) has no name to bind. The parser
+# records that as `bind == "_"` (a real, non-empty string), not `None` (the
+# same shape the cordis-rs backend hit — roadmap item 186 / the Rust wildcard-
+# payload fix). Before this fix every case-bind site here (the plain type
+# switch, and the Opt/Result tuple-match component helpers) treated any
+# truthy bind as a real name: it declared `_ := _m.Value` and read it back
+# with `_ = _` — a literal `_` used as a value, which Go refuses ("cannot use
+# _ as value", "no new variables on left side of :="). The fix discards the
+# payload exactly like an unbound arm.
+def test_wildcard_payload_arm_discards_rather_than_binds_underscore():
+    src = emit.emit(_compile("""
+type Outcome = Found(Int) | Missing
+fn has(o: Outcome) -> Bool {
+  return match o { Found(_) => true, Missing => false }
+}
+"""))
+    _has(src, "switch _m := o.(type) {")
+    _has(src, "case OutcomeFound:")
+    # the malformed construct this regression guards against, verbatim.
+    assert "_ := _m.Value" not in src
+    assert "_ = _\n" not in src
+
+
 def test_v3_stdlib_emit_shapes():
     src = emit.emit(_load(V3_STDLIB), package="stdlib")
     # Opt/Result as generic sealed interfaces
