@@ -1805,6 +1805,136 @@ def check_taint(program, fns, components, model: TaintModel,
             }
 
 
+# ---------------------------------------------------------------------------
+# item 444: the compile-to-runtime taint-origin channel
+# ---------------------------------------------------------------------------
+
+
+def _secret_param(params) -> bool:
+    """Whether any declared parameter carries the `Secret[T]` IR marking."""
+    if not isinstance(params, (list, tuple)):
+        return False
+    return any(isinstance(p, dict) and p.get("secret") for p in params)
+
+
+def declares_confidential_surface(ir) -> bool:
+    """Whether a composition declares ANY surface that can mint the `secret` or
+    `confidential` origin, read off the IR document alone (item 444).
+
+    These declarations are the only places the two origins enter the value
+    graph. `extract_and_normalize` mints `secret` from a bound emission
+    capability (`secret_caps`, item 256 Slice 1 — the `secrets` IR key) and
+    `confidential` from a `Secret[T]` extern return (`secret_return`), a
+    `Secret[T]` parameter on an extern / service operation / top-level fn
+    (`params[i]["secret"]`) and a `Secret[T]` config field (`config[i]["secret"]`)
+    — and from nothing else. A composition that declares none of them therefore
+    cannot produce a value carrying either origin, anywhere, at any crossing.
+
+    Every marking read here is one the compiler already stamps for the runtime's
+    own redaction (`backends/python/confidential.SecretIndex` reads the same
+    keys), so this adds no IR surface of its own."""
+    if not isinstance(ir, dict):
+        return True                                  # no IR is no proof
+    if ir.get("secrets"):
+        return True
+    for spec in (ir.get("services") or {}).values():
+        for method in ((spec or {}).get("methods") or {}).values():
+            if _secret_param((method or {}).get("params")):
+                return True
+    for ext in (ir.get("externs") or ()):
+        if not isinstance(ext, dict):
+            continue
+        if ext.get("secret_return") or ext.get("secrets"):
+            return True
+        if _secret_param(ext.get("params")):
+            return True
+    for fn in (ir.get("functions") or ()):
+        if isinstance(fn, dict) and _secret_param(fn.get("params")):
+            return True
+    for comp in (ir.get("components") or ()):
+        if not isinstance(comp, dict):
+            continue
+        for cfield in (comp.get("config") or ()):
+            if isinstance(cfield, dict) and cfield.get("secret"):
+                return True
+    return False
+
+
+class OriginIndex:
+    """What the taint checker proved about a composition, read back off the IR
+    document the driver already holds (roadmap item 444).
+
+    Item 121's `promptDigest` is a fail-closed gate: `revl_prompt_digest`
+    (`backends/python/runtime.py`) emits a digest ONLY when taint analysis is
+    engaged AND the crossing's arguments are proven to carry neither `secret`
+    (the bound provider key, item 256 Slice 1) nor `confidential` (the
+    `Secret[T]` qualifier, Slice 3). Until this landed the driver had no channel
+    to answer either question and passed `taint_engaged=False` unconditionally,
+    so the digest was suppressed on every shipped run — safe, and inert.
+
+    The channel is the IR itself, so no new IR key exists and every golden
+    document stays byte-identical. Two facts are read off it:
+
+    * :attr:`engaged` — the whole-program CERTIFICATE
+      (:func:`declares_confidential_surface`, inverted). True only when the
+      composition declares no surface that can mint `secret` or `confidential`
+      anywhere. That it is a DECLARATION-level proof is exactly what makes it
+      sound: it is deliberately NOT a per-crossing judgment, because in the
+      refusal pass an unqualified parameter is seeded CLEAN, so a per-crossing
+      origin set is an UNDER-approximation across a call boundary — and a
+      fail-closed gate must never rest on one.
+
+    * :meth:`origins_for` — the origins the checker's flow walk recorded as
+      REACHING an emission crossing in that component (`comp["taint"]["reaches"]`,
+      item 249 Decision 5): the union over that component's crossings, so it
+      OVER-approximates any single one. It can therefore only over-suppress,
+      never under-suppress — the same direction as `SecretIndex.crossing`'s
+      operation-name fallback.
+
+    Both must hold for a digest to be emitted. The certificate is what turns
+    `taint_engaged` on; the origins are then re-checked by `revl_prompt_digest`
+    itself, so a future checker change that let `confidential` reach a crossing
+    under a clean certificate is still caught by the gate it already has. A
+    composition that declares ANY confidentiality surface certifies FALSE and
+    every one of its crossings stays suppressed."""
+
+    __slots__ = ("_certified", "_reaches")
+
+    def __init__(self, ir=None) -> None:
+        # A document with no `components` key is not a composition this can
+        # reason about (a bare or partial driver, a generation not yet
+        # compiled): unproven, so the gate stays closed.
+        usable = isinstance(ir, dict) and "components" in ir
+        self._certified = bool(usable) and not declares_confidential_surface(ir)
+        self._reaches: dict = {}
+        if not usable:
+            return
+        for comp in (ir.get("components") or ()):
+            if not isinstance(comp, dict):
+                continue
+            comp_taint = comp.get("taint")
+            if isinstance(comp_taint, dict):
+                self._reaches[comp.get("name")] = frozenset(
+                    comp_taint.get("reaches") or ())
+
+    @property
+    def engaged(self) -> bool:
+        """Whether the taint analysis counts as ENGAGED for the digest gate: the
+        composition is certified to declare no `secret`/`confidential` surface,
+        so what the flow walk recorded at a crossing is a complete account of
+        the origins that crossing's arguments can carry."""
+        return self._certified
+
+    def origins_for(self, component) -> frozenset | None:
+        """The origins the checker recorded reaching an emission crossing in
+        `component`, or ``None`` when the composition is not certified (which
+        `revl_prompt_digest` treats as unproven and suppresses). A certified
+        component the walk recorded nothing for carries no origin at all."""
+        if not self._certified:
+            return None
+        return self._reaches.get(component, frozenset())
+
+
 def splice_declassifiers(node):
     """Replace every `endorse(v)` call node with its argument `v`, everywhere in
     the IR. `endorse` is identity on the base type (its whole job is the taint
