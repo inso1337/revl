@@ -1026,15 +1026,28 @@ def _tool_resolve(arguments: dict) -> dict:
                                 "set `registry` or $REVL_REGISTRY"]}
     verify_required = bool(arguments.get("verifyRequired"))
     trusted_publishers = tuple(arguments.get("trustedPublishers") or ())
+    from ..attest import resolve_key  # noqa: PLC0415
+
     key = None
     if verify_required:
         # a verify-required resolve needs the signer secret to cryptographically
-        # check the attestations it gates on.
-        from ..attest import resolve_key  # noqa: PLC0415
+        # check the attestations it gates on: no key is a hard error.
         try:
             key = resolve_key(None)
         except RevlError as error:
             return report(error)
+    else:
+        # `verifyRequired` stays off by default: most environments configure no
+        # signing key, and an agent-facing resolve that errored out without one
+        # would be unusable. But whenever a key IS configured, USE it. An
+        # attestation nobody checked vouches for nothing, so passing the key is
+        # what lets a candidate's evidence count for anything at all; absent, the
+        # resolve still runs and the evidence ranks as the unverified claim it
+        # is, rather than being read as proof.
+        try:
+            key = resolve_key(None)
+        except RevlError:
+            key = None
     try:
         registry = Registry.from_dir(registry_dir)
         return registry_resolve(registry, need,

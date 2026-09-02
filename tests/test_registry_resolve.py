@@ -101,9 +101,14 @@ def test_ranking_is_least_authority_then_fit_then_evidence():
     # the exact providers (empty capability set, identical interface) rank above
     # the superset provider (audited adds a method — a compatible widening).
     assert names.index("audited_database") == len(names) - 1
-    # mysql and pg tie on authority and fit; mysql carries a gauntlet dossier
-    # and pg is audit-only, so the evidence tiebreak puts mysql first.
+    # mysql and pg tie on authority and fit, and now on evidence too: the seed
+    # registry ships no attestation, so mysql's gauntlet dossier is an
+    # unverified self-report and buys it no rank (a dossier a publisher wrote
+    # about itself is a claim, not a check). What separates them below is the
+    # stable tiebreak - shorter source, then name - not an evidence verdict.
     assert names.index("mysql_database") < names.index("pg_database")
+    by_name = {e.name: e for e in _registry().entries}
+    assert len(by_name["mysql_database"].source) < len(by_name["pg_database"].source)
 
 
 def test_manifest_withholds_a_key_the_composition_already_provides():
