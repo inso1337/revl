@@ -107,6 +107,18 @@ export function emitFixtures(): void {
   // scan, like the fixtures above.
   const emitPhase1BracketFault = emitFixture
   emitPhase1BracketFault('phase1_bracket_fault.ir.json', 'phase1_bracket_fault.ts')
+  // issue #251: the a2a-to-ts path. `revl import a2a --backend ts` emitted
+  // `await` inside a SYNCHRONOUS ts function and both typecheck gates (#219
+  // over emitted modules, #238 over hand-written sources) stayed green,
+  // because no fixture reached this path — the gate was sound and the input
+  // set did not contain the broken output. This pair is that input.
+  // `tests/fixtures/_gen_a2a_agent.py` regenerates it from the Agent Card
+  // through the real importer, and `tests/test_import_a2a.py` pins it current,
+  // so an importer change cannot leave the gate aimed at output nobody emits
+  // any more. Carries no `test` blocks, so the alias keeps the pair off
+  // `generated_coverage.test.ts`'s scan, like the fixtures above.
+  const emitA2aAgent = emitFixture
+  emitA2aAgent('a2a_agent.ir.json', 'a2a_agent.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone
