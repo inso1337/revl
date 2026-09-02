@@ -143,6 +143,65 @@ the write-ahead discipline). Three record shapes:
 {"record": "discharge", "discharged": [5]}
 ```
 
+Two optional fields on the descriptors carry the **re-dispatch register** — the
+question recovery actually asks about a journalled call: *may I issue this
+again?* (items 309 and 440):
+
+```jsonc
+// a witnessed inverse the author declared `undo pure` — the READ tier
+{"record": "discharge-descriptor", "seq": 5, "entry": "transactional",
+ "call": {"receiver": "db", "method": "probe", "args": ["row#1"]},
+ "register": "read"}
+
+// a deferred emission the author declared `idempotent(key: id)` — the KEYED
+// tier, with the key VALUE captured at enqueue (item 440)
+{"record": "deferred-emission", "seq": 7,
+ "call": {"receiver": "ledger", "method": "post", "args": ["k1"]},
+ "idempotency": "k1", "register": "keyed"}
+```
+
+## 4b. The three call tiers (items 309, 440)
+
+| register | what makes a re-issue safe | recovery does |
+|---|---|---|
+| `read` (`undo pure`) | the call changes nothing, so there is no outcome to be ambiguous about | re-dispatches on every run, spends no fence, never asks an operator |
+| `keyed` / `shape-proven` | the remote dedups on a stable key carried in the descriptor | re-dispatches freely; a duplicate is the remote's dedup CONTRACT, never a confirmed fact |
+| `declared` (`undo idempotent`, bare `idempotent`) | the author's claim, machine-checked for shape only | replays an inverse freely; re-issues an owed emission only under the operator's explicit knob, once, fenced |
+| absent | nothing is known | one fenced at-most-once attempt, then `outcome: "unknown"` for a human |
+
+The `read` tier is DECLARED, not derived. revl's `pure` extern *classification*
+means "not acquire/emission/witnessed" and is checked for shape only, and shipped
+examples classify mutating host bodies `pure` (`extern pure fn close_ledger(h)`),
+so reading the tier off the classification alone would resolve an ambiguity
+optimistically — the one direction recovery never takes. `undo pure` is the
+author's explicit claim, and lowering refuses it unless the named inverse is
+itself a `pure`-classified extern.
+
+## 4c. The re-issue seam (item 440)
+
+`recover` never re-enters the dead runtime; it re-issues NAMED CALLS against a
+`World` adapter. Item 309 §3b wanted the same thing for an OWED deferred
+emission — one the commit approved but whose `flushed` record never landed — and
+could not, because there was no seam. There is one now: `World.reissue(op)`,
+alongside `apply_inverse` and `apply_compensation`.
+
+It is **off by default**. Nothing auto-fires unless an operator turns it on in
+the item-33 boundary policy:
+
+```
+recovery may re-issue owed emissions
+recovery may re-issue owed emissions (strength: declared)
+```
+
+The bare rule admits only the by-construction registers (`read`, `keyed`,
+`shape-proven`); `(strength: declared)` additionally accepts the author's
+unverified claim. An owed emission with **no** register is never auto-fired under
+any setting, because whether its pre-crash flush landed cannot be decided. A
+`declared` re-issue is fenced before it fires (consume-before-fire, exactly like
+item 309 §3a's `replay-fence`), so a crash between the fence and the fire leaves
+`fenced-before-attempt, outcome unknown` for a human rather than a second
+unprovable attempt. Pass the policy with `revl recover --wal FILE --policy P`.
+
 The `activation-complete` marker's **presence or absence is the entire
 roll-forward/roll-back decision**. A genuine `kill -9` can leave a half-written
 final line; `WriteAheadLog.read` tolerates it, reports `torn: true`, and recovers

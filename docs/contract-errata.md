@@ -300,9 +300,17 @@ This goes in the compiler spec, not the runtimes.
   `/opt/homebrew/opt/openjdk` and `/usr/libexec/java_home -V` before
   concluding a machine cannot run java.
 
-  Until the switch is on in CI, the guards that hold this line are the STATIC
-  ones, which need no toolchain and run in the `frontend` job; there is now
-  one per lowering per tier, and four of them for this defect specifically.
+  A THIRD gate stacks under both of those and is not an environment
+  variable at all: `RUNNERS["ts"]` needs
+  `backends/typescript/node_modules/.bin/vitest`, and no job that runs
+  `tests/` executes `npm ci`, so the TypeScript column skipped in CI
+  exactly as hard as java did while being described as running "by
+  default". Roadmap item 445 turns all three on together, in the
+  `conformance` job, which is the one place every toolchain exists at once.
+
+  The STATIC guards still hold the line wherever a toolchain is absent:
+  they need none, run in the `frontend` job, and there is now one per
+  lowering per tier, four of them for this defect specifically.
 
 ## Arithmetic divergences (open, pinned — one root cause)
 

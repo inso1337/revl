@@ -385,6 +385,38 @@ operand makes the fallback dead code. It is now a type error — three
 backends could not render it (rust would emit `unwrap_or_else` on an `i64`,
 java `orElseGet` on a `long`), and python silently accepted it.
 
+## 4c. Composition documents
+
+A composition is a set of ROWS, and a row is one component placed into one
+composition under a name of its own. The form is a declaration like any other,
+and `composition` is a contextual keyword: it heads a declaration only in the
+shape `composition NAME {`, so a program already using the word as an ordinary
+name is unaffected.
+
+```revl
+composition Demo {
+  use "services.rvl"
+
+  row @db from "db.rvl" provides db
+    config { url: "postgres://primary:5432/app", pool_size: 8 }
+  row @cache from "cache.rvl" provides cache
+  row @routes from "routes.rvl" provides nothing
+}
+```
+
+The `@label` is the row's IDENTITY, declared and scoped to the document's
+origin (`.` for the project, otherwise the truc key the document is vendored
+under), so a row is `.::@db` in full. `provides ...` is an ASSERTION checked
+against the component's header, which is why the document cannot lie about the
+wiring; `component <Name>` disambiguates a file holding several components and
+is provenance, never identity. `config { ... }` supplies constants for the
+component's own typed `config` block and is checked against those types.
+`granted { ... }` names what a confined row may compose against.
+
+Resolution is header-only: it reads each row's component header and lowers no
+body. Everything the row table decides is a REFUSAL rather than a silent
+no-op. See [composition-rows.md](composition-rows.md).
+
 ## 5. Services 2.0
 
 ```revl
@@ -796,12 +828,19 @@ IDENT       := [A-Za-z_][A-Za-z0-9_]*        -- ASCII, see the note below
 use         := 'use' STRING ('{' IDENT (',' IDENT)* '}' | 'as' IDENT)
 decl        := ['pub'] (typedecl | fndecl | service | component | extern)
              | ['lifecycle'] test                              (§7.1)
+             | composition                                     (§4c)
 typedecl    := 'type' IDENT generics? '=' (record | variant ('|' variant)*)
 fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type] block
 component   := (unchanged from 1.x) + blockeffect + fail
 extern      := 'extern' class 'fn' sig ['undo' expr] ['compensate' expr]
                  ['config' '{' configfield (',' configfield)* '}'] hostbody+
 configfield := IDENT ':' type ['=' literal]         -- same as a component's
+composition := 'composition' IDENT '{' (use | row)* '}'   -- contextual kw
+row         := 'row' '@' IDENT 'from' STRING
+                 'provides' ('nothing' | key (',' key)*)
+                 ['component' IDENT]
+                 ['config' '{' IDENT ':' literal (',' ...)* '}']
+                 ['granted' '{' key (',' key)* '}']
 hostbody    := '=' '@' IDENT '{' <verbatim host text, brace-balanced> '}'
                  -- brace-balancing skips host strings, char/rune literals and
                  -- block comments, so a `}` inside `"}"` or `/* } */` does not

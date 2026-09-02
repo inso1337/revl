@@ -56,7 +56,11 @@ def test_the_committed_crate_matches_a_fresh_generation():
     """
     problems = GEN.drift(CRATE)
     assert not problems, (
-        "crates/revl-gate has drifted from the sources it is generated from:\n  "
+        "crates/revl-gate has drifted from the sources it is generated from "
+        "(fix: `python3 tools/regen_goldens.py gate-crate`, equivalently "
+        "`python3 tools/build_gate_crate.py`, then review and commit the diff — "
+        "the crate embeds emitted rust, so ANY backends/rust/emit.py or "
+        "selfhost/*.rvl change rewrites it):\n  "
         + "\n  ".join(problems)
         + "\n\nRegenerate with: python3 tools/build_gate_crate.py")
 

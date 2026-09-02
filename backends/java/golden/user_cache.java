@@ -233,7 +233,7 @@ public final class Components {
         public void put(String key, String value) {
             this.store.insert(key, value);
             fx.track(Disposables.of(() -> this.store.remove(key)));
-            this.db.execute(String.format("INSERT INTO cache_log VALUES (%s)", key));
+            this.db.execute("INSERT INTO cache_log VALUES (" + key + ")");
         }
     }
 
