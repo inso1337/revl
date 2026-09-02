@@ -38,6 +38,18 @@
 // method-body `effect`/saga `emit … compensate` (the `_revl_frame.adopt`
 // accumulator + the `_label`/`_effect_N`/`_emit_N` counter).
 //
+// The declared `Secret[T]` MARKING (item 421 F6, ported per item 429(d)) is
+// carried at all three sites the reference carries it: `@_revl_secret_result` on
+// a `Secret[T]`-returning extern (the ORIGIN), `_revl_mark_secret(..)` at the
+// head of a provide method whose service declares that parameter `Secret[T]`
+// (the RECEIVER), and `_revl_ConfigSchema([..], secret=[..])` on a component
+// whose `config` declares a `Secret[T]` field (the schema the runtime redacts
+// the `<name>.config` trace line from). The frontend supplies all three stamps
+// natively (`selfhost/lower.rvl`), so a composition compiled through `compile_to`
+// hands the runtime the same redaction instructions `revl compile --backend py`
+// does — pinned by `tests/fixtures/emit_py_corpus/secrets{,_nested}.rvl` in both
+// the emit_py oracle and the fully-native compile corpus.
+//
 // ============================================================ WHAT IT DEFERS
 // Reported for a follow-on slice 5, deliberately OUT of this file:
 //   * async coloring (colored fns / async externs' await-seed / awaited call
@@ -1125,8 +1137,9 @@ fn runtime_ref(name: Str) -> Str {
   if (name == "ConfigSchema") { return "_revl_ConfigSchema" }
   if (name == "schedule_every") { return "_revl_schedule_every" }
   if (name == "schedule_after") { return "_revl_schedule_after" }
-  // item 421 F6 (ported per item 429(d)): the two declared-`Secret[T]` markings
-  // the EMITTED program carries.
+  // item 421 F6 (ported per item 429(d)): the two runtime NAMES the declared
+  // `Secret[T]` marking needs. The third consumer, a config field's stamp, rides
+  // the `ConfigSchema` argument list and needs no name of its own.
   if (name == "mark_secret") { return "_revl_mark_secret" }
   if (name == "secret_result") { return "_revl_secret_result" }
   return name
@@ -1636,7 +1649,28 @@ fn component_body(comp: Any, services: Any) -> List[Str] {
       let field = mangle(value_str(value_field(spec, "name")))
       out = out.push(line(1, `(${py_repr(field)}, ${py_repr(value_field(spec, "type"))}, ${py_repr(value_field(spec, "default"))}),`))
     }
-    out = out.push("])")
+    // item 256 Slice 3: the config fields declared `Secret[T]`. The qualifier is
+    // stripped off the declared type before lowering, so a field's `secret`
+    // stamp is the only surviving record that the value arriving there is
+    // confidential — and the schema is where the runtime learns it, since the
+    // runtime keeps a secret field's value out of the `<name>.config` trace line
+    // (stdout under `revl run`, the `revl_load` response under MCP) while still
+    // handing the real value to the component. The field name is the RAW
+    // declared one, not the `mangle`d spelling used for the tuple: the schema's
+    // secret list is matched against the config KEY the operator writes.
+    // Emitted only when a field carries the stamp, so every existing module
+    // stays byte-identical.
+    var secret_fields = []
+    for (spec of config_fields) {
+      if (value_bool(value_field(spec, "secret"))) {
+        secret_fields = secret_fields.push(value_str(value_field(spec, "name")))
+      }
+    }
+    if (secret_fields.length() > 0) {
+      out = out.push(`], secret=${py_repr(secret_fields)})`)
+    } else {
+      out = out.push("])")
+    }
     out = out.push("")
     out = out.push("")
   }
@@ -2054,7 +2088,9 @@ pub fn emit_py_src(ir: Any) -> Str {
   }
   // item 421 F6 (ported per item 429(d)): the two declared-`Secret[T]` marking
   // imports, each gated on EXACTLY the condition that emits its call, so a
-  // secret-free document's import line is unchanged. `secret_result` is gated
+  // secret-free document's import line is unchanged. A config field's stamp adds
+  // no import: it is an argument to the `ConfigSchema` `need_config` already
+  // covers. `secret_result` is gated
   // from the extern list rather than through a component, because the externs
   // are rendered outside any component emitter (the reference gates it in the
   // same place, for the same reason).
