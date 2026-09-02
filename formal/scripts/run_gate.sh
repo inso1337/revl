@@ -6,7 +6,11 @@
 # 3. lake build over the Lean package;
 # 4. CheckAxioms.lean's `#print axioms` output through the axioms gate
 #    (no sorryAx, no project-defined axioms, no missing theorem);
-# 5. the harness census (formal/harness/diff_corpus.py).
+# 5. the same axioms gate over harness/Oracle.lean's own `#print axioms`
+#    block — that file is outside the RevL library root, so it is outside
+#    CheckAxioms.lean and outside the layering gate, and its bridge
+#    theorems are what make the differential oracle bite;
+# 6. the harness census (formal/harness/diff_corpus.py).
 #
 # Steps 1 and 2 need no toolchain and always run. Item 418 step 8: the
 # axioms gate cannot tell a load-bearing theorem from a vacuous one, and
@@ -62,7 +66,7 @@ python3 scripts/axioms_gate.py \
   RevL.G7.commit_discharges_compensation \
   RevL.G7.commit_replays_only_brackets \
   RevL.G7.abort_replays_every_transactional \
-  RevL.G7.bracket_replays_under_every_verdict \
+  RevL.G7.bracket_replays_under_every_settling_verdict \
   RevL.G7.teardown_eq_reversed_inverses \
   RevL.G7.compensations_drain_after_the_proof_pass \
   RevL.G7.phase1_is_lifo \
@@ -84,6 +88,11 @@ python3 scripts/axioms_gate.py \
   RevL.G7.halt_books_are_total \
   RevL.G7.estop_is_load_bearing \
   RevL.G7.mid_abort_halt_cut_is_not_vacuous \
+  RevL.G7.settles_iff_not_halted \
+  RevL.G7.settles_iff_strands_nothing \
+  RevL.G7.settling_strands_nothing \
+  RevL.G7.bracket_replays_exactly_when_settling \
+  RevL.G7.bracket_is_replayed_or_stranded \
   RevL.G8.boundary_enumerates_emissions \
   RevL.G8.boundary_only_declared \
   RevL.CrossTier.cross_tier_agreement \
@@ -199,4 +208,25 @@ python3 scripts/axioms_gate.py \
   RevL.G9.g9_context_hypotheses_are_inhabited \
   RevL.R4.r4_side_conditions_are_inhabited \
   RevL.A8.a8_hypotheses_are_inhabited < .axioms.out
+
+# The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
+# library root, so CheckAxioms.lean cannot reach them and the layering gate
+# does not walk them. Elaborate the file a second time, without `--run`, to
+# collect its own `#print axioms` block: these are the proofs the
+# differential oracle's verdicts rest on, and they get the same treatment as
+# everything else.
+lake env lean harness/Oracle.lean > .oracle-axioms.out 2>&1 \
+  || { cat .oracle-axioms.out; exit 1; }
+cat .oracle-axioms.out
+python3 scripts/axioms_gate.py \
+  RevLOracle.linkOKB_iff \
+  RevLOracle.pathPrefixB_iff \
+  RevLOracle.pleqB_iff \
+  RevLOracle.mem_keys_of_lookupV \
+  RevLOracle.lookupV_isSome_of_mem_keys \
+  RevLOracle.coversB_iff \
+  RevLOracle.resourceOKB_iff \
+  RevLOracle.ceilingOKB_iff \
+  RevLOracle.attenuatesB_iff < .oracle-axioms.out
+
 python3 harness/diff_corpus.py

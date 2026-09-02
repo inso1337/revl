@@ -711,3 +711,28 @@ end RevLOracle
 -- `lean --run` needs a root-level `main`.
 def main (args : List String) : IO UInt32 :=
   RevLOracle.main args
+
+/-! ## The axioms gate over the oracle's bridge theorems
+
+`formal/CheckAxioms.lean` covers the `RevL` library. This file is not part
+of it: `lakefile.lean`'s `lean_lib` has `roots := #[`RevL]`, and
+`scripts/layering_gate.py` walks `formal/RevL/` only, so until these lines
+existed the theorems that make the differential oracle *bite* — the ones
+`STATUS.md` cites when it says "the Lean side `decide`s the proved model"
+— were the only proofs in `formal/` outside every gate. A `sorry` here
+would have left `lake env lean --run` at exit 0 and the gate green.
+
+`scripts/run_gate.sh` elaborates this file a second time without `--run`
+and feeds the block below to `scripts/axioms_gate.py`. Each of these is a
+`... = true ↔ <model predicate>` bridge: the decision procedure the oracle
+runs, proved equivalent to the judgment the theorems are about. -/
+
+#print axioms RevLOracle.linkOKB_iff
+#print axioms RevLOracle.pathPrefixB_iff
+#print axioms RevLOracle.pleqB_iff
+#print axioms RevLOracle.mem_keys_of_lookupV
+#print axioms RevLOracle.lookupV_isSome_of_mem_keys
+#print axioms RevLOracle.coversB_iff
+#print axioms RevLOracle.resourceOKB_iff
+#print axioms RevLOracle.ceilingOKB_iff
+#print axioms RevLOracle.attenuatesB_iff

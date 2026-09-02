@@ -56,6 +56,7 @@ FORMAL = Path(__file__).resolve().parent.parent
 REGISTRY = FORMAL / "scripts" / "nonvacuity.tsv"
 CHECK = FORMAL / "CheckAxioms.lean"
 GATE = FORMAL / "scripts" / "run_gate.sh"
+STATUS = FORMAL / "STATUS.md"
 
 KINDS = {"instance", "necessity", "contentless", "concrete"}
 
@@ -157,6 +158,15 @@ def main() -> int:
                 f"rest on, not an exemption."
             )
 
+    status = STATUS.read_text()
+    for name in sorted(known):
+        if f"`{name}`" not in status:
+            errors.append(
+                f"{name}: registered and witnessed, but not named in "
+                f"STATUS.md. Add its row so the human-readable record says "
+                f"what the layer proves."
+            )
+
     if errors:
         print("non-vacuity registry: FAILED")
         for e in errors:
@@ -167,7 +177,8 @@ def main() -> int:
     for _name, (kind, _wl, _note) in rows.items():
         tally[kind] += 1
     print(
-        f"non-vacuity registry: clean, {len(rows)} registered theorems, "
+        f"non-vacuity registry: clean, {len(rows)} registered theorems "
+        f"(all named in STATUS.md), "
         f"{tally['instance']} instance, {tally['necessity']} necessity, "
         f"{tally['concrete']} concrete, {tally['contentless']} contentless"
     )

@@ -26,10 +26,60 @@ read "enforced by imports, not by hope" while nothing checked it;
   vacuous one: `#print axioms` is just as clean on a theorem whose
   hypotheses are unsatisfiable. `scripts/nonvacuity_gate.py` fails on a
   registered theorem with no row, on a witness that is not itself
-  registered, and on a self-witnessing row. Two rows are marked
-  `contentless` rather than witnessed, because they are true by definition
+  registered, on a self-witnessing row, and on a registered theorem this
+  file does not name — so a proof and the record of it cannot drift
+  apart. Two rows are marked `contentless` rather than witnessed,
+  because they are true by definition
   rather than by any property of their subject; the gate prints both on
   every run so they cannot be quietly counted as proof.
+
+## What the layer covers, and what it does not
+
+The honest map, per guarantee code (`src/revl/diagnostics.py`'s
+`GUARANTEES`). The table below the map lists every proved theorem; this is
+the part a reader wants first, because a guarantee with no row here is a
+guarantee this layer buys nothing for. "Oracle" is whether the
+differential harness (`harness/diff_corpus.py`) compares the model's
+verdict against the shipped checker on the corpus — a proved theorem with
+no oracle row is checked against the *paper*, not against `src/revl`.
+
+| Code | Formal status | Theorems | Oracle | The gap, and what kind of gap it is |
+|---|---|---|---|---|
+| **G1** declared access | partial | 2 | no | `declared_only_access` is real and witnessed, but its content is the shape of `Typed`/`ReachIn`: it says an undeclared access cannot be *written*, not that the checker *visits* every statement of a real component body. **Modelling limit** — L0 has no component bodies |
+| **G2** provision disjointness | full | 4 | **yes** (V rows, 2 agree-G2) | stated over `(key, realm)` slots from the incremental `LinkOK`, and the oracle bites: change `Manifest.needs` to ignore the realm and four corpus files mismatch |
+| **G3** acyclic dependencies | full | 9 | **yes** (V rows, 1 agree-G3) | the layering certificate is *derived* from `LinkOK`, so nothing is assumed. No known gap |
+| **G4** inverse-or-emit | full over the lattice; the shape-level statement is weak and marked | 2 + 7 | **yes** (182 G rows, 25 P rows, 6 agree-G4) | `G4.inverse_or_emit` is shape-level and superseded. For the lattice form: the reach fold's **fuel bound** is real and named (`fold_must_run_to_stability`), `FnDecl.calls` stands in for `_calls_in` (an empirical obligation on the lowering), first-class dispatch is `*`, and `inverseOK` reads `undo` only where the reference walks `compensate` too. **Unbuilt work**, not modelling limits |
+| **G5** teardown registers nothing | full over the lattice; the shape-level statement is **contentless** and registered as a finding | 2 + 14 | no | `G5.teardown_registers_nothing` is true by definition (`registrations` is constant zero) and says so in the registry. `G5Classified` carries the real count, including two operational runs. **Gap: no oracle row** — the lattice model is checked against the paper, not the checker |
+| **G6** purity outside effect forms | partial | 2 | no | content is the shape of `TypedIn`/`ReachIn`; the derived form (reach computed from program text) exists only inside `CapCeilings.derived_confinement_within_ceiling`. **Unbuilt work** |
+| **G7** derived LIFO teardown | full for *which* entries run, in *what order*, under *which verdict* — including the E-Stop | 32 + 7 | no | deliberately not modelled: Phase-1 continue-and-record and its residue severities, the Phase-2 budget, deferred method-registered entries (item 318), escrow under a pending session verdict (item 245), cascading abort. This model says which entries run, **not what happens when one of them fails**. **Modelling limit, scoped on purpose** |
+| **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 8 | no | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. **Gap: no oracle row**; the harness's `methodBoundOK` is a private restatement, not the model |
+| **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
+| **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | no | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly |
+| **A1** iteration boundaries only during activation | **none** | 0 | no | not modelled at all: L0 has no `await` and no iteration boundary. **Unbuilt work**, and it needs L0 to grow first |
+| **A2** no acquisition after a provision | **none** | 0 | no | L0 bodies carry no acquisition/provision ordering. **Unbuilt work** |
+| **A3** host-safe identifiers | **none** | 0 | no | lexical, checked by extraction rather than by a theorem shape. **Out of scope by kind** |
+| **A5** compensation accompanies an emission | **none** | 0 | no | G7 *models* the `compensation` entry kind and proves how it is disposed, but **nothing states that an emission must register one**. **Unbuilt work**, and the nearest thing to a surprise on this map |
+| **A6** provide-methods match the service signature | **none** | 0 | partial | the oracle's P row is a *capability bound* check, not the signature match, and `methodBoundOK` is a private restatement. **Unbuilt work** |
+| **A8** mid-body failure reverts and contains | full over the WAL model | 18 | no | crash cuts covered: fence-to-apply, abort-then-crash, the approved-to-discharged window. **Not covered and not claimed**: a crash between a witnessed mutation and its record (the reference logs the descriptor *after* the forward extern returns), the roll-forward `flush-residue` surface, cascading abort, escrow. Durability is a floor, not a theorem |
+| **A9** provide key declared in `provides` | **none** | 0 | no | **Unbuilt work** |
+| **T1/T2/T3** typing, `Opt[T]`, holes | **none** | 0 | no | the type checker is outside the guarantee backbone. **Out of scope by kind** |
+| **R4** no residue | full for the **abort path** | 9 | no | stated over the abort; the roll-forward window's `flush-residue` surface is not modelled. **Unbuilt work** |
+| items 66/294/260 capability ceilings | full, with the held/reach sets **derived** from component shapes | 23 | **yes** (6 W rows) | the corpus declares no integer-valued capability parameter, so the ceiling half of the oracle comparison agrees **vacuously** — wired, but not yet exercised. Also unmodelled: parse-time canonicalization and `cap_order.disjoint`'s D2 same-token clause |
+| item 133 cross-tier agreement | full, under two named hypotheses | 4 | no | that the real emitters realise a `Conformant` profile is the differential conformance matrix's empirical obligation; map values are one level deep |
+
+Three summary readings of that map:
+
+- **The oracle reaches G2, G3, G4 and the capability order, and nothing
+  else.** G5, G6, G7, G8, G9, A8 and R4 are proved against the design
+  documents and the reference source read by hand. That is the single
+  largest gap in the layer, and it is a gap in *coverage of the gate*, not
+  in the proofs.
+- **Seven guarantee codes have no theorem at all** (A1, A2, A3, A5, A6,
+  A9, T1-T3). Of those, A5 is the one worth naming twice: G7 proves how a
+  `compensation` entry is disposed without anything proving one has to
+  exist.
+- **One row is UNPROVED by construction** (G9 path coverage) and says so
+  in the table, rather than being absent.
 
 ## Theorem status
 
@@ -51,7 +101,7 @@ read "enforced by imports, not by hope" while nothing checked it;
 | `RevL.G4.inverse_or_emit` | G4 — inverse-or-emit (Def. 8) | **proved (shape-level)** | none | *weaker*: content is the shape of `Typed`, which has no `raw` constructor, so the same sentence holds of a relation admitting nothing. **Superseded by `RevL.G4Classified.inverse_or_emit_classified`** (item 418 step 4); kept as the syntactic statement |
 | `RevL.G5.teardown_registers_nothing` | G5, teardown registers nothing | **proved, and CONTENTLESS** | none | `registrations` ignores its argument (constant zero), so a `sneakyUndo` calling `db.insert` counts 0 and the conclusion holds by definition rather than by any property of undo bodies. `RevL.G5.registrations_ignores_its_argument` proves the review's own probe, so the emptiness is on the record. **Superseded by `RevL.G5Classified.inverse_reaches_no_emission`** (item 418 step 4); kept as the grammar-level statement |
 | `RevL.G6.confinement` | G6 — confinement (Def. 48) | **proved** | `propext, Quot.sound` | content is the shape of `TypedIn`/`ReachIn` |
-| `RevL.Semantics.replays_or_discharges` | G7 (item 418 step 5) | **proved** | `propext` | replayed and discharged are complements, per kind and verdict |
+| `RevL.Semantics.replays_or_discharges` | G7 (item 418 step 5) | **proved** | `propext` | replayed and discharged are complements, per kind and per **settling** verdict. Item 443 added the `v.settles = true` hypothesis; `RevL.Semantics.disposition_trichotomy` is the total replacement and `RevL.G7.settles_iff_strands_nothing` proves the hypothesis is exactly "this verdict strands nothing" |
 | `RevL.Semantics.phase_lengths_add` | G7 (item 418 step 5) | **proved** | `propext, Quot.sound` | the two phases partition the replaying entries |
 | `RevL.Semantics.teardown_length` | G7, length form | **proved** | `propext, Quot.sound` | one replay per entry *the verdict replays*. The pre-step-5 row said "one replay per witnessed effect", which over-counted every commit carrying a transactional entry |
 | `RevL.G7.replay_table` | G7 (item 418 step 5) | **proved** | none | the teardown contract's replay rows, computed per kind and verdict |
@@ -63,7 +113,7 @@ read "enforced by imports, not by hope" while nothing checked it;
 | `RevL.G7.commit_discharges_compensation` | G7 vs `runtime.py` (item 247) | **proved** | `propext` | a clean commit never fires a compensation |
 | `RevL.G7.commit_replays_only_brackets` | G7 | **proved** | `propext` | a clean commit replays brackets and nothing else |
 | `RevL.G7.abort_replays_every_transactional` | G7 vs `runtime.py` | **proved** | `propext` | the other half of the `_Transactional` branch |
-| `RevL.G7.bracket_replays_under_every_verdict` | G7 | **proved** | `propext` | releasing an acquired handle is always right |
+| `RevL.G7.bracket_replays_under_every_settling_verdict` | G7 | **proved** | `propext` | releasing an acquired handle is always right *when the activation settles*. Item 443 added the hypothesis and this audit renamed the theorem to say so; `RevL.G7.bracket_replays_exactly_when_settling` is the hypothesis-free equation behind it and `RevL.G7.bracket_is_replayed_or_stranded` the total form |
 | `RevL.G7.teardown_eq_reversed_inverses` | G7 | **proved** | `propext` | the LIFO equation, per phase; positions via `List.getElem_reverse` |
 | `RevL.G7.compensations_drain_after_the_proof_pass` | G7, the phase split | **proved** | `propext` | the replay is a compensation-free prefix then an all-compensation suffix |
 | `RevL.G7.phase1_is_lifo` | G7, order within a phase | **proved** | `propext` | undoing the run order gives back a sub-sequence of the registration order |
@@ -72,6 +122,24 @@ read "enforced by imports, not by hope" while nothing checked it;
 | `RevL.G7.abort_runs_the_proof_pass_then_the_drain` | G7, non-vacuity | **proved** | none | the same stack on abort: proof pass LIFO, then the compensation that was registered LAST |
 | `RevL.G7.verdict_is_load_bearing` | G7, non-vacuity | **proved** | none | the two replays of one stack differ |
 | `RevL.G7.commit_discharge_is_not_vacuous` | G7, non-vacuity | **proved** | `propext` | the discharged entry is on the stack the theorem quantifies over |
+| `RevL.Semantics.disposition_trichotomy` | G7 / item 443 — total accounting | **proved** | none | every (kind, verdict) pair has EXACTLY one disposition: replayed, discharged or stranded. The hypothesis-free replacement for `replays_or_discharges` |
+| `RevL.Semantics.halted_strands_every_kind` | G7 / item 443 — the E-Stop column | **proved** | none | under `.halted` every kind is neither replayed nor discharged, and stranded |
+| `RevL.Semantics.replayed_length` | G7 / item 443 | **proved** | `propext, Quot.sound` | one replay-list entry per entry the verdict replays (`teardown_length` before the `map`) |
+| `RevL.Semantics.book_lengths_add` | G7 / item 443 — the books balance | **proved** | `propext, Quot.sound` | replayed + discharged + stranded is the whole stack, under **every** verdict. All three terms are witnessed non-zero |
+| `RevL.G7.estop_replays_nothing` | G7 / item 443 — the guarantee | **proved** | `propext, Classical.choice, Quot.sound` | a halt runs no inverse at all, not "the brackets and none of the rest" |
+| `RevL.G7.estop_discharges_nothing` | G7 / item 443 | **proved** | `propext, Classical.choice, Quot.sound` | discharge releases the inverse and the witness; a halt must keep both for `revl recover` |
+| `RevL.G7.estop_strands_everything` | G7 / item 443 — the counterpart of R4 | **proved** | `propext, Quot.sound` | R4 is "no residue"; the E-Stop is "all residue, all of it on the inventory" |
+| `RevL.G7.estop_strands_the_bracket` | G7 / item 443 — non-vacuity | **proved** | none | the bracket row really does change in the third column, so the settling hypothesis is load-bearing |
+| `RevL.G7.halt_inventory_is_total` | G7 / item 443 — the halt cut | **proved** | `propext` | completed ++ ambiguous ++ unattempted is the interrupted replay order exactly |
+| `RevL.G7.halt_ambiguity_is_at_most_one` | G7 / item 443 — item 440's tier | **proved** | `propext, Quot.sound` | a halt makes at most ONE inverse ambiguous, never a fog over the stack |
+| `RevL.G7.halt_books_are_total` | G7 / item 443 | **proved** | `propext, Quot.sound` | the five books balance at every cut and under every verdict |
+| `RevL.G7.estop_is_load_bearing` | G7 / item 443 — non-vacuity | **proved** | none | one three-kind stack: abort replays 3 and strands 0, the halt replays 0 and strands 3 |
+| `RevL.G7.mid_abort_halt_cut_is_not_vacuous` | G7 / item 443 — non-vacuity | **proved** | none | a halt one inverse into an abort: one completed, one ambiguous, one never attempted |
+| `RevL.G7.settles_iff_not_halted` | G7 / item 443 — the hypothesis, audited | **proved** | `propext` | `v.settles = true` excludes **exactly** `.halted` and no other verdict |
+| `RevL.G7.settles_iff_strands_nothing` | G7 / item 443 — the hypothesis, audited | **proved** | `propext` | a verdict settles precisely when it strands no kind, so `settles` is the property the dichotomy needs and not a side condition picked to rescue a proof |
+| `RevL.G7.settling_strands_nothing` | G7 / item 443 — the hypothesis, audited | **proved** | `propext, Classical.choice, Quot.sound` | a settling verdict owes nothing: the inventory is empty for every stack. With `estop_strands_everything` this is the whole of `stranded` |
+| `RevL.G7.bracket_replays_exactly_when_settling` | G7 / item 443 — strengthening | **proved** | none | *stronger than the corollary that carries the hypothesis*: the bracket row **equals** `settles`, with no hypothesis at all |
+| `RevL.G7.bracket_is_replayed_or_stranded` | G7 / item 443 — the total form | **proved** | `propext` | over every verdict, no hypothesis: a registered bracket is replayed, or the verdict is the E-Stop and the bracket is on the inventory |
 | `RevL.G8.boundary_enumerates_emissions` | G8 — boundary enumerable (§6.1) | **proved (shape-level)** | `propext, Quot.sound` | *weaker*: completeness over the syntactic `emit` marker. **Superseded by `RevL.G8Classified.surface_enumerates_reached_crossings`** (item 418 step 4); kept as the marker-level statement |
 | `RevL.G8.boundary_only_declared` | G8 | **proved (shape-level)** | `propext, Quot.sound` | *weaker*: rests on `boundaryOf (.effect _ _) = []` **by definition**, so a typed `.effect` carrying an emission has an empty surface. **Superseded by `RevL.G8Classified.surface_only_declared_crossings`** (item 418 step 4); kept as the marker-level statement |
 | `RevL.CapCeilings.cap_order_partial` | item 294 — the `(T,P)` capability order | **proved** | `propext, Quot.sound` | `covers` is reflexive, transitive, antisymmetric |
@@ -181,6 +249,9 @@ read "enforced by imports, not by hope" while nothing checked it;
 | `RevL.G5.registrations_ignores_its_argument` | G5, the FINDING (step 8) | **proved** | none | the review's constant-function probe, proved, plus an undo body that calls an emission and still scores zero |
 | `RevL.G6.g6_not_vacuous` | G6, non-vacuity (step 8) | **proved** | `propext, Classical.choice, Quot.sound` | an admitted statement with a non-empty reach surface, and a refused one |
 | `RevL.G8.g8_marker_level_not_vacuous` | G8, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | a typed body with a non-empty surface, beside the `effect` whose surface is empty by definition |
+| `RevL.CrossTier.cross_tier_agreement` | item 133 — cross-tier agreement | **proved** | `propext` | any two `Conformant` profiles lower a `WellAnnotated` IR to the same `Value` |
+| `RevL.CrossTier.six_tier_agreement` | item 133 — the six backends | **proved** | `propext` | the corollary over the six-element `Tier` |
+| `RevL.CrossTier.annotation_necessary` | item 133 — anti-tautology | **proved** | none | python and typescript disagree on a bare literal, so the annotation hypothesis is load-bearing |
 | `RevL.CrossTier.conformance_hypotheses_are_inhabited` | item 133, non-vacuity (step 8) | **proved** | `propext` | two conformant tiers and a well-annotated map IR agreeing on a re-ordered non-empty value |
 | `RevL.CapCeilings.capceilings_hypotheses_are_inhabited` | items 294/66/260, non-vacuity (step 8) | **proved** | `propext, Classical.choice, Quot.sound` | a `Lineage` built by `Lineage.spawn` from a real program spawn edge, plus `Descends`, `Resolves`, `NameableEmission`, a counter run and a refused overdraw |
 | `RevL.CapCeilings.ceiling_lineage_is_inhabited` | item 260, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | a spawn edge narrowing a `calls` ceiling from 3 to 2, so the lineage and the ceiling side condition hold together |
@@ -253,7 +324,8 @@ completeness and soundness over the entries the verdict replays
 against the runtime (`commit_discharges_transactional`,
 `commit_discharges_compensation`, `commit_replays_only_brackets`,
 `abort_replays_every_transactional`,
-`bracket_replays_under_every_verdict`), the LIFO equation per phase, the
+`bracket_replays_under_every_settling_verdict`), the LIFO equation per
+phase, the
 phase split (`compensations_drain_after_the_proof_pass`, the contract's
 "all Phase-1 inverses complete before any compensation starts"), and LIFO
 within a phase.
@@ -275,6 +347,69 @@ says which entries run and in what order, not what happens when one of
 them fails. The failure and crash side lives in
 `RevL.Theorems.A8_WalDischarge` and `RevL.Theorems.R4_NoResidue`, over the
 WAL rather than over the stack.
+
+### G7 grows a third verdict: the operator E-Stop (roadmap item 443)
+
+`docs/design/443-estop.md`. `Verdict` gains `halted`, and it is not a
+relabelling of `abort`: it replays nothing, discharges nothing, and leaves
+every registered entry **owed**. That is a third disposition, STRANDED —
+registered, not run, not dropped — beside replayed and discharged.
+
+| | `bracket` | `transactional` | `compensation` |
+|---|---|---|---|
+| clean commit | replays | discharged | discharged |
+| abort | replays, Phase 1 | replays, Phase 1 | runs in Phase 2 |
+| **halted (E-Stop)** | **stranded** | **stranded** | **stranded** |
+
+The accounting is what makes the third column honest rather than a hole:
+`disposition_trichotomy` proves every (kind, verdict) pair has EXACTLY one
+disposition, and `book_lengths_add` proves replayed + discharged +
+stranded is the whole stack, under every verdict. An entry cannot fall off
+the books by being halted. The halt can also arrive *during* a teardown
+that was already running, and that is a cut into the interrupted replay
+order: `halt_inventory_is_total` partitions it into completed / ambiguous
+/ unattempted, and `halt_ambiguity_is_at_most_one` bounds the ambiguity at
+the single crossing that was in flight (item 440's tier, reached
+deliberately rather than by accident).
+
+**Two theorems gained a hypothesis, and this is the audit of it.** Adding
+a hypothesis to rescue a proof is the standard way a formal layer stops
+meaning what its name says, so the added `v.settles = true` on
+`Semantics.replays_or_discharges` and on the theorem now called
+`G7.bracket_replays_under_every_settling_verdict` is itself pinned by
+theorems rather than by this paragraph:
+
+- `settles_iff_not_halted` — the hypothesis excludes **exactly** the
+  E-Stop and no other verdict, so the gap it leaves is a single case.
+- `settles_iff_strands_nothing` — and it excludes it for the right
+  reason: a verdict settles precisely when it strands no kind. `settles`
+  is the property the replay/discharge dichotomy needs, spelled as a
+  predicate, not a side condition chosen to make a proof go through.
+- `settling_strands_nothing` — under a settling verdict the inventory is
+  empty for **every** stack, which with `estop_strands_everything` is the
+  whole of `stranded`: empty under `commit` and `abort`, the whole stack
+  under `halted`.
+- `bracket_replays_exactly_when_settling` — the bracket row is not merely
+  *true* under the settling verdicts, it **equals** `settles`, with no
+  hypothesis at all. So the restricted corollary is weaker than something
+  proved, not weaker than something claimed, and its hypothesis is the
+  exact condition its conclusion needs.
+- `bracket_is_replayed_or_stranded` — the total form over every verdict,
+  hypothesis-free: a registered bracket is replayed, or the verdict is the
+  E-Stop and the bracket is on the inventory.
+
+Neither restriction weakened G7 itself. `teardown_replays_all` and
+`teardown_only_witnessed` — completeness and soundness, the two statements
+G7 *is* — were already relative to `replaysUnder v` and carry no verdict
+hypothesis at all; they hold under `.halted` unchanged, with an empty
+replay set.
+
+**The E-Stop is the counterpart of R4, not a hole in it.** R4 is "no
+residue"; the halt is "all residue, all of it reported"
+(`estop_strands_everything`). Deliberately NOT modelled here: what the
+operator does with the inventory, the reconciliation path itself (`revl
+recover` reading the descriptors back), and whether the latch is observed
+promptly. This model says what a halt owes, not how the debt is settled.
 
 ## Item 133 — cross-tier agreement (`RevL.Theorems.CrossTier`)
 
@@ -609,10 +744,12 @@ only the closure is local, the judgment it feeds is the model's).
 ### Census
 
 Nothing is dropped and nothing is counted without being named. Over the
-corpus: **296 .rvl files → 182 components → 403 statements = 130 modeled
-+ 138 componentless + 28 refused at parse**, and **371 verdicts compared
-(130 files + 182 components + 25 provide methods + 6 spawn edges + 28
-parse refusals), 371 agree, 0 mismatches**.
+corpus as of `chore/formal-review`: **305 .rvl files → 189 components →
+414 statements = 137 modeled + 140 componentless + 28 refused at parse**,
+and **387 verdicts compared (137 files + 189 components + 27 provide
+methods + 6 spawn edges + 28 parse refusals), 387 agree, 0 mismatches**.
+(The corpus grows; the shape of the census does not. The step-6 numbers
+were 296 / 182 / 403 and 371 verdicts.)
 
 - The 28 parse refusals are LISTED by name and code, not counted. The
   previous "(28 parse-error skips, loud)" parenthesis hid
@@ -634,8 +771,8 @@ and `missed-G2` are **gate failures** (item 418 step 7), not findings:
 the checker refusing where the model sees nothing is the model being
 weaker than what revl enforces. `formal-strict` — the model refusing what
 the checker accepts — stays informational; it is the safe direction and
-names fragment gaps. Current buckets: 88 agree-accept, 2 agree-G2, 1
-agree-G3, 6 agree-G4, 33 out-of-fragment, and **0 missed-G4, 0 missed-G2,
+names fragment gaps. Current buckets: 93 agree-accept, 2 agree-G2, 1
+agree-G3, 7 agree-G4, 34 out-of-fragment, and **0 missed-G4, 0 missed-G2,
 0 formal-strict, 0 formal-found-other**.
 
 Movements from the pre-step-6 buckets (52 agree-accept, 2 agree-G2, 6
@@ -850,13 +987,13 @@ carry non-vacuity evidence". So every theorem registered in
 `CheckAxioms.lean` now has a row in `scripts/nonvacuity.tsv` naming the
 evidence, in one of four kinds:
 
-- **instance** (85 rows): the hypotheses are jointly satisfiable, and the
+- **instance** (97 rows): the hypotheses are jointly satisfiable, and the
   named witness theorems exhibit a concrete instance satisfying them.
 - **necessity** (8 rows): the theorem refuses, so joint satisfiability is
   precisely what it denies. The witnesses show each hypothesis satisfiable
   on its own and the refusal not universal. `G3.linkOK_no_cycles` and
   `R4.abort_leaves_no_residue` are the shape.
-- **concrete** (57 rows): the theorem is itself a computation on concrete
+- **concrete** (63 rows): the theorem is itself a computation on concrete
   data, so it has no hypotheses to satisfy. The gate accepts this label
   **only** when some other row cites the theorem as its witness, so it
   cannot be used to opt out.
@@ -866,8 +1003,16 @@ evidence, in one of four kinds:
 
 The gate also fails on a row whose witness is not itself a registered
 theorem (so witnesses are axiom-checked like everything else), on a
-self-witnessing row, on a stale row, and on `CheckAxioms.lean` and
-`run_gate.sh` disagreeing about which theorems are registered. That last
+self-witnessing row, on a stale row, on `CheckAxioms.lean` and
+`run_gate.sh` disagreeing about which theorems are registered, and — since
+`chore/formal-review` — on a registered theorem this file does not name.
+That last check was added because the record had already drifted: item
+443's thirteen E-Stop theorems and three `CrossTier` theorems were
+registered, witnessed and axiom-checked while the table above listed none
+of them, and two rows went on describing the pre-443 unrestricted
+statements of theorems that had since gained a `v.settles = true`
+hypothesis. A proved theorem nobody can find and a record that overstates
+what is proved are two halves of the same failure. That last
 check is the one item 418's MEDIUM list wanted:
 `Semantics.teardown_length` was once listed as proved in this file and
 registered in neither.
@@ -886,6 +1031,19 @@ the surrounding prose used to read:
 - `RevL.A8.outcome_trichotomy`. `Outcome` has three constructors, so this
   is definitional. It was already marked so in the table; the registry
   makes the marking machine-checked rather than editorial.
+
+One further gap, found by the `chore/formal-review` audit and now closed:
+`RevL.Semantics.discharged` appeared in three registered statements, and in
+every one of them it was asserted **empty** (`discharged .halted log = []`,
+`(discharged .halted stack).length = 0`) or summed inside a length
+identity. So `book_lengths_add`'s three-way partition and
+`halt_books_are_total`'s five-way one held with their `discharged` term
+never exhibited non-zero, while the registry notes on `book_lengths_add`
+and `estop_discharges_nothing` claimed a witness that no registered
+theorem supplied. `G7.commit_discharge_is_not_vacuous` now computes
+`discharged .commit stack` as a length-2 list containing the witnessed
+mutation, and both rows cite it. The theorems did not change; what they
+are worth did.
 
 Nothing else in the registered set turned out to be vacuous. Writing the
 witnesses did surface one real gap, now closed: the derived capability
@@ -908,6 +1066,20 @@ also fails when an L1 or L2 module is missing from `RevL.lean`, because a
 module outside the root import is a module outside the build and therefore
 outside `CheckAxioms.lean`. The tree passes today: 5 L0, 7 L1, 16 L2
 modules, no upward or sideways import.
+
+### The oracle's own bridge theorems (`chore/formal-review`)
+
+`harness/Oracle.lean` is outside `lakefile.lean`'s `lean_lib` root
+(`roots := #[`RevL]`) and outside the directory the layering gate walks, so
+`CheckAxioms.lean` could not reach it. Its nine `..B_iff` bridges are
+exactly what this file cites when it says "the Lean side `decide`s the
+proved model" — `linkOKB_iff`, `coversB_iff`, `attenuatesB_iff` and the
+rest — and they were the only proofs under `formal/` outside every gate. A
+`sorry` in one of them would have left `lake env lean --run` at exit 0 and
+`make formal` green. The file now carries its own `#print axioms` block,
+and `scripts/run_gate.sh` elaborates it a second time (without `--run`) and
+feeds that block to the same `scripts/axioms_gate.py`. All nine are clean
+on the standard three.
 
 ## Conventions for worker sessions
 

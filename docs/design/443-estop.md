@@ -142,14 +142,26 @@ hypothesis was added to either.
 What did change is two COROLLARIES that quantified over all verdicts while
 assuming every verdict settles:
 
-* `RevL.G7.bracket_replays_under_every_verdict` now carries
-  `hv : v.settles = true`. The E-Stop counter-instance is proved alongside it
-  (`estop_strands_the_bracket`), so the hypothesis is exhibited as
-  load-bearing rather than left as an unexplained weakening.
+* `RevL.G7.bracket_replays_under_every_settling_verdict` (renamed from
+  `bracket_replays_under_every_verdict`, so the name says what the theorem
+  says) now carries `hv : v.settles = true`. The E-Stop counter-instance is
+  proved alongside it (`estop_strands_the_bracket`), so the hypothesis is
+  exhibited as load-bearing rather than left as an unexplained weakening.
 * `RevL.Semantics.replays_or_discharges` — the replay/discharge dichotomy —
   likewise. It was true because every verdict settled; it is now stated over
   the verdicts that do, with `disposition_trichotomy` as the total statement
   that holds everywhere.
+
+Four further theorems pin what that hypothesis costs, so it cannot become a
+place to park a broken proof: `settles_iff_not_halted` (it excludes exactly
+one verdict), `settles_iff_strands_nothing` (it excludes it because that is
+the verdict that strands, so `settles` is the property the dichotomy needs
+rather than a chosen side condition), `settling_strands_nothing` (a settling
+verdict owes nothing, on every stack), and
+`bracket_replays_exactly_when_settling` — the bracket row as an EQUATION
+with no hypothesis at all, so the restricted corollary is weaker than
+something proved rather than weaker than something claimed.
+`bracket_is_replayed_or_stranded` is then the total form over every verdict.
 
 And G7 gains its E-Stop counterpart rather than losing anything:
 `estop_replays_nothing`, `estop_discharges_nothing`,
