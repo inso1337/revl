@@ -362,6 +362,50 @@ jobs:
       # so the conductor needs the cordis-py runtime — install it the way the
       # `--placement` preflight itself advertises, then run the smoke under it.
       - run: sh backends/python/setup.sh
+      # Roadmap item 445: the semantic floor, on every tier that exists here.
+      #
+      # These three files run one source on every tier and compare the VALUES,
+      # which is the only gate that catches a tier that compiles and then means
+      # something else. All three live in `tests/`, so they were collected by
+      # `frontend` and `frontend-cordis`, and skipped nearly whole there,
+      # because a tier executes only where its toolchain is installed and
+      # neither job installs node_modules, cargo or a JDK. This job installs
+      # all of them, so run the files HERE, where the skips actually go away.
+      # test_time_coeffect.py is in the list because it carries the 17th
+      # REVL_CROSS_TIER_SLOW gate (the rust async-timer lifecycle), which had
+      # the same problem and is not in the cross-tier file.
+      #
+      # Run under the cordis-py venv (setup.sh above) so the py-runtime probes
+      # execute too. Measured cost of this step is minutes, not seconds, which
+      # is the whole reason for the switch below; it is proportionate for a job
+      # that already provisions six toolchains, and it is the price of the
+      # matrix being real rather than implied.
+      #
+      # ONE KNOWN SKIP IS LEFT OPEN HERE, enumerated rather than left silent.
+      # test_realm_conformance.py::test_cordis4j_realm_conformance needs
+      # REVL_CORDIS4J_CLASSES. That variable IS set in CI, but only in the
+      # `backend-java` job, which runs backends/java/test_emit_java.py and never
+      # collects tests/, so the probe skips in every job that does run it. This
+      # is item 430's shape a third time: right variable, wrong job. Closing it
+      # means cloning and compiling cordis4j-core here the way `backend-java`
+      # already does; it is left off because it could not be run on the audit
+      # machine to prove it green first, and an unverified CI step is how a red
+      # build happens. Tracked on roadmap item 445 and asserted in
+      # tests/test_env_gated_skips_run_somewhere.py (_KNOWN_WRONG_JOB), so it
+      # cannot go quiet.
+      - run: backends/python/.venv/bin/python -m pytest tests/test_cross_tier_execution.py tests/test_realm_conformance.py tests/test_time_coeffect.py -q
+        env:
+          # LIVE as of item 445. This turns on the rust and java probes, the
+          # 17 gates that had executed in no CI job at all.
+          #
+          # It was staged behind the java v3 record equals/hashCode gap, which
+          # is now fixed and landed on main. Verified on a real JDK 26 against
+          # this branch before flipping: the full five-tier matrix is green.
+          #
+          # The failing probe was never deselected and the file was never
+          # narrowed to make this fit. A smaller green is exactly what let
+          # items 430 and 433 happen.
+          REVL_CROSS_TIER_SLOW: "1"
       # ci/placement_smoke.sh boots examples/user_cache.rvl split py<->node,
       # py<->rust, py<->go and py<->java (`--once`: boot, cross the seam via a
       # probe, tear down, exit). It fails the build on a seam that will not come
