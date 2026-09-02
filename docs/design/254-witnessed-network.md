@@ -624,8 +624,10 @@ Deferred, explicitly:
 
 - **`DELETE`-recreate compensate-grade** (attack 2's soft-delete residue) - Slice
   2; the same audit-surface framing, recreate via the documented create op.
+  **LANDED in Slice 2, see §8.**
 - **`POST`-with-documented-delete compensate-grade** - Slice 2 follow-up on item
-  247's surface.
+  247's surface. **LANDED in Slice 2, see §8.2** (admissible only in the keyed
+  `delete-created` shape).
 - **A genuine proof-surface network witness** - a NEW language construct
   (`witnessed-with-observable-inverse`), its own item, not this feature; see the
   Revision section. Slice 1 does not deliver it.
@@ -633,7 +635,7 @@ Deferred, explicitly:
   runtime-seam contract (rust waits on item 278 as 243 does).
 - **Endpoints with no version token** - Slice 1 either refuses the
   compensate-reversal or marks it best-effort-may-clobber (HIGH 1); a richer
-  concurrency-token story is Slice 2.
+  concurrency-token story is Slice 2. **LANDED in Slice 2, see §8.4.**
 - **Verified-idempotent upgrade** (attack 3 closure, item 37) - its own item; Slice
   1 ships the verb gate + honesty, not the round-trip proof.
 - **item 248 measurement extension** to the network boundary - rides item 248,
@@ -642,3 +644,104 @@ Deferred, explicitly:
 Slice 1 is additive: no existing generated program uses `x-revl-compensate`, so
 every current `import openapi` fixture emits byte-identically, and the backends
 are untouched beyond the py host-body stub.
+
+---
+
+## 8. Slice 2 as landed (the routed verbs + the concurrency-token policy)
+
+Slice 2 takes three of the four items Slice 1 deferred: the `DELETE`-recreate
+form, the `POST`-with-documented-delete form, and the richer concurrency-token
+story. **Other tiers stay deferred** (Slice 3, per item 243 Slice 2b's per-tier
+runtime-seam contract; rust still waits on item 278). Everything Slice 1 fixed
+holds unchanged: the ceiling is `compensate`, the reversal lands on the audit
+surface, it makes no `noResidue`/witness claim, its cap scope is a network cap
+the item-250 rewind enumerates-not-runs, and an unannotated document emits
+byte-identically.
+
+### 8.1 One promotion, three routes
+
+The promotion is no longer gated on one verb; it is gated on a **route** the
+document names, and the verb decides which route SHAPE is admissible:
+
+| verb | route | preimage | undo | key |
+| --- | --- | --- | --- | --- |
+| `PUT` | `restore` | required (safe `GET`) | the `PUT` itself by default | - |
+| `DELETE` | `recreate` | required (safe `GET`, read first) | required (the documented create) | - |
+| `POST` | `delete-created` | refused (there is no pre-state) | required (the documented delete) | required (`x-revl-undo-key`) |
+| `PATCH` | none | - | - | - |
+
+A missing leg is a hard error, never a half-emitted compensation. Neither new
+form has a default undo: a `DELETE` is not its own inverse and neither is a
+`POST`, so there is nothing to fall back to.
+
+### 8.2 Why `POST` is admissible now, and the verb gate is still closed
+
+§6 attack 3 gates the promotion on the RFC verb because `x-revl-*` is a human's
+claim and must never be able to **invent idempotence**. That reasoning is about
+a reversal that **re-issues the forward request**: `PUT`(preimage) restores
+nothing if the server implements `PUT` as append/merge.
+
+A `delete-created` reversal re-issues nothing. It removes one named resource,
+so it never rests on the forward `POST` being idempotent. What it rests on
+instead is being **keyed** - and unlike idempotence, keyedness is *checkable
+from the document*, so it is checked rather than claimed:
+
+- the `POST` must decode a response body, or nothing can identify what it
+  created;
+- `x-revl-undo-key` must name a **required, non-nullable** field of that
+  response record. An `Opt[T]` field is an unkeyed compensation wearing a key's
+  name: the server is allowed to omit it, and then the reversal has nothing;
+- the undo must be a real `DELETE` emission taking exactly one parameter, so
+  the one captured value addresses it unambiguously.
+
+Fail all of these and the promotion is **refused**, not downgraded - the same
+posture the recovery machinery takes when it reports `outcome="unknown"` for an
+unkeyed spent inverse rather than guessing. A reversal aimed at nothing reports
+success from teardown either way, which is worse than no reversal, because the
+audit surface would then claim the crossing was offset.
+
+`PATCH` remains refused in every form. It is not idempotent, and a partial merge
+has no inverse a document can name: the pre-state of a merged field is not
+recoverable from the request, and re-issuing the `PATCH` is not a reversal.
+
+### 8.3 Attack 2, split into its detectable and undetectable halves
+
+§6 attack 2 said the importer "can detect the schema gap and refuse". Slice 2
+does exactly that, and refuses **outright** rather than downgrading, because
+under the recast `compensate` is already the floor - there is nothing weaker to
+fall to:
+
+- the recreate must take a request body, and that body's type must be the
+  preimage's response type (or an `Opt[]` of it: a create with an optional body
+  can carry a preimage the reversal always sends; the converse does not hold,
+  since a preimage that may decode to nothing cannot fill a required body).
+
+The undetectable half - a semantic soft delete, a re-stamped server-assigned
+id, a dropped audit history, whose schemas look total - stays **OPEN** and is
+now stated **on the operation**, not only in the file header, because that is
+where a reader most easily assumes it away. The `delete-created` form carries
+the analogous line: deleting the created resource does not undo the welcome
+email that creating it sent.
+
+### 8.4 HIGH 1: the refusal path, made selectable
+
+HIGH 1 asked for "a refusal path plus an explicit may-clobber path, never a
+silent clobber". Slice 1 shipped the second half. Slice 2 adds the first:
+`--require-if-match` (or `x-revl-require-if-match: true` at the document root)
+turns a compensate-grade promotion on a token-less endpoint into a hard error.
+The default is unchanged - best-effort-may-clobber, said out loud on the
+operation - so this is a policy the importing engineer selects, not a new
+refusal imposed on existing imports.
+
+The token is now stated **per form**, because it is not the same header in each:
+a `restore` and a `delete-created` issue under `If-Match`, but a `recreate` is a
+**create**, so its precondition is `If-None-Match: *` - fail loudly if the
+resource came back, rather than overwrite whatever took its place.
+
+### 8.5 Still deferred after Slice 2
+
+- **Other tiers** (ts/rust/…) - Slice 3.
+- **A genuine proof-surface network witness** - a new language construct, its
+  own item.
+- **Verified-idempotent upgrade** (attack 3's real closure, item 37).
+- **item 248 measurement extension** to the network boundary.

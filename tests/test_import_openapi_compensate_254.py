@@ -112,25 +112,31 @@ def test_no_extern_is_ever_classified_witnessed():
 
 # --------------------------------------------------------------- the verb gate
 
-@pytest.mark.parametrize("verb", ["post", "patch"])
-def test_compensate_is_a_hard_error_off_an_idempotent_verb(verb):
-    """The verb gate (attack 3): the promotion is honoured only on PUT. On a
-    POST/PATCH — verbs the RFC does NOT define idempotent — it is a HARD error,
-    so the annotation can never invent idempotence."""
+def test_compensate_is_a_hard_error_on_patch():
+    """The verb gate (attack 3): `PATCH` is refused in every form. It is neither
+    idempotent by RFC 9110 §9.2.2 nor addressable by a documented reversal
+    route, so the annotation can never invent one for it.
+
+    Slice 2 admits `DELETE` and `POST` in their own routed forms (see
+    test_import_openapi_compensate_slice2_254.py); `PATCH` is the one verb the
+    gate still closes outright."""
     op = _put(**{"x-revl-compensate": True, "x-revl-preimage": "getConfig"})
     with pytest.raises(RevlError) as exc:
-        import_openapi(_doc(op, verb=verb), backend="py")
+        import_openapi(_doc(op, verb="patch"), backend="py")
     msg = str(exc.value)
-    assert verb.upper() in msg
+    assert "PATCH" in msg
     assert "idempotent" in msg
 
 
-def test_delete_compensate_is_deferred_to_slice_2():
+def test_a_delete_that_names_no_recreate_is_refused():
+    """A `DELETE` is not its own inverse, so the `recreate` form has no default
+    undo: naming a preimage alone is half a route and is refused rather than
+    half-emitted."""
     op = {"operationId": "setConfig", "parameters": _ID_PARAM, "responses": _OK,
           "x-revl-compensate": True, "x-revl-preimage": "getConfig"}
     with pytest.raises(RevlError) as exc:
         import_openapi(_doc(op, verb="delete"), backend="py")
-    assert "Slice 2" in str(exc.value)
+    assert "recreate" in str(exc.value)
 
 
 def test_the_engineer_flag_promotes_the_same_way_as_the_annotation():

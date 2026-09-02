@@ -159,6 +159,90 @@ is the thing being trusted. A `GET` that actually writes is still a lie — but
 it is a lie with a verb, a path and an author attached, in the generated
 source, on the audit surface. That is the most this boundary can offer.
 
+### The third claim: compensate-grade reversals (item 254)
+
+`safe` and `idempotent` are claims the RFC makes about a verb. A third claim
+sits on top of them, is narrower than either, and is never made by a verb alone:
+that an emission has a **documented reversal** an abort can issue.
+
+Mark the operation `x-revl-compensate: true` and name the route it takes, and
+the generated extern carries a `compensate` slot: a best-effort reversal fired
+at teardown on abort.
+
+```yaml
+# PUT: restore the preimage
+put:
+  operationId: setConfig
+  x-revl-compensate: true
+  x-revl-preimage: getConfig      # the safe GET whose response is put back
+  x-revl-if-match: true           # the endpoint exposes an ETag / version token
+
+# DELETE: recreate from the preimage, through the documented create
+delete:
+  operationId: deleteConfig
+  x-revl-compensate: true
+  x-revl-preimage: getConfig      # read BEFORE the delete
+  x-revl-undo: createConfig       # the create the reversal re-sends it through
+
+# POST: delete what it created, addressed by a response field
+post:
+  operationId: createConfig
+  x-revl-compensate: true
+  x-revl-undo: deleteConfig       # the documented delete
+  x-revl-undo-key: id             # a REQUIRED field of the POST's response
+```
+
+The engineer equivalents are `--compensate OP`, `--preimage OP=GETOP`,
+`--undo OP=UNDOOP`, `--undo-key OP=FIELD` and `--if-match OP`, on the same
+footing as `--pure`/`--emission`.
+
+**What it is, exactly.** Compensate-grade, and that is the ceiling. The reversal
+lands on the **audit** surface, never a proof surface: it makes no
+`noResidue`/witness claim, restores **server state** only, and is best-effort —
+it may 5xx or time out. Reversal is not un-observation, and over a network that
+is the common case rather than the edge: a rewound `PUT` does not unsend what a
+webhook subscriber already saw, and deleting a created resource does not undo
+the email that creating it sent. Both sentences are in the generated source, on
+the operation. The reversal is itself an outbound crossing on the
+`net.<host>` cap, enumerated at teardown as its own event.
+
+**What it refuses.** Each verb takes one route shape, and a route with a leg
+missing is a hard error rather than a compensation that fires at the wrong
+resource:
+
+| verb | route | needs |
+| --- | --- | --- |
+| `PUT` | `restore` | a safe `GET` preimage; the undo defaults to the `PUT` |
+| `DELETE` | `recreate` | a safe `GET` preimage **and** a create that can carry it |
+| `POST` | `delete-created` | a `DELETE` undo **and** a required response key |
+| `PATCH` | — | refused: a partial merge has no inverse a document can name |
+
+Three refusals are worth calling out, because each is a place where a
+compensation would otherwise look fine and do the wrong thing:
+
+* a `DELETE` whose recreate cannot **carry** the preimage — the create's request
+  body type must be the preimage's response type. A create that cannot hold a
+  field the original had restores a *different* resource;
+* a `POST` that cannot **name** what it created — no response body, a key that
+  is not a required non-nullable field, a non-record response, or a delete
+  needing more inputs than the one key. An unkeyed compensation is refused, not
+  guessed at;
+* an undo wired to the wrong verb. That is not a weaker reversal, it is a second
+  forward effect wearing a reversal's name.
+
+**Concurrency.** Where the endpoint exposes a version token, `x-revl-if-match:
+true` makes the reversal issue under `If-Match` (`If-None-Match: *` for a
+recreate, which is a create) and fail loudly on a racing writer. Without one it
+is best-effort-may-clobber, and the operation says so out loud. Import with
+`--require-if-match` — or set `x-revl-require-if-match: true` at the document
+root — to refuse the promotion entirely on any endpoint that claims no token.
+
+What none of this closes: idempotence is not reversibility, and no document
+proves either. A soft delete, a re-stamped server-assigned id or a dropped audit
+history is invisible here, and the generated source marks that residue OPEN on
+the operation rather than quietly rounding it off. The real closure is the item
+37 verified round-trip, not an annotation.
+
 ## 2. Path + method → one service operation
 
 The default is `<method>_<path>`, with template segments spelled `by_<name>`:
