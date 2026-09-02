@@ -130,3 +130,104 @@ def test_stdlib_root_directory_is_real():
     # guards against the parent-vs-self mixup this join depends on.
     assert (stdlib_root() / "str.rvl").is_file()
     assert (stdlib_root().parent / "stdlib" / "str.rvl").is_file()
+
+
+# ==========================================================================
+# roadmap 422 F7: `use "stdlib/..."` is not identity-pinned, so say which file
+# ==========================================================================
+
+#: A stand-in `stdlib/fs.rvl` supplying a `write` that is `pure`, carries no
+#: capability, and reaches the filesystem with no confinement at all — the exact
+#: opposite of what the real module's `witnessed[fs]` externs guarantee. It is
+#: never executed here; the point is that the IMPORT LINE reads identically.
+SHADOW_FS = """\
+pub type FsError = { code: Str, message: Str, path: Str }
+pub type WriteWitness = { path: Str, preimage: Str, created: Bool }
+pub extern pure fn write(path: Str, contents: Str) -> Result[WriteWitness, FsError] = @py {
+    return Ok({"path": path, "preimage": "", "created": True})
+}
+"""
+
+FS_CONSUMER = 'use "stdlib/fs.rvl" { write, FsError, WriteWitness }\n' \
+              "component App {\n}\n"
+
+
+def _fs_consumer(tmp_path):
+    app_dir = tmp_path / "consumer"
+    app_dir.mkdir()
+    main = app_dir / "app.rvl"
+    main.write_text(FS_CONSUMER, encoding="utf-8")
+    return main
+
+
+def test_an_importer_relative_stdlib_dir_shadows_fs_and_the_compile_says_so(tmp_path):
+    """The finding: relative resolution is primary and wins outright, so a
+    `stdlib/` directory beside the importing file supplies `stdlib/fs.rvl`. The
+    substitute's `write` compiles `pure` with NO capability, beside the real
+    module's `witnessed[fs]` — reading `use "stdlib/fs.rvl"` and concluding
+    "confined witnessed fs" is therefore unsound.
+
+    Shadowing stays SUPPORTED (item 319 pins that a local file wins, and item
+    389 stamps a vendored copy). What changes is that the compile no longer says
+    nothing: the identity it actually resolved is a measured fact on the IR."""
+    main = _fs_consumer(tmp_path)
+    (main.parent / "stdlib").mkdir()
+    (main.parent / "stdlib" / "fs.rvl").write_text(SHADOW_FS, encoding="utf-8")
+
+    ir = compile_files([str(main)])
+
+    # the unsoundness itself, on the record: same import line, no capability
+    [write] = [e for e in ir["externs"] if e["name"] == "write"]
+    assert write["class"] == "pure"
+    assert not write.get("capabilities")
+
+    [shadow] = ir["stdlib_shadow"]
+    assert shadow["written"] == "stdlib/fs.rvl"
+    assert shadow["origin"] == "importer-relative"
+    assert shadow["resolved"].endswith("consumer/stdlib/fs.rvl")
+
+
+def test_a_search_path_stdlib_dir_shadows_fs_and_the_compile_says_so(
+        tmp_path, monkeypatch):
+    """The other half: `REVL_IMPORT_PATH` is searched BEFORE
+    `stdlib_root().parent`, so one env-var entry supplies the module with no
+    file anywhere near the consumer."""
+    standin = tmp_path / "standin"
+    (standin / "stdlib").mkdir(parents=True)
+    (standin / "stdlib" / "fs.rvl").write_text(SHADOW_FS, encoding="utf-8")
+    main = _fs_consumer(tmp_path)
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(standin))
+
+    ir = compile_files([str(main)])
+
+    [shadow] = ir["stdlib_shadow"]
+    assert shadow["written"] == "stdlib/fs.rvl"
+    assert shadow["origin"] == f"search path {standin}"
+    assert shadow["resolved"] == str((standin / "stdlib" / "fs.rvl").resolve())
+
+
+def test_the_real_stdlib_carries_no_shadow_key_at_all(tmp_path, monkeypatch):
+    """ADDITIVE: a composition importing the shipped modules gains no IR key, so
+    every existing IR document and audit stays byte-identical."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    main = tmp_path / "main.rvl"
+    main.write_text(CONSUMER, encoding="utf-8")
+
+    ir = compile_files([str(main)])
+    assert "stdlib_shadow" not in ir
+
+    # and compiling the stdlib module itself is not self-shadowing
+    assert "stdlib_shadow" not in compile_files([str(stdlib_root() / "fs.rvl")])
+
+
+def test_a_non_stdlib_use_is_not_reported_as_a_shadow(tmp_path):
+    """Only the `stdlib/` prefix makes a claim about identity. An ordinary local
+    import is just an import, and reporting it would be noise that trains a
+    reader to ignore the line that matters."""
+    (tmp_path / "local.rvl").write_text(
+        "pub fn helper(s: Str) -> Str { return s }\n", encoding="utf-8")
+    main = tmp_path / "main.rvl"
+    main.write_text('use "local.rvl" { helper }\n'
+                    "pub fn go(s: Str) -> Str { return helper(s) }\n",
+                    encoding="utf-8")
+    assert "stdlib_shadow" not in compile_files([str(main)])
