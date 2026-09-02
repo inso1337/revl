@@ -456,6 +456,42 @@ resume, and the way back is `revl recover --wal FILE`.
 Exit status follows the residue, as `revl recover` does: 0 when nothing is
 outstanding, 1 when a halt is engaged and entries are owed. An E-Stop is never
 clean.
+### `revl branch`
+
+Session branch lineage over durable write-ahead logs (roadmap item 250): what a
+WAL is, the branch tree across several WALs, and the fork partition of a
+recorded tail ([design/250-session-branching.md](design/250-session-branching.md)).
+
+Reads through the tier-agnostic WAL core, so a branch written by any tier's
+runtime reads the same. It runs nothing and rewinds nothing - an offline reader
+has no workspace to rewind. Exit status follows the residue: `0` when the branch
+stands on a clean fork point, `1` when honest residue (a crossed emission, an
+unfired crossing inverse) or an unclosed lineage edge remains.
+
+- `--wal FILE` - a write-ahead log (required). One WAL prints its lineage:
+  `standalone`, `forked-parent` (frozen at its fork point), `branch`, or
+  `forked-branch`, with the provenance a branch inherited and, listed
+  explicitly, the provenance it did not. Repeat `--wal` to reconstruct the
+  branch tree; an edge whose other end was not supplied is reported as an
+  orphan or a dangling child rather than dropped.
+- `--at SEQ` - instead of the lineage, enumerate the fork partition of the tail
+  above this WAL position: what a fork there would put back, what already
+  crossed and cannot be undone, what would be enumerated and never fired, and
+  every reason the fork would be refused. `-1` is the whole recorded tail.
+  Requires a single `--wal`.
+- `--json` - machine-readable output.
+
+### `revl compare`
+
+Compare two recorded session histories that share a fork point (roadmap item
+250): what each did after diverging, and what a comparison of durable logs
+cannot yet say.
+
+Two WALs with no recorded lineage relation are not compared against an invented
+common point - the comparison says so and exits nonzero.
+
+- `LEFT.wal` / `RIGHT.wal` - the two write-ahead logs (required).
+- `--json` - machine-readable output.
 
 ### `revl why`
 
