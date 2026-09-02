@@ -558,6 +558,76 @@ class CompositionDecl:
     line: int
     uses: list[tuple[str, int]] = field(default_factory=list)
     source: str = ""  # provenance: the file this composition was parsed from
+    # item 426 S2 (§3.1): the ordered layer stack. `stack` entries are LEVEL 1
+    # peers — conflicts between them refuse — and `site` is the single LEVEL 2
+    # layer, the one level at which "I decide" is expressible. Both are ordered
+    # lists in a file, which is what makes the fold reproducible (§3.3).
+    stack: list[tuple[str, int]] = field(default_factory=list)
+    site: tuple[str, int] | None = None
+
+
+# --- item 426 S2: layers and the fold ---------------------------------------
+
+@dataclass
+class Address:
+    """A patch address (426 §2.3). Two spellings, both exact, both refusing
+    rather than no-opping (§2.4).
+
+    `key("db")` follows the CONTRACT wherever it moved and refuses if the key
+    moved rows; `acme_pg::@db` names one exact row and refuses if that row is
+    gone. The choice is a choice about failure mode, and both are useful.
+    """
+    kind: str                 # "key" | "label"
+    line: int
+    key: str | None = None    # kind == "key"
+    realm: str | None = None  # kind == "key"; None == the shared realm
+    label: str | None = None  # kind == "label"
+    origin: str | None = None # kind == "label"; None == the layer's own origin
+
+    def spelling(self) -> str:
+        """The address as the layer author wrote it, for every diagnostic."""
+        if self.kind == "key":
+            if self.realm is None:
+                return f'key("{self.key}")'
+            return f'key("{self.key}", realm: "{self.realm}")'
+        return f"@{self.label}" if self.origin is None \
+            else f"{self.origin}::@{self.label}"
+
+
+@dataclass
+class LayerOp:
+    """One of the four operations (426 §3.2), plus the site layer's `resolve`.
+
+    There is deliberately NO positional operation: load order is derived by Kahn
+    over the wiring graph, not declared, so a position operation would invent a
+    concept the gate does not have.
+    """
+    op: str                   # "add" | "remove" | "replace" | "configure" | "resolve"
+    line: int
+    address: Address | None = None
+    row: RowDecl | None = None                    # add / replace
+    config: list[tuple[str, object, int]] = field(default_factory=list)
+    winner: Address | None = None                 # resolve
+    loser: Address | None = None                  # resolve
+
+
+@dataclass
+class LayerDecl:
+    """A patch document. `site` marks LEVEL 2 (the operator's, exactly one);
+    otherwise it is a LEVEL 1 stack layer and its conflicts with a peer refuse.
+
+    A layer document may contain ONLY layer operations (426 §6.1) — no
+    `component`, no `service`, no `extern`, no top-level `fn`. Without that rule
+    a layer is a component-authoring surface, which is the surface §4 exists to
+    profile.
+    """
+    name: str
+    target: str               # the composition this layer patches
+    ops: list[LayerOp]
+    line: int
+    site: bool = False
+    touches: list[Address] | None = None   # None == the clause was not written
+    source: str = ""
 
 
 # --- v2.0: types & pure functions (docs/syntax-2.0.md §2–§3) ----------------
@@ -1289,6 +1359,9 @@ class Program:
     # in `revl.composition` folds these into a row table and a file list; the
     # lowerer never reads them, so a program that declares none is byte-identical.
     compositions: list[CompositionDecl] = field(default_factory=list)
+    # item 426 S2: layer documents. Also pre-linker — `revl.composition` folds
+    # them into the row table before `compile_files` sees a single path.
+    layers: list[LayerDecl] = field(default_factory=list)
     # Set by compile_files so the checker can resolve module-private vs
     # imported names without merging all files into one global namespace.
     fn_scopes: dict[int, set[str]] = field(default_factory=dict)
@@ -1673,6 +1746,22 @@ class Parser:
                 # needs no sync (the same discipline `fault`/`prop`/`lifecycle`
                 # use).
                 program.compositions.append(self.composition_decl())
+
+            elif self.at("ident", "layer") \
+                    and self.toks[self.pos + 1].kind == "ident":
+                # item 426 S2. `layer` is a CONTEXTUAL keyword on the same
+                # discipline `composition` uses: it heads a declaration only in
+                # the shape `layer NAME for COMPOSITION {`, so the self-hosted
+                # lexer's KEYWORDS table still needs no sync and a program using
+                # `layer` as an ordinary identifier is unaffected.
+                program.layers.append(self.layer_decl(site=False))
+
+            elif self.at("ident", "site") and self.toks[self.pos + 1].kind == "ident" \
+                    and self.toks[self.pos + 1].value == "layer":
+                # `site layer ...` — LEVEL 2, the operator's own. Two contextual
+                # words, still no lexer change.
+                self.next()
+                program.layers.append(self.layer_decl(site=True))
 
             elif self.at("ident", "lifecycle"):
                 # contextual keyword: `lifecycle` is a modifier on `test`
@@ -2532,6 +2621,8 @@ class Parser:
         self.expect("{")
         rows: list[RowDecl] = []
         uses: list[tuple[str, int]] = []
+        stack: list[tuple[str, int]] = []
+        site: tuple[str, int] | None = None
         seen: dict[str, int] = {}
         while True:
             self._skip_semis()
@@ -2541,12 +2632,33 @@ class Parser:
                 uline = self.next().line
                 uses.append((self.expect("string", what="a module path string").value, uline))
                 continue
+            if self.at("ident", "stack"):
+                # item 426 S2 §3.1: a LEVEL 1 peer. The list is ORDERED in the
+                # file, but the fold's result does not depend on that order —
+                # peer conflicts refuse rather than resolving by position
+                # (§3.4), so the order only ever decides message ordering.
+                sline = self.next().line
+                stack.append((self.expect("string", what="a layer path string").value, sline))
+                continue
+            if self.at("ident", "site"):
+                sline = self.next().line
+                if site is not None:
+                    raise self.err(
+                        sline,
+                        f"composition {name} declares a second `site` layer",
+                        hint="there is exactly ONE site layer (426 §3.1): it is "
+                             "the single level at which the operator resolves a "
+                             "peer conflict, and a precedence order between two "
+                             "site layers would be precedence choosing a "
+                             "provider, which decision 4 forbids")
+                site = (self.expect("string", what="a layer path string").value, sline)
+                continue
             if not self.at("ident", "row"):
                 tok = self.peek()
                 raise self.err(
                     tok.line,
-                    f"expected `row`, `use`, or `}}` in composition {name}, "
-                    f"found {tok.value!r}",
+                    f"expected `row`, `use`, `stack`, `site`, or `}}` in "
+                    f"composition {name}, found {tok.value!r}",
                     hint="a composition document declares rows: "
                          '`row @label from "path.rvl" provides key`')
             rows.append(self.row_decl(name))
@@ -2564,7 +2676,7 @@ class Parser:
                          "(426 §1.2)")
             seen[rows[-1].label] = rows[-1].line
         self.expect("}")
-        return CompositionDecl(name, rows, line, uses)
+        return CompositionDecl(name, rows, line, uses, stack=stack, site=site)
 
     def row_decl(self, composition: str) -> RowDecl:
         line = self.next().line                       # `row`
@@ -2632,6 +2744,210 @@ class Parser:
             else:
                 break
         return RowDecl(label, path, claims, line, component, config, granted)
+
+    # -- item 426 S2: layers, addresses and the four operations -------------
+
+    def _address(self) -> Address:
+        """`key("db")`, `key("kv", realm: "t")`, `@db`, or `acme_pg::@db`.
+
+        NOTE (the S1 finding, resolved): `configure @db { ... }` would put a `{`
+        immediately after the label, and the lexer turns `@ident {` into a
+        verbatim HOST BODY (lexer.py:422-446). The fold therefore spells it
+        `configure @db with { ... }`, which is the shape `spawn C with { ... }`
+        and `intercept k with { ... }` already use, and no lexer change is
+        needed. `::` likewise reaches here as two `:` pieces rather than a new
+        operator token, so the self-hosted lexer needs no sync either.
+        """
+        if self.at("hostbody"):
+            # The S1 finding, caught rather than leaked: `@db {` never reaches
+            # the parser as `@` + `db` + `{` — the lexer consumed it as a
+            # verbatim `@db` HOST BODY (lexer.py:422-446), so the token here
+            # carries the config block as opaque text. Say so instead of
+            # printing the tuple.
+            tok = self.peek()
+            backend, _body = tok.value
+            raise self.err(
+                tok.line,
+                f"`@{backend} {{ ... }}` is a HOST BODY, not a row address",
+                hint=f"a brace cannot follow a row label: write `configure "
+                     f"@{backend} with {{ ... }}`, the same shape `spawn C with "
+                     "{ ... }` uses (426 S2)")
+        if self.at("ident", "key"):
+            line = self.next().line
+            self.expect("(")
+            key = self.expect("string", what="a provision key string").value
+            realm = None
+            if self.at(","):
+                self.next()
+                self.expect("kw", "realm", what="`realm:` inside `key(...)`")
+                self.expect(":")
+                realm = self.expect("string", what="a realm name string").value
+            self.expect(")")
+            if not key:
+                raise self.err(line, "`key(\"\")` names no provision key")
+            return Address("key", line, key=key, realm=realm)
+        return self._label_address()
+
+    def _label_address(self) -> Address:
+        """`@db` (this layer's own origin) or `acme_pg::@db` (fully qualified).
+
+        The origin is never MINTED by a document — it is read off where the
+        document lives (426 §1.2) — but it is written here as the qualifier of a
+        cross-origin reference, which is the only place it appears in source.
+        """
+        origin = None
+        if self.at("."):
+            # The PROJECT's own origin is spelled `.` (426 §1.2) — reserved and
+            # unmintable by anyone else, so `.::@db` is how a layer names a row
+            # the composition itself declared.
+            self.next()
+            origin = "."
+        elif self.at("ident") and not self.at("ident", "key"):
+            origin = self._name(what="an origin qualifier")
+        if origin is not None:
+            self.expect(":", what="`::` after an origin qualifier")
+            self.expect(":", what="`::` after an origin qualifier")
+        line = self.peek().line
+        self.expect("@", what="`@` before a row label")
+        return Address("label", line, label=self._name(what="a row label after `@`"),
+                       origin=origin)
+
+    def layer_decl(self, site: bool) -> LayerDecl:
+        line = self.next().line                       # `layer`
+        name = self.expect("ident", what="a layer name").value
+        if not self.at("kw", "for"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `for` after layer name `{name}`, found {tok.value!r}",
+                hint="a layer names the composition it patches: "
+                     f"`layer {name} for MyComposition {{ ... }}`")
+        self.next()
+        target = self.expect("ident", what="the composition this layer patches").value
+        self.expect("{")
+        ops: list[LayerOp] = []
+        touches: list[Address] | None = None
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
+            if self.at("ident", "touches"):
+                tline = self.next().line
+                if touches is not None:
+                    raise self.err(tline, f"duplicate `touches` clause on layer `{name}`")
+                touches = [self._address()]
+                while self.at(","):
+                    self.next()
+                    touches.append(self._address())
+                continue
+            ops.append(self._layer_op(name, site))
+        self.expect("}")
+        return LayerDecl(name, target, ops, line, site=site, touches=touches)
+
+    def _layer_op(self, layer: str, site: bool) -> LayerOp:
+        tok = self.peek()
+        if self.at("ident", "add"):
+            oline = self.next().line
+            if not self.at("ident", "row"):
+                raise self.err(self.peek().line,
+                               f"expected `row` after `add` in layer `{layer}`",
+                               hint='`add row @label from "path.rvl" provides key`')
+            return LayerOp("add", oline, row=self.row_decl(layer))
+        if self.at("ident", "remove"):
+            oline = self.next().line
+            return LayerOp("remove", oline, address=self._address())
+        if self.at("ident", "replace"):
+            oline = self.next().line
+            address = self._address()
+            if not self.at("kw", "with"):
+                raise self.err(self.peek().line,
+                               f"expected `with` after `replace {address.spelling()}`",
+                               hint=f"`replace {address.spelling()} with row @label "
+                                    'from "path.rvl" provides key`')
+            self.next()
+            if not self.at("ident", "row"):
+                raise self.err(self.peek().line,
+                               f"expected `row` after `replace ... with` in layer `{layer}`")
+            return LayerOp("replace", oline, address=address, row=self.row_decl(layer))
+        if self.at("ident", "configure"):
+            oline = self.next().line
+            address = self._address()
+            if not self.at("kw", "with"):
+                raise self.err(
+                    self.peek().line,
+                    f"expected `with` after `configure {address.spelling()}`, "
+                    f"found {self.peek().value!r}",
+                    hint=f"the fields go in a `with` block: `configure "
+                         f"{address.spelling()} with {{ field: value }}`. The "
+                         "brace cannot follow the label directly — `@db {` is a "
+                         "HOST BODY to the lexer (426 S2)")
+            self.next()
+            return LayerOp("configure", oline, address=address,
+                           config=self._layer_config_block(layer, address))
+        if self.at("ident", "resolve"):
+            oline = self.next().line
+            if not site:
+                raise self.err(
+                    oline,
+                    f"`resolve` is a SITE layer operation, and `{layer}` is a "
+                    "stack layer",
+                    hint="a peer never resolves a peer conflict: refusal is only "
+                         "meaningful between peers, and the operator is not a "
+                         "peer (426 §3.4). Write it in the site layer")
+            address = self._address()
+            if not self.at("ident", "to"):
+                raise self.err(self.peek().line,
+                               f"expected `to` after `resolve {address.spelling()}`",
+                               hint="`resolve key(\"db\") to acme::@db over corp::@db` "
+                                    "— the operator names BOTH sides")
+            self.next()
+            winner = self._label_address()
+            if not self.at("ident", "over"):
+                raise self.err(self.peek().line,
+                               "expected `over` after the winning row of a `resolve`",
+                               hint="naming both sides is the point: the losing row "
+                                    "is written down, never inferred (426 §3.4)")
+            self.next()
+            return LayerOp("resolve", oline, address=address,
+                           winner=winner, loser=self._label_address())
+        raise self.err(
+            tok.line,
+            f"expected `add`, `remove`, `replace`, `configure`"
+            f"{', `resolve`' if site else ''}, `touches`, or `}}` in layer "
+            f"`{layer}`, found {tok.value!r}",
+            hint="there are four operations and no more (426 §3.2). There is no "
+                 "positional operation: load order is derived from the wiring, "
+                 "not declared, so no layer gets to reorder anything")
+
+    def _layer_config_block(self, layer: str,
+                            address: Address) -> list[tuple[str, object, int]]:
+        """`with { field: value, ... }` on a `configure`.
+
+        Merged into the target row's config and re-checked against the
+        component's declared types, so a wrong-typed value is a REFUSAL and not
+        a runtime surprise (426 §3.2, exit test 9)."""
+        line = self.expect("{").line
+        out: list[tuple[str, object, int]] = []
+        seen: set[str] = set()
+        while not self.at("}"):
+            fline = self.peek().line
+            field_name = self._name(what="a config field name")
+            if field_name in seen:
+                raise self.err(fline, f"duplicate config field `{field_name}` in "
+                                      f"`configure {address.spelling()}` "
+                                      f"(layer `{layer}`)")
+            seen.add(field_name)
+            self.expect(":")
+            out.append((field_name, self.literal(), fline))
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        if not out:
+            raise self.err(line, f"`configure {address.spelling()}` sets no field "
+                                 f"(layer `{layer}`)",
+                           hint="an operation that changes nothing is dead weight in "
+                                "the diff — drop it")
+        return out
 
     def row_config_block(self, label: str) -> list[tuple[str, object, int]]:
         """`config { field: <literal>, ... }` on a row.
@@ -5557,6 +5873,8 @@ def parse_file(path: str) -> Program:
         component.source = source
     for composition in program.compositions:
         composition.source = source
+    for layer in program.layers:
+        layer.source = source
     for decl in (*program.fn_decls, *program.externs, *program.services):
         program.decl_files[id(decl)] = source
     for fn in program.fn_decls:

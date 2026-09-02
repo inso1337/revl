@@ -283,8 +283,6 @@ Item 44's idempotency evidence rides on every emission and its inverse:
 `lower.py::_idempotent_register` into a register with a partial order:
 
 - `keyed` (an `idempotency_key` is present) dedup-safe by construction;
-- `shape-proven` (a 244 revl-expressed restore-to-recorded-value inverse) proven
-  safe to re-deliver, peer of `keyed`;
 - `declared` (a bare `idempotent` claim over an opaque host body) the author's
   claim, machine-checked for shape only, NOT proven;
 - absent (no claim) at-most-once, must not be re-delivered.
@@ -293,7 +291,7 @@ The map to a Temporal `RetryPolicy`:
 
 | register | `RetryPolicy` | rationale |
 |---|---|---|
-| `keyed` / `shape-proven` | retries enabled, bounded backoff, high/unbounded `maximumAttempts` | proven safe to re-deliver |
+| `keyed` | retries enabled, bounded backoff, high/unbounded `maximumAttempts` | dedup-safe by construction |
 | `declared` | `maximumAttempts: 1` in v1 (opt-in to relax) | an unverified claim is not proof |
 | absent | `maximumAttempts: 1` | non-idempotent: a retry double-applies |
 
@@ -302,8 +300,8 @@ sound" hides: `declared` is a claim, not a proof (`_idempotent_register` says so
 in its own docstring). Enabling Temporal retries on a `declared` activity trusts
 an unverified author claim and, because Temporal WILL retry on transient failure,
 amplifies a false claim into a production double-apply. So v1 treats `declared`
-as at-most-once and only `keyed`/`shape-proven` earn retries. This is stricter
-than a naive reading of the roadmap and it is deliberate.
+as at-most-once and only `keyed` earns retries. This is stricter than a naive
+reading of the roadmap and it is deliberate.
 
 Interaction with item 257: a `retry N` on a `validated` model emission is NOT
 item 44's idempotent-delivery retry (`lower.py` says so explicitly: a completion
@@ -352,8 +350,10 @@ compiles a real `undo pure` declaration and pins the asymmetry.
 | no claim at all | 1 | the fail-closed fall-through |
 | `recordResidue` (revl-emitted, host-implemented) | 1 | no declaration, so no evidence |
 
-`shape-proven` is admitted by the mapping and unreachable today:
-`_idempotent_register` cannot produce it (`TODO(309-slice4)`).
+This table used to carry a fourth row, `shape-proven`, admitted by the mapping
+and reachable by nothing. Item 207 deleted the register: its provenance was an
+inverse BODY and this mapping grades a forward activity, so no declaration could
+ever have landed in that row. `docs/design/207-checkable-extern-body.md`.
 
 **Why `declared` gets no opt-in knob.** The design said "opt-in to relax", and
 revl already has that knob — `recovery may re-issue owed emissions (strength:
@@ -559,7 +559,7 @@ the workflow-side budget check must all be emitted explicitly in Slice 1.
 The `declared` register is an unverified author claim over an opaque host body
 (`_idempotent_register`). Temporal retries on transient failure, so a false
 `declared` becomes a production double-apply. **Mitigation:** Slice 2 gives
-retries only to `keyed`/`shape-proven`; `declared` and absent both get
+retries only to `keyed`; `declared` and absent both get
 `maximumAttempts: 1`. Slice 1 gives EVERYTHING `maximumAttempts: 1`. Status:
 mitigated; the stricter-than-roadmap reading is deliberate and stated in section
 3.
@@ -665,7 +665,7 @@ Temporal TS SDK, for the derived-allowlist subset of revl constructs. Concretely
 
 **Slice 2 (deferred): retry policies from evidence.** Derive each activity's and
 each compensation's `RetryPolicy` from the item-44 idempotency register
-(`keyed`/`shape-proven` earn retries, `declared`/absent stay at-most-once); keep
+(`keyed` earns retries, `declared`/absent stay at-most-once); keep
 the item-257 completion retry distinct from item-44 idempotent-delivery retry.
 
 **Slice 3 (deferred): the Python SDK target.** A `--target temporal` rendering of

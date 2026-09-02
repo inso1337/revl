@@ -241,8 +241,9 @@ Three honest sentences the docs must carry, mirroring 294's:
    honoring its dedup contract, including its retention window", and
    `revl audit` carries the window where the import evidence names one
    (OpenAPI importers increasingly do). The audit prints
-   `idempotent: declared` vs `idempotent: keyed` vs
-   `idempotent: shape-proven` so the three never blur. The key's own
+   `idempotent: declared` vs `idempotent: keyed` so the two never blur.
+   (A third spelling, `idempotent: shape-proven`, was proposed by slice 4
+   below and removed by item 207; nothing ever printed it.) The key's own
    failure mode is UNDER-apply, not double-apply: two distinct logical
    operations issued under one key value are dedup'd by the remote into
    one application, and the leak is silent because every retry-safety
@@ -491,14 +492,14 @@ completeness sweep over the boundary surface:
    admission of a composition whose recovery surface contains any
    `fenced`/`human-finish` entry, for deployments where unattended
    recovery is a requirement. The bare rule alone is too coarse: it
-   cannot distinguish `declared` (trust-me) from `keyed` or `shape-proven`
-   (by-construction or statically checked), and the unattended-recovery
-   operator's real sentence is "auto-replay only what is keyed or
-   shape-proven". So the rule takes a strength argument,
-   `requires idempotent-teardown(strength: keyed)`, refusing any inverse
-   or emission whose register is weaker than the named floor (order:
-   `declared < keyed`, `declared < shape-proven`; the two strong forms are
-   peers and either satisfies a strong floor). The bare form means
+   cannot distinguish `declared` (trust-me) from `keyed`
+   (by-construction), and the unattended-recovery operator's real sentence
+   is "auto-replay only what is keyed". So the rule takes a strength
+   argument, `requires idempotent-teardown(strength: keyed)`, refusing any
+   inverse or emission whose register is weaker than the named floor
+   (order: `declared < keyed < read`; `strong` names any register above
+   `declared`). This note also named a `shape-proven` floor here, which
+   item 207 removed along with the register. The bare form means
    `strength: declared` (any register counts), today's behavior. The
    audit already prints the three registers per entry, so the data the
    rule keys on exists on day one. This is where "flagged" becomes
@@ -673,8 +674,8 @@ Policy and audit:
   inverse and admits it once the declaration (or key) is added.
 - The strength floor works: `requires idempotent-teardown(strength:
   keyed)` refuses a composition whose only claim is bare `declared`
-  (trust-me) and admits it when the inverse is keyed or shape-proven;
-  the bare rule (no argument) admits all three registers.
+  (trust-me) and admits it when the inverse is keyed; the bare rule (no
+  argument) admits every register.
 - `audit --diff` flags removing `idempotent` from an undo as a
   weakening.
 

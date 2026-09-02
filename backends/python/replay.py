@@ -75,6 +75,31 @@ except ModuleNotFoundError:  # pragma: no cover — path-loaded copy of this mod
     _confidential_spec.loader.exec_module(confidential)
     sys.modules.setdefault("confidential", confidential)
 
+def _note_emission_index(component: str, index: int) -> None:
+    """Item 242: tell the runtime which crossing is being recorded right now.
+
+    The item-121 model-hop observation is measured at the `validate_retry` seam,
+    which runs AROUND the completion call — so the crossing is recorded first,
+    inside `make_call`, and the seam can bind its numbers to this exact step
+    instead of leaving the driver to infer a crossing at read time from a
+    fiber-wide register (which the newest-first `step_back` walk mis-attributed).
+
+    Resolved through `sys.modules` with a lazy import fallback, and a NO-OP when
+    the runtime is not importable: this module's promise is that a timeline is
+    pure python over the accumulator, so publishing a marker must never be what
+    makes recording fail. Losing the marker only degrades the hop to absent.
+    """
+    mod = sys.modules.get("runtime")
+    if mod is None:
+        try:
+            import runtime as mod  # noqa: PLC0415 — lazy, keeps replay standalone
+        except Exception:  # noqa: BLE001 — recording must not depend on this
+            return
+    note = getattr(mod, "revl_note_emission_index", None)
+    if note is not None:
+        note(component, index)
+
+
 __all__ = [
     "GUARANTEE", "IrreversibleStep", "KINDS", "Recorder", "ReplayError",
     "Step", "Timeline",
@@ -422,6 +447,11 @@ class Timeline:
         )
         if file is not None:
             self._emission_sites[(file, lineno)] = step
+        # item 242: mark the crossing at RECORD time. `validate_retry` brackets
+        # the completion, so this fires inside `make_call` and the seam that
+        # returns next binds its observation to THIS step — the fix for the
+        # driver's newest-first walk attributing a model hop to a later crossing.
+        _note_emission_index(self.component, step.index)
         self._wal_append(step)
         return step
 

@@ -3954,14 +3954,189 @@ fn json_escape(s: Str) -> Str {
 
 fn jstr(s: Str) -> Str { return "\"".concat(json_escape(s)).concat("\"") }
 
+// ================================================ the declared `Secret[T]` mark
+//
+// `Untrusted[T]`, `Trusted[T]` and `Secret[T]` are QUALIFIERS on a declared
+// type, orthogonal to the base type (docs/design/249-taint-provenance.md, open
+// question 2). The reference strips all three off every declared type before
+// anything downstream sees it (`src/revl/taint.py::strip_qualifiers`) and, for
+// `Secret`, leaves a FLAG behind in the IR — which is then the ONLY surviving
+// record that the position is confidential, because the spelling is gone.
+//
+// This is the DECLARATION-side marking and nothing more: it reads a qualifier
+// off a declared type and stamps the IR positions a backend consumes. The
+// reference's FLOW analysis — the origin lattice, the `confidential` /
+// `secret` origins, the G9 refusals, `endorse`, the declassifiers — is a much
+// larger surface and is NOT ported here; the self-host still has no taint
+// analysis, only the marking a taint analysis would also produce.
+//
+// Without this the self-host frontend rendered the qualifier as a TYPE NAME
+// (`"returns": "Secret[Str]"`) and emitted no stamp at all, so every tier that
+// goes through `compile_to` lost the marking before its emitter could act on
+// it — an emitter that knows how to redact cannot act on a mark the frontend
+// never produced.
+
+type TyParts = { head: Str, args: List[Str] }
+
+fn ty_ident_char(c: Str) -> Bool { return c.is_alnum() || c == "_" }
+
+// Split a rendered argument list at its TOP-LEVEL commas: `Str, Map[Int, Row]`
+// -> [`Str`, `Map[Int, Row]`]. Bracket AND paren depth are counted, so a
+// function-typed argument (`(Int, Str) -> Bool`) stays one argument.
+fn ty_split_args(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var start = 0
+  var i = 0
+  while (i < s.length()) {
+    let c = s.charAt(i)
+    if (c == "[" || c == "(") { depth += 1 }
+    else { if (c == "]" || c == ")") { depth -= 1 }
+    else { if (c == "," && depth == 0) {
+      out = out.push(ty_trim(s.slice(start, i)))
+      start = i + 1
+    } } }
+    i += 1
+  }
+  let last = ty_trim(s.slice(start, s.length()))
+  if (last != "") { out = out.push(last) }
+  return out
+}
+
+// The index of the `)` matching a leading `(`, or -1.
+fn ty_close_paren(ty: Str) -> Int {
+  var depth = 0
+  var i = 0
+  while (i < ty.length()) {
+    let c = ty.charAt(i)
+    if (c == "(") { depth += 1 }
+    else { if (c == ")") { depth -= 1  if (depth == 0) { return i } } }
+    i += 1
+  }
+  return 0 - 1
+}
+
+// `List[Row]` -> (`List`, [`Row`]); `Str` -> (`Str`, []); `(Int) -> Str` ->
+// (`->`, [`Int`, `Str`]). The last shape is the reference's `parse_type`
+// normalisation, which makes a function type an ordinary application whose LAST
+// argument is the return; `ty_render` puts the surface spelling back.
+fn ty_parse(ty: Str) -> TyParts {
+  if (ty.startsWith("(")) {
+    let close = ty_close_paren(ty)
+    if (close != 0 - 1 && ty.slice(close, ty.length()).startsWith(") -> ")) {
+      let ps = ty_split_args(ty.slice(1, close))
+      return { head: "->", args: ps.push(ty.slice(close + 5, ty.length())) }
+    }
+    return { head: ty, args: [] }
+  }
+  let br = ty.indexOf("[")
+  if (br == 0 - 1 || !ty.endsWith("]")) { return { head: ty, args: [] } }
+  return { head: ty.slice(0, br),
+           args: ty_split_args(ty.slice(br + 1, ty.length() - 1)) }
+}
+
+// The inverse of `ty_parse` (the reference's `format_type`).
+fn ty_render(head: Str, args: List[Str]) -> Str {
+  if (args.length() == 0) { return head }
+  if (head == "->") {
+    var ps: List[Str] = []
+    var i = 0
+    while (i < args.length() - 1) { ps = ps.push(args[i])  i += 1 }
+    return "(".concat(ps.join(", ")).concat(") -> ").concat(args[args.length() - 1])
+  }
+  return head.concat("[").concat(args.join(", ")).concat("]")
+}
+
+fn is_qual_head(h: Str) -> Bool {
+  return h == "Secret" || h == "Trusted" || h == "Untrusted"
+}
+
+// Whether any qualifier head appears as a STANDALONE head — never the tail of a
+// longer identifier such as a user type `MyTrusted[T]`. The byte-identity fast
+// path: a type carrying no qualifier is returned VERBATIM by `taint_strip`,
+// never round-tripped through parse/render (which would renormalise spacing and
+// break byte-identity for every program that uses no annotation).
+fn taint_has_qualifier(ty: Str) -> Bool {
+  var i = 0
+  while (i < ty.length()) {
+    if (ty.charAt(i) == "[") {
+      var a = i
+      while (a > 0 && ty_ident_char(ty.charAt(a - 1))) { a -= 1 }
+      if (is_qual_head(ty.slice(a, i))) { return true }
+    }
+    i += 1
+  }
+  return false
+}
+
+// Remove every `Untrusted[…]`/`Trusted[…]`/`Secret[…]` wrapper, anywhere in the
+// type: `Secret[Str]` -> `Str`; `Opt[Secret[Str]]` -> `Opt[Str]`;
+// `Result[Secret[Str], Str]` -> `Result[Str, Str]`. Idempotent, and a no-op on
+// any type that carries no qualifier.
+fn taint_strip(ty: Str) -> Str {
+  if (ty == "" || !taint_has_qualifier(ty)) { return ty }
+  let p = ty_parse(ty)
+  if (is_qual_head(p.head) && p.args.length() == 1) { return taint_strip(p.args[0]) }
+  if (p.args.length() == 0) { return p.head }
+  var out: List[Str] = []
+  var i = 0
+  while (i < p.args.length()) { out = out.push(taint_strip(p.args[i]))  i += 1 }
+  return ty_render(p.head, out)
+}
+
+// True if a `Secret[…]` head appears anywhere the VALUE ITSELF reaches. The
+// marking has to follow the VALUE rather than the spelling: a fallible lease
+// hands the payload back as `Result[Secret[Str], Str]`, and the bytes crossing
+// there are exactly as confidential as `Secret[Str]`'s, so the walk recurses
+// through type constructors (`Result`, `Opt`, `List`, `Map`, a tuple, a
+// declared record — every container whose value graph physically carries the
+// bytes).
+//
+// The ONE argument position that is not a container is a FUNCTION type's: `(
+// Secret[Str]) -> Int` declares what a closure will one day be CALLED WITH, not
+// what the closure value holds, so descending there would redact a function
+// repr while the real disclosure happens at the call.
+fn taint_mentions_secret(ty: Str) -> Bool {
+  if (ty == "") { return false }
+  let p = ty_parse(ty)
+  if (p.head == "Secret") { return true }
+  if (p.head == "->" || p.head == "Fn") { return false }
+  var i = 0
+  while (i < p.args.length()) {
+    if (taint_mentions_secret(p.args[i])) { return true }
+    i += 1
+  }
+  return false
+}
+
+// True if a declared return puts a `Secret[…]` in the position a WITNESS is
+// read out of — the `Ok` arm of `Result[W, E]`. The narrower sibling of
+// `taint_mentions_secret`: a witnessed crossing's durable discharge descriptor
+// records the Ok witness as the inverse's referent, so `Result[Secret[Str],
+// Str]` puts a confidential value on disk while `Result[Str, Secret[Str]]` —
+// the same declaration with the qualifier on the error arm — does not.
+fn taint_secret_witness(ty: Str) -> Bool {
+  if (ty == "") { return false }
+  let p = ty_parse(ty)
+  return p.head == "Result" && p.args.length() == 2
+         && taint_mentions_secret(p.args[0])
+}
+
 // ---------------------------------------------------------------- services IR
 
+// A declaration's `params` list. The qualifier is STRIPPED off each type and,
+// where the declared type mentions `Secret[…]`, the position carries
+// `"secret": true` instead — the reference's `_ir_params`. Additive: absent
+// unless the author wrote the qualifier, so every existing IR document is
+// byte-identical.
 fn ir_params_json(ps: List[ParamN]) -> Str {
   var out = ""
   var i = 0
   while (i < ps.length()) {
-    let e = "{\"name\": ".concat(jstr(ps[i].name))
-      .concat(", \"type\": ").concat(jstr(ps[i].ty)).concat("}")
+    var e = "{\"name\": ".concat(jstr(ps[i].name))
+      .concat(", \"type\": ").concat(jstr(taint_strip(ps[i].ty)))
+    if (taint_mentions_secret(ps[i].ty)) { e = e.concat(", \"secret\": true") }
+    e = e.concat("}")
     out = out == "" ? e : out.concat(", ").concat(e)
     i += 1
   }
@@ -4014,7 +4189,7 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool) -> IrMethR 
   var nexti = ps.i
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
-    retJson = jstr(tr.ty)
+    retJson = jstr(taint_strip(tr.ty))
     nexti = tr.i
   }
   var mj = jstr(nm).concat(": {\"params\": [").concat(ir_params_json(ps.ps))
@@ -4511,8 +4686,14 @@ fn ir_config(ts: List[Token], lo: Int, hi: Int) -> Str {
       let nm = tkc(ts, k).text
       let tr = type_at(ts, k + 2)
       let dfl = ir_config_default(ts, tr.i)
-      let entry = "{\"name\": ".concat(jstr(nm)).concat(", \"type\": ")
-        .concat(jstr(tr.ty)).concat(", \"default\": ").concat(dfl.js).concat("}")
+      // A `Secret[T]` config field is a declared confidential INPUT. The
+      // qualifier is stripped exactly as everywhere else — so the field matches
+      // a scalar type and can take a default — and the flag left behind is what
+      // an emitted `ConfigSchema` reads to keep the value out of the run log.
+      var entry = "{\"name\": ".concat(jstr(nm)).concat(", \"type\": ")
+        .concat(jstr(taint_strip(tr.ty))).concat(", \"default\": ").concat(dfl.js)
+      if (taint_mentions_secret(tr.ty)) { entry = entry.concat(", \"secret\": true") }
+      entry = entry.concat("}")
       out = out == "" ? entry : out.concat(", ").concat(entry)
       k = dfl.i
     } else { k += 1 }
@@ -5320,7 +5501,10 @@ fn params_env(ps: List[ParamN], acc: List[Bind]) -> List[Bind] {
   var env = acc
   var i = 0
   while (i < ps.length()) {
-    if (ps[i].ty != "") { env = tenv_put(env, ps[i].name, ps[i].ty) }
+    // stripped: past the declaration a `Secret[T]` parameter IS a `T` (the
+    // qualifier is orthogonal to the base type), and the marking lives on in
+    // the IR flag rather than in the type the body is checked against.
+    if (ps[i].ty != "") { env = tenv_put(env, ps[i].name, taint_strip(ps[i].ty)) }
     i += 1
   }
   return env
@@ -5335,8 +5519,11 @@ fn lir_function(ts: List[Token], i: Int) -> LirFn {
   var retTy = ""
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
-    retJson = jstr(tr.ty)
-    retTy = tr.ty
+    // the qualifier is stripped for BOTH the IR and the body's type
+    // environment: a `Secret[T]` is a `T` everywhere past the declaration, and
+    // the marking survives only as the flag `ir_params_json` stamps.
+    retJson = jstr(taint_strip(tr.ty))
+    retTy = taint_strip(tr.ty)
     reti = tr.i
   }
   if (!atk(ts, reti, "{")) { return { js: "", i: skip_line(ts, i) } }
@@ -5406,9 +5593,13 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
   let ps = params_at(ts, np + 1)
   var k = ps.i
   var retJson = "null"
+  // the return AS DECLARED, qualifier and all - `retJson` is already stripped,
+  // so this is what the marking below has to be read off.
+  var retDecl = ""
   if (atk(ts, k, "arrow")) {
     let tr = type_at(ts, k + 1)
-    retJson = jstr(tr.ty)
+    retJson = jstr(taint_strip(tr.ty))
+    retDecl = tr.ty
     k = tr.i
   }
   // undo/compensate lower a pure expression in the extern scope — outside this
@@ -5431,6 +5622,14 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
   var js = "{\"name\": ".concat(jstr(nm)).concat(", \"class\": ").concat(jstr(cls))
     .concat(", \"params\": [").concat(ir_params_json(ps.ps)).concat("], \"returns\": ").concat(retJson)
     .concat(", \"bodies\": {").concat(bodies).concat("}")
+  // The RETURN-side half of the marking (the counterpart of a parameter's
+  // `secret`). `returns` above is stripped, so these two flags are the only
+  // surviving record that this crossing's result is confidential:
+  // `secret_return` for the value anywhere in the declared return, and the
+  // narrower `secret_witness` for the `Ok` arm a witnessed extern's durable
+  // discharge descriptor records as its inverse's referent.
+  if (taint_mentions_secret(retDecl)) { js = js.concat(", \"secret_return\": true") }
+  if (taint_secret_witness(retDecl)) { js = js.concat(", \"secret_witness\": true") }
   if (isAsync) { js = js.concat(", \"async\": true") }
   return mk_irres(true, js.concat("}"))
 }
@@ -6302,4 +6501,77 @@ test "a redirect never fires on a valid program (no false refusal)" {
   // (triple-quoted: the oracle's in-file program harvester reads a plain
   // string literal up to the next `"`, so an escaped quote would truncate it)
   assert admit_src("""service S { emission[fs.write(path="/tmp")] fn go(r: Str) -> Int }""") == ""
+}
+
+// ------------------------------------------ the declared `Secret[T]` marking
+
+test "a qualifier-free type is returned verbatim" {
+  // the byte-identity fast path: no parse/render round trip, so spacing and
+  // spelling survive exactly for every program that uses no annotation.
+  assert taint_strip("Str") == "Str"
+  assert taint_strip("Map[Str, Int]") == "Map[Str, Int]"
+  assert taint_strip("(Int, Str) -> Bool") == "(Int, Str) -> Bool"
+  assert taint_mentions_secret("Str") == false
+  assert taint_mentions_secret("Result[Str, Str]") == false
+}
+
+test "a qualifier is stripped wherever it is written" {
+  assert taint_strip("Secret[Str]") == "Str"
+  assert taint_strip("Trusted[Int]") == "Int"
+  assert taint_strip("Untrusted[Str]") == "Str"
+  assert taint_strip("Opt[Secret[Str]]") == "Opt[Str]"
+  assert taint_strip("Result[Secret[Str], Str]") == "Result[Str, Str]"
+  assert taint_strip("Map[Str, List[Secret[Int]]]") == "Map[Str, List[Int]]"
+  assert taint_strip("(Secret[Str]) -> Int") == "(Str) -> Int"
+  // idempotent
+  assert taint_strip(taint_strip("Secret[Str]")) == "Str"
+}
+
+test "a qualifier head is never the tail of a longer identifier" {
+  // a user type `MyTrusted[T]` is not a qualifier, so it round-trips verbatim.
+  assert taint_strip("MyTrusted[Int]") == "MyTrusted[Int]"
+  assert taint_strip("SecretBox[Str]") == "SecretBox[Str]"
+  assert taint_mentions_secret("SecretBox[Str]") == false
+}
+
+test "the marking follows the VALUE through type constructors" {
+  // the half only a recursive read gets right: a fallible lease spells its
+  // payload `Result[Secret[Str], Str]`, and those bytes are exactly as
+  // confidential as `Secret[Str]`'s.
+  assert taint_mentions_secret("Secret[Str]")
+  assert taint_mentions_secret("Opt[Secret[Str]]")
+  assert taint_mentions_secret("Result[Secret[Str], Str]")
+  assert taint_mentions_secret("Result[Str, Secret[Str]]")
+  assert taint_mentions_secret("Map[Str, List[Secret[Int]]]")
+}
+
+test "a function type's parameter is not a container of the value" {
+  // `(Secret[Str]) -> Int` says what a closure will be CALLED WITH, not what
+  // the closure value holds; the disclosure happens at the call, and is caught
+  // at its own crossing.
+  assert taint_mentions_secret("(Secret[Str]) -> Int") == false
+  assert taint_mentions_secret("Fn[Secret[Str], Int]") == false
+  assert taint_mentions_secret("List[(Secret[Str]) -> Int]") == false
+}
+
+test "the witness position is the Ok arm alone" {
+  assert taint_secret_witness("Result[Secret[Str], Str]")
+  assert taint_secret_witness("Result[Str, Secret[Str]]") == false
+  assert taint_secret_witness("Secret[Str]") == false
+  assert taint_secret_witness("Opt[Secret[Str]]") == false
+}
+
+test "the stamps land in the IR the emitters read" {
+  // both ends of the declared marking, on one program: the extern's declared
+  // RETURN (the origin) and a service operation's declared PARAMETER (the
+  // receiver). `returns`/`type` read the BARE type — the qualifier is gone —
+  // and the flag is the only surviving record.
+  let ir = lower_to_ir("""extern pure fn mint(u: Str) -> Secret[Str]
+= @py { return u }
+service V { fn take(t: Secret[Str]) -> Int  fn plain(n: Int) -> Int }""")
+  assert ir.indexOf("\"returns\": \"Str\", \"bodies\"") != 0 - 1
+  assert ir.indexOf("\"secret_return\": true") != 0 - 1
+  assert ir.indexOf("\"name\": \"t\", \"type\": \"Str\", \"secret\": true") != 0 - 1
+  assert ir.indexOf("\"name\": \"n\", \"type\": \"Int\"}") != 0 - 1
+  assert ir.indexOf("Secret[") == 0 - 1
 }

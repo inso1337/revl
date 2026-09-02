@@ -335,9 +335,11 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
             continue
         # item 121: a validated model completion. Record the revl-measured
         # bracket, the attempt count against the static N+1 ceiling, and the
-        # host-reported usage from the return, into a fiber-local slot the driver
-        # reads when it records this crossing's `emit` event (§2.1). Off-path for
-        # a non-model retry loop only in that nothing reads the slot there.
+        # host-reported usage from the return, bound to the crossing `make_call`
+        # just recorded, for the driver to read when it records THAT crossing's
+        # `emit` event (§2.1; item 242 for why the binding is by crossing rather
+        # than by fiber). Off-path for a non-model retry loop only in that
+        # nothing reads the entry there.
         _revl_record_model_call(started, attempt + 1, budget + 1, value)
         return validated
 
@@ -375,8 +377,9 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
 # seam, `validate_retry` above, the only scope that sees the attempt count, the
 # wall-clock bracket, the static N+1 ceiling, and the host usage metadata in one
 # place (§2.1). These helpers assemble the `llm` payload the driver attaches to
-# the crossing's `emit` event, mint the fiber-local value-flow token that gates
-# `producedSeq`, and compute the salted, suppressible prompt digest.
+# the crossing's `emit` event, bind that payload to the crossing it was measured
+# at (item 242), mint the fiber-local value-flow token that gates `producedSeq`,
+# and compute the salted, suppressible prompt digest.
 # ---------------------------------------------------------------------------
 
 # The origin markers item 256/249 attribute to a value. Spelled here as bare
@@ -404,7 +407,8 @@ def revl_digest_nonce() -> bytes:
 
 def revl_reset_run_trace_state() -> None:
     """Reset the per-run trace state (mint a fresh digest nonce, clear the
-    fiber-local model-hop registers).
+    fiber-local model-hop registers: the crossing-keyed observation store, the
+    recorded-crossing marker, and the value-flow token).
 
     Called by the driver at every generation boundary (`run._Driver._emit_module`,
     which is gen 1 for a plain run and gen N+1 for each `--watch` reload), and
@@ -413,15 +417,43 @@ def revl_reset_run_trace_state() -> None:
     process."""
     global _revl_digest_nonce
     _revl_digest_nonce = None
-    _revl_last_model_call.set(None)
+    _revl_model_calls.set(())
+    _revl_recorded_crossing.set(None)
     _revl_last_validated_completion.set(None)
 
 
-# The fiber-local observation of the most recent model completion in THIS fiber:
-# (latencySeconds, attempts, attemptCeiling, rawReturn). Written by
-# `validate_retry` at the seam, read by the driver when it records the crossing.
-_revl_last_model_call: "contextvars.ContextVar[Optional[tuple]]" = \
-    contextvars.ContextVar("_revl_last_model_call", default=None)
+# item 242: the model-hop observations live in THIS fiber, KEYED BY THE CROSSING
+# they were measured at — `(component, stepIndex)`, the identity the recorder
+# mints for the `emit` step. Entries are `((crossing, observation), ...)`, oldest
+# first, where an observation is `(latencySeconds, attempts, attemptCeiling,
+# rawReturn)`. Written by `validate_retry` at the seam, read by the driver when
+# it records that crossing.
+#
+# Why keyed and not a single register. The driver walks a step-back's
+# `emissionsCrossed` NEWEST FIRST (`replay.Timeline.step_back` iterates
+# `reversed(tail)`), so a bare "did this fiber observe a completion" register is
+# consumed by whichever crossing the walk reaches first: a model completion
+# followed by a later filesystem write got its model/token/cost/latency numbers
+# attributed to the write. Fiber-locality alone cannot fix that — it isolates
+# concurrent ACTIVATIONS, and both crossings are in one fiber. The crossing key
+# isolates completions WITHIN one body, the same finer-than-fiber property the
+# `producedSeq` token gets from the activation id: two completions in one body
+# are two crossings, so they are two entries, and the walk order stops mattering.
+#
+# The value is REBUILT on every write, never mutated in place: a child Task
+# copies the context by reference, so an in-place mutation would be visible to
+# every fiber and would give back exactly the cross-attribution this keying
+# exists to prevent.
+_revl_model_calls: "contextvars.ContextVar[tuple]" = \
+    contextvars.ContextVar("_revl_model_calls", default=())
+
+# The crossing this fiber recorded most recently: `(component, stepIndex)`, or
+# None when nothing has been recorded (recording off, or a hand-built timeline).
+# Published by `replay.Timeline.record_emission` at RECORD time — which is inside
+# `validate_retry`'s `make_call`, so when the seam returns, this names the
+# completion's OWN crossing and nothing else's.
+_revl_recorded_crossing: "contextvars.ContextVar[Optional[tuple]]" = \
+    contextvars.ContextVar("_revl_recorded_crossing", default=None)
 
 # The fiber-local value-flow token gating `producedSeq` (§2.2, the NEW CRITICAL).
 # (activationId, completionSeq): the last VALIDATED model completion crossing in
@@ -433,22 +465,71 @@ _revl_last_validated_completion: "contextvars.ContextVar[Optional[tuple]]" = \
     contextvars.ContextVar("_revl_last_validated_completion", default=None)
 
 
+def revl_note_emission_index(component: str, index: int) -> None:
+    """Item 242: publish the crossing being recorded RIGHT NOW in this fiber.
+
+    Called by `replay.Timeline.record_emission` as it mints the `emit` step, so
+    the completion seam below can bind its observation to the crossing that
+    carried it instead of leaving the driver to infer one at read time. Pure
+    bookkeeping: it records nothing, redacts nothing, and a timeline built
+    without a runtime (a hand-written test) simply never calls it."""
+    _revl_recorded_crossing.set((component, index))
+
+
+def revl_recorded_crossing() -> "Optional[tuple]":
+    """The crossing this fiber recorded most recently, or None."""
+    return _revl_recorded_crossing.get()
+
+
 def _revl_record_model_call(started: float, attempts: int, attempt_ceiling: int,
                             raw_return) -> None:
-    """Stash this fiber's model-completion observation for the driver to read
-    when it records the crossing's `emit` event. `latencySeconds` is the
-    revl-measured BRACKET (§2.2): honest about what revl timed, silent about what
-    the host `@py` body did inside it."""
+    """Stash this fiber's model-completion observation, KEYED BY THE CROSSING it
+    was measured at, for the driver to read when it records that crossing's
+    `emit` event. `latencySeconds` is the revl-measured BRACKET (§2.2): honest
+    about what revl timed, silent about what the host `@py` body did inside it.
+
+    The key is `revl_recorded_crossing()` — the crossing `make_call` just
+    recorded, which under a validation retry is the LAST attempt, the one whose
+    return validated and is being measured here. A completion with no recorded
+    crossing (recording off) keys on None and is never matched by a keyed take,
+    which is right: with nothing recorded there is no crossing to attribute it
+    to (item 242)."""
     latency = max(0.0, time.monotonic() - started)
-    _revl_last_model_call.set((latency, attempts, attempt_ceiling, raw_return))
+    crossing = _revl_recorded_crossing.get()
+    obs = (latency, attempts, attempt_ceiling, raw_return)
+    entries = tuple(e for e in _revl_model_calls.get() if e[0] != crossing)
+    _revl_model_calls.set((*entries, (crossing, obs)))
 
 
-def revl_take_model_call() -> "Optional[tuple]":
-    """Consume and return this fiber's last model-call observation (or None).
-    Consuming clears it so a later NON-model emit in the same fiber does not
-    inherit a stale bracket."""
-    obs = _revl_last_model_call.get()
-    _revl_last_model_call.set(None)
+_REVL_ANY_CROSSING = object()
+
+
+def revl_take_model_call(crossing=_REVL_ANY_CROSSING) -> "Optional[tuple]":
+    """Consume and return a model-call observation from this fiber, or None.
+
+    With a `crossing` — `(component, stepIndex)`, what the driver holds while
+    recording one `emissionsCrossed` entry — this returns the observation
+    measured AT THAT CROSSING and no other, so the newest-first walk order
+    cannot hand a completion's numbers to a later non-model crossing (item 242).
+    A crossing that carried no completion gets None and its record stays
+    byte-identical to a pre-121 v2 emit.
+
+    Called with no argument it consumes the most recent observation whatever its
+    crossing — the pre-242 unkeyed behaviour, kept for the seam's own unit tests
+    and for a caller that holds no crossing identity. Consuming always clears the
+    entry, so a later emit cannot inherit a stale bracket either way."""
+    entries = _revl_model_calls.get()
+    if not entries:
+        return None
+    if crossing is _REVL_ANY_CROSSING:
+        keep, (_, obs) = entries[:-1], entries[-1]
+    else:
+        hit = next((i for i, e in enumerate(entries) if e[0] == crossing), None)
+        if hit is None:
+            return None
+        keep = entries[:hit] + entries[hit + 1:]
+        obs = entries[hit][1]
+    _revl_model_calls.set(keep)
     return obs
 
 

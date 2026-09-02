@@ -1557,19 +1557,36 @@ separate holes, one nested inside the other:
    was checked to FAIL against the pre-port emitter, which is the only way to know
    a fixture is doing anything.
 
-2. **The self-host FRONTEND has no taint pass, so the native compile drops the
+2. **The self-host FRONTEND had no taint pass, so the native compile dropped the
    marking anyway.** `grep -ci secret selfhost/{lexer,parser,checker,lower}.rvl`
-   is 0 in all four. `src/revl/taint.py` is what strips the `Secret[...]`
-   qualifier and sets the three stamps every backend redacts from; nothing mirrors
-   it. So `compile_to(src, "ts")` emits `Secret<unknown>` as a TYPE and none of the
-   markings — and `compile_to(src, "py")`, wired since item 230, has had exactly
-   the same hole the whole time. Both native emitters are byte-exact on their own
-   `secrets.rvl` when fed the reference IR; both produce an unredacting module
-   when driven natively. Pinned as a strict xfail in
-   `tests/test_selfhost_compile.py` over both tiers, so closing it fails the build
-   until the headers are corrected.
+   was 0 in all four. `src/revl/taint.py` is what strips the `Secret[...]`
+   qualifier and sets the stamps every backend redacts from; nothing mirrored it.
+   So `compile_to(src, "ts")` emitted `Secret<unknown>` as a TYPE and none of the
+   markings — and `compile_to(src, "py")`, wired since item 230, had exactly the
+   same hole the whole time. Both native emitters were byte-exact on their own
+   `secrets.rvl` when fed the reference IR; both produced an unmarked module when
+   driven natively.
+
+   **Closed** (`fix/selfhost-frontend-secret-marking`). `selfhost/lower.rvl` now
+   carries the DECLARATION-side marking: the qualifier surgery (`taint_strip`,
+   the recursive `taint_mentions_secret`, `taint_secret_witness`) plus the four
+   IR stamps a backend consumes — `params[i].secret` on an extern, a module fn
+   and a service operation; `secret_return` and `secret_witness` on an extern;
+   and a config field's `secret`. The strict xfail in
+   `tests/test_selfhost_compile.py` is gone and the test now asserts the
+   positive on both wired tiers: a `Secret[T]` document compiles fully natively
+   to bytes identical to the reference compile.
+
+   **What is NOT ported, and no part of that change implies otherwise:** the
+   reference's FLOW analysis — the origin lattice, the `confidential` / `secret`
+   origins, `Untrusted`/`Trusted` sinks and sources, the declassifiers (`endorse`,
+   a checked parser) and the G9 refusals. The self-host has a MARKING, not a taint
+   analysis. All three qualifiers are STRIPPED (a qualifier is orthogonal to the
+   base type, so leaving `Untrusted[T]` standing as a type name would be wrong the
+   same way `Secret[T]` was), but only `Secret` stamps anything, and nothing mints
+   an origin or refuses a program.
 
 The second one is the more interesting failure: a per-stage oracle can be green on
 every stage while their COMPOSITION drops a security property, because no stage's
-corpus is the composition's corpus. Fixing the emitter (1) does not fix the
-program; only the frontend port does.
+corpus is the composition's corpus. Fixing the emitter (1) did not fix the
+program; only the frontend port did.
