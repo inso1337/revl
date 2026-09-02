@@ -1045,8 +1045,18 @@ class _FlowChecker:
     def _union_children(self, node: dict, env: dict) -> Taint:
         result = CLEAN
         for key, value in node.items():
-            if key in ("kind", "op", "name", "id", "method", "line", "src_line",
-                       "callee"):
+            if key in ("kind", "op", "name", "id", "method", "line", "src_line"):
+                continue
+            if key == "callee" and isinstance(value, dict) \
+                    and value.get("kind") in ("var", "name"):
+                # A directly-named callee is the call TARGET, not a value that
+                # flows: `_callee_name` resolves it and `_taint_of_call` owns
+                # the sink check, so this fallback is not even reached for one.
+                # A COMPUTED callee is a different thing — `[f, g][i](x)`,
+                # `(c ? f : g)(x)` — an ordinary expression that carries taint
+                # and can nest a sink call of its own. Skipping the whole
+                # `callee` slot dropped both (the `_calls_in` blind spot in the
+                # same shape), so only the named form is skipped here.
                 continue
             result = _join(result, self.taint_of(value, env))
         return result
