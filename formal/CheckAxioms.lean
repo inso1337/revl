@@ -63,3 +63,21 @@ import RevL
 #print axioms RevL.CapCeilings.no_star_amplification
 #print axioms RevL.CapCeilings.parameter_widening_refused
 #print axioms RevL.CapCeilings.ceiling_check_not_subsumed
+
+-- Item 294/66/260, STATUS.md TODO 2(a): `held` and `reach` DERIVED from
+-- the statement fragment instead of taken as given -- the capKeys bridge
+-- and the emit-step surface as lemmas, the unnameable receivers named,
+-- the five affected guarantees re-stated over `SpawnsAdmitted`, and the
+-- three derived non-vacuity witnesses.
+#print axioms RevL.CapCeilings.derived_held_tokens_are_declared_keys
+#print axioms RevL.CapCeilings.derived_reach_is_emit_surface
+#print axioms RevL.CapCeilings.unnameable_receiver_is_star
+#print axioms RevL.CapCeilings.derived_lineage
+#print axioms RevL.CapCeilings.derived_attenuation_monotone
+#print axioms RevL.CapCeilings.derived_lineage_ceiling_le
+#print axioms RevL.CapCeilings.derived_budget_never_exceeds_root_ceiling
+#print axioms RevL.CapCeilings.derived_confinement_within_ceiling
+#print axioms RevL.CapCeilings.derived_no_star_amplification
+#print axioms RevL.CapCeilings.derivation_non_vacuous
+#print axioms RevL.CapCeilings.derivation_refuses_unnameable
+#print axioms RevL.CapCeilings.derived_ceiling_check_not_subsumed
