@@ -25,13 +25,23 @@ belongs.
    `backends/rust/emit.py`, run the rust emit suite and the rust golden tests.
    Do not run the root `tests/` tree. Do not run the cordis suite.
 3. Commit and push the branch.
-4. Open a PR that closes the issue:
+4. Run the cheap pre-PR checks. They take seconds and catch most `lint` reds:
+
+   ```
+   ./tools/pre_pr.sh
+   ```
+
+   This runs ruff, a Python 3.11 syntax sweep (CI runs 3.11, the dev venv is
+   newer, so 3.12+ syntax passes locally and reds CI) and the roadmap marker
+   gate. It does not run any suite.
+
+5. Open a PR that closes the issue:
 
    ```
    gh pr create --repo inso1337/revl --fill --body "Closes #<issue>"
    ```
 
-5. Report what you changed, what you ran, and the PR number. Then stop.
+6. Report what you changed, what you ran, and the PR number. Then stop.
    **Do not wait for CI.** The orchestrator watches it.
 
 ## What an agent does not do
