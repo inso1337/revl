@@ -493,6 +493,131 @@ def test_a_receiver_may_require_gauntlet_evidence_to_exist(staged):
     assert receipt["link"] == deploy.FACET_GAUNTLET
 
 
+# ---------------------- what the artifact digest is a statement about (428 F11)
+
+
+def _resign_artifact(bundle):
+    """Re-sign the chain over the artifact tree as it stands. Used to make the
+    receiving half of each case honest: the attestation binds exactly the
+    digest of the tree at signing time, so nothing below is a forgery."""
+    return deploy.make_deploy_attestation(bundle, SIGNER_KEY, signer="ci")
+
+
+def test_an_empty_artifact_tree_is_refused_not_digested(staged):
+    """It folds nothing and yields sha256(b""), a value anyone can produce
+    without holding an artifact at all. Signing it is refused, and so is
+    admitting one against a chain signed over the real bytes."""
+    import hashlib
+
+    bundle, att = staged
+    emitted = bundle / "emitted" / "python"
+    saved = {p.name: p.read_bytes() for p in emitted.iterdir()}
+    for p in list(emitted.iterdir()):
+        p.unlink()
+
+    with pytest.raises(Exception) as signing:
+        _resign_artifact(bundle)
+    assert "empty" in str(signing.value)
+    assert hashlib.sha256(b"").hexdigest()[:12] in str(signing.value)
+
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_ARTIFACT
+
+    for name, data in saved.items():
+        (emitted / name).write_bytes(data)
+    assert deploy.admit(bundle, trust=_trust(),
+                        attestation=att)["verdict"] == deploy.ACCEPT
+
+
+def test_a_symlink_in_the_artifact_tree_is_refused_not_followed(staged, tmp_path):
+    """`p.is_file()` followed links, so bound bytes could live outside the
+    bundle and stay writable after signing. A digest over a path the bundle
+    does not own is not a statement about the bundle."""
+    bundle, _att = staged
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    payload = outside / "extra.py"
+    payload.write_text("VALUE = 1\n", encoding="utf-8")
+
+    link = bundle / "emitted" / "python" / "extra.py"
+    os.symlink(payload, link)
+    with pytest.raises(Exception) as signing:
+        _resign_artifact(bundle)
+    assert "symlink" in str(signing.value)
+
+    # and on the receiving side, against a chain signed over the real tree
+    link.unlink()
+    att = _resign_artifact(bundle)
+    os.symlink(payload, link)
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_ARTIFACT
+    assert "symlink" in receipt["reason"]
+
+
+def test_a_symlinked_backend_directory_is_refused(staged, tmp_path):
+    """Same defect one level up: `emitted/<backend>/` itself a link out of the
+    bundle, so the whole artifact lives somewhere the bundle does not own."""
+    bundle, att = staged
+    real = bundle / "emitted" / "python"
+    moved = tmp_path / "moved-emitted"
+    shutil.move(str(real), str(moved))
+    os.symlink(moved, real)
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_ARTIFACT
+    assert "symlink" in receipt["reason"]
+
+
+def test_repin_closes_the_window_between_admission_and_load(staged):
+    """`admit` is PREPARE and loads nothing, so the ACCEPT receipt described
+    bytes that could change or vanish before anything executed. `repin` is the
+    check a loader runs immediately before it runs them."""
+    bundle, att = staged
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.ACCEPT
+    assert deploy.repin(bundle, receipt) == (
+        True, "the staged bytes are still the admitted ones")
+
+    artifact = bundle / "emitted" / "python" / "components.py"
+    original = artifact.read_bytes()
+    artifact.write_bytes(original + b"\n# swapped after admission\n")
+    ok, reason = deploy.repin(bundle, receipt)
+    assert ok is False
+    assert "changed since admission" in reason
+
+    artifact.unlink()
+    ok, reason = deploy.repin(bundle, receipt)
+    assert ok is False
+    assert "no longer be digested" in reason
+    artifact.write_bytes(original)
+
+    ir_path = bundle / "ir" / "ir.json"
+    saved_ir = ir_path.read_bytes()
+    doc = json.loads(saved_ir)
+    doc["swappedAfterAdmission"] = True
+    ir_path.write_text(json.dumps(doc), encoding="utf-8")
+    ok, reason = deploy.repin(bundle, receipt)
+    assert ok is False
+    assert "changed since admission" in reason
+    ir_path.write_bytes(saved_ir)
+
+
+def test_repin_refuses_a_receipt_that_authorises_nothing(staged):
+    """Fail closed: a REFUSE receipt, and one with no hashes, authorise no
+    load at all, so neither is treated as a pass."""
+    bundle, _att = staged
+    refused = deploy._refusal(deploy.LINK_ARTIFACT, "no")
+    ok, reason = deploy.repin(bundle, refused)
+    assert ok is False
+    assert "nothing it authorises loading" in reason
+
+    ok, reason = deploy.repin(bundle, {"verdict": deploy.ACCEPT})
+    assert ok is False
+    assert "nothing to re-pin against" in reason
+
+
 # ------------------------------- a crash is not a refusal (428 F10)
 #
 # `json.loads` builds a lone surrogate out of a `"\ud800"` escape and
