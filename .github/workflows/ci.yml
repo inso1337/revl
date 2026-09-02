@@ -520,6 +520,55 @@ jobs:
         env:
           REVL_DEMO_REQUIRE: "1"
 
+  # Roadmap item 253's exit test: the derived saga on a REAL Temporal server.
+  # Every other check on the Temporal target reads emitted TEXT, which proves
+  # what revl wrote and nothing about what the platform does with it. This job
+  # provisions a pinned Temporal CLI (the same shape `backend-wasm` uses for
+  # wasmtime, and for the same reason: a runtime nobody installs turns its
+  # tests into silent skips) plus the TS SDK, boots a dev server, and runs the
+  # emitter's own output against it. The gate variable is set HERE and the same
+  # step runs the file that reads it, which is the pairing
+  # tests/test_env_gated_skips_run_somewhere.py checks.
+  temporal-exit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: pip install -e ".[test]"
+      - name: Install the Temporal CLI (pinned)
+        run: |
+          curl -sSfL https://github.com/temporalio/cli/releases/download/v1.8.2/temporal_cli_1.8.2_linux_amd64.tar.gz -o /tmp/temporal.tar.gz
+          mkdir -p /tmp/temporal
+          tar -C /tmp/temporal -xzf /tmp/temporal.tar.gz
+          echo "/tmp/temporal" >> "$GITHUB_PATH"
+      # installing it is only half: if the download ever breaks, the test would
+      # go back to failing on the toolchain rather than on revl. Prove it first.
+      - run: temporal --version
+      - run: cd tests/temporal_exit && npm ci
+      - name: Boot a Temporal dev server and wait for it
+        run: |
+          temporal server start-dev --headless --ip 127.0.0.1 --port 7233 \
+            --db-filename /tmp/temporal-dev.db > /tmp/temporal-dev.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if temporal operator cluster health --address 127.0.0.1:7233 >/dev/null 2>&1; then
+              echo "dev server is serving"; exit 0
+            fi
+            sleep 2
+          done
+          echo "the Temporal dev server never became healthy"; cat /tmp/temporal-dev.log; exit 1
+      - run: pytest tests/test_temporal_exit_saga.py backends/typescript/test_temporal_target.py -q
+        env:
+          # The item-253 exit gate. Past it NOTHING skips: the test asserts on
+          # node and the SDK install rather than skipping over them, so a
+          # broken provisioning step above fails this job instead of quietly
+          # reporting green with nothing measured (roadmap items 430/433/445).
+          REVL_TEMPORAL_DEV_SERVER: "127.0.0.1:7233"
+
   # formal/ — the Lean backbone (formal/STATUS.md). lean-action pins the
   # toolchain via formal/lean-toolchain and runs `lake build`; the second
   # step is the axioms gate: every theorem must be axiom-free (`#print
