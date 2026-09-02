@@ -177,6 +177,11 @@ CORPUS = [
     # the oracle and `selfhost/emit_ts.rvl` emitted none of it while the suite was
     # green — item 429's trap, and a live security divergence.
     "secrets.rvl",
+    # item 233 / 276 (self-host port, item 391): the ASCII classification
+    # builtins + `codepoint_at`, the ts tier's arrow-IIFE (`_rc`) forms and the
+    # astral-aware `revlCharCodeAt` redirect. Added red, exactly as on the py
+    # tier: no ts corpus document called any of them.
+    "classify.rvl",
 ]
 
 def _load_reference_emit():
