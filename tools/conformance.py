@@ -149,6 +149,24 @@ CASES: list[tuple[str, str, str]] = [
      "}\n"
      + _component("  provide s { fn f(x) { let a = x.to_int32()\n"
                   "    return mask(a, a, 2.to_int32()).to_int() } }")),
+    # `/` and Float `==` (item 433 riders R1 and R2). The corpus's only
+    # arithmetic case was `x + 1 * 2`, so nothing here ever divided or
+    # compared. This matrix asks only "did the emitter raise?", and
+    # tests/test_conformance_validate.py asks "does the emitted code compile?".
+    # Neither question can see a tier that emits cleanly and then computes a
+    # different number, which is what java did for `Int / Int` (Java's
+    # `long / long` is integer division) and for `==` on Float
+    # (`Objects.equals` boxes to Double and compares `doubleToLongBits`). The
+    # VALUES are asserted by execution in tests/test_cross_tier_execution.py's
+    # "true division and IEEE float equality" probe; these two cases pin that
+    # both constructs still emit on all six tiers and that what they emit is
+    # accepted by each tier's own compiler.
+    ("expr", "true division",
+     "fn realdiv(a: Int, b: Int) -> Float { return a / b }\n"
+     + _component("  provide s { fn f(x) { let q = realdiv(x, 2)  return x } }")),
+    ("expr", "float equality",
+     "fn feq(a: Float, b: Float) -> Bool { return a == b }\n"
+     + _component("  provide s { fn f(x) { let b = feq(1.5, 1.5)  return x } }")),
     ("expr", "comparison", _component("  provide s { fn f(x) { let b = x > 1  return x } }")),
     ("expr", "unary", _component("  provide s { fn f(x) = -x }")),
     ("expr", "ternary", _component("  provide s { fn f(x) = x > 0 ? 1 : 0 }")),
