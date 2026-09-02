@@ -173,6 +173,13 @@ jobs:
       # before. The offline-first attempt is what lets an offline dev machine
       # with a warm ~/.cargo run these for real instead of skipping them.
       - run: pytest backends/rust/test_emit_rust.py -q
+      # item 332 stage 3: the revl-gate crate's corpus gate needs cargo, so it
+      # rides this job. The drift gate needs no toolchain and already runs in
+      # the frontend job's plain `pytest tests/ -q`.
+      - run: pytest tests/test_gate_crate_admit.py -q
+      # item 336 slice 1: the rust LSP binary's byte-identity agreement against
+      # `python -m revl.lsp`. REVL_LSP_PYTHON points it at this job's python.
+      - run: PYTHONPATH=src REVL_LSP_PYTHON=$(which python) cargo test --manifest-path crates/revl-lsp/Cargo.toml
 
   backend-java:
     runs-on: ubuntu-latest
