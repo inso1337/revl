@@ -284,18 +284,22 @@ def test_boundary_refusals_say_why_not_unknown_kind():
     cannot cross the scalar service boundary is this tier's design."""
     emitter = _emitter()
     for source, expected in [
-        # a compound value returned from a service operation. A *typed*
-        # compound (`let xs = [1, 2]  return xs`) is now refused by the
-        # checker: the provide-method let sweep types the binding (roadmap
-        # 75(b)), so `return xs` against an `Int` service return is a compile
-        # error before any tier sees it. An anonymous record literal has no
-        # recoverable type, so it still reaches this tier's boundary.
-        (_component("{ return { a: 1 } }"), "cannot cross this tier's scalar service boundary"),
-        # a compound value passed to a coeffect (same story: `b.g(xs)` with
-        # `xs: List[Int]` is checker-refused; an anonymous record passes)
+        # a compound value returned from a service operation. Every value the
+        # checker can TYPE is now refused before any tier sees it: a typed
+        # compound (`let xs = [1, 2]  return xs`, roadmap 75(b)), and, since
+        # `compatible` decides structural-vs-nominal instead of waving it
+        # through (F3), a bare record literal too. What still reaches this
+        # tier is what the checker is DOCUMENTED to wave through: the gradual
+        # frontier. `Any` launders in both directions by design, so a compound
+        # bound through an `Any` annotation is admitted by the frontend and
+        # meets its width mismatch here, which is exactly the boundary this
+        # test is about.
+        (_component("{ let r: Any = { a: 1 } return r }"),
+         "cannot cross this tier's scalar service boundary"),
+        # a compound value passed to a coeffect, reached the same way
         ("service B { fn g(n: Int) -> Int }\n" + _SVC
          + "component C requires b: B provides s: S "
-           "{ provide s { fn f(x) { return b.g({ a: 1 }) } } }",
+           "{ provide s { fn f(x) { let r: Any = { a: 1 } return b.g(r) } } }",
          "cannot cross this tier's scalar coeffect boundary"),
         # an extern with no @wasm body is not a missing case either
         ("extern pure fn h(n: Int) -> Int = @py { return n } = @ts { return n }\n"

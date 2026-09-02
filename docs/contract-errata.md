@@ -612,7 +612,8 @@ reads through the binding are checked too.
 At every *declared* boundary the structural type **unifies field-wise with the
 nominal record it meets** — the field set must match and each field type must be
 compatible, with the `List[Never]` bottom rule falling out of the elementwise
-`compatible` recursion (`Never` is already a wildcard). This is the same shape
+`compatible` recursion (`Never` flows out of a bottom position into any other,
+and nothing flows in). This is the same shape
 as item 11's `?T` widening marker: a checker-level annotation that **never
 reaches the IR**. The `record` / `record_update` IR nodes carry no type, an
 inferred `let` type is not emitted, and the emitted `types` table stays nominal
