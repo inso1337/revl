@@ -223,7 +223,7 @@ command, in order, reporting each step:
 | backend-wasm | `pytest backends/wasm/test_v3_emit.py backends/wasm/test_canonical_abi.py` |
 | backend-java | `pytest backends/java/test_emit_java.py` (emit/golden tests) |
 | conformance matrix | `tools/conformance.py --check-readme` |
-| site wheel | `tools/check_site_wheel.py` |
+| site wheel | `tools/check_site_wheel.py` (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
 | lint | `ruff check` (pinned `ruff==0.16.4` via `uvx` if not on `PATH`) |
 
 Two properties make it trustworthy rather than theatre:
