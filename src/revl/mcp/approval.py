@@ -228,17 +228,31 @@ class ClassMap:
     # -- lookups ------------------------------------------------------------
 
     def _provider_of(self, key: str) -> str | None:
+        """The one component providing `key`, or None when the key does not
+        resolve to exactly one.
+
+        A shared-realm provision answers directly. Otherwise the key is
+        realm-partitioned, and the fold may only answer when every realm's
+        provider is the SAME component. Returning the first arbitrary match over
+        an AMBIGUOUS key (the same key provided in two realms by two different
+        components) would classify the call against a provider the caller may
+        not even reach — the r2 provider's class-(c) crossing then reports as
+        the r1 provider's class none, and the gate defers on a boundary call.
+        No single answer exists, so refuse: None, which the per-call decision
+        now treats as unresolved-and-refused rather than not-a-boundary-call."""
         provider = self.index.provider_of.get((key, SHARED_REALM))
         if provider is not None:
             return provider
-        for (k, _realm), p in self.index.provider_of.items():
-            if k == key:
-                return p
+        providers = {p for (k, _realm), p in self.index.provider_of.items()
+                     if k == key}
+        if len(providers) == 1:
+            return next(iter(providers))
         return None
 
     def classify_call(self, key: str, method: str) -> dict | None:
         """The reach of a `revl_call(key, method)`, or None when the key/method
-        resolves to no scope (the handler will report that; the gate defers)."""
+        resolves to no scope — an unresolved classification, which the per-call
+        decision refuses (it is never read as "not a boundary call")."""
         provider = self._provider_of(key)
         if provider is None:
             return None
