@@ -995,6 +995,23 @@ _HOST_ARG_SIG: dict[str, list[str]] = {
     "Pool.query": ["Str"],
     "Pool.execute": ["Str"],
     "Job.run": ["Str"],
+    # item 130 (docs/design/130-stream-reactive-types.md). Exactly the Slice 1
+    # revl SURFACE, no more: `Stream.source()` opens the reference-tier provider,
+    # and `close` is the terminal-delivering inverse the subscription's core
+    # guarantee rests on; `Subscription` is the host-local family a `subscribe`
+    # binds — `next` awaits an item raced against a cancel token, `close` is the
+    # synchronous bracket inverse. Results stay opaque.
+    #
+    # The provider-DRIVING verbs (`emit`/`fault`) are deliberately absent. A
+    # Slice 1 test provider is driven from the harness, never from revl source
+    # (design §8: "a test provider `emit`s items explicitly"), and `emit` is a
+    # revl keyword that cannot parse as a method call at all. Listing them would
+    # grow the shared host-verb namespace — the disjointness invariant pinned in
+    # tests/test_map_value_type.py — for a surface no admitted program can reach.
+    "Stream.source": [],
+    "Stream.close": [],
+    "Subscription.next": [],
+    "Subscription.close": [],
 }
 
 

@@ -748,6 +748,19 @@ class _ComponentEmitter:
             self.config_imports[field] = _wasm_ty(fty)
             return _E(f"(call $config_{field})", fty)
         if kind == "host":
+            fn = node.get("fn") or ""
+            if fn.startswith("Stream."):
+                # item 130: the stream provider host. A stream subscription
+                # suspends a fiber (its `next` awaits an item raced against a
+                # cancel token); this tier awaits only `Job.run(name)` and has no
+                # async host seam for a stream, so refuse honestly — the same
+                # shape as the awaited-step and `advance` refusals.
+                raise EmitError(
+                    f"{where}: `{fn}` opens a stream; a stream subscription "
+                    f"suspends a fiber, but this tier awaits only `Job.run(name)` "
+                    f"— streams live on the hosted and blocking backends "
+                    f"(py/ts/go/java/rust); try `--backend py`"
+                )
             raise EmitError(
                 f"{where}: host builtin {node.get('fn')!r} is not available on "
                 f"the cordis-wasm tier — express state through coeffects instead"
@@ -1244,6 +1257,19 @@ class _ComponentEmitter:
 
         for step in self.ir.get("body") or []:
             kind = step.get("step")
+            if kind in ("let-effect", "effect") and step.get("subscribe"):
+                # item 130: a `subscribe` opens a single-consumer subscription
+                # whose `next` awaits a stream item raced against a cancel token —
+                # a fiber suspension. This tier awaits only the `Job.run` host op
+                # (see the `await` branch below); there is no async host seam for a
+                # stream here, so silently erasing the subscription would drop the
+                # suspension (and the cancellation-first teardown) semantics.
+                # Refuse honestly, matching the awaited-step and `advance` refusals.
+                raise EmitError(
+                    f"{where}: a stream subscription suspends a fiber; this tier "
+                    f"awaits only `Job.run(name)`; streams live on the hosted and "
+                    f"blocking backends (py/ts/go/java/rust) — try `--backend py`"
+                )
             if kind in ("let-effect", "effect", "emit") and step.get("async"):
                 # item 131: the awaited effect-composition spellings (`effect
                 # await …`, `await emit …`) suspend a fiber. This tier awaits

@@ -53,7 +53,17 @@ def test_value_and_host_method_namespaces_are_disjoint():
         host_verbs |= set(methods)
     assert host_verbs == {"open", "close", "query", "execute", "new",
                           "drop", "insert", "insert_if_absent", "remove",
-                          "get", "run"}
+                          "get", "run",
+                          # item 130 Slice 1: the `Stream`/`Subscription` host
+                          # families. `source` is the provider constructor verb
+                          # (structurally like `new`/`open`) and `next` is the
+                          # subscription's suspension verb; `close` was already
+                          # here. Deliberate, reviewed growth of the host-verb
+                          # namespace — the provider-driving verbs (`emit`/
+                          # `fault`) are kept OUT of the table precisely so this
+                          # set grows by the minimum the revl surface needs
+                          # (see the item-130 note in typecheck._HOST_ARG_SIG).
+                          "source", "next"}
     # `remove` is the ONE sanctioned overlap (docs/stdlib-2.0.md §Map): the
     # persistent Map value operation shares a spelling with the v1 host stub
     # verb. Safe because dispatch is by receiver kind — a constructor-tracked
