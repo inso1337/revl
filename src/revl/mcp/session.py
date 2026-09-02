@@ -1886,6 +1886,16 @@ class Session:
                 # the halt violates it by design and says so.
                 "clean": False}
 
+    @property
+    def halted(self) -> bool:
+        """Whether this session was E-STOPPED (item 443). A public read of the
+        latch `_refuse_if_halted` enforces, so a caller that composes several
+        session verbs into one (item 334's `Gate.propose` = compile + swap) can
+        report the HALT as the halt rather than as whatever its last step raised.
+        A halt dominates every other verdict, and a verdict is only dominated by
+        something the reporter can SEE."""
+        return bool(getattr(self, "_halted", False))
+
     def _refuse_if_halted(self, verb: str) -> None:
         """Every state-changing verb after an E-Stop refuses (item 443, open
         question 3: the instance is dead and recovery is the only path back).
