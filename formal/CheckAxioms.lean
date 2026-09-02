@@ -45,11 +45,32 @@ import RevL
 -- G6: confinement — admitted code reaches only declared keys.
 #print axioms RevL.G6.confinement
 
--- G7: LIFO-completeness — completeness, soundness, and the LIFO equation.
-#print axioms RevL.G7.teardown_replays_all
-#print axioms RevL.G7.teardown_only_witnessed
-#print axioms RevL.G7.teardown_eq_reversed_inverses
+-- G7 (item 418 step 5): LIFO-completeness over the three-kind teardown
+-- stack, under the activation's verdict. The replay rule read off
+-- docs/design/teardown-contract.md, completeness and soundness relative
+-- to it, the per-kind rows against `backends/python/runtime.py`, the LIFO
+-- equation, the two-phase split, and the concrete witnesses.
+#print axioms RevL.Semantics.replays_or_discharges
+#print axioms RevL.Semantics.phase_lengths_add
 #print axioms RevL.Semantics.teardown_length
+#print axioms RevL.G7.replay_table
+#print axioms RevL.G7.replayed_complete
+#print axioms RevL.G7.teardown_replays_all
+#print axioms RevL.G7.replayed_sound
+#print axioms RevL.G7.teardown_only_witnessed
+#print axioms RevL.G7.commit_discharges_transactional
+#print axioms RevL.G7.commit_discharges_compensation
+#print axioms RevL.G7.commit_replays_only_brackets
+#print axioms RevL.G7.abort_replays_every_transactional
+#print axioms RevL.G7.bracket_replays_under_every_verdict
+#print axioms RevL.G7.teardown_eq_reversed_inverses
+#print axioms RevL.G7.compensations_drain_after_the_proof_pass
+#print axioms RevL.G7.phase1_is_lifo
+#print axioms RevL.G7.phase2_is_lifo
+#print axioms RevL.G7.commit_runs_the_bracket_only
+#print axioms RevL.G7.abort_runs_the_proof_pass_then_the_drain
+#print axioms RevL.G7.verdict_is_load_bearing
+#print axioms RevL.G7.commit_discharge_is_not_vacuous
 
 -- G8: the boundary surface is enumerable (completeness + soundness).
 #print axioms RevL.G8.boundary_enumerates_emissions
@@ -211,3 +232,20 @@ import RevL
 #print axioms RevL.G8Classified.raw_leak_is_on_the_surface
 #print axioms RevL.G8Classified.g8_surface_is_not_universal
 #print axioms RevL.G8Classified.witness_surface_traces_to_its_declaration
+
+-- Item 418 step 8: the non-vacuity witnesses added so that every
+-- registered theorem has a row in formal/scripts/nonvacuity.tsv naming
+-- concrete evidence that its hypotheses are satisfiable. The registry is
+-- checked by formal/scripts/nonvacuity_gate.py.
+#print axioms RevL.G1.g1_not_vacuous
+#print axioms RevL.G3.g3_not_vacuous
+#print axioms RevL.G4.g4_shape_not_vacuous
+#print axioms RevL.G5.registrations_ignores_its_argument
+#print axioms RevL.G6.g6_not_vacuous
+#print axioms RevL.G8.g8_marker_level_not_vacuous
+#print axioms RevL.CrossTier.conformance_hypotheses_are_inhabited
+#print axioms RevL.CapCeilings.capceilings_hypotheses_are_inhabited
+#print axioms RevL.CapCeilings.ceiling_lineage_is_inhabited
+#print axioms RevL.G9.g9_context_hypotheses_are_inhabited
+#print axioms RevL.R4.r4_side_conditions_are_inhabited
+#print axioms RevL.A8.a8_hypotheses_are_inhabited

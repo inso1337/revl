@@ -498,4 +498,51 @@ theorem secret_refusal_is_load_bearing (P : Profile) (G : Grants) :
   · intro h; exact h.2 (by simp)
   · exact ⟨fun _ => rfl, by decide, by decide⟩
 
+
+/-- A manifest whose only capability scope is `fs`. -/
+def trustedCtx : Ctx := ["fs.write"]
+
+/-- The same shape with a web scope declared. -/
+def untrustedCtx : Ctx := ["web.fetch"]
+
+/-- A declared crossing through the `fs` scope. -/
+def fsCrossing : Stmt := .emit (.call "fs.write" [.lit "row"])
+
+/-- **Non-vacuity for the two bridge theorems and the profile hypothesis**
+(roadmap item 418, step 8). `taint_surface_within_declared_context` and
+`no_untrusted_without_a_declared_source` are stated over `TypedIn Γ s`;
+here is a `Γ` and an `s` satisfying it with a NON-EMPTY reach surface, so
+neither is a claim about a statement that touches nothing. The
+untrusted-source side condition is satisfiable AND refutable: it holds of
+`fs.write` and fails of `web.fetch`, so it is a real side condition, and
+`flow_declassifiers_granted`'s `noDeclassify` hypothesis is one a shipped
+profile satisfies. -/
+theorem g9_context_hypotheses_are_inhabited :
+    untrustedAuthor.noDeclassify = true ∧
+    TypedIn trustedCtx fsCrossing ∧
+    stmtHeads fsCrossing = ["fs.write"] ∧
+    (∀ c ∈ trustedCtx, ¬ IsUntrusted (originOfCap c)) ∧
+    ¬ (∀ c ∈ untrustedCtx, ¬ IsUntrusted (originOfCap c)) ∧
+    originOfCap "fs.write" ∈ contextOrigins trustedCtx := by
+  have hty : TypedIn trustedCtx fsCrossing :=
+    TypedIn.emit _ _
+      (ReachIn.call _ "fs.write" _ (by decide) (by
+        intro a ha
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at ha
+        rcases ha with rfl
+        exact ReachIn.lit _ _))
+  refine ⟨rfl, hty, by simp [fsCrossing, stmtHeads, heads], ?_, ?_, by decide⟩
+  · intro c hc
+    simp only [trustedCtx, List.mem_cons, List.not_mem_nil, or_false] at hc
+    subst hc
+    intro hu
+    unfold IsUntrusted at hu
+    rw [show untrustedB (originOfCap "fs.write") = false from by decide] at hu
+    exact Bool.noConfusion hu
+  · intro h
+    have hw : IsUntrusted (originOfCap "web.fetch") := by
+      unfold IsUntrusted
+      decide
+    exact h "web.fetch" (by simp [untrustedCtx]) hw
+
 end RevL.G9
