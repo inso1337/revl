@@ -1,0 +1,14 @@
+// Record field reads and functional record update.
+type Point = { x: Int, y: Int }
+
+fn total(ps: List[Point]) -> Int {
+  var t = 0
+  for (p of ps) { t += p.x + p.y }
+  return t
+}
+
+fn shift_all(ps: List[Point], d: Int) -> List[Point] {
+  var out: List[Point] = []
+  for (p of ps) { out = out.push({ p | x = p.x + d }) }
+  return out
+}

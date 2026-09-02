@@ -39,12 +39,17 @@ demo:
 	REVL_DEMO_REQUIRE=1 backends/python/.venv/bin/python demo/live_systems/run_demo.py
 
 # formal/ — the machine-checked backbone (formal/STATUS.md). run_gate.sh:
-# lake build, then the axioms gate (no theorem may depend on sorryAx — an
-# unfinished proof — or any project-defined axiom; the machine-checked
-# form of "a claim gets a command or it gets softened"), then the harness
-# census. A missing elan/lake skips LOUDLY (never a false green), matching
-# the pre-merge discipline. The logic lives in a script, not recipe lines:
-# each recipe line is its own shell, so an in-Makefile skip-guard cannot
-# stop the target.
+# the import-layering and non-vacuity gates (both toolchain-free, so they
+# always run), then lake build, then the axioms gate (no theorem may
+# depend on sorryAx, an unfinished proof, or on any project-defined axiom;
+# the machine-checked form of "a claim gets a command or it gets
+# softened"), then the harness census. The non-vacuity gate is roadmap
+# item 418 step 8: `#print axioms` is as clean on a theorem whose
+# hypotheses cannot all hold as on a load-bearing one, so every registered
+# theorem carries a row in formal/scripts/nonvacuity.tsv naming its
+# evidence. A missing elan/lake skips LOUDLY (never a false green),
+# matching the pre-merge discipline. The logic lives in a script, not
+# recipe lines: each recipe line is its own shell, so an in-Makefile
+# skip-guard cannot stop the target.
 formal:
 	sh formal/scripts/run_gate.sh

@@ -1,0 +1,11 @@
+// Comparing a Str against a string LITERAL. The comparison itself needs no
+// allocation: rust's `String: PartialEq<&str>` compares in place.
+pub fn str_eq_literal(xs: List[Str]) -> Int {
+  var n = 0
+  for (x of xs) {
+    if (x == "alpha") { n = n + 1 }
+    if (x == "beta") { n = n + 2 }
+    if (x != "gamma") { n = n + 3 }
+  }
+  return n
+}

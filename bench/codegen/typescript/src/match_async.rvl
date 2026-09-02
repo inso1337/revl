@@ -1,0 +1,21 @@
+// Benchmark: a match inside an async fn. The emitter lowers this to an async
+// IIFE plus one async arrow per bound arm, all awaited, even though no arm
+// suspends.
+type Step = Final(Str) | NeedTool(Str)
+
+extern emission async fn fetch_one(p: Str) -> Str = @ts { return p }
+
+pub fn decode(resp: Str) -> Step {
+  if (resp.slice(0, 6) == "FINAL ") {
+    return Final(resp.slice(6, resp.length()))
+  }
+  return NeedTool(resp.slice(0, 10))
+}
+
+pub fn drive(prompt: Str, n: Int) -> Str {
+  if (n <= 0) { return "done" }
+  return match decode(fetch_one(prompt)) {
+    Final(answer) => answer,
+    NeedTool(req) => drive(req, n - 1),
+  }
+}

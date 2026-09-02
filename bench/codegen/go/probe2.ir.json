@@ -1,0 +1,571 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "types": {
+    "Row": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "id": "Int",
+        "name": "Str"
+      }
+    },
+    "Outcome": {
+      "params": [],
+      "kind": "variant",
+      "cases": [
+        {
+          "name": "Ok",
+          "payload": "Row"
+        },
+        {
+          "name": "NotFound",
+          "payload": null
+        },
+        {
+          "name": "Invalid",
+          "payload": "Str"
+        }
+      ]
+    }
+  },
+  "functions": [
+    {
+      "name": "index_of",
+      "params": [
+        {
+          "name": "hay",
+          "type": "Str"
+        },
+        {
+          "name": "needle",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "indexOf",
+            "target": {
+              "kind": "var",
+              "name": "hay"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "needle"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "take",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        },
+        {
+          "name": "a",
+          "type": "Int"
+        },
+        {
+          "name": "b",
+          "type": "Int"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "slice",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "a"
+              },
+              {
+                "kind": "var",
+                "name": "b"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "render",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "to_str",
+            "target": {
+              "kind": "var",
+              "name": "n"
+            },
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "describe",
+      "params": [
+        {
+          "name": "o",
+          "type": "Outcome"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "match",
+            "scrutinee": {
+              "kind": "var",
+              "name": "o"
+            },
+            "arms": [
+              {
+                "pattern": "Ok",
+                "bind": "row",
+                "body": {
+                  "kind": "field",
+                  "target": {
+                    "kind": "var",
+                    "name": "row"
+                  },
+                  "name": "name"
+                },
+                "payload_type": "Row"
+              },
+              {
+                "pattern": "NotFound",
+                "bind": null,
+                "body": {
+                  "kind": "lit",
+                  "value": "not found"
+                }
+              },
+              {
+                "pattern": "Invalid",
+                "bind": "why",
+                "body": {
+                  "kind": "var",
+                  "name": "why"
+                },
+                "payload_type": "Str"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "bucket",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "n"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 0
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "lit",
+                "value": "neg"
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "n"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 0
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "lit",
+                "value": "zero"
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "lit",
+            "value": "pos"
+          }
+        }
+      ]
+    },
+    {
+      "name": "tally",
+      "params": [
+        {
+          "name": "words",
+          "type": "List[Str]"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "m",
+          "value": {
+            "kind": "maplit",
+            "entries": [],
+            "expected": "Map[Str, Int]"
+          },
+          "mutable": true
+        },
+        {
+          "step": "for",
+          "bind": "w",
+          "iterable": {
+            "kind": "var",
+            "name": "words"
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "m",
+              "value": {
+                "kind": "builtin",
+                "method": "set",
+                "target": {
+                  "kind": "var",
+                  "name": "m"
+                },
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "w"
+                  },
+                  {
+                    "kind": "lit",
+                    "value": 1
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "size",
+            "target": {
+              "kind": "var",
+              "name": "m"
+            },
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "find",
+      "params": [
+        {
+          "name": "m",
+          "type": "Map[Str, Int]"
+        },
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "hit",
+          "value": {
+            "kind": "builtin",
+            "method": "lookup",
+            "target": {
+              "kind": "var",
+              "name": "m"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "k"
+              }
+            ]
+          },
+          "mutable": true
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "match",
+            "scrutinee": {
+              "kind": "var",
+              "name": "hit"
+            },
+            "arms": [
+              {
+                "pattern": "Some",
+                "bind": "v",
+                "body": {
+                  "kind": "var",
+                  "name": "v"
+                },
+                "payload_type": "Int"
+              },
+              {
+                "pattern": "None",
+                "bind": null,
+                "body": {
+                  "kind": "bin",
+                  "op": "-",
+                  "left": {
+                    "kind": "lit",
+                    "value": 0
+                  },
+                  "right": {
+                    "kind": "lit",
+                    "value": 1
+                  },
+                  "operands": "Int"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "key_list",
+      "params": [
+        {
+          "name": "m",
+          "type": "Map[Str, Int]"
+        }
+      ],
+      "returns": "List[Str]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "keys",
+            "target": {
+              "kind": "var",
+              "name": "m"
+            },
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "char_at",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        },
+        {
+          "name": "i",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "charCodeAt",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "i"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "maybe",
+      "params": [
+        {
+          "name": "m",
+          "type": "Map[Str, Int]"
+        },
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Opt[Int]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "lookup",
+            "target": {
+              "kind": "var",
+              "name": "m"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "k"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "boxed",
+      "params": [
+        {
+          "name": "xs",
+          "type": "List[Str]"
+        },
+        {
+          "name": "m",
+          "type": "Map[Str, Int]"
+        }
+      ],
+      "returns": "List[Opt[Int]]",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "out",
+          "value": {
+            "kind": "list",
+            "items": [],
+            "expected": "List[Opt[Int]]"
+          },
+          "mutable": true
+        },
+        {
+          "step": "for",
+          "bind": "x",
+          "iterable": {
+            "kind": "var",
+            "name": "xs"
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "out",
+              "value": {
+                "kind": "builtin",
+                "method": "push",
+                "target": {
+                  "kind": "var",
+                  "name": "out"
+                },
+                "args": [
+                  {
+                    "kind": "builtin",
+                    "method": "lookup",
+                    "target": {
+                      "kind": "var",
+                      "name": "m"
+                    },
+                    "args": [
+                      {
+                        "kind": "var",
+                        "name": "x"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "out"
+          }
+        }
+      ]
+    }
+  ]
+}

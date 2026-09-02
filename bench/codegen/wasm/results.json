@@ -1,0 +1,931 @@
+{
+  "programs": {
+    "echo": {
+      "service": "Echoer",
+      "static": {
+        "memory_copy_sites": 1,
+        "alloc_calls": 2,
+        "str_concat_calls": 0,
+        "byte_loop_stores": 0,
+        "funcs_on_path": 6
+      },
+      "modules": {
+        "baseline": {
+          "wat_bytes": 22253,
+          "funcs_defined": 32,
+          "funcs_reachable": 5,
+          "dead_funcs": 27,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_concat",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3503
+        },
+        "memcopy_lift": {
+          "wat_bytes": 22253,
+          "funcs_defined": 32,
+          "funcs_reachable": 5,
+          "dead_funcs": 27,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_concat",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3503
+        },
+        "zerocopy_lift": {
+          "wat_bytes": 22253,
+          "funcs_defined": 32,
+          "funcs_reachable": 5,
+          "dead_funcs": 27,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_concat",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3503
+        },
+        "prune_dead": {
+          "wat_bytes": 3370,
+          "funcs_defined": 5,
+          "funcs_reachable": 5,
+          "dead_funcs": 0,
+          "dead_names": [],
+          "core_wasm_bytes": 523
+        },
+        "static_return_area": {
+          "wat_bytes": 22253,
+          "funcs_defined": 32,
+          "funcs_reachable": 5,
+          "dead_funcs": 27,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_concat",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3503
+        },
+        "combined": {
+          "wat_bytes": 3370,
+          "funcs_defined": 5,
+          "funcs_reachable": 5,
+          "dead_funcs": 0,
+          "dead_names": [],
+          "core_wasm_bytes": 523
+        }
+      },
+      "fuel": {
+        "baseline": {
+          "16": 49,
+          "256": 49,
+          "4096": 49,
+          "slope_per_byte": 0.0
+        },
+        "memcopy_lift": {
+          "16": 49,
+          "256": 49,
+          "4096": 49,
+          "slope_per_byte": 0.0
+        },
+        "zerocopy_lift": {
+          "16": 49,
+          "256": 49,
+          "4096": 49,
+          "slope_per_byte": 0.0
+        },
+        "prune_dead": {
+          "16": 49,
+          "256": 49,
+          "4096": 49,
+          "slope_per_byte": 0.0
+        },
+        "static_return_area": {
+          "16": 49,
+          "256": 49,
+          "4096": 49,
+          "slope_per_byte": 0.0
+        },
+        "combined": {
+          "16": 49,
+          "256": 49,
+          "4096": 49,
+          "slope_per_byte": 0.0
+        }
+      },
+      "delta": {
+        "memcopy_lift": {
+          "16": 0,
+          "256": 0,
+          "4096": 0
+        },
+        "zerocopy_lift": {
+          "16": 0,
+          "256": 0,
+          "4096": 0
+        },
+        "prune_dead": {
+          "16": 0,
+          "256": 0,
+          "4096": 0
+        },
+        "static_return_area": {
+          "16": 0,
+          "256": 0,
+          "4096": 0
+        },
+        "combined": {
+          "16": 0,
+          "256": 0,
+          "4096": 0
+        }
+      },
+      "agrees_with_baseline": [
+        "baseline",
+        "combined",
+        "memcopy_lift",
+        "prune_dead",
+        "static_return_area",
+        "zerocopy_lift"
+      ]
+    },
+    "greet": {
+      "service": "Greeter",
+      "static": {
+        "memory_copy_sites": 3,
+        "alloc_calls": 3,
+        "str_concat_calls": 2,
+        "byte_loop_stores": 0,
+        "funcs_on_path": 7
+      },
+      "modules": {
+        "baseline": {
+          "wat_bytes": 22445,
+          "funcs_defined": 32,
+          "funcs_reachable": 6,
+          "dead_funcs": 26,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3547
+        },
+        "memcopy_lift": {
+          "wat_bytes": 22445,
+          "funcs_defined": 32,
+          "funcs_reachable": 6,
+          "dead_funcs": 26,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3547
+        },
+        "zerocopy_lift": {
+          "wat_bytes": 22445,
+          "funcs_defined": 32,
+          "funcs_reachable": 6,
+          "dead_funcs": 26,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3547
+        },
+        "fused_concat": {
+          "wat_bytes": 23296,
+          "funcs_defined": 33,
+          "funcs_reachable": 6,
+          "dead_funcs": 27,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_concat",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3698
+        },
+        "prune_dead": {
+          "wat_bytes": 4161,
+          "funcs_defined": 6,
+          "funcs_reachable": 6,
+          "dead_funcs": 0,
+          "dead_names": [],
+          "core_wasm_bytes": 665
+        },
+        "combined": {
+          "wat_bytes": 4413,
+          "funcs_defined": 6,
+          "funcs_reachable": 6,
+          "dead_funcs": 0,
+          "dead_names": [],
+          "core_wasm_bytes": 719
+        }
+      },
+      "fuel": {
+        "baseline": {
+          "16": 16591,
+          "4096": 24751,
+          "slope_per_byte": 2.0
+        },
+        "memcopy_lift": {
+          "16": 16591,
+          "4096": 24751,
+          "slope_per_byte": 2.0
+        },
+        "zerocopy_lift": {
+          "16": 16591,
+          "4096": 24751,
+          "slope_per_byte": 2.0
+        },
+        "fused_concat": {
+          "16": 16531,
+          "4096": 20611,
+          "slope_per_byte": 1.0
+        },
+        "prune_dead": {
+          "16": 16591,
+          "4096": 24751,
+          "slope_per_byte": 2.0
+        },
+        "combined": {
+          "16": 16531,
+          "4096": 20611,
+          "slope_per_byte": 1.0
+        }
+      },
+      "delta": {
+        "memcopy_lift": {
+          "16": 0,
+          "4096": 0
+        },
+        "zerocopy_lift": {
+          "16": 0,
+          "4096": 0
+        },
+        "fused_concat": {
+          "16": 60,
+          "4096": 4140
+        },
+        "prune_dead": {
+          "16": 0,
+          "4096": 0
+        },
+        "combined": {
+          "16": 60,
+          "4096": 4140
+        }
+      },
+      "agrees_with_baseline": [
+        "baseline",
+        "combined",
+        "fused_concat",
+        "memcopy_lift",
+        "prune_dead",
+        "zerocopy_lift"
+      ]
+    },
+    "concat6": {
+      "service": "Banner",
+      "static": {
+        "memory_copy_sites": 3,
+        "alloc_calls": 3,
+        "str_concat_calls": 8,
+        "byte_loop_stores": 0,
+        "funcs_on_path": 7
+      },
+      "modules": {
+        "baseline": {
+          "wat_bytes": 22915,
+          "funcs_defined": 32,
+          "funcs_reachable": 6,
+          "dead_funcs": 26,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3603
+        },
+        "memcopy_lift": {
+          "wat_bytes": 22915,
+          "funcs_defined": 32,
+          "funcs_reachable": 6,
+          "dead_funcs": 26,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3603
+        },
+        "zerocopy_lift": {
+          "wat_bytes": 22915,
+          "funcs_defined": 32,
+          "funcs_reachable": 6,
+          "dead_funcs": 26,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3603
+        },
+        "fused_concat": {
+          "wat_bytes": 25140,
+          "funcs_defined": 33,
+          "funcs_reachable": 6,
+          "dead_funcs": 27,
+          "dead_names": [
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_concat",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3977
+        },
+        "combined": {
+          "wat_bytes": 6257,
+          "funcs_defined": 6,
+          "funcs_reachable": 6,
+          "dead_funcs": 0,
+          "dead_names": [],
+          "core_wasm_bytes": 998
+        }
+      },
+      "fuel": {
+        "baseline": {
+          "16": 17264,
+          "1024": 37424,
+          "slope_per_byte": 20.0
+        },
+        "memcopy_lift": {
+          "16": 17264,
+          "1024": 37424,
+          "slope_per_byte": 20.0
+        },
+        "zerocopy_lift": {
+          "16": 17264,
+          "1024": 37424,
+          "slope_per_byte": 20.0
+        },
+        "fused_concat": {
+          "16": 16711,
+          "1024": 20743,
+          "slope_per_byte": 4.0
+        },
+        "combined": {
+          "16": 16711,
+          "1024": 20743,
+          "slope_per_byte": 4.0
+        }
+      },
+      "delta": {
+        "memcopy_lift": {
+          "16": 0,
+          "1024": 0
+        },
+        "zerocopy_lift": {
+          "16": 0,
+          "1024": 0
+        },
+        "fused_concat": {
+          "16": 553,
+          "1024": 16681
+        },
+        "combined": {
+          "16": 553,
+          "1024": 16681
+        }
+      },
+      "agrees_with_baseline": [
+        "baseline",
+        "combined",
+        "fused_concat",
+        "memcopy_lift",
+        "zerocopy_lift"
+      ]
+    },
+    "listid": {
+      "service": "Ids",
+      "static": {
+        "memory_copy_sites": 1,
+        "alloc_calls": 1,
+        "str_concat_calls": 0,
+        "byte_loop_stores": 0,
+        "funcs_on_path": 5
+      },
+      "modules": {
+        "baseline": {
+          "wat_bytes": 23126,
+          "funcs_defined": 34,
+          "funcs_reachable": 4,
+          "dead_funcs": 30,
+          "dead_names": [
+            "$__canon_lift_str",
+            "$__canon_lower_str",
+            "$alloc_str",
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_concat",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3635
+        },
+        "list_bulk": {
+          "wat_bytes": 23126,
+          "funcs_defined": 34,
+          "funcs_reachable": 4,
+          "dead_funcs": 30,
+          "dead_names": [
+            "$__canon_lift_str",
+            "$__canon_lower_str",
+            "$alloc_str",
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_add",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_concat",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3635
+        },
+        "prune_dead": {
+          "wat_bytes": 3357,
+          "funcs_defined": 4,
+          "funcs_reachable": 4,
+          "dead_funcs": 0,
+          "dead_names": [],
+          "core_wasm_bytes": 473
+        },
+        "combined": {
+          "wat_bytes": 3357,
+          "funcs_defined": 4,
+          "funcs_reachable": 4,
+          "dead_funcs": 0,
+          "dead_names": [],
+          "core_wasm_bytes": 473
+        }
+      },
+      "fuel": {
+        "baseline": {
+          "4": 100,
+          "1024": 8260,
+          "slope_per_byte": 8.0
+        },
+        "list_bulk": {
+          "4": 100,
+          "1024": 8260,
+          "slope_per_byte": 8.0
+        },
+        "prune_dead": {
+          "4": 100,
+          "1024": 8260,
+          "slope_per_byte": 8.0
+        },
+        "combined": {
+          "4": 100,
+          "1024": 8260,
+          "slope_per_byte": 8.0
+        }
+      },
+      "delta": {
+        "list_bulk": {
+          "4": 0,
+          "1024": 0
+        },
+        "prune_dead": {
+          "4": 0,
+          "1024": 0
+        },
+        "combined": {
+          "4": 0,
+          "1024": 0
+        }
+      },
+      "agrees_with_baseline": [
+        "baseline",
+        "combined",
+        "list_bulk",
+        "prune_dead"
+      ]
+    },
+    "scalar": {
+      "service": "Doubler",
+      "static": {
+        "memory_copy_sites": 0,
+        "alloc_calls": 0,
+        "str_concat_calls": 0,
+        "byte_loop_stores": 0,
+        "funcs_on_path": 3
+      },
+      "modules": {
+        "baseline": {
+          "wat_bytes": 22265,
+          "funcs_defined": 33,
+          "funcs_reachable": 4,
+          "dead_funcs": 29,
+          "dead_names": [
+            "$__canon_lift_str",
+            "$__canon_lower_str",
+            "$alloc_str",
+            "$int32_add",
+            "$int32_mul",
+            "$int32_narrow",
+            "$int32_sub",
+            "$int_div_euclid",
+            "$int_div_floor",
+            "$int_mod",
+            "$int_mul",
+            "$int_sub",
+            "$int_to_str",
+            "$list_concat",
+            "$list_push",
+            "$list_slice",
+            "$str_char_at",
+            "$str_char_code_at",
+            "$str_concat",
+            "$str_cp_char_at",
+            "$str_cp_char_code_at",
+            "$str_cp_length",
+            "$str_cp_offset",
+            "$str_cp_slice",
+            "$str_ends_with",
+            "$str_eq",
+            "$str_slice",
+            "$str_starts_with",
+            "$str_to_int"
+          ],
+          "core_wasm_bytes": 3566
+        },
+        "prune_dead": {
+          "wat_bytes": 2843,
+          "funcs_defined": 4,
+          "funcs_reachable": 4,
+          "dead_funcs": 0,
+          "dead_names": [],
+          "core_wasm_bytes": 451
+        },
+        "combined": {
+          "wat_bytes": 2885,
+          "funcs_defined": 4,
+          "funcs_reachable": 4,
+          "dead_funcs": 0,
+          "dead_names": [],
+          "core_wasm_bytes": 468
+        }
+      },
+      "fuel": {
+        "baseline": {
+          "0": 11
+        },
+        "prune_dead": {
+          "0": 11
+        },
+        "combined": {
+          "0": 11
+        }
+      },
+      "delta": {
+        "prune_dead": {
+          "0": 0
+        },
+        "combined": {
+          "0": 0
+        }
+      },
+      "agrees_with_baseline": [
+        "baseline",
+        "combined",
+        "prune_dead"
+      ]
+    }
+  }
+}

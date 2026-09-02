@@ -339,6 +339,48 @@ def _activity_call(call: dict, scope: "_Scope") -> str:
     return f"{_activity_name(call)}({args})"
 
 
+def _redaction_args(node: Any, scope: "_Scope") -> str:
+    """A lazy TS thunk over the runtime values `node` (a compensate call or an
+    undo expression) touches, for the residue-error redaction funnel (item 421
+    F7): a failed compensation's error text can embed any of these values, so
+    `redactResidueError` scrubs them out of it before the residue record, the
+    `ApplicationFailure.details` Temporal persists, and the residue query ever
+    see the text.
+
+    Walks every `name`/`var`/`config`/`field` leaf reachable in the node (the
+    same shape `_check_expr` already walks for the allowlist refusal), so a
+    literal argument contributes nothing (an author-written constant is not a
+    secret) while a bound variable — including the write-ahead referent itself,
+    e.g. `undo r_close(h)` — does. Rendered as a closure (`() => [...]`), not a
+    value captured at push time: the write-ahead pattern pushes an undo's
+    registration BEFORE the acquire it guards has run, so the referent it
+    closes over is only assigned afterwards, and reading it eagerly here would
+    freeze it at its pre-acquire `undefined`."""
+    exprs: list[str] = []
+    seen: set = set()
+
+    def walk(n: Any) -> None:
+        if isinstance(n, list):
+            for item in n:
+                walk(item)
+            return
+        if not isinstance(n, dict):
+            return
+        kind = n.get("kind")
+        if kind in ("name", "var", "config", "field"):
+            text = _t_expr(n, scope)
+            if text not in seen:
+                seen.add(text)
+                exprs.append(text)
+            return  # `_t_expr` already rendered a field's target chain whole
+        for value in n.values():
+            if isinstance(value, (dict, list)):
+                walk(value)
+
+    walk(node)
+    return "() => [" + ", ".join(exprs) + "]"
+
+
 # ------------------------------------------------------------ activity registry
 
 class _Activity:
@@ -400,7 +442,8 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", services: dict,
                     # compensation is a safe no-op if the forward never landed.
                     body.append(
                         f"{indent}saga.push({{ name: {_string(_crossing_label(comp_call))}, "
-                        f"run: () => {_activity_call(comp_call, scope)} }})  "
+                        f"run: () => {_activity_call(comp_call, scope)}, "
+                        f"args: {_redaction_args(comp_call.get('args') or [], scope)} }})  "
                         f"// write-ahead: registered before the forward await")
                 body.append(f"{indent}await {_activity_call(fwd, scope)}")
             elif kind in ("effect", "let-effect"):
@@ -418,13 +461,15 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", services: dict,
                     body.append(
                         f"{indent}saga.push({{ name: {_string(bind + '.undo')}, "
                         f"run: async () => {{ if ({bind} !== undefined) "
-                        f"{{ {_t_expr(step['undo'], scope)} }} }} }})  "
+                        f"{{ {_t_expr(step['undo'], scope)} }} }}, "
+                        f"args: {_redaction_args(step['undo'], scope)} }})  "
                         f"// write-ahead: no-op if the acquire never landed")
                     body.append(f"{indent}{bind} = await {_t_expr(acquire, scope)}")
                 elif step.get("undo") is not None:
                     body.append(
                         f"{indent}saga.push({{ name: {_string('undo')}, "
-                        f"run: async () => {{ {_t_expr(step['undo'], scope)} }} }})  "
+                        f"run: async () => {{ {_t_expr(step['undo'], scope)} }}, "
+                        f"args: {_redaction_args(step['undo'], scope)} }})  "
                         f"// write-ahead: registered before the forward await")
                     body.append(f"{indent}await {_t_expr(acquire, scope)}")
                 elif bind is not None:
@@ -484,7 +529,7 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", services: dict,
     lines.append("      // startToCloseTimeout, NOT this budget (HIGH 1).")
     lines.append("      try { await step.run() }")
     lines.append("      catch (e) { residue.push({ kind: 'compensation-residue', "
-                 "name: step.name, error: String(e) }) }")
+                 "name: step.name, error: redactResidueError(e, step.args()) }) }")
     lines.append("    }")
     lines.append("    // Residue sink (attack 7): a durable record, plus the same")
     lines.append("    // envelope on the workflow-failure details, so a failed run")
@@ -566,9 +611,55 @@ def emit_temporal(ir: dict, *, runtime_import: str = "@temporalio/workflow") -> 
         "// workflow-side BETWEEN compensations (HIGH 1). Never a per-activity timeout.",
         f"const COMPENSATION_BUDGET_MS = {_COMPENSATION_BUDGET_MS}",
         "",
-        "type SagaStep = { name: string; run: () => Promise<unknown> }",
+        "type SagaStep = { name: string; run: () => Promise<unknown>; "
+        "args: () => unknown[] }",
         "type Residue = Record<string, unknown>",
         "type SagaReport = { outstanding: Residue[]; worldRemaining: number; proof: string }",
+        "",
+        "// A compensation activity's error text is HOST TEXT this workflow did not",
+        "// write, and it crosses into ApplicationFailure.details, which PERSISTS IN",
+        "// TEMPORAL HISTORY for the namespace retention period, plus the residue",
+        "// record and the live residue query (item 421 F7). `Secret[Str]` erases to",
+        "// plain `string` in RevlActivities, so a compensation implementer gets no",
+        "// type-level warning before a confidential value ends up embedded in a",
+        "// thrown Error's message (e.g. `throw new Error('close failed for '+h)`).",
+        "// Mirror of backends/typescript/bridge.ts's seamFailure/REDACTED_ARG (item",
+        "// 421 F5): the values this compensation call was made with (SagaStep.args,",
+        "// evaluated lazily so a write-ahead referent is read at failure time, not",
+        "// frozen at its pre-acquire undefined) are scrubbed out of the error text",
+        "// before it is kept anywhere, so the exception TYPE and the sentence around",
+        "// it survive but the caller's own bytes do not.",
+        "const REDACTED_ARG = '<redacted:arg>'",
+        "const MIN_MATCHABLE_ARG = 3",
+        "function argNeedles(value: unknown, into: Set<string>): void {",
+        "  if (value === null || value === undefined || typeof value === 'boolean') return",
+        "  if (typeof value === 'string') {",
+        "    if (value.length >= MIN_MATCHABLE_ARG) into.add(value)",
+        "    return",
+        "  }",
+        "  if (typeof value === 'number' || typeof value === 'bigint') {",
+        "    const form = String(value)",
+        "    if (form.length >= MIN_MATCHABLE_ARG) into.add(form)",
+        "    return",
+        "  }",
+        "  if (Array.isArray(value)) {",
+        "    for (const item of value) argNeedles(item, into)",
+        "    return",
+        "  }",
+        "  if (typeof value === 'object') {",
+        "    for (const item of Object.values(value as Record<string, unknown>)) "
+        "argNeedles(item, into)",
+        "  }",
+        "}",
+        "function redactResidueError(error: unknown, args: unknown[]): string {",
+        "  let text = String(error)",
+        "  const needles = new Set<string>()",
+        "  argNeedles(args ?? [], needles)",
+        "  for (const needle of [...needles].sort((a, b) => b.length - a.length)) {",
+        "    if (needle && text.includes(needle)) text = text.split(needle).join(REDACTED_ARG)",
+        "  }",
+        "  return text",
+        "}",
         "",
     ]
     out.extend(rendered)

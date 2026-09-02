@@ -1,0 +1,3 @@
+// F6: `Map.keys()`. The java stdlib helper sorts a fresh ArrayList and then
+// copies it again through `List.copyOf`.
+fn ks(m: Map[Str, Int]) -> List[Str] { return m.keys() }

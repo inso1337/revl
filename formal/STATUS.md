@@ -1,6 +1,9 @@
 # revl formal backbone — proof status
 
-Rules of the layering (enforced by imports, not by hope):
+Rules of the layering. Roadmap item 418 recorded that this line used to
+read "enforced by imports, not by hope" while nothing checked it;
+`scripts/layering_gate.py` checks it now, and runs as the first step of
+`scripts/run_gate.sh`:
 
 - **L0** (`RevL.Syntax`, `RevL.Typing`, `RevL.Semantics`,
   `RevL.Manifest`, `RevL.Boundary` — the last two say so in their own
@@ -17,6 +20,16 @@ Rules of the layering (enforced by imports, not by hope):
   whitelisted; anything else fails `make formal`. (`#print axioms` on a
   `sorry`'d declaration reports `sorryAx`, so an unfinished proof can
   never pass.)
+- A theorem also needs a row in `scripts/nonvacuity.tsv` naming the
+  concrete evidence that its hypotheses can all hold at once (roadmap item
+  418, step 8). The axioms gate cannot tell a load-bearing theorem from a
+  vacuous one: `#print axioms` is just as clean on a theorem whose
+  hypotheses are unsatisfiable. `scripts/nonvacuity_gate.py` fails on a
+  registered theorem with no row, on a witness that is not itself
+  registered, and on a self-witnessing row. Two rows are marked
+  `contentless` rather than witnessed, because they are true by definition
+  rather than by any property of their subject; the gate prints both on
+  every run so they cannot be quietly counted as proof.
 
 ## Theorem status
 
@@ -36,12 +49,29 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.G3.mutual_cycle_refused` | G3 — non-vacuity | **proved** | `propext` | `g3_dependency_cycle.rvl` refused in both orderings |
 | `RevL.G3.layering_exists_for_admitted` | G3 — non-vacuity | **proved** | `propext, Quot.sound` | the certificate is reachable, not just refutable |
 | `RevL.G4.inverse_or_emit` | G4 — inverse-or-emit (Def. 8) | **proved (shape-level)** | none | *weaker*: content is the shape of `Typed`, which has no `raw` constructor, so the same sentence holds of a relation admitting nothing. **Superseded by `RevL.G4Classified.inverse_or_emit_classified`** (item 418 step 4); kept as the syntactic statement |
-| `RevL.G5.teardown_registers_nothing` | G5 — teardown registers nothing | **proved (shape-level)** | none | *weaker*: `registrations` ignores its argument (constant zero), so a `sneakyUndo` calling `db.insert` counts 0. **Superseded by `RevL.G5Classified.inverse_reaches_no_emission`** (item 418 step 4); kept as the grammar-level statement |
+| `RevL.G5.teardown_registers_nothing` | G5, teardown registers nothing | **proved, and CONTENTLESS** | none | `registrations` ignores its argument (constant zero), so a `sneakyUndo` calling `db.insert` counts 0 and the conclusion holds by definition rather than by any property of undo bodies. `RevL.G5.registrations_ignores_its_argument` proves the review's own probe, so the emptiness is on the record. **Superseded by `RevL.G5Classified.inverse_reaches_no_emission`** (item 418 step 4); kept as the grammar-level statement |
 | `RevL.G6.confinement` | G6 — confinement (Def. 48) | **proved** | `propext, Quot.sound` | content is the shape of `TypedIn`/`ReachIn` |
-| `RevL.G7.teardown_replays_all` | G7 — LIFO-completeness (Thm. 16) | **proved** | `propext, Quot.sound` | every witnessed inverse is replayed |
-| `RevL.G7.teardown_only_witnessed` | G7 | **proved** | `propext, Quot.sound` | nothing unwitnessed is replayed |
-| `RevL.G7.teardown_eq_reversed_inverses` | G7 | **proved** | `propext` | the LIFO equation; positions via `List.getElem_reverse` |
-| `RevL.Semantics.teardown_length` | G7 — length form | **proved** | `propext` | one replay per witnessed effect |
+| `RevL.Semantics.replays_or_discharges` | G7 (item 418 step 5) | **proved** | `propext` | replayed and discharged are complements, per kind and verdict |
+| `RevL.Semantics.phase_lengths_add` | G7 (item 418 step 5) | **proved** | `propext, Quot.sound` | the two phases partition the replaying entries |
+| `RevL.Semantics.teardown_length` | G7, length form | **proved** | `propext, Quot.sound` | one replay per entry *the verdict replays*. The pre-step-5 row said "one replay per witnessed effect", which over-counted every commit carrying a transactional entry |
+| `RevL.G7.replay_table` | G7 (item 418 step 5) | **proved** | none | the teardown contract's replay rows, computed per kind and verdict |
+| `RevL.G7.replayed_complete` | G7, completeness | **proved** | `propext` | every entry the verdict replays is on the replay list |
+| `RevL.G7.teardown_replays_all` | G7 (LIFO-completeness, Thm. 16) | **proved** | `propext, Quot.sound` | the same at the inverse level. **Corrected in item 418 step 5**: the pre-step-5 statement had no hypothesis and was therefore false of a committing activation carrying a transactional entry |
+| `RevL.G7.replayed_sound` | G7, soundness | **proved** | `propext` | the replay list holds only registered entries this verdict replays |
+| `RevL.G7.teardown_only_witnessed` | G7 | **proved** | `propext, Quot.sound` | the same at the inverse level, now also excluding what the verdict discharges |
+| `RevL.G7.commit_discharges_transactional` | G7 vs `runtime.py` | **proved** | `propext` | a clean commit never replays a witnessed inverse. This is the row the pre-step-5 G7 contradicted |
+| `RevL.G7.commit_discharges_compensation` | G7 vs `runtime.py` (item 247) | **proved** | `propext` | a clean commit never fires a compensation |
+| `RevL.G7.commit_replays_only_brackets` | G7 | **proved** | `propext` | a clean commit replays brackets and nothing else |
+| `RevL.G7.abort_replays_every_transactional` | G7 vs `runtime.py` | **proved** | `propext` | the other half of the `_Transactional` branch |
+| `RevL.G7.bracket_replays_under_every_verdict` | G7 | **proved** | `propext` | releasing an acquired handle is always right |
+| `RevL.G7.teardown_eq_reversed_inverses` | G7 | **proved** | `propext` | the LIFO equation, per phase; positions via `List.getElem_reverse` |
+| `RevL.G7.compensations_drain_after_the_proof_pass` | G7, the phase split | **proved** | `propext` | the replay is a compensation-free prefix then an all-compensation suffix |
+| `RevL.G7.phase1_is_lifo` | G7, order within a phase | **proved** | `propext` | undoing the run order gives back a sub-sequence of the registration order |
+| `RevL.G7.phase2_is_lifo` | G7, order within a phase | **proved** | `propext` | the same for the drain |
+| `RevL.G7.commit_runs_the_bracket_only` | G7, non-vacuity | **proved** | none | one stack, all three kinds: the commit replay is exactly the bracket inverse |
+| `RevL.G7.abort_runs_the_proof_pass_then_the_drain` | G7, non-vacuity | **proved** | none | the same stack on abort: proof pass LIFO, then the compensation that was registered LAST |
+| `RevL.G7.verdict_is_load_bearing` | G7, non-vacuity | **proved** | none | the two replays of one stack differ |
+| `RevL.G7.commit_discharge_is_not_vacuous` | G7, non-vacuity | **proved** | `propext` | the discharged entry is on the stack the theorem quantifies over |
 | `RevL.G8.boundary_enumerates_emissions` | G8 — boundary enumerable (§6.1) | **proved (shape-level)** | `propext, Quot.sound` | *weaker*: completeness over the syntactic `emit` marker. **Superseded by `RevL.G8Classified.surface_enumerates_reached_crossings`** (item 418 step 4); kept as the marker-level statement |
 | `RevL.G8.boundary_only_declared` | G8 | **proved (shape-level)** | `propext, Quot.sound` | *weaker*: rests on `boundaryOf (.effect _ _) = []` **by definition**, so a typed `.effect` carrying an emission has an empty surface. **Superseded by `RevL.G8Classified.surface_only_declared_crossings`** (item 418 step 4); kept as the marker-level statement |
 | `RevL.CapCeilings.cap_order_partial` | item 294 — the `(T,P)` capability order | **proved** | `propext, Quot.sound` | `covers` is reflexive, transitive, antisymmetric |
@@ -144,6 +174,19 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.G8Classified.raw_leak_is_on_the_surface` | G8 — the dropped hypothesis | **proved** | `propext, Quot.sound` | a `raw` leak is enumerated without needing `Typed` to exclude it |
 | `RevL.G8Classified.g8_surface_is_not_universal` | G8 — non-vacuity | **proved** | `propext, Quot.sound` | a body on the surface, a non-empty body off it |
 | `RevL.G8Classified.witness_surface_traces_to_its_declaration` | G8 — non-vacuity | **proved** | `propext, Quot.sound` | the entry `db_insert` traces through a `fn` to the `emission` that owns it |
+
+| `RevL.G1.g1_not_vacuous` | G1, non-vacuity (item 418 step 8) | **proved** | `propext, Classical.choice, Quot.sound` | a component admitted under its own `requires`, and the same body neither admitted nor confined under a smaller manifest |
+| `RevL.G3.g3_not_vacuous` | G3, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | a link, a layering, a dependency path with a strict rank drop, and a genuine self-path on the cyclic composition |
+| `RevL.G4.g4_shape_not_vacuous` | G4, non-vacuity (step 8) | **proved** | none | both conclusion branches inhabited, and the `raw` branch shown to close because `Typed` lacks a constructor |
+| `RevL.G5.registrations_ignores_its_argument` | G5, the FINDING (step 8) | **proved** | none | the review's constant-function probe, proved, plus an undo body that calls an emission and still scores zero |
+| `RevL.G6.g6_not_vacuous` | G6, non-vacuity (step 8) | **proved** | `propext, Classical.choice, Quot.sound` | an admitted statement with a non-empty reach surface, and a refused one |
+| `RevL.G8.g8_marker_level_not_vacuous` | G8, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | a typed body with a non-empty surface, beside the `effect` whose surface is empty by definition |
+| `RevL.CrossTier.conformance_hypotheses_are_inhabited` | item 133, non-vacuity (step 8) | **proved** | `propext` | two conformant tiers and a well-annotated map IR agreeing on a re-ordered non-empty value |
+| `RevL.CapCeilings.capceilings_hypotheses_are_inhabited` | items 294/66/260, non-vacuity (step 8) | **proved** | `propext, Classical.choice, Quot.sound` | a `Lineage` built by `Lineage.spawn` from a real program spawn edge, plus `Descends`, `Resolves`, `NameableEmission`, a counter run and a refused overdraw |
+| `RevL.CapCeilings.ceiling_lineage_is_inhabited` | item 260, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | a spawn edge narrowing a `calls` ceiling from 3 to 2, so the lineage and the ceiling side condition hold together |
+| `RevL.G9.g9_context_hypotheses_are_inhabited` | G9 + G6, non-vacuity (step 8) | **proved** | `propext, Classical.choice, Quot.sound` | a `TypedIn` crossing with a non-empty head list, an untrusted-free scope and an untrusted one |
+| `RevL.R4.r4_side_conditions_are_inhabited` | R4, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | freshness and disjointness hold at both traces, with the emitted set empty on one and not the other |
+| `RevL.A8.a8_hypotheses_are_inhabited` | A8, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | `SemLog`, a fork-free log, a discharged seq, and a `WAFrom` run that really fires an undeclared inverse under a unique seq space |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -176,6 +219,62 @@ The point of the second change is `RevL.G3.linkOK_layered`, the bridge
 `no_dependency_cycles`' layering hypothesis was not establishable from
 anything the model admitted, so "cycles rejected" had no proof path;
 `RevL.G3.linkOK_no_cycles` now states G3 with no layering assumed.
+
+### G7 restated over the three-kind teardown stack (roadmap item 418, step 5)
+
+`RevL.Semantics` used to carry one entry kind and define
+
+    teardown log = log.reverse.map (·.inverse)
+
+so `G7.teardown_replays_all` said, with no hypothesis, that every
+accumulated inverse is replayed on every teardown. Item 418's C3 recorded
+that as *false of revl*, and it was:
+`backends/python/runtime.py`'s `_Transactional.__call__` reads the owning
+frame's commit bit and, on a clean COMMIT, **discharges** the entry. The
+inverse never runs and the witness is dropped, because the mutation is the
+deliverable. Only an ABORT replays it.
+
+L0 now carries what `docs/design/teardown-contract.md` specifies, the
+table under "the three entry kinds, one stack" and the two-phase algorithm
+under "the teardown algorithm":
+
+| | `bracket` | `transactional` (243) | `compensation` (247) |
+|---|---|---|---|
+| clean commit | replays | discharged | discharged |
+| abort | replays, Phase 1 | replays, Phase 1 | runs in Phase 2 |
+
+`EntryKind`, `Verdict`, `EntryKind.replaysUnder`, `phase1`, `phase2`,
+`replayed`, `discharged` and `teardown` are the model; `G7.replay_table`
+pins the six cells so a change to the rule has to face them. The
+guarantees are then stated relative to the kind and the verdict:
+completeness and soundness over the entries the verdict replays
+(`replayed_complete` / `replayed_sound`, and their inverse-level forms
+`teardown_replays_all` / `teardown_only_witnessed`), the per-kind rows
+against the runtime (`commit_discharges_transactional`,
+`commit_discharges_compensation`, `commit_replays_only_brackets`,
+`abort_replays_every_transactional`,
+`bracket_replays_under_every_verdict`), the LIFO equation per phase, the
+phase split (`compensations_drain_after_the_proof_pass`, the contract's
+"all Phase-1 inverses complete before any compensation starts"), and LIFO
+within a phase.
+
+The witness is one activation stack carrying all three kinds, with the
+acquisition registered first, the witnessed mutation second and the
+compensation LAST. A verdict-blind teardown would replay the mutation on a
+clean commit; a single-phase LIFO walk would fire the compensation first.
+Neither happens: the commit replay is exactly `[release_handle]` and the
+abort replay is exactly `[db_delete, release_handle, send_apology]`.
+
+**Deliberately not modelled**, so the reach of these theorems is not
+overstated: Phase-1 continue-and-record and its two residue severities
+(`bracket-fault` / `restore-residue`), the Phase-2 budget and its
+`compensation-residue` skips, deferred method-registered entries
+(`_deferred_transactional`, item 318), escrow under a pending session
+verdict (item 245), and cascading abort across activations. This model
+says which entries run and in what order, not what happens when one of
+them fails. The failure and crash side lives in
+`RevL.Theorems.A8_WalDischarge` and `RevL.Theorems.R4_NoResidue`, over the
+WAL rather than over the stack.
 
 ## Item 133 — cross-tier agreement (`RevL.Theorems.CrossTier`)
 
@@ -248,7 +347,9 @@ refused purely because the untrusted author minted it itself.
 Item 418's adversarial review found G4/G5/G6/G8 to be tautologies over a
 chosen inductive (the identical statements hold of a typing relation
 admitting nothing) and only 3 of 25 theorems to carry non-vacuity
-evidence. G9 carries four guards, each a registered theorem:
+evidence. Step 8 closed that count for the whole layer, in
+`scripts/nonvacuity.tsv`; G9 was already ahead of it, carrying four
+guards, each a registered theorem:
 `g9_not_vacuous` and `secret_rules_not_vacuous` exhibit **inhabited**
 flows; `authority_refusal_is_not_universal` exhibits ONE declassifier-free
 flow that a disclosure sink admits and an authority sink refuses, so the
@@ -387,7 +488,6 @@ verdict taken at a declared inverse constrain every call beneath it.
   C4 applies here as it does to G9: the lattice model is not covered by
   that gate.
 
-## Differential oracle (two re-statements, not the model)
 ## Differential oracle (the proved model against the shipped checker)
 
 `harness/diff_corpus.py` + `harness/Oracle.lean`: parse every corpus
@@ -668,9 +768,10 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    integer-valued capability parameter, so the two agree vacuously — but
    the comparison exists, so the first one to appear is checked rather
    than ignored.
-3. **L3**: `Trusted[T]`/`Secret[T]` non-interference — **done**, see
-   *G9* below — and WAL commit/abort discharge, still deferred (a runtime
-   state-machine refinement). The taint half turned out **not** to need an
+3. **L3**: `Trusted[T]`/`Secret[T]` non-interference. **Done**, see *G9*
+   below. (The WAL half is item 4; these two used to be one entry numbered
+   3 twice, with the taint half called done in one and deferred in the
+   other.) The taint half turned out **not** to need an
    L0 change: taint is a property of a value flowing along a path, L0's
    `Ctx`/`ReachIn` is a property of which keys a statement touches, and
    the two meet at one bridge (`taint._origin_of`: the origin a crossing
@@ -678,20 +779,19 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    went into the new L1 farm `RevL.Lemmas.TaintLemmas` and the guarantees
    into the new L2 file `RevL.Theorems.G9_NoAuthorityFromUntrusted`,
    exactly as items 294/66/260 went into `CapLemmas` + `CapCeilings`.
-   **L0 is untouched and every pre-existing theorem's axiom set is
-   unchanged.** What is proved is the flow *rule*; what remains open is
+   **L0 was untouched by this work and no pre-existing theorem's axiom set
+   moved.** (Item 418 step 5 later did change L0, in `RevL.Semantics`; that
+   is scoped to G7 and is described above.) What is proved is the flow
+   *rule*; what remains open is
    the *coverage* of the checker's walk, which needs the L0 growth item
    418's ordered exit schedules ahead of it — see the G9 section for the
    named obligation and why it is not statable today.
-3. **L3**: `Trusted[T]`/`Secret[T]` non-interference (still deferred —
-   taint is a checker feature, not part of the current core) and **WAL
-   commit/abort discharge — the second half is now done**, as R4 and A8
-   in the table above.
+4. **WAL commit/abort discharge. Done**, as R4 and A8 in the table above.
 
-   The WAL half needed an operational semantics, which roadmap item 418
-   correctly says L0 does not have, so it was built additively in the L1
-   farm `RevL.Lemmas.WalLemmas` rather than by editing L0: **L0 is
-   untouched**. The farm carries (a) the record set, decision function
+   This needed an operational semantics, which roadmap item 418 correctly
+   said L0 did not have, so it was built additively in the L1 farm
+   `RevL.Lemmas.WalLemmas` rather than by editing L0: **L0 was untouched by
+   this work**. The farm carries (a) the record set, decision function
    and roll-back walk of `src/revl/wal.py` + `src/revl/recovery.py`, (b)
    a `Run`/`RunStep` model in which a crash is a *prefix*, and (c) a
    five-form small-step relation `SemStep`/`SemSteps` in which taking an
@@ -735,6 +835,79 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    is visible. "Never mixed" is about the VERDICT: per-seq dispositions
    are heterogeneous by design, and `mixed_disposition_admitted` pins
    that reading.
+
+## Non-vacuity per theorem, and the layering gate (item 418, step 8)
+
+Two things the axioms gate cannot see, now checked by
+`scripts/run_gate.sh` before it ever calls `lake`.
+
+### `scripts/nonvacuity.tsv` + `scripts/nonvacuity_gate.py`
+
+`#print axioms` is exactly as clean on a theorem whose hypotheses cannot
+all hold as on a load-bearing one. Item 418's review found G4/G5/G6/G8 to
+be tautologies over a chosen inductive and counted "only 3 of 25 theorems
+carry non-vacuity evidence". So every theorem registered in
+`CheckAxioms.lean` now has a row in `scripts/nonvacuity.tsv` naming the
+evidence, in one of four kinds:
+
+- **instance** (85 rows): the hypotheses are jointly satisfiable, and the
+  named witness theorems exhibit a concrete instance satisfying them.
+- **necessity** (8 rows): the theorem refuses, so joint satisfiability is
+  precisely what it denies. The witnesses show each hypothesis satisfiable
+  on its own and the refusal not universal. `G3.linkOK_no_cycles` and
+  `R4.abort_leaves_no_residue` are the shape.
+- **concrete** (57 rows): the theorem is itself a computation on concrete
+  data, so it has no hypotheses to satisfy. The gate accepts this label
+  **only** when some other row cites the theorem as its witness, so it
+  cannot be used to opt out.
+- **contentless** (2 rows): true by definition rather than by any property
+  of the subject. This is a finding, not a pass, and the gate prints both
+  rows on every run.
+
+The gate also fails on a row whose witness is not itself a registered
+theorem (so witnesses are axiom-checked like everything else), on a
+self-witnessing row, on a stale row, and on `CheckAxioms.lean` and
+`run_gate.sh` disagreeing about which theorems are registered. That last
+check is the one item 418's MEDIUM list wanted:
+`Semantics.teardown_length` was once listed as proved in this file and
+registered in neither.
+
+**The two contentless rows, stated plainly** because they contradict how
+the surrounding prose used to read:
+
+- `RevL.G5.teardown_registers_nothing`. `registrations` is the constant
+  zero function, so the theorem is true of every undo body including one
+  whose only statement calls an emission.
+  `RevL.G5.registrations_ignores_its_argument` proves the review's own
+  probe, `forall u v, registrations u = registrations v`. The theorem is
+  not *vacuous* (it has no hypotheses to be unsatisfiable) but it is
+  *empty*: its conclusion follows from the definition and from nothing
+  about undo bodies. The load-bearing G5 is `RevL.G5Classified`.
+- `RevL.A8.outcome_trichotomy`. `Outcome` has three constructors, so this
+  is definitional. It was already marked so in the table; the registry
+  makes the marking machine-checked rather than editorial.
+
+Nothing else in the registered set turned out to be vacuous. Writing the
+witnesses did surface one real gap, now closed: the derived capability
+lineage over the corpus (`wProgGood`) declares **no ceiling anywhere**, so
+`lineage_ceiling_le` and `budget_never_exceeds_root_ceiling` had no
+instance in which their `Lineage` hypothesis and their ceiling side
+condition held together. `RevL.CapCeilings.ceiling_lineage_is_inhabited`
+supplies one, a spawn edge narrowing `calls` from 3 to 2. Until it existed
+those two theorems were conditioned on a pair of hypotheses this layer had
+never exhibited jointly.
+
+### `scripts/layering_gate.py`
+
+This file's opening line used to call the L0/L1/L2 layering "enforced by
+imports, not by hope", and item 418 recorded that nothing enforced it. The
+script parses every `import` under `formal/RevL/` and fails on an L0 file
+importing outside L0, an L1 farm file importing anything but L0 or
+importing another farm file, and an L2 file importing another L2 file. It
+also fails when an L1 or L2 module is missing from `RevL.lean`, because a
+module outside the root import is a module outside the build and therefore
+outside `CheckAxioms.lean`. The tree passes today: 5 L0, 7 L1, 16 L2
+modules, no upward or sideways import.
 
 ## Conventions for worker sessions
 

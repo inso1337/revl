@@ -1,0 +1,13 @@
+// Positional character scanning via `slice` — the item-277/282 residual,
+// re-measured here so the audit's coverage is honest about it.
+pub fn slice_scan(s: Str) -> Int {
+  var n = 0
+  var i = 0
+  let len = s.length()
+  while (i < len) {
+    let c = s.slice(i, i + 1)
+    if (c == "a") { n = n + 1 }
+    i = i + 1
+  }
+  return n
+}
