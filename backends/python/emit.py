@@ -1902,15 +1902,58 @@ class _ComponentEmitter:
           subscription active" obligation, and it is delivered by not catching
           anything here.
 
-        A `fail` in the body raises the same way, for the same reason."""
+        A `fail` in the body raises the same way, for the same reason.
+
+        Slice 5's typed-event handler (`on <Event> as <x> in <sub>`) is THIS
+        loop with one gate added between the terminal test and the body:
+
+            <c> = Stream.contract(<event>, <schema>, <key>, <window>)
+            while True:
+                <x> = await <sub>.next()
+                yield None            # iteration boundary (A1)
+                if Stream.is_closed(<x>):
+                    break
+                if not <c>.admit(<x>):
+                    continue
+                <body>
+
+        Where each line sits is the argument that the contract costs the
+        guarantee nothing. The contract is built ONCE, above the loop, so the
+        dedup memory is constant in the length of the stream rather than one
+        entry per item (§4.7). The gate sits AFTER the await and its yield, so
+        the iteration boundary — the property a divert-while-parked depends on —
+        is in exactly the place Slice 4 put it. It sits after the terminal test,
+        so a `Closed` still ends the loop without being validated as an item. And
+        a schema violation RAISES `StreamFaulted` out of `admit`, which is the
+        same terminal a provider abort delivers and takes the same uncaught path:
+        the activation fails and the prefix reverts LIFO with the subscription
+        bracket on it (§6, A8). Nothing here catches anything."""
         self.uses.add("Stream")
         item = _mangle(_ident(step.get("bind"), f"{where}: stream item"))
         subject = self._expr(step.get("subject"), where)
+        contract = step.get("event")
+        gate = None
+        if contract:
+            self._counter += 1
+            gate = f"_revl_event{self._counter}"
+            name = _ident(contract.get("name"), f"{where}: event name")
+            key = _ident(contract.get("key"), f"{where}: event key")
+            window = contract.get("window")
+            if not isinstance(window, int) or window < 1:
+                raise EmitError(
+                    f"{where}: event `{name}` has a non-positive dedup window "
+                    f"{window!r} — the window is bounded by construction")
+            out.add(indent, f"{gate} = Stream.contract({name!r}, "
+                            f"{contract.get('schema')!r}, {key!r}, {window})")
         out.add(indent, "while True:")
         out.add(indent + 1, f"{item} = await {subject}.next()")
         out.add(indent + 1, "yield None  # iteration boundary (A1)")
         out.add(indent + 1, f"if Stream.is_closed({item}):")
         out.add(indent + 2, "break")
+        if gate is not None:
+            out.add(indent + 1,
+                    f"if not {gate}.admit({item}, {f'{where}: on {name}'!r}):")
+            out.add(indent + 2, "continue")
         body = step.get("body") or []
         if not body:  # pragma: no cover — the parser rejects an empty body
             raise EmitError(f"{where}: an `every … in` body is empty")

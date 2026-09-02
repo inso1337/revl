@@ -52,7 +52,16 @@ from revl import compile_source  # noqa: E402
 def _module(src: str, name: str) -> types.ModuleType:
     code = emit.emit(compile_source(src))
     module = types.ModuleType(name)
-    exec(compile(code, f"{name}.py", "exec"), module.__dict__)
+    # registered before the exec because an emitted RECORD renders as a
+    # `@dataclass`, and `dataclasses` resolves a string annotation by looking the
+    # defining class's module up in `sys.modules`. A typed event always brings a
+    # record with it (item 130 Slice 5), so this is the ordinary path now rather
+    # than an exotic one; each test uses its own module name.
+    sys.modules[name] = module
+    try:
+        exec(compile(code, f"{name}.py", "exec"), module.__dict__)
+    finally:
+        sys.modules.pop(name, None)
     return module
 
 
@@ -927,3 +936,231 @@ async def test_the_iteration_composes_with_the_combinator_chain(trace):
     await _flush()
     assert c.state is FiberState.DISPOSED
     assert runtime_mod.Stream.pending() == 0, "the whole chain unwound (no residue)"
+
+
+# ===========================================================================
+# Slice 5 — typed EVENTS: `on <Event> as <x> in <sub> { … }` (§6)
+# ===========================================================================
+#
+# Events are a `Stream[T]` SPECIALIZATION, so these tests are not a re-proof of
+# the protocol or of the loop. They are the proof that the CONTRACT does what §6
+# assigns to it and costs the guarantee nothing:
+#
+#   * every delivered item is validated against the event's schema BEFORE the
+#     body runs, and a violation takes the `Faulted` path that already closes
+#     the subscription — "a failed handler does not leave a subscription active"
+#     reached with no events-specific teardown;
+#   * a redelivery inside the bounded window is collapsed, and the collapse is
+#     traced rather than silent;
+#   * the window is BOUNDED, which bounds what it claims: past it, a redelivery
+#     runs the handler again. That is the honest limit, not a bug — a durable
+#     exactly-once claim needs the §4.5 cursor, a later slice;
+#   * the terminal is still not an item, and withdrawal while parked still ends
+#     the handler and closes the subscription LIFO.
+
+_EVENT = """
+event OrderCreated(key: order_id, window: 2) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+component Fulfiller requires ship: Ship {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub {
+    emit ship.dispatch(e.order_id)
+  }
+}
+"""
+
+
+class _Ship:
+    def __init__(self) -> None:
+        self.dispatched: list = []
+
+    def dispatch(self, id):
+        self.dispatched.append(id)
+        return None
+
+
+def _ship_root() -> tuple:
+    root = Context()
+    ship = _Ship()
+    root.provide("ship", ship)
+    return root, ship
+
+
+def _order(oid: str, qty: int = 1) -> dict:
+    return {"order_id": oid, "quantity": qty}
+
+
+@pytest.mark.asyncio
+async def test_a_conforming_item_reaches_the_body_and_a_duplicate_is_collapsed(trace):
+    """§6's two added rows at once: schema compatibility (the item validates and
+    the handler reads its declared fields) and duplicate handling (a redelivery
+    of a key already admitted does NOT run the body again)."""
+    module = _module(_EVENT, "event_dedup")
+    root, ship = _ship_root()
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+    assert c.state is FiberState.ACTIVE
+
+    src = runtime_mod.Stream.last_source()
+    src.emit(_order("o1"))
+    src.emit(_order("o2"))
+    src.emit(_order("o1"))          # a redelivery, inside the window
+    await _flush()
+
+    assert ship.dispatched == ["o1", "o2"], "the duplicate never ran the handler"
+    assert c.state is FiberState.ACTIVE, "a duplicate is not a failure"
+    ops = _ops(trace)
+    assert ops.count("event.OrderCreated admit") == 2
+    assert ops.count("event.OrderCreated duplicate") == 1, \
+        "the collapse is traced, not silent"
+
+    c.dispose()
+    await _flush()
+    assert runtime_mod.Stream.pending() == 0, "no residue"
+
+
+@pytest.mark.asyncio
+async def test_the_dedup_window_is_bounded_and_says_so(trace):
+    """The window is a fixed-size LRU (`window: 2` here), which is what keeps the
+    dedup memory constant in the length of the stream rather than one entry per
+    delivered item — the shape §4.7 refuses. Bounded memory bounds the claim:
+    once a key has aged out, its redelivery runs the handler again. This
+    collapses redeliveries; it is not a durable exactly-once claim (§4.5)."""
+    module = _module(_EVENT, "event_window")
+    root, ship = _ship_root()
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+
+    src = runtime_mod.Stream.last_source()
+    for oid in ("o1", "o2", "o3"):          # o1 ages out of a 2-key window
+        src.emit(_order(oid))
+    await _flush()
+    src.emit(_order("o1"))
+    await _flush()
+
+    assert ship.dispatched == ["o1", "o2", "o3", "o1"]
+    assert c.state is FiberState.ACTIVE
+
+    c.dispose()
+    await _flush()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_schema_violation_faults_the_handler_and_closes_the_subscription(trace):
+    """§6, "a failed handler does not leave a subscription active", reached by
+    the path Slice 4 already defines. A provider that delivers an item the event
+    does not describe breaks the contract at the boundary; `admit` raises
+    `StreamFaulted` — the SAME terminal a provider abort delivers — which the
+    loop does not catch, so the activation fails and the accumulated prefix
+    reverts LIFO with the subscription bracket on it."""
+    module = _module(_EVENT, "event_schema")
+    root, ship = _ship_root()
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+    assert c.state is FiberState.ACTIVE
+
+    src = runtime_mod.Stream.last_source()
+    src.emit(_order("o1"))
+    await _flush()
+    assert ship.dispatched == ["o1"]
+
+    src.emit({"order_id": "o2"})            # `quantity` is required
+    await _flush()
+
+    assert c.state is FiberState.FAILED, "the contract breach aborted the handler"
+    assert ship.dispatched == ["o1"], "the malformed item never reached the body"
+    ops = [e for e in _ops(trace) if e.startswith("stream")]
+    assert "stream.close" in ops, \
+        "a failed handler does NOT leave the subscription active (§6)"
+    assert runtime_mod.Stream.pending() == 0, "no residue"
+
+
+@pytest.mark.asyncio
+async def test_a_mistyped_field_is_a_contract_breach_not_a_body_crash(trace):
+    """The schema is checked at the BOUNDARY, before the value binds — so a
+    provider that sends the right field at the wrong type is caught as a stream
+    fault with a path in its message, never as a mid-body host error the handler
+    would have to defend against."""
+    module = _module(_EVENT, "event_mistyped")
+    root, ship = _ship_root()
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+
+    src = runtime_mod.Stream.last_source()
+    src.emit({"order_id": 7, "quantity": 1})
+    await _flush()
+
+    assert c.state is FiberState.FAILED
+    assert ship.dispatched == []
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_is_not_validated_as_an_item(trace):
+    """The gate sits AFTER the terminal test: an orderly `Closed` ends the loop
+    without being run through the schema, so the end of a stream is never
+    reported as a contract breach."""
+    module = _module(_EVENT, "event_terminal")
+    root, ship = _ship_root()
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+
+    src = runtime_mod.Stream.last_source()
+    src.emit(_order("o1"))
+    await _flush()
+    src.close()
+    await _flush()
+
+    assert c.state is FiberState.ACTIVE, "an orderly close is not a fault"
+    assert ship.dispatched == ["o1"]
+
+    c.dispose()
+    await _flush()
+    assert c.state is FiberState.DISPOSED
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_unloading_the_owner_ends_the_handler_and_closes_the_stream(trace):
+    """The core guarantee (§0) through the handler, unchanged by the contract:
+    withdraw the owner while the consumer is parked on a provider that never
+    emits. The park resolves as `Closed` (§9 Part A), the handler ends, `close`
+    runs before the source's inverse (LIFO), and teardown does not deadlock."""
+    module = _module(_EVENT, "event_unload")
+    root, ship = _ship_root()
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+    assert runtime_mod.Stream.pending() == 2, "parked: source open + subscription live"
+
+    c.dispose()
+    await _flush()
+    assert c.state is FiberState.DISPOSED, "teardown completed (no deadlock)"
+    ops = [e for e in _ops(trace) if e.startswith("stream")]
+    assert ops.index("stream.close") < ops.index("stream.source close"), \
+        "the subscription closes before its source (LIFO)"
+    assert ship.dispatched == [], "no item was invented for the terminal"
+    assert runtime_mod.Stream.pending() == 0, "no residue"
+
+
+@pytest.mark.asyncio
+async def test_the_contract_is_built_once_not_per_item(trace):
+    """The dedup memory is per HANDLER, not per delivered item: if the contract
+    were rebuilt each turn its table would be empty every time and no duplicate
+    would ever be recognised. This is the same test the emitted code's shape
+    makes (`Stream.contract(...)` above `while True:`), observed at runtime."""
+    module = _module(_EVENT, "event_once")
+    root, ship = _ship_root()
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+
+    src = runtime_mod.Stream.last_source()
+    for _ in range(4):
+        src.emit(_order("same"))
+        await _flush()
+
+    assert ship.dispatched == ["same"], "one admit, three collapses"
+    c.dispose()
+    await _flush()
+    assert runtime_mod.Stream.pending() == 0

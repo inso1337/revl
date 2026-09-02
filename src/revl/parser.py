@@ -270,14 +270,61 @@ class StreamIterStmt:
     the loop pushes one bracket per item onto the owner's single LIFO
     accumulator, which is unbounded in the length of the stream, and the
     per-iteration discharge that would bound it does not exist. The refusal is
-    the parser's (see `stream_iter`), and it names the fix.
+    the parser's (see `_iteration_body`), and it names the fix.
 
     `bind` is the item name; `subject` names the subscription (a bare
     identifier — a `Subscription` is a host-local with no nominal type, so it
-    can be spelled no other way)."""
+    can be spelled no other way).
+
+    `event` is Slice 5 (§6): the typed-event handler `on <Event> as <x> in <sub>
+    { … }` parses to THIS node with the event's name recorded, because an event
+    IS a stream item with a contract and its handler IS this iteration. One node
+    and one lowering means the two forms cannot drift apart on the properties
+    that carry the guarantee — the iteration boundary and the uncaught
+    `Faulted` — which is the whole reason §6 makes events a specialization
+    rather than a second surface. `None` for a plain `every … in`, so a Slice 4
+    program lowers byte-identically."""
     bind: str
     subject: object
     body: list
+    line: int
+    event: str | None = None
+
+
+@dataclass
+class EventDecl:
+    """`event <Name>(key: <field>[, window: <n>]) { <fields> }` — a typed
+    external event (item 130 Slice 5,
+    docs/design/130-stream-reactive-types.md §6).
+
+    An event is a `Stream[T]` element with a CONTRACT, not a second reactive
+    surface (§6): the declaration produces an ordinary record type (carried as a
+    sibling `TypeDecl`, so every record rule — field types, literals, field
+    reads — applies to it unchanged) plus the two things events add on top of a
+    stream, and nothing else.
+
+    * `key` names the field carrying the event's IDENTITY, the value a duplicate
+      delivery repeats. It is item 309's keyed-idempotency role in the one place
+      a consumer can act on it, spelled the way 309 spells it (`(key: <field>)`,
+      the `confined:` precedent); it must name a declared field of scalar-
+      serializable type, and it is REQUIRED — an event with no key can deliver
+      neither of the obligations §6 lists for it (handler idempotency, duplicate
+      handling), and admitting one would ship those two rows as a claim nothing
+      backs.
+    * `window` bounds the dedup memory: the handler remembers the last N keys it
+      admitted, so redelivery inside the window is collapsed. Bounded by
+      construction and constant per handler — NOT one entry per delivered item,
+      which is the unbounded shape §4.7 refuses. `None` takes the runtime
+      default.
+
+    `event` is a CONTEXTUAL keyword (the `boot`/`fault`/`secret` discipline): it
+    heads a declaration only as `event <IDENT> (`, so the corpus's existing
+    `fn log(event: Str)` parameters keep parsing and neither the lexer's
+    KEYWORDS set nor the self-hosted lexer needs a sync."""
+    name: str
+    key: str
+    window: object          # int, or None for the runtime default
+    fields: list
     line: int
 
 
@@ -1348,6 +1395,11 @@ class Program:
     services: list[ServiceDecl] = field(default_factory=list)
     components: list[ComponentDecl] = field(default_factory=list)
     type_decls: list[TypeDecl] = field(default_factory=list)
+    # item 130 Slice 5: the typed-event declarations. Each also contributes a
+    # record `TypeDecl` above (an event IS a record with a contract), so the
+    # type table needs no event case; this list carries only the contract the
+    # `on` handler reads. Empty for every program that declares no event.
+    event_decls: list[EventDecl] = field(default_factory=list)
     fn_decls: list[FnDecl] = field(default_factory=list)
     uses: list[UseDecl] = field(default_factory=list)
     externs: list[ExternDecl] = field(default_factory=list)
@@ -1716,6 +1768,28 @@ class Parser:
                 # as an ordinary identifier (and the self-hosted lexer's
                 # KEYWORDS table needs no sync).
                 program.fault_tests.append(self.fault_test_decl())
+
+            elif self.at("ident", "event") \
+                    and self.pos + 2 < len(self.toks) \
+                    and self.toks[self.pos + 1].kind == "ident" \
+                    and self.toks[self.pos + 2].kind in ("(", "{"):
+                # item 130 Slice 5: `event <Name>(key: <field>) { <fields> }`.
+                # `event` is a *contextual* keyword, the `boot`/`fault`/`secret`
+                # discipline: it heads a declaration ONLY in the shape
+                # `event IDENT (` / `event IDENT {`, so the corpus's
+                # `emission fn log(event: Str)` parameters keep parsing and the
+                # self-hosted lexer's KEYWORDS table (and the gate crate's
+                # frontier derived from it) needs no sync. The `{` spelling is
+                # admitted HERE and refused in `_event_contract` so the most
+                # likely mistake — a key-less event — gets the diagnostic that
+                # names the missing key, not "expected a top-level declaration". The declaration ALSO contributes an ordinary record
+                # `TypeDecl`, because an event is a record with a contract (§6):
+                # every record rule then applies to it with no event-specific
+                # case anywhere in the type machinery.
+                decl = self.event_decl()
+                program.event_decls.append(decl)
+                program.type_decls.append(
+                    TypeDecl(decl.name, [], decl.fields, [], decl.line))
 
             elif self.at("ident", "secret") \
                     and self.peek_ahead(1).kind == "ident" \
@@ -3225,6 +3299,24 @@ class Parser:
                 hint="the subscription is a single-consumer acquisition whose "
                      "inverse `close` needs a name; bind it with `let` (item 130)",
             )
+        if tok.kind == "ident" and tok.value == "on" and self._at_event_handler():
+            # item 130 Slice 5: `on <Event> as <x> in <sub> { … }`, the typed-
+            # event handler. It parses to the SAME `StreamIterStmt` the Slice 4
+            # `every … in` does (§6: `on … as` desugars to `every … in`), so it
+            # inherits that form's whole admission and lowering — including the
+            # position rules below, which is why the same in-method refusal
+            # applies verbatim.
+            if in_method:
+                raise self.err(
+                    tok.line,
+                    "`on … as` event handling is only allowed in a "
+                    "component activation body",
+                    hint="a provide method runs while the component is ACTIVE; "
+                         "`next` is a suspension and the iteration is owned by "
+                         "the activation frame that holds the subscription "
+                         "bracket (item 130 §3.3, §4.7)",
+                )
+            return self.event_handler()
         if tok.kind == "kw" and tok.value in ("every", "after"):
             # item 130 Slice 4: `every <x> in <sub> { … }` is stream iteration,
             # `every <n><unit> { … }` is a timer. ONE token of lookahead past the
@@ -3793,12 +3885,104 @@ class Parser:
     def stream_iter(self) -> "StreamIterStmt":
         """`every <x> in <sub> { <emit>* }` (item 130 Slice 4, §1, §4.7).
 
-        The subject is a BARE identifier naming a subscription binding. That is
-        not a shortcut: a `Subscription` is a host-local with no nominal type, so
-        it cannot be returned from a fn, stored in a record or passed anywhere —
-        a bare name is the only way to spell one, and admitting a general
-        expression here would only produce worse diagnostics for shapes the
-        lowering must refuse anyway.
+        The subject (`_iteration_subject`) is a bare subscription name and the
+        body (`_iteration_body`) is emissions plus `fail`; both are shared with
+        Slice 5's `on … as … in`, which is the same iteration with a contract on
+        each item."""
+        kw = self.expect("kw", "every")
+        bind = self.expect("ident", what="the item name after `every`").value
+        self.expect("kw", "in")
+        subject = self._iteration_subject(bind, f"`every {bind} in …`")
+        body = self._iteration_body(bind, subject.head, kw.line,
+                                    form="`every … in`",
+                                    head=f"`every {bind} in {subject.head}`")
+        return StreamIterStmt(bind, subject, body, kw.line)
+
+    def _at_event_handler(self) -> bool:
+        """True at the head of `on <Event> as …` — the item-130 Slice 5 typed-
+        event handler.
+
+        `on` is a CONTEXTUAL keyword (the `boot`/`fault`/`secret` discipline):
+        it heads a statement only in the shape `on IDENT as`, so a program that
+        used `on` as an ordinary identifier keeps parsing and the self-hosted
+        lexer's KEYWORDS table needs no sync — the same reason Slice 4 reused
+        `every` rather than minting a keyword (§1, judgment call 1)."""
+        if not self.at("ident", "on") or self.pos + 2 >= len(self.toks):
+            return False
+        name = self.toks[self.pos + 1]
+        sep = self.toks[self.pos + 2]
+        return (name.kind == "ident" and sep.kind == "kw" and sep.value == "as")
+
+    def event_handler(self) -> "StreamIterStmt":
+        """`on <Event> as <x> in <sub> { … }` — the typed-event handler (item
+        130 Slice 5, §6).
+
+        Parses to a `StreamIterStmt` carrying the event's name, because §6's
+        call is that `on … as` DESUGARS to `every … in`: an event is a stream
+        item with a contract, and its handler is the Slice 4 iteration with that
+        contract applied per item. One node, one lowering, one emitted loop — so
+        the two properties the guarantee rests on (the iteration boundary
+        immediately after the await, and a `Faulted` that is not caught) are
+        literally the same code, not a second implementation that could drift.
+
+        The `in <sub>` clause names the subscription the handler pulls, and it
+        is the one place this surface departs from §6's `on <Event> as <x> { … }`
+        sketch. That sketch resolves the event's stream through the provide/
+        inject graph — "the event source is the provided `Stream[T]`" — which
+        needs a REQUIRED `Stream[T]` capability the language does not have yet
+        (`subscribe`'s own diagnostic says so: a required stream capability is a
+        later slice). Naming the subscription explicitly keeps the source
+        honest, and keeps every Slice 2/3 qualifier — `policy`, `buffer`,
+        `drain`, the combinator chain, `merge` — available to an event consumer,
+        which an implicit `subscribe` would have stranded."""
+        kw = self.expect("ident", "on")
+        event = self.expect("ident", what="the event's name after `on`").value
+        self.expect("kw", "as")
+        bind = self.expect("ident",
+                           what=f"the item name after `on {event} as`").value
+        if not self.at("kw", "in"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"`on {event} as {bind}` needs the subscription it handles: "
+                f"`on {event} as {bind} in <sub> {{ … }}`",
+                hint="an event handler is the Slice 4 iteration with a contract "
+                     "on each item (item 130 §6), so it pulls a subscription a "
+                     "`subscribe … undo …` bracket already owns — which is what "
+                     "keeps the event's teardown the SAME single LIFO bracket a "
+                     "plain stream's is")
+        self.next()
+        subject = self._iteration_subject(
+            bind, f"`on {event} as {bind} in …`")
+        body = self._iteration_body(bind, subject.head, kw.line,
+                                    form="`on … as`",
+                                    head=f"`on {event} as {bind}`")
+        return StreamIterStmt(bind, subject, body, kw.line, event=event)
+
+    def _iteration_subject(self, bind: str, form: str) -> "Postfix":
+        """The subscription an `every … in` / `on … as … in` pulls.
+
+        A BARE identifier, and that is not a shortcut: a `Subscription` is a
+        host-local with no nominal type, so it cannot be returned from a fn,
+        stored in a record or passed anywhere — a bare name is the only way to
+        spell one, and admitting a general expression here would only produce
+        worse diagnostics for shapes the lowering must refuse anyway."""
+        subj = self.peek()
+        if subj.kind != "ident":
+            found = subj.value if subj.kind in ("ident", "kw") else repr(subj.value)
+            raise self.err(
+                subj.line,
+                f"{form} needs the name of a subscription, found {found}",
+                hint=f"subscribe first, then iterate: `let sub = subscribe "
+                     f"<stream> undo sub.close()` then bind the items with "
+                     f"`{bind}` from `sub` (item 130 §1)")
+        self.next()
+        return Postfix(subj.value, [], subj.line)
+
+    def _iteration_body(self, bind: str, subject: str, head_line: int, *,
+                        form: str, head: str) -> list:
+        """The per-item body shared by `every … in` (Slice 4) and `on … as`
+        (Slice 5) — one parser, so the two forms cannot admit different work.
 
         The body is emissions (the effectful callback, G1/G8-checked) plus
         `fail` (the A8 handler-failure path). Two shapes are refused by name:
@@ -3806,7 +3990,10 @@ class Parser:
         * an ACQUISITION (`effect … undo …`, `subscribe`, a timer, `spawn`)
           — one accumulator entry per delivered item is unbounded in the length
           of the stream, and the per-iteration discharge that would bound it does
-          not exist (§4.7). Acquire once, before the loop.
+          not exist (§4.7). Acquire once, before the loop. Slice 5 does not
+          change this calculus: an event's dedup memory is a fixed-size window
+          per handler (§6), constant in the length of the stream, so it bounds
+          nothing an acquisition would need bounded.
         * an `emit … compensate …` — a compensation registered per item has the
           same unbounded shape, and the same refusal the timer body already makes
           for the same reason.
@@ -3814,21 +4001,6 @@ class Parser:
         A bare `await` inside the body is refused too: the loop IS the pull, and
         a second `next` on the same subscription inside its own iteration would
         be a second consumer of a single-consumer subscription (rule 3.1)."""
-        kw = self.expect("kw", "every")
-        bind = self.expect("ident", what="the item name after `every`").value
-        self.expect("kw", "in")
-        subj = self.peek()
-        if subj.kind != "ident":
-            found = subj.value if subj.kind in ("ident", "kw") else repr(subj.value)
-            raise self.err(
-                subj.line,
-                f"`every {bind} in …` needs the name of a subscription, found "
-                f"{found}",
-                hint=f"subscribe first, then iterate: `let sub = subscribe "
-                     f"<stream> undo sub.close()` then `every {bind} in sub "
-                     f"{{ … }}` (item 130 §1)")
-        self.next()
-        subject = Postfix(subj.value, [], subj.line)
         self.expect("{")
         body: list = []
         while True:
@@ -3840,7 +4012,7 @@ class Parser:
                 if inner.compensate is not None:
                     raise self.err(
                         inner.line,
-                        "an `every … in` body `emit` cannot declare `compensate`",
+                        f"an {form} body `emit` cannot declare `compensate`",
                         hint="a per-item compensation would put one accumulator "
                              "entry on the owner's LIFO stack per delivered item, "
                              "unbounded in the length of the stream; the "
@@ -3854,15 +4026,15 @@ class Parser:
             if isinstance(inner, AwaitStmt):
                 raise self.err(
                     inner.line,
-                    "an `every … in` body cannot `await` — the loop IS the pull",
+                    f"an {form} body cannot `await` — the loop IS the pull",
                     hint="each turn of the iteration already awaits "
-                         f"`{subj.value}.next()` and binds the item to `{bind}`; "
+                         f"`{subject}.next()` and binds the item to `{bind}`; "
                          "a second `next` inside the body would be a second "
                          "consumer racing a single-consumer subscription for "
                          "items (rule 3.1, item 130 §4.1)")
             raise self.err(
-                getattr(inner, "line", kw.line),
-                "an `every … in` body records emissions (and `fail`) only",
+                getattr(inner, "line", head_line),
+                f"an {form} body records emissions (and `fail`) only",
                 hint="the body is a setup-mode effect context: its `emit`s are "
                      "capability-checked against the component's row (G1) and "
                      "enumerated on its boundary (G8), and a `fail` aborts the "
@@ -3873,11 +4045,11 @@ class Parser:
         self.expect("}")
         if not body:
             raise self.err(
-                kw.line,
-                f"an `every {bind} in {subj.value}` body is empty",
+                head_line,
+                f"an {head} body is empty",
                 hint="an iteration that does nothing per item still pulls the "
                      "subscription to its terminal; drop it, or give it work")
-        return StreamIterStmt(bind, subject, body, kw.line)
+        return body
 
     def timer(self) -> "TimerStmt":
         """`every 30s { emit … }` / `after 5m { emit … }` (item 57).
@@ -4168,6 +4340,89 @@ class Parser:
             else:
                 break
         return TypeDecl(name, params, [], cases, line, public)
+
+    def event_decl(self) -> "EventDecl":
+        """`event <Name>(key: <field>[, window: <n>]) { <field>: <type>, … }`
+        — a typed external event (item 130 Slice 5, §6).
+
+        The body is a record body, parsed exactly as `type N = { … }` parses
+        one, because that is what it is: §6's call is that an event is a
+        `Stream[T]` element with a contract, so the schema half of the events
+        proposal is "an ordinary record type-check on `T`" and needs no new
+        machinery. What the head adds is the contract — the identity `key` a
+        duplicate repeats, and the bounded `window` of keys the handler
+        remembers. The key is checked against the fields in lowering, where the
+        whole type table is known, exactly as item 309 checks
+        `idempotent(key: p)` against a signature's parameters."""
+        line = self.expect("ident", "event").line
+        name = self.expect("ident", what="the event's name").value
+        key, window = self._event_contract(name)
+        self.expect("{", what=f"the fields of `event {name}`")
+        fields: list[RecordField] = []
+        while not self.at("}"):
+            fline = self.peek().line
+            fname = self._record_key_name()
+            self.expect(":")
+            ftype = self.type_()
+            fields.append(RecordField(fname, ftype, fline))
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        if not fields:
+            raise self.err(
+                line,
+                f"`event {name}` declares no fields",
+                hint="an event is a record with a contract (item 130 §6); give it "
+                     "the fields the provider delivers, including its key field")
+        return EventDecl(name, key, window, fields, line)
+
+    def _event_contract(self, name: str):
+        """`(key: <field>[, window: <n>])` — the contract clause of an `event`
+        declaration (item 130 Slice 5, §6).
+
+        `key`/`window` are contextual words recognised only in this slot, the
+        same discipline item 309's `idempotent(key: p)` and item 373's
+        `confined: p` use, so the lexer's KEYWORDS set stays untouched. The key
+        is REQUIRED: it is what makes the two obligations §6 assigns to events
+        beyond a plain stream — handler idempotency and duplicate handling —
+        checkable at all, and an event without one would carry those rows as a
+        claim nothing backs."""
+        if not self.at("("):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"`event {name}` needs a key: `event {name}(key: <field>) "
+                f"{{ … }}`",
+                hint="the key names the field carrying the event's identity — the "
+                     "value a duplicate delivery repeats — so the handler can "
+                     "dedup on it and its idempotency obligation is checkable "
+                     "(item 130 §6; the role spelling is item 309's)")
+        self.expect("(")
+        self.expect("ident", "key",
+                    what=f"`key` — the event's identity field (`event {name}"
+                         "(key: <field>)`, item 130 §6)")
+        self.expect(":", what="`:` after `key`")
+        key = self.expect("ident",
+                          what="the field carrying the event's identity").value
+        window = None
+        if self.at(","):
+            self.next()
+            self.expect("ident", "window",
+                        what="`window` — the bounded dedup memory (`event "
+                             f"{name}(key: <field>, window: <n>)`, item 130 §6)")
+            self.expect(":", what="`:` after `window`")
+            tok = self.peek()
+            if tok.kind != "int" or tok.value < 1:
+                raise self.err(
+                    tok.line,
+                    f"`window` needs a positive whole count, found {tok.value!r}",
+                    hint="the dedup memory is BOUNDED by construction — a handler "
+                         "remembers the last N keys it admitted, never one entry "
+                         "per delivered item (item 130 §6, §4.7)")
+            self.next()
+            window = tok.value
+        self.expect(")", what="`)` closing the event's contract clause")
+        return key, window
 
     def _type_param_list(self) -> list[str]:
         """An optional `[T, U]` type-parameter list after a `fn`/`extern` name
