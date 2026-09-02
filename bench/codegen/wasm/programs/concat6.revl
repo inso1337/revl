@@ -1,0 +1,1 @@
+fn banner(a: Str, b: Str) -> Str { return `<<${a}|${b}|${a}|${b}>>` }

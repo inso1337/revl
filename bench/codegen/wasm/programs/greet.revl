@@ -1,0 +1,1 @@
+fn greet(name: Str) -> Str { return `Hello, ${name}!` }
