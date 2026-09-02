@@ -254,6 +254,72 @@ jobs:
       # it to 430 rather than narrowing the path above.
       - run: backends/python/.venv/bin/python -m pytest tests/ -q
 
+  # The `container` isolation rung (roadmap item 411 Slice 2) launches a REAL
+  # container: a sandboxed process runs inside a boundary whose confinement
+  # flags come from its declared envelope, and an in-sandbox boot canary
+  # confirms the boundary before the process starts. So the level needs a
+  # container runtime, and this is the job that has one.
+  #
+  # GitHub-hosted `ubuntu-latest` images ship Docker (engine + CLI, daemon
+  # running) preinstalled, so this coverage EXECUTES in CI rather than skipping
+  # everywhere the way a toolchain-gated suite otherwise does (items 430/445).
+  # The gate is an environment variable rather than a `which docker` probe on
+  # purpose: an env gate is audited by tests/test_env_gated_skips_run_somewhere.py
+  # against the job that sets it, a filesystem probe is invisible to that audit.
+  sandbox-container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v4
+      # the CONDUCTOR needs cordis-py too: the driver mounts the conductor's own
+      # revl + cordis into the boundary so the confined process runs the vintage
+      # that admitted it, and the placement preflight refuses without it.
+      - run: sh backends/python/setup.sh
+      # prove the runtime is actually there before depending on it. If the
+      # runner image ever stops shipping Docker, this fails loudly instead of
+      # letting the sandbox level quietly go back to skipping.
+      - run: docker version
+      - run: backends/python/.venv/bin/python -m pytest tests/test_sandbox_container_rung_411.py -q --junitxml=/tmp/sandbox-junit.xml
+        env:
+          # the gate the file reads. With it set, a missing or broken container
+          # runtime REDS this job instead of skipping past the boundary tests.
+          REVL_SANDBOX_DOCKER: "1"
+      - name: no sandbox test may skip in CI
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          report = pathlib.Path("/tmp/sandbox-junit.xml")
+          if not report.is_file():
+              print("::error::pytest wrote no junit report - the run did not start")
+              sys.exit(1)
+          text = report.read_text(encoding="utf-8", errors="replace")
+          reasons = re.findall(r'<skipped\b[^>]*?\bmessage="([^"]*)"', text)
+          if reasons:
+              for reason in reasons:
+                  print(f"::error::sandbox test skipped in CI: {reason}")
+              print(f"::error::{len(reasons)} test(s) skipped - the container rung "
+                    "is not actually being exercised anywhere")
+              sys.exit(1)
+          print("no sandbox test skipped: the container rung executed here")
+          PY
+      # the suite tears its own containers down; this is the audit that says so
+      # out loud, on a shared runner where a leaked container would be somebody
+      # else's problem.
+      - name: no container outlives the job
+        if: always()
+        run: |
+          left="$(docker ps -a --filter label=revl.sandbox=411 --format '{{.Names}}')"
+          if [ -n "$left" ]; then
+            echo "::error::containers left behind: $left"
+            docker rm -f $left
+            exit 1
+          fi
+          echo "no revl sandbox container left behind"
+
   backend-typescript:
     runs-on: ubuntu-latest
     steps:
