@@ -11,7 +11,11 @@ Mapping (DESIGN.md §7 — the backend contract is small):
                  `plugin_sync` and `Inject`.
 - requires    -> `Inject::new([...])` + `ctx.require::<dyn <Svc>>("key")?`
 - provides    -> `impl <Svc> for <Comp><Key> { ... }` +
-                 `ctx.provide_arc("key", Arc::new(impl) as Arc<dyn <Svc>>)?`
+                 `let <key>_box: Box<dyn <Svc>> = Box::new(impl);`
+                 `ctx.provide("key", <key>_box)?`  (cordis-rs 0.3.0 stores the
+                 box; `require` hands back `Arc<Box<dyn <Svc>>>`, which is why
+                 the double indirection is a runtime bound and not emitter
+                 waste — item 437 negative result 3)
 - effect/undo -> `let x = Arc::new(<acquire>); ctx.effect(label, move || { <undo>; Ok(()) })?;`
 - config      -> `#[derive(Clone)] struct <Comp>Config { ... }`, read as `config.<field>`
 - emit        -> a plain method call (the emission marker is a revl-checker
@@ -4892,15 +4896,20 @@ def _stdlib_helper_traits() -> list[str]:
         "    fn revl_slice(&self, a: i64, b: i64) -> String {",
         "        self.chars().skip(a.max(0) as usize).take((b - a).max(0) as usize).collect()",
         "    }",
+        # `str::find` runs a two-way search over the bytes and allocates
+        # nothing, where the previous body materialised BOTH operands as
+        # `Vec<char>` on every call and then scanned in O(n*m) (item 437c).
+        # `find` reports a BYTE offset and revl's contract is a CODEPOINT
+        # index (docs/stdlib-2.0.md), so the prefix before the match is
+        # counted. A byte offset from `find` always lands on a char
+        # boundary, so the slice cannot panic. Same answer on every input:
+        # an empty needle matches at 0, an absent needle is -1, and a
+        # non-ASCII haystack yields the codepoint index.
         "    fn revl_index_of(&self, needle: &str) -> i64 {",
-        "        let hay: Vec<char> = self.chars().collect();",
-        "        let nee: Vec<char> = needle.chars().collect();",
-        "        if nee.is_empty() { return 0; }",
-        "        if nee.len() > hay.len() { return -1; }",
-        "        for i in 0..=(hay.len() - nee.len()) {",
-        "            if hay[i..i + nee.len()] == nee[..] { return i as i64; }",
+        "        match self.find(needle) {",
+        "            Some(b) => self[..b].chars().count() as i64,",
+        "            None => -1,",
         "        }",
-        "        -1",
         "    }",
         "    fn revl_concat(&self, other: &str) -> String { format!(\"{}{}\", self, other) }",
         "    fn revl_split(&self, sep: &str) -> Vec<String> {",
