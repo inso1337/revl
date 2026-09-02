@@ -139,6 +139,16 @@ CORPUS = [
     # oracle was green while the self-host emitted a program that DOES NOT
     # REDACT, a security divergence and not a parity nicety.
     "secrets.rvl",
+    # item 421 F6 / item 256 §7: the declaration positions `secrets.rvl` does not
+    # reach — a nested `Result[Secret[Str], Str]` extern return, a `Secret[T]`
+    # module-fn parameter, an `Opt[Secret[Str]]` service parameter and, the one
+    # this emitter had no site for at all, a `Secret[T]` COMPONENT CONFIG FIELD
+    # (`_revl_ConfigSchema([...], secret=[...])`). Added to the corpus FIRST and
+    # red on the missing `secret=[...]` argument, per item 429's standing rule:
+    # the frontend (`selfhost/lower.rvl`) stamps a config field's `secret`, and an
+    # emitter with no site for the stamp emits a schema the runtime cannot redact
+    # from.
+    "secrets_nested.rvl",
 ]
 
 
