@@ -163,6 +163,40 @@ NATIVE_CORPUS = (
     + [("ts", "emit_ts_corpus", n) for n in TS_FUNCTION_DOCS]
 )
 
+# item 445 / item 435 (d): the reference frontend proves UNIQUE OWNERSHIP of an
+# accumulation local once (`src/revl/ownership.py`) and stamps the answer on the
+# IR, and the ts tier now LOWERS it — `out = out.push(f(x))` renders
+# `out.push(f(x))` where the binding owns its object at that write.
+# `selfhost/lower.rvl` has no such stage: it streams tokens straight to IR JSON
+# in one pass, and the analysis is a forward dataflow with a fixpoint over each
+# loop back edge, which needs the statement tree the streaming producer never
+# builds. So the NATIVE IR carries no marker, the native chain emits the copying
+# form the reference used to emit, and the two diverge on any document with an
+# in-place accumulation loop.
+#
+# Recorded as a NAMED strict-xfail on the terms tests/test_selfhost_lower_ir.py
+# records the same gap (`UNIQUE_MARKER_GAP`) — red for a stated reason, XPASSing
+# loudly the day the pass is ported — rather than dropped from the corpus. The
+# reference-IR oracle for the same tier (tests/test_selfhost_emit_ts.py) is
+# unaffected and stays green: `selfhost/emit_ts.rvl` READS the marker, and that
+# oracle feeds it the reference IR, which carries it.
+NATIVE_UNIQUE_MARKER_GAP = {
+    ("ts", "transforms.rvl"): (
+        "item 445: selfhost/lower.rvl has no unique-ownership stage, so the "
+        "native IR carries no `unique` marker and the ts tier's in-place "
+        "lowering (item 435 (d)) does not fire on the native chain"
+    ),
+}
+
+NATIVE_CORPUS_PARAMS = [
+    pytest.param(
+        tier, subdir, name,
+        marks=pytest.mark.xfail(
+            strict=True, reason=NATIVE_UNIQUE_MARKER_GAP[(tier, name)]))
+    if (tier, name) in NATIVE_UNIQUE_MARKER_GAP else pytest.param(tier, subdir, name)
+    for tier, subdir, name in NATIVE_CORPUS
+]
+
 # The FULLY-NATIVE, byte-exact COMPONENT + extern surface (roadmap item 262, the
 # capstone of the self-hosting arc). Items 242 + 241 made lower_to_ir COMPLETE and
 # emitter-ready for component/extern programs; these are the documents each tier's
@@ -215,7 +249,7 @@ def _fixture_path(subdir: str, name: str) -> Path:
 # ---------------------------------------- the fully-native byte-exact proof
 
 @pytest.mark.parametrize(
-    "tier,subdir,name", NATIVE_CORPUS,
+    "tier,subdir,name", NATIVE_CORPUS_PARAMS,
     ids=[f"{t}:{n}" for t, _, n in NATIVE_CORPUS])
 def test_native_compile_is_byte_identical_with_no_reference(
         compile_to, reference_emit, tier, subdir, name):
