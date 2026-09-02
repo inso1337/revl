@@ -707,6 +707,100 @@ def sandbox_audit_view(ir: dict, placement: dict) -> tuple[list[str], str | None
 # --------------------------------------------------------------------------
 
 
+def _seam_model(candidate: dict, component: str, backend: str,
+                from_backend: str | None, fallback: dict | None = None):
+    """The two-process topology a seam decision is made over: `component` alone
+    in its own process on `backend`, everything else in the process it is
+    reached FROM, on `from_backend` (default `py`). Returns the four maps the
+    plan-time gates take — ``(requires, provides, owner, backends)`` — so the
+    swap gate and the boot re-admission below decide over the SAME model,
+    built once.
+
+    Every key the moving half provides and the rest requires (outbound), and
+    every key the rest provides and the moving half requires (inbound), is a
+    cross-process seam in this model; a key a half both provides and requires
+    is served locally and the gates skip it.
+    """
+    cand_comps = candidate.get("components") or []
+    moving = next((c for c in cand_comps
+                   if c.get("name") == component), fallback) or {}
+    move_provides = moving.get("provides") or {}
+    move_requires = moving.get("requires") or {}
+    rest_provides: dict[str, str] = {}
+    rest_requires: dict[str, str] = {}
+    for other in cand_comps:
+        if other.get("name") == component:
+            continue
+        rest_provides.update(other.get("provides") or {})
+        rest_requires.update(other.get("requires") or {})
+    model_provides = {"__moving__": dict(move_provides), "__rest__": rest_provides}
+    model_requires = {"__moving__": dict(move_requires), "__rest__": rest_requires}
+    model_owner = {k: "__moving__" for k in move_provides}
+    model_owner.update({k: "__rest__" for k in rest_provides})
+    model_backends = {"__moving__": backend, "__rest__": from_backend or "py"}
+    return model_requires, model_provides, model_owner, model_backends
+
+
+def seam_readmission(files, running_ir: dict, component: str, backend: str,
+                     from_backend: str | None = None):
+    """Re-admit `component` AS IT ALREADY IS, on the tier it is already placed
+    on, against the running manifest. Returns ``(candidate_ir, None)`` when the
+    seam is admissible or ``(None, diagnostic)`` when it is refused. This is the
+    question a CONSUMER asks at boot before it wires a proxy to a provider
+    another process already hosts (item 337 Seam 2, `_process_runner.
+    _boot_wiring_decision`).
+
+    It is deliberately NOT `swap_admission`. A swap asks "may this component be
+    MOVED to that tier", and its extra outbound refusal — a sync `fn`/`emission`
+    the swap would re-point a LIVE consumer's call site across — is a
+    relocation-only hazard: at a cutover an in-address-space call site becomes a
+    cross-process one under a running consumer. At boot nothing moves and
+    nothing is re-pointed. The provider is already on its tier, the seam already
+    exists, the conductor already planned it, and the consumer's call sites were
+    compiled against that seam from the start. Asking the swap question there
+    refused seams the conductor deliberately sanctions — a same-tier py<->py
+    value-typed seam whose service happens to be address-space-bound is
+    permitted by `cross_tier_boundary_check` by construction ("the sync REPORT
+    half stays cross-tier only"), and the cross-tier form is permitted-and-
+    reported, never refused.
+
+    So the boot seam asks EXACTLY what the conductor answered when it planned
+    the placement: recompile against the running manifest (the structural
+    G2/G3 half `swap_admission` also runs) and then run the conductor's own
+    plan-time seam gate, `cross_tier_boundary_check`, over the seam's topology.
+    A resource crossing and a `cache`-split crossing are refused, tier-
+    agnostically; a sync crossing is permitted, exactly as at plan time. The
+    report lines are dropped here: the conductor already printed them once, and
+    a consumer re-deriving them would double every advisory.
+
+    The honest limit, named rather than smuggled past: the model lumps every
+    non-provider component into one "rest" process, so a key the real placement
+    serves locally between two co-located components is modelled as a seam.
+    That is the same approximation `swap_admission` already commits to, and it
+    can only refuse MORE than the conductor did, never less.
+    """
+    try:
+        candidate = compile_files(list(files), manifest=running_ir,
+                                  replacing=(component,))
+    except RevlError as exc:
+        return None, str(exc)
+
+    running_comp = next((c for c in running_ir.get("components") or []
+                         if c.get("name") == component), None)
+    if running_comp is None:
+        return None, (f"{component!r} is not a component of the running "
+                      f"composition (nothing to re-admit at this seam)")
+
+    model_requires, model_provides, model_owner, model_backends = _seam_model(
+        candidate, component, backend, from_backend, fallback=running_comp)
+    problem, _report = cross_tier_boundary_check(
+        candidate, model_requires, model_provides, model_owner, model_backends,
+        candidate.get("services") or {})
+    if problem is not None:
+        return None, problem
+    return candidate, None
+
+
 def swap_admission(files, running_ir: dict, component: str, backend: str,
                    from_backend: str | None = None):
     """Admit a candidate provider for `component`, re-hosted on `backend`,
@@ -765,23 +859,8 @@ def swap_admission(files, running_ir: dict, component: str, backend: str,
     # predicate the plan-time gate uses (`resource_crossing_refusal`), keeping
     # the swap-vs-plan parity actual and symmetric rather than a private loop
     # that only walked the provides side.
-    cand_comps = candidate.get("components") or []
-    cand_moving = next((c for c in cand_comps
-                        if c.get("name") == component), running_comp)
-    move_provides = cand_moving.get("provides") or {}
-    move_requires = cand_moving.get("requires") or {}
-    rest_provides: dict[str, str] = {}
-    rest_requires: dict[str, str] = {}
-    for other in cand_comps:
-        if other.get("name") == component:
-            continue
-        rest_provides.update(other.get("provides") or {})
-        rest_requires.update(other.get("requires") or {})
-    model_provides = {"__moving__": dict(move_provides), "__rest__": rest_provides}
-    model_requires = {"__moving__": dict(move_requires), "__rest__": rest_requires}
-    model_owner = {k: "__moving__" for k in move_provides}
-    model_owner.update({k: "__rest__" for k in rest_provides})
-    model_backends = {"__moving__": backend, "__rest__": from_backend or "py"}
+    model_requires, model_provides, model_owner, model_backends = _seam_model(
+        candidate, component, backend, from_backend, fallback=running_comp)
     resource_problem = resource_crossing_refusal(
         candidate, model_requires, model_provides, model_owner, model_backends)
     if resource_problem is not None:
