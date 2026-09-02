@@ -21,7 +21,8 @@
 //
 //   * the module scaffold — the two `// Code generated …` banner lines, the
 //     `package emitted`, the conditional `import ( … )` block (only `"fmt"`
-//     reaches it in-slice, when interpolation is present), and the conditional
+//     and `"strconv"` reach it in-slice, from an interpolation; which of the
+//     two depends on the operand types, see `render_interp`), and the conditional
 //     runtime PREAMBLES the pure path prepends when a feature is used:
 //     `revlDiv` (true division), the `revlAdd`/`revlSub`/`revlMul` Int-overflow
 //     trap trio, and the `revlAddI32`/`revlSubI32`/`revlMulI32`/`revlToI32`
@@ -51,8 +52,9 @@
 //     `%`, comparisons, `&&`/`||`, native scalar `==`/`!=`, and string `+` as
 //     Go `+`), un (`!`, and the `revlSub(0, x)` Int negate), the free-function
 //     call, index, list literal, the sync arrow (with untyped-param recovery),
-//     the `widen` Float/Int markers, and non-float `${..}` interpolation via
-//     `fmt.Sprintf`.
+//     the `widen` Float/Int markers, and non-float `${..}` interpolation as a
+//     `+` chain over the inferred operand types (`fmt.Sprintf` only as the
+//     untyped fallback, item 434 (f)).
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on go-emitter slices, deliberately OUT of this slice —
@@ -705,29 +707,57 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
   return `func(${ps.join(", ")})${ret} { return ${body} }`
 }
 
-// `_go_v3_interp`: a `${..}` template as a Go `fmt.Sprintf`. A Float part routes
-// through the canonical `revlFtoa` (DEFERRED — such a part is excluded from the
-// corpus, since it pulls in the `revlFtoa` helper the scaffold omits).
+// `_go_v3_interp`: a `${..}` template, rendered from the operand types the
+// emitter already knows (roadmap item 434 (f)). `fmt.Sprintf` with `%v` takes
+// `...any`, so every operand is boxed: `${a}/${b}` over two `Str` measured 3
+// allocs / 48 B where the SAME emitter's `a + "/" + b` measured 1 / 16. Where
+// every part's type is known each renders to a `string`-typed piece and the
+// template is a `+` chain: one allocation for the result and no boxing;
+// `fmt.Sprintf` with `%v` stays as the fallback for a part whose type could
+// not be inferred. A Float part routes through the canonical `revlFtoa`
+// (DEFERRED: such a part is excluded from the corpus, since it pulls in the
+// `revlFtoa` helper the scaffold omits).
 fn render_interp(node: Any, ctx: Ctx) -> Str {
   var fmt = []
   var args = []
+  var pieces = []
+  var typed = true
   for (part of value_list(value_field(node, "parts"))) {
     let k = value_str(value_at(part, 0))
     let v = value_at(part, 1)
     if (k == "text") {
       fmt = fmt.push(double_pct(value_str(v)))
+      pieces = pieces.push(go_string(value_str(v)))
     } else {
-      if (infer_type(v, ctx) == "Float") {
+      let vt = infer_type(v, ctx)
+      let rendered = render_expr(v, ctx, "")
+      if (vt == "Float") {
         fmt = fmt.push("%s")
-        args = args.push(`revlFtoa(${render_expr(v, ctx, "")})`)
+        args = args.push(`revlFtoa(${rendered})`)
+        pieces = pieces.push(`revlFtoa(${rendered})`)
       } else {
         fmt = fmt.push("%v")
-        args = args.push(render_expr(v, ctx, ""))
+        args = args.push(rendered)
+        if (vt == "Str") {
+          pieces = pieces.push(rendered)
+        } else if (vt == "Int") {
+          pieces = pieces.push(`strconv.FormatInt(${rendered}, 10)`)
+        } else if (vt == "Int32") {
+          pieces = pieces.push(`strconv.FormatInt(int64(${rendered}), 10)`)
+        } else if (vt == "Bool") {
+          pieces = pieces.push(`strconv.FormatBool(${rendered})`)
+        } else {
+          typed = false
+        }
       }
     }
   }
   let joined = fmt.join("")
   if (args.length() == 0) { return go_string(joined) }
+  if (typed) {
+    if (pieces.length() == 1) { return pieces[0] }
+    return `(${pieces.join(" + ")})`
+  }
   return `fmt.Sprintf(${go_string(joined)}, ${args.join(", ")})`
 }
 
@@ -1071,29 +1101,31 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
 // the IR: the reference sets each flag while RENDERING a node, and every node in
 // a function body (arrow bodies included) is rendered, so a structural pass over
 // the IR sees exactly the same set. `_go_string`-escaping and type spellings set
-// no flag; only these do, in-slice.
-type Flags = { fmt: Bool, fdiv: Bool, ovf: Bool, ovf32: Bool }
+// no flag; only these do, in-slice. The `fmt`/`strconv` IMPORT flags are NOT
+// here: since item 434 (f) an interpolation picks between them from the operand
+// types it infers as it renders, so `emit_src` reads them off the rendered
+// lines instead of re-deriving that inference structurally.
+type Flags = { fdiv: Bool, ovf: Bool, ovf32: Bool }
 
 fn flags_or(a: Flags, b: Flags) -> Flags {
-  return { fmt: a.fmt || b.fmt, fdiv: a.fdiv || b.fdiv, ovf: a.ovf || b.ovf, ovf32: a.ovf32 || b.ovf32 }
+  return { fdiv: a.fdiv || b.fdiv, ovf: a.ovf || b.ovf, ovf32: a.ovf32 || b.ovf32 }
 }
 
 fn flag_walk(node: Any, acc: Flags) -> Flags {
   var f = acc
   if (value_kind(node) == "record") {
     let k = node_kind(node)
-    if (k == "interp") { f = { fmt: true, fdiv: f.fdiv, ovf: f.ovf, ovf32: f.ovf32 } }
     if (k == "bin") {
       let op = node_op(node)
       let opnd = node_operands(node)
-      if (op == "/") { f = { fmt: f.fmt, fdiv: true, ovf: f.ovf, ovf32: f.ovf32 } }
-      if (is_addsubmul(op) && opnd == "Int") { f = { fmt: f.fmt, fdiv: f.fdiv, ovf: true, ovf32: f.ovf32 } }
-      if (is_addsubmul(op) && opnd == "Int32") { f = { fmt: f.fmt, fdiv: f.fdiv, ovf: f.ovf, ovf32: true } }
+      if (op == "/") { f = { fdiv: true, ovf: f.ovf, ovf32: f.ovf32 } }
+      if (is_addsubmul(op) && opnd == "Int") { f = { fdiv: f.fdiv, ovf: true, ovf32: f.ovf32 } }
+      if (is_addsubmul(op) && opnd == "Int32") { f = { fdiv: f.fdiv, ovf: f.ovf, ovf32: true } }
     }
     if (k == "un" && node_op(node) == "-") {
       let opnd = node_operands(node)
-      if (opnd == "Int") { f = { fmt: f.fmt, fdiv: f.fdiv, ovf: true, ovf32: f.ovf32 } }
-      if (opnd == "Int32") { f = { fmt: f.fmt, fdiv: f.fdiv, ovf: f.ovf, ovf32: true } }
+      if (opnd == "Int") { f = { fdiv: f.fdiv, ovf: true, ovf32: f.ovf32 } }
+      if (opnd == "Int32") { f = { fdiv: f.fdiv, ovf: f.ovf, ovf32: true } }
     }
   }
   for (c of value_children(node)) { f = flag_walk(c, f) }
@@ -1101,7 +1133,7 @@ fn flag_walk(node: Any, acc: Flags) -> Flags {
 }
 
 fn collect_flags(functions: List[Any]) -> Flags {
-  var f = { fmt: false, fdiv: false, ovf: false, ovf32: false }
+  var f = { fdiv: false, ovf: false, ovf32: false }
   for (fnode of functions) { f = flag_walk(fnode, f) }
   return f
 }
@@ -1174,6 +1206,16 @@ pub fn emit_src(ir: Any) -> Str {
     if (!value_is_null(r)) { fr = fr.set(value_str(value_field(fnode, "name")), value_str(r)) }
   }
   let flags = collect_flags(functions)
+  // The reference renders every body BEFORE assembling the import block, so a
+  // flag a lowering only sets while rendering has settled by then. The `fmt`
+  // and `strconv` imports are exactly that: which one an interpolation needs
+  // depends on the operand types `render_interp` infers as it renders (item
+  // 434 (f)), so read them off the rendered lines rather than re-deriving the
+  // inference in the structural `collect_flags` pass.
+  let fnlines = emit_functions(functions, fr, er, tables)
+  let rendered = fnlines.join(newline())
+  let uses_fmt = rendered.indexOf("fmt.Sprintf(") >= 0
+  let uses_strconv = rendered.indexOf("strconv.Format") >= 0
 
   var out = []
   out = out.push("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -1181,9 +1223,11 @@ pub fn emit_src(ir: Any) -> Str {
   out = out.push("package emitted")
   out = out.push("")
 
-  if (flags.fmt) {
+  if (uses_fmt || uses_strconv) {
     out = out.push("import (")
-    out = out.push(line(1, `"fmt"`))
+    // `sorted(set(imports))` on the reference: "fmt" sorts before "strconv".
+    if (uses_fmt) { out = out.push(line(1, `"fmt"`)) }
+    if (uses_strconv) { out = out.push(line(1, `"strconv"`)) }
     out = out.push(")")
     out = out.push("")
   }
@@ -1197,7 +1241,7 @@ pub fn emit_src(ir: Any) -> Str {
   // The reference's section order: user `type` items precede the free functions
   // (both after the header + feature preambles).
   if (value_keys(types).length() > 0) { out = out.concat(emit_v3_types(types)) }
-  out = out.concat(emit_functions(functions, fr, er, tables))
+  out = out.concat(fnlines)
   return rstrip(out.join(newline())).concat(newline())
 }
 
