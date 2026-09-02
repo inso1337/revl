@@ -485,13 +485,9 @@ def test_gate_load_refuses_the_hole_draft():
         gate.close()
 
 
-def test_public_import_surface_is_pinned():
-    import revl.gate as g
-    expected = {
-        "Verdict", "Emit", "admit", "admit_into", "compile_to",
-        "gate_version", "Gate", "GateError", "GateRefused", "AdmitResult",
-        "Handle", "recover",
-    }
-    assert expected <= set(g.__all__)
-    for name in expected:
-        assert hasattr(g, name), name
+# The public-surface compat gate (an EXACT pin of `revl.gate.__all__`, plus
+# `gate_version()` compat semantics) is item 338's public compat gate, in
+# tests/test_gate_compat.py. It supersedes the subset check that used to live
+# here (332's stage-1 import-surface test): a subset check can only catch a
+# promised name silently DISAPPEARING, never one silently APPEARING, and 338
+# owns the exact contract a dependency actually pins against.
