@@ -4771,13 +4771,20 @@ fn struct_field(t: Str, name: Str) -> Str {
 // lowers to a `builtin` node rather than a plain `call`.
 fn is_builtin_method(m: Str) -> Bool {
   return m == "length" || m == "push" || m == "slice" || m == "charAt"
-    || m == "charCodeAt" || m == "indexOf" || m == "concat" || m == "split"
+    || m == "charCodeAt" || m == "codepoint_at" || m == "indexOf"
+    || m == "concat" || m == "split"
     || m == "join" || m == "repeat" || m == "startsWith" || m == "endsWith"
+    || m == "is_alnum" || m == "is_digit" || m == "is_alpha" || m == "is_space"
     || m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
     || m == "to_int" || m == "to_int32" || m == "checked_div_trunc"
     || m == "checked_div_floor" || m == "checked_div_euclid" || m == "checked_mod"
     || m == "set" || m == "lookup" || m == "has" || m == "size" || m == "keys"
     || m == "remove" || m == "to_str"
+    // The Value dot-accessors (item 189) share this table in the reference so a
+    // wrong-arity call is diagnosed here; the Value-receiver ones are redirected
+    // to their `value_*` free function before this row is ever consulted
+    // (`value_accessor_free` / `lir_call`), and `keys` doubles as the Map row.
+    || m == "field" || m == "str" || m == "list"
 }
 
 fn is_host_root(n: Str) -> Bool {
@@ -4793,6 +4800,13 @@ fn builtin_ret(method: Str, recvTy: Str) -> Str {
       || method == "set" || method == "remove") { return recvTy }
   if (method == "charAt") { return "Str" }
   if (method == "charCodeAt") { return "Int" }
+  // Codepoint-at-index scan (item 276): Str receiver, Int index, Int result —
+  // the family of `charCodeAt`.
+  if (method == "codepoint_at") { return "Int" }
+  // Single-character ASCII classification (item 233): Str-only, no argument,
+  // Bool result.
+  if (method == "is_alnum" || method == "is_digit"
+      || method == "is_alpha" || method == "is_space") { return "Bool" }
   if (method == "indexOf") { return "Int" }
   if (method == "split") { return "List[Str]" }
   if (method == "join") { return "Str" }
@@ -4808,6 +4822,12 @@ fn builtin_ret(method: Str, recvTy: Str) -> Str {
   if (method == "to_str") { return "Str" }
   if (method == "size") { return "Int" }
   if (method == "keys") { return "List[Str]" }
+  // The Value dot-accessors (item 189): the return type of the `value_*` free
+  // function each one redirects to. `keys` is shared with the Map row above and
+  // answers `List[Str]` for either receiver.
+  if (method == "field") { return "Value" }
+  if (method == "str") { return "Str" }
+  if (method == "list") { return "List[Value]" }
   if (method == "checked_div_trunc" || method == "checked_div_floor"
       || method == "checked_div_euclid" || method == "checked_mod") {
     return "Result[Int, Str]"
@@ -4952,7 +4972,15 @@ fn operands_of(op: Str, lt: Str, rt: Str) -> Str {
   return ""
 }
 
-fn arm_payload(scrutTy: Str, pat: Str) -> Str {
+fn arm_payload(scrutTy: Str, pat: Str, env: List[Bind]) -> Str {
+  // item 391 (self-host port): a USER variant's arm payload comes from the case
+  // table (`_variant_case_payload`), gated on the case actually belonging to the
+  // scrutinee's ADT. The built-in `Opt`/`Result` payloads come from the
+  // scrutinee's type ARGUMENTS below, so the built-in table entries
+  // (`Result[Any, Any]`) never match a concrete `Result[Int, Str]` here.
+  if (scrutTy != "" && tenv_get(env, "case ".concat(pat)) == scrutTy) {
+    return tenv_get(env, "payload ".concat(pat))
+  }
   let head = parse_head(scrutTy)
   let args = type_args(scrutTy)
   if (head == "Opt" && pat == "Some" && args.length() >= 1) { return args[0] }
@@ -5060,18 +5088,191 @@ fn list_transform_free(name: Str) -> Str {
   return ""
 }
 
+// ---------------------------------------------------------- ADT constructors
+//
+// item 391 (self-host port): TAGGED ADT construction. `Ok(x)`, `Err(e)` and any
+// user variant case (`Circle(r)`) lower to an `adt` node naming the ADT the case
+// belongs to — lower.py's `_case_table` + `_tagged_case` — not to a plain `call`
+// of a function that does not exist. `Opt`'s `Some`/`None` are deliberately NOT
+// tagged: they stay host-null/value and are handled as identity/null downstream.
+// Before this, the self-host frontend emitted `{"kind":"call", ...}` for every
+// constructor and `selfhost/emit_py.rvl` had no `adt` branch at all, so no
+// program that BUILDS a Result or a user variant could be self-compiled — a hole
+// the corpus could not see, because its `result.rvl` document only MATCHES.
+//
+// The table rides in the type environment under a reserved key shape
+// (`"case <Name>"` -> the ADT, `"payload <Name>"` -> the case payload) so it
+// reaches `lir_expr` through the `env` every lowering function already threads.
+// A space is not an identifier character, so a reserved key can never collide
+// with a bound name, and `tenv_get`'s last-wins scan gives shadowing for free.
+type CaseAcc = { binds: List[Bind], amb: List[Str] }
+type CaseStep = { a: CaseAcc, i: Int }
+
+fn amb_has(amb: List[Str], n: Str) -> Bool {
+  var i = 0
+  while (i < amb.length()) { if (amb[i] == n) { return true }  i += 1 }
+  return false
+}
+
+// `_case_table`'s per-case rule. `Some`/`None` are reserved for `Opt`, so a user
+// ADT reusing them is ambiguous and dropped; a user ADT MAY reuse `Ok`/`Err`,
+// shadowing the built-in `Result`; any other collision is ambiguous and dropped.
+// A dropped name is recorded as the empty ADT, which `tenv_get` already answers
+// for an absent key — so "dropped" and "never declared" read identically.
+fn case_add(a: CaseAcc, name: Str, adt: Str, payload: Str) -> CaseAcc {
+  if (name == "Some" || name == "None") {
+    return { binds: a.binds.push({ name: "case ".concat(name), ty: "" }),
+             amb: a.amb.push(name) }
+  }
+  let cur = tenv_get(a.binds, "case ".concat(name))
+  let shadows_result = (name == "Ok" || name == "Err") && cur.startsWith("Result")
+  if (!shadows_result && (cur != "" || amb_has(a.amb, name))) {
+    return { binds: a.binds.push({ name: "case ".concat(name), ty: "" }),
+             amb: a.amb.push(name) }
+  }
+  var b = a.binds.push({ name: "case ".concat(name), ty: adt })
+  b = b.push({ name: "payload ".concat(name), ty: payload })
+  return { binds: b, amb: a.amb }
+}
+
+// One `type <Name> = <case> | <case>` declaration's cases, read exactly the way
+// `ir_type_cases` reads them for the `types` section.
+fn decl_cases(ts: List[Token], i: Int, a: CaseAcc) -> CaseStep {
+  let lineHi = line_end(ts, i, ts.length())
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+  if (!atk(ts, j, "=")) { return { a: a, i: lineHi } }
+  j += 1
+  if (atk(ts, j, "{")) {
+    let bend = close_brace(ts, j)
+    return { a: a, i: bend == 0 - 1 ? lineHi : bend }
+  }
+  if (!is_variant_rhs(ts, j, lineHi)) { return { a: a, i: lineHi } }
+  var k = j
+  var acc = a
+  while (k < lineHi) {
+    if (atk(ts, k, "ident")) {
+      let cn = tkc(ts, k).text
+      var payload = ""
+      var nk = k + 1
+      if (atk(ts, k + 1, "(")) {
+        let tr = type_at(ts, k + 2)
+        payload = tr.ty
+        nk = tr.i
+        if (atk(ts, nk, ")")) { nk += 1 }
+      }
+      acc = case_add(acc, cn, nm, payload)
+      k = nk
+    } else { k += 1 }
+  }
+  return { a: acc, i: lineHi }
+}
+
+fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return a }
+  let t = tkc(ts, i)
+  if (at_boot(ts, i)) { return case_binds_walk(ts, i + 1, a) }
+  if (t.kind != "kw") { return case_binds_walk(ts, skip_line(ts, i), a) }
+  if (t.text == "type") {
+    let d = decl_cases(ts, i, a)
+    return case_binds_walk(ts, d.i, d.a)
+  }
+  if (t.text == "test") {
+    if (atk(ts, i + 1, "{")) {
+      let e = close_brace(ts, i + 1)
+      if (e != 0 - 1) { return case_binds_walk(ts, e, a) }
+    }
+    return case_binds_walk(ts, skip_line(ts, i), a)
+  }
+  if (t.text == "extern") { return case_binds_walk(ts, p_extern(ts, i, empty_prog()).i, a) }
+  if (t.text == "fn") { return case_binds_walk(ts, p_fn(ts, i, empty_prog()).i, a) }
+  if (t.text == "service") { return case_binds_walk(ts, p_service(ts, i, empty_prog()).i, a) }
+  if (t.text == "component") { return case_binds_walk(ts, p_component(ts, i, empty_prog()).i, a) }
+  return case_binds_walk(ts, skip_line(ts, i), a)
+}
+
+// The built-in half of `_case_table`, declared first so a user ADT can shadow
+// `Ok`/`Err` and a user reuse of `Some`/`None` collides with something.
+fn case_binds(ts: List[Token]) -> List[Bind] {
+  var b = []
+  b = b.push({ name: "case Some", ty: "Opt[Any]" })
+  b = b.push({ name: "payload Some", ty: "" })
+  b = b.push({ name: "case None", ty: "Opt[Any]" })
+  b = b.push({ name: "payload None", ty: "" })
+  b = b.push({ name: "case Ok", ty: "Result[Any, Any]" })
+  b = b.push({ name: "payload Ok", ty: "" })
+  b = b.push({ name: "case Err", ty: "Result[Any, Any]" })
+  b = b.push({ name: "payload Err", ty: "" })
+  return case_binds_walk(ts, 0, { binds: b, amb: [] }).binds
+}
+
+// `_tagged_case`: the ADT a name constructs, or "" when it constructs none.
+// `Some`/`None` are excluded here (untagged), exactly as the reference does.
+fn tagged_case_adt(env: List[Bind], name: Str) -> Str {
+  if (name == "Some" || name == "None") { return "" }
+  return tenv_get(env, "case ".concat(name))
+}
+
+fn lir_adt(adt: Str, case_: Str, args: List[Expr], env: List[Bind]) -> Str {
+  return "{\"kind\":\"adt\",\"type\":".concat(jstr(adt))
+    .concat(",\"case\":").concat(jstr(case_))
+    .concat(",\"args\":[").concat(lir_args(args, env)).concat("]}")
+}
+
+// item 189 (self-host port): the Value dot-accessors. A `Value` receiver's
+// `.field(k)` / `.str()` / `.list()` / `.keys()` is receiver-first SUGAR for
+// stdlib/value.rvl's `value_*` free function — lower.py's `_VALUE_ACCESSORS`.
+// It redirects to the SAME call IR `value_str(value_field(node, "k"))` lowers
+// to, so the emitted code is byte-identical on every tier and NO backend needs
+// a new expr-kind. Gated on a proven `Value` receiver: `.keys()` also names a
+// Map builtin, which keeps the builtin path when the head is not `Value`.
+fn value_accessor_free(name: Str) -> Str {
+  if (name == "field") { return "value_field" }
+  if (name == "str") { return "value_str" }
+  if (name == "list") { return "value_list" }
+  if (name == "keys") { return "value_keys" }
+  return ""
+}
+
+// `recv.<m>(a, ...)` -> `<free>(recv, a, ...)`: thread the receiver in as the
+// leading argument and emit the plain free-function call IR. Shared by the two
+// receiver-first redirects (item 383's list transforms, item 189's Value
+// accessors), which differ only in the free function they name.
+fn lir_receiver_first(free: Str, recv: Expr, args: List[Expr],
+                      env: List[Bind]) -> Str {
+  return "{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":"
+    .concat(jstr(free)).concat("},\"args\":[").concat(lir_expr(recv, env))
+    .concat(args.length() > 0 ? "," : "").concat(lir_args(args, env)).concat("]}")
+}
+
 fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
+  // ADT construction (Result / user variants) beats every other call shape: the
+  // callee is a bare `Var` naming a case, not a callable.
+  let ctor = match callee { Var(n) => tagged_case_adt(env, n), _ => "", }
+  if (ctor != "") {
+    let cname = match callee { Var(n) => n, _ => "", }
+    return lir_adt(ctor, cname, args, env)
+  }
   let transform = match callee {
     Field(f) => is_host_root_recv(f.target) ? "" : list_transform_free(f.name),
     _ => "",
   }
   if (transform != "") {
-    // `recv.map(...)` -> `list_map(recv, ...)`: thread the receiver in as the
-    // leading argument and lower the resulting plain free-function call.
+    // `recv.map(...)` -> `list_map(recv, ...)`.
     let recv = match callee { Field(f) => f.target, _ => callee, }
-    return "{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":"
-      .concat(jstr(transform)).concat("},\"args\":[").concat(lir_expr(recv, env))
-      .concat(args.length() > 0 ? "," : "").concat(lir_args(args, env)).concat("]}")
+    return lir_receiver_first(transform, recv, args, env)
+  }
+  let vaccess = match callee {
+    Field(f) => (is_host_root_recv(f.target)
+                 || parse_head(infer(f.target, env)) != "Value")
+      ? "" : value_accessor_free(f.name),
+    _ => "",
+  }
+  if (vaccess != "") {
+    // `node.field("k")` -> `value_field(node, "k")`.
+    let recv = match callee { Field(f) => f.target, _ => callee, }
+    return lir_receiver_first(vaccess, recv, args, env)
   }
   let builtin = match callee {
     Field(f) => (is_host_root_recv(f.target) || !is_builtin_method(f.name))
@@ -5120,7 +5321,7 @@ fn lir_match(m: MatchN, env: List[Bind]) -> Str {
   var i = 0
   while (i < m.arms.length()) {
     let a = m.arms[i]
-    let pay = arm_payload(scrutTy, a.pat)
+    let pay = arm_payload(scrutTy, a.pat, env)
     var inner = env
     if (a.bind != "" && pay != "") { inner = tenv_put(inner, a.bind, pay) }
     var arm = "{\"pattern\":".concat(jstr(a.pat))
@@ -5142,7 +5343,15 @@ fn lir_expr(e: Expr, env: List[Bind]) -> Str {
     BoolLit(v)  => "{\"kind\":\"lit\",\"value\":".concat(v).concat("}"),
     StrLit(v)   => "{\"kind\":\"lit\",\"value\":".concat(jstr(v)).concat("}"),
     NullLit     => "{\"kind\":\"lit\",\"value\":null}",
-    Var(n)      => "{\"kind\":\"var\",\"name\":".concat(jstr(n)).concat("}"),
+    // A nullary USER case used as a bare value (`Red`) is an `adt` with no
+    // args; the built-in `Result`/`Opt` cases always carry a payload, so they
+    // keep the `var` shape the emitters special-case.
+    Var(n)      => (tagged_case_adt(env, n) != ""
+                    && tenv_get(env, "payload ".concat(n)) == ""
+                    && !tagged_case_adt(env, n).startsWith("Result")
+                    && !tagged_case_adt(env, n).startsWith("Opt"))
+                     ? lir_adt(tagged_case_adt(env, n), n, [], env)
+                     : "{\"kind\":\"var\",\"name\":".concat(jstr(n)).concat("}"),
     Bin(b)      => lir_bin(b, env),
     Un(u)       => lir_un(u, env),
     Emit(u)     => "{\"kind\":\"bad\"}",
@@ -5417,7 +5626,7 @@ fn params_env(ps: List[ParamN], acc: List[Bind]) -> List[Bind] {
 }
 
 // One module `fn` -> its `functions` entry. Advances past the whole fn.
-fn lir_function(ts: List[Token], i: Int) -> LirFn {
+fn lir_function(ts: List[Token], i: Int, cases: List[Bind]) -> LirFn {
   let nm = tkc(ts, i + 1).text
   let ps = params_at(ts, i + 3)
   var reti = ps.i
@@ -5435,7 +5644,8 @@ fn lir_function(ts: List[Token], i: Int) -> LirFn {
   if (!atk(ts, reti, "{")) { return { js: "", i: skip_line(ts, i) } }
   let bend = close_brace(ts, reti)
   if (bend == 0 - 1) { return { js: "", i: ts.length() } }
-  let bodyjs = lir_stmts(ts, reti + 1, bend - 1, params_env(ps.ps, []), [], retTy)
+  let bodyjs = lir_stmts(ts, reti + 1, bend - 1,
+                         params_env(ps.ps, cases), [], retTy)
   let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_params_json(ps.ps))
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":false,\"body\":[")
     .concat(bodyjs).concat("]}")
@@ -5444,29 +5654,29 @@ fn lir_function(ts: List[Token], i: Int) -> LirFn {
 
 // Collect every top-level `fn` into the `functions` list; skip other decls
 // wholesale (a nested `fn` inside a component is not a module function).
-fn fns_walk(ts: List[Token], i: Int, acc: Str) -> Str {
+fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind]) -> Str {
   if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc) }
-  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc) }
-  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc) }
+  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases) }
+  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases) }
+  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases) }
   if (t.text == "test") {
     if (atk(ts, i + 1, "{")) {
       let e = close_brace(ts, i + 1)
-      if (e != 0 - 1) { return fns_walk(ts, e, acc) }
+      if (e != 0 - 1) { return fns_walk(ts, e, acc, cases) }
     }
-    return fns_walk(ts, skip_line(ts, i), acc)
+    return fns_walk(ts, skip_line(ts, i), acc, cases)
   }
-  if (t.text == "type") { return fns_walk(ts, skip_line(ts, i), acc) }
-  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc) }
+  if (t.text == "type") { return fns_walk(ts, skip_line(ts, i), acc, cases) }
+  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases) }
   if (t.text == "fn") {
-    let f = lir_function(ts, i)
+    let f = lir_function(ts, i, cases)
     let acc2 = f.js == "" ? acc : (acc == "" ? f.js : acc.concat(",").concat(f.js))
-    return fns_walk(ts, f.i, acc2)
+    return fns_walk(ts, f.i, acc2, cases)
   }
-  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc) }
-  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc) }
-  return fns_walk(ts, skip_line(ts, i), acc)
+  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases) }
+  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases) }
+  return fns_walk(ts, skip_line(ts, i), acc, cases)
 }
 
 // ================================================================ externs IR
@@ -5738,7 +5948,7 @@ pub fn lower_to_ir(src: Str) -> Str {
   let ts = lex_src(src)
   let a = ir_walk(ts, 0, mk_iracc("", "", false, false))
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
-  let fnsjs = fns_walk(ts, 0, "")
+  let fnsjs = fns_walk(ts, 0, "", case_binds(ts))
   let typesjs = types_walk(ts, 0, "")
   let exres = externs_walk(ts, 0, "", true)
   var out = "{\"ir_version\": ".concat(ver).concat(", \"services\": {")
