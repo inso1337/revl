@@ -54,7 +54,12 @@ says so, so nobody approves `notify` believing that is all that will run.
 `files` arguments are jailed to the operator-sanctioned root(s) (see
 `_jail_refusal`): unjailed, they were a filesystem oracle (existence, first
 token, line numbers) over every path on the machine, and `revl_restore` +
-`revl_snapshot` was a full arbitrary-file READ.
+`revl_snapshot` was a full arbitrary-file READ. A `use` path written INSIDE
+transport-carried source is the same path argument by another carrier — the
+compile follows it and reads the file — so it is jailed by the same door
+(`_transport_use_escapes`, roadmap 425 F2). Imports in a `.rvl` file that was
+already on disk inside a sanctioned root are the operator's own composition
+layout and resolve unchanged.
 """
 
 from __future__ import annotations
@@ -218,32 +223,130 @@ def _collect_path_arguments(node, out: list) -> None:
             _collect_path_arguments(item, out)
 
 
+def _escaping_use(path: str) -> bool:
+    """Whether a `use` path written in transport-carried source names a file
+    outside the importing directory's own tree.
+
+    Purely syntactic, so the check itself opens and stat-s nothing (the whole
+    point is that the compile's own resolution was the oracle). Two shapes
+    escape: an ABSOLUTE path, and a relative path that normalises to a leading
+    `..`. Everything else resolves either under the importer's directory — for
+    transport-carried source that is the directory the server was started in,
+    the one the operator sanctioned — or, when nothing sits there, through the
+    OPERATOR's own search path (`REVL_IMPORT_PATH`, then the installed stdlib),
+    which is why `use "stdlib/str.rvl"` keeps working untouched.
+    """
+    if os.path.isabs(path):
+        return True
+    normalized = os.path.normpath(path)
+    return normalized == ".." or normalized.startswith(".." + os.sep)
+
+
+def _transport_use_escapes(arguments: dict) -> list[str]:
+    """The `use` paths in this call's transport-carried source that leave the
+    sanctioned tree (roadmap 425 F2).
+
+    A `use` path IS a caller-supplied path argument; it just rides inside the
+    source text rather than beside it, which is how it survived the argument
+    jail above. The compile follows it: `_ModuleLoader.resolve_use` joins it to
+    the importing directory and reads whatever is there, so
+    `revl_check {"source": 'use \"/etc/passwd\" as p', "modules": {...}}`
+    reported that file's existence, its first token and its line numbers — the
+    same filesystem oracle the argument jail closed, reached through the source
+    instead. Item 422's lesson exactly: a guard on the destination that does not
+    cover the source is not a guard.
+
+    Scoped to source that ARRIVED OVER THE TRANSPORT, which is the same premise
+    `_compile` already runs on: a `.rvl` file on disk inside a sanctioned root
+    was put there by a human, and its own `../lib/x.rvl` is the operator's
+    composition layout, not an agent's traversal. Those are untouched.
+
+    A path the caller also supplies in-memory (a `modules` key) is exempt: it
+    resolves out of the sources map with no disk access at all, so it is not a
+    path into the filesystem in the first place.
+    """
+    sources: list = []
+    _collect_sources(arguments, sources)
+    if not sources:
+        return []
+    supplied: set[str] = set()
+    _collect_module_keys(arguments, supplied)
+    from ..parser import Parser  # noqa: PLC0415
+
+    escapes: list[str] = []
+    for text in sources:
+        try:
+            program = Parser(text, "<candidate>.rvl").parse()
+        except Exception:  # noqa: BLE001 — not parseable: the handler reports it
+            continue
+        for use in program.uses:
+            if not _escaping_use(use.path):
+                continue
+            if os.path.abspath(use.path) in supplied:
+                continue
+            escapes.append(use.path)
+    return escapes
+
+
+def _collect_module_keys(node, out: set) -> None:
+    """The abspaths of every in-memory module this call supplies. Those resolve
+    from the sources map, never from disk."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _SOURCE_MAP_ARGUMENTS and isinstance(value, dict):
+                out.update(os.path.abspath(k) for k in value)
+            else:
+                _collect_module_keys(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_module_keys(item, out)
+
+
 def _jail_refusal(arguments: dict) -> dict | None:
     """The refusal payload when a tool call names a path outside the sanctioned
     roots, or `None` when every path is inside. Fails CLOSED: refused before the
     handler runs, so nothing is opened, stat-ed or compiled, and the message
-    discloses only what the caller already sent."""
+    discloses only what the caller already sent.
+
+    Two carriers, one jail: a path ARGUMENT (`files`, `traceFile`, ...) and a
+    `use` path written inside transport-carried source (`_transport_use_escapes`,
+    roadmap 425 F2)."""
     paths: list = []
     _collect_path_arguments(arguments, paths)
-    if not paths:
-        return None
     roots = _file_roots()
     escaped = [p for p in paths if not _within_roots(p, roots)]
-    if not escaped:
+    imports = _transport_use_escapes(arguments) if not escaped else []
+    if not escaped and not imports:
         return None
-    named = ", ".join(f"`{p}`" for p in sorted(set(escaped)))
     allowed = ", ".join(f"`{r}`" for r in roots)
+    if escaped:
+        named = ", ".join(f"`{p}`" for p in sorted(set(escaped)))
+        message = (f"refused: {named} is outside the operator-sanctioned "
+                   f"root(s) [{allowed}] — a path argument may not leave them")
+        hint = ("a path argument is confined to what the operator sanctioned "
+                "when starting this server (`revl mcp serve --root DIR`); "
+                "without the jail, `files` reports whether any path on the "
+                "machine exists, what its first token is and where it fails, "
+                "and a snapshot round-trip returns its content. Send the "
+                "candidate as inline `source`, or ask the operator to sanction "
+                "the directory")
+    else:
+        named = ", ".join(f'`use "{p}"`' for p in sorted(set(imports)))
+        message = (f"refused: {named} leaves the operator-sanctioned "
+                   f"root(s) [{allowed}] — an import in source sent over this "
+                   "transport may not name an absolute path or traverse upward")
+        hint = ("a `use` path is a path argument like any other: the compile "
+                "follows it and reads the file, so an unconfined one reports "
+                "whether any path on the machine exists, what its first token "
+                "is and where it fails. Send the imported module inline in "
+                "`modules`, keyed by the relative path the import names; write "
+                "the import relative to the sanctioned directory; or, for an "
+                "installed module, use its search-path spelling (`use "
+                "\"stdlib/str.rvl\"`). A `.rvl` file already inside a sanctioned "
+                "root resolves its own imports unchanged")
     return {"ok": False, "diagnostics": [{
         "severity": "error", "code": "REVL", "category": "admission",
-        "message": (f"refused: {named} is outside the operator-sanctioned "
-                    f"root(s) [{allowed}] — a path argument may not leave them"),
-        "hint": ("a path argument is confined to what the operator sanctioned "
-                 "when starting this server (`revl mcp serve --root DIR`); "
-                 "without the jail, `files` reports whether any path on the "
-                 "machine exists, what its first token is and where it fails, "
-                 "and a snapshot round-trip returns its content. Send the "
-                 "candidate as inline `source`, or ask the operator to sanction "
-                 "the directory"),
+        "message": message, "hint": hint,
     }], "note": "nothing was read, compiled or loaded"}
 
 
