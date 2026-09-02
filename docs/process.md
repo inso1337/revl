@@ -72,6 +72,41 @@ when a test reads an env name that nothing sets, which is what keeps this list
 from growing silently. If your change needs a switch flipped, flip it in
 `ci.yml` in the same PR.
 
+## The release path
+
+`publish.yml` triggers on a `v*` tag and on nothing else, so none of it runs on
+a PR or on main. A green CI says nothing about it. That gap already cost one
+latent break: the publish job declared `id-token: write` alone, and because a
+job-level `permissions` block **replaces** the workflow-level one rather than
+merging into it, `contents` was `none` and `actions/checkout` could not have
+read the tag it publishes (issue #191, fixed in PR #190).
+
+Two things cover it now, and neither is a substitute for the other.
+
+`tools/check_workflow_permissions.py` runs in `lint` on every PR. It resolves
+each job's effective permission set and checks it against the scopes the
+actions in that job need, following local reusable-workflow calls under the
+caller's set as a ceiling. It is a static read, so it reaches the publish job
+without a tag existing. Its `--self-test` reintroduces the original bug into a
+synthetic workflow and asserts the gate catches it, and that runs in `lint`
+too. The action-to-scopes table is deliberately small and hand-checked: an
+action not in it is skipped with a note rather than guessed at, so add the
+entry when you add the action.
+
+`.github/workflows/release-dryrun.yml` builds the distribution, runs
+`twine check`, installs the wheel into a clean environment and compiles an
+example with it. It runs weekly, on `workflow_dispatch`, and on a PR that edits
+`pyproject.toml` or the release workflows. It has no upload step, not even a
+skipped one. It is also the only place the built **wheel** is used at all: the
+rest of CI tests the checkout tree, so a break in pyproject's force-include of
+`backends/` and `stdlib/` is invisible everywhere else and would surface as a
+broken release on PyPI.
+
+What is still not covered is the publish job's own runtime environment, its
+`pypi` environment and the Trusted Publishing OIDC handshake. Those exist only
+on a tag build and cannot be rehearsed without publishing. Run
+`gh workflow run "release dry run"` and read it green before pushing a tag.
+
 ## Merging
 
 The orchestrator merges when CI is green, and regenerates the site wheel and the
