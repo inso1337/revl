@@ -76,6 +76,7 @@ UNVERIFIED = "cannot verify"
 
 # The tiers, in the order item 297 names them, so the report reads the same
 # every run.
+TIER_VERSION = "version"
 TIER_SOURCE = "source"
 TIER_ANCHOR = "independent pin"
 TIER_LOCK = "dependency lock"
@@ -150,8 +151,14 @@ class ReproduceReport:
 # --------------------------------------------------------------- resolution
 
 def _split_spec(spec: str) -> tuple[str, str]:
-    """`name@version` -> (name, version). No `@` means no version pin was asked
-    for. Split on the last `@` so a name is never mistaken for a version."""
+    """`name@version` -> (name, version). Split on the last `@` so a name is
+    never mistaken for a version.
+
+    No `@` means no version was asked for, which is NOT the same as "the
+    version does not matter": a rebuild that pinned no release identity is
+    reported `cannot verify` on the version tier and can never be *fully*
+    reproduced (see `_check_version`). Asking for nothing is answered with
+    nothing, never with a silent pass."""
     if "@" in spec:
         name, _, version = spec.rpartition("@")
         return name, version
@@ -251,8 +258,63 @@ def _check_source(source: str, row: dict) -> Check:
     return Check(TIER_SOURCE, OK, f"sha256 {_short(rebuilt)}", recorded, rebuilt)
 
 
+def _check_version(name: str, requested: str, recorded: str | None) -> Check:
+    """The version tier: does `@version` actually PIN a release?
+
+    `@version` used to be a label rather than a pin. Nothing recorded a
+    per-component version, so `truc reproduce name@99.99.99` rebuilt whatever
+    `name` happened to be and the tier could only ever be `cannot verify`
+    (roadmap item 428 F12). The registry now records a publisher-declared
+    `version` per entry (`registry.ENTRY_VERSION_FILENAME`), which gives the
+    tier something to check, and this is what it means for it to be a pin:
+
+      * asked for and recorded and equal -> OK, this really is that release;
+      * asked for and recorded and different -> the resolution refuses before
+        it gets here, in `reproduce`, since answering about another release is
+        answering a different question;
+      * asked for and NOT recorded -> MISMATCH. There is no version to pin
+        against, and an unanswerable question is refused, never rounded down to
+        a pass;
+      * NOT asked for -> `cannot verify`, whether or not the registry records
+        one. A rebuild that pinned no release identity reproduced "whatever
+        this registry serves right now", which is a real and much weaker claim,
+        so it can never be *fully* reproduced. The run is not a failure - no
+        tier diverged - and `ok` stays true, exactly the honest-degradation
+        rule the rest of this module follows.
+
+    A recorded version is publisher metadata and this tier is a check of the
+    registry against itself; the project's own lock row carries the version it
+    admitted, and `_check_anchor` is where that independent copy is compared.
+    """
+    if requested:
+        if recorded is None:
+            return Check(
+                TIER_VERSION, MISMATCH,
+                f"no version is recorded for '{name}' in this registry, so "
+                f"'@{requested}' is not a pin and there is nothing to check it "
+                f"against. Reproducing the published '{name}' would answer a "
+                "different question than the one asked; run "
+                f"`truc reproduce {name}` if that is the question",
+                requested, "(no version recorded)")
+        return Check(TIER_VERSION, OK,
+                     f"the registry records version {recorded}, the requested "
+                     "pin", recorded, requested)
+    if recorded is None:
+        return Check(
+            TIER_VERSION, UNVERIFIED,
+            f"no `@version` was asked for and this registry records none for "
+            f"'{name}': nothing pins WHICH release was reproduced, only that "
+            "the bytes served right now rebuild to what is recorded beside "
+            "them")
+    return Check(
+        TIER_VERSION, UNVERIFIED,
+        f"no `@version` was asked for, so no release was pinned; this registry "
+        f"serves '{name}' {recorded} today (run `truc reproduce {name}@"
+        f"{recorded}` to pin it)", recorded, "(none requested)")
+
+
 def _check_anchor(project_dir: str, name: str, source: str,
-                  lock: dict | None) -> Check:
+                  lock: dict | None, recorded_version: str | None = None) -> Check:
     """Cross-check the registry's source against something the REGISTRY DID NOT
     WRITE: the project's own `truc.lock` pin, and the bytes vendored under
     `trucs/<name>/`.
@@ -296,6 +358,18 @@ def _check_anchor(project_dir: str, name: str, source: str,
                      "the published component is not the one this project "
                      "locked (a substituted dependency)",
                      pin, rebuilt)
+    lock_version = (lock or {}).get("version") or ""
+    if lock_version and recorded_version and lock_version != recorded_version:
+        # Same name, same project, two different release identities. The bytes
+        # may even agree; the registry relabelling a release under a name this
+        # project pinned is still a divergence the project can see and the
+        # registry cannot hide, which is the whole point of this tier.
+        return Check(TIER_ANCHOR, MISMATCH,
+                     f"this project locked '{name}' at version {lock_version} "
+                     f"but the registry now publishes it as {recorded_version}: "
+                     "the release identity was relabelled under the name this "
+                     "project pinned",
+                     lock_version, recorded_version)
     if vendored is not None and _sha256(vendored) != pin:
         return Check(TIER_ANCHOR, MISMATCH,
                      f"the bytes vendored at trucs/{name}/component.rvl do not "
@@ -611,30 +685,17 @@ def reproduce(spec: str, *, project_dir: str = ".", registry: str | None = None,
 
     report = ReproduceReport(name=name, version=requested_version)
 
-    # version: the registry index carries no per-component version today, so a
-    # requested `@version` cannot be checked against anything.
-    #
-    # It used to report UNVERIFIED, and an unverifiable tier contributes no
-    # MISMATCH, so `truc reproduce name@99.99.99-totally-different` reproduced
-    # whatever `name` is TODAY and answered `ok=True` (roadmap 428 F12). The
-    # report LINE was honest and the verdict was not: the caller asked about
-    # one version and got an answer about another. An input this registry
-    # cannot measure refuses; it does not quietly become a different question.
-    recorded_version = row.get("version")
-    if requested_version:
-        if recorded_version is None:
-            report.checks.append(Check(
-                "version", MISMATCH,
-                f"no version is recorded for '{name}' in this registry, so "
-                f"'@{requested_version}' is not a pin and there is nothing to "
-                f"check it against. Reproducing the published '{name}' would "
-                "answer a different question than the one asked; run "
-                f"`truc reproduce {name}` if that is the question",
-                requested_version, "(no version recorded)"))
-        elif recorded_version != requested_version:
-            raise RevlError(str(entry_dir), 0,
-                            f"'{name}@{requested_version}' is not published here "
-                            f"(recorded version is {recorded_version})")
+    # version: the release identity of what is being reproduced.
+    recorded_version = row.get("version") or None
+    if requested_version and recorded_version \
+            and recorded_version != requested_version:
+        # A resolution that cannot honour the pin refuses outright rather than
+        # reproducing a different release under the name that was asked for.
+        raise RevlError(str(entry_dir), 0,
+                        f"'{name}@{requested_version}' is not published here "
+                        f"(recorded version is {recorded_version})")
+    report.checks.append(
+        _check_version(name, requested_version, recorded_version))
 
     source_path = entry_dir / "component.rvl"
     if not source_path.exists():
@@ -647,7 +708,8 @@ def reproduce(spec: str, *, project_dir: str = ".", registry: str | None = None,
     # source tier, hash the recorded bytes; then the one check the registry
     # cannot satisfy on its own - the project's independent truc.lock pin.
     report.checks.append(_check_source(source, row))
-    report.checks.append(_check_anchor(project_dir, name, source, lock))
+    report.checks.append(
+        _check_anchor(project_dir, name, source, lock, recorded_version))
 
     # rebuild the IR + manifest through the normal pipeline (frontend-only, no
     # runtime needed, the same path registry.build_index runs).

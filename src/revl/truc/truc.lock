@@ -1,14 +1,38 @@
 {
-  "lockVersion": 0,
-  "note": "truc's own stage-0 composition file list (docs/design/truc-architecture.md §7). The launcher compiles exactly these; that compile IS truc passing its own gate on every boot. externs.rvl is pulled in as an import, so it is not listed as a root. Slice S5 extends this file into truc's full self-description (truc.toml + trucs/ + pinned hashes).",
+  "lockVersion": 1,
+  "note": "truc's stage-0 composition: the file list the launcher compiles, and the sha256 of each file's bytes. That compile IS truc passing its own gate on every boot (docs/design/truc-architecture.md section 7). externs.rvl is pulled in as an import, so it is not listed as a root. The pins are mandatory and so is this file: a missing, unparseable or unpinned lock refuses to boot rather than falling back to compiling whatever sits in components/. Regenerate with `python -m revl.truc._relock` and commit; tests/test_truc_bootstrap.py is the regenerate-or-red gate.",
   "files": [
-    "components/registry_client.rvl",
-    "components/fetcher.rvl",
-    "components/gatekeeper.rvl",
-    "components/workspace.rvl",
-    "components/planner.rvl",
-    "components/assembler.rvl",
-    "components/shipper.rvl",
-    "components/cli.rvl"
+    {
+      "path": "components/registry_client.rvl",
+      "sha256": "868718bf422d1fac180cd34f4245092f0fe4aefb3e0efa98a3dd38f48cad6e4e"
+    },
+    {
+      "path": "components/fetcher.rvl",
+      "sha256": "adc07c6a00153ad82dad82647900e2f87f1c076ae601a914183e2161350f23f6"
+    },
+    {
+      "path": "components/gatekeeper.rvl",
+      "sha256": "924540ad363530b155826e5602f4b012ce80a8ee0bbd16a04a04c959f41366d9"
+    },
+    {
+      "path": "components/workspace.rvl",
+      "sha256": "8f557491202c5ef393ad28203ef77a5f0e5e59e6007b0bad8ec4ca2482150ae1"
+    },
+    {
+      "path": "components/planner.rvl",
+      "sha256": "8f250896c1405389ec464840609224cfa529a42a68be15b902cd0775ceebba1d"
+    },
+    {
+      "path": "components/assembler.rvl",
+      "sha256": "5924d51aaac60cd3d65b881e2afc469af1ec8545016506b9a3ae8169aee6f6cf"
+    },
+    {
+      "path": "components/shipper.rvl",
+      "sha256": "0459dc3c7b1ebccb5ecc811e9b3876ff00e75199f428f385a3bbdfdab3be460e"
+    },
+    {
+      "path": "components/cli.rvl",
+      "sha256": "8ff38597dfa407b87d813895db4634df622d3fd06c369989a833a992d4bfdc35"
+    }
   ]
 }
