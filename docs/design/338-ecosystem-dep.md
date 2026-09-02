@@ -54,7 +54,7 @@ A downstream consumer imports the layer-1 verdict surface. It is pure (no disk,
 no clock, no live state; strings in, structured strings out) and is the surface
 another tool builds a gate on.
 
-```revl
+```python
 # sketch (py, not revl): what a third-party MCP server / CI check imports
 from revl.gate import admit, admit_into, compile_to, gate_version, Verdict
 ```
@@ -134,7 +134,7 @@ the ACTUAL dependency path: install `revl` from a package index (or a built
 wheel), import `revl.gate`, admit. It stands in for the three named consumer
 kinds without being any specific product:
 
-```revl
+```python
 # sketch (py, a third-party tool's own module): an MCP-server-shaped admitter
 from revl.gate import admit, gate_version
 
