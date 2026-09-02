@@ -118,6 +118,48 @@ rust tier cannot cross the process seam) is REFUSED, and the refusal BLOCKS the
 substitution: `_apply_repoint(...)` returns False and the stub client is never
 re-pointed, so it keeps its original target.
 
+### Amendment: a selector is not an authorization (adversarial audit, HIGH)
+
+As first landed, both seams satisfied property 1 for the SELECTOR and violated
+it for everything else, which is to say they judged the wrong thing. Three
+inputs reached the effect unjudged:
+
+- nothing bound `component` to the `key` whose proxy moved, so any admissible
+  `(component, backend)` pair in the composition was a pass token for
+  re-pointing or wiring ANY key;
+- the SOCKET/ENDPOINT was never an input to the decision at all, though it is
+  the entire effect of a repoint or a boot wiring;
+- `_apply_boot_wiring` skipped the gate outright on a wire-carried
+  `remote: true`, so one flag on a same-composition key bought an ungated
+  wiring.
+
+Property 1 now covers all three, and each is derived from state the receiver
+holds on its own:
+
+- **Binding** (`_providers_of`, `_selector_binding`): the receiver recomputes
+  key -> component from its own `running_ir` (the same map `placement.py` builds
+  as `key_component`) and refuses a selector that its own manifest does not name
+  as the provider of that key.
+- **Address** (`_seam_anchor`, `_sanction_address`): a UDS target must lie in
+  the placement directory the conductor wrote this process's own spec into,
+  which the receiver learns from `argv[1]`, never from the spec JSON, and where
+  the conductor binds every seam socket including a swap successor's. A network
+  target must be anchored on the mTLS identity and CA this process was itself
+  issued, since a network seam is "the two processes that hold CA-signed certs",
+  not whoever can reach a port. No placement directory, or no single identity of
+  its own, means the receiver cannot sanction the address and therefore refuses.
+- **Scope** (`_apply_boot_wiring`): whether an entry is a same-composition seam
+  is read off the receiver's manifest, not off `remote`. A key some component of
+  `running_ir` provides is gated however the entry labels itself; only a key this
+  composition provides nowhere is the genuine cross-composition handoff of Seam
+  3, still deferred.
+
+The honest limit of the address sanction, named rather than smuggled past: a
+spec edit that copies this process's own mTLS material onto a foreign host:port
+passes the gate and is stopped one layer down, at the handshake, because the
+foreign host holds no CA-signed leaf. The UDS half has no such gap, since the
+placement directory is `mkdtemp` at 0700 and only the conductor binds in it.
+
 ## The generalization: which seams re-admit, and the one invariant they share
 
 A "seam" is any point where a component or a service reference crosses from one
