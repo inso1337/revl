@@ -126,7 +126,7 @@
 // type/fn/extern/test, no `if`/`fail`/setup-effect body step, no
 // builtin/adt/spawn/async-op) lowers to ir_version 1; a component carrying ONLY a
 // realm placement (`isolate`) or `intercept` metadata lowers to ir_version 2.
-// `emit_src` is version-agnostic — it assembles the same shape `_emit_v1` does for
+// `emit_ts_src` is version-agnostic — it assembles the same shape `_emit_v1` does for
 // a component-only doc (header, `_revl_helpers`, service interfaces,
 // `_context_augmentation`, each `_component` plugin object) — so its output is
 // byte-identical to the reference's v1/v2 emission. This CLOSES item 234's flag
@@ -1392,19 +1392,51 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
   for (ext of externs) {
     let name = ident(value_str(value_field(ext, "name")))
     var parts = []
+    var args = []
     for (p of value_list(value_field(ext, "params"))) {
       parts = parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type(value_str(value_field(p, "type")))}`)
+      args = args.push(ident(value_str(value_field(p, "name"))))
     }
     let params = parts.join(", ")
+    let arg_list = args.join(", ")
     let returns = ts_return_type(value_field(ext, "returns"))
     let bodies = value_field(ext, "bodies")
+    // item 421 F6 (ported per item 429(d), the ts end): an extern whose DECLARED
+    // return was `Secret[T]` is the ORIGIN — where a confidential value enters
+    // the value world, the case a receiver-end marking misses (`let t = emit
+    // mint(); effect store.insert(t, v)`). `taint.py` strips the qualifier
+    // before lowering, so `secret_return` is the only surviving record of it.
+    // The verbatim `@ts` body owns its own `return` statements, so it moves into
+    // an INNER function and the exported name becomes a one-line marking
+    // wrapper — every call site is covered without the body being rewritten.
+    // Absent unless the author declared it, so every other module stays
+    // byte-identical.
+    let secret_return = value_bool(value_field(ext, "secret_return"))
+    var impl = name
+    var export_kw = "export "
+    if (secret_return) {
+      impl = "_revl_secret_".concat(name)
+      export_kw = ""
+    }
     if (!value_has(bodies, "ts")) {
       out = out.push(`<<EXTERN-NO-TS-BODY:${name}>>`)
     } else {
       if (value_bool(value_field(ext, "async"))) {
-        out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
+        if (secret_return) {
+          out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
+          out = out.push(`  return host.secretResult(await ${impl}(${arg_list}))`)
+          out = out.push("}")
+          out = out.push("")
+        }
+        out = out.push(`${export_kw}async function ${impl}(${params}): Promise<${returns}> {`)
       } else {
-        out = out.push(`export function ${name}(${params}): ${returns} {`)
+        if (secret_return) {
+          out = out.push(`export function ${name}(${params}): ${returns} {`)
+          out = out.push(`  return host.secretResult(${impl}(${arg_list}))`)
+          out = out.push("}")
+          out = out.push("")
+        }
+        out = out.push(`${export_kw}function ${impl}(${params}): ${returns} {`)
       }
       let body = py_dedent(py_strip_nl(value_str(value_field(bodies, "ts"))))
       if (body == "") {
@@ -1457,7 +1489,7 @@ fn emit_ts_types(types: Any) -> List[Str] {
 // Slice 3 (item 208) adds the COMPOSITE signature types (List/Opt/Map/Result/
 // fn-type + the declared-record `known_types` path in `ts_type_v1`).
 // The v1/v2 `_emit_v1` dispatch is COVERED byte-exact (slice 7, item 240) —
-// `emit_src` is version-agnostic, so a component-only v1/v2 doc emits identically.
+// `emit_ts_src` is version-agnostic, so a component-only v1/v2 doc emits identically.
 // STILL DEFERRED (a divergence, not a bug, if fed one — excluded from the
 // corpus): ROUTED requires (`realms(...)` + the router + `realmLabel` + the
 // routed-`req` proxy), the canonical ABI, and the component-body `timer` step.
@@ -1692,10 +1724,24 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str]
     let spec_params = value_list(value_field(spec, "params"))
     let param_names = value_list(value_field(method, "params"))
     var sig_parts = []
+    // item 421 F6 (ported per item 429(d), the ts end): the SURFACE names of
+    // this method's params that its SERVICE declares `Secret[T]`. `taint.py`
+    // strips the qualifier before lowering, so the service spec's
+    // `params[i].secret` stamp is the only surviving record that the position is
+    // confidential. A method's param names are its own and may differ from the
+    // declared ones (only the arity must agree), so the stamp is read BY INDEX
+    // off the declaration while the name comes from the method — which is why
+    // this needs the `services` table threaded down, and why the method node
+    // alone could never see it.
+    var secret_params = []
     var i = 0
     for (pn of param_names) {
-      let ptype = ts_type_v1(value_str(value_field(value_at(spec_params, i), "type")), known_types)
+      let pspec = value_at(spec_params, i)
+      let ptype = ts_type_v1(value_str(value_field(pspec, "type")), known_types)
       sig_parts = sig_parts.push(`${ident(value_str(pn))}: ${ptype}`)
+      if (value_bool(value_field(pspec, "secret"))) {
+        secret_params = secret_params.push(ident(value_str(pn)))
+      }
       i += 1
     }
     // services 2.0 §5: the async flag lives on the SERVICE declaration (the
@@ -1708,6 +1754,15 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str]
       body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [] }
     }
     out = out.push(`${pad}${prefix}${name}(${sig_parts.join(", ")}) {`)
+    // A param the service declared `Secret[T]` is a declared DISCLOSURE
+    // RECEIVER. Registering the value at the head of the receiver is what lets
+    // `runtime.record` scrub it out of the host trace when the body goes on to
+    // use it as a `Map` key, a `pool.query` sql, or a stream item. Emitted ONLY
+    // for a method that actually declares one, so every other module stays
+    // byte-identical.
+    if (secret_params.length() > 0) {
+      out = out.push(`${pad}  host.markSecret(${secret_params.join(", ")})`)
+    }
     let br = method_body(value_list(value_field(method, "body")), level + 1, c, body_acx)
     out = out.concat(br.lines)
     c = br.counter
@@ -1970,10 +2025,17 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
     for (field of fields) {
       let fname = value_str(value_field(field, "name"))
       let dflt = value_field(field, "default")
+      // item 256 Slice 3 / 421 F6 (ported per item 429(d), the ts end): a field
+      // declared `Secret[T]` is stamped so the runtime keeps its value out of
+      // the `<Component>.config` trace line while still handing the real value
+      // to the component. Emitted only when the author declared one, so every
+      // other module stays byte-identical.
+      var mark = ""
+      if (value_bool(value_field(field, "secret"))) { mark = ", secret: true" }
       if (value_is_null(dflt)) {
-        spec_parts = spec_parts.push(`${fname}: { required: true }`)
+        spec_parts = spec_parts.push(`${fname}: { required: true${mark} }`)
       } else {
-        spec_parts = spec_parts.push(`${fname}: { default: ${literal_of(dflt)} }`)
+        spec_parts = spec_parts.push(`${fname}: { default: ${literal_of(dflt)}${mark} }`)
       }
     }
     out = out.push(`    const config = host.applyConfigDefaults(${json_dumps(name)}, rawConfig, { ${spec_parts.join(", ")} }) as Required<${name}Config>`)
@@ -2547,7 +2609,7 @@ fn revl_helpers(ir: Any) -> List[Str] {
 // helpers, service interfaces, context augmentation, and per-component plugin
 // object are the exact subset `_emit_v1` emits. (The v1/v2 dispatch has no
 // declared type/extern/fn/test, so those branches below emit nothing for it.)
-pub fn emit_src(ir: Any) -> Str {
+pub fn emit_ts_src(ir: Any) -> Str {
   var out = []
   out = out.push("// Generated by revl backends/typescript/emit.py — do not edit.")
   out = out.push("// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).")
@@ -2691,7 +2753,7 @@ fn indentation_is_two_spaces() -> Bool {
 
 // --------------------------------------------------------------- component wrap
 // A trivial provider so the emitted module is a valid plugin (the pure
-// `emit_src` above is what the cross-check exercises); mirrors the wrapper the
+// `emit_ts_src` above is what the cross-check exercises); mirrors the wrapper the
 // other self-host stages carry. `render` avoids the `emit` keyword.
 service EmitStream {
   fn render(ir: Any) -> Str
@@ -2699,6 +2761,6 @@ service EmitStream {
 
 component EmitTs provides emitter: EmitStream {
   provide emitter {
-    fn render(ir) = emit_src(ir)
+    fn render(ir) = emit_ts_src(ir)
   }
 }
