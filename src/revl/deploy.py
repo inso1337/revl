@@ -110,6 +110,13 @@ FACET_POLICY = "policy"
 FACET_LOCK = "lock"
 FACET_GAUNTLET = "gauntlet"
 
+#: The one item-31 gauntlet verdict that is evidence of admissibility, and the
+#: dossier member naming the composition the dossier was graded over. Both are
+#: `bundle.py`'s spellings, re-stated here so admission never imports the
+#: bundler (the receiver has a bundle, not a build).
+GAUNTLET_ADMISSIBLE = "admissible"
+GAUNTLET_IDENTITY = "compositionHash"
+
 
 def artifact_facet(backend: str) -> str:
     """The `evidence_bindings` key binding one backend's emitted artifact."""
@@ -373,6 +380,14 @@ class TrustStore:
     False and HMAC is honest; the flag is the place the Ed25519 prerequisite
     lands when Slice 2 crosses a domain.
 
+    `require_gauntlet` demands that the signed chain actually carry item-31
+    gauntlet evidence. Off (the default) a bundle built where the gauntlet
+    machinery was unavailable still admits, since `build_bundle` degrades
+    honestly and stages no dossier; on, a chain with no `gauntlet` facet is
+    REFUSED rather than admitted on absent evidence. A dossier that IS bound is
+    read in full either way: an unreadable one, a verdict that is not
+    `admissible`, and one graded over another composition are all refusals.
+
     `recheck_source` is the receiver's answer to "a signature is not a check".
     Off (the default), admission trusts the SIGNER's gate run: the attestation
     is only issuable from a real admitted verdict over this exact
@@ -390,6 +405,7 @@ class TrustStore:
     evidence_ttl_seconds: Optional[float] = None
     cross_domain: bool = False
     recheck_source: bool = False
+    require_gauntlet: bool = False
 
     def key_for(self, kid: str | None) -> Optional[bytes]:
         if not isinstance(kid, str):
@@ -578,6 +594,66 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
             return _refusal(LINK_EVIDENCE,
                             f"the staged conformance cert for {trust.backend} is "
                             "not the bound one (re-hashed here, and it differs)")
+
+    # (f2) the gauntlet VERDICT, and the composition it was graded over.
+    #
+    # (f) above only re-hashes the dossier: it proves the bytes are the signed
+    # bytes and says nothing about what they SAY. So a dossier recording
+    # `rejected` — the bundle's own evidence that it should not have been built
+    # — was hashed, matched, and ACCEPTED, and a genuine `admissible` record
+    # produced for a DIFFERENT artifact was accepted too, because the dossier
+    # named no composition and there was nothing to check it against.
+    # `bundle.build_bundle` now stamps the graded composition into the dossier
+    # as it stages it, and both halves are read here.
+    #
+    # Fail closed throughout: a dossier that will not parse, or that names no
+    # composition, is refused rather than read as absent evidence.
+    if FACET_GAUNTLET in bindings:
+        try:
+            dossier = json.loads(
+                (root / GAUNTLET_NAME).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+            return _refusal(
+                FACET_GAUNTLET,
+                f"the chain binds `{FACET_GAUNTLET}` but the staged "
+                f"{GAUNTLET_NAME} cannot be read as JSON ({error}); unreadable "
+                "evidence is refused, never read as evidence that passed")
+        if not isinstance(dossier, dict):
+            return _refusal(
+                FACET_GAUNTLET,
+                f"the staged {GAUNTLET_NAME} is not a gauntlet dossier "
+                f"(it is a {type(dossier).__name__}, not an object)")
+        verdict = dossier.get("verdict")
+        if verdict != GAUNTLET_ADMISSIBLE:
+            return _refusal(
+                FACET_GAUNTLET,
+                f"the staged {GAUNTLET_NAME} records the gauntlet verdict "
+                f"{verdict!r}, not {GAUNTLET_ADMISSIBLE!r}: the bundle carries "
+                "its own evidence that it should not have been built, and an "
+                "honest signature over that evidence does not turn it into a "
+                "pass")
+        graded = dossier.get(GAUNTLET_IDENTITY)
+        if not isinstance(graded, str) or not graded:
+            return _refusal(
+                FACET_GAUNTLET,
+                f"the staged {GAUNTLET_NAME} carries no `{GAUNTLET_IDENTITY}`, "
+                "so it names no composition: it cannot be shown to be evidence "
+                "about the artifact in hand, and unidentified evidence is "
+                "refused rather than assumed to be about this one")
+        if not hmac.compare_digest(graded, recomputed_ir):
+            return _refusal(
+                FACET_GAUNTLET,
+                f"the staged {GAUNTLET_NAME} was graded over composition "
+                f"{graded[:12]}…, but the composition staged here is "
+                f"{recomputed_ir[:12]}…: a genuine dossier for a DIFFERENT "
+                "artifact hashes correctly into the chain and would otherwise "
+                "ride along under an honest signature")
+    elif trust.require_gauntlet:
+        return _refusal(
+            FACET_GAUNTLET,
+            "this receiver requires item-31 gauntlet evidence and the signed "
+            f"chain binds no `{FACET_GAUNTLET}` facet; absent evidence is "
+            "refused, never counted as evidence that passed")
 
     # (g) capability ceiling: a deploy may not widen authority (§2.2, G1/G9).
     #
