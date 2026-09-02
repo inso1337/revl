@@ -23,3 +23,11 @@ func TestBoolWorks(revlT *testing.T) {
 		revlT.Fatalf("assertion failed: %s", "t")
 	}
 }
+
+func TestAssertTempDoesNotCollideWithAUserRBindingItem110143(revlT *testing.T) {
+	r := "hello from revl"
+	_ = r
+	if !(r == "hello from revl") {
+		revlT.Fatalf("assertion failed: %s", "(r == \"hello from revl\")")
+	}
+}
