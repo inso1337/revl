@@ -1,7 +1,10 @@
-"""Executed probe: the emitted bump heap is one fixed 64 KiB page, never
-grows, and never frees.
+"""Executed probe: the emitted bump heap, its growth, and its lifetime.
 
-Two facts, both run rather than argued:
+Roadmap item 432(e) FIXED the growth half: `$alloc` now calls `$__heap_grow`
+when the bump crosses the current memory limit, so both facts below now come
+back green and the probe reads as a regression witness rather than a defect
+report. Nothing is reclaimed yet, so fact 2's heap still rises with the call
+count; it just no longer ends the instance. The two facts as originally found:
 
 1. A single canonical call with a `Str` argument larger than the page
    traps. The emitter writes `(memory (export "memory") 1)` and neither
@@ -84,8 +87,10 @@ def main() -> int:
              str(calls), "1024"],
             capture_output=True, text=True, timeout=120)
         if res.returncode == 0:
-            print(f"   {calls:4d} calls x 1024 B -> heap at {res.stdout.strip()} B "
-                  f"of 65536")
+            hp = int(res.stdout.strip())
+            pages = -(-hp // 65536)
+            print(f"   {calls:4d} calls x 1024 B -> heap at {hp} B "
+                  f"({pages} page{'' if pages == 1 else 's'})")
         else:
             line = next((ln.strip() for ln in
                          (res.stderr + res.stdout).splitlines()
