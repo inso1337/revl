@@ -183,10 +183,17 @@ NATIVE_CORPUS = (
 # selfhost emitter this test drives (`compile_to`), so `compile_to` and the
 # reference are byte-identical on this fixture again — see
 # tests/test_selfhost_emit_py.py's matching note for the full rationale.
+#
+# "secrets_nested.rvl" is the declared-`Secret[T]` document, in the corpus as of
+# the config-field port: the native chain has to carry the marking through BOTH
+# halves — `lower_to_ir` stamps a config field's `secret`, and `emit_py_src`
+# renders it as `_revl_ConfigSchema([...], secret=[...])`. Byte-agreement here is
+# the only statement that a composition compiled through `compile_to` hands the
+# runtime the same redaction instructions `revl compile --backend py` does.
 PY_COMPONENT_DOCS = [
     "services_basic.rvl", "services_body.rvl", "services_config.rvl",
     "services_methods.rvl", "services_method_effects.rvl", "services_timers.rvl",
-    "externs.rvl",
+    "externs.rvl", "secrets_nested.rvl",
 ]
 RUST_COMPONENT_DOCS = [
     "service.rvl", "services_multi.rvl", "requires.rvl", "effect_emit.rvl",
