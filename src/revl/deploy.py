@@ -39,6 +39,15 @@ What Slice 1 does build, in the four pieces the design names:
    a peer cannot forge another peer's identity or replay its envelope.
    :class:`CorrelationGuard` is what `bridge.serve` runs before dispatch.
 
+   A **network** seam cannot carry that property: the per-process secret is
+   minted per boot by one conductor and a cross-composition peer runs under
+   another, so demanding a sealed envelope there refuses the legitimate caller.
+   What mTLS *does* give is a proven peer identity, and what was missing was a
+   closed set to check it against — :class:`PeerAllowlist` (§1.4b). The
+   achieved level is recorded per seam as :class:`SeamAdmission`
+   (`sealed` / `peer-pinned` / `unverified`), because a weaker property under
+   the same name would be the lie this module is written not to tell.
+
 3. **coordinated cross-process rollback** (§3). :func:`run_deploy` drives a
    two-phase PREPARE/COMMIT over :class:`Participant`s that are *other
    processes*. The coordinator holds an ordered **commit ledger** — who
@@ -1177,6 +1186,147 @@ class CorrelationGuard:
         if not self.ledger.admit(correlation):
             return False, REJECT_DUPLICATE
         return True, "authenticated"
+
+
+# ---------------------------------------------------------------------------
+# §1.4b. the same question on a NETWORK seam, and the honest answer
+# ---------------------------------------------------------------------------
+#
+# :class:`CorrelationGuard` above is four gates: shape, KNOWN PEER (a closed,
+# enumerated identity table), AUTHENTICITY (an HMAC under that peer's own
+# per-process secret, cross-checked against the transport identity when the
+# transport proved one), and FRESHNESS (the dedup ledger). On a local UDS seam
+# the transport authenticates nothing — `bridge.peer_identity` returns None for
+# a Unix socket — so the HMAC is the *only* thing binding the claimed
+# `peer_identity` to a real caller, and the ledger is the only replay defence.
+# That is what "sealed" means, and it is why the guard is worth running there.
+#
+# A TCP+mTLS seam cannot carry the same property, and the reason is structural
+# rather than an omission:
+#
+#   * The secret is `secrets.token_bytes(32)`, minted fresh by the conductor at
+#     every `run_placement()` and delivered only inside the process specs of
+#     ITS OWN children. A network provider may also be dialled by an item-151
+#     cross-composition consumer, which runs under a DIFFERENT conductor, on a
+#     different machine, and can never hold that secret. There is no
+#     distribution channel for it, and inventing one is item 118 Slice 2's
+#     replicated control plane, not this plane. Demanding a sealed envelope
+#     from a peer that cannot produce one does not harden the seam, it refuses
+#     the legitimate caller — the same mistake as installing the guard in front
+#     of a consumer tier whose bridge cannot seal.
+#   * The freshness gate needs an envelope to dedup, so it goes with the secret.
+#     (Over mTLS an off-path attacker cannot replay a record anyway; a
+#     re-delivery by the key holder itself is item 309's idempotency question,
+#     not something a transport can answer.)
+#
+# What a network seam CAN carry is the gate the UDS seam cannot: the mTLS
+# handshake proves the peer's identity with a CA-signed private key, per
+# session, and `bridge.peer_identity` reads it off the certificate. What is
+# missing there is not authentication but a CLOSED SET: `verify_mode =
+# CERT_REQUIRED` against a shared CA admits every identity that CA ever signed,
+# so the receiver knows *who* is calling and has no opinion about whether that
+# one may. :class:`PeerAllowlist` is that opinion, and it needs no secret
+# distribution at all — only names, which an operator can declare. It also
+# needs nothing from the caller's bridge, which is why it works for a py
+# consumer, a node consumer and a cross-composition stranger alike.
+#
+# So the network seam gets a STRICTLY WEAKER property than the UDS seam, and
+# the vocabulary below says so rather than calling both "guarded".
+
+#: The transport proved no identity at all (no TLS, or a session with no peer
+#: certificate). Distinct from :data:`REJECT_UNKNOWN_PEER`, which is a peer that
+#: named itself and is not on the list.
+REJECT_UNAUTHENTICATED_PEER = "unauthenticated-peer"
+
+#: The peer-admission level a seam ACHIEVED — never the one it wanted. The
+#: vocabulary is `bundle.verify`'s OK / cannot-verify: a surface that cannot
+#: prove its property says so.
+ADMISSION_SEALED = "sealed"
+ADMISSION_PEER_PINNED = "peer-pinned"
+ADMISSION_UNVERIFIED = "unverified"
+
+#: Rendered for the level, so a reader never has to remember which is stronger.
+ADMISSION_MEANING = {
+    ADMISSION_SEALED: "peer authenticated by per-process secret, replays refused",
+    ADMISSION_PEER_PINNED: "mTLS peer identity checked against a declared allowlist; "
+                           "NOT replay-checked",
+    ADMISSION_UNVERIFIED: "cannot verify who may call",
+}
+
+
+class PeerAllowlist:
+    """What a NETWORK provider runs on every connection before it answers one.
+
+    The mTLS handshake has already proved an identity by the time this is
+    consulted; this decides whether that identity is one the placement declared
+    may call. It holds NAMES, not secrets — that is the whole reason it works
+    across a composition boundary where :class:`CorrelationGuard` cannot.
+
+    It answers `(ok, reason)` in the same shape the correlation guard does, so a
+    provider treats the two verdicts identically. It deliberately does NOT
+    dedup: an allowlist has no envelope to dedup on, and pretending otherwise
+    would be the claim this whole plane exists to avoid.
+    """
+
+    def __init__(self, identities: Iterable[str]) -> None:
+        self.identities = frozenset(str(i) for i in identities)
+
+    def admit(self, transport_identity: str | None) -> tuple[bool, str]:
+        if not transport_identity:
+            return False, REJECT_UNAUTHENTICATED_PEER
+        if transport_identity not in self.identities:
+            return False, REJECT_UNKNOWN_PEER
+        return True, "peer-pinned"
+
+    def __len__(self) -> int:
+        return len(self.identities)
+
+
+@dataclass(frozen=True)
+class SeamAdmission:
+    """One seam's achieved peer-admission level, for the conductor's audit.
+
+    `provider` is the process that serves the seam, `transport` is `"uds"` or
+    `"tcp+mtls"`, `level` is one of the three above and `detail` says why that
+    level and not a stronger one. `peers` is the closed set when there is one.
+    """
+
+    provider: str
+    transport: str
+    level: str
+    detail: str
+    peers: tuple[str, ...] = ()
+
+    @property
+    def verified(self) -> bool:
+        return self.level != ADMISSION_UNVERIFIED
+
+    def render(self) -> str:
+        head = f"  seam admission {self.provider} ({self.transport}): "
+        if self.level == ADMISSION_UNVERIFIED:
+            head += f"UNVERIFIED — {self.detail}"
+        else:
+            head += f"{self.level} — {self.detail}"
+        if self.peers:
+            head += f"  peers: {', '.join(self.peers)}"
+        return head
+
+
+def render_seam_admissions(admissions: Sequence["SeamAdmission"]) -> list[str]:
+    """The conductor's admission block: one line per cross-process seam in
+    placement declaration order (so a reader finds a process by name, not by
+    rank), then a count of the ones that proved nothing. An empty list renders
+    nothing, so a placement with no cross-process seam prints no block."""
+    if not admissions:
+        return []
+    unverified = [a for a in admissions if not a.verified]
+    lines = [a.render() for a in admissions]
+    if unverified:
+        lines.append(
+            f"  seam admission: {len(unverified)} of {len(admissions)} seam(s) "
+            "UNVERIFIED — see the lines above; a seam is only as closed as the "
+            "peer set it can name")
+    return lines
 
 
 # ---------------------------------------------------------------------------

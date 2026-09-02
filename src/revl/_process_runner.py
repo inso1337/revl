@@ -644,11 +644,29 @@ async def run(spec: dict, spec_path=None) -> None:
             from revl.deploy import CorrelationGuard  # noqa: PLC0415
             guard = CorrelationGuard({identity: bytes.fromhex(secret_hex)
                                       for identity, secret_hex in corr["peers"].items()})
+        # item 118 §1.4b: a NETWORK `serve` block may instead carry `peers`, the
+        # declared set of mTLS identities allowed to call this seam. It is the
+        # network counterpart of the correlation guard and a WEAKER property —
+        # the handshake proves who is calling, the allowlist decides whether that
+        # one may, and neither can dedup, because an off-placement peer cannot
+        # hold this boot's secret and so sends no envelope. Absent, the wire is
+        # unchanged and every identity the shared CA signed is answered.
+        allow = None
+        if serve.get("peers"):
+            from revl.deploy import PeerAllowlist  # noqa: PLC0415
+            allow = PeerAllowlist(serve["peers"])
         server = await bridge.serve(root, serve.get("methods") or serve["keys"], serve_target,
-                                    module=module, correlation=guard)
+                                    module=module, correlation=guard, peers=allow)
+        # The level this seam achieved, named on the seam's own log line so it is
+        # readable where the seam is, not only in the conductor's audit block.
+        if guard is not None:
+            level = " (correlation-guarded)"
+        elif allow is not None:
+            level = f" (peer-pinned: {len(allow)} declared peer(s))"
+        else:
+            level = " (UNVERIFIED: no peer admission — any caller that reaches it)"
         log("serve", ", ".join(serve["keys"]),
-            f"-> {bridge.Endpoint.from_spec(serve_target).describe()}"
-            + (" (correlation-guarded)" if guard is not None else ""))
+            f"-> {bridge.Endpoint.from_spec(serve_target).describe()}" + level)
 
     # 4. probes: call provided services (may cross a seam), print results
     namespace = {key: root.get(key) for key in (spec.get("provides") or [])}
