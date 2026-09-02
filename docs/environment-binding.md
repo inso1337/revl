@@ -168,6 +168,16 @@ so like the CLI's it names the field and the bound and never the value.
 - **Everything is conditional.** A composition that declares no boot component
   is byte-identical through parse, IR, manifest, audit and every emitted tier.
   `--env` against such a composition is refused rather than ignored.
+- **A `Secret[T]` contract field is an inbound channel only.** The marking
+  mints the `confidential` origin (item 256 §7a), so the field reads normally
+  inside the component and is refused where it would leave: a log, an ordinary
+  serialization, a model prompt, and the return of a `provide` method. That
+  last one is why the contract above declares `auth_token` and never hands it
+  back through `env`. A provide-method return is marshalled by value across the
+  service / MCP bridge and the placement seam, to a caller that declared `->
+  Str` and so never declared a `Secret[T]` receiver. Hand the credential to the
+  component's own host binding instead, or downgrade it at a declared
+  `endorse[confidential](…, reason = "…")` slot.
 
 ## What this does not close
 
