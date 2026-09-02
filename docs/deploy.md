@@ -209,6 +209,23 @@ hold it, and admitting the plan would let a late partition strand that
 composition with residue while its peers revert. The refusal names the extern
 and the component, and says the fix: declare the extern `deferred`.
 
+Reachability is read off `query.Composition`'s per-scope facts, the same surface
+`revl audit` prints, so the gate can never disagree with the boundary the audit
+shows. Two shapes that are easy to miss are counted:
+
+* a provide-method whose body **is** the emit (`fn put(k, v) = emit host(v)`)
+  lowers to a `return` step, so the `emit` marker does not survive lowering;
+  the crossing is found by the called name instead;
+* an emission mediated through a required service's capability-scoped operation
+  (`emit store.put(..)` against `emission[host_put] fn put`), when the key
+  resolves to no provider **in this composition**. Such a row carries
+  `via: "<key>.<method>"` and is always class (c): deferral is a property of an
+  extern declaration and is not spellable on a service method, so the operation
+  fires at the call and this composition cannot prove the far side holds it.
+  When the key does resolve locally, the provider's own scope already carries
+  the crossing with its true deferrability, so the mediated row is skipped
+  rather than double-counted.
+
 The same call also refuses the whole update when any pinned consumer surface
 would break, using `federation.check` — the §5 drift predicate itself, not a
 copy — so a federation update is admitted or refused as one unit.

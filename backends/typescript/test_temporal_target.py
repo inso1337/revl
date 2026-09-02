@@ -21,6 +21,9 @@ saga on a real dev server); Slice 1 goldens the generated code SHAPE.
 """
 
 import importlib.util
+import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -227,6 +230,154 @@ def test_residue_sink_present():
     assert "ApplicationFailure.create(" in got and "details: [report]" in got
     assert "defineQuery<Residue[]>" in got and "setHandler(" in got
     assert "worldRemaining" in got and "proof: 'revl-saga-abort'" in got
+
+
+# --------------------------------------------------------------- residue-error redaction (item 421 F7)
+
+def test_residue_error_static_shape_no_longer_bare_string_of_e():
+    """`error: String(e)` (the finding's own quote) must be gone, replaced by
+    the redaction funnel; the args thunk must be wired at the push site so the
+    write-ahead referent (`h`, only assigned AFTER this push runs) is read
+    lazily rather than frozen at its pre-acquire `undefined`."""
+    src = (
+        'extern pure fn r_close(h: RHandle) = @py { return }\n'
+        'extern acquire fn r_open(n: Int) -> RHandle undo r_close(result)'
+        ' = @py { return "h" }\n'
+        'component Res {\n'
+        '  let h = effect r_open(0) undo r_close(h)\n'
+        '}\n'
+    )
+    ir = compile_source(src, "res_421_f7_shape.rvl")
+    got = _emit_temporal_module().emit_temporal(ir)
+    assert "error: String(e)" not in got
+    assert "error: redactResidueError(e, step.args())" in got
+    assert "args: () => [h]" in got
+    assert "const REDACTED_ARG = '<redacted:arg>'" in got
+
+
+def test_residue_error_redacts_host_text_from_all_three_sinks_end_to_end(tmp_path):
+    """Item 421 F7, run for real: a compensation (`r_close`) that echoes the
+    handle value it was called with into a thrown Error's message — exactly
+    what `Secret[Str]` erasing to plain `string` in `RevlActivities` invites,
+    with no type-level warning to the implementer. Runs the ACTUAL emitted
+    module (not a hand-written stand-in) end to end against a stub Temporal
+    SDK, and asserts the canary is ABSENT from all three sinks — the durable
+    `recordResidue` record, `ApplicationFailure.details` (the one that
+    PERSISTS IN TEMPORAL HISTORY for the namespace retention period), and the
+    live residue query — while the redaction marker IS present in each, so
+    the test cannot pass merely because nothing was emitted."""
+    if shutil.which("node") is None:
+        pytest.skip("node is not on PATH")
+
+    # A second, always-failing crossing (`boom.trigger`) is needed to reach
+    # compensation: if the ACQUIRE itself failed, `h` would still be
+    # `undefined` and the write-ahead no-op guard would skip the compensation
+    # call entirely (that guard is the point of the write-ahead pattern), so
+    # the canary would never reach `r_close` at all.
+    src = (
+        'service Boom { emission fn trigger() -> Str }\n'
+        'extern pure fn r_close(h: RHandle) = @py { return }\n'
+        'extern acquire fn r_open(n: Int) -> RHandle undo r_close(result)'
+        ' = @py { return "h" }\n'
+        'component Res requires boom: Boom {\n'
+        '  let h = effect r_open(0) undo r_close(h)\n'
+        '  emit boom.trigger()\n'
+        '}\n'
+    )
+    ir = compile_source(src, "res_421_f7.rvl")
+    workflow_src = _emit_temporal_module().emit_temporal(
+        ir, runtime_import="./temporal-stub.mjs")
+    assert "args: () => [h]" in workflow_src
+    assert "error: redactResidueError(e, step.args())" in workflow_src
+
+    stub = """
+export function proxyActivities() {
+  globalThis.__proxyCalls = globalThis.__proxyCalls || []
+  return new Proxy({}, {
+    get(_target, prop) {
+      return async (...args) => {
+        globalThis.__proxyCalls.push({ name: prop, args })
+        // boomTrigger is the forward step this fixture needs to fail, so the
+        // saga aborts AFTER h has already been assigned the real (canary)
+        // value by the acquire that landed just before it.
+        if (prop === "boomTrigger") throw new Error("boom activity failed")
+      }
+    },
+  })
+}
+export class ApplicationFailure extends Error {
+  static create({ message, type, nonRetryable, details }) {
+    const f = new ApplicationFailure(message)
+    f.type = type
+    f.nonRetryable = nonRetryable
+    f.details = details
+    return f
+  }
+}
+const handlers = new Map()
+export function setHandler(query, fn) { handlers.set(query, fn) }
+export function defineQuery(name) { return { name } }
+export function __runQuery(query) { return handlers.get(query)() }
+"""
+    (tmp_path / "temporal-stub.mjs").write_text(stub, encoding="utf-8")
+
+    canary = "SEKRIT-CANARY-421-F7"
+    driver = f"""
+import {{ __runQuery }} from "./temporal-stub.mjs"
+{workflow_src}
+const CANARY = {json.dumps(canary)}
+async function r_open(n) {{ return CANARY }}
+function r_close(h) {{ throw new Error(`r_close failed for handle ${{h}}`) }}
+
+async function main() {{
+  try {{
+    await Res()
+    console.log(JSON.stringify({{ error: "Res() did not throw" }}))
+  }} catch (e) {{
+    const proxyCalls = globalThis.__proxyCalls ?? []
+    const recordResidueCall = proxyCalls.find((c) => c.name === "recordResidue")
+    console.log(JSON.stringify({{
+      sink1_recordResidue: recordResidueCall,
+      sink2_applicationFailureDetails: e.details,
+      sink3_residueQuery: __runQuery(ResResidue),
+    }}))
+  }}
+}}
+main()
+"""
+    driver_file = tmp_path / "driver.ts"
+    driver_file.write_text(driver, encoding="utf-8")
+
+    result = subprocess.run(
+        ["node", str(driver_file)], capture_output=True, text=True,
+        cwd=tmp_path, timeout=30)
+    assert result.returncode == 0, (
+        f"driver script failed:\nstdout={result.stdout}\nstderr={result.stderr}")
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    blob = json.dumps(payload)
+
+    # the canary must be ABSENT from every sink...
+    assert canary not in blob, f"canary leaked into a sink: {payload}"
+    # ...and the redaction marker must be PRESENT in every one of them, so
+    # this cannot pass merely because recordResidue/details/query came back
+    # empty or unreached.
+    assert "<redacted:arg>" in json.dumps(payload["sink1_recordResidue"])
+    assert "<redacted:arg>" in json.dumps(payload["sink2_applicationFailureDetails"])
+    assert "<redacted:arg>" in json.dumps(payload["sink3_residueQuery"])
+
+    # (3): ApplicationFailure.details is the sink that PERSISTS IN TEMPORAL
+    # HISTORY — confirm it specifically, not just the bundle.
+    details_blob = json.dumps(payload["sink2_applicationFailureDetails"])
+    assert canary not in details_blob
+    assert "<redacted:arg>" in details_blob
+    assert "r_close failed for handle" in details_blob  # the TYPE/sentence survive
+
+    # an operator still sees the error TYPE and the surrounding sentence —
+    # only the caller's own bytes are gone.
+    residue_entry = payload["sink3_residueQuery"][0]
+    assert residue_entry["error"] == "Error: r_close failed for handle <redacted:arg>"
+    assert residue_entry["name"] == "h.undo"
+    assert residue_entry["kind"] == "compensation-residue"
 
 
 # --------------------------------------------------------------- byte-identical default

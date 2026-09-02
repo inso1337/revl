@@ -132,7 +132,7 @@ out of scope for this item and are recorded here so they are not re-derived:
   - **wasm** (first-party): the substrate grew a `route:<key>` host op — a
     strict single-realm liveness-checked read + a `live` probe, no parent
     fallback — and the emitter emits a selector + strict dispatch that consume
-    it (`backends/wasm/emit.py`, proven by `test_router_exec.py`).
+    it (`backends/wasm/emit.py`, proven by `test_router_exec_wasm.py`).
   - **go**: a `revlRouter<Comp><Key>` struct re-resolves live per-realm handles
     each call via the stc-go fork's strict `ServiceInRealm` (no parent-chain
     fallback); built + tested against the fork (`forks/stc-go`), upstream PR

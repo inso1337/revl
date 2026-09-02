@@ -69,6 +69,7 @@ from .mcp.schema import (
 )
 from .resources import (
     NO_HANDLE_RETURNS,
+    _callee_name,
     acquire_return_is_nominal_handle,
     closing_ops,
     resource_in,
@@ -76,6 +77,7 @@ from .resources import (
 )
 from .parser import (
     _describe_expr,
+    missing_undo_refusal,
     AbortStmt,
     AdvanceStmt,
     AssertStmt,
@@ -566,6 +568,13 @@ class Env:
         # witnessed extern already obeys. Set by `_lower_component`; an empty
         # table simply means no callee is classified, so the walk is inert.
         self.extern_class: dict[str, str] = {}
+        # extern name -> the bare callee of its DECLARED inverse, for the
+        # externs that declare one at all. Read only by `_lower_effect_step`'s
+        # missing-`undo` refusal (item 420(d)): the declared inverse of a
+        # non-`witnessed` extern is never replayed, so a bare acquisition of
+        # one is still refused, but the refusal must say the inverse was
+        # discarded and by which rule rather than claim there is none.
+        self.extern_undo: dict[str, str] = {}
         # names of `witnessed`-classified externs in scope (item 243, Slice 2,
         # docs/design/243-witnessed-externs.md): set by `_lower_component` so
         # an effect-position acquisition calling one of these lowers to the
@@ -5590,6 +5599,10 @@ def check_and_lower(program: Program, ambient: dict | None = None,
                                             poly_extern_names, extern_colour_instances,
                                             extern_class={e["name"]: e.get("class")
                                                           for e in externs},
+                                            extern_undo={
+                                                e["name"]: _callee_name(e.get("undo"))
+                                                for e in externs
+                                                if _callee_name(e.get("undo"))},
                                             errors=errors, untrusted=untrusted)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
@@ -7641,6 +7654,19 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
     return step
 
 
+def _bare_callee_name(raw_acquire) -> str | None:
+    """The extern name an acquisition AST names by bare spelling, or None.
+
+    A bare-name call (`open_h()`) and a bare name (`open_h`) are the two
+    spellings the parser defers to the lowering, and both name the same
+    declaration. Anything else (a dotted path, a literal, an operator) cannot
+    be an extern by construction: externs are declared with an unqualified
+    name and are imported under it."""
+    if isinstance(raw_acquire, ExprCall):
+        raw_acquire = raw_acquire.callee
+    return raw_acquire.name if isinstance(raw_acquire, ExprVar) else None
+
+
 def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line: int,
                        *, bind: str | None, raw_acquire=None) -> dict:
     """Build the `effect`/`let-effect` IR step for one activation-body
@@ -7703,11 +7729,22 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
         step = {"step": step_kind, "acquire": acquire}
     elif undo_expr is None:
         head = _describe_expr(raw_acquire) if raw_acquire is not None else "the expression"
+        # item 420(d): the refusal stands, but its REASON depends on whether
+        # the callee declares an inverse. If it does, this is the one position
+        # that knows so (it runs on the merged, post-import program), and the
+        # generic wording would deny the existence of a declaration the author
+        # wrote and can point at. `_bare_callee_name` reads the AST rather than
+        # the lowered node because the lowered `fn` shape covers only the
+        # called spelling, and `effect open_h` names the same extern `effect
+        # open_h()` does.
+        callee = _bare_callee_name(raw_acquire)
+        inverse = env.extern_undo.get(callee) if callee is not None else None
+        declared = None
+        if inverse is not None:
+            declared = (env.extern_class.get(callee) or "acquire", inverse)
+        message, hint = missing_undo_refusal(head, declared)
         raise RevlError(
-            filename, line,
-            f"effect has no `undo` and {head} is not pure",
-            hint=f"write `effect {head}(...) undo <expr>`, or mark the call "
-                 "`emit` if it deliberately crosses the system boundary (G4)",
+            filename, line, message, hint=hint,
             code="G4", category="witnessed",
         )
     else:
@@ -8237,12 +8274,14 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      poly_externs: set | None = None,
                      extern_colour_instances: dict | None = None,
                      extern_class: dict | None = None,
+                     extern_undo: dict | None = None,
                      errors: list | None = None,
                      untrusted: bool = False) -> dict:
     env = Env(comp, services, filename, types)
     env.untrusted = untrusted
     env.emitting_fns = emitting_fns or set()
     env.extern_class = extern_class or {}
+    env.extern_undo = extern_undo or {}
     env.emitting_caps = emitting_caps or {}
     env.emission_evidence = emission_evidence
     env.witnessed_externs = witnessed_externs or set()

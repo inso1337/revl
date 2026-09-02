@@ -260,6 +260,11 @@ def _agree(admit, src: str) -> None:
 # Two providers of one key, isolated into realms `r1` and `r2` — the backend
 # realms every multi-realm routing case below binds against (item 162). Per-realm
 # G2 keeps them non-conflicting, so the routing verdict is the only one in play.
+# That is load-bearing, not tidiness: a program with TWO live refusals hits the
+# 419c ordering divergence (the reference picks the earlier LINE, the gate the
+# earlier PHASE), so the corpus keeps every case single-refusal. See
+# `test_which_refusal_wins_diverges_when_a_program_has_several` at the end of
+# this file, which is where that divergence is pinned.
 _ROUTE_PROVIDERS = """service Kv { fn get(k: Str) -> Str }
 service Api { fn go(k: Str) -> Str }
 component StoreA provides kv: Kv {
@@ -1380,3 +1385,45 @@ component C provides s: S {{
     assert ref_tag in ("", "A1", "G4"), \
         f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
     _agree(admit, src)
+
+
+# ---------------------------------------------------------------------------
+# A KNOWN, DELIBERATE divergence, pinned rather than left as folklore
+# ---------------------------------------------------------------------------
+
+_MULTI_REFUSAL = """service D { fn q(s: Str) -> Int }
+service Bus { emission fn publish(topic: Str) }
+component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+component Z requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }
+"""
+
+
+def test_which_refusal_wins_diverges_when_a_program_has_several(admit):
+    """Roadmap 419c, pinned as a documented limitation, NOT as agreement.
+
+    `admit_src` returns the FIRST refusal it reaches, in its own fixed phase
+    order (module fns, then per component, then spawn bounds, then the G2/G3
+    link). The reference collects diagnostics and orders them by LINE (item
+    386's sink). So on a program carrying BOTH an earlier-line link refusal and
+    a later-line component refusal the two disagree: genuinely different
+    refusals, both true of the program, chosen by different rules.
+
+    Closing it means a line number on every gate refusal plus a collecting sink
+    in `selfhost/lower.rvl`, which is item 186's own deferred work; `admit_src`
+    is also what `tools/build_gate_crate.py` digests, so its phase order is not
+    a local edit. Until then the corpus above deliberately never builds a
+    multi-refusal program (see `_ROUTE_PROVIDERS`, which isolates its two
+    providers into distinct realms so the routing verdict is the only one in
+    play), and this test is the only place the divergence is written down.
+
+    When this test reds because the two now agree, delete it and tick 419c."""
+    ref_tag, _ = _ref(_MULTI_REFUSAL)
+    got = admit(_MULTI_REFUSAL)
+    got_tag = got.split("|", 1)[0]
+    # both refuse, and both refusals are true of this program
+    assert ref_tag == "G2" and got_tag == "G4", (ref_tag, got_tag)
+    # the reference picks the earlier LINE (the duplicate provision, line 4);
+    # the gate picks the earlier PHASE (the component loop precedes the link).
+    assert _ref(_MULTI_REFUSAL)[1].startswith("provision conflict")
+    assert "must be marked `emit`" in got

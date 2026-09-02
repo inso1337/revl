@@ -2731,6 +2731,8 @@ class _V3Emitter:
 
     def _helper_funcs(self) -> list[str]:
         return [
+            self._helper_heap_exhausted(),
+            self._helper_heap_grow(),
             self._helper_alloc(),
             self._helper_alloc_str(),
             self._helper_int_to_str(),
@@ -2774,16 +2776,72 @@ class _V3Emitter:
         # `$n` is a byte count and the result is an address: both stay i32,
         # wasm32 addressing being 32-bit. The bump is rounded to 8 rather than
         # 4 so every allocation starts on an 8-byte slot boundary.
+        #
+        # item 432(e): the bump must not run off the end of the declared
+        # memory. Every path that could hand back an address the module cannot
+        # legally write is closed here rather than at the write:
+        #   * the round-to-8 wrapping past 2^32 (a hostile `new_size` reaching
+        #     this through `cabi_realloc`),
+        #   * the bump itself wrapping past 2^32,
+        #   * the bump crossing the current memory limit, which now GROWS
+        #     ($__heap_grow) instead of returning an out-of-bounds address.
+        # The fast-path guard is deliberately conservative: at a 65536-page
+        # memory `(i32.shl (memory.size) 16)` is 0 and every allocation calls
+        # $__heap_grow, which then finds nothing to do and returns. Being
+        # over-eager there costs a call; being under-eager would cost a fault.
         return """  (func $alloc (param $n i32) (result i32)
     (local $p i32)
+    (local $sz i32)
+    (local $end i32)
+    (local.set $sz
+      (i32.and
+        (i32.add (local.get $n) (i32.const 7))
+        (i32.const -8)))
+    (if (i32.lt_u (local.get $sz) (local.get $n))
+      (then (call $__heap_exhausted)))
     (local.set $p (global.get $__hp))
-    (global.set $__hp
-      (i32.add
-        (global.get $__hp)
-        (i32.and
-          (i32.add (local.get $n) (i32.const 7))
-          (i32.const -8))))
+    (local.set $end (i32.add (local.get $p) (local.get $sz)))
+    (if (i32.lt_u (local.get $end) (local.get $p))
+      (then (call $__heap_exhausted)))
+    (if (i32.gt_u
+          (local.get $end)
+          (i32.shl (memory.size) (i32.const 16)))
+      (then (call $__heap_grow (local.get $end))))
+    (global.set $__hp (local.get $end))
     (local.get $p))"""
+
+    def _helper_heap_grow(self) -> str:
+        # Grow the memory so that byte `$end - 1` is addressable. The page
+        # arithmetic is done in pages, never in bytes, so nothing here can
+        # overflow: `$end >>> 16` is at most 65535 and the ceiling adds at
+        # most 1, giving a want of at most 65536, exactly the wasm32 maximum.
+        return """  (func $__heap_grow (param $end i32)
+    (local $want i32)
+    (local $have i32)
+    (local.set $want
+      (i32.add
+        (i32.shr_u (local.get $end) (i32.const 16))
+        (i32.ne
+          (i32.and (local.get $end) (i32.const 65535))
+          (i32.const 0))))
+    (local.set $have (memory.size))
+    (if (i32.le_u (local.get $want) (local.get $have))
+      (then (return)))
+    (if (i32.eq
+          (memory.grow (i32.sub (local.get $want) (local.get $have)))
+          (i32.const -1))
+      (then (call $__heap_exhausted))))"""
+
+    def _helper_heap_exhausted(self) -> str:
+        # The refusal site. There is no error channel out of `cabi_realloc` or
+        # out of $alloc -- the canonical ABI requires an allocator to return a
+        # usable pointer or not to return -- so a host that caps this
+        # instance's memory is answered with a deliberate trap at a function
+        # whose NAME is the diagnosis. An operator reads
+        # `__heap_exhausted` off the wasm backtrace instead of guessing at a
+        # `memory fault at wasm address 0x10000`.
+        return """  (func $__heap_exhausted
+    (unreachable))"""
 
     def _helper_alloc_str(self) -> str:
         return """  (func $alloc_str (param $len i32) (result i32)

@@ -92,6 +92,10 @@ class _ModuleLoader:
         # default). A ref declared by such a module jails to that one entry's
         # tree, never the composition's user tree. Absent -> user-origin.
         self._install_root_of: dict[str, str] = {}
+        # roadmap 422 F7: every `use "stdlib/..."` in this compile that did NOT
+        # land on the stdlib this compiler ships, as
+        # `{"written", "resolved", "origin"}`. See `stdlib_shadow`.
+        self.stdlib_shadow: list[dict] = []
 
     def mark_roots(self, abs_paths) -> None:
         """Record the composition's root module abspaths BEFORE any load, so a
@@ -150,6 +154,7 @@ class _ModuleLoader:
         """
         primary = os.path.join(importer_dir, use.path)
         if self._exists(primary):
+            self._note_stdlib_shadow(use.path, primary, "importer-relative")
             return primary
         for base in self._search_path:
             candidate = os.path.join(base, use.path)
@@ -170,6 +175,7 @@ class _ModuleLoader:
                 if _contained(os.path.realpath(candidate),
                               os.path.realpath(base)):
                     self._install_root_of.setdefault(os.path.abspath(candidate), base)
+                self._note_stdlib_shadow(use.path, candidate, f"search path {base}")
                 return candidate
         hint = "`use` resolves paths relative to the importing file"
         if self._search_path:
@@ -178,6 +184,40 @@ class _ModuleLoader:
                      "found relative to the importer or anywhere on that path")
         raise RevlError(importer_path, use.line,
                         f"cannot find imported module `{use.path}`", hint=hint)
+
+    def _note_stdlib_shadow(self, written: str, resolved: str,
+                            origin: str) -> None:
+        """Record a `use "stdlib/..."` that resolved somewhere OTHER than the
+        stdlib this compiler ships (roadmap 422 F7).
+
+        `use "stdlib/fs.rvl"` is not identity-pinned: relative-to-the-importer
+        resolution is primary and wins outright (item 319), and `REVL_IMPORT_PATH`
+        is searched before `stdlib_root().parent`, so a `stdlib/` directory beside
+        the importing file, or one entry on an env var, supplies the module.
+        Both are DELIBERATE (vendoring a stdlib copy is supported, and item 389
+        stamps and drift-checks one), so neither is refused here. What was
+        unsound was the silence: reading `use "stdlib/fs.rvl"` and concluding
+        "confined witnessed fs" drew a security conclusion from a spelling, and
+        nothing in the compile said the spelling had been satisfied elsewhere.
+
+        Recording it makes the identity a MEASURED fact of the compile instead:
+        it rides on the IR as `stdlib_shadow` and `revl` prints it beside the
+        open-holes report. Present only when a shadow actually happened, so
+        every non-shadowing composition's IR and audit stay byte-identical.
+
+        Note what this does and does not claim. It says the `stdlib/` module
+        that was compiled is not the one this compiler ships; it does NOT say
+        the substitute is hostile, and a vendored copy is the common honest
+        case. The drift check (item 389, `revl doctor`) is the other half and
+        answers a different question: which VERSION, not which FILE."""
+        if not written.startswith("stdlib/"):
+            return
+        real = os.path.realpath(resolved)
+        if _contained(real, os.path.realpath(str(stdlib_root()))):
+            return
+        entry = {"written": written, "resolved": real, "origin": origin}
+        if entry not in self.stdlib_shadow:
+            self.stdlib_shadow.append(entry)
 
     def load(self, path: str) -> _LoadedModule:
         abs_path = os.path.abspath(path)
@@ -575,6 +615,12 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # the allowlist half — refuse a reach outside the granted service set, on the
     # lowered document's resolved requires/provides.
     _enforce_document(document, profile)
+    # roadmap 422 F7: which file each `use "stdlib/..."` actually got. ADDITIVE
+    # and present only when one of them did not come from this compiler's own
+    # stdlib, so a composition that imports the shipped modules carries no new
+    # IR key and every existing audit is byte-identical.
+    if loader.stdlib_shadow:
+        document["stdlib_shadow"] = loader.stdlib_shadow
     if manifest is not None:
         # The admission gate. Compiling a draft is fine — that is how an
         # agent gets a verdict on the parts it has written — but admitting

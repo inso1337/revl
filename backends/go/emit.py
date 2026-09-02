@@ -128,6 +128,15 @@ _PRIM = {
 # scenarios. Set per emit() call; never read outside a single call.
 _V3_MODE = False
 
+
+def _go_widen_int(expr: str) -> str:
+    """A revl `Int` expression as a Go int64, for strconv.FormatInt (item 434 (f)).
+
+    The pure v3 tier already lowers `Int` to int64; the ir_version 1/2
+    component tier lowers it to `int`, which FormatInt does not accept.
+    """
+    return expr if _V3_MODE else "int64(%s)" % expr
+
 # The declared record/variant types of the current document (ir["types"]),
 # for the component/method renderer: record literals need the struct name for
 # their field set, and ADT construction/match need the case -> (adt, payload)
@@ -408,7 +417,10 @@ def _expr(node, env: _Env, expected=None) -> str:
         args = ", ".join(_expr(a, env) for a in node.get("args", []))
         return "%s.%s(%s)" % (target, meth, args)
     if kind == "format":
-        return _format(node["template"], [_expr(a, env) for a in node.get("args", [])])
+        arg_nodes = node.get("args", [])
+        return _format(node["template"],
+                       [_expr(a, env) for a in arg_nodes],
+                       [_comp_infer(a, env) for a in arg_nodes])
     if kind == "str":
         return _go_string(node.get("value", ""))
     if kind == "int":
@@ -991,6 +1003,10 @@ _COMP_NEEDS_MAP = False
 # Str.to_int (revlParseInt) referenced by a component body: flags the Opt
 # preamble (the helper's return type) plus the helper itself.
 _COMP_NEEDS_PARSE_INT = False
+# `Int.to_str` / an interpolated Int in a component body renders through
+# strconv.FormatInt rather than fmt.Sprintf("%d") (item 434 (f)): flags the
+# `strconv` import, which this tier does not otherwise always carry.
+_COMP_NEEDS_STRCONV = False
 # A `timer` step (item 57) in a component body: flags the clock coeffect +
 # timer scheduler preamble (_TIMER_PREAMBLE). Timers lower to a revertible
 # schedule whose inverse is cancellation, wired into the same effect ledger.
@@ -1082,10 +1098,13 @@ def _comp_builtin(method, recv_surface, target, args):
             _COMP_NEEDS_PARSE_INT = True
             return "revlParseInt(%s)" % (target,)
         return "int64(%s)" % (target,)
-    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): fmt is always
-    # imported on this tier, and %d on an int64 is exact decimal.
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): strconv.FormatInt
+    # base 10 is exact decimal for an int64 and takes the int64 directly, where
+    # fmt.Sprintf("%d", x) boxes it into an `any` first (item 434 (f)).
     if method == "to_str":
-        return 'fmt.Sprintf("%%d", %s)' % target
+        global _COMP_NEEDS_STRCONV
+        _COMP_NEEDS_STRCONV = True
+        return "strconv.FormatInt(%s, 10)" % _go_widen_int(target)
     # The Map value type (docs/stdlib-2.0.md §Map): the same helpers the v3
     # tier uses; they live in _V3_MAP_PREAMBLE, pulled in by
     # _COMP_NEEDS_MAP at module assembly.
@@ -1156,11 +1175,29 @@ def _comp_checked_div_expr(node, env: _Env) -> str:
     )
 
 
-def _format(template: str, args: list[str]) -> str:
-    """revl format template with $0,$1 placeholders -> fmt.Sprintf."""
-    out = []
-    i = 0
+def _format(template: str, args: list[str], arg_types: list | None = None) -> str:
+    """revl format template with $0,$1 placeholders -> a Go `string` expression.
+
+    `fmt.Sprintf` with `%v` takes `...any`, so every substituted operand is
+    boxed into an interface (item 434 (f)). Where each operand's surface type
+    is known the template instead renders as a `+` chain of `string`-typed
+    pieces: one allocation for the result and no boxing. `%v` remains the
+    fallback for an operand whose type could not be inferred.
+    """
+    types = list(arg_types or [])
+    out: list[str] = []          # the fmt.Sprintf template
+    pieces: list[str] = []       # `string`-typed operands of the `+` chain
+    text: list[str] = []         # literal run pending flush into `pieces`
     used = 0
+    typed = True
+    wants_strconv = False
+
+    def flush_text() -> None:
+        if text:
+            pieces.append(_go_string("".join(text)))
+            text.clear()
+
+    i = 0
     while i < len(template):
         c = template[i]
         if c == "$" and i + 1 < len(template) and template[i + 1].isdigit():
@@ -1168,17 +1205,46 @@ def _format(template: str, args: list[str]) -> str:
             while j < len(template) and template[j].isdigit():
                 j += 1
             out.append("%v")
+            # The k-th placeholder takes the k-th argument, which is the
+            # mapping this function has always used (the index digits are not
+            # read); keep it so nothing but the boxing changes.
+            arg = args[used] if used < len(args) else None
+            at = types[used] if used < len(types) else None
             used += 1
             i = j
+            if arg is None:
+                typed = False
+                continue
+            flush_text()
+            if at == "Str":
+                pieces.append(arg)
+            elif at in ("Int", "Int32"):
+                wants_strconv = True
+                inner = _go_widen_int(arg) if at == "Int" else "int64(%s)" % arg
+                pieces.append("strconv.FormatInt(%s, 10)" % inner)
+            elif at == "Bool":
+                wants_strconv = True
+                pieces.append("strconv.FormatBool(%s)" % arg)
+            else:
+                typed = False
             continue
         if c == "%":
             out.append("%%")
         else:
             out.append(c)
+        text.append(c)
         i += 1
+    flush_text()
     fmt_str = _go_string("".join(out))
     if not args:
         return "fmt.Sprintf(%s)" % fmt_str
+    if typed and used == len(args):
+        if wants_strconv:
+            global _COMP_NEEDS_STRCONV
+            _COMP_NEEDS_STRCONV = True
+        if len(pieces) == 1:
+            return pieces[0]
+        return "(%s)" % " + ".join(pieces)
     return "fmt.Sprintf(%s, %s)" % (fmt_str, ", ".join(args))
 
 
@@ -3207,8 +3273,10 @@ func (m *Map[V]) Get(k string) (V, bool) {
 // as method calls on this object. `Size` is the entry count as the tier's
 // revl Int (@INT@, matching the service-method return type); `Keys`
 // yields the keys in ascending canonical Str order (UTF-8 byte lexicographic —
-// go string < is exactly code-point order, matching sort.Strings; the inline
-// insertion sort keeps it import-free, as revlMapKeys does). Both are
+// go string < is exactly code-point order, and slices.Sort on []string orders
+// by <, so the order is identical to the insertion sort this replaced, as it
+// is in revlMapKeys). keys() IS the Map iteration surface, so this sits on
+// every map traversal: O(n log n), not O(n^2) (item 434 (h)). Both are
 // read-only queries, no host trace — like Get.
 func (m *Map[V]) Size() @INT@ {
 	m.mu.Lock()
@@ -3222,11 +3290,7 @@ func (m *Map[V]) Keys() []string {
 		ks = append(ks, k)
 	}
 	m.mu.Unlock()
-	for i := 1; i < len(ks); i++ {
-		for j := i; j > 0 && ks[j] < ks[j-1]; j-- {
-			ks[j], ks[j-1] = ks[j-1], ks[j]
-		}
-	}
+	slices.Sort(ks)
 	return ks
 }
 '''
@@ -3406,6 +3470,15 @@ class _V3GoCtx:
             ex.get("name"): [p.get("type") for p in ex.get("params") or []]
             for ex in externs or []
         }
+        # `{name: "List"|"Map"}` for the current function's uniquely-owned
+        # collection locals; see `_v3_self_rebind_locals` (item 434 (a)/(b)).
+        self.linear_locals: dict = {}
+        # `{name: builder}` for the Str accumulators of the loops currently
+        # being rendered, and a per-function counter that keeps two sequential
+        # loops from declaring the same builder twice in one Go scope;
+        # see `_v3_str_accumulators` (item 434 (e)).
+        self.str_builders: dict = {}
+        self.str_builder_seq = 0
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple, str | None] = {}
@@ -3420,6 +3493,12 @@ class _V3GoCtx:
         self.needs_overflow = False     # trapping + - * on Int
         self.needs_overflow32 = False   # trapping + - * on Int32, and to_int32
         self.needs_parse_int = False    # Str.to_int (revlParseInt helper)
+        # Int -> Str through strconv.FormatInt rather than fmt.Sprintf("%d"):
+        # `%d` takes ...any and boxes the operand (item 434 (f)).
+        self.needs_strconv = False
+        # a strings.Builder for a loop accumulator (item 434 (e)); needs
+        # `strings` WITHOUT the rest of the stdlib preamble `used_stdlib` pulls
+        self.needs_strings = False
         # Stdlib packages an extern @go body asked to be hoisted into the
         # module's import block via a `//revl:import <path>` directive
         # (see _emit_v3_go_externs). A verbatim extern body cannot carry its
@@ -3584,6 +3663,14 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         if op == "/":
             return "Float"  # true division (docs/arithmetic.md)
         if op in ("-", "*", "%"):
+            # The node carries the operand type the checker resolved, and
+            # `Float` arithmetic answers a Float. Before item 434 (f) this
+            # returned a flat "Int", which no caller could tell from a real
+            # one: interpolation then rendered `(0.0 - 1.0) * 0.0` through
+            # `%v` instead of the canonical revlFtoa
+            # (tests/test_cross_tier_execution.py's negative-zero probe).
+            if node.get("operands") == "Float":
+                return "Float"
             return "Int"
         return None
     if kind == "un":
@@ -4116,13 +4203,16 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"strings.HasPrefix({target}, {args[0]})"
     if method == "endsWith":
         return f"strings.HasSuffix({target}, {args[0]})"
-    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): %d on an int64 is
-    # exact decimal. Unlike the component tier, the pure v3 module imports fmt
-    # only on demand, so flag it — otherwise a module whose sole fmt use is
-    # to_str emits fmt.Sprintf with no import (undefined: fmt).
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): strconv.FormatInt
+    # base 10 is exact decimal for an int64, and unlike fmt.Sprintf("%d", x) it
+    # takes the int64 directly instead of boxing it into an `any` (item 434
+    # (f): 2 allocs/16 B -> 1 alloc/4 B). Int32 widens first; FormatInt's
+    # parameter is int64.
     if method == "to_str":
-        ctx.needs_fmt = True
-        return f'fmt.Sprintf("%d", {target})'
+        ctx.needs_strconv = True
+        if rt == "Int32":
+            return f"strconv.FormatInt(int64({target}), 10)"
+        return f"strconv.FormatInt({target}, 10)"
     # The Map value type (docs/stdlib-2.0.md §Map): persistent Go maps —
     # `set` copies into a fresh map, `lookup` answers the sealed RevlOpt.
     if method == "set":
@@ -4191,26 +4281,69 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
 
 
 def _go_v3_interp(node: dict, ctx: _V3GoCtx) -> str:
-    ctx.needs_fmt = True
+    """`${..}` interpolation, rendered from the operand types the emitter knows.
+
+    `fmt.Sprintf` with `%v` takes `...any`, so every operand is boxed into an
+    interface: `${a}/${b}` over two `Str` measured 3 allocs / 48 B where the
+    same emitter's `a + "/" + b` measured 1 / 16 (roadmap item 434 (f)). Where
+    every part's type is known, each renders to a `string`-typed piece and the
+    whole interpolation is a `+` chain: one allocation for the result, no
+    boxing, and no `fmt` import at all. `%v` stays only as the fallback for a
+    part whose type could not be inferred.
+    """
+    # Every part is rendered exactly once; both spellings are built in the same
+    # pass so the fallback is a choice at the end rather than a second walk
+    # (rendering twice would double any ctx feature flag a part sets).
+    pieces: list[str] = []
     fmt_parts: list[str] = []
     args: list[str] = []
+    typed = True
+    wants_strconv = False
     for part_kind, value in node.get("parts") or []:
         if part_kind == "text":
-            fmt_parts.append(str(value).replace("%", "%%"))
-        elif _go_v3_infer_type(value, ctx) == "Float":
+            text = str(value)
+            pieces.append(_go_string(text))
+            fmt_parts.append(text.replace("%", "%%"))
+            continue
+        vt = _go_v3_infer_type(value, ctx)
+        rendered = _go_v3_expr(value, ctx)
+        if vt == "Float":
             # A `Float` renders through the canonical ECMAScript form, not
             # Go's `%v` (`%v` matches for these values but diverges elsewhere,
-            # e.g. `1e-07` vs `1e-7`); see docs/strings.md.
+            # e.g. `1e-07` vs `1e-7`); see docs/strings.md. revlFtoa already
+            # answers a string, so it is the piece on both paths.
             ctx.needs_ftoa = True
+            pieces.append(f"revlFtoa({rendered})")
             fmt_parts.append("%s")
-            args.append(f"revlFtoa({_go_v3_expr(value, ctx)})")
+            args.append(f"revlFtoa({rendered})")
+            continue
+        fmt_parts.append("%v")
+        args.append(rendered)
+        if vt == "Str":
+            pieces.append(rendered)
+        elif vt in ("Int", "Int32"):
+            # strconv.FormatInt renders the same decimal `%v`/`%d` does for an
+            # integer, from the int64 itself rather than through an `any`.
+            wants_strconv = True
+            inner = rendered if vt == "Int" else f"int64({rendered})"
+            pieces.append(f"strconv.FormatInt({inner}, 10)")
+        elif vt == "Bool":
+            # `%v` on a bool is "true"/"false", which is FormatBool exactly.
+            wants_strconv = True
+            pieces.append(f"strconv.FormatBool({rendered})")
         else:
-            fmt_parts.append("%v")
-            args.append(_go_v3_expr(value, ctx))
-    joined = "".join(fmt_parts)
+            typed = False
     if not args:
-        return _go_string(joined)
-    return f"fmt.Sprintf({_go_string(joined)}, {', '.join(args)})"
+        return _go_string("".join(fmt_parts))
+    if typed:
+        if wants_strconv:
+            ctx.needs_strconv = True
+        # A lone piece is already a `string`; `+` needs at least two operands.
+        if len(pieces) == 1:
+            return pieces[0]
+        return "(" + " + ".join(pieces) + ")"
+    ctx.needs_fmt = True
+    return f"fmt.Sprintf({_go_string(''.join(fmt_parts))}, {', '.join(args)})"
 
 
 def _go_v3_optchain(node, ctx: _V3GoCtx, *, field=None, method=None, args=None):
@@ -4374,6 +4507,239 @@ def _guard_frame_neutral_loop(body) -> None:
                 "while/for body (docs/design/379-break-continue.md)")
 
 
+# ---------------------------------------------------------------------------
+# The self-rebind (unique-ownership) analysis, roadmap item 434 (a) and (b).
+#
+# `out = out.push(x)` and `m = m.set(k, v)` lower through revlListPush /
+# revlMapSet, which COPY: the correct lowering for a persistent value, and a
+# quadratic for the loop idiom, where the previous value is dead the instant
+# the assignment lands. Measured, building a 1000-element list: 1001 allocs /
+# 4,274,103 B against a hand-written `append`'s 1 / 8,192; 1000 map insertions:
+# 3989 / 19,168,881 against an in-place `m[k] = v`'s 5 / 54,609.
+#
+# A destructive lowering is only sound where nothing else can observe the
+# write, so this recognises the shape that makes the value UNIQUELY OWNED by
+# the binding rather than special-casing the assignment. A name qualifies when
+# BOTH hold over the whole function body:
+#
+#   1. every write to it is either a fresh allocation this function made (a
+#      list literal or a `Map.empty()`/map literal) or a self-rebind through
+#      one of the write builtins below, with at least one of each; and
+#   2. every other occurrence of the name is a read that retains no reference
+#      to the value: the receiver of a read-only builtin, an index target, a
+#      `for ... of` iterable, or the returned expression.
+#
+# Together these keep the value linear: it is never bound to a second name,
+# passed as an argument, stored into another collection, or captured, so no
+# alias exists to see an in-place write. `return` is allowed because the rule
+# closes over calls too. A caller binds the result with a `let` whose value is
+# a CALL, not a fresh literal, so the caller's binding never qualifies and
+# never writes destructively into what it was handed.
+_V3_LINEAR_READ_METHODS = frozenset({
+    "length", "indexOf", "slice", "concat", "join", "size", "keys",
+    "lookup", "has", "get", "contains",
+})
+# method -> the collection shape it writes, and the destructive Go statement.
+_V3_LINEAR_WRITE_METHODS = {"push": "List", "set": "Map", "remove": "Map"}
+
+
+def _v3_walk_nodes(node):
+    """Every dict reachable from `node`: statements and expressions alike."""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _v3_walk_nodes(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _v3_walk_nodes(value)
+
+
+def _v3_self_rebind_locals(fn_node: dict) -> dict:
+    """The `{name: shape}` map of uniquely-owned collection locals in `fn_node`."""
+    body = fn_node.get("body") or []
+    shape: dict = {}
+    seeded: set = set()
+    rebound: set = set()
+    disqualified: set = {p.get("name") for p in fn_node.get("params") or []}
+    permitted: set = set()  # id() of the `var` nodes an occurrence may sit at
+
+    for stmt in _v3_walk_nodes(body):
+        if stmt.get("step") not in ("let", "assign"):
+            continue
+        name = stmt.get("name")
+        value = stmt.get("value")
+        value = value if isinstance(value, dict) else {}
+        kind = value.get("kind")
+        if kind in ("list", "maplit"):
+            found = "List" if kind == "list" else "Map"
+            target = None
+        elif kind == "builtin" and value.get("method") in _V3_LINEAR_WRITE_METHODS:
+            target = value.get("target")
+            if not (isinstance(target, dict) and target.get("kind") == "var"
+                    and target.get("name") == name):
+                disqualified.add(name)
+                continue
+            found = _V3_LINEAR_WRITE_METHODS[value["method"]]
+        else:
+            disqualified.add(name)
+            continue
+        if shape.setdefault(name, found) != found:
+            disqualified.add(name)
+            continue
+        if target is None:
+            seeded.add(name)
+        else:
+            rebound.add(name)
+            permitted.add(id(target))
+
+    for node in _v3_walk_nodes(body):
+        candidates = []
+        if node.get("kind") == "builtin" and node.get("method") in _V3_LINEAR_READ_METHODS:
+            candidates.append(node.get("target"))
+        elif node.get("kind") in ("index", "len"):
+            candidates.append(node.get("target"))
+        elif node.get("step") == "for":
+            candidates.append(node.get("iterable"))
+        elif node.get("step") == "return":
+            candidates.append(node.get("expr"))
+        for candidate in candidates:
+            if isinstance(candidate, dict) and candidate.get("kind") == "var":
+                permitted.add(id(candidate))
+
+    for node in _v3_walk_nodes(body):
+        if node.get("kind") == "var" and id(node) not in permitted:
+            disqualified.add(node.get("name"))
+
+    return {name: found for name, found in shape.items()
+            if name not in disqualified and name in seeded and name in rebound}
+
+
+# ---------------------------------------------------------------------------
+# The string-accumulator lowering, roadmap item 434 (e).
+#
+# `out = out + x + sep` in a loop lowers verbatim, so building n pieces
+# allocates n whole intermediate strings: 1001 allocs / 3,717,392 B at n=1000
+# against a strings.Builder's 1 / 8,192. A Go string cannot be mutated, so
+# unlike (a)/(b) there is no destructive form; the accumulation has to move
+# into a Builder that spans the loop.
+#
+# The rewrite applies to a loop only when, over the WHOLE loop (its condition
+# or iterable included), every assignment to the accumulator is a `+`/`concat`
+# chain whose leftmost operand is the accumulator itself, the accumulator
+# appears nowhere else, and the loop body contains no `return`. Those three
+# together mean no one can observe the accumulator between the loop's first
+# and last write, which is exactly what lets the value live in the Builder for
+# the loop's extent and be materialized once, after it.
+
+
+def _v3_str_concat_pieces(value, name: str):
+    """`(root, [piece, ...])` for `name + p1 + p2 …`, else None.
+
+    The chain is left-nested, so this walks the left spine down to what must be
+    a read of `name` itself. `Int`/`Int32`/`Float` `+` is arithmetic, not
+    concatenation, and never matches.
+    """
+    pieces: list = []
+    node = value
+    while isinstance(node, dict):
+        kind = node.get("kind")
+        if (kind == "bin" and node.get("op") == "+"
+                and node.get("operands") not in ("Int", "Int32", "Float")):
+            pieces.append(node.get("right"))
+            node = node.get("left")
+            continue
+        if kind == "builtin" and node.get("method") == "concat":
+            args = node.get("args") or []
+            if len(args) != 1:
+                return None
+            pieces.append(args[0])
+            node = node.get("target")
+            continue
+        break
+    if not (pieces and isinstance(node, dict) and node.get("kind") == "var"
+            and node.get("name") == name):
+        return None
+    pieces.reverse()
+    return node, pieces
+
+
+def _v3_str_accumulators(loop: dict, ctx: _V3GoCtx) -> list:
+    """The `Str` locals this loop accumulates into and nothing else touches."""
+    body = loop.get("body") or []
+    if any(n.get("step") == "return" for n in _v3_walk_nodes(body)):
+        # the accumulator is materialized after the loop, which a return skips
+        return []
+    permitted: set = set()
+    found: list = []
+    disqualified: set = set()
+    for stmt in _v3_walk_nodes(body):
+        if stmt.get("step") not in ("let", "assign"):
+            continue
+        name = stmt.get("name")
+        parsed = (_v3_str_concat_pieces(stmt.get("value"), name)
+                  if stmt.get("step") == "assign" else None)
+        if parsed is None or ctx.var_types.get(name) != "Str":
+            # a `let` re-declares the name inside the loop, and any other
+            # assignment writes a value the Builder would not hold
+            disqualified.add(name)
+            continue
+        if name not in found:
+            found.append(name)
+        permitted.add(id(parsed[0]))
+    for node in _v3_walk_nodes(loop):
+        if node.get("kind") == "var" and id(node) not in permitted:
+            disqualified.add(node.get("name"))
+    return [name for name in found
+            if name not in disqualified and name not in ctx.str_builders]
+
+
+def _go_v3_open_builders(loop: dict, ctx: _V3GoCtx, out: list, pad: str) -> list:
+    """Declare a strings.Builder per accumulator, seeded with its current value."""
+    opened = []
+    for name in _v3_str_accumulators(loop, ctx):
+        ident = _v3_ident(name, "binding")
+        builder = f"_revlSB{ctx.str_builder_seq}"
+        ctx.str_builder_seq += 1
+        ctx.str_builders[name] = builder
+        ctx.needs_strings = True
+        out.append(f"{pad}var {builder} strings.Builder")
+        out.append(f"{pad}{builder}.WriteString({ident})")
+        opened.append((name, ident, builder))
+    return opened
+
+
+def _go_v3_close_builders(opened: list, ctx: _V3GoCtx, out: list, pad: str) -> None:
+    """Materialize each accumulator once, immediately after the loop."""
+    for name, ident, builder in opened:
+        out.append(f"{pad}{ident} = {builder}.String()")
+        del ctx.str_builders[name]
+
+
+def _go_v3_self_rebind(node: dict, ctx: _V3GoCtx, name: str):
+    """The destructive Go statement for a qualifying self-rebind, else None.
+
+    `_v3_self_rebind_locals` has already decided that the binding uniquely owns
+    its value, so the copy the persistent helper makes is unobservable and the
+    in-place form is the faithful lowering.
+    """
+    raw = node.get("name")
+    if raw not in ctx.linear_locals:
+        return None
+    value = node.get("value")
+    if not (isinstance(value, dict) and value.get("kind") == "builtin"):
+        return None
+    method = value.get("method")
+    target = value.get("target") or {}
+    if method not in _V3_LINEAR_WRITE_METHODS or target.get("name") != raw:
+        return None
+    args = [_go_v3_expr(a, ctx) for a in value.get("args") or []]
+    if method == "push":
+        return f"{name} = append({name}, {args[0]})"
+    if method == "set":
+        return f"{name}[{args[0]}] = {args[1]}"
+    return f"delete({name}, {args[0]})"
+
+
 def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=None) -> None:
     pad = "\t" * indent
     step = node.get("step")
@@ -4400,9 +4766,23 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
             out.append(f"{pad}{name} := {value}")
         out.append(f"{pad}_ = {name}")
     elif step == "assign":
-        name = _v3_ident(node.get("name"), "binding")
-        value = _go_v3_expr(node.get("value"), ctx, ctx.var_types.get(node.get("name")))
-        out.append(f"{pad}{name} = {value}")
+        raw = node.get("name")
+        name = _v3_ident(raw, "binding")
+        builder = ctx.str_builders.get(raw)
+        parsed = (_v3_str_concat_pieces(node.get("value"), raw)
+                  if builder else None)
+        if parsed is not None:
+            # inside the loop the accumulator lives in the Builder, so the
+            # rebind is just what this step appends (item 434 (e))
+            for piece in parsed[1]:
+                out.append(f"{pad}{builder}.WriteString({_go_v3_expr(piece, ctx)})")
+            return
+        destructive = _go_v3_self_rebind(node, ctx, name)
+        if destructive is not None:
+            out.append(f"{pad}{destructive}")
+        else:
+            value = _go_v3_expr(node.get("value"), ctx, ctx.var_types.get(raw))
+            out.append(f"{pad}{name} = {value}")
     elif step == "return":
         if node.get("expr") is None:
             out.append(f"{pad}return")
@@ -4419,10 +4799,12 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         out.append(f"{pad}}}")
     elif step == "while":
         _guard_frame_neutral_loop(node.get("body"))
+        opened = _go_v3_open_builders(node, ctx, out, pad)
         out.append(f"{pad}for {_go_v3_expr(node['cond'], ctx)} {{")
         for child in node.get("body") or []:
             _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
         out.append(f"{pad}}}")
+        _go_v3_close_builders(opened, ctx, out, pad)
     elif step == "for":
         _guard_frame_neutral_loop(node.get("body"))
         bind = _v3_ident(node.get("bind"), "loop binding")
@@ -4430,11 +4812,13 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         it_t = _go_v3_infer_type(it_node, ctx)
         if isinstance(it_t, str) and it_t.startswith("List[") and it_t.endswith("]"):
             ctx.var_types[node.get("bind")] = it_t[5:-1]
+        opened = _go_v3_open_builders(node, ctx, out, pad)
         out.append(f"{pad}for _, {bind} := range {_go_v3_expr(it_node, ctx)} {{")
         out.append(f"{pad}\t_ = {bind}")
         for child in node.get("body") or []:
             _go_v3_stmt(child, ctx, out, indent + 1, t_name=t_name)
         out.append(f"{pad}}}")
+        _go_v3_close_builders(opened, ctx, out, pad)
     elif step == "break":
         out.append(f"{pad}break")
     elif step == "continue":
@@ -4664,6 +5048,9 @@ def _emit_v3_go_functions(functions: list, ctx: _V3GoCtx) -> list[str]:
         name = _v3_ident(fn.get("name"), "function name")
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         ctx.ret_type = fn.get("returns")
+        ctx.linear_locals = _v3_self_rebind_locals(fn)
+        ctx.str_builders = {}
+        ctx.str_builder_seq = 0
         params = ", ".join(
             f"{_v3_ident(p.get('name'), 'parameter')} {_go_v3_type(p.get('type'), ctx.types)}"
             for p in fn.get("params") or []
@@ -4685,6 +5072,9 @@ def _emit_v3_go_tests(tests: list, ctx: _V3GoCtx) -> list[str]:
         tname = _go_v3_test_name(test.get("name"), used)
         ctx.var_types = {}
         ctx.ret_type = None
+        ctx.linear_locals = _v3_self_rebind_locals(test)
+        ctx.str_builders = {}
+        ctx.str_builder_seq = 0
         # `revlT` (not `t`) so a user binding named `t` can't shadow it.
         out.append(f"func {tname}(revlT *testing.T) {{")
         for stmt in test.get("body") or []:
@@ -5993,18 +6383,18 @@ func revlMapRemove[K comparable, V any](m map[K]V, k K) map[K]V {
 }
 
 // revlMapKeys yields the keys in ascending canonical Str order (UTF-8 byte
-// lexicographic — go string < is exactly that). A plain insertion sort over
-// a copied slice: no sort import, and symbol-table keys come in small sets.
+// lexicographic, which go `string <` is exactly, and slices.Sort orders
+// []string by `<`, so the emitted order is identical to the hand-rolled
+// insertion sort this replaced). Map.keys() IS the iteration surface for Map
+// (docs/stdlib-2.0.md §Map), so it sits on the path of every map traversal a
+// program does: O(n log n), not the O(n^2) the "keys come in small sets"
+// premise assumed (roadmap item 434 (h)).
 func revlMapKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
 	}
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-		}
-	}
+	slices.Sort(keys)
 	return keys
 }
 '''
@@ -6151,14 +6541,46 @@ func revlStrRepeat(s string, n int64) string {
 \treturn strings.Repeat(s, int(n))
 }
 
+// revlStrCharAt / revlStrCharCodeAt walk to the code point at index i with
+// utf8.DecodeRuneInString instead of materializing `[]rune(s)`. Both are
+// code-point indexed exactly as before (docs/strings.md); the difference is
+// that one read no longer allocates a copy of the whole string, so a scan loop
+// stops being quadratic in bytes (item 434 (c): a 780-code-point scan measured
+// 781 allocs / 2,496,127 B, one whole-string rune copy per character, against
+// 0 / 0 for the hand-written `for _, r := range s`). An out-of-range index
+// falls through to the `[]rune(s)[i]` it always was, so it panics with the
+// same Go index-out-of-range error on exactly the same inputs.
 func revlStrCharAt(s string, i int64) string {
-\tr := []rune(s)
-\treturn string(r[i])
+\tif i >= 0 {
+\t\tt := s
+\t\tfor j := int64(0); len(t) > 0; j++ {
+\t\t\tr, w := utf8.DecodeRuneInString(t)
+\t\t\tif j == i {
+\t\t\t\tif r == utf8.RuneError && w == 1 {
+\t\t\t\t\t// invalid encoding: []rune(s) substitutes U+FFFD, so
+\t\t\t\t\t// answer the replacement character, not the raw byte
+\t\t\t\t\treturn string(utf8.RuneError)
+\t\t\t\t}
+\t\t\t\treturn t[:w] // a substring shares s's bytes: no allocation
+\t\t\t}
+\t\t\tt = t[w:]
+\t\t}
+\t}
+\treturn string([]rune(s)[i])
 }
 
 func revlStrCharCodeAt(s string, i int64) int64 {
-\tr := []rune(s)
-\treturn int64(r[i])
+\tif i >= 0 {
+\t\tt := s
+\t\tfor j := int64(0); len(t) > 0; j++ {
+\t\t\tr, w := utf8.DecodeRuneInString(t)
+\t\t\tif j == i {
+\t\t\t\treturn int64(r)
+\t\t\t}
+\t\t\tt = t[w:]
+\t\t}
+\t}
+\treturn int64([]rune(s)[i])
 }
 
 func revlJoin(xs []string, sep string) string { return strings.Join(xs, sep) }
@@ -6275,6 +6697,13 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         imports.append('\t"math"')
         imports.append('\t"strconv"')
         imports.append('\t"strings"')
+    if ctx.needs_strconv:
+        imports.append('\t"strconv"')
+    if ctx.needs_strings:
+        imports.append('\t"strings"')
+    # _V3_MAP_PREAMBLE's revlMapKeys sorts with slices.Sort (item 434 (h)).
+    if used_map:
+        imports.append('\t"slices"')
     # packages a @go extern body hoisted via `//revl:import` (e.g. encoding/json)
     for path in sorted(ctx.extern_imports):
         imports.append(f'\t"{path}"')
@@ -6578,6 +7007,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
+    global _COMP_NEEDS_STRCONV
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET, _COMP_NEEDS_STREAM
@@ -6632,6 +7062,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     _COMP_NEEDS_STDLIB = False
     _COMP_NEEDS_MAP = False
     _COMP_NEEDS_PARSE_INT = False
+    _COMP_NEEDS_STRCONV = False
 
     # Emit the body first so `_COMP_NEEDS_STDLIB` settles before the import
     # block and preamble are assembled. For ir_version 1/2 no v3 feature is
@@ -6700,6 +7131,15 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
             out.append('\t"time"')
         out.append('\t"os"')
         out.append('\t"strconv"')
+    if _COMP_NEEDS_STRCONV and not _COMP_NEEDS_TEARDOWN:
+        # Int.to_str renders through strconv.FormatInt (item 434 (f)); the
+        # teardown block above already imports strconv when it is present, and
+        # Go rejects the same path twice.
+        out.append('\t"strconv"')
+    # The host runtime's Map.Keys and _V3_MAP_PREAMBLE's revlMapKeys both sort
+    # with slices.Sort (item 434 (h)); the host runtime is unconditional on
+    # this tier, so the import is too.
+    out.append('\t"slices"')
     if _RECORD_MODE and _COMP_NEEDS_TEARDOWN:
         # item 322 Slice 1: the durable WAL sink marshals records with
         # encoding/json ("os" is already pulled in by the teardown block above).
@@ -7244,6 +7684,7 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
+    global _COMP_NEEDS_STRCONV
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
     _V3_MODE = True
     _V3_TYPES = types
@@ -7251,6 +7692,7 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     _COMP_NEEDS_STDLIB = False
     _COMP_NEEDS_MAP = False
     _COMP_NEEDS_PARSE_INT = False
+    _COMP_NEEDS_STRCONV = False
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
@@ -7321,6 +7763,14 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         imports.append('\t"math"')
         imports.append('\t"strconv"')
         imports.append('\t"strings"')
+    if ctx.needs_strconv or _COMP_NEEDS_STRCONV:
+        imports.append('\t"strconv"')
+    if ctx.needs_strings:
+        imports.append('\t"strings"')
+    # The host runtime's Map.Keys and _V3_MAP_PREAMBLE's revlMapKeys both sort
+    # with slices.Sort (item 434 (h)); the host runtime is unconditional on
+    # this tier, so the import is too.
+    imports.append('\t"slices"')
     if has_spawn:
         imports.append('\tstdctx "context"')
     # the stc-go side always needs fmt + sync + the runtime

@@ -14,10 +14,21 @@ The lesson is the project's own recurring one, one level up: "the emitter did
 not raise" never implied "the code is right", and "every emitter agreed on a
 shape" never implied "every tier agrees on a value".
 
-python and TypeScript execute here because both are fast. rust and java are
-gated behind REVL_CROSS_TIER_SLOW=1 (cargo and javac make the default suite
-minutes rather than seconds); their regression guards below are static and
-cheap, and CI runs the full matrix.
+python, TypeScript and go execute here because all three are fast. rust and
+java are gated behind REVL_CROSS_TIER_SLOW=1 (cargo and javac make the default
+suite minutes rather than seconds), and their regression guards below are
+static and cheap.
+
+CI DOES NOT RUN THE FULL MATRIX, whatever this header used to say.
+`REVL_CROSS_TIER_SLOW` is set nowhere in this repository, so every `*_slow`
+test in this file executes in no CI job at all, and `RUNNERS["java"]` skips
+again on top of that wherever no JDK is installed. That is how item 433's
+riders R1 and R2 survived: `IEEE_FLOAT` below already contained assertions
+java fails, and java never ran them. Until the switch is on, the STATIC guards
+here are the ones actually holding the line, so add one alongside every probe
+that matters. Turning the switch on is worth doing in the `conformance` job,
+which is the one place every toolchain exists at once, and it needs the java
+record `equals` gap closed first (see item 433's rider section).
 """
 
 import importlib.util
@@ -67,6 +78,55 @@ pub fn widen_return(x: Int) -> Float { return x }
 test "call argument widens" { assert ident(3) == 3.0 }
 test "annotated let widens" { assert widen_let() == 3.0 }
 test "return widens" { assert widen_return(4) == 4.0 }
+""",
+
+    # `/` and Float `==` (item 433 riders R1 and R2), and the reason a live
+    # java divergence in both survived is worth stating plainly, because the
+    # corpus was NOT the main problem.
+    #
+    # `IEEE_FLOAT` below already asserted `7 / 2 == 3.5` and
+    # `0.0 / 0.0 != 0.0 / 0.0`, and java failed BOTH: it emitted
+    # `Objects.equals((7L / 2L), 3.5d)`, where `7L / 2L` is Java integer
+    # division and boxes to a `Long` that no `Double` equals, and
+    # `!Objects.equals((0.0d / 0.0d), (0.0d / 0.0d))`, where `Double.equals`
+    # compares `doubleToLongBits` and so calls NaN equal to itself. Either one
+    # would have fired the first time java executed this file.
+    #
+    # java never did. Its probes sit behind `REVL_CROSS_TIER_SLOW`, and that
+    # variable is set NOWHERE in this repository: not in .github/workflows,
+    # not in the Makefile, not in ci/. Every `*_slow` test here has therefore
+    # run in no CI job and on no machine that did not export it by hand, and
+    # the runner adds a second gate on top ("no working JDK" is a skip, so
+    # "nothing checked it" is recorded as a pass). The header above claiming
+    # "CI runs the full matrix" is aspirational, not true.
+    #
+    # So the durable guard for this class is a STATIC one that needs no
+    # toolchain (`test_java_true_division_widens_both_operands` and
+    # `test_java_equality_goes_through_the_revl_helper` below), the same role
+    # the rust and TypeScript guards already play. This probe is the executed
+    # half, and it adds the one case genuinely missing from `IEEE_FLOAT`:
+    # negative zero. `IEEE_FLOAT`'s "negative zero equals zero" spells it
+    # `0.0 - 0.0`, which is POSITIVE zero in IEEE, so nothing ever compared a
+    # real `-0.0` and java's `0.0 == -0.0` being false went unprobed even in
+    # principle. `scale(0.0, 0.0 - 1.0)` is a real one.
+    #
+    # The divisor and both compared floats arrive as PARAMETERS, never as
+    # literals: a literal zero divisor is a checker rejection, and Go folds
+    # untyped float constants in arbitrary precision, so a constant-folded
+    # form would test the frontend rather than the tier.
+    "true division and IEEE float equality": """
+pub fn realdiv(a: Int, b: Int) -> Float { return a / b }
+pub fn fdiv(a: Float, b: Float) -> Float { return a / b }
+pub fn scale(a: Float, b: Float) -> Float { return a * b }
+pub fn feq(a: Float, b: Float) -> Bool { return a == b }
+
+test "Int / Int is true division"       { assert realdiv(1, 2) == 0.5 }
+test "true division keeps the fraction" { assert realdiv(7, 2) == 3.5 }
+test "true division does not truncate"  { assert realdiv(0 - 7, 2) == 0.0 - 3.5 }
+test "Float / Float agrees with it"     { assert fdiv(7.0, 2.0) == 3.5 }
+test "NaN is not equal to itself"       { assert !feq(fdiv(0.0, 0.0), fdiv(0.0, 0.0)) }
+test "NaN is unequal under !="          { assert fdiv(0.0, 0.0) != fdiv(0.0, 0.0) }
+test "negative zero equals zero"        { assert feq(scale(0.0, 0.0 - 1.0), 0.0) }
 """,
 
     # The C1 contract (docs/collections.md, docs/stdlib-2.0.md §Map): keys()
@@ -349,11 +409,35 @@ def test_rust_records_derive_partial_eq():
     assert "#[derive(Clone, Debug, PartialEq" in emitted
 
 
-def test_java_equality_goes_through_objects_equals():
-    """Java records have a structural `equals`; `==` would be identity. This
-    tier was already correct and should stay that way."""
+def test_java_equality_goes_through_the_revl_helper():
+    """Java records have a structural `equals`, so `Objects.equals` was right
+    for every value EXCEPT Float: it boxes to Double, whose `equals` compares
+    `doubleToLongBits`, which made `NaN == NaN` true and `0.0 == -0.0` false
+    (item 433 rider R2). `revlEq` keeps the structural behaviour as its
+    fallback and restores the IEEE rule for Float, so the helper must travel
+    with the module the way TypeScript's does."""
     emitted = _emit("java", PROBES["structural equality"])
-    assert "java.util.Objects.equals(" in emitted
+    assert "revlEq(" in emitted
+    assert "private static boolean revlEq" in emitted, (
+        "the helper must travel with the module")
+    assert "java.util.Objects.equals(a, b)" in emitted, (
+        "structural equality is still the fallback for every non-Float value")
+
+
+def test_java_true_division_widens_both_operands():
+    """`Int / Int` is `Float` (docs/arithmetic.md) and the `/` node carries
+    `operands`, but java ignored it and emitted Java's `long / long`, which is
+    INTEGER division: `realdiv(1, 2)` was `0.0` here against `0.5` on python,
+    TypeScript, rust and go (item 433 rider R1). java executes the probe above
+    only under REVL_CROSS_TIER_SLOW, so this is the cheap static guard that
+    runs by default, the same role the rust/TypeScript guards play."""
+    emitted = _emit("java", PROBES["true division and IEEE float equality"])
+    assert ("public static double realdiv(long a, long b) {\n"
+            "        return (((double) (a)) / ((double) (b)));") in emitted, (
+        "`long / long` is Java integer division, not revl's `/`")
+    # Float operands already divide as doubles and must not grow a cast.
+    assert ("public static double fdiv(double a, double b) {\n"
+            "        return (a / b);") in emitted
 
 
 # ------------------------------------------------- widening is emitted, not absorbed

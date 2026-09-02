@@ -3,7 +3,7 @@
 package stdlib
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -108,14 +108,46 @@ func revlStrRepeat(s string, n int64) string {
 	return strings.Repeat(s, int(n))
 }
 
+// revlStrCharAt / revlStrCharCodeAt walk to the code point at index i with
+// utf8.DecodeRuneInString instead of materializing `[]rune(s)`. Both are
+// code-point indexed exactly as before (docs/strings.md); the difference is
+// that one read no longer allocates a copy of the whole string, so a scan loop
+// stops being quadratic in bytes (item 434 (c): a 780-code-point scan measured
+// 781 allocs / 2,496,127 B, one whole-string rune copy per character, against
+// 0 / 0 for the hand-written `for _, r := range s`). An out-of-range index
+// falls through to the `[]rune(s)[i]` it always was, so it panics with the
+// same Go index-out-of-range error on exactly the same inputs.
 func revlStrCharAt(s string, i int64) string {
-	r := []rune(s)
-	return string(r[i])
+	if i >= 0 {
+		t := s
+		for j := int64(0); len(t) > 0; j++ {
+			r, w := utf8.DecodeRuneInString(t)
+			if j == i {
+				if r == utf8.RuneError && w == 1 {
+					// invalid encoding: []rune(s) substitutes U+FFFD, so
+					// answer the replacement character, not the raw byte
+					return string(utf8.RuneError)
+				}
+				return t[:w] // a substring shares s's bytes: no allocation
+			}
+			t = t[w:]
+		}
+	}
+	return string([]rune(s)[i])
 }
 
 func revlStrCharCodeAt(s string, i int64) int64 {
-	r := []rune(s)
-	return int64(r[i])
+	if i >= 0 {
+		t := s
+		for j := int64(0); len(t) > 0; j++ {
+			r, w := utf8.DecodeRuneInString(t)
+			if j == i {
+				return int64(r)
+			}
+			t = t[w:]
+		}
+	}
+	return int64([]rune(s)[i])
 }
 
 func revlJoin(xs []string, sep string) string { return strings.Join(xs, sep) }
@@ -210,7 +242,7 @@ func codeAtOf(s string, i int64) int64 {
 }
 
 func greetN(name string, n int64) string {
-	return fmt.Sprintf("hi %v#%v!", name, n)
+	return ("hi " + name + "#" + strconv.FormatInt(n, 10) + "!")
 }
 
 func optName(row RevlOpt[Row]) RevlOpt[string] {

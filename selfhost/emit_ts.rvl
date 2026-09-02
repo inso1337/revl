@@ -80,6 +80,13 @@
 //   * the canonical ABI;
 //   * the component-body `timer` step; and the component-dialect expr kinds
 //     `spawn`/`instance-get` (unexercised);
+//   * the reference's `Stream.*` TIER-LIMIT refusal (roadmap 419e): the
+//     reference `_expr` now refuses a `Stream.*` host builtin, since this tier
+//     has no `Stream` runtime primitive and `host.Stream.source()` was a dead
+//     emit. Deliberately NOT ported: these emitters have no refusal channel at
+//     all (they render bytes over a slice-limited covered surface), and no
+//     fixture reaches a `Stream.*` host builtin, so the oracle cannot see it;
+//     a port would mean inventing a refusal channel for an unreached shape;
 //   * the VARIANT half of `_emit_ts_types` (the `export type … =` union + its
 //     constructor functions) — only records are emitted; a variant type would
 //     emit a marker and diverge, so no fixture declares one;

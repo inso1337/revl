@@ -125,6 +125,25 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+def _refuse_stream_host(fn: str) -> None:
+    """Refuse a `Stream.*` host builtin on this tier (roadmap item 419e).
+
+    `subscribe` already refuses honestly, but the ACQUISITION that opens the
+    stream (`let src = effect Stream.source() undo src.close()`) did not:
+    `Stream` is not in `_HOST_ROOTS` and has no entry in `_HOST_STUBS`, so the
+    emitter rendered `Stream src = Stream.source();` against a class it never
+    emits and the file did not compile. Refuse at emit time with a message that
+    names the tiers which do lower streams, the way wasm already does."""
+    if fn.split(".", 1)[0] == "Stream":
+        raise EmitError(
+            f"`{fn}` opens a stream; a stream subscription suspends a fiber "
+            "and the java blocking-tier lowering (a `BlockingQueue.poll` "
+            "interruptible by the cancel signal) is not implemented, so this "
+            "tier has no `Stream` runtime class; streams run on py, go and "
+            "rust (item 130 §4.6); try `--backend py`"
+        )
+
+
 # Dispatcher conformance (roadmap item 76a). This tier converged to ONE
 # expression renderer (`_expr`) covering both IR dialects, so the table below
 # has a single entry: every kind the frontend can produce in either position
@@ -456,6 +475,33 @@ _V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
 # because `_expr` also renders the v1 component dialect (`req`, `config`, ..).
 _V3_POSTFIX_SAFE_KINDS = _V3_ATOMIC_KINDS | {"name", "req", "config", "host", "fn"}
 _HOST_ROOTS = {"Pool", "Map", "Job"}
+
+# item 416a: host roots this tier emits no runtime class for. `_emit_host_stubs`
+# only ever writes a class for a root in `_HOST_STUBS`, so a call on any other
+# root lowered to a bare `Stream.source()` naming a type the generated file
+# never declares — the emitter was happy and javac was not. That is a SILENT
+# EMIT where the design promises a refusal. `subscribe`/`stream-merge` were
+# already refused here; a `Stream.source()`-only program was not, so the honest
+# refusal covered only half the surface. Refuse the whole root instead.
+_UNIMPLEMENTED_HOST_ROOTS = {
+    "Stream": (
+        "opens a stream, and a stream subscription suspends a fiber. The java "
+        "blocking-tier lowering (a `BlockingQueue.poll` interruptible by the "
+        "cancel signal, item 130 §4.6) is not implemented and this tier emits "
+        "no `Stream` runtime class, so the emitted program would name a type "
+        "the generated file never declares: streams run on py, go and rust; "
+        "try `--backend py`"
+    ),
+}
+
+
+def _refuse_missing_host_root(fn: str) -> None:
+    """Refuse a host builtin whose ROOT this tier emits no runtime for, instead
+    of emitting a call against a type the generated file does not declare."""
+    root = (fn or "").split(".")[0]
+    reason = _UNIMPLEMENTED_HOST_ROOTS.get(root)
+    if reason is not None:
+        raise EmitError(f"`{fn}` {reason}")
 
 
 def _split_v3_types(inner: str) -> list[str]:
@@ -863,6 +909,82 @@ def _emit_stdlib_helpers() -> list[str]:
         "        return Boolean.compare(i >= a.length(), j >= b.length());",
         "    });",
         "    return java.util.List.copyOf(ks);",
+        "}",
+        "",
+    ]
+
+
+_EQUALITY_OPS = ("==", "===", "!=", "!==")
+
+
+def _uses_equality(ir: dict) -> bool:
+    """True when any `==`/`!=` appears anywhere in the document, so `revlEq`
+    is emitted exactly where it is called (the same gating idiom as
+    `_uses_stdlib` and `_uses_checked_div`)."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("kind") == "bin" and node.get("op") in _EQUALITY_OPS:
+                return True
+            return any(walk(value) for value in node.values())
+        if isinstance(node, list):
+            return any(walk(value) for value in node)
+        return False
+
+    return (walk(ir.get("components")) or walk(ir.get("functions"))
+            or walk(ir.get("tests")) or walk(ir.get("externs")))
+
+
+def _emit_eq_helper() -> list[str]:
+    """`==` on this tier.
+
+    revl has ONE equality and it is structural (docs/syntax-2.0.md §3.4), with
+    exactly one exception: `Float` is IEEE 754 binary64, so `==` on it is the
+    IEEE comparison and is NOT reflexive: `NaN != NaN`, and `0.0 == -0.0`
+    (docs/arithmetic.md, "Float is IEEE 754 binary64"; "This is not a
+    divergence between tiers; every tier agrees").
+
+    Java did diverge. `java.util.Objects.equals` boxes both operands, and
+    `Double.equals` compares `doubleToLongBits`, which calls NaN equal to
+    itself and negative zero unequal to zero, both the opposite of what
+    python, TypeScript, rust and go compute for the same source. So a Double
+    pair compares as primitives here, a List/Map/Optional recurses so a Float
+    nested inside one keeps the same rule, and every other value keeps the
+    structural `Objects.equals` behaviour it already had."""
+    return [
+        "// revl equality (docs/syntax-2.0.md §3.4): structural, EXCEPT that",
+        "// `==` on Float is IEEE 754 (docs/arithmetic.md), so NaN != NaN and",
+        "// 0.0 == -0.0. `Objects.equals` boxes to Double, whose `equals`",
+        "// compares doubleToLongBits and gets both of those backwards.",
+        "private static boolean revlEq(Object a, Object b) {",
+        "    if (a instanceof Double && b instanceof Double) {",
+        "        return ((Double) a).doubleValue() == ((Double) b).doubleValue();",
+        "    }",
+        "    if (a instanceof java.util.List<?> && b instanceof java.util.List<?>) {",
+        "        java.util.List<?> xs = (java.util.List<?>) a;",
+        "        java.util.List<?> ys = (java.util.List<?>) b;",
+        "        if (xs.size() != ys.size()) { return false; }",
+        "        for (int i = 0; i < xs.size(); i++) {",
+        "            if (!revlEq(xs.get(i), ys.get(i))) { return false; }",
+        "        }",
+        "        return true;",
+        "    }",
+        "    if (a instanceof java.util.Map<?, ?> && b instanceof java.util.Map<?, ?>) {",
+        "        java.util.Map<?, ?> xs = (java.util.Map<?, ?>) a;",
+        "        java.util.Map<?, ?> ys = (java.util.Map<?, ?>) b;",
+        "        if (xs.size() != ys.size()) { return false; }",
+        "        for (java.util.Map.Entry<?, ?> e : xs.entrySet()) {",
+        "            if (!ys.containsKey(e.getKey())) { return false; }",
+        "            if (!revlEq(e.getValue(), ys.get(e.getKey()))) { return false; }",
+        "        }",
+        "        return true;",
+        "    }",
+        "    if (a instanceof java.util.Optional<?> && b instanceof java.util.Optional<?>) {",
+        "        java.util.Optional<?> xs = (java.util.Optional<?>) a;",
+        "        java.util.Optional<?> ys = (java.util.Optional<?>) b;",
+        "        if (xs.isPresent() != ys.isPresent()) { return false; }",
+        "        return xs.isEmpty() || revlEq(xs.get(), ys.get());",
+        "    }",
+        "    return java.util.Objects.equals(a, b);",
         "}",
         "",
     ]
@@ -1279,7 +1401,9 @@ def _expr(
 
     if kind == "host":
         fn = node.get("fn")
+        _refuse_missing_host_root(fn)
         host, _, method = fn.partition(".")
+        _refuse_stream_host(fn)
         args = ", ".join(
             _expr(a, ctx, rename, env) for a in node.get("args") or []
         )
@@ -1324,9 +1448,20 @@ def _expr(
         left = _expr(node["left"], ctx, rename, env)
         right = _expr(node["right"], ctx, rename, env)
         if op in ("==", "==="):
-            return f"java.util.Objects.equals({left}, {right})"
+            return f"revlEq({left}, {right})"
         if op in ("!=", "!=="):
-            return f"!java.util.Objects.equals({left}, {right})"
+            return f"!revlEq({left}, {right})"
+        if op == "/" and node.get("operands") in ("Int", "Int32"):
+            # `Int / Int` is TRUE division and yields `Float`
+            # (docs/arithmetic.md: "§0 governs, syntax revl shares with
+            # TypeScript means what TypeScript means"). Java's `/` on two
+            # `long`s is INTEGER division, so falling through to the plain
+            # operator made `1 / 2` be `0.0` here and `0.5` on python,
+            # TypeScript, rust and go. The `/` node already carries `operands`
+            # for exactly this reason, so widen both sides first. That is the
+            # shape rust emits (`(a) as f64 / (b) as f64`) and go emits
+            # (`revlDiv(float64(a), float64(b))`).
+            return f"(((double) ({left})) / ((double) ({right})))"
         if op in ("+", "-", "*") and node.get("operands") in ("Int", "Int32"):
             # Int/Int32 overflow traps (docs/arithmetic.md); Math.*Exact throws
             # ArithmeticException, which is exactly the fault we want. Each has
@@ -2861,6 +2996,51 @@ def _contains_expr(node: object) -> bool:
     return False
 
 
+def _reads_config(node: object) -> bool:
+    """True if `node` reads a component `config` field anywhere inside it.
+
+    A `config` node is v1-expressible in the ACTIVATION body, because `apply()` is a
+    method of `<Comp>Plugin`, which holds the config fields, so a bare
+    `prefix` resolves there. It is NOT expressible in a PROVIDE-METHOD body:
+    the legacy path puts that body in a separate `<Comp><Key>` provider class
+    with no config fields and no reference to the plugin, so the same bare
+    `prefix` names nothing and the emitted Java does not compile. The modern
+    path threads config through the provider's constructor, so it is the only
+    correct home for such a method."""
+    if isinstance(node, dict):
+        if node.get("kind") == "config":
+            return True
+        return any(_reads_config(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_reads_config(value) for value in node)
+    return False
+
+
+def _provider_config_fields(component: dict) -> list[dict]:
+    """The component's `config` fields when a PROVIDE METHOD reads one, else
+    an empty list.
+
+    `_expr` renders a `config` node as the BARE field name, which resolves in
+    `apply()` because that is a method of `<Comp>Plugin` and the plugin holds
+    the config fields. A provide-method body lives in the separate
+    `<Comp><Key>` provider class, which carried ctx/fx/reqs/binds and no
+    config at all, so `config.prefix` emitted a `prefix` that names nothing
+    and javac rejected the unit. Threading config into the provider for
+    exactly the components that read it there keeps every other component
+    emitting byte-for-byte as before (the same gating rule `needs_frame`
+    uses)."""
+    config_fields = component.get("config") or []
+    if not config_fields:
+        return []
+    for step in component.get("body") or []:
+        if step.get("step") != "provide":
+            continue
+        for method in step.get("methods") or []:
+            if _reads_config(method.get("body")):
+                return list(config_fields)
+    return []
+
+
 def _component_needs_modern(component: dict) -> bool:
     if component.get("isolate") or component.get("intercept"):
         return True
@@ -2888,6 +3068,12 @@ def _component_needs_modern(component: dict) -> bool:
                     if stmt.get("step") != "return":
                         return True
                     if _contains_expr(stmt.get("expr")):
+                        return True
+                    # A `config` read is v1-expressible in the activation body
+                    # but not in a provide method (see `_reads_config`): the
+                    # legacy provider class has no config field, so it emitted
+                    # a bare `prefix` that names nothing and does not compile.
+                    if _reads_config(stmt.get("expr")):
                         return True
         for key in ("acquire", "undo", "expr", "compensate", "message", "cond", "value"):
             if key in step and _contains_expr(step[key]):
@@ -3793,6 +3979,8 @@ def _emit_component_stmts(
             ctor_args = ", ".join(
                 ["ctx", "fx"] + (["frame"] if frame_expr else [])
                 + list(env.reqs) + list(_binds(component))
+                + [_ident(f.get("name"), "config field")
+                   for f in _provider_config_fields(component)]
             )
             out.append(
                 f"{pad}fx.track(ctx.provide(ServiceKey.of({service}.class), "
@@ -3877,6 +4065,15 @@ def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str
     out.append("    private final Context ctx;")
     out.append(f"    private final String[] realms = {{{realm_lits}}};")
     out.append(f"    private final String strategy = {_string(strategy)};")
+    # `cursor` and `served` are MUTABLE router state, and the tier's placement
+    # runner serves every bridge connection on its own thread
+    # (backends/java/placement/PlacementRunner.java: `new Thread(() ->
+    # serveConn(ch), "bridge-conn")`), so two requests can select
+    # concurrently. The go router already takes `r.mu.Lock()` for the whole of
+    # its select; java took nothing, which is the hazard item 397 closed for
+    # the host `Map`. `revlSelect` below is `synchronized`, which is the exact
+    # mirror of go's whole-function mutex: every read and write of both fields
+    # happens inside it.
     out.append("    private int cursor = 0;")
     out.append("    private final java.util.Map<String, Long> served = new java.util.HashMap<>();")
     out.append(f"    {struct}(Context ctx) {{ this.ctx = ctx; }}")
@@ -3887,7 +4084,7 @@ def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str
     out.append("        }")
     out.append("        return out;")
     out.append("    }")
-    out.append(f"    private {service_name} revlSelect() {{")
+    out.append(f"    private synchronized {service_name} revlSelect() {{")
     out.append("        java.util.List<String> live = revlLive();")
     out.append("        if (live.isEmpty()) throw new CordisException("
                "\"revl: router for " + key + " has no live worker (all realms withdrawn)\");")
@@ -3957,6 +4154,7 @@ def _emit_component_modern(
     witnessed = _witnessed_externs(externs)
     needs_frame = _component_needs_frame(component, witnessed)
     frame_expr = "frame" if needs_frame else None
+    provider_config = _provider_config_fields(component)
 
     for key in isolate:
         if key not in env.reqs and key not in env.provides:
@@ -3980,11 +4178,18 @@ def _emit_component_modern(
         for b in _binds(component):
             btype = _bind_type(component, b, v3_ctx, map_values)
             out.append(f"    private final {btype} {b};")
+        # A provide method that reads `config.<f>` needs the field HERE, not
+        # only on the plugin (see `_provider_config_fields`).
+        for f in provider_config:
+            out.append(f"    private final {_java_v3_type(f.get('type'))} "
+                       f"{_ident(f.get('name'), 'config field')};")
         ctor_params = ", ".join(
             ["Context ctx", "Context.EffectScope fx"]
             + (["RevlFrame frame"] if needs_frame else [])
             + [f"{service} {local}" for local, service in env.reqs.items()]
             + [f"{_bind_type(component, b, v3_ctx, map_values)} {b}" for b in _binds(component)]
+            + [f"{_java_v3_type(f.get('type'))} {_ident(f.get('name'), 'config field')}"
+               for f in provider_config]
         )
         out.append(f"    {struct}({ctor_params}) {{")
         out.append("        this.ctx = ctx;")
@@ -3995,6 +4200,9 @@ def _emit_component_modern(
             out.append(f"        this.{local} = {local};")
         for b in _binds(component):
             out.append(f"        this.{b} = {b};")
+        for f in provider_config:
+            fname = _ident(f.get("name"), "config field")
+            out.append(f"        this.{fname} = {fname};")
         out.append("    }")
         provide = next(
             (s for s in component.get("body") or []
@@ -4302,6 +4510,8 @@ def _emit_v1(ir: dict, package_name: str) -> str:
     out.append("")
     out.extend(["    " + line if line else line for line in _emit_service_interfaces(ir.get("services") or {})])
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
+    if _uses_equality(ir):
+        out.extend(["    " + line if line else line for line in _emit_eq_helper()])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
     if _uses_float_interp(ir):
@@ -4331,6 +4541,8 @@ def _emit_v2(ir: dict, package_name: str) -> str:
     out.append("")
     out.extend(["    " + line if line else line for line in _emit_service_interfaces(ir.get("services") or {})])
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
+    if _uses_equality(ir):
+        out.extend(["    " + line if line else line for line in _emit_eq_helper()])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
     if _uses_float_interp(ir):
@@ -4504,6 +4716,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     if services:
         out.extend(["    " + line if line else line for line in _emit_service_interfaces_v3(services)])
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
+    if _uses_equality(ir):
+        out.extend(["    " + line if line else line for line in _emit_eq_helper()])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
     if _uses_float_interp(ir):
