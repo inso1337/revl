@@ -1,0 +1,738 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "types": {
+    "Pt": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "x": "Int",
+        "y": "Int"
+      }
+    }
+  },
+  "functions": [
+    {
+      "name": "built",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "List[Int]",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "xs",
+          "value": {
+            "kind": "list",
+            "items": []
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "i",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "while",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "i"
+            },
+            "right": {
+              "kind": "var",
+              "name": "n"
+            }
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "xs",
+              "value": {
+                "kind": "builtin",
+                "method": "push",
+                "target": {
+                  "kind": "var",
+                  "name": "xs"
+                },
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "i"
+                  }
+                ]
+              },
+              "unique": true
+            },
+            {
+              "step": "assign",
+              "name": "i",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "i"
+                },
+                "right": {
+                  "kind": "lit",
+                  "value": 1
+                },
+                "operands": "Int"
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "xs"
+          }
+        }
+      ]
+    },
+    {
+      "name": "counted",
+      "params": [
+        {
+          "name": "keys",
+          "type": "List[Str]"
+        }
+      ],
+      "returns": "Map[Str, Int]",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "m",
+          "value": {
+            "kind": "maplit",
+            "entries": []
+          },
+          "mutable": true
+        },
+        {
+          "step": "for",
+          "bind": "k",
+          "iterable": {
+            "kind": "var",
+            "name": "keys"
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "m",
+              "value": {
+                "kind": "builtin",
+                "method": "set",
+                "target": {
+                  "kind": "var",
+                  "name": "m"
+                },
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "k"
+                  },
+                  {
+                    "kind": "lit",
+                    "value": 1
+                  }
+                ]
+              },
+              "unique": true
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "m"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dropped",
+      "params": [
+        {
+          "name": "keys",
+          "type": "List[Str]"
+        },
+        {
+          "name": "gone",
+          "type": "Str"
+        }
+      ],
+      "returns": "Map[Str, Int]",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "m",
+          "value": {
+            "kind": "maplit",
+            "entries": []
+          },
+          "mutable": true
+        },
+        {
+          "step": "for",
+          "bind": "k",
+          "iterable": {
+            "kind": "var",
+            "name": "keys"
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "m",
+              "value": {
+                "kind": "builtin",
+                "method": "set",
+                "target": {
+                  "kind": "var",
+                  "name": "m"
+                },
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "k"
+                  },
+                  {
+                    "kind": "lit",
+                    "value": 1
+                  }
+                ]
+              },
+              "unique": true
+            }
+          ]
+        },
+        {
+          "step": "assign",
+          "name": "m",
+          "value": {
+            "kind": "builtin",
+            "method": "remove",
+            "target": {
+              "kind": "var",
+              "name": "m"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "gone"
+              }
+            ]
+          },
+          "unique": true
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "m"
+          }
+        }
+      ]
+    },
+    {
+      "name": "moved",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Pt",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "p",
+          "value": {
+            "kind": "record",
+            "fields": [
+              [
+                "x",
+                {
+                  "kind": "lit",
+                  "value": 1
+                }
+              ],
+              [
+                "y",
+                {
+                  "kind": "lit",
+                  "value": 2
+                }
+              ]
+            ]
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "i",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "while",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "i"
+            },
+            "right": {
+              "kind": "var",
+              "name": "n"
+            }
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "p",
+              "value": {
+                "kind": "record_update",
+                "base": {
+                  "kind": "var",
+                  "name": "p"
+                },
+                "updates": [
+                  [
+                    "x",
+                    {
+                      "kind": "field",
+                      "target": {
+                        "kind": "var",
+                        "name": "p"
+                      },
+                      "name": "y"
+                    }
+                  ],
+                  [
+                    "y",
+                    {
+                      "kind": "field",
+                      "target": {
+                        "kind": "var",
+                        "name": "p"
+                      },
+                      "name": "x"
+                    }
+                  ]
+                ]
+              },
+              "unique": true
+            },
+            {
+              "step": "assign",
+              "name": "i",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "i"
+                },
+                "right": {
+                  "kind": "lit",
+                  "value": 1
+                },
+                "operands": "Int"
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "p"
+          }
+        }
+      ]
+    },
+    {
+      "name": "snapshots",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "List[List[Int]]",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "xs",
+          "value": {
+            "kind": "list",
+            "items": [
+              {
+                "kind": "lit",
+                "value": 0
+              }
+            ]
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "out",
+          "value": {
+            "kind": "list",
+            "items": []
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "i",
+          "value": {
+            "kind": "lit",
+            "value": 1
+          },
+          "mutable": true
+        },
+        {
+          "step": "while",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "i"
+            },
+            "right": {
+              "kind": "var",
+              "name": "n"
+            }
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "out",
+              "value": {
+                "kind": "builtin",
+                "method": "push",
+                "target": {
+                  "kind": "var",
+                  "name": "out"
+                },
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "xs"
+                  }
+                ]
+              },
+              "unique": true
+            },
+            {
+              "step": "assign",
+              "name": "xs",
+              "value": {
+                "kind": "builtin",
+                "method": "push",
+                "target": {
+                  "kind": "var",
+                  "name": "xs"
+                },
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "i"
+                  }
+                ]
+              }
+            },
+            {
+              "step": "assign",
+              "name": "i",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "i"
+                },
+                "right": {
+                  "kind": "lit",
+                  "value": 1
+                },
+                "operands": "Int"
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "out"
+          }
+        }
+      ]
+    },
+    {
+      "name": "chunked",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "List[List[Int]]",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "out",
+          "value": {
+            "kind": "list",
+            "items": []
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "i",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "while",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "i"
+            },
+            "right": {
+              "kind": "var",
+              "name": "n"
+            }
+          },
+          "body": [
+            {
+              "step": "let",
+              "name": "res",
+              "value": {
+                "kind": "list",
+                "items": []
+              },
+              "mutable": true
+            },
+            {
+              "step": "let",
+              "name": "j",
+              "value": {
+                "kind": "lit",
+                "value": 0
+              },
+              "mutable": true
+            },
+            {
+              "step": "while",
+              "cond": {
+                "kind": "bin",
+                "op": "<",
+                "left": {
+                  "kind": "var",
+                  "name": "j"
+                },
+                "right": {
+                  "kind": "lit",
+                  "value": 2
+                }
+              },
+              "body": [
+                {
+                  "step": "assign",
+                  "name": "res",
+                  "value": {
+                    "kind": "builtin",
+                    "method": "push",
+                    "target": {
+                      "kind": "var",
+                      "name": "res"
+                    },
+                    "args": [
+                      {
+                        "kind": "bin",
+                        "op": "+",
+                        "left": {
+                          "kind": "bin",
+                          "op": "*",
+                          "left": {
+                            "kind": "var",
+                            "name": "i"
+                          },
+                          "right": {
+                            "kind": "lit",
+                            "value": 2
+                          },
+                          "operands": "Int"
+                        },
+                        "right": {
+                          "kind": "var",
+                          "name": "j"
+                        },
+                        "operands": "Int"
+                      }
+                    ]
+                  },
+                  "unique": true
+                },
+                {
+                  "step": "assign",
+                  "name": "j",
+                  "value": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "var",
+                      "name": "j"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    },
+                    "operands": "Int"
+                  }
+                }
+              ]
+            },
+            {
+              "step": "assign",
+              "name": "out",
+              "value": {
+                "kind": "builtin",
+                "method": "push",
+                "target": {
+                  "kind": "var",
+                  "name": "out"
+                },
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "res"
+                  }
+                ]
+              },
+              "unique": true
+            },
+            {
+              "step": "assign",
+              "name": "i",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "i"
+                },
+                "right": {
+                  "kind": "lit",
+                  "value": 1
+                },
+                "operands": "Int"
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "out"
+          }
+        }
+      ]
+    },
+    {
+      "name": "appended",
+      "params": [
+        {
+          "name": "xs",
+          "type": "List[Int]"
+        },
+        {
+          "name": "v",
+          "type": "Int"
+        }
+      ],
+      "returns": "List[Int]",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "ys",
+          "value": {
+            "kind": "var",
+            "name": "xs"
+          },
+          "mutable": true,
+          "unique_birth": "List"
+        },
+        {
+          "step": "assign",
+          "name": "ys",
+          "value": {
+            "kind": "builtin",
+            "method": "push",
+            "target": {
+              "kind": "var",
+              "name": "ys"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "v"
+              }
+            ]
+          },
+          "unique": "copy"
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "ys"
+          }
+        }
+      ]
+    }
+  ]
+}
