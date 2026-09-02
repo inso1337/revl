@@ -267,6 +267,13 @@ jobs:
       # rides this job. The drift gate needs no toolchain and already runs in
       # the frontend job's plain `pytest tests/ -q`.
       - run: pytest tests/test_gate_crate_admit.py -q
+      # item 333 slice 2: the rust in-process gate harness
+      # (bench/inprocess_gate_rust) builds a standalone consumer of the gate
+      # crate and runs it, so it needs cargo and rides this job too. It has to
+      # be named HERE: its skip is a toolchain probe, not an env switch, and
+      # tests/test_env_gated_skips_run_somewhere.py only catches env-var gates —
+      # so without this line the skip would be the only thing that ever ran.
+      - run: pytest tests/test_inprocess_gate_rust.py -q
       # item 336 slice 1: the rust LSP binary's byte-identity agreement against
       # `python -m revl.lsp`. REVL_LSP_PYTHON points it at this job's python.
       - run: PYTHONPATH=src REVL_LSP_PYTHON=$(which python) cargo test --manifest-path crates/revl-lsp/Cargo.toml

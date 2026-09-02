@@ -35,3 +35,9 @@ formal/.axioms.out
 # diff_corpus.py; regenerated on every `make formal`
 formal/harness/out/
 formal/harness/out/
+
+# cargo build output for the rust in-process gate harness (item 333). The
+# harness is source; its target/ is not, and `cargo run` in the checkout would
+# otherwise leave a few hundred MB of untracked artefacts behind.
+bench/inprocess_gate_rust/target/
+bench/inprocess_gate_rust/Cargo.lock
