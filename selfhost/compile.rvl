@@ -22,17 +22,21 @@
 //                                             TYPE surface, and emitter-ready.
 //          ──▶ json_parse (stdlib/json.rvl)   the JSON text → the `Any` value the
 //                                             emitters navigate (stdlib/value.rvl).
-//          ──▶ emit_py_src / emit_rust_src     the native EMITTER, dispatched on
-//              (emit_py.rvl / emit_rust.rvl)   tier: IR → target source, byte-exact
-//                                             vs the reference emitter.
+//          ──▶ emit_py_src / emit_rust_src /   the native EMITTER, dispatched on
+//              emit_ts_src                    tier: IR → target source, byte-exact
+//              (emit_py.rvl / emit_rust.rvl / vs the reference emitter.
+//               emit_ts.rvl)
 //
 // The WHOLE chain lex→parse→check→lower→emit is native revl, co-compiled into one
-// artifact: `compile.rvl` `use`s lower.rvl (which `use`s lexer+parser), emit_py.rvl
-// AND emit_rust.rvl in ONE composition. This is what items 228 + 230 unlocked —
-// 228 stopped a `use`d module's PRIVATE decls from leaking (so the three stages'
-// private `Ctx`/`node_kind`/… no longer collide), and 230 gave the two emitter
-// entrypoints DISTINCT public names (`emit_py_src` / `emit_rust_src`) so the merge,
-// which flattens public decls by bare name, no longer sees a duplicate `emit_src`.
+// artifact: `compile.rvl` `use`s lower.rvl (which `use`s lexer+parser), emit_py.rvl,
+// emit_rust.rvl AND emit_ts.rvl in ONE composition. This is what items 228 + 230
+// unlocked — 228 stopped a `use`d module's PRIVATE decls from leaking (so the four
+// stages' private `Ctx`/`node_kind`/… no longer collide), and 230 gave the emitter
+// entrypoints DISTINCT public names (`emit_py_src` / `emit_rust_src`, and now
+// `emit_ts_src`) so the merge, which flattens public decls by bare name, no longer
+// sees a duplicate `emit_src`. Item 146 gap 2 wires the ts tier the same way: the
+// rename is the whole cost of admitting a tier, since the three surviving emitters
+// (go/java/wasm) still export a bare `emit_src` and so still cannot co-compile.
 // Both former SEAMs (224's header: the reference IR in the middle; the stages not
 // co-compiling) are now CLOSED for the function surface.
 //
@@ -54,19 +58,47 @@
 // json_parse into the native emitter with no reference anywhere. That was the last
 // seam; the covered surface is now entirely self-compiled.
 //
+// ALSO NATIVE — the ts tier (roadmap item 146, gap 2). `emit_ts.rvl` is renamed to
+// `emit_ts_src` and dispatched here, so `compile_to(source, "ts")` runs the same
+// fully-native chain and equals `revl compile --backend ts` BYTE-FOR-BYTE over the
+// fifteen emit_ts corpus documents listed in tests/test_selfhost_compile.py — eight
+// function documents and seven component ones, the ir_version-1 dispatch included.
+// The ts emitter is byte-exact on ALL 34 of its own corpus documents, but that
+// oracle feeds it the REFERENCE IR; the remaining nineteen are held out here
+// because the NATIVE `lower_to_ir` — not the emitter — does not yet reproduce them:
+//   * ASYNC is not carried at all (an async extern/fn lowers without its `async`
+//     stamp, so the native emit says `export function f(): T` where the reference
+//     says `export async function f(): Promise<T>`);
+//   * the realm/`intercept` metadata and the `spawn`/`Frame`/`record` runtime-import
+//     gates are not reproduced.
+// Those are lower.rvl gaps shared by every tier, not ts ones.
+//
+// NOT NATIVE, ON ANY TIER — the declared `Secret[T]` marking (found while wiring ts;
+// see tests/test_selfhost_compile.py's strict-xfail pin for the full write-up).
+// `src/revl/taint.py` strips the qualifier and sets the three stamps every backend
+// redacts from; the self-host frontend has no counterpart (zero occurrences of
+// "secret" in lexer/parser/checker/lower.rvl). So a program declaring `Secret[T]`
+// compiles natively to a module MISSING its whole marking on py and on ts alike,
+// even though both native EMITTERS were ported and are byte-exact on their own
+// `secrets.rvl` corpus document when fed the reference IR. Pre-existing, not
+// ts-specific, and stated here rather than left to be rediscovered.
+//
 // Ground truth is the reference; on the covered surface any divergence is a defect
 // in a stage.
 
 use "./lower.rvl" { admit_src, lower_to_ir }
 use "./emit_py.rvl" { emit_py_src }
 use "./emit_rust.rvl" { emit_rust_src }
+use "./emit_ts.rvl" { emit_ts_src }
 use "../stdlib/json.rvl" { json_parse }
 
 // The tiers whose self-host emitter is byte-exact against its reference on this
-// surface. Any other tier is out of this slice — reported, never silently waved
-// through as if the pipeline covered it.
+// surface AND whose entrypoint has a distinct public name, so it can co-compile
+// here. go, java and wasm each still export a bare `emit_src` and are therefore out
+// of this slice — reported, never silently waved through as if the pipeline covered
+// them.
 fn supported_tier(tier: Str) -> Bool {
-  return (tier == "py") || (tier == "rust")
+  return (tier == "py") || (tier == "rust") || (tier == "ts")
 }
 
 // The native FRONTEND admission gate: the cordis verdict over the source, run
@@ -91,8 +123,9 @@ pub fn admit(source: Str) -> Str {
 //                               the component + extern surface (item 262; see WHAT IS
 //                               NATIVE).
 // A control verdict ("UNKNOWN_TIER|"/"REFUSED|") never collides with target source:
-// the emitted py source begins `"""Generated by the revl cordis-py backend …` and
-// the rust source `//! Generated by the revl cordis-rs backend …`.
+// the emitted py source begins `"""Generated by the revl cordis-py backend …`, the
+// rust source `//! Generated by the revl cordis-rs backend …`, and the ts source
+
 pub fn compile_to(source: Str, tier: Str) -> Str {
   if (!supported_tier(tier)) { return "UNKNOWN_TIER|".concat(tier) }
   let verdict = admit_src(source)
@@ -100,6 +133,7 @@ pub fn compile_to(source: Str, tier: Str) -> Str {
   // FULLY NATIVE from here: native IR producer → parse → native emitter.
   let ir = json_parse(lower_to_ir(source))
   if (tier == "py") { return emit_py_src(ir) }
+  if (tier == "ts") { return emit_ts_src(ir) }
   return emit_rust_src(ir)
 }
 
@@ -123,7 +157,9 @@ test "an unsupported tier is reported, not waved through" {
   assert compile_to("fn id(x: Int) -> Int { return x }", "java") == "UNKNOWN_TIER|java"
   assert supported_tier("py")
   assert supported_tier("rust")
+  assert supported_tier("ts")
   assert !supported_tier("go")
+  assert !supported_tier("wasm")
 }
 
 test "a refused program never reaches an emitter (G4), natively" {
@@ -148,6 +184,13 @@ test "an admitted function program compiles fully-native to rust source" {
   assert out.slice(0, 43) == "//! Generated by the revl cordis-rs backend"
 }
 
+test "an admitted function program compiles fully-native to ts source (item 146)" {
+  let out = compile_to("fn id(x: Int) -> Int { return x }", "ts")
+  assert out.slice(0, 8) != "REFUSED|"
+  assert out.slice(0, 11) != "UNKNOWN_TIER"
+  assert out.slice(0, 27) == "// Generated by revl backen"
+}
+
 test "an admitted component program compiles fully-native, both tiers (item 262)" {
   // a service + provider — the native IR producer now carries the component/method
   // body all the way through json_parse into the native emitter, no reference.
@@ -158,4 +201,7 @@ test "an admitted component program compiles fully-native, both tiers (item 262)
   let rs = compile_to(src, "rust")
   assert rs.slice(0, 8) != "REFUSED|"
   assert rs.slice(0, 43) == "//! Generated by the revl cordis-rs backend"
+  let ts = compile_to(src, "ts")
+  assert ts.slice(0, 8) != "REFUSED|"
+  assert ts.slice(0, 27) == "// Generated by revl backen"
 }

@@ -934,11 +934,13 @@ class Registry:
     def resolve(self, need, manifest: dict | None = None,
                 limit: int = 5, *, verify_required: bool = False,
                 key: bytes | None = None, trusted_publishers=(),
-                adapt: bool = True, adapt_opt_ins: dict | None = None) -> dict:
+                adapt: bool = True, adapt_opt_ins: dict | None = None,
+                policy=None) -> dict:
         return resolve(self, need, manifest=manifest, limit=limit,
                        verify_required=verify_required, key=key,
                        trusted_publishers=trusted_publishers,
-                       adapt=adapt, adapt_opt_ins=adapt_opt_ins)
+                       adapt=adapt, adapt_opt_ins=adapt_opt_ins,
+                       policy=policy)
 
 
 # --------------------------------------------------------------- the need
@@ -1404,10 +1406,38 @@ def _assess_match(match: "_Match", *, key: bytes | None,
                            trusted_publishers=trusted_publishers)
 
 
+def _component_name(entry: RegistryEntry, ir_cache: dict) -> str:
+    """The COMPONENT name an evidence rule's glob matches, off the entry's own
+    compiled IR — the same name `revl policy evaluate --registry --candidate`
+    resolves (`__main__._run_policy_evaluate`), so the marker and the operator's
+    dry-run predict about the same subject. Falls back to the registry entry name
+    when the source does not compile (`_compiled_entry_ir` caches `{}` then)."""
+    from .audit_diff import audit_report  # noqa: PLC0415 — lazy, additive
+    ir = _compiled_entry_ir(entry, ir_cache)
+    if not ir:
+        return entry.name
+    return next(iter(audit_report(ir).get("boundary") or {}), entry.name)
+
+
+def _would_be_refused(policy, entry: RegistryEntry, ir_cache: dict, *,
+                      key: bytes | None, trusted: frozenset) -> dict:
+    """Item 290 §5: the courtesy prediction for one ranked candidate, computed by
+    the SAME evaluator the gate runs (`policy.predict_refusals`). Refuses
+    nothing, filters nothing, and reorders nothing — `resolve` has already ranked
+    the candidate before this is called, and does not read the answer back."""
+    from .policy import predict_refusals  # noqa: PLC0415 — lazy, additive
+    return predict_refusals(
+        policy, _component_name(entry, ir_cache),
+        evidence_bundle=entry.evidence_bundle,
+        evidence_ir=_compiled_entry_ir(entry, ir_cache) or None,
+        key=key, trusted_publishers=trusted)
+
+
 def resolve(registry, need, manifest: dict | None = None,
             limit: int = 5, *, verify_required: bool = False,
             key: bytes | None = None, trusted_publishers=(),
-            adapt: bool = True, adapt_opt_ins: dict | None = None) -> dict:
+            adapt: bool = True, adapt_opt_ins: dict | None = None,
+            policy=None) -> dict:
     """Rank the registry's §5-admissible providers for a need (docs/registry.md §2).
 
     `registry` is a `Registry` or a directory path. `need` is a service
@@ -1443,6 +1473,17 @@ def resolve(registry, need, manifest: dict | None = None,
     name exactly as `revl adapt --adapt` takes it: without it the transformations
     that need an opt-in (an outcome merge, a non-canonical default) refuse, and
     the refusal rides out under `nearMisses` naming the position and the clause.
+
+    `policy` (a loaded `policy.Policy`, item 290 §5) adds a `wouldBeRefused`
+    marker to any ranked candidate the policy's COMPONENT-scoped evidence rules
+    already refuse on the evidence it publishes, so an agent does not pick a
+    top-ranked candidate the gate then bounces. It is a PREDICTION and nothing
+    else: it refuses nothing, filters nothing and reorders nothing (ranking is
+    computed before it runs and never reads it back), and its ABSENCE is not an
+    approval — realm-, capability- and mcp-scoped rules, the register floors and
+    the idempotent-teardown floor all select on the assembled composition, so
+    they are listed under the result's `policyPreview.unpredicted` instead of
+    being silently reported as passing. Only the gate admits.
 
     Two things here are checked rather than trusted, always: an entry whose
     `index.json` row disagrees with its own `component.rvl` is REFUSED (it is
@@ -1544,6 +1585,13 @@ def resolve(registry, need, manifest: dict | None = None,
         assumptions.append(
             "verify-required: a candidate without a cryptographically valid "
             "attestation was filtered, not merely ranked lower")
+    if policy is not None:
+        assumptions.append(
+            "an evidence policy was supplied: a candidate its component-scoped "
+            "evidence rules ALREADY refuse carries `wouldBeRefused` (item 290 "
+            "§5). The marker predicts, it never refuses - nothing was filtered "
+            "or reordered by it - and its absence is not an admission; see "
+            "`policyPreview.unpredicted` for the rules only the gate can decide")
     if adapt:
         adapted = [m for m, _ in graded if m.bridge is not None]
         assumptions.append(
@@ -1600,6 +1648,16 @@ def resolve(registry, need, manifest: dict | None = None,
                     "facet status above is unchanged, its RANK is discounted")
         if entry.dossier is not None:
             candidate["dossier"] = entry.dossier
+        if policy is not None:
+            # item 290 §5. Attached AFTER ranking and never read back, so the
+            # prediction cannot influence the order it annotates. The key is
+            # present only when something actually fails: an empty list beside a
+            # candidate would read as a clearance, and this call cannot give one.
+            failing = _would_be_refused(policy, entry, ir_cache,
+                                        key=key_bytes,
+                                        trusted=trusted)["wouldBeRefused"]
+            if failing:
+                candidate["wouldBeRefused"] = failing
         candidates.append(candidate)
 
     result = {
@@ -1611,6 +1669,27 @@ def resolve(registry, need, manifest: dict | None = None,
         "candidates": candidates,
         "refused": refused,
     }
+    if policy is not None:
+        # item 290 §5: the prediction's OWN honesty block. `unpredicted` is the
+        # reason an absent `wouldBeRefused` is not a clearance, so it rides in the
+        # answer next to the markers rather than living in a docstring.
+        from .policy import unpredicted_rules  # noqa: PLC0415 — lazy, additive
+        result["policyPreview"] = {
+            "predicted": [c["name"] for c in candidates
+                          if "wouldBeRefused" in c],
+            "unpredicted": unpredicted_rules(policy),
+            "caveat":
+                "a one-sided PREDICTION over each candidate's PUBLISHED evidence: "
+                "`wouldBeRefused` means the gate already refuses this candidate, "
+                "its ABSENCE is not an admission. Only component-scoped evidence "
+                "rules are predictable from a candidate standing alone; the rules "
+                "in `unpredicted` select on the assembled composition (realm "
+                "placement, G8 reach, MCP admission, the audit graph's registers "
+                "and recovery surface) and refuse on their own at the gate. The "
+                "gate additionally sees the operator's key and trust set and may "
+                "recompute facets locally (§4), so a prediction that names nothing "
+                "still leaves admission to `revl audit --policy`.",
+        }
     if adapt:
         # capped like `candidates`: a near miss is a repair to act on, not a
         # log, and an unbounded list would quietly become the bulk of the

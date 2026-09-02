@@ -249,7 +249,7 @@ def ownership_navigate(*, kind: str, resource: str | None = None,
     there is no policy knob, so the hint must not invent one. They are
     `candidate`, never `clears-this-gate`: the compiler does not re-synthesize the
     restructured source to re-run the gate, so it cannot promise the rewrite
-    clears (§3). `kind` selects O1 / B1 / R0.
+    clears (§3). `kind` selects O1 / B1 / R0 / F9.
 
     `seam` marks an O1 refusal fired inside a provide METHOD, where the
     own-undo alternative is not enactable: only `spawn` may be acquired there,
@@ -285,6 +285,20 @@ def ownership_navigate(*, kind: str, resource: str | None = None,
                         f"owner lends it per call); a borrow may not be "
                         f"{_B1_ESCAPE_TEXT.get(clause, 'escaped')}"),
                 ref=clause))
+    elif kind == "f9":
+        # item 308 F9: a request-scoped instance handle escaping its provide
+        # method. Both moves are author-enacted restructures; neither is
+        # `clears-this-gate`, since the compiler does not re-synthesize them.
+        alts.append(alternative(
+            enacts=ENACTS_AUTHOR,
+            action=("hand out a VALUE read off the instance instead of the "
+                    "handle; the instance is reclaimed when the request ends"),
+            ref=binding or "instance"))
+        alts.append(alternative(
+            enacts=ENACTS_AUTHOR,
+            action=("spawn at ACTIVATION scope and lend the instance per call "
+                    "(the owner pool pattern), if it must outlive one request"),
+            ref="activation-scope"))
     elif kind == "r0":
         stem = (handle_name or "Log")
         alts.append(alternative(

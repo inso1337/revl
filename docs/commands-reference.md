@@ -163,6 +163,17 @@ revl composition base.rvl --admit
 The composition manifest plus the G8 boundary surface: which emissions each
 component can perform and the capabilities each crosses.
 
+Also prints the **retention surface** (roadmap item 308 F10) when the
+composition has one: every declared position at which a resource handle leaves
+revl's sight — a resource-carrying parameter of a non-inverse extern, or of a
+service method whose implementation may live host-side. This is report-only and
+refuses nothing: the ownership checks refuse a borrow that escapes through a
+revl position, but a host body that keeps the handle it was handed escapes
+through a surface the declaration does not describe, so the frontier is listed
+for review instead. A row is a may-retain, and an absent row is not a proof of
+non-retention. Declared inverses are excluded: teardown closing a handle is the
+contract working, not a hazard.
+
 - `FILES` (required).
 - `--json` - machine-readable output.
 - `--diff PREV.json` - authority-drift gate: re-audit and FAIL (nonzero) if

@@ -493,7 +493,8 @@ def _run_audit(args, ir: dict) -> int:
         # audit_report; the interchange body must carry them too so it stays the
         # byte-for-byte unstamped audit report (test_version_is_additive_body_unchanged).
         from .audit_diff import (  # noqa: PLC0415
-            _capability_registers, _env_surface, _recovery_surface, _secrets_surface)
+            _capability_registers, _env_surface, _recovery_surface,
+            _retention_surface, _secrets_surface)
         from .cardinality import cardinality  # noqa: PLC0415
         print(json.dumps(stamp(
             {"manifest": manifest, "boundary": boundary,
@@ -515,7 +516,12 @@ def _run_audit(args, ir: dict) -> int:
              # ADDITIVE and present only when a boot component is declared, so
              # this must match audit_report byte-for-byte
              # (test_version_is_additive_body_unchanged).
-             **_env_surface(ir)}), indent=2))
+             **_env_surface(ir),
+             # item 308 F10: the report-only retaining-extern surface. ADDITIVE
+             # and present only when a resource handle reaches a non-inverse
+             # callee; must match audit_report byte-for-byte
+             # (test_version_is_additive_body_unchanged), so it is the same call.
+             **_retention_surface(ir)}), indent=2))
         return 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
     # item 350: the environment contract, printed before the components — it is
@@ -671,6 +677,24 @@ def _run_audit(args, ir: dict) -> int:
             verdict = distribution[name]
             print(f"  {name:<{width}}  {verdict['verdict']:<20} "
                   f"{'; '.join(verdict['reasons'])}")
+    # item 308 F10 (docs/design/308-effect-ownership-modes.md, "The honest
+    # limitation: retaining externs"): the report-only retention surface. B1
+    # refuses a borrow that escapes through a revl position; a host body that
+    # keeps the handle it was handed escapes through a surface no clause can
+    # see, because the declaration does not say "retains". So the frontier is
+    # LISTED for a human instead of refused, and the section is printed only
+    # when there is one — a handle-free composition renders exactly as before.
+    retention = _retention_surface_rows(ir)
+    if retention:
+        print("\nretention surface (item 308 F10 — report-only: a host body may "
+              "keep a handle it is handed; revl cannot see inside one):")
+        width = max(len(row["callee"] or "") for row in retention)
+        for row in retention:
+            print(f"  {row['callee']:<{width}}  [{row['class']}]  "
+                  f"{row['kind']}  param {row['index']} `{row['param']}`: "
+                  f"{row['type']} (carries {row['resource']})")
+        print("  a declared inverse is excluded — teardown closing a handle is "
+              "the contract working, not a retention hazard")
     # item 411, Slice 1: the sandbox envelope + effective reach per sandboxed
     # process, when a placement is supplied. `net=none` is printed alongside
     # each seam-served key's provider reach, so it is never readable as a
@@ -694,6 +718,14 @@ def _run_audit(args, ir: dict) -> int:
         for line in _recovery_audit_view(ir):
             print(line)
     return 0
+
+
+def _retention_surface_rows(ir: dict) -> list:
+    """The item-308 F10 retention rows, through the one implementation the
+    `--json` document uses, so the two views cannot drift."""
+    from .resources import retention_surface  # noqa: PLC0415
+    return retention_surface(ir.get("externs"), ir.get("types"),
+                             ir.get("services"))
 
 
 def _recovery_audit_view(ir: dict) -> list:
