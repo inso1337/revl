@@ -596,6 +596,53 @@ extern body no longer has to start in column 0 — the py and ts emitters
 `textwrap.dedent` the body (roadmap item 78), so `os.open(...)` can sit at a
 natural indent inside the `= @py { … }` block.
 
+### 6.2 `boot component` — the environment contract (item 350)
+
+Some values are read before the composition exists: the port, the auth token,
+the data dir, which model provider to boot. The host has to know them to stand
+the composition up, so they arrive from outside revl by construction
+(docs/composition-bootstrap.md is that floor). A **`boot` component** is where a
+composition *declares* them, so the boundary is explicit and audited rather than
+an undeclared host-authored `--config` map:
+
+```revl
+service Env { fn data_root() -> Str }
+
+boot component HarnessBoot provides env: Env {
+  config {
+    data_dir: Str under "./.harness-data",
+    model: Str in ["mock", "real", "engine"] = "mock",
+    auth_token: Secret[Str],
+  }
+  provide env { fn data_root() = config.data_dir }
+}
+```
+
+- `boot` is a **contextual keyword**, recognised only immediately before
+  `component`, so a program already using `boot` as a name is unaffected and the
+  lexer's `KEYWORDS` table (and the generated gate crate's frontier table with
+  it) needs no sync.
+- The `config {}` block IS the contract: the exhaustive, typed list of what the
+  host must inject. `revl run --env FILE` is its one door — a `--config` table
+  naming the boot component is refused, an undeclared `--env` key is refused,
+  and a missing required field refuses the boot before any runtime is imported.
+- A config field in a boot component may carry an **admission bound**, checked
+  against the injected value: `under "<prefix>"` confines a `Str` path, `in
+  [lit, …]` enumerates the admissible values. A bound is refused on an ordinary
+  component, where nothing would enforce it. This is the authority rule: an
+  environment value adds no capability, but where it lands in a resource-scoped
+  position it *spells* the scope (a data dir is the path reached, a provider
+  identity is the destination posted to), so an unbounded one widens the real
+  reach while the declared capability set is unchanged.
+- **At most one** boot component per composition (two contracts cannot both be
+  the exhaustive one), and a boot component **cannot be spawned** (a spawn's
+  `with { … }` config bypasses the bounds).
+- Everything is conditional: a composition that declares no boot component is
+  byte-identical through parse, IR and every emitted tier.
+
+Full treatment, including what this does *not* close, in
+docs/environment-binding.md.
+
 ## 7. `verified` and `test` — the self-checking loop
 
 ```revl sketch
@@ -835,7 +882,8 @@ was before this feature.
 program     := use* decl*
 IDENT       := [A-Za-z_][A-Za-z0-9_]*        -- ASCII, see the note below
 use         := 'use' STRING ('{' IDENT (',' IDENT)* '}' | 'as' IDENT)
-decl        := ['pub'] (typedecl | fndecl | service | component | extern)
+decl        := ['pub'] (typedecl | fndecl | service | extern)
+             | ['boot'] component                              (§6.2)
              | ['lifecycle'] test                              (§7.1)
              | composition                                     (§4c)
 typedecl    := 'type' IDENT generics? '=' (record | variant ('|' variant)*)
@@ -843,7 +891,9 @@ fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type] block
 component   := (unchanged from 1.x) + blockeffect + fail
 extern      := 'extern' class 'fn' sig ['undo' expr] ['compensate' expr]
                  ['config' '{' configfield (',' configfield)* '}'] hostbody+
-configfield := IDENT ':' type ['=' literal]         -- same as a component's
+configfield := IDENT ':' type [bound] ['=' literal] -- same as a component's
+bound       := 'under' STRING                       -- boot component only (§6.2)
+             | 'in' '[' literal (',' literal)* ']'  --   ditto
 composition := 'composition' IDENT '{' (use | row)* '}'   -- contextual kw
 row         := 'row' '@' IDENT 'from' STRING
                  'provides' ('nothing' | key (',' key)*)

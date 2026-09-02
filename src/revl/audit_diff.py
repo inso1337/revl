@@ -103,6 +103,17 @@ def audit_report(ir: dict) -> dict:
         # `secret:<capability>:<name>` crossing the drift gate flags as a widening
         # (see `crossings`); removing a binding is a narrowing.
         **_secrets_surface(ir),
+        # item 350: the ENVIRONMENT CONTRACT table — the `boot` component's
+        # config schema, which is the exhaustive list of what the host must
+        # inject before the composition can boot. NAME, TYPE, requiredness,
+        # credential marking and the author-written BOUND only; never a value
+        # (values arrive at run time through `--env` and never enter the IR).
+        # ADDITIVE and PRESENT ONLY when the composition declares a boot
+        # component, so every existing audit surface is byte-identical (the same
+        # conditional-presence discipline as `secrets` above). Adding a contract
+        # field, or dropping/loosening a field's bound, surfaces as an `env:`
+        # crossing the drift gate flags as a widening (see `crossings`).
+        **_env_surface(ir),
         # item 308 F10 (docs/design/308-effect-ownership-modes.md, "The honest
         # limitation: retaining externs"): the REPORT-ONLY retention surface -
         # every declared position at which a resource handle leaves revl's
@@ -115,6 +126,43 @@ def audit_report(ir: dict) -> dict:
         # opposite - see `resources.retention_surface`.
         **_retention_surface(ir),
     }
+
+
+def _env_table(ir: dict) -> dict | list:
+    """The audit environment-contract table (item 350): one row per field of the
+    composition's `boot` component config block, wrapped with the component's
+    name, or `[]` when the composition declares no boot component.
+
+    Read statically off the IR. A field's `bound` is AUTHOR-WRITTEN SOURCE (a
+    path prefix or an enumerated set), so it is safe to publish here — unlike a
+    value, which this table never sees: the host injects values at `revl run
+    --env` time, after the audit, and they never enter the IR."""
+    boot = next((c for c in (ir.get("components") or []) if c.get("boot")), None)
+    if boot is None:
+        return []
+    rows = []
+    for field in boot.get("config") or []:
+        rows.append({
+            "name": field["name"],
+            "type": field.get("type") or "?",
+            # a field with no default MUST be injected or the boot refuses
+            "required": field.get("default") is None,
+            # item 256: a contract field declared `Secret[T]` carries a credential
+            "secret": bool(field.get("secret")),
+            # None = UNBOUNDED: the host may inject any value of the type, which
+            # is exactly as wide as the pre-350 host-written config map. The
+            # audit says so explicitly rather than leaving it unsaid.
+            "bound": field.get("bound"),
+        })
+    return {"component": boot["name"], "fields": rows}
+
+
+def _env_surface(ir: dict) -> dict:
+    """The additive `env` audit key, or `{}` when the composition declares no
+    `boot` component, so a boot-free composition's audit surface stays
+    byte-identical to before."""
+    table = _env_table(ir)
+    return {"env": table} if table else {}
 
 
 def _secrets_table(ir: dict) -> list:
@@ -234,6 +282,7 @@ def crossings(audit: dict) -> set[str]:
         taint:<component>:<origin>        a value of <origin> reaches an emission here
         declassify:<component>:<origin>   an untrusted value of <origin> is declassified here
         secret:<capability>:<name>        a secret bound to a capability (item 256)
+        env:<name>:<bound>                a host-injected environment value (item 350)
 
     The two taint tokens flow through `diff_crossings`/`evaluate` unchanged, so a
     newly-appearing `taint:` (web content newly routed into a send) or
@@ -265,7 +314,29 @@ def crossings(audit: dict) -> set[str]:
     # secret-free composition, so its crossing set is byte-identical to before.
     for row in audit.get("secrets") or []:
         out.add(f"secret:{row['capability']}:{row['name']}")
+    # item 350: the environment-contract crossings. Like `secret:`, these are
+    # composition-level, drawn from the top-level `env` table. The token carries
+    # the field's declared BOUND, so three distinct authority changes all land as
+    # a token ADDITION the drift gate flags as a widening:
+    #   * a NEW contract field         -> a token that was not there before
+    #   * a field's bound REMOVED      -> `env:x:under=./data` becomes `env:x:*`
+    #   * a bound LOOSENED             -> the fingerprint changes
+    # Removing a field, or tightening a bound, drops the old token: a narrowing.
+    # The token names the field and the author-written bound, never a value.
+    for row in (audit.get("env") or {}).get("fields") or []:
+        out.add(f"env:{row['name']}:{_bound_token(row.get('bound'))}")
     return out
+
+
+def _bound_token(bound) -> str:
+    """A contract field's declared bound, as a stable crossing fingerprint.
+    `*` means UNBOUNDED — the host may inject any value of the declared type."""
+    if not bound:
+        return "*"
+    if bound.get("kind") == "under":
+        return f"under={bound.get('prefix')}"
+    values = "|".join(str(v) for v in (bound.get("values") or []))
+    return f"in={values}"
 
 
 def _reach_map(audit: dict) -> dict[str, dict | None]:

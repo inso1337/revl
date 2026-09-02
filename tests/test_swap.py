@@ -533,6 +533,109 @@ def test_conductor_refuses_an_inadmissible_swap_and_boots_no_successor(tmp_path,
     assert set(procs) == {"provider", "consumer"}
 
 
+# ---------------------------------------------------------------------------
+# item 56 / 151: a swap of a component hosted in a NETWORK provider is refused.
+# The successor is booted on a fresh local UDS and the re-point loop reaches
+# only the consumers this conductor runs, so a swap of a TCP+mTLS provider would
+# leave every off-machine consumer (an item-56 network consumer in another
+# process, an item-151 `[remotes]` consumer in a separate composition) dialling
+# a torn-down address — the network seam silently ceasing to exist, with no
+# refusal and no report line. The address is part of the placement contract
+# other machines hold; a swap cannot unilaterally change it.
+# ---------------------------------------------------------------------------
+
+
+def _free_port() -> int:
+    """An ephemeral port, bound and released. This suite must never pin a fixed
+    port (the machine is shared); nothing ever binds this one anyway — the
+    children are stubs — it only has to be a plausible number in the manifest."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+_NET_PLACEMENT = """
+[processes.provider]
+components = ["MemCache"]
+[processes.provider.address]
+host = "127.0.0.1"
+port = {port}
+[processes.provider.tls]
+identity = "provider"
+cert = "{d}/provider.crt"
+key = "{d}/provider.key"
+ca = "{d}/ca.crt"
+
+[processes.consumer]
+components = ["Consumer"]
+[processes.consumer.tls]
+identity = "consumer"
+cert = "{d}/consumer.crt"
+key = "{d}/consumer.key"
+ca = "{d}/ca.crt"
+"""
+
+
+def test_conductor_refuses_to_swap_a_component_in_a_network_provider(
+        tmp_path, monkeypatch, capsys):
+    """`swap MemCache --to py` where MemCache is hosted in a process that
+    declares an `address`: refused, naming the process, that it is a network
+    provider, the endpoint remote consumers hold, and what to do instead. No
+    successor boots and no consumer is re-pointed.
+
+    TLS material is declared explicitly (paths that need not exist — the child
+    processes are stubs) rather than minted, so this test shells out to nothing.
+    """
+    port = _free_port()
+    app = _write(tmp_path, "net_app.rvl", _SWAPPABLE_APP)
+    plc = _write(tmp_path, "net_app.toml",
+                 _NET_PLACEMENT.format(port=port, d=tmp_path))
+    procs = _wire_conductor(tmp_path, monkeypatch, ["swap MemCache --to py", ":q"])
+
+    rc = _placement.run_placement([app], plc, once=False)
+    assert rc == 0
+
+    # the seam really is a network seam (guards against a vacuous pass: if the
+    # manifest stopped producing a TCP+mTLS provider this test would otherwise
+    # still "prove" the refusal)
+    serve = procs["provider"].spec["serve"]
+    assert "socket" not in serve and serve["endpoint"]["port"] == port
+
+    # nothing booted beyond the two original processes ...
+    assert not [n for n in procs if "__t" in n], list(procs)
+    assert set(procs) == {"provider", "consumer"}
+    # ... and the consumer was never re-pointed: the running seam is untouched
+    written = [json.loads(w) for w in procs["consumer"].stdin.written if w.strip()]
+    assert not [c for c in written if c.get("op") == "repoint"], written
+
+    out = capsys.readouterr().out
+    assert "swap refused" in out
+    # the refusal names the process, what it is, and the address others hold
+    assert "'provider'" in out and "NETWORK provider" in out
+    assert f"127.0.0.1:{port}" in out
+    assert "[processes.provider.address]" in out
+    # ... and it is actionable: it says what to do instead
+    assert "[processes.provider] backend =" in out
+    assert "Running composition untouched." in out
+
+
+def test_a_swap_in_a_purely_local_placement_is_not_refused_as_network(
+        tmp_path, monkeypatch, capsys):
+    """The network refusal keys on the PROVIDER's process declaring an address,
+    not on the placement containing one anywhere: the same composition with no
+    `address` swaps as before (guards against over-refusal)."""
+    app = _write(tmp_path, "local_app.rvl", _SWAPPABLE_APP)
+    plc = _write(tmp_path, "local_app.toml", _SWAPPABLE_PLACEMENT)
+    procs = _wire_conductor(tmp_path, monkeypatch, ["swap MemCache --to py", ":q"])
+
+    rc = _placement.run_placement([app], plc, once=False)
+    assert rc == 0
+    assert [n for n in procs if n.startswith("MemCache__t")], list(procs)
+    assert "NETWORK provider" not in capsys.readouterr().out
+
+
 def test_placement_accepts_ts_as_an_alias_for_node(tmp_path, monkeypatch):
     """The manifest names the TypeScript tier `node` while every other surface
     says `ts`; the conductor must accept both spellings and boot the node

@@ -392,6 +392,13 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   process over the bridge seam. A missing runtime is a skip with a reason and
   a nonzero exit.
 - `--config FILE` - TOML/JSON file of `component-name = { ... }` config tables.
+- `--env FILE` - TOML/JSON file of flat `name = value` environment values,
+  injected into the composition's `boot` component. Its `config {}` block is the
+  ENVIRONMENT CONTRACT (item 350): a `--config` table naming the boot component,
+  an `--env` key the contract does not declare, a missing required field, or a
+  value outside a declared `under "<prefix>"` / `in [...]` bound each refuse the
+  boot before any runtime is imported. See
+  [environment-binding.md](environment-binding.md).
 - `--watch` - watch the sources and recompile on change; a rejected edit is
   refused and the run keeps going.
 - `--record` - record the effect accumulator so the REPL can step backwards
@@ -776,6 +783,13 @@ serves the compiler itself.
 - `--mcp` - serve over the MCP stdio protocol (required).
 - `--config FILE` - TOML/JSON file of `component-name = { ... }` config tables,
   supplied to each component at boot.
+- `--env FILE` - TOML/JSON file of flat `name = value` environment values,
+  injected into the composition's `boot` component. Its `config {}` block is the
+  ENVIRONMENT CONTRACT (item 350): a `--config` table naming the boot component,
+  an `--env` key the contract does not declare, a missing required field, or a
+  value outside a declared `under "<prefix>"` / `in [...]` bound each refuse the
+  boot before any runtime is imported. See
+  [environment-binding.md](environment-binding.md).
 - `--composition PREFIX` - tool-name prefix (tools are `<prefix>.<key>.<op>`;
   default: `revl`).
 

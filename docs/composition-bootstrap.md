@@ -72,12 +72,26 @@ needs to grow its own append beyond an environment tier, that is a sign the
 manifest should grow a new mode instead, not that the host should start
 deciding composition shape.
 
+## The environment tier is the other half
+
+Step 2's "append whatever the environment tier adds" is the second thing the
+host knows before the composition exists: the port, the auth token, the data
+dir, which model provider to boot against. That half has its own declaration
+now — a `boot` component, whose `config {}` block is the typed, bounded,
+audited contract for exactly those values, with `revl run --env` as its one
+door. The floor described above is unchanged (something still has to compile the
+first document); what moves is that the environment values crossing it are no
+longer an undeclared host-authored map. See
+[environment-binding.md](environment-binding.md).
+
 ## See also
 
 - `src/manifest.rvl` and `_composition()` / `_manifest_module()` in
   `tools/server/app.py`, both in the revl-harness repository, the worked
   instance this doc generalizes from
 - [v2.0-roadmap.md](v2.0-roadmap.md) item 348, where this finding was filed
+- [environment-binding.md](environment-binding.md), the environment contract
+  the host injects across this same boundary (roadmap item 350)
 - [interchange-format.md](interchange-format.md), a different sense of
   "manifest" (the linker's provides/requires/load-order manifest emitted by
   `revl audit --json`), not to be confused with a composition manifest

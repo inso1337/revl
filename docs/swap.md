@@ -125,6 +125,21 @@ part of this pass.
 - The swapped component must be **alone in its process** (its process is the
   provider being replaced). A component sharing a process with others is
   refused with a diagnostic; split it into its own placement process first.
+- The swapped component's process must **not be a network provider**. A process
+  that declares `[processes.<p>].address` serves its seam over TCP + mutual TLS
+  (`docs/network-placement.md`), and that address is part of the placement
+  contract consumers on other machines hold — an item-56 network consumer in
+  another process, or an item-151 `[remotes]` consumer in a wholly separate
+  composition. The conductor cannot enumerate those consumers, let alone
+  re-point them, and the successor is booted on a fresh local Unix socket, so a
+  swap here would cut every remote caller off the seam while reporting success.
+  It is refused with a diagnostic naming the process and its endpoint. To
+  re-tier a network provider, bring the composition down and re-place it with
+  `[processes.<p>] backend = "<tier>"`, which keeps the address (and its TLS
+  material) declared in one place. Serving the successor on the *same* endpoint
+  is a real feature — an address handover, with the cert material carried across
+  and a story for the window where both processes bind the port — not a gap this
+  pass papers over with a fresh socket.
 - The swap is driven as a **command inside the running `revl run --placement`
   session** (a `swap>` prompt interactively, or a script on stdin — see
   "Scripted swaps" below), not a separate `revl swap` OS process. Re-pointing a
