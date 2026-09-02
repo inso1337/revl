@@ -302,6 +302,15 @@ class TaintModel:
     # `secret`-origin bound key is NEVER admitted here (only `confidential` is),
     # which is the A8 / CRITICAL 1 guarantee.
     secret_receivers: dict[str, set[int]] = field(default_factory=dict)
+    # component name -> the config field names declared `Secret[T]`. The THIRD
+    # place the `confidential` origin is minted, beside a `Secret[T]` extern
+    # return and a `Secret[T]` parameter. A config field is an ordinary readable
+    # binding inside every method of its component (`config.api_key`), so
+    # without this the declared marking reached the emitters (which read it to
+    # keep the value out of the run log) but never reached the ORIGIN LATTICE:
+    # `config.api_key` was seeded CLEAN and was therefore invisible to every §7
+    # rule, the provide-method return crossing included.
+    secret_config: dict[str, frozenset] = field(default_factory=dict)
 
     @property
     def active(self) -> bool:
@@ -312,7 +321,7 @@ class TaintModel:
         through `secret_receivers` (item 256 Slice 3)."""
         return bool(self.sources or self.sinks or self.untrusted_params
                     or self.declassifiers or self.declared_endorse
-                    or self.secret_receivers)
+                    or self.secret_receivers or self.secret_config)
 
 
 def _sink_kind_for(name: str, capabilities) -> str:
@@ -542,6 +551,7 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     # value out of the run log and the `revl_load` MCP response (item 256 Slice 3,
     # §7b). Byte-identical for a field with no qualifier.
     for comp in getattr(program, "components", ()):
+        confidential_fields: set = set()
         for cfield in getattr(comp, "config", ()) or ():
             # `mentions_secret`, not `top_qualifier`: a config field that holds
             # its credential inside a container (`Opt[Secret[Str]]`, the shape an
@@ -550,9 +560,16 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             if mentions_secret(cfield.type):
                 cfield.secret = True
                 _warn_on_literal_secret_default(comp, cfield)
+                # ... and record it in the MODEL, so the flow walk mints
+                # `confidential` on a `config.<field>` read. The emitters read
+                # `cfield.secret`; the checker reads this. Both come off the one
+                # declaration, so they cannot drift apart.
+                confidential_fields.add(cfield.name)
             clean = strip_qualifiers(cfield.type)
             if clean != cfield.type:
                 cfield.type = clean
+        if confidential_fields:
+            model.secret_config[comp.name] = frozenset(confidential_fields)
 
     return model
 
@@ -762,7 +779,8 @@ class _FlowChecker:
                  state_env: dict | None = None,
                  state_names: frozenset = frozenset(),
                  untrusted: bool = False,
-                 provide_return: bool = False) -> None:
+                 provide_return: bool = False,
+                 secret_config: frozenset = frozenset()) -> None:
         self.model = model
         self.filename = filename
         self.line = line
@@ -779,6 +797,10 @@ class _FlowChecker:
         # propagates through the fn's signature and is caught at whatever crossing
         # the caller reaches).
         self.provide_return = provide_return
+        # The config fields of the component this body belongs to that were
+        # declared `Secret[T]` (`model.secret_config`). Empty for a top-level
+        # `fn`, which has no `config` to read.
+        self.secret_config = secret_config
         self.signatures = signatures or {}
         self.infer = infer
         self.qualname = qualname
@@ -1178,8 +1200,24 @@ class _FlowChecker:
         if var is not None and kind in ("var", "name"):
             return env.get(var, CLEAN)
 
+        # a component config read. Ordinarily trusted by construction, exactly
+        # like a literal — the author wrote the field and the operator supplies
+        # its value. A field DECLARED `Secret[T]`, though, is a declared
+        # confidential INPUT: the operator hands the component a credential, and
+        # every §7 rule downstream (a disclosure sink, an emission crossing, the
+        # provide-method return across the service / MCP bridge and the placement
+        # seam) has to see it as one. It is the third mint of the `confidential`
+        # origin, beside a `Secret[T]` extern return and a `Secret[T]` parameter,
+        # and the only one that had no seed here.
+        if kind == "config":
+            fname = node.get("field")
+            if fname in self.secret_config:
+                return Taint(frozenset({CONFIDENTIAL_ORIGIN}),
+                             (f"config.{fname}",))
+            return CLEAN
+
         # a literal is trusted by construction (Decision 2, trusted origins)
-        if kind in ("lit", "int", "float", "string", "str", "bool", "config"):
+        if kind in ("lit", "int", "float", "string", "str", "bool"):
             return CLEAN
 
         # a read of / write into a component STATE world (Slice B3): a call whose
@@ -1523,7 +1561,9 @@ class _FlowChecker:
                 self._refuse_confidential(
                     "this provide method",
                     "a provide-method return across the service / MCP bridge "
-                    "(an MCP tool return)", None, result, stmt)
+                    "(an MCP tool return, or a placement-seam reply - the Err "
+                    "half of a Result included, which is marshalled BY VALUE "
+                    "like any other return)", None, result, stmt)
             if step == "emit":
                 # the taint crossing the boundary here (Decision 5): the emission's
                 # return AND the arguments it carries outward — a value-passing send
@@ -1674,6 +1714,18 @@ def _param_names(params) -> list[str]:
     return [p["name"] if isinstance(p, dict) else p for p in (params or [])]
 
 
+def secret_config_fields(comp) -> frozenset:
+    """The config field names a lowered IR component declares `Secret[T]`.
+
+    Read off `config[i]["secret"]`, the stamp `extract_and_normalize` leaves and
+    the emitters already read — one declaration, no second IR key."""
+    if not isinstance(comp, dict):
+        return frozenset()
+    return frozenset(
+        f["name"] for f in (comp.get("config") or ())
+        if isinstance(f, dict) and f.get("secret") and f.get("name"))
+
+
 def _callables(fns, components, filename: str):
     """Every callable whose body inference walks (Slice B): top-level fns and
     component provide methods. Yields `(qualname, key, params, body, source,
@@ -1683,10 +1735,14 @@ def _callables(fns, components, filename: str):
     for fn in fns:
         yield (fn["name"], fn["name"], _param_names(fn.get("params")),
                fn.get("body") or [], fn.get("source") or filename,
-               fn.get("line") or 0)
+               fn.get("line") or 0, frozenset())
     for comp in components:
         source = comp.get("source") or filename
         cname = comp.get("name") or "?"
+        # the component's `Secret[T]` config fields travel with its methods, so
+        # inference mints `confidential` into a method's signature exactly as
+        # the refusal pass does.
+        secret_config = secret_config_fields(comp)
         for step in comp.get("body") or []:
             if not isinstance(step, dict) or step.get("step") != "provide":
                 continue
@@ -1694,7 +1750,8 @@ def _callables(fns, components, filename: str):
                 mname = method.get("name")
                 yield (f"{cname}.{mname}", mname,
                        _param_names(method.get("params")),
-                       method.get("body") or [], source, method.get("line") or 0)
+                       method.get("body") or [], source, method.get("line") or 0,
+                       secret_config)
 
 
 # constructor / builtin callables that may appear as a bare callee but are not a
@@ -1739,7 +1796,8 @@ def _state_bindings(body) -> frozenset:
 
 def _infer_state_env(body, model: TaintModel, source: str, line: int,
                      signatures: dict, state_names: frozenset,
-                     known: frozenset, any_sink: bool) -> dict:
+                     known: frozenset, any_sink: bool,
+                     secret_config: frozenset = frozenset()) -> dict:
     """The per-component state environment (Slice B3), to a fixed point: seed each
     world from its activation binding, then join in every tainted write from every
     method (methods run in unknown order, so the join over all writers is the only
@@ -1749,7 +1807,8 @@ def _infer_state_env(body, model: TaintModel, source: str, line: int,
                  if isinstance(s, dict) and s.get("step") != "provide"]
     act = _FlowChecker(model, source, line, signatures=signatures, enforce=False,
                        known_callables=known, any_sink=any_sink,
-                       state_env=state_env, state_names=state_names)
+                       state_env=state_env, state_names=state_names,
+                       secret_config=secret_config)
     act_env: dict = {}
     act.run(act_steps, act_env)
     for name in state_names:
@@ -1773,7 +1832,8 @@ def _infer_state_env(body, model: TaintModel, source: str, line: int,
             checker = _FlowChecker(
                 model, source, method.get("line") or line, signatures=signatures,
                 enforce=False, known_callables=known, any_sink=any_sink,
-                state_env=state_env, state_names=state_names)
+                state_env=state_env, state_names=state_names,
+                secret_config=secret_config)
             env: dict = {}
             _seed_param_env(model, mname, method.get("params"), env)
             checker.run(method.get("body") or [], env)
@@ -1812,10 +1872,11 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
     while changed and bound > 0:
         changed = False
         bound -= 1
-        for qual, key, params, body, source, line in callables:
+        for qual, key, params, body, source, line, secret_config in callables:
             checker = _FlowChecker(model, source, line, signatures=signatures,
                                    infer=True, qualname=qual,
-                                   known_callables=known, any_sink=any_sink)
+                                   known_callables=known, any_sink=any_sink,
+                                   secret_config=secret_config)
             env: dict = {}
             seeded = _declared_param_origins(model, key)
             for i, pname in enumerate(params):
@@ -1918,13 +1979,15 @@ def check_taint(program, fns, components, model: TaintModel,
         # accumulated taint to a fixed point before the refusal pass, so a value
         # stored by one method is seen tainted when another reads it.
         state_names = _state_bindings(comp_body)
+        secret_config = secret_config_fields(comp)
         state_env = (_infer_state_env(comp_body, model, source, line, signatures,
-                                      state_names, known, any_sink)
+                                      state_names, known, any_sink,
+                                      secret_config)
                      if state_names else {})
         reaches, declassified, records, approvals = _walk_component_methods(
             comp_body, model, source, line, signatures,
             comp.get("name") or "", known, any_sink, state_env, state_names,
-            untrusted=untrusted)
+            untrusted=untrusted, secret_config=secret_config)
         # item 249, Finding 2: fold the provenance of every top-level fn washer
         # this component reaches onto its own surface, so a declassification done
         # inside a helper fn is not invisible to the audit token / policy.
@@ -2123,7 +2186,8 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                             any_sink: bool = False,
                             state_env: dict | None = None,
                             state_names: frozenset = frozenset(),
-                            untrusted: bool = False
+                            untrusted: bool = False,
+                            secret_config: frozenset = frozenset()
                             ) -> tuple[set, set, list, set]:
     reaches: set = set()
     declassified: set = set()
@@ -2157,7 +2221,7 @@ def _walk_component_methods(body, model: TaintModel, source: str,
             state_names=state_names, untrusted=untrusted,
             # an activation-body `return` is not a crossing of the service / MCP
             # bridge, so the provide-method return rules do not apply here.
-            provide_return=False)
+            provide_return=False, secret_config=secret_config)
         act.run(act_steps, {})
         reaches |= act.reaches
         declassified |= act.declassified
@@ -2178,7 +2242,7 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                     endorse_label=label, known_callables=known, any_sink=any_sink,
                     state_env=state_env if state_env is not None else {},
                     state_names=state_names, untrusted=untrusted,
-                    provide_return=True)
+                    provide_return=True, secret_config=secret_config)
                 env: dict = {}
                 _seed_param_env(model, mname, method.get("params"), env)
                 checker.run(method.get("body") or [], env)
