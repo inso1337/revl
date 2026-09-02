@@ -950,6 +950,18 @@ class _ComponentEmitter:
 
     # -- expressions --------------------------------------------------------
 
+    def _stream_head(self, node, where: str) -> str:
+        """The stream a `subscribe` acquires: a plain source, or a `merge(a, b)`
+        fan-in (item 130 Slice 3). Recursive, because a merged stream is itself a
+        stream. Every link is a DERIVED stream owned by the subscription, so
+        `close` unwinds the whole chain off the ONE bracket the subscribe
+        registers, leaving each plain source to its own."""
+        if isinstance(node, dict) and node.get("kind") == "stream-merge":
+            args = ", ".join(self._stream_head(src, where)
+                             for src in node.get("sources") or [])
+            return f"Stream.merge({args})"
+        return self._expr(node, where)
+
     def _expr(self, expr: Any, where: str) -> str:
         if not isinstance(expr, dict) or "kind" not in expr:
             raise EmitError(f"{where}: malformed expression {expr!r}")
@@ -1052,7 +1064,7 @@ class _ComponentEmitter:
             # so the bracket inverse is reachable off the teardown path even while
             # a `next` is parked (design §4.6, the cancellation-first fix).
             self.uses.add("Stream")
-            stream = self._expr(expr.get("stream"), where)
+            stream = self._stream_head(expr.get("stream") or {}, where)
             policy = expr.get("policy") or "error"
             # `_revl_ctx` lets the subscription observe owner withdrawal so a
             # parked `next` resolves as `Closed` when the owner unloads (§9 Part

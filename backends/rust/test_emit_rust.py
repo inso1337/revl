@@ -2844,3 +2844,114 @@ def test_method_witnessed_does_not_perturb_non_witnessed_methods():
     assert "committed" not in src
     assert "RevlTeardown" not in src
     assert "self.ctx.effect(" in src
+
+
+# ---------------------------------------------------------------------------
+# item 130 Slice 3 — `Stream[T]` on the cordis-rs (blocking) tier.
+#
+# docs/design/130-stream-reactive-types.md §4.6, the rust row: this tier ERASES
+# the async color. `next` blocks on a race between the item queue and the
+# subscription's CANCEL signal, and `close` trips that signal — the shape that
+# keeps the bracket inverse reachable off the teardown thread (§9 Part A), so a
+# `next` parked on a provider that never emits cannot deadlock teardown.
+# ---------------------------------------------------------------------------
+
+_STREAM_SCENARIO = ROOT / "backends" / "rust" / "scenarios" / "stream.rvl"
+
+
+def _stream_src() -> str:
+    return emit.emit(compile_files([str(_STREAM_SCENARIO)]))
+
+
+def test_subscribe_is_an_ordinary_bracket_whose_inverse_is_close():
+    """The CORE GUARANTEE's mechanism on this tier: the subscription is a
+    `ctx.effect` bracket like any other, so unloading the owner runs `close`
+    through the same LIFO disposer stack a Pool rides."""
+    src = _stream_src()
+    assert ('let sub = Arc::new(Stream::subscribe(&src, "error", 0usize));'
+            in src)
+    assert 'ctx.effect("Consumer.sub.undo", move || { sub_undo.close(); Ok(()) })?;' in src
+
+
+def test_next_parks_on_the_item_terminal_cancel_race():
+    """`next` erases to a blocking park whose wake conditions are item /
+    terminal / cancel, with the CANCEL checked first — the cancellation-first
+    priority the design's `select!` spells and a condvar wake does not order on
+    its own."""
+    src = _stream_src()
+    assert "fn next(&self) -> Result<StreamNext, String> {" in src
+    assert "if st.cancelled {" in src
+    assert "st = self.wake.wait(st).unwrap();" in src
+    # `close` trips the signal and wakes the park, synchronously
+    assert "st.cancelled = true;" in src
+    assert "self.wake.notify_all();" in src
+
+
+def test_a_faulted_terminal_fails_the_activation():
+    """A `Faulted` terminal (a provider abort, or an `error`-policy overflow) is
+    an error at the await site, so the accumulated prefix — the subscription
+    bracket included — reverts LIFO. A `Closed` terminal is an ordinary value."""
+    src = _stream_src()
+    assert ("sub.next().map_err(|e| cordis::CordisError::with_message("
+            "cordis::ErrorCode::Plugin, e))?;") in src
+
+
+def test_merge_rides_the_subscriptions_single_bracket():
+    """`subscribe merge(a, b)` opens the fan-in INSIDE the subscription's
+    acquisition, so multi-source teardown stays ONE LIFO stack: the single
+    bracket inverse closes the subscription, that closes the merge it owns, and
+    closing the merge detaches it from both sources — which keep their own
+    brackets (design §1)."""
+    src = _stream_src()
+    assert 'Stream::subscribe(&Stream::merge(&a, &b), "error", 0usize)' in src
+    fanin = src.split("pub fn fanin()", 1)[1].split("\npub fn ", 1)[0]
+    # three brackets — one per source, one for the subscription. The fan-in adds
+    # NO fourth: it rides the subscription's.
+    assert fanin.count("ctx.effect(") == 3
+    # the subscription's close cascades into a derived upstream
+    assert 'if closed && self.inner.src.kind != "source" {' in src
+
+
+def test_stream_free_program_is_byte_identical():
+    """The stream host block is pulled in only by a document that reaches a
+    stream, so every stream-free program on this tier emits exactly as before."""
+    src = emit.emit(_ir("user_cache"))
+    assert "Subscription" not in src
+    assert "StreamNext" not in src
+    assert "revl_stream_pending" not in src
+
+
+@needs_cargo
+def test_stream_runtime_on_real_cordis_rs(tmp_path):
+    """Definition of done for the rust tier: the emitted components RUN on real
+    cordis-rs and prove, by running,
+
+      * §10.2 the core guarantee — unloading the owner closes the stream, LIFO,
+        with no residue;
+      * §9 Part A — a parked `next` is terminated by the owner's own bracket
+        inverse, run from another thread, which returns without waiting for the
+        park to drain;
+      * §9 Part B — a provider fault terminates an outstanding `next` through a
+        real activation, and the failed activation closes the subscription;
+      * `merge` — an item from either source reaches the one consumer, the
+        fan-in tears down as one LIFO stack, one source's close does not strand
+        the consumer on the other, and a source's fault propagates at once;
+      * backpressure `error` — a full bounded buffer faults, no silent loss.
+
+    Single-threaded: the provider/subscription registry the scenario drives is
+    process-wide, so parallel `#[test]` threads would clobber each other's
+    `revl_stream_reset()`.
+    """
+    here = Path(__file__).resolve().parent
+    ir = compile_files([str(_STREAM_SCENARIO)])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(emit.emit(ir), encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_stream_scn"),
+                                         encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "stream.rs").write_text(
+        (here / "scenarios" / "stream.rs").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "11 passed" in result.stdout

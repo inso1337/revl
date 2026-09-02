@@ -1010,6 +1010,13 @@ _HOST_ARG_SIG: dict[str, list[str]] = {
     # revl keyword that cannot parse as a method call at all. Listing them would
     # grow the shared host-verb namespace — the disjointness invariant pinned in
     # tests/test_map_value_type.py — for a surface no admitted program can reach.
+    # item 130 Slice 3 adds NO verb here: `merge(a, b)` is parsed in the
+    # `subscribe` head (parser.subscribe_form), the one position the surface
+    # already controls, exactly as Slice 2 parses `map`/`filter`/`take` as
+    # stages. A `<src>.merge(..)` method spelling would grow this shared
+    # namespace for a combinator, which is what the disjointness invariant
+    # forbids — so the exact-set pin in tests/test_map_value_type.py is
+    # untouched by this slice.
     "Stream.source": [],
     "Stream.close": [],
     "Subscription.next": [],

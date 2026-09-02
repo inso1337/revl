@@ -130,6 +130,7 @@ from .parser import (
     RouteStmt,
     ServiceDecl,
     SpawnExpr,
+    StreamMergeExpr,
     SubscribeExpr,
     TestDecl,
     TimerStmt,
@@ -7269,6 +7270,97 @@ def _lower_stream_stages(sub_expr: "SubscribeExpr", env: "Env",
     return stages
 
 
+def _admit_stream_operand(node, env: "Env", filename: str, line: int,
+                          *, form: str) -> str:
+    """Admit ONE stream operand of a `subscribe` head and answer its safe name
+    (item 130, docs/design/130-stream-reactive-types.md §3).
+
+    Three checks, applied to a plain `subscribe src` and pointwise to every
+    source of a `subscribe merge(a, b)` — a fan-in is only as sound as its
+    weakest source, so a single silent or already-consumed operand poisons the
+    whole thing:
+
+    * the operand must name a stream (host-local family `Stream`);
+    * rule 3.6 — it must be TERMINAL-DELIVERING (`effect Stream.source() undo
+      s.close()`), so a provider that could vanish while a `next` is outstanding
+      without delivering a terminal is refused (§9 Part B);
+    * rule 3.1 — it must not already be consumed by another subscription or
+      merge (single-consumer)."""
+    src_name = node.get("id") if isinstance(node, dict) \
+        and node.get("kind") == "name" else None
+    if src_name is None or env.host_locals.get(src_name) != "Stream":
+        raise RevlError(
+            filename, line,
+            f"`{form}` needs a stream source — the operand does not name one",
+            hint="acquire a source first: `let src = effect Stream.source() undo "
+                 "src.close()`, then `let sub = subscribe src undo sub.close()` "
+                 "(item 130). A required `Stream[T]` capability is a later slice.",
+            code="lifecycle", category="lifecycle")
+    if src_name not in env.terminal_stream_sources:
+        # rule 3.6 — the §9 Part B refusal, the one the core guarantee rests on.
+        raise RevlError(
+            filename, line,
+            f"`{form}` refuses a provider that can vanish without delivering a "
+            f"terminal — stream source `{src_name}`'s inverse does not `close` it",
+            hint="a subscription's outstanding `next` must be terminated by "
+                 "exactly one of owner-teardown or a provider terminal, never a "
+                 "silent third state; give the source `undo <src>.close()` so its "
+                 "teardown delivers `Closed`/`Faulted` to the consumer "
+                 "(item 130 §3.6, §9 Part B)",
+            code="lifecycle", category="lifecycle")
+    if src_name in env.subscribed_sources:
+        # rule 3.1 — single-consumer: a stream is consumed at most once, by one
+        # subscription or one merge.
+        raise RevlError(
+            filename, line,
+            f"stream source `{src_name}` is already subscribed — a subscription "
+            "is single-consumer (rule 3.1)",
+            hint="multicast is a later item; compose fan-out from an explicit "
+                 "bridge, one bracket per consumer (item 130 §4.1)",
+            code="lifecycle", category="lifecycle")
+    return src_name
+
+
+def _lower_stream_head(head, env: "Env", filename: str, line: int,
+                       consumed: list) -> dict:
+    """Lower the stream a `subscribe` acquires — a plain source, or a
+    `merge(a, b)` fan-in — and collect every source it CONSUMES (item 130
+    Slice 3).
+
+    Recursive, because a merged stream is itself a stream: `merge(merge(a, b),
+    c)` is the three-source fan-in with no extra machinery. Each nested merge is
+    a derived stream owned by the one above it, and the outermost is owned by the
+    subscription — so the whole chain still tears down on the ONE bracket the
+    `subscribe` registers, and every plain source stays on its own bracket."""
+    if not isinstance(head, StreamMergeExpr):
+        node = _lower_expr(head, env, mode="setup")
+        consumed.append(_admit_stream_operand(node, env, filename, line,
+                                              form="subscribe"))
+        return node
+    sources = []
+    before = len(consumed)
+    for src in head.sources:
+        if isinstance(src, StreamMergeExpr):
+            sources.append(_lower_stream_head(src, env, filename, line, consumed))
+            continue
+        node = _lower_expr(src, env, mode="setup")
+        consumed.append(_admit_stream_operand(node, env, filename, line,
+                                              form="merge"))
+        sources.append(node)
+    reached = consumed[before:]
+    if len(set(reached)) != len(reached):
+        # a source merged with itself would be two consumers of one stream
+        raise RevlError(
+            filename, line,
+            "`merge` refuses the same stream source twice — a stream is "
+            "single-consumer (rule 3.1)",
+            hint="a fan-in of one source is that source; merge two distinct "
+                 "streams, or compose fan-out from an explicit bridge "
+                 "(item 130 §4.1)",
+            code="lifecycle", category="lifecycle")
+    return {"kind": "stream-merge", "sources": sources}
+
+
 def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
     """Build the `let-effect` IR step for a `subscribe <stream> undo sub.close()`
     bracket (item 130, docs/design/130-stream-reactive-types.md §5).
@@ -7278,48 +7370,29 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
     `yield lambda: <undo>` verbatim (the bracket whose handle is a live listener,
     §0) and wasm refuses the whole shape. Admission enforces:
 
-    * rule 3.6 — the subscribed stream must be a terminal-delivering source
+    * rule 3.6 — every subscribed stream must be a terminal-delivering source
       (`effect Stream.source() undo s.close()`), so a provider that could vanish
       while a `next` is outstanding, without delivering a terminal, is refused
       (the no-silent-vanish rule the core guarantee rests on, §9 Part B);
-    * rule 3.1 — a source is subscribed at most once (single-consumer);
+    * rule 3.1 — a source is consumed at most once, by one subscription or one
+      merge (single-consumer);
     * rule 3.4 — the `undo` (`close`) must not itself suspend (`close` is the
       synchronous, non-suspending bracket inverse; a `next` in it is refused);
-    * rule 3.5 — a `map`/`filter` transform is pure (Slice 2, §3.5)."""
+    * rule 3.5 — a `map`/`filter` transform is pure (Slice 2, §3.5).
+
+    Slice 3's `subscribe merge(a, b)` lowers the head to a `stream-merge` node
+    over both sources (rules 3.6 and 3.1 applied POINTWISE, see
+    `_admit_stream_operand`). The merged stream is DERIVED — owned by the
+    subscription, not a bracket of its own, exactly like a Slice 2 stage — so the
+    one bracket the subscribe registers still tears the whole fan-in down:
+    `close` closes the merge, which detaches it from both sources, and each
+    source is left to its own bracket. Multi-source teardown is therefore the
+    same single LIFO stack Slice 1 proved, with no path where a source keeps
+    feeding — or holding a reference to — a fan-in whose owner is gone."""
     sub_expr: SubscribeExpr = stmt.acquire
-    stream_ir = _lower_expr(sub_expr.stream, env, mode="setup")
-    # The stream must resolve to a host-local stream source (family `Stream`).
-    src_name = stream_ir.get("id") if isinstance(stream_ir, dict) \
-        and stream_ir.get("kind") == "name" else None
-    if src_name is None or env.host_locals.get(src_name) != "Stream":
-        raise RevlError(
-            filename, stmt.line,
-            "`subscribe` needs a stream source — the operand does not name one",
-            hint="acquire a source first: `let src = effect Stream.source() undo "
-                 "src.close()`, then `let sub = subscribe src undo sub.close()` "
-                 "(item 130). A required `Stream[T]` capability is a later slice.",
-            code="lifecycle", category="lifecycle")
-    if src_name not in env.terminal_stream_sources:
-        # rule 3.6 — the §9 Part B refusal, the one the core guarantee rests on.
-        raise RevlError(
-            filename, stmt.line,
-            "`subscribe` refuses a provider that can vanish without delivering a "
-            "terminal — this stream source's inverse does not `close` it",
-            hint="a subscription's outstanding `next` must be terminated by "
-                 "exactly one of owner-teardown or a provider terminal, never a "
-                 "silent third state; give the source `undo <src>.close()` so its "
-                 "teardown delivers `Closed`/`Faulted` to the consumer "
-                 "(item 130 §3.6, §9 Part B)",
-            code="lifecycle", category="lifecycle")
-    if src_name in env.subscribed_sources:
-        # rule 3.1 — single-consumer: a stream is subscribed at most once.
-        raise RevlError(
-            filename, stmt.line,
-            "a stream source is already subscribed — a subscription is "
-            "single-consumer (rule 3.1)",
-            hint="multicast is a later item; compose fan-out from an explicit "
-                 "bridge, one bracket per consumer (item 130 §4.1)",
-            code="lifecycle", category="lifecycle")
+    consumed: list[str] = []
+    stream_ir = _lower_stream_head(sub_expr.stream, env, filename, stmt.line,
+                                   consumed)
     safe = env.bind_local(stmt.bind, stmt.line)
     # the subscription is a host-local of the reserved `Subscription` family, so
     # `sub.next()` / `sub.close()` are checked against that verb surface (item
@@ -7360,7 +7433,7 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
                  "bound rule) — the inverse of a subscription is `sub.close()`, "
                  "which trips the cancel token and returns; it must not `next`",
             code="lifecycle", category="lifecycle")
-    env.subscribed_sources.add(src_name)
+    env.subscribed_sources.update(consumed)
     return step
 
 
