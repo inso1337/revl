@@ -300,17 +300,51 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     approved = next((r for r in records
                      if r.get("record") == "commit-approved"), None)
     if wal["complete"]:
-        return _roll_forward(wal, session=session, snapshot=snapshot)
+        return _with_lineage(
+            _roll_forward(wal, session=session, snapshot=snapshot), records)
     if approved is not None:
         # item 245, Decision 3, the approved-to-discharged window: a crash after
         # `commit-approved` and before `activation-complete` is a COMMITTED
         # session. The durable approval, not the discharge record, is the commit
         # proof; recover replays no inverse and rolls the missing discharge
         # forward. This dominates the discharge-set skip for a session-owned WAL.
-        return _roll_forward_window(wal_path, wal, approved,
-                                    world=world or DictWorld(),
-                                    reissue=reissue)
-    return _roll_back(wal, world=world or DictWorld(), wal_path=wal_path)
+        return _with_lineage(
+            _roll_forward_window(wal_path, wal, approved,
+                                 world=world or DictWorld(),
+                                 reissue=reissue), records)
+    return _with_lineage(
+        _roll_back(wal, world=world or DictWorld(), wal_path=wal_path), records)
+
+
+def _with_lineage(report: dict, records: list) -> dict:
+    """Annotate a verdict with the session's branch lineage when its WAL carries
+    one (item 250, Slice 2).
+
+    A branch recovers exactly as any other session does — over its OWN witnessed
+    effects, back to its own fork point — so the VERDICT is untouched and every
+    non-branch WAL's report is byte-identical. What changes is that the operator
+    reading it is told the rollback lands at a fork point rather than at an
+    activation start, and which parent it diverged from; a rollback that silently
+    looks like a fresh session's is the one way this report could mislead.
+    """
+    branch = next((r for r in records if r.get("record") == "fork-branch"), None)
+    if branch is None:
+        return report
+    report["lineage"] = {
+        "role": "branch",
+        "branch": branch.get("branch"),
+        "parent": branch.get("parent"),
+        "divergedAt": branch.get("at"),
+        "parentWal": branch.get("parentWal"),
+        "notPreserved": branch.get("notPreserved") or [],
+        "note": (
+            "this session is a BRANCH: the rollback above unwinds only what the "
+            "branch itself recorded, so it lands at the fork point, not at an "
+            "empty workspace. The state below the fork point is the parent's "
+            "rewound step-k state and is not this WAL's to restore. The parent "
+            "(its own WAL) is retired at k and recovers separately."),
+    }
+    return report
 
 
 def _fork_retired(wal: dict, frozen: dict) -> dict:
@@ -1303,5 +1337,10 @@ def render(report: dict) -> str:
                              f"— the inverse changes nothing (item 440)")
     residue = report["residue"]
     lines += ["", f"residue proof [{'CLEAN' if residue['clean'] else 'RESIDUE'}]:",
-              f"  {residue['proof']}", "", f"guarantee: {report['guarantee']}"]
+              f"  {residue['proof']}"]
+    lineage = report.get("lineage")
+    if lineage:
+        lines += ["", f"lineage: branch of {lineage['parent']} at step "
+                      f"{lineage['divergedAt']}", f"  {lineage['note']}"]
+    lines += ["", f"guarantee: {report['guarantee']}"]
     return "\n".join(lines)
