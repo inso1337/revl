@@ -1,0 +1,146 @@
+{
+  "ir_version": 3,
+  "services": {
+    "InvoiceAgent": {
+      "methods": {
+        "invoice_lookup": {
+          "params": [
+            {
+              "name": "message",
+              "type": "Str"
+            }
+          ],
+          "returns": "Str",
+          "emission": true,
+          "async": true
+        },
+        "draft_reminder": {
+          "params": [
+            {
+              "name": "message",
+              "type": "Str"
+            }
+          ],
+          "returns": "Str",
+          "emission": true,
+          "async": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "InvoiceAgentProvider",
+      "source": "a2a_agent.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "invoice_agent": "InvoiceAgent"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "invoice_agent",
+          "service": "InvoiceAgent",
+          "methods": [
+            {
+              "name": "invoice_lookup",
+              "params": [
+                "message"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "a2a_invoice_agent_invoice_lookup",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "message"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "draft_reminder",
+              "params": [
+                "message"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "a2a_invoice_agent_draft_reminder",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "message"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "InvoiceAgentProvider",
+        "file": "a2a_agent.rvl",
+        "inject": [],
+        "provides": [
+          "invoice_agent"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "InvoiceAgentProvider"
+    ]
+  },
+  "externs": [
+    {
+      "name": "a2a_invoice_agent_invoice_lookup",
+      "class": "emission",
+      "params": [
+        {
+          "name": "message",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "ts": "\n      // A2A 1.0.0, JSON-RPC 2.0 `message/send`. ONE crossing.\n      const res = await fetch(\"https://billing.internal:8443/a2a\", {\n        method: \"POST\",\n        headers: { \"content-type\": \"application/json\" },\n        body: JSON.stringify({\n          jsonrpc: \"2.0\",\n          id: crypto.randomUUID(),\n          method: \"message/send\",\n          params: {\n            message: {\n              role: \"user\",\n              messageId: crypto.randomUUID(),\n              parts: [{ kind: \"text\", text: message }],\n              metadata: { \"revl.skill\": \"invoice-lookup\" },\n            },\n          },\n        }),\n      });\n      if (!res.ok) {\n        // A transport failure is a FAULT, never a quietly-empty result.\n        throw new Error(`a2a: transport failure (HTTP ${res.status})`);\n      }\n      const rpc = await res.json();\n      if (rpc && rpc.error) {\n        throw new Error(`a2a: JSON-RPC error ${rpc.error.code}`);\n      }\n      const result = rpc ? rpc.result : undefined;\n      if (!result) {\n        throw new Error(\"a2a: response carried no result\");\n      }\n      // A direct Message reply is already terminal; a Task is terminal only in\n      // the states A2A 1.0.0 says are.\n      const kind = result.kind;\n      const terminal = [\"completed\", \"failed\", \"canceled\", \"rejected\"];\n      if (kind === \"task\") {\n        const state = result.status ? result.status.state : undefined;\n        if (!terminal.includes(state)) {\n          // Item 439's open question: a task still in flight is a LIFECYCLE\n          // this slice does not express. Refuse; never poll, never resume.\n          throw new Error(\n            `a2a: task returned non-terminal state '${state}' \u2014 this binding crosses once and does not poll`);\n        }\n        if (state !== \"completed\") {\n          throw new Error(`a2a: task ended '${state}'`);\n        }\n      } else if (kind !== \"message\") {\n        throw new Error(`a2a: unexpected result kind '${kind}'`);\n      }\n      // The reply is the peer's JSON and nothing about it is typed: `res.json()`\n      // is `any` on every ts lib, so an unannotated `(p) => ...` here is an\n      // implicit `any` parameter and `tsc --strict` refuses the module (issue\n      // #251, the second defect the a2a-to-ts fixture found). The shape below\n      // is a CLAIM being checked, not a type being trusted \u2014 every field stays\n      // optional and the `kind`/`typeof` guards below do the real work.\n      type A2aPart = { kind?: unknown; text?: unknown };\n      type A2aArtifact = { parts?: A2aPart[] };\n      const parts: A2aPart[] = kind === \"task\"\n        ? ((result.artifacts as A2aArtifact[] | undefined) || [])\n            .flatMap((a: A2aArtifact) => a.parts || [])\n        : ((result.parts as A2aPart[] | undefined) || []);\n      const text = parts\n        .filter((p: A2aPart) => p && p.kind === \"text\" && typeof p.text === \"string\")\n        .map((p: A2aPart) => p.text as string)\n        .join(\"\");\n      if (text.length === 0 && parts.length > 0) {\n        throw new Error(\"a2a: reply carried only non-text parts\");\n      }\n      return text;\n    "
+      },
+      "async": true,
+      "capabilities": [
+        "net.billing_internal"
+      ]
+    },
+    {
+      "name": "a2a_invoice_agent_draft_reminder",
+      "class": "emission",
+      "params": [
+        {
+          "name": "message",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "ts": "\n      // A2A 1.0.0, JSON-RPC 2.0 `message/send`. ONE crossing.\n      const res = await fetch(\"https://billing.internal:8443/a2a\", {\n        method: \"POST\",\n        headers: { \"content-type\": \"application/json\" },\n        body: JSON.stringify({\n          jsonrpc: \"2.0\",\n          id: crypto.randomUUID(),\n          method: \"message/send\",\n          params: {\n            message: {\n              role: \"user\",\n              messageId: crypto.randomUUID(),\n              parts: [{ kind: \"text\", text: message }],\n              metadata: { \"revl.skill\": \"draft-reminder\" },\n            },\n          },\n        }),\n      });\n      if (!res.ok) {\n        // A transport failure is a FAULT, never a quietly-empty result.\n        throw new Error(`a2a: transport failure (HTTP ${res.status})`);\n      }\n      const rpc = await res.json();\n      if (rpc && rpc.error) {\n        throw new Error(`a2a: JSON-RPC error ${rpc.error.code}`);\n      }\n      const result = rpc ? rpc.result : undefined;\n      if (!result) {\n        throw new Error(\"a2a: response carried no result\");\n      }\n      // A direct Message reply is already terminal; a Task is terminal only in\n      // the states A2A 1.0.0 says are.\n      const kind = result.kind;\n      const terminal = [\"completed\", \"failed\", \"canceled\", \"rejected\"];\n      if (kind === \"task\") {\n        const state = result.status ? result.status.state : undefined;\n        if (!terminal.includes(state)) {\n          // Item 439's open question: a task still in flight is a LIFECYCLE\n          // this slice does not express. Refuse; never poll, never resume.\n          throw new Error(\n            `a2a: task returned non-terminal state '${state}' \u2014 this binding crosses once and does not poll`);\n        }\n        if (state !== \"completed\") {\n          throw new Error(`a2a: task ended '${state}'`);\n        }\n      } else if (kind !== \"message\") {\n        throw new Error(`a2a: unexpected result kind '${kind}'`);\n      }\n      // The reply is the peer's JSON and nothing about it is typed: `res.json()`\n      // is `any` on every ts lib, so an unannotated `(p) => ...` here is an\n      // implicit `any` parameter and `tsc --strict` refuses the module (issue\n      // #251, the second defect the a2a-to-ts fixture found). The shape below\n      // is a CLAIM being checked, not a type being trusted \u2014 every field stays\n      // optional and the `kind`/`typeof` guards below do the real work.\n      type A2aPart = { kind?: unknown; text?: unknown };\n      type A2aArtifact = { parts?: A2aPart[] };\n      const parts: A2aPart[] = kind === \"task\"\n        ? ((result.artifacts as A2aArtifact[] | undefined) || [])\n            .flatMap((a: A2aArtifact) => a.parts || [])\n        : ((result.parts as A2aPart[] | undefined) || []);\n      const text = parts\n        .filter((p: A2aPart) => p && p.kind === \"text\" && typeof p.text === \"string\")\n        .map((p: A2aPart) => p.text as string)\n        .join(\"\");\n      if (text.length === 0 && parts.length > 0) {\n        throw new Error(\"a2a: reply carried only non-text parts\");\n      }\n      return text;\n    "
+      },
+      "async": true,
+      "capabilities": [
+        "net.billing_internal"
+      ]
+    }
+  ]
+}
