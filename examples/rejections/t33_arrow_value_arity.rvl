@@ -1,0 +1,19 @@
+// REJECTED — a call through an arrow *value* supplying the wrong number of
+// arguments (roadmap item 75(a)). The arrow-value twin of t10_call_arity: an
+// arrow's arity is purely syntactic and never in doubt, so it is checked even
+// when nothing about the parameter's type is known. revl has no default,
+// optional, or variadic parameters, so arity is exact.
+//
+// Before item 75(a) an arrow with any un-annotated parameter had no type at
+// all, which threw the arity away with it, and `f(1, 2)` compiled. rust reports
+// E0061 ("this function takes 1 argument but 2 arguments were supplied") and
+// javac "method cannot be applied to given types"; python raises only at run
+// time.
+//
+// expected error:
+//   `f` is a `(Any) -> Str` and takes 1 argument(s), 2 given
+
+fn demo() -> Str {
+  let f = (x) => "s"
+  return f(1, 2)
+}

@@ -125,10 +125,56 @@ fn demo(n: Int) -> Int {
 }
 ```
 
-An arrow with **neither** — `let g = v => v + 1` — still has no type. Its body
-is walked (so a mistake inside it is still caught), but the binding is
-untyped; this is the one arrow shape left on the documented frontier, and it
-is *deliberately* left there rather than given a guessed type.
+**(c) Return annotations.** `(v: Int): Int => v + 1` names the result. The
+spelling is TypeScript's, because for the arrow *expression* the "same meaning,
+same syntax" premise holds where it failed for the function type: TS's
+`(x: number): number => x` and revl's `(x: Int): Int => x` are the same
+construct, a named parameter list with an optional result type and a single
+expression body. `->` is **not** accepted in this position — `) -> T` is
+already the tail of a function type, and two readings of the same three tokens
+at nearly the same place is a readability hazard the grammar does not need.
+
+```revl
+fn demo(n: Int) -> Int {
+  let inc = (v: Int): Int => v + 1    // both halves annotated
+  let zero = (): Int => 0             // no parameters, so no other site exists
+  return inc(n) + zero()
+}
+```
+
+The return type is a full type, so `?` binds to it: `(v: Int): Str? => e`
+returns `Opt[Str]`. The bare single-parameter form takes no annotation of
+either kind — `v: Int => e` is a parse error, as it is in TypeScript.
+
+> **Rule C1. Colour is positional. An arrow may not declare its own.**
+> An arrow return annotation naming `Async[...]`, at the top level or as the
+> return of a function type it names, is refused with `A1`. An arrow's
+> `"async"` flag is not a label but a certificate that some *declaration*
+> promised to await it — the item-92 leak check skips a flagged arrow and
+> callee collection stops descending at one — so a self-declared colour would
+> forge it and launder every async callable nested inside the arrow out of the
+> enclosing scope's reach set. Colour stays obtainable from a declared
+> parameter `(Int) -> Async[Str]`, or from the coercion that stamps an arrow
+> argument landing in an `Async[T]` slot; an annotation on such a coerced
+> arrow names the **sync inner type**.
+
+> **Rule G. An arrow is an expression, not a signature. It never quantifies.**
+> A type name in an arrow annotation resolves to a type parameter of the
+> *enclosing* `fn`/`extern`, else to a declared type, else to an ordinary
+> opaque nominal that unifies with nothing — never to a fresh type parameter.
+> Otherwise a one-letter typo would silently wildcard, and unlike a `fn` there
+> is no `[T]` list on an arrow to turn the implicit heuristic off with
+> (docs/generics.md).
+
+**What an arrow with none of the three types as.** `v => v + 1` types
+`(Any) -> Any`. Every arrow has a type: its arity is syntactic and therefore
+always known, so every call through an arrow value is arity-checked, and the
+unknown components are the `Any` wildcard the rest of the checker already
+lives with. The result is inferred from the body only when **no unknown
+parameter occurs free in it** — `(x) => "s"` is `(Any) -> Str`, while
+`(x) => x + 1` keeps an unknown result, because a body typed under unknown
+parameters produces half-solved types (`[x]` infers `List[Never]`,
+`{ a: x }` infers `{a: Any}`) that look known and are not.
 
 ### Calls through a function value
 
@@ -190,10 +236,16 @@ An arrow node carries its signature when the checker recovered one:
   "body": { ... } }
 ```
 
-`param_types` and `returns` are **absent together** exactly when the arrow is
-still untyped — a backend can therefore distinguish "typed as `Any`" from "no
-type at all", which is the distinction the TypeScript emitter needs. This is a
-breaking IR change; there are no external consumers.
+`param_types` and `returns` are **absent together** exactly when the arrow has
+no complete parameter signature — that is, they are written iff **every**
+parameter type is known. A backend can therefore distinguish "typed as `Any`"
+from "no type at all", which is the distinction the TypeScript emitter needs.
+This is a breaking IR change; there are no external consumers.
+
+The checker's *partial* knowledge deliberately stays in the frontend: a
+half-annotated `(x: Int, y) => …` carries neither key rather than a
+`["Int", null]` the contract never admitted. `returns` may still be the string
+`"Any"` when the result is unknown but every parameter is not.
 
 Nothing else in the IR changed shape. A `let` step does *not* carry its
 annotation: the annotation's whole job is to be the checking position, and it

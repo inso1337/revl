@@ -193,6 +193,18 @@ REJECTIONS = {
     #       undeclared type and errors where it is used.
     "t24_opaque_receiver_builtin.rvl": "stdlib method `remove` on a value of unknown type",
     "t25_explicit_tparam_heuristic_off.rvl": "argument 1 of `typo(...)` expects `List[U]`, got `List[Int]`",
+    # errata harvest, arrow side (docs/v2.0-roadmap.md 75(a), slice 1). Every
+    # arrow now has a type, so its arity is always checked and its result is
+    # checked wherever the body cannot depend on an un-annotated parameter:
+    "t32_arrow_value_result_flows.rvl": "argument 1 of `takes_int(...)` expects `Int`, got `Str`",
+    "t33_arrow_value_arity.rvl": "takes 1 argument(s), 2 given",
+    # rule C1, the CRITICAL: colour is positional and an arrow may not
+    # self-declare it, because the async flag is the certificate two separate
+    # analyses read as "a consumer will await this".
+    "t34_arrow_self_declared_async.rvl": "an arrow may not declare its own async colour",
+    # rule G: the new annotation site must not reopen 75(c)'s hygiene hole —
+    # an arrow is an expression, not a signature, so it never quantifies.
+    "t35_arrow_annotation_not_quantified.rvl": "argument 1 of `f` expects `Q`, got `Int`",
     # item 71: an update on an anonymous record literal is field-checked against
     # the literal's own structural shape — the wrong-answer-class gap that used
     # to escape checking (docs/contract-errata.md, now RESOLVED).
