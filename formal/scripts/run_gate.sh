@@ -227,6 +227,11 @@ python3 scripts/axioms_gate.py \
   RevLOracle.coversB_iff \
   RevLOracle.resourceOKB_iff \
   RevLOracle.ceilingOKB_iff \
-  RevLOracle.attenuatesB_iff < .oracle-axioms.out
+  RevLOracle.attenuatesB_iff \
+  RevLOracle.mem_replayedLabels_iff \
+  RevLOracle.mem_dischargedLabels_iff \
+  RevLOracle.mem_strandedLabels_iff \
+  RevLOracle.row_is_total \
+  RevLOracle.replayedLabels_phase_order < .oracle-axioms.out
 
 python3 harness/diff_corpus.py
