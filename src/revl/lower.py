@@ -1450,7 +1450,16 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         # colored set is known. This function is now pure lowering.
         entry = {
             "name": decl.name,
-            "params": [{"name": p.name, "type": p.type} for p in decl.params],
+            # the `Secret[T]` marking rides here exactly as it does on an extern
+            # or a service operation (item 256 §7a): `extract_and_normalize`
+            # strips the qualifier off `p.type` before lowering, so without this
+            # a `Secret[T]` fn parameter left NO trace in the IR at all. Item 444
+            # reads it back (`taint.declares_confidential_surface`) to decide
+            # whether a composition can mint the `confidential` origin anywhere.
+            # Additive: absent unless the author wrote `Secret[T]`, so every
+            # existing IR document stays byte-identical.
+            "params": _ir_params(((p.name, p.type) for p in decl.params),
+                                 getattr(decl, "secret_params", ())),
             "returns": decl.returns,
             "public": decl.public,
             "body": body,
