@@ -1,0 +1,10 @@
+// Repeated substring search. `Str.indexOf` returns a CODEPOINT index, which
+// is why the emitted helper materializes char vectors; the question is
+// whether it has to do so per call.
+pub fn str_index_of(hay: Str, needles: List[Str]) -> Int {
+  var total = 0
+  for (nd of needles) {
+    total = total + hay.indexOf(nd)
+  }
+  return total
+}
