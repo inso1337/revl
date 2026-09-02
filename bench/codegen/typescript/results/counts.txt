@@ -17,7 +17,7 @@ all default numbers are COUNTS, not durations: they do not move with machine loa
   executed: 10 put() calls -> 10 ctx.effect calls, 10 distinct body closures (one fresh per call)
 
 ## list-build-spread
-  `xs = xs.push(e)` lowers to a whole-array spread copy per iteration, so building an n-element list copies n(n-1)/2 elements instead of n
+  `xs = xs.push(e)` on a uniquely-owned local lowers to a destructive `xs.push(e)`, so building an n-element list copies no elements at all (item 445's `unique` marker; the unproven case keeps the spread copy)
   emitted     microtask turns         2   promise allocs         3 per run
   hand        microtask turns         2   promise allocs         3 per run
   EXCESS vs hand: 0 microtask turns, 0 promise allocations
@@ -62,8 +62,8 @@ all default numbers are COUNTS, not durations: they do not move with machine loa
 
 ## list-build element copies (exact counts, no timing)
   n         emitted         hand
-  50           1225            0
-  100          4950            0
-  200         19900            0
-  400         79800            0
-  emitted: QUADRATIC in n (x4.0 per doubling of 50..400); hand copies nothing.
+  50              0            0
+  100             0            0
+  200             0            0
+  400             0            0
+  emitted: no growth (0); hand copies nothing.
