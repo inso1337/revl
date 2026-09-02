@@ -288,6 +288,13 @@ jobs:
       # rides this job. The drift gate needs no toolchain and already runs in
       # the frontend job's plain `pytest tests/ -q`.
       - run: pytest tests/test_gate_crate_admit.py -q
+      # item 333 slice 2: the rust in-process gate harness
+      # (bench/inprocess_gate_rust) builds a standalone consumer of the gate
+      # crate and runs it, so it needs cargo and rides this job too. It has to
+      # be named HERE: its skip is a toolchain probe, not an env switch, and
+      # tests/test_env_gated_skips_run_somewhere.py only catches env-var gates —
+      # so without this line the skip would be the only thing that ever ran.
+      - run: pytest tests/test_inprocess_gate_rust.py -q
       # item 338: the committed rust CONSUMER example
       # (examples/ecosystem-consumer-rs), built from outside the checkout with
       # the crate as its only dependency. Its source-level contract checks run
