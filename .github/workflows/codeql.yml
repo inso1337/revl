@@ -54,16 +54,33 @@ jobs:
         # no files, CodeQL fails the job rather than skipping it.
         #
         # go is `autobuild` because CodeQL REFUSES `none` for Go: the first
-        # run failed with "Go does not support the none build mode". Worth
-        # knowing what that costs here, because this tree has FIVE
-        # independent go modules (backends/go/placement_runner,
+        # run failed with "Go does not support the none build mode". This
+        # tree has FIVE independent go modules (backends/go/placement_runner,
         # backends/go/scenarios, backends/go/v3, bench/codegen/go and
-        # forks/stc-go) and no root module. Autobuild builds what it can
-        # find, so Go coverage may be PARTIAL, and a partial scan reporting
-        # green is the "the tests that ran, ran" failure this project keeps
-        # hitting. If the Go lane stays green while obviously reachable Go
-        # goes unanalysed, switch it to `manual` with a per-module build
-        # rather than trusting the green.
+        # forks/stc-go) and no root module.
+        #
+        # MEASURED PARTIAL COVERAGE, do not read this lane's green as full.
+        # The first successful run warned: package `revl.goplacement/emitted`
+        # could not be found. That is BY DESIGN and not fixable by a build
+        # step: `backends/go/placement_runner/emitted/*.go` is generated per
+        # COMPOSITION by `backends/go/emit.py` at `revl run --placement`
+        # build time and is gitignored (only `.gitkeep` is tracked). So a
+        # fresh checkout has no such package, `main.go` imports it, and
+        # CodeQL analyses that file only partially.
+        #
+        # What that costs: `placement_runner/main.go` is the seam-handling
+        # entry point, so the correlation guard (roadmap 421 F8) and the
+        # seam address judgement (337) live behind a partially-resolved
+        # import. `bridge/bridge.go` and the other four modules are analysed
+        # normally.
+        #
+        # Not worth "fixing" by generating a synthetic emitted package: the
+        # emitted code differs per composition, so a scan of one instance
+        # reports on generated output rather than on the runner, which is
+        # coverage theatre. If the placement runner ever needs real scanning,
+        # the honest route is a `manual` build that emits a REPRESENTATIVE
+        # composition and says which one, in the workflow, so a reader knows
+        # what was covered.
         #
         # Every other lane is `build-mode: none`, which analyses every
         # tracked source file with no build. That matters for rust in
