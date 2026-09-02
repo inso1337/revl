@@ -810,6 +810,23 @@ def _string(value) -> str:
     return "".join(out)
 
 
+def _escape_format_braces(text: str) -> str:
+    """Double every literal `{`/`}` in *text* so it survives as the FIRST
+    (format-string) argument of `assert!`/`format!`/`panic!` -- Rust's
+    format macros scan that argument's *value* for `{...}` placeholders, and
+    an un-doubled brace in interpolated text (a test name, a field value, ...)
+    either collides with a real placeholder or -- as finding #35 found for a
+    `\\u{XXXX}` escape landing there -- is misread as one outright. `_string`
+    itself must NOT double braces: most of its callers hand its output to a
+    plain (non-format) position -- `.expect(&str)`, a function argument, a
+    struct field -- where a doubled brace would show up VERBATIM, wrong in
+    the opposite direction. Braces are doubled here, on the raw text, before
+    the one `_string` call that renders it, exactly like the interpolated-
+    template text in `_v3_interp`/`_format` already do (item 135, finding
+    #35)."""
+    return text.replace("{", "{{").replace("}", "}}")
+
+
 def _rust_v3_lit(node: dict) -> str:
     """v3 literal: strings are owned `String` (revl `Str` is `String`)."""
     value = node.get("value")
@@ -5604,7 +5621,21 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
     for test in tests:
         if not test.get("lifecycle"):
             continue
-        where = f"lifecycle test {_string(test['name'])}"
+        # `where` is a plain Python label, RAW (not run through `_string`):
+        # every use below feeds it straight into a single `_string(where +
+        # suffix)` call at its own emission site, which is the one place that
+        # is allowed to escape it. Rendering the name through `_string` here
+        # too would double-escape it -- `_string`'s residual `\u{XXXX}` path
+        # (still needed for the lone-surrogate/unprintable case; item 135,
+        # finding #35) puts a literal backslash in its OWN output, and a
+        # second `_string` call over that output re-escapes the backslash
+        # itself (`\` -> `\\`), stranding `u{XXXX}` as literal, unescaped
+        # text in the final string's runtime value -- which lands `{XXXX}`
+        # right back in front of `format!`'s placeholder parser, the same
+        # crash finding #35 reported for a printable em dash. Keeping this
+        # one raw (`_string` called exactly once, at each downstream site)
+        # closes that residual case without reopening the printable one.
+        where = f'lifecycle test "{test["name"]}"'
         base = _snake(test.get("name") or "lifecycle")
         base = re.sub(r"[^A-Za-z0-9_]", "_", base)
         if not base or base[0].isdigit():
@@ -5675,7 +5706,7 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
                     out.append(f"    let _ = {call};")
             elif kind == "assert":
                 out.append(f"    assert!({_render_expr(step['expr'], ctx, {})}, "
-                           f"{_string(where + ': assertion failed')});")
+                           f"{_string(_escape_format_braces(where + ': assertion failed'))});")
             elif kind == "advance":
                 # item 112 (rust half): drive the clock coeffect forward, firing
                 # every timer that comes due (`revl_clock_advance`, item 99). A
@@ -5695,7 +5726,7 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
                            " && root.reflect().services().len() == 0"
                            " && REVL_LIVE_HOST_RESOURCES.with(|c| c.get()) == 0,")
                 msg = where + ": residue \u2014 the host runtime still holds state (R4/R1)"
-                out.append("            " + _string(msg) + ");")
+                out.append("            " + _string(_escape_format_braces(msg)) + ");")
             else:  # pragma: no cover — the lowerer emits nothing else
                 raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
         out.append("}")

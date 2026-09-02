@@ -2,3 +2,8 @@ fn cat(a: Str, b: Str) -> Str { return a + b }
 fn greet(name: Str, n: Int) -> Str { return `hi ${name} x${n}!` }
 fn lit() -> Str { return "plain ascii string" }
 fn label(a: Str) -> Str { return a + " suffix" }
+// A literal `{`/`}` in the template's TEXT portion (not the `${..}` hole)
+// must double through `escape_braces`/`_escape_format_braces` before it
+// reaches `format!`'s literal, or rustc reads it as a positional-argument
+// placeholder (item 106, finding #35).
+fn curly(name: Str) -> Str { return `{${name}}` }
