@@ -51,6 +51,17 @@ def running():
     return compile_source(CHAIN)
 
 
+@pytest.fixture
+def sanctioned_root(tmp_path):
+    """Sanction `tmp_path` as a root the agent's path arguments may name — the
+    operator side of the MCP path jail (`revl mcp serve --root`)."""
+    from revl.mcp import server as server_mod
+    before = server_mod.AUTHORING
+    server_mod.set_authoring_trust(roots=(str(tmp_path),))
+    yield tmp_path
+    server_mod.AUTHORING = before
+
+
 def _names(records):
     return [record["name"] for record in records]
 
@@ -711,8 +722,12 @@ def test_mcp_plan_takes_in_memory_sources(running):
     assert "nothing was admitted" in payload["note"]
 
 
-def test_mcp_plan_takes_in_memory_modules(tmp_path):
-    """A multi-module candidate that has never existed as a file."""
+def test_mcp_plan_takes_in_memory_modules(tmp_path, sanctioned_root):
+    """A multi-module candidate that has never existed as a file.
+
+    The paths are `tmp_path`'s, which is outside the directory the server was
+    started in, so the path jail refuses them until the operator sanctions that
+    root (`server.AuthoringTrust.roots`, `revl mcp serve --root`)."""
     payload = _call("revl_plan", {
         "files": [str(tmp_path / "app.rvl")],
         "modules": {

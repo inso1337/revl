@@ -573,6 +573,39 @@ def build_parser() -> argparse.ArgumentParser:
                                 "per call via the ticket two-step. Requires "
                                 "`record: true` at load. Omit for no policy "
                                 "(today's behaviour)")
+    # authoring trust: whether the AGENT driving this server may author host
+    # code, and what filesystem it may name. Defaults CLOSED — an inline `@py`
+    # body sent to revl_load/check/swap used to compile and RUN as host Python
+    # with no operator in the loop (docs/mcp-bridge.md, items 329/334).
+    mcp_serve.add_argument("--author-trust", default="untrusted",
+                           choices=("untrusted", "trusted"),
+                           help="how much to trust the agent on the other end as "
+                                "an AUTHOR. `untrusted` (default) compiles its "
+                                "source under the item-329 untrusted-author "
+                                "profile: it may compose granted services but may "
+                                "neither declare nor reach an `extern`/host block. "
+                                "`trusted` lets it author host code, and stamps "
+                                "every class-(c) ticket with the unreviewed host "
+                                "bodies a yes would also run")
+    mcp_serve.add_argument("--provider", action="append", default=[],
+                           metavar="MODULE.rvl",
+                           help="an OPERATOR-sanctioned host-code module the "
+                                "untrusted agent may compose the services of "
+                                "(repeatable). The granted-providers map item "
+                                "334's `Gate.propose` uses: the operator writes "
+                                "the host body, the agent wires it")
+    mcp_serve.add_argument("--grant", action="append", default=[],
+                           metavar="SERVICE",
+                           help="a service name an admitted turn may reach "
+                                "(repeatable). Naming any turns on the item-329 "
+                                "reach allowlist; omit them all and reach is not "
+                                "bounded by this flag")
+    mcp_serve.add_argument("--root", action="append", default=[], metavar="DIR",
+                           help="a directory the agent's path arguments (`files`, "
+                                "`candidateFiles`, `baselineFiles`, `traceFile`, "
+                                "`registry`) may name (repeatable). Defaults to "
+                                "the directory the server was started in; anything "
+                                "outside is refused before it is read")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
