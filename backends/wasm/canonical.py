@@ -114,6 +114,11 @@ _DEFAULT_PACKAGE = "revl:exported"
 _MAX_FLAT_PARAMS = 16
 _MAX_FLAT_RESULTS = 1
 
+# Bytes `cabi_realloc` reserves BELOW every buffer it hands the host (item
+# 432a). The internal string layout puts a u32 length in front of the bytes, so
+# 4 would do; 8 keeps the returned pointer on `$alloc`'s 8-byte slot grid.
+_STR_HEADROOM = 8
+
 
 def _align_to(offset: int, align: int) -> int:
     return (offset + align - 1) & ~(align - 1)
@@ -168,6 +173,9 @@ class _Canon:
         self._names: dict[tuple, str] = {}
         self.helpers: dict[str, str] = {}
         self._fresh = 0
+        # widest canonical return area any export in this module needs (item
+        # 432f). One module-level cell serves them all; see `_reserve_ret_area`.
+        self.ret_area = 0
 
     # -- type table views (mirror emit._V3Emitter) -----------------------
     def record_fields(self, ty: str | None) -> list[tuple[str, str]] | None:
@@ -397,10 +405,63 @@ class _Canon:
 
         return self._reg(("lower_rec", ty), name, body)
 
+    def bulk_copyable(self, elem: str) -> bool:
+        """True iff a `List[elem]` body is BYTE-IDENTICAL between the canonical
+        array and the internal `[u32 count][pad][slot0]...` body, so the
+        crossing is one `memory.copy` in and zero copies out (item 432c).
+
+        Decided from the LAYOUT, never from the element's name, so a later
+        element type cannot silently inherit a wrong copy:
+
+        * an aggregate is carried internally as a POINTER to its own block and
+          canonically as the DATA itself, so the two layouts are never the same
+          bytes -- a bulk copy would copy pointers, not values;
+        * the canonical element must be 8 bytes at 8-byte alignment, which is
+          exactly the internal slot's size and stride;
+        * and moving one element must reduce to a plain 64-bit move, with no
+          widening, narrowing or per-element helper call. That is checked by
+          generating the very expressions the element-at-a-time loop would use
+          and requiring both to be a bare `i64.store` of a bare `i64.load`.
+
+        `Int` is the only element type that satisfies all three today; every
+        other one keeps the loop. The aggregate test runs first so the probe
+        never reaches `load_canon`/`store_canon` for a type whose helpers those
+        would register.
+        """
+        if (self._list_elem(elem) is not None
+                or self.record_fields(elem) is not None
+                or self.tagged_layout(elem) is not None):
+            return False        # aggregate: internally a pointer, not the data
+        try:
+            if self.size(elem) != 8 or self.align(elem) != 8:
+                return False    # canonical stride is not the internal slot
+            src, dst = "$SRC", "$DST"
+            lift = _slot_store(dst, self.load_canon(elem, src), elem)
+            lower = self.store_canon(elem, _slot_load(dst, elem), src)
+        except EmitError:
+            return False        # not canonically representable at all
+        return (lift == f"(i64.store {dst} (i64.load {src}))"
+                and lower == f"(i64.store {src} (i64.load {dst}))")
+
     def _lift_list(self, elem: str) -> str:
         name = f"__canon_lift_list_{_san(elem)}"
 
         def body() -> str:
+            if self.bulk_copyable(elem):
+                return "\n".join([
+                    f"  ;; item 432(c): `{elem}` lays out identically canonical"
+                    " and internal, so the",
+                    "  ;; whole body crosses in one bulk copy, not a load/store"
+                    " per element.",
+                    f"  (func ${name} (param $p i32) (param $len i32) (result i32)",
+                    "    (local $r i32)",
+                    "    (local.set $r (call $alloc (i32.add (i32.const 8) "
+                    "(i32.mul (local.get $len) (i32.const 8)))))",
+                    "    (i32.store (local.get $r) (local.get $len))",
+                    "    (memory.copy (i32.add (local.get $r) (i32.const 8)) "
+                    "(local.get $p) (i32.mul (local.get $len) (i32.const 8)))",
+                    "    (local.get $r))",
+                ])
             esz = self.size(elem)
             caddr = (f"(i32.add (local.get $p) (i32.mul (local.get $i) "
                      f"(i32.const {esz})))")
@@ -426,6 +487,25 @@ class _Canon:
         name = f"__canon_lower_list_{_san(elem)}"
 
         def body() -> str:
+            if self.bulk_copyable(elem):
+                # item 432(c): the internal body at `r+8` ALREADY IS the
+                # canonical array, so the lowered side points the host at it
+                # instead of allocating a scratch buffer and refilling it. The
+                # body is 8-aligned ($alloc hands out 8-byte slots), which is
+                # the canonical alignment such an element demands, and the host
+                # reads the result before it can re-enter the instance, exactly
+                # as it already does for $__canon_lower_str's aliased bytes.
+                return "\n".join([
+                    f"  ;; item 432(c): `{elem}` lays out identically canonical"
+                    " and internal, so the",
+                    "  ;; internal body IS the canonical array: point at it,"
+                    " copy nothing.",
+                    f"  (func ${name} (param $r i32) (param $dst i32)",
+                    "    (i32.store (local.get $dst) (i32.add (local.get $r) "
+                    "(i32.const 8)))",
+                    "    (i32.store offset=4 (local.get $dst) "
+                    "(i32.load (local.get $r))))",
+                ])
             esz = self.size(elem)
             caddr = (f"(i32.add (local.get $buf) (i32.mul (local.get $i) "
                      f"(i32.const {esz})))")
@@ -637,7 +717,13 @@ class _Canon:
             locals_.append((rv, _internal_wasm(ret)))
             locals_.append(("$area", "i32"))
             stmts.append(f"(local.set {rv} {call})")
-            stmts.append(f"(local.set $area (call $alloc (i32.const {self.size(ret)})))")
+            # item 432(f): the canonical return area is CONSTANT for the
+            # module. The component host reads it before it can re-enter the
+            # instance, so one module-level cell sized to the widest result
+            # serves every call on a single-threaded instance -- no bump per
+            # call, and no 8 bytes of unreclaimed heap growth per call.
+            self.ret_area = max(self.ret_area, self.size(ret))
+            stmts.append("(local.set $area (global.get $__canon_ret_area))")
             stmts.append(self.store_canon(ret, f"(local.get {rv})", "(local.get $area)"))
             ret_expr = "(local.get $area)"
 
@@ -665,28 +751,64 @@ class _Canon:
         raise EmitError(f"cannot direct-return canonical type {ret!r}")
 
     # -- the shared canonical library (always emitted) -------------------
-    def base_helpers(self) -> str:
+    def base_helpers(self, alloc_floor: int) -> str:
+        """The always-emitted canonical library.
+
+        `alloc_floor` is the lowest address `$alloc` can ever hand out in this
+        module, which is what makes the item-432(a) zero-copy `Str` lift a
+        CHECKED optimisation rather than an assumption; see below.
+        """
+        # item 432(a). A canonical `string` param reaches a linear-memory
+        # callee in memory the callee itself handed out through
+        # `cabi_realloc`, so if `cabi_realloc` reserves _STR_HEADROOM bytes
+        # below every buffer, the incoming bytes ALREADY sit exactly where the
+        # internal `[u32 len][bytes]` layout wants them: lifting is one store
+        # of the length, O(1) in the string rather than a copy of it.
+        #
+        # That the buffer came from this module's `cabi_realloc` is the
+        # canonical ABI's contract for an indirect param, but it is CHECKED
+        # here rather than assumed: the fast path is gated on `$ptr` lying in
+        # this module's own heap, the only region `cabi_realloc` hands out.
+        # Anything else -- a zero-length buffer, which a host may place at any
+        # aligned address including 0, or a pointer a non-conforming host
+        # invented -- takes a bulk `memory.copy` instead, which is correct for
+        # any pointer and still 1 fuel/byte. The fix therefore cannot write
+        # below a buffer it was not given room under.
+        #
+        # 8 bytes of headroom, not the 4 the length needs, so the pointer
+        # `cabi_realloc` returns stays 8-aligned for `$alloc`'s slot grid.
         return (
             '  ;; --- canonical ABI boundary (item 41) ---\n'
             '  ;; cabi_realloc: the standard allocator a component host calls to\n'
             '  ;; place an incoming string/list into this module\'s memory. Backed\n'
             '  ;; by the same bump heap ($__hp / $alloc); old/align are unused (a\n'
             '  ;; bump allocator never frees, and $alloc already 8-aligns).\n'
+            '  ;; item 432(a): every buffer is handed out with '
+            f'{_STR_HEADROOM} bytes of headroom\n'
+            '  ;; below it, so lifting a canonical string into the internal\n'
+            '  ;; [u32 len][bytes] layout is one store instead of a copy.\n'
             '  (func (export "cabi_realloc")\n'
             '      (param $old i32) (param $old_size i32) (param $align i32) (param $new_size i32)\n'
             '      (result i32)\n'
-            '    (call $alloc (local.get $new_size)))\n'
+            '    (i32.add\n'
+            '      (call $alloc (i32.add (local.get $new_size) '
+            f'(i32.const {_STR_HEADROOM})))\n'
+            f'      (i32.const {_STR_HEADROOM})))\n'
             '  ;; bare (ptr,len) canonical string <-> internal [u32 len][bytes].\n'
+            '  ;; The lift is zero-copy for a buffer that came from the\n'
+            '  ;; cabi_realloc above (every conforming host\'s string param), and\n'
+            '  ;; falls back to a bulk copy for any pointer outside this heap.\n'
             '  (func $__canon_lift_str (param $ptr i32) (param $len i32) (result i32)\n'
-            '    (local $s i32) (local $i i32)\n'
+            '    (local $s i32)\n'
+            f'    (if (i32.ge_u (local.get $ptr) (i32.const {alloc_floor + _STR_HEADROOM}))\n'
+            '      (then\n'
+            '        (i32.store (i32.sub (local.get $ptr) (i32.const 4)) (local.get $len))\n'
+            '        (return (i32.sub (local.get $ptr) (i32.const 4)))))\n'
             '    (local.set $s (call $alloc_str (local.get $len)))\n'
-            '    (block (loop\n'
-            '      (br_if 1 (i32.ge_u (local.get $i) (local.get $len)))\n'
-            '      (i32.store8\n'
-            '        (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))\n'
-            '        (i32.load8_u (i32.add (local.get $ptr) (local.get $i))))\n'
-            '      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n'
-            '      (br 0)))\n'
+            '    (memory.copy\n'
+            '      (i32.add (local.get $s) (i32.const 4))\n'
+            '      (local.get $ptr)\n'
+            '      (local.get $len))\n'
             '    (local.get $s))\n'
             '  (func $__canon_lower_str (param $s i32) (param $dst i32)\n'
             '    (i32.store (local.get $dst) (i32.add (local.get $s) (i32.const 4)))\n'
@@ -780,6 +902,46 @@ def _name_provide_funcs(module: str) -> tuple[str, dict[str, str]]:
     return _PROVIDE_EXPORT.sub(repl, module), symbols
 
 
+# `_V3Emitter` / `_ComponentEmitter` anchor the bump heap with this global; the
+# canonical boundary needs both its value (the floor every `$alloc` result is
+# at or above, item 432a) and the room just under it (the shared canonical
+# return area, item 432f).
+_HEAP_GLOBAL = _re.compile(r"\(global \$__hp \(mut i32\) \(i32\.const (\d+)\)\)")
+
+
+def _canonical_module(core: str, canon: _Canon, exports: list[str]) -> str:
+    """`core` with the canonical boundary spliced in: the shared return area
+    carved off the bottom of the bump heap, then cabi_realloc + the lift/lower
+    library + one wrapper per boundary function.
+
+    Must run AFTER every `canon.canon_export` call, since those are what size
+    the return area and populate `canon.helpers`.
+    """
+    m = _HEAP_GLOBAL.search(core)
+    if m is None:
+        raise EmitError(
+            "core module has no `$__hp` heap global; the canonical boundary "
+            "anchors its return area and its lift bounds check against it")
+    heap_start = int(m.group(1))
+    area = _align_to(canon.ret_area, 8)
+    if area:
+        # item 432(f): one module-level cell instead of a bump per call. Taken
+        # off the BOTTOM of the heap and the heap started above it, so it can
+        # never be handed out again; `$alloc`'s first result moves up by
+        # `area`, which is the floor the lift bounds check uses.
+        core = core.replace(
+            m.group(0),
+            f"(global $__hp (mut i32) (i32.const {heap_start + area}))\n"
+            "  ;; item 432(f): the canonical return area is constant for the\n"
+            "  ;; module (the host reads it before it can re-enter), so one\n"
+            "  ;; cell serves every call instead of one bump allocation each.\n"
+            f"  (global $__canon_ret_area i32 (i32.const {heap_start}))",
+            1)
+    additions = ([canon.base_helpers(heap_start + area)]
+                 + list(canon.helpers.values()) + exports)
+    return _splice_canonical(core, additions)
+
+
 def _splice_canonical(core: str, additions: list[str]) -> str:
     """Splice `additions` (WAT funcs) in just before a core module's closing
     paren. Shared by the pure-`fn` and service-method paths."""
@@ -807,8 +969,7 @@ def _core_with_canonical(ir: dict, canon: _Canon, boundary: list[dict],
     core = modules.get("functions")
     if core is None:
         raise EmitError("no `functions` module was emitted for the canonical component")
-    additions = [canon.base_helpers()] + list(canon.helpers.values()) + exports
-    return _splice_canonical(core, additions)
+    return _canonical_module(core, canon, exports)
 
 
 def _service_core_with_canonical(ir: dict, canon: _Canon, component: dict,
@@ -836,8 +997,7 @@ def _service_core_with_canonical(ir: dict, canon: _Canon, component: dict,
         fn = {"name": mname, "params": spec.get("params") or [],
               "returns": spec.get("returns")}
         exports.append(canon.canon_export(fn, package, iface, call_symbol=sym))
-    additions = [canon.base_helpers()] + list(canon.helpers.values()) + exports
-    return _splice_canonical(named_core, additions)
+    return _canonical_module(named_core, canon, exports)
 
 
 def _resolve_provide_symbol(symbols: dict[str, str], method: str) -> str:

@@ -1,0 +1,11 @@
+// String LITERALS passed to builtins whose runtime helper takes `&str`.
+pub fn literal_arg(xs: List[Str]) -> Int {
+  var n = 0
+  for (x of xs) {
+    if (x.startsWith("pre")) { n = n + 1 }
+    if (x.endsWith("fix")) { n = n + 1 }
+    if (x.indexOf("mid") >= 0) { n = n + 1 }
+    n = n + x.concat("!").length()
+  }
+  return n
+}

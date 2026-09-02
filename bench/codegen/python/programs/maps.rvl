@@ -1,0 +1,22 @@
+// The persistent Map surface: `set` copies, `remove` rebuilds, `keys` sorts.
+fn fill(ks: List[Str]) -> Map[Str, Int] {
+  var m: Map[Str, Int] = Map.empty()
+  var i = 0
+  for (k of ks) {
+    m = m.set(k, i)
+    i += 1
+  }
+  return m
+}
+
+fn drop_keys(m: Map[Str, Int], ks: List[Str]) -> Map[Str, Int] {
+  var out = m
+  for (k of ks) { out = out.remove(k) }
+  return out
+}
+
+fn probe(m: Map[Str, Int], ks: List[Str]) -> Int {
+  var acc = 0
+  for (k of ks) { acc += m.lookup(k) ?? 0 }
+  return acc
+}

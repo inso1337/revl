@@ -1,0 +1,468 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "functions": [
+    {
+      "name": "sum_ids",
+      "params": [
+        {
+          "name": "xs",
+          "type": "List[Int]"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "n",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "for",
+          "bind": "x",
+          "iterable": {
+            "kind": "var",
+            "name": "xs"
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "n",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "n"
+                },
+                "right": {
+                  "kind": "var",
+                  "name": "x"
+                },
+                "operands": "Int"
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "n"
+          }
+        }
+      ]
+    },
+    {
+      "name": "scan",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "i",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "acc",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "n",
+          "value": {
+            "kind": "builtin",
+            "method": "length",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": []
+          },
+          "mutable": true
+        },
+        {
+          "step": "while",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "i"
+            },
+            "right": {
+              "kind": "var",
+              "name": "n"
+            }
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "acc",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "acc"
+                },
+                "right": {
+                  "kind": "builtin",
+                  "method": "charCodeAt",
+                  "target": {
+                    "kind": "var",
+                    "name": "s"
+                  },
+                  "args": [
+                    {
+                      "kind": "var",
+                      "name": "i"
+                    }
+                  ]
+                },
+                "operands": "Int"
+              }
+            },
+            {
+              "step": "assign",
+              "name": "i",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "i"
+                },
+                "right": {
+                  "kind": "lit",
+                  "value": 1
+                },
+                "operands": "Int"
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "acc"
+          }
+        }
+      ]
+    },
+    {
+      "name": "build",
+      "params": [
+        {
+          "name": "xs",
+          "type": "List[Str]"
+        },
+        {
+          "name": "sep",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "out",
+          "value": {
+            "kind": "lit",
+            "value": ""
+          },
+          "mutable": true
+        },
+        {
+          "step": "for",
+          "bind": "x",
+          "iterable": {
+            "kind": "var",
+            "name": "xs"
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "out",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "bin",
+                  "op": "+",
+                  "left": {
+                    "kind": "var",
+                    "name": "out"
+                  },
+                  "right": {
+                    "kind": "var",
+                    "name": "x"
+                  }
+                },
+                "right": {
+                  "kind": "var",
+                  "name": "sep"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "out"
+          }
+        }
+      ]
+    },
+    {
+      "name": "label",
+      "params": [
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "interp",
+            "parts": [
+              [
+                "text",
+                "item "
+              ],
+              [
+                "expr",
+                {
+                  "kind": "var",
+                  "name": "name"
+                }
+              ],
+              [
+                "text",
+                " #"
+              ],
+              [
+                "expr",
+                {
+                  "kind": "var",
+                  "name": "n"
+                }
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "collect",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "List[Int]",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "out",
+          "value": {
+            "kind": "list",
+            "items": [],
+            "expected": "List[Int]"
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "i",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "while",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "i"
+            },
+            "right": {
+              "kind": "var",
+              "name": "n"
+            }
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "out",
+              "value": {
+                "kind": "builtin",
+                "method": "push",
+                "target": {
+                  "kind": "var",
+                  "name": "out"
+                },
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "i"
+                  }
+                ]
+              }
+            },
+            {
+              "step": "assign",
+              "name": "i",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "i"
+                },
+                "right": {
+                  "kind": "lit",
+                  "value": 1
+                },
+                "operands": "Int"
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "out"
+          }
+        }
+      ]
+    },
+    {
+      "name": "tag",
+      "params": [
+        {
+          "name": "a",
+          "type": "Str"
+        },
+        {
+          "name": "b",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "interp",
+            "parts": [
+              [
+                "expr",
+                {
+                  "kind": "var",
+                  "name": "a"
+                }
+              ],
+              [
+                "text",
+                "/"
+              ],
+              [
+                "expr",
+                {
+                  "kind": "var",
+                  "name": "b"
+                }
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "joined",
+      "params": [
+        {
+          "name": "a",
+          "type": "Str"
+        },
+        {
+          "name": "b",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "bin",
+            "op": "+",
+            "left": {
+              "kind": "bin",
+              "op": "+",
+              "left": {
+                "kind": "var",
+                "name": "a"
+              },
+              "right": {
+                "kind": "lit",
+                "value": "/"
+              }
+            },
+            "right": {
+              "kind": "var",
+              "name": "b"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+// `match` is the idiomatic way to consume Opt and Result. Each arm lowers to a
+// lambda that is BUILT and CALLED at every evaluation.
+fn unwrap_or(o: Opt[Int], d: Int) -> Int {
+  return match o { Some(v) => v, None => d }
+}
+
+fn sum_present(xs: List[Opt[Int]]) -> Int {
+  var t = 0
+  for (o of xs) { t += match o { Some(v) => v, None => 0 } }
+  return t
+}
+
+fn classify(o: Opt[Int]) -> Int {
+  return match o { Some(v) => v + 1, _ => 0 }
+}

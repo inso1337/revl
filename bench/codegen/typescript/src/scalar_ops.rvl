@@ -1,0 +1,43 @@
+// Negative control: shapes the emitter produces that a hand-written TS
+// equivalent would not obviously beat. Int arithmetic through the overflow
+// guard, structural equality on scalars, ADT and record construction, record
+// field reads, and the character-class predicate IIFE.
+type Pt = { x: Int, y: Int }
+type Tag = A(Int) | B(Int)
+
+pub fn arith(n: Int) -> Int {
+  var acc = 0
+  var i = 0
+  while (i < n) {
+    acc = acc + i
+    i = i + 1
+  }
+  return acc
+}
+
+pub fn scalar_eq(n: Int) -> Int {
+  var hits = 0
+  var i = 0
+  while (i < n) {
+    if (i == 7) { hits = hits + 1 }
+    i = i + 1
+  }
+  return hits
+}
+
+pub fn build(n: Int) -> Int {
+  var acc = 0
+  var i = 0
+  while (i < n) {
+    let p = { x: i, y: i + 1 }
+    acc = acc + p.x + p.y
+    i = i + 1
+  }
+  return acc
+}
+
+pub fn classify(c: Str) -> Int {
+  if (c.is_digit()) { return 1 }
+  if (c.is_alpha()) { return 2 }
+  return 0
+}

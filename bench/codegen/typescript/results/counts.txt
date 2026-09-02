@@ -1,0 +1,69 @@
+node v26.7.0   cases: 7
+all default numbers are COUNTS, not durations: they do not move with machine load
+
+## async-arrow-value
+  a service op passed as a function value is wrapped in a fresh `async` arrow per call; the closure is activation-invariant and the `async` adds a resolution hop over the promise the body already returns
+  emitted     microtask turns       6.0   promise allocs       9.0 per logical op
+  de-coloured microtask turns       4.0   promise allocs       7.0 per logical op
+  hand        microtask turns       4.0   promise allocs       7.0 per logical op
+  EXCESS vs hand: 2 microtask turns, 2 promise allocations (2.0 / 2.0 per op)
+  shape metric (read off the emitted text, not executed): emitted 1 closures / 2 awaits per call, hand 0 / 2
+
+## emission-method-effect
+  each emission-method call allocates the ctx.effect body closure as well as the disposer; only the body closure is avoidable
+  emitted     microtask turns       0.0   promise allocs       0.1 per logical op
+  hand        microtask turns       0.0   promise allocs       0.1 per logical op
+  EXCESS vs hand: 0 microtask turns, 0 promise allocations (0.0 / 0.0 per op)
+  executed: 10 put() calls -> 10 ctx.effect calls, 10 distinct body closures (one fresh per call)
+
+## list-build-spread
+  `xs = xs.push(e)` lowers to a whole-array spread copy per iteration, so building an n-element list copies n(n-1)/2 elements instead of n
+  emitted     microtask turns         2   promise allocs         3 per run
+  hand        microtask turns         2   promise allocs         3 per run
+  EXCESS vs hand: 0 microtask turns, 0 promise allocations
+  shape metric (read off the emitted text, not executed): emitted 0 closures / 0 awaits per call, hand 0 / 0
+
+## match-in-async-fn
+  a match in an async body lowers to an awaited async IIFE plus one awaited async arrow per bound arm, even when no arm suspends
+  emitted     microtask turns       4.2   promise allocs       8.3 per logical op
+  hand        microtask turns       2.2   promise allocs       4.3 per logical op
+  EXCESS vs hand: 24 microtask turns, 48 promise allocations (2.0 / 4.0 per op)
+  shape metric (read off the emitted text, not executed): emitted 2 closures / 3 awaits per call, hand 0 / 2
+
+## match-sync-arms-in-async-fn
+  a match whose arms never suspend still lowers to an awaited async IIFE plus one awaited async identity arrow per bound arm
+  emitted     microtask turns       5.0   promise allocs       9.0 per logical op
+  de-coloured microtask turns       3.0   promise allocs       5.0 per logical op
+  hand        microtask turns       3.0   promise allocs       5.0 per logical op
+  EXCESS vs hand: 2 microtask turns, 4 promise allocations (2.0 / 4.0 per op)
+  shape metric (read off the emitted text, not executed): emitted 3 closures / 3 awaits per call, hand 0 / 1
+
+## scalar-ops-control
+  NEGATIVE CONTROL: the Int overflow guard, revlEq on scalars, record literals and the character-class predicate IIFE are all cheap
+  emitted     microtask turns         2   promise allocs         3 per run
+  hand        microtask turns         2   promise allocs         3 per run
+  EXCESS vs hand: 0 microtask turns, 0 promise allocations
+
+## string-scan-helpers
+  revlLen/revlCharAt/revlCharCodeAt each rebuild the whole code-point array, and the while lowering re-evaluates revlLen every iteration, so an index scan is quadratic in time and allocation
+  emitted     microtask turns         2   promise allocs         3 per run
+  hand-memo   microtask turns         2   promise allocs         3 per run
+  hand        microtask turns         2   promise allocs         3 per run
+  EXCESS vs hand: 0 microtask turns, 0 promise allocations
+
+## string-scan allocation complexity: code points materialised by Array.from
+  (count_digits over an n-code-point ASCII string; exact counts, no timing)
+  n           emitted        memo         hand
+  200             80200          200          200
+  400            320400          400          400
+  800           1280800          800          800
+  1600          5121600         1600         1600
+  emitted grows as 2n^2 + n; memo and hand are n. Quadratic in the input length.
+
+## list-build element copies (exact counts, no timing)
+  n         emitted         hand
+  50           1225            0
+  100          4950            0
+  200         19900            0
+  400         79800            0
+  emitted grows as n(n-1)/2; hand copies nothing. Quadratic in the list length.

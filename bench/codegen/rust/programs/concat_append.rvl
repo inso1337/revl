@@ -1,0 +1,17 @@
+// Self-append through `concat` rather than `push`. Item 284 rewrote
+// `out = out.push(x)` to an in-place mutation but deliberately left `concat`
+// out, because `concat` is defined on both Str and List and the receiver type
+// was said to be unknown at that node. `selfhost/emit_go.rvl`,
+// `emit_java.rvl`, `emit_ts.rvl` and `checker.rvl` accumulate their output
+// through exactly this shape.
+pub fn concat_append(chunks: List[List[Str]]) -> Int {
+  var lines: List[Str] = []
+  for (c of chunks) {
+    lines = lines.concat(c)
+  }
+  var text = ""
+  for (l of lines) {
+    text = text.concat(l)
+  }
+  return text.length() + lines.length()
+}
