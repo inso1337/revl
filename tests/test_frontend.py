@@ -228,10 +228,11 @@ REJECTIONS = {
     # item 294 Slice 1: a spawn that widens a parameterized capability (a child
     # reaching a path outside the parent's declared cone) is refused by the same
     # attenuation fold that refuses a dropped token, now comparing (T, P) via
-    # the key-to-token bridge.
+    # the key-to-token bridge. The refusal names the DECLARED boundary
+    # (`fs.write`), never the local wiring key (`fs`) it was reached through.
     "g4_spawn_widens_parameter.rvl":
-        "granting it `fs(path=\"/etc\")`, but `Router` holds only "
-        "`fs(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
+        "granting it `fs.write(path=\"/etc\")`, but `Router` holds only "
+        "`fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
         "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
     "g4_spawn_widens_capability.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
