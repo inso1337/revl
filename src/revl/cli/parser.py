@@ -862,9 +862,11 @@ def build_parser() -> argparse.ArgumentParser:
                               "of firing unprompted. Required when the snapshot "
                               "records an approval policy")
     recover.add_argument("--policy", default=None, metavar="POLICY",
-                         help="on --restore, re-bind the boundary-policy file (item "
-                              "33) the snapshot was taken under, so its `requires "
-                              "approval` gate re-arms on recovery")
+                         help="the boundary-policy file (item 33). On --restore it "
+                              "re-binds the posture the snapshot was taken under so "
+                              "the `requires approval` gate re-arms; a `recovery may "
+                              "re-issue owed emissions` rule additionally turns on "
+                              "the item-440 re-issue seam (off by default)")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
 
     why = sub.add_parser(

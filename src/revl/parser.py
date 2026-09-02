@@ -692,6 +692,20 @@ class ExternDecl:
     # IR + WAL discharge-descriptor so recovery reads the register in a fresh
     # process (docs/design/309-idempotent-inverse.md, §1a).
     undo_idempotent: bool = False
+    # item 440: `undo pure <inverse>(result)` — the READ tier, the third value of
+    # 309's re-dispatch register. It claims the declared inverse CHANGES NOTHING
+    # (it observes, it does not mutate), so re-issuing it is observationally free
+    # and needs neither an idempotency key nor a fence nor an operator. `pure` is
+    # already a reserved keyword and an inverse fn named `pure` is impossible, so
+    # accepting the kw token in the undo slot is unambiguous — the same argument
+    # item 309 made for `idempotent` there. It is a DECLARATION, not a derivation:
+    # revl's `pure` extern CLASSIFICATION means "not acquire/emission/witnessed",
+    # not "read-only" (`extern pure fn close_ledger(h) = @py { ... }` is shipped
+    # in docs/guide-ai-agents.md), so the classification alone cannot be trusted
+    # to mean read. Lower checks the named inverse IS a `pure`-classified extern,
+    # which anchors the claim to the existing classification without deriving the
+    # read tier from it. `False` for every existing extern (byte-identical IR).
+    undo_read: bool = False
     # item 309: bare `idempotent` in the extern modifier slot — item-44's
     # emission delivery claim extended from service methods to externs (the
     # author asserts the remote treats re-delivery as delivery). Emission-only,
@@ -1784,6 +1798,7 @@ class Parser:
             cache = self._cache_clause()
         undo = None
         undo_idempotent = False
+        undo_read = False
         compensate = None
         if self.at("kw", "undo"):
             self.next()
@@ -1792,9 +1807,22 @@ class Parser:
             # `idempotent` is impossible, so accepting the kw token here is
             # unambiguous (design §1a). It scopes the `undo(undo(s)) = undo(s)`
             # claim to this inverse, not the forward mutation.
-            if self.at("kw", "idempotent"):
-                self.next()
-                undo_idempotent = True
+            # item 440: `undo pure <inverse>(result)` — the READ tier, the
+            # third register value, in the same slot and on the same argument:
+            # `pure` is reserved, so an inverse fn named `pure` is impossible and
+            # the kw token here is unambiguous. Both words are ACCEPTED here (in
+            # either order) so that writing both gets an honest "two different
+            # claims about one inverse" diagnostic from lower rather than a bare
+            # parse error pointing at the inverse expression.
+            while True:
+                if self.at("kw", "idempotent") and not undo_idempotent:
+                    self.next()
+                    undo_idempotent = True
+                elif self.at("kw", "pure") and not undo_read:
+                    self.next()
+                    undo_read = True
+                else:
+                    break
             undo = self.pure_expr()
         if self.at("kw", "compensate"):
             self.next()
@@ -1876,7 +1904,8 @@ class Parser:
                           capabilities=capabilities, type_params=type_params, async_=async_,
                           deferred=deferred, requires_approval=requires_approval,
                           reach=reach, config=config, colour_poly=colour_poly,
-                          undo_idempotent=undo_idempotent, idempotent=idempotent,
+                          undo_idempotent=undo_idempotent, undo_read=undo_read,
+                          idempotent=idempotent,
                           idempotency_key=idempotency_key, cache=cache,
                           validated=validated, retry=retry_budget)
 
