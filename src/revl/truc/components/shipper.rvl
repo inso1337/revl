@@ -11,6 +11,15 @@
 //      not find: a human/agent-readable description and search tags are
 //      mandatory (the provide/require surfaces + capabilities/emissions come
 //      from the compiler audit and ride into the published index row too).
+//   3. the *registry's* release rule (roadmap item 49 phase 2). A name already
+//      published is no longer refused outright: it may be REPUBLISHED as a new
+//      release, and `host_release_facts` carries the registry's own verdict on
+//      whether this one may replace it — the release must be declared, a
+//      published release is immutable, and the declared version must satisfy
+//      the bump item 64 COMPUTES from the interface diff. Where that bump
+//      cannot be computed the publish is refused rather than waved through,
+//      unless the publisher declares an opaque version scheme, and then every
+//      release under it is recorded `cannot verify` for consumers to see.
 //
 // Every branch and decision is a pure free fn below (revl audit sees the
 // Shipper *component* as a thin rim: it emits the boundary externs and threads
@@ -30,7 +39,8 @@
 
 use "../externs.rvl" {
   json_parse, json_stringify,
-  host_ship_context, host_gauntlet, host_admit_all, host_publish, host_print
+  host_ship_context, host_gauntlet, host_admit_all, host_release_facts,
+  host_publish, host_print
 }
 
 // ---- shapes crossing in ----
@@ -42,12 +52,22 @@ type ShipCtx = {
   registryName: Str,
   registryPath: Str,
   policy: Str,
-  existingNames: List[Str],
   evidencePresent: Bool,
   evidenceVerdict: Str,
   evidenceLifecycle: Str
 }
 type Audit    = { ok: Bool, diagnostic: Str }
+// The registry's release verdict — same {ok, diagnostic} shape as the gate's,
+// plus what the publisher declared, so the plan carries it verbatim.
+type Release  = {
+  ok: Bool,
+  diagnostic: Str,
+  version: Str,
+  scheme: Str,
+  publisher: Str,
+  previousVersion: Str,
+  note: Str
+}
 type Evidence = { verdict: Str, lifecycle: Str, admission: Str, dossierText: Str }
 type ShipCand = { path: Str, source: Str, name: Str }
 
@@ -61,7 +81,10 @@ type PublishPlan = {
   description: Str,
   tags: List[Str],
   stampDossier: Bool,
-  dossierText: Str
+  dossierText: Str,
+  version: Str,
+  scheme: Str,
+  publisher: Str
 }
 type ShipReport = { code: Int, message: Str, plan: Str }
 
@@ -85,15 +108,6 @@ fn ship_ordered(ctxJson: Str) -> Str {
 
 // ---- pure helpers ----
 
-fn name_in(xs: List[Str], s: Str) -> Bool {
-  for (x of xs) {
-    if (x == s) {
-      return true
-    }
-  }
-  return false
-}
-
 fn evidence_passes(c: ShipCtx, fresh: Evidence) -> Bool {
   // present (deliberate authorship) AND both the supplied record and a fresh
   // re-run agree it is admissible and the lifecycle battery passed.
@@ -115,10 +129,11 @@ fn refuse(message: Str) -> Str {
 
 // ---- THE DECISION (pure) ----
 
-fn ship_report(ctxJson: Str, name: Str, auditJson: Str, freshJson: Str) -> Str {
+fn ship_report(ctxJson: Str, name: Str, auditJson: Str, freshJson: Str, releaseJson: Str) -> Str {
   let c: ShipCtx = json_parse(ctxJson)
   let audit: Audit = json_parse(auditJson)
   let fresh: Evidence = json_parse(freshJson)
+  let release: Release = json_parse(releaseJson)
 
   // 1. DISCOVERABILITY — refuse an under-described component, naming what's
   //    missing (the human's decision 2). Another agent must be able to find it.
@@ -143,10 +158,14 @@ fn ship_report(ctxJson: Str, name: Str, auditJson: Str, freshJson: Str) -> Str {
 `.concat(audit.diagnostic))
   }
 
-  // 3. FIRST-COME — the registry has a single namespace, names are claimed by
-  //    "the directory did not exist" (docs/registry.md §1).
-  if (name_in(c.existingNames, name)) {
-    return refuse(`"${name}" is already published in registry "${c.registryName}" (names are first-come; pick another name).`)
+  // 3. THE RELEASE RULE — the registry's own verdict (item 49 phase 2). A free
+  //    name is claimed first-come; a name already published may be republished
+  //    as a NEW RELEASE, and everything that makes that safe (the release is
+  //    declared, a published release is immutable, the declared version
+  //    satisfies the computed bump, the publisher label does not change hands)
+  //    is decided by revl.registry, not by a second opinion here.
+  if (!release.ok) {
+    return refuse(`"${name}" cannot be published to registry "${c.registryName}": ${release.diagnostic}`)
   }
 
   // 4. EVIDENCE, per the TARGET registry's declared policy.
@@ -173,10 +192,15 @@ fn ship_report(ctxJson: Str, name: Str, auditJson: Str, freshJson: Str) -> Str {
     description: c.description,
     tags: c.tags,
     stampDossier: stampFinal,
-    dossierText: fresh.dossierText
+    dossierText: fresh.dossierText,
+    version: release.version,
+    scheme: release.scheme,
+    publisher: release.publisher
   }
   let ev = evidence_word(stampFinal)
-  return make_report(0, `truc: published "${name}" to registry "${c.registryName}" — admitted through the gate${ev}; discoverable in index.json (provides/requires/capabilities/description/tags).`, json_stringify(plan))
+  let tag = release_tag(release)
+  let replaced = release_replaces(release)
+  return make_report(0, `truc: published "${name}${tag}"${replaced} to registry "${c.registryName}" — admitted through the gate${ev}; discoverable in index.json (provides/requires/capabilities/description/tags).${release.note}`, json_stringify(plan))
 }
 
 fn evidence_word(stamp: Bool) -> Str {
@@ -184,6 +208,22 @@ fn evidence_word(stamp: Bool) -> Str {
     return ", gauntlet evidence stamped into the entry"
   }
   return ""
+}
+
+// Name the release in the success line: which one this is, and which one it
+// replaced. An unversioned publish adds neither, and says so in the note.
+fn release_tag(release: Release) -> Str {
+  if (release.version == "") {
+    return ""
+  }
+  return "@".concat(release.version)
+}
+
+fn release_replaces(release: Release) -> Str {
+  if (release.previousVersion == "") {
+    return ""
+  }
+  return " (replacing ".concat(release.previousVersion).concat(")")
 }
 
 // ---- report accessors ----
@@ -220,7 +260,8 @@ component Shipper provides ship: Shipper {
       let audit = emit host_admit_all(ordered)
       let source = ship_source(ctx)
       let fresh = emit host_gauntlet(source)
-      let r = ship_report(ctx, name, audit, fresh)
+      let release = emit host_release_facts(projectDir, name)
+      let r = ship_report(ctx, name, audit, fresh, release)
       emit host_publish(ship_plan_of(r))
       emit host_print(ship_msg_of(r))
       return ship_code_of(r)

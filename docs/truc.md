@@ -105,8 +105,45 @@ surface everyone else will read — `provides`/`requires`, capability counts,
 manifest and source hashes.
 
 ```console
-$ truc ship
+$ truc ship greeter
+truc: published "greeter@1.1.0" (replacing 1.0.0) to registry "community" — …
 ```
+
+`[ship]` in `truc.toml` declares what the compiler cannot derive:
+
+```toml
+[ship]
+registry       = "community"
+description    = "A greeting service: name in, hello out."
+tags           = ["greet", "text"]
+version        = "1.1.0"      # the release this is
+publisher      = "acme"       # the label an update must keep
+version_scheme = "semver"     # or "opaque" for dates/build ids
+```
+
+A free name is claimed first-come. A name you already published is
+**republished as a new release**, and the registry decides whether this one may
+replace it ([registry.md §1.2](registry.md#12-releases--the-update-flow)): the
+release must be declared, a published release is immutable, and the version you
+declare must satisfy the bump `revl version` **computes** from the interface
+diff against the release it replaces. Declaring `1.0.1` over a breaking reshape
+is refused by name; declaring `2.0.0` where a minor would do is not (an
+over-bump misleads nobody).
+
+Where that bump cannot be computed — a date, a build id, anything that is not
+`MAJOR.MINOR.PATCH` — the publish is **refused**, not waved through. Setting
+`version_scheme = "opaque"` publishes anyway and records `cannot verify` on
+that release for every consumer to read.
+
+Two things fail closed and are worth knowing before your first publish. An
+entry published with no `version` can never be *updated*, because there is no
+release to bump from; ship says so on the way out. And `publisher` is
+continuity of a label you assert, not authentication — it catches a name
+quietly changing hands, and registry-side identity is still to come.
+
+Each release freezes its own bytes, manifest, record and derived changelog under
+`registry/components/<name>/releases/<version>/`, so the chain survives the next
+publish and `index.json` carries the list of releases in the entry's row.
 
 ### `truc reproduce`
 

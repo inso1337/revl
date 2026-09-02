@@ -92,10 +92,20 @@ pub extern emission fn host_ship_context(project_dir: Str) -> Str
 pub extern emission fn host_gauntlet(source: Str) -> Str
   = @py { from revl.truc._host import gauntlet_evidence; return gauntlet_evidence(source) }
 
-// The publish I/O: write registry/components/<name>/, regenerate the index
-// via revl.registry.build_index (manifest.json is REGENERATED, never copied),
-// then carry the discoverability fields (description/tags) into the index row.
-// A no-op on an empty plan, so "registry untouched on refusal" is a pure
-// Shipper decision (the empty-guard, mirroring host_commit_add).
+// The REGISTRY's verdict on publishing this name from this project, in the same
+// {ok, diagnostic} shape as the gate: may an already-published name be
+// republished as a new release, does the declared version follow the one it
+// replaces, and does it satisfy the bump item 64 COMPUTES from the interface
+// diff (roadmap item 49 phase 2). truc cannot hold a different opinion from
+// revl about registry semantics any more than it can about admission.
+pub extern emission fn host_release_facts(project_dir: Str, name: Str) -> Str
+  = @py { from revl.truc._host import release_facts; return release_facts(project_dir, name) }
+
+// The publish I/O: revl.registry.publish_release — freeze the release being
+// replaced, install the component, record the declared version, regenerate the
+// index (manifest.json is REGENERATED, never copied), attach the derived
+// changelog, then carry the discoverability fields (description/tags) into the
+// index row. A no-op on an empty plan, so "registry untouched on refusal" is a
+// pure Shipper decision (the empty-guard, mirroring host_commit_add).
 pub extern emission fn host_publish(plan_json: Str) -> Str
   = @py { from revl.truc._host import publish; return publish(plan_json) }

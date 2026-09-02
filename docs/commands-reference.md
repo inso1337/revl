@@ -811,7 +811,19 @@ verbs it accepts today:
 - `truc rm <name>` - remove a dependency.
 - `truc assemble` - assemble the workspace into a build (`--check` is the
   dry-run that writes nothing).
-- `truc ship <target>` - ship the assembled composition.
+- `truc ship <target>` - publish the assembled composition to a registry. A free
+  name is claimed first-come; a name already published is republished as a NEW
+  RELEASE, declared in `[ship] version` (roadmap item 49 phase 2,
+  [registry.md §1.2](registry.md#12-releases--the-update-flow)). A published
+  release is immutable, an unversioned entry cannot be replaced, and the
+  declared version must satisfy the bump `revl version` computes from the
+  interface diff against the release it replaces - an under-bump is refused by
+  name. A version the bump check cannot read (a date, a build id) refuses unless
+  `[ship] version_scheme = "opaque"`, which publishes with the check recorded as
+  `cannot verify`. `[ship] publisher` must stay the same across releases of a
+  name (continuity of a self-asserted label, not authentication). Each release
+  freezes its bytes, manifest, record and derived changelog (item 261) under
+  `components/<name>/releases/<version>/`.
 - `truc reproduce <component@version>` - deterministic package reproduction
   (roadmap item 297, [truc.md](truc.md#truc-reproduce)). Rebuilds a published
   component and verifies it is bit-for-bit what was published, comparing
