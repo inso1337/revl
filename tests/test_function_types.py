@@ -442,6 +442,13 @@ fn run_loop(msgs: List[Str], step: (List[Str]) -> Step, n: Int) -> Step {
   }
 }
 
+fn answer_of(s: Step) -> Str {
+  return match s {
+    Final(answer) => answer,
+    NeedTool(req) => req.name,
+  }
+}
+
 service Model { emission fn complete(h: List[Str]) -> Str }
 service Loop { emission fn run(p: Str) -> Str }
 component Agent requires model: Model provides agent: Loop {
@@ -452,9 +459,10 @@ component Agent requires model: Model provides agent: Loop {
       let first = emit model.complete(msgs)
       return match decode_response(first) {
         Final(answer) => answer,
-        NeedTool(req) => run_loop(msgs.push(req.name),
-                                  msgs2 => decode_response(emit model.complete(msgs2)),
-                                  config.max_steps - 1),
+        NeedTool(req) => answer_of(
+          run_loop(msgs.push(req.name),
+                   msgs2 => decode_response(emit model.complete(msgs2)),
+                   config.max_steps - 1)),
       }
     }
   }

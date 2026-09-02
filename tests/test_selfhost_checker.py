@@ -552,7 +552,6 @@ ACCEPTED_PROG_EXPR = [
     ("type Box = Wrap(Any) | Empty", "Empty"),
     ("type W = Wrap(Int)", "Wrap(x)"),
     ("type W = Wrap(Int)", "Wrap(q)"),
-    ("type N = Wrap(Never) | X", "Wrap(1)"),
     ("type M = M(Opt[Int]) | N", "M(1)"),
     ("type M = M(Opt[Int]) | N", "M(Some(1))"),
     # Some/Ok/Err keep their builtin parametric results
@@ -644,6 +643,10 @@ REJECTED_PROG_EXPR = [
     ("type Bad = Result", "1"),
     ("type R = { a: Opt }", "1"),
     ("type S = A(Opt) | B", "1"),
+    # `Never` is not denotable: it is the inferred bottom, a two-way wildcard
+    # and uninhabited, so writing it into a payload/field is an unchecked cast
+    ("type N = Wrap(Never) | X", "Wrap(1)"),
+    ("type R = { a: Never }", "1"),
 ]
 
 
