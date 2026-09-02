@@ -121,6 +121,10 @@ def _placeholder_reaches(tier: str, emitted: str) -> bool:
     wasm module cannot: a Str crosses the host import as a POINTER, so the call
     frames the offset of a pooled `<redacted:secret>` data segment — which is
     checked here by resolving that offset rather than by trusting the constant.
+
+    Scoped to the record call on purpose: the go tier's host-trace registry
+    (item 421 F6) declares the SAME constant in its preamble, so a whole-module
+    search would report a redacted referent for an emission that has none.
     """
     call = _record_call(tier, emitted)
     if tier != "wasm":
@@ -335,7 +339,8 @@ def test_an_ordinary_witness_is_still_recorded_verbatim(tier):
     emitted = _emit_record(tier, _lease_ir("Result[Str, Str]", tier))
     assert WITNESS_EXPR[tier] in _record_call(tier, emitted), \
         f"{tier} lost its referent"
-    assert REDACTED_SECRET not in emitted, f"{tier} redacts an unmarked witness"
+    assert not _placeholder_reaches(tier, emitted), \
+        f"{tier} redacts an unmarked witness"
 
 
 @pytest.mark.parametrize("tier", WAL_TIERS)
@@ -344,7 +349,7 @@ def test_a_secret_on_the_error_arm_leaves_the_referent_alone(tier):
     `secret_witness` is not, and it is the latter the WAL writer reads."""
     emitted = _emit_record(tier, _lease_ir("Result[Str, Secret[Str]]", tier))
     assert WITNESS_EXPR[tier] in _record_call(tier, emitted)
-    assert REDACTED_SECRET not in emitted
+    assert not _placeholder_reaches(tier, emitted)
 
 
 # ---------------------------------------------------------------------------
