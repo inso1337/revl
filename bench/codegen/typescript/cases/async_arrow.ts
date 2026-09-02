@@ -4,24 +4,27 @@
 // on EVERY call. Two separate costs:
 //   1. the closure is allocated per call although it captures only `ctx`,
 //      which is fixed for the whole activation;
-//   2. it is `async` although its body only forwards an already-async call, so
-//      every hop through it resolves through the async-function wrapper
+//   2. it was `async` although its body only forwards an already-async call,
+//      so every hop through it resolved through the async-function wrapper
 //      instead of returning the callee's promise straight to the awaiter.
 //
-// Emitter site: backends/typescript/emit.py, the arrow branch around the
-// `is_async = bool(node.get("async"))` / `prefix = "async " if is_async` lines.
+// (2) is fixed by item 435(b): the arrow branch of
+// backends/typescript/emit.py now drops `async` when the rendered body has no
+// `await` and IS the un-awaited emission Promise. (1) is untouched, so the
+// emitted arm should now measure equal to `de-coloured` and the remaining gap
+// to `hand` is the per-call closure allocation alone.
 
 import { Context } from 'cordis'
 import { Agent } from '../emitted/async_arrow.ts'
 
 export const name = 'async-arrow-value'
 export const summary =
-  'a service op passed as a function value is wrapped in a fresh `async` ' +
-  'arrow per call; the closure is activation-invariant and the `async` adds a ' +
-  'resolution hop over the promise the body already returns'
+  'a service op passed as a function value is wrapped in a fresh arrow per ' +
+  'call; the arrow is no longer `async` (item 435(b)), so what is left is the ' +
+  'activation-invariant closure allocation'
 
 export const provenance = [
-  { file: 'async_arrow.ts', snippet: '(async (msgs: any) => (ctx.model.complete(msgs)))' },
+  { file: 'async_arrow.ts', snippet: '((msgs: any) => (ctx.model.complete(msgs)))' },
 ]
 
 const ModelStub = {
@@ -94,6 +97,6 @@ export const handHot = async () => { for (let i = 0; i < 2000; i++) await handAg
 
 // shape metric, read off emitted/async_arrow.ts (not executed)
 export const shape = {
-  emitted: { closuresPerCall: 1, awaitsPerCall: 2 },  // fresh async arrow per run() call
+  emitted: { closuresPerCall: 1, awaitsPerCall: 2 },  // fresh (no longer async) arrow per run() call
   hand: { closuresPerCall: 0, awaitsPerCall: 2 },     // arrow hoisted to the activation, not async
 }

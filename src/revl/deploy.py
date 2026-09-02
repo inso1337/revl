@@ -110,6 +110,13 @@ FACET_POLICY = "policy"
 FACET_LOCK = "lock"
 FACET_GAUNTLET = "gauntlet"
 
+#: The one item-31 gauntlet verdict that is evidence of admissibility, and the
+#: dossier member naming the composition the dossier was graded over. Both are
+#: `bundle.py`'s spellings, re-stated here so admission never imports the
+#: bundler (the receiver has a bundle, not a build).
+GAUNTLET_ADMISSIBLE = "admissible"
+GAUNTLET_IDENTITY = "compositionHash"
+
 
 def artifact_facet(backend: str) -> str:
     """The `evidence_bindings` key binding one backend's emitted artifact."""
@@ -142,6 +149,44 @@ def _file_digest(path: Path) -> str:
     return _sha256_bytes(path.read_bytes())
 
 
+def _artifact_files(root: Path) -> list[Path]:
+    """Every REGULAR file under `root`, walked without following a single link.
+
+    `rglob` plus `p.is_file()` followed symlinks, so a link inside
+    `emitted/<backend>/` bound bytes that live OUTSIDE the bundle and stay
+    writable after the signature is taken: the digest covered a path the bundle
+    does not own (roadmap 428 F11). A tree digest is only a statement about the
+    bundle if every byte it folds is IN the bundle, so a link is refused rather
+    than resolved. The same refusal covers a fifo, socket or device node, whose
+    "bytes" are not bytes the receiver can re-read and get the same answer.
+    """
+    if root.is_symlink():
+        raise RevlError(str(root), 0,
+                        "the emitted artifact directory is a symlink; a digest "
+                        "over it would bind bytes the bundle does not contain")
+    found: list[Path] = []
+    stack = [root]
+    while stack:
+        for entry in sorted(stack.pop().iterdir()):
+            if entry.is_symlink():
+                raise RevlError(
+                    str(entry), 0,
+                    "the emitted artifact tree contains a symlink, so the "
+                    "bytes it binds live outside the bundle and stay writable "
+                    "after the signature is taken; it is refused rather than "
+                    "followed")
+            if entry.is_dir():
+                stack.append(entry)
+            elif entry.is_file():
+                found.append(entry)
+            else:
+                raise RevlError(
+                    str(entry), 0,
+                    "the emitted artifact tree contains an entry that is not a "
+                    "regular file, so it has no stable bytes to bind")
+    return sorted(found)
+
+
 def artifact_digest(backend_dir: Path | str) -> str:
     """The digest of one backend's emitted artifact — a *tree* digest, since a
     backend may emit several files (the wasm emitter emits one `.wat` per
@@ -152,10 +197,27 @@ def artifact_digest(backend_dir: Path | str) -> str:
     split of the emitted set can collide with another. This is the value the
     signer binds and the value the receiver RE-COMPUTES from the bytes it is
     about to execute.
+
+    Two things it REFUSES rather than digests, both `RevlError` (428 F11):
+
+      * a symlink anywhere in the tree, or a `backend_dir` that is itself one —
+        the bytes would live outside the bundle and stay writable after
+        signing, so the digest would not be a statement about the bundle;
+      * an EMPTY tree — it folds nothing and yields `sha256(b"")`, a value
+        anyone can produce without holding any artifact at all. An artifact of
+        no bytes is not an artifact, and admitting one means admitting a bundle
+        with nothing to execute on the strength of a matching hash.
     """
     root = Path(backend_dir)
+    files = _artifact_files(root)
+    if not files:
+        raise RevlError(
+            str(root), 0,
+            "the emitted artifact directory is empty, so its tree digest is "
+            f"sha256 of nothing ({_sha256_bytes(b'')[:12]}…) — a value that "
+            "matches without any artifact being present. An empty artifact is "
+            "refused, never digested")
     digest = hashlib.sha256()
-    files = sorted(p for p in root.rglob("*") if p.is_file())
     for path in files:
         rel = path.relative_to(root).as_posix().encode("utf-8")
         data = path.read_bytes()
@@ -170,6 +232,12 @@ def chain_bindings(bundle_dir: Path | str, *,
                    backends: Optional[Iterable[str]] = None) -> dict:
     """Collect every link of the chain as a per-facet sha256, ready to fold into
     item 127's signed `evidence_bindings`.
+
+    A facet whose file the bundle does not carry is simply absent from the
+    bindings. An `emitted/<backend>/` that EXISTS but holds no bytes, or that
+    reaches outside the bundle through a link, is not an absent facet: it is a
+    bundle that cannot be honestly signed, and :func:`artifact_digest` raises
+    rather than binding it (roadmap 428 F11).
 
     Nothing here is re-derived: `bundle.py` already wrote `components.lock`,
     `policy.json`, `emitted/<backend>/...` and `gauntlet.json`, and
@@ -345,12 +413,31 @@ RECEIPT_VERSION = "1.0"
 #: entirely different things ("I admitted this" vs "this was admitted").
 RECEIPT_DOMAIN = b"revl.deploy.receipt/v1\x00"
 
+#: How far into the RECEIVER's future a signed timestamp may sit and still be
+#: read as a real instant rather than a post-date. Freshness was anchored on a
+#: signer-chosen field with a lower bound only, so a 2019 stamp was refused as
+#: stale and a 2099 stamp ACCEPTED — its age is negative, and nothing compared
+#: a negative age against anything (roadmap 428 F7). The bound exists because
+#: two clocks are never identical, not because a signer may choose its own
+#: window: it is a tolerance, and it is the receiver's, not the record's.
+DEFAULT_CLOCK_SKEW_SECONDS = 300.0
+
 
 def _receipt_mac(body: Mapping, host_key: bytes) -> str:
     """The receipt MAC: domain-tagged HMAC-SHA256 over the canonical body bytes
-    (`body` is the receipt with its `signature` member removed)."""
-    payload = json.dumps({k: v for k, v in body.items() if k != "signature"},
-                         sort_keys=True, separators=(",", ":")).encode("utf-8")
+    (`body` is the receipt with its `signature` member removed).
+
+    `ensure_ascii=True` here, unlike the attestation spelling, so a lone
+    surrogate escapes rather than failing to encode. It can still meet a value
+    that will not serialize at all, which is why this raises
+    `attest.NotCanonicalizable` and :func:`verify_receipt` refuses on it."""
+    try:
+        payload = json.dumps(
+            {k: v for k, v in body.items() if k != "signature"},
+            sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise attest.NotCanonicalizable(
+            f"the receipt has no canonical byte spelling: {error}") from error
     return hmac.new(bytes(host_key), RECEIPT_DOMAIN + payload,
                     hashlib.sha256).hexdigest()
 
@@ -373,6 +460,25 @@ class TrustStore:
     False and HMAC is honest; the flag is the place the Ed25519 prerequisite
     lands when Slice 2 crosses a domain.
 
+    `clock_skew_seconds` and `not_before` are the receiver's half of freshness.
+    `evidence_ttl_seconds` alone bounded the PAST only, so post-dating an
+    attestation walked straight past it: the age came out negative and nothing
+    compared a negative age with anything. `clock_skew_seconds` is how far into
+    this receiver's future a signed instant may sit before it is read as a
+    post-date rather than as two clocks disagreeing. `not_before` is an
+    independent anchor the receiver SUPPLIES rather than reads off the record
+    (a unix timestamp or an ISO-8601 string, typically the instant of the last
+    deploy it accepted): evidence older than it is refused whatever its TTL
+    says, which is what makes replaying an old-but-in-window attestation fail.
+
+    `require_gauntlet` demands that the signed chain actually carry item-31
+    gauntlet evidence. Off (the default) a bundle built where the gauntlet
+    machinery was unavailable still admits, since `build_bundle` degrades
+    honestly and stages no dossier; on, a chain with no `gauntlet` facet is
+    REFUSED rather than admitted on absent evidence. A dossier that IS bound is
+    read in full either way: an unreadable one, a verdict that is not
+    `admissible`, and one graded over another composition are all refusals.
+
     `recheck_source` is the receiver's answer to "a signature is not a check".
     Off (the default), admission trusts the SIGNER's gate run: the attestation
     is only issuable from a real admitted verdict over this exact
@@ -390,6 +496,9 @@ class TrustStore:
     evidence_ttl_seconds: Optional[float] = None
     cross_domain: bool = False
     recheck_source: bool = False
+    require_gauntlet: bool = False
+    clock_skew_seconds: float = DEFAULT_CLOCK_SKEW_SECONDS
+    not_before: Optional[float | str] = None
 
     def key_for(self, kid: str | None) -> Optional[bytes]:
         if not isinstance(kid, str):
@@ -494,7 +603,17 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
         ir = staged_ir(root)
     except RevlError as error:
         return _refusal(LINK_COMPOSITION, str(error))
-    recomputed_ir = attest.canonical_hash(ir)
+    try:
+        recomputed_ir = attest.canonical_hash(ir)
+    except attest.NotCanonicalizable as error:
+        # Staged bytes this receiver cannot canonicalize are unmeasurable, and
+        # an unmeasurable input refuses (roadmap 428 F10/F11). `json.loads`
+        # will build a lone surrogate out of a `"\ud800"` escape, so a staged
+        # `ir/ir.json` can reach this.
+        return _refusal(LINK_COMPOSITION,
+                        f"the staged {IR_DOCUMENT} cannot be canonically "
+                        f"hashed, so it cannot be compared with the signed "
+                        f"composition: {error}")
     bound_ir = attestation.get("composition_hash")
     if not hmac.compare_digest(recomputed_ir, str(bound_ir)):
         return _refusal(
@@ -541,7 +660,17 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
         return _refusal(LINK_ARTIFACT,
                         f"the staged bundle has no emitted/{trust.backend}/ "
                         "artifact to execute")
-    recomputed_artifact = artifact_digest(backend_dir)
+    # Fail CLOSED on a tree this receiver cannot honestly digest: a symlink
+    # binding bytes outside the bundle, a non-regular entry, or an empty
+    # directory whose digest is `sha256(b"")` and therefore matches without any
+    # artifact being present (roadmap 428 F11).
+    try:
+        recomputed_artifact = artifact_digest(backend_dir)
+    except RevlError as error:
+        return _refusal(
+            LINK_ARTIFACT,
+            f"the bytes staged at emitted/{trust.backend}/ cannot be digested "
+            f"as an artifact this receiver holds: {error}")
     if not hmac.compare_digest(recomputed_artifact, str(bindings[facet])):
         return _refusal(
             LINK_ARTIFACT,
@@ -578,6 +707,66 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
             return _refusal(LINK_EVIDENCE,
                             f"the staged conformance cert for {trust.backend} is "
                             "not the bound one (re-hashed here, and it differs)")
+
+    # (f2) the gauntlet VERDICT, and the composition it was graded over.
+    #
+    # (f) above only re-hashes the dossier: it proves the bytes are the signed
+    # bytes and says nothing about what they SAY. So a dossier recording
+    # `rejected` — the bundle's own evidence that it should not have been built
+    # — was hashed, matched, and ACCEPTED, and a genuine `admissible` record
+    # produced for a DIFFERENT artifact was accepted too, because the dossier
+    # named no composition and there was nothing to check it against.
+    # `bundle.build_bundle` now stamps the graded composition into the dossier
+    # as it stages it, and both halves are read here.
+    #
+    # Fail closed throughout: a dossier that will not parse, or that names no
+    # composition, is refused rather than read as absent evidence.
+    if FACET_GAUNTLET in bindings:
+        try:
+            dossier = json.loads(
+                (root / GAUNTLET_NAME).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+            return _refusal(
+                FACET_GAUNTLET,
+                f"the chain binds `{FACET_GAUNTLET}` but the staged "
+                f"{GAUNTLET_NAME} cannot be read as JSON ({error}); unreadable "
+                "evidence is refused, never read as evidence that passed")
+        if not isinstance(dossier, dict):
+            return _refusal(
+                FACET_GAUNTLET,
+                f"the staged {GAUNTLET_NAME} is not a gauntlet dossier "
+                f"(it is a {type(dossier).__name__}, not an object)")
+        verdict = dossier.get("verdict")
+        if verdict != GAUNTLET_ADMISSIBLE:
+            return _refusal(
+                FACET_GAUNTLET,
+                f"the staged {GAUNTLET_NAME} records the gauntlet verdict "
+                f"{verdict!r}, not {GAUNTLET_ADMISSIBLE!r}: the bundle carries "
+                "its own evidence that it should not have been built, and an "
+                "honest signature over that evidence does not turn it into a "
+                "pass")
+        graded = dossier.get(GAUNTLET_IDENTITY)
+        if not isinstance(graded, str) or not graded:
+            return _refusal(
+                FACET_GAUNTLET,
+                f"the staged {GAUNTLET_NAME} carries no `{GAUNTLET_IDENTITY}`, "
+                "so it names no composition: it cannot be shown to be evidence "
+                "about the artifact in hand, and unidentified evidence is "
+                "refused rather than assumed to be about this one")
+        if not hmac.compare_digest(graded, recomputed_ir):
+            return _refusal(
+                FACET_GAUNTLET,
+                f"the staged {GAUNTLET_NAME} was graded over composition "
+                f"{graded[:12]}…, but the composition staged here is "
+                f"{recomputed_ir[:12]}…: a genuine dossier for a DIFFERENT "
+                "artifact hashes correctly into the chain and would otherwise "
+                "ride along under an honest signature")
+    elif trust.require_gauntlet:
+        return _refusal(
+            FACET_GAUNTLET,
+            "this receiver requires item-31 gauntlet evidence and the signed "
+            f"chain binds no `{FACET_GAUNTLET}` facet; absent evidence is "
+            "refused, never counted as evidence that passed")
 
     # (g) capability ceiling: a deploy may not widen authority (§2.2, G1/G9).
     #
@@ -638,7 +827,15 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
                     f"receiver admitted reaches {sorted(wanted)}")
 
     # (h) freshness: a signature proves authenticity, never current validity.
-    if trust.evidence_ttl_seconds is not None:
+    #
+    # The timestamp is SIGNER-CHOSEN and `attest._now_iso` passes an ISO string
+    # straight through, so post-dating is a one-argument change. A TTL alone
+    # bounds only the past: a 2099 stamp gave a NEGATIVE age, which is not
+    # greater than any TTL, so it was accepted while a 2019 stamp was refused.
+    # Both ends are bounded here, and both bounds are the RECEIVER's — its own
+    # clock, its own skew tolerance, its own `not_before` anchor.
+    if (trust.evidence_ttl_seconds is not None
+            or trust.not_before is not None):
         signed_at = _parse_timestamp(attestation.get("timestamp"))
         if signed_at is None:
             return _refusal(LINK_EVIDENCE,
@@ -646,12 +843,38 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
                             "its freshness cannot be checked; refused fail-closed")
         current = now if isinstance(now, (int, float)) else time.time()
         age = current - signed_at
-        if age > trust.evidence_ttl_seconds:
+        skew = max(float(trust.clock_skew_seconds), 0.0)
+        if age < -skew:
+            return _refusal(
+                LINK_EVIDENCE,
+                f"the attestation is dated {-age:.0f}s in this receiver's "
+                f"FUTURE, past its {skew:.0f}s clock-skew tolerance: the "
+                "timestamp is signer-chosen, so a post-dated record would "
+                "otherwise stay 'fresh' indefinitely and outlive any TTL")
+        if (trust.evidence_ttl_seconds is not None
+                and age > trust.evidence_ttl_seconds):
             return _refusal(
                 LINK_EVIDENCE,
                 f"the attestation is {age:.0f}s old, past this receiver's "
                 f"{trust.evidence_ttl_seconds:.0f}s freshness TTL; a valid "
                 "signature over stale evidence is still refused")
+        if trust.not_before is not None:
+            floor = (trust.not_before if isinstance(trust.not_before, (int, float))
+                     else _parse_timestamp(trust.not_before))
+            if floor is None:
+                return _refusal(
+                    LINK_EVIDENCE,
+                    "this receiver's `not_before` anchor is not a readable "
+                    f"instant ({trust.not_before!r}), so freshness cannot be "
+                    "checked against it; refused fail-closed rather than "
+                    "checked against no anchor")
+            if signed_at < float(floor):
+                return _refusal(
+                    LINK_EVIDENCE,
+                    "the attestation predates this receiver's own freshness "
+                    "anchor, so it is evidence from before the last state this "
+                    "receiver accepted; a replay of in-window evidence is "
+                    "still a replay")
 
     receipt = {
         "kind": RECEIPT_KIND,
@@ -686,7 +909,11 @@ def verify_receipt(receipt: Mapping, host_key: bytes) -> tuple[bool, str]:
     given = receipt.get("signature")
     if not isinstance(given, str):
         return False, "receipt carries no signature"
-    if not hmac.compare_digest(_receipt_mac(receipt, host_key), given):
+    try:
+        expected = _receipt_mac(receipt, host_key)
+    except attest.NotCanonicalizable as error:
+        return False, f"receipt cannot be verified: {error}"
+    if not hmac.compare_digest(expected, given):
         return False, "receipt signature mismatch"
     if receipt.get("kind") != RECEIPT_KIND:
         return False, (f"not a {RECEIPT_KIND} record: kind is "
@@ -697,6 +924,63 @@ def verify_receipt(receipt: Mapping, host_key: bytes) -> tuple[bool, str]:
     if receipt.get("verdict") not in (ACCEPT, REFUSE):
         return False, f"receipt verdict is {receipt.get('verdict')!r}"
     return True, "receipt is authentic"
+
+
+def repin(bundle_dir: Path | str, receipt: Mapping) -> tuple[bool, str]:
+    """Re-derive the composition hash and the artifact digest from the staged
+    bytes and check them against an ACCEPT `receipt`. Answers `(ok, reason)`.
+
+    :func:`admit` is PREPARE: it verifies and LOADS NOTHING, so everything it
+    checked was checked at admission time and nothing re-checked it at the
+    moment of execution. Between the two the staged tree is ordinary files on
+    ordinary disk, so an ACCEPT receipt can end up describing bytes that have
+    since changed or gone (roadmap 428 F11). This is the check a loader runs
+    IMMEDIATELY before it executes: same two re-derivations `admit` ran,
+    against the receipt this receiver itself signed rather than against the
+    sender's attestation.
+
+    It is not a substitute for `admit` and cannot be: a receipt binds only what
+    the receiver already admitted. It closes the admit-to-load window, and
+    nothing else.
+
+    Fails CLOSED everywhere: a receipt that is not an ACCEPT, one carrying no
+    hashes, an IR that cannot be read or canonicalized, and an artifact tree
+    that cannot be honestly digested are each a refusal.
+    """
+    root = Path(bundle_dir)
+    if receipt.get("verdict") != ACCEPT:
+        return False, (f"the receipt verdict is {receipt.get('verdict')!r}, "
+                       f"not {ACCEPT}: there is nothing it authorises loading")
+    bound_ir = receipt.get("composition_hash")
+    bound_artifact = receipt.get("artifact_hash")
+    backend = receipt.get("backend")
+    if not (isinstance(bound_ir, str) and isinstance(bound_artifact, str)
+            and isinstance(backend, str) and bound_ir and bound_artifact
+            and backend):
+        return False, ("the receipt does not pin a composition, an artifact and "
+                       "a backend, so there is nothing to re-pin against")
+    try:
+        recomputed_ir = attest.canonical_hash(staged_ir(root))
+    except (RevlError, attest.NotCanonicalizable) as error:
+        return False, f"the staged {IR_DOCUMENT} cannot be re-hashed: {error}"
+    if not hmac.compare_digest(recomputed_ir, bound_ir):
+        return False, (f"the staged {IR_DOCUMENT} changed since admission: the "
+                       f"receipt pins {bound_ir[:12]}…, the bytes on disk now "
+                       f"hash to {recomputed_ir[:12]}…")
+    backend_dir = root / EMITTED_ROOT / backend
+    if not backend_dir.is_dir():
+        return False, (f"the admitted emitted/{backend}/ artifact is gone; the "
+                       "receipt describes bytes this receiver no longer holds")
+    try:
+        recomputed_artifact = artifact_digest(backend_dir)
+    except RevlError as error:
+        return False, (f"the staged emitted/{backend}/ can no longer be "
+                       f"digested as an artifact: {error}")
+    if not hmac.compare_digest(recomputed_artifact, bound_artifact):
+        return False, (f"the staged emitted/{backend}/ changed since admission: "
+                       f"the receipt pins {bound_artifact[:12]}…, the bytes on "
+                       f"disk now hash to {recomputed_artifact[:12]}…")
+    return True, "the staged bytes are still the admitted ones"
 
 
 def render_receipt(receipt: Mapping) -> str:
@@ -778,12 +1062,15 @@ class Correlation:
 
 
 def _envelope_bytes(wire: Mapping) -> bytes:
-    """Canonical bytes of an envelope, excluding its own auth tag. Same
-    sorted-keys/compact spelling `attest._canonical_bytes` uses, so the tag is a
-    pure function of the envelope's content and not of member order."""
-    body = {k: v for k, v in wire.items() if k != AUTH_FIELD}
-    return json.dumps(body, sort_keys=True, ensure_ascii=False,
-                      separators=(",", ":")).encode("utf-8")
+    """Canonical bytes of an envelope, excluding its own auth tag. Literally
+    `attest._canonical_bytes`, so the tag is a pure function of the envelope's
+    content and not of member order — and so an envelope with no canonical
+    spelling raises `attest.NotCanonicalizable` here rather than a raw
+    `UnicodeEncodeError` out of a guard whose contract is `(ok, reason)`
+    (roadmap 428 F10). This used to inline the same `json.dumps`, which is how
+    the two copies drifted into having the same defect twice."""
+    return attest._canonical_bytes({k: v for k, v in wire.items()
+                                    if k != AUTH_FIELD})
 
 
 def seal(correlation: Correlation, secret: bytes) -> dict:
@@ -872,8 +1159,16 @@ class CorrelationGuard:
         given = wire.get(AUTH_FIELD)
         if not isinstance(given, str):
             return False, REJECT_FORGED
-        expected = hmac.new(bytes(secret), _envelope_bytes(wire),
-                            hashlib.sha256).hexdigest()
+        # An envelope with no canonical byte spelling (a lone surrogate, a
+        # value that will not serialize) cannot be authenticated, so it is
+        # MALFORMED. It is peer-supplied, and this method's contract is
+        # `(ok, reason)`: a crash here would escape past every caller written
+        # to read a verdict and take the seam down (roadmap 428 F10).
+        try:
+            envelope = _envelope_bytes(wire)
+        except attest.NotCanonicalizable:
+            return False, REJECT_MALFORMED
+        expected = hmac.new(bytes(secret), envelope, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, given):
             return False, REJECT_FORGED
         if (transport_identity is not None
@@ -1156,6 +1451,11 @@ FEDERATION_ABORTED = "federation-abort-decided"
 #: Why a plan is refused admission into a federation update.
 REFUSE_IRREVERSIBLE = "non-deferrable-irreversible-crossing"
 REFUSE_CONTRACT = "contract-break"
+#: A pinned contract naming a provider this update does not carry. It used to
+#: be SKIPPED, in a function whose whole posture is refuse-as-one-unit: a pin
+#: the federation cannot check is not a pin the federation satisfied (roadmap
+#: 428 F13).
+REFUSE_UNKNOWN_PROVIDER = "contract-provider-not-in-update"
 
 
 def reached_emissions(ir: dict) -> list[dict]:
@@ -1252,7 +1552,10 @@ def federation_admission(plans: Mapping[str, dict], *,
     optional sequence of `(consumer_surface_doc, provider_composition_id)`
     pairs; each is checked with `federation.check` against the provider's NEW
     IR, so a federation update that would break a pinned consumer surface is
-    refused as one unit rather than deployed composition by composition.
+    refused as one unit rather than deployed composition by composition. A
+    contract naming a provider `plans` does not carry is REFUSED, not skipped:
+    it cannot be checked, and a pin that could not be checked is not a pin the
+    update satisfied.
 
     The refusal that matters is the second CRITICAL's: **a plan that
     necessarily crosses a non-deferrable irreversible effect is REFUSED
@@ -1305,6 +1608,23 @@ def federation_admission(plans: Mapping[str, dict], *,
     for consumer_doc, provider_id in (contracts or ()):
         provider_ir = plans.get(provider_id)
         if provider_ir is None:
+            # Fail CLOSED. This used to `continue`, so a contract naming a
+            # provider outside `plans` — a typo, a composition dropped from the
+            # update, a rename on one side only — was checked against nothing
+            # and the federation admitted. A pin that could not be checked is
+            # not a pin that was satisfied, and "all or nothing" cannot mean
+            # "all of the ones we happened to be able to look at".
+            named = ", ".join(sorted(plans)) or "(none)"
+            refusals.append({
+                "kind": REFUSE_UNKNOWN_PROVIDER,
+                "composition": provider_id,
+                "reason": (
+                    f"a pinned consumer surface names `{provider_id}` as its "
+                    "provider, but this federation update carries no plan for "
+                    f"it (updating: {named}); the pin cannot be checked, so it "
+                    "is refused rather than skipped. An all-or-nothing update "
+                    "refuses as one unit."),
+            })
             continue
         from .federation import check  # noqa: PLC0415 — lazy, avoids a cycle
         verdict = check(consumer_doc, provider_ir)
