@@ -181,6 +181,57 @@ Rejections come back structured, so the agent reacts to a *code*, not prose:
 The same projection is available to humans and CI as
 `revl compile --json-diagnostics`.
 
+### Authoring trust — the agent is not a host-code author
+
+The agent on the other end of the transport may **compose**; it may not
+**author host code**. That is a decision, and it defaults closed.
+
+The gate does not sandbox host code (G8, item 24). So an inline
+
+```
+extern pure fn compute(x: Str) -> Str = @py { ... }
+```
+
+sent to `revl_load` used to compile, load and RUN as host Python with nobody in
+the loop. The item-246 approval policy did not catch it either: the policy
+classifies from **declared** extern facts, so a body declared `pure` crosses
+nothing, and a body declared `emission[notify]` that also read a `.env`
+produced a ticket naming only `notify` — an operator approving a notification
+while arbitrary I/O rode along.
+
+So source that ARRIVES OVER THE TRANSPORT (inline `source`, `modules`, a
+`revl_restore` snapshot, a `revl_edit` patch, a `revl_repair` /
+`revl_gauntlet` / `revl_canary` candidate) compiles under the item-329
+untrusted-author profile, exactly as item 334's `Gate.propose` compiles an
+agent-authored component: no new `extern`/host block, no reach into one through
+an imported module, no self-minted declassifier. `.rvl` **files** inside a
+sanctioned root are not agent-authored — no MCP verb writes to disk — so they
+compile unprofiled, the way an embedder's own sources do.
+
+| flag | what the operator is deciding |
+|---|---|
+| `--author-trust untrusted` (default) | the agent may compose granted services; it may neither author nor reach host code |
+| `--author-trust trusted` | the agent MAY author host code. Every class-(c) ticket then carries `unreviewedHostCode` and says the declared capabilities are not a bound on what those bodies do |
+| `--provider MODULE.rvl` | operator-written host code the untrusted agent may compose the SERVICES of — item 334's granted-providers map. Reaching its externs directly is still refused |
+| `--grant SERVICE` | turn on the item-329 reach allowlist. With no grants the allowlist is off: there is no honest default for which of a running system's services an agent may reach |
+| `--root DIR` | a directory the agent's path arguments may name. Defaults to the directory the server was started in |
+
+The path jail is the other half. Unjailed, `files` accepted absolute paths and
+`../` traversal, which made every path on the machine an oracle (does it exist,
+what is its first token, which line fails), and `revl_restore` +
+`revl_snapshot` returned an arbitrary file's whole content. Every path
+argument — `files`, `candidateFiles`, `baselineFiles`, `traceFile`, `registry`,
+and the ones nested inside a snapshot — is resolved with `realpath` and refused
+if it lands outside a sanctioned root. The refusal runs before anything is
+opened or stat-ed, so it cannot report existence either.
+
+The composable shape, then: the operator writes the host bodies, the agent
+writes the wiring.
+
+```
+revl mcp serve --provider notify.rvl --grant Notify --root ./workspace
+```
+
 ### Import before you regenerate — `revl_resolve`
 
 Before an agent writes a component, it should ask whether one already exists

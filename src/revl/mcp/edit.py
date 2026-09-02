@@ -263,10 +263,19 @@ def _apply_edits(text: str, edits: list) -> tuple[str, list[dict]]:
 def compile_virtual(vs: dict, *, manifest: dict | None = None,
                     replacing: tuple = ()) -> dict:
     """Compile a working source set through the same entry points a full swap
-    uses, so the admission gate is literally identical."""
+    uses, so the admission gate is literally identical.
+
+    "Literally identical" now includes the AUTHORING TRUST the server runs
+    under: `revl_edit` is an authoring verb like `revl_swap`, and a patch that
+    inserts an `extern ... = @py { ... }` has to be refused for exactly the
+    reason the same text sent to `revl_swap` is. The profile is READ from the
+    server rather than passed in, so trust is decided in one place."""
+    from .server import AUTHORING  # noqa: PLC0415 — lazy, avoids an import cycle
+
     if vs.get("source") is not None:
         return compile_source(vs["source"], "<candidate>.rvl", manifest=manifest,
-                              replacing=replacing, modules=vs.get("modules") or None)
+                              replacing=replacing, modules=vs.get("modules") or None,
+                              profile=AUTHORING.profile())
     raise EditError("the working source set has no inline `source` to compile")
 
 
