@@ -590,11 +590,13 @@ mod revl_item282_tests {
 def test_read_only_string_param_lowers_to_borrow_but_owned_still_clones():
     src = emit.emit(compile_source(_BORROW_RVL))
     # read-only params (a builtin receiver, and a pass-through to one) borrow.
-    assert "fn peek(s: &str, i: i64) -> i64" in src, src
-    assert "fn thread(s: &str, i: i64) -> i64" in src, src
+    # `peek` indexes its param positionally, so item 277 also threads the
+    # `&[char]` view here; the borrow of `s` itself is what this test pins.
+    assert "fn peek(s: &str, i: i64, s_revl_cs: &[char]) -> i64" in src, src
+    assert "fn thread(s: &str, i: i64, s_revl_cs: &[char]) -> i64" in src, src
     # the borrowed param threads straight through — no clone, no re-borrow.
     thread_body = src.split("fn thread(")[1].split("\n}")[0]
-    assert "peek(s, i)" in thread_body, thread_body
+    assert "peek(s, i, s_revl_cs)" in thread_body, thread_body
     assert "peek(s.clone()" not in thread_body, thread_body
     assert "peek(&s" not in thread_body, thread_body
     # a param that escapes into owned record fields stays a String and clones.
@@ -604,7 +606,8 @@ def test_read_only_string_param_lowers_to_borrow_but_owned_still_clones():
     assert "y: s.clone()" in pair_body, pair_body
     # the `pub` entry keeps the owned `Str` ABI and lends a borrow at the call.
     assert "pub fn run(src: String) -> i64" in src, src
-    assert "thread(&src, 0i64)" in src.split("pub fn run(")[1], src
+    assert ("thread(&src, 0i64, &src_revl_cs)"
+            in src.split("pub fn run(")[1]), src
 
 
 @needs_cargo
@@ -614,6 +617,91 @@ def test_cargo_test_borrowed_param_builds_and_runs(tmp_path):
     escaping param still owned."""
     src = emit.emit(compile_source(_BORROW_RVL))
     result = _cargo_test(tmp_path, src, _BORROW_TEST_MODULE)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "test result: ok" in result.stdout, result.stdout
+
+
+# item 277 — positional string indexing (`charAt`/`charCodeAt`/`codepoint_at`)
+# lowers to `chars().nth(i)`, an O(i) front walk, so a scan is O(n^2). The
+# INTERPROCEDURAL fix threads a `&[char]` view: a non-`pub` helper that indexes a
+# `Str` param (or hands it to one that does) grows a synthetic
+# `<name>_revl_cs: &[char]` parameter, and the `pub` entry that owns the buffer
+# collects ONCE into a local and lends it down. A slot whose argument at some
+# call site is not such a threaded parameter would need a fresh collect per call
+# — the shape that regressed when it was done per function — so that slot is
+# retracted and keeps the front walk.
+_CHARVIEW_RVL = """
+fn peek(s: Str, i: Int) -> Int { return s.charCodeAt(i) }
+
+fn scan(s: Str, i: Int) -> Int {
+  var j = i
+  var acc = 0
+  while (j < 3) {
+    acc = acc + peek(s, j)
+    j = j + 1
+  }
+  return acc
+}
+
+fn head(s: Str) -> Int { return s.charCodeAt(0) }
+
+fn via_slice(s: Str) -> Int { return head(s.slice(1, 4)) }
+
+pub fn run(src: Str) -> Int { return scan(src, 0) + via_slice(src) }
+"""
+
+_CHARVIEW_TEST_MODULE = """
+#[cfg(test)]
+mod revl_item277_tests {
+    use super::*;
+    #[test]
+    fn char_view_indexes_the_same_code_points_as_the_front_walk() {
+        // scan sums the first three code points of "abcdef" (97+98+99 = 294)
+        // through the threaded view; via_slice reads "bcd"[0] = 98 through the
+        // retained `chars().nth` walk. 294 + 98 = 392.
+        assert_eq!(run("abcdef".to_string()), 392);
+        // multi-byte input: the view indexes Unicode SCALARS, exactly like
+        // `chars().nth`, so a non-ASCII buffer agrees too.
+        // "\\u{e9}..\\u{ee}" = 233+234+235 = 702, then "\\u{ea}\\u{eb}\\u{ec}"[0] = 234.
+        assert_eq!(run("\\u{e9}\\u{ea}\\u{eb}\\u{ec}\\u{ed}\\u{ee}".to_string()), 936);
+    }
+}
+"""
+
+
+def test_positional_index_threads_a_char_view_and_retracts_where_it_cannot():
+    src = emit.emit(compile_source(_CHARVIEW_RVL))
+    # the indexed helper and its caller both carry the synthetic view param,
+    # and the index is an O(1) slice index, not a `chars().nth` front walk.
+    assert "fn peek(s: &str, i: i64, s_revl_cs: &[char]) -> i64" in src, src
+    assert "fn scan(s: &str, i: i64, s_revl_cs: &[char]) -> i64" in src, src
+    peek_body = src.split("fn peek(")[1].split("\n}")[0]
+    assert "s_revl_cs[(i) as usize]" in peek_body, peek_body
+    assert "chars().nth" not in peek_body, peek_body
+    # the view threads straight through — no per-call collect anywhere.
+    assert "peek(s, j, s_revl_cs)" in src.split("fn scan(")[1], src
+    assert "chars().collect::<std::vec::Vec<char>>()" not in src, src
+    # the `pub` entry keeps its owned `Str` ABI, collects once, and lends it.
+    assert "pub fn run(src: String) -> i64" in src, src
+    run_body = src.split("pub fn run(")[1].split("\n}")[0]
+    assert ("let src_revl_cs: std::vec::Vec<char> = src.chars().collect();"
+            in run_body), run_body
+    assert "scan(&src, 0i64, &src_revl_cs)" in run_body, run_body
+    # `head` is reached with a COMPUTED argument (`s.slice(1, 4)`), which no
+    # caller holds a view for, so its slot is retracted rather than paying a
+    # collect per call: the signature is unchanged and the walk stays.
+    assert "fn head(s: &str) -> i64" in src, src
+    head_body = src.split("fn head(")[1].split("\n}")[0]
+    assert "chars().nth((0i64) as usize)" in head_body, head_body
+    assert "head(&(s.revl_slice(1i64, 4i64)))" in src.split("fn via_slice(")[1], src
+
+
+@needs_cargo
+def test_cargo_test_char_view_builds_and_runs(tmp_path):
+    """item 277 definition-of-done: the threaded `&[char]` view cargo-builds AND
+    runs, indexing the same Unicode scalars the `chars().nth` walk did."""
+    src = emit.emit(compile_source(_CHARVIEW_RVL))
+    result = _cargo_test(tmp_path, src, _CHARVIEW_TEST_MODULE)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "test result: ok" in result.stdout, result.stdout
 

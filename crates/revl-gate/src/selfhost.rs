@@ -5155,27 +5155,27 @@ fn op_at(source: &str, i: i64) -> String {
     return String::from("");
 }
 
-fn scan_word(source: &str, i: i64) -> Scan {
+fn scan_word(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
     let mut j = i;
     let n = source.revl_length();
-    while ((j < n) && ({ let _rc: &str = &({ source.chars().nth((j) as usize).unwrap().to_string() }); ("0" <= _rc && _rc <= "9") || ("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z") } || ({ source.chars().nth((j) as usize).unwrap().to_string() } == "_"))) {
+    while ((j < n) && ({ let _rc: &str = &({ source_revl_cs[(j) as usize].to_string() }); ("0" <= _rc && _rc <= "9") || ("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z") } || ({ source_revl_cs[(j) as usize].to_string() } == "_"))) {
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
     let jj = j;
     return Scan { j: jj, out: source.revl_slice(i, jj), nl: 0i64 };
 }
 
-fn scan_digits(source: &str, i: i64) -> Scan {
+fn scan_digits(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
     let mut j = i;
     let n = source.revl_length();
-    while ((j < n) && { let _rc: &str = &({ source.chars().nth((j) as usize).unwrap().to_string() }); "0" <= _rc && _rc <= "9" }) {
+    while ((j < n) && { let _rc: &str = &({ source_revl_cs[(j) as usize].to_string() }); "0" <= _rc && _rc <= "9" }) {
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
     let jj = j;
     return Scan { j: jj, out: source.revl_slice(i, jj), nl: 0i64 };
 }
 
-fn scan_grouped(source: &str, i: i64, valid: &str) -> Scan {
+fn scan_grouped(source: &str, i: i64, valid: &str, source_revl_cs: &[char]) -> Scan {
     let mut j = i;
     let n = source.revl_length();
     let mut out = String::from("");
@@ -5183,7 +5183,7 @@ fn scan_grouped(source: &str, i: i64, valid: &str) -> Scan {
     let mut has = false;
     let mut go = true;
     while (go && (j < n)) {
-        let ch = { source.chars().nth((j) as usize).unwrap().to_string() };
+        let ch = { source_revl_cs[(j) as usize].to_string() };
         if (ch == "_") {
             if ((!has) || prev_us) {
                 return Scan { j: (0i64).checked_sub(1i64).expect("revl: Int overflow"), out: String::from(""), nl: 0i64 };
@@ -5236,19 +5236,19 @@ fn radix_value(digits: &str, base: i64) -> i64 {
     return v;
 }
 
-fn scan_quoted(source: &str, i: i64, q: i64) -> Scan {
+fn scan_quoted(source: &str, i: i64, q: i64, source_revl_cs: &[char]) -> Scan {
     let mut j = i;
     let n = source.revl_length();
     let mut out = String::from("");
     while (j < n) {
-        let cc = { source.chars().nth((j) as usize).unwrap() as u32 as i64 };
+        let cc = { source_revl_cs[(j) as usize] as u32 as i64 };
         if ((cc == 92i64) && ((j).checked_add(1i64).expect("revl: Int overflow") < n)) {
-            let ncc = { source.chars().nth(((j).checked_add(1i64).expect("revl: Int overflow")) as usize).unwrap() as u32 as i64 };
+            let ncc = { source_revl_cs[((j).checked_add(1i64).expect("revl: Int overflow")) as usize] as u32 as i64 };
             if ((ncc == q) || (ncc == 92i64)) {
-                out.push_str(&({ source.chars().nth(((j).checked_add(1i64).expect("revl: Int overflow")) as usize).unwrap().to_string() }));
+                out.push_str(&({ source_revl_cs[((j).checked_add(1i64).expect("revl: Int overflow")) as usize].to_string() }));
                 j = (j).checked_add(2i64).expect("revl: Int overflow");
             } else {
-                out.push_str(&({ source.chars().nth((j) as usize).unwrap().to_string() }));
+                out.push_str(&({ source_revl_cs[(j) as usize].to_string() }));
                 j = (j).checked_add(1i64).expect("revl: Int overflow");
             }
         } else {
@@ -5260,20 +5260,20 @@ fn scan_quoted(source: &str, i: i64, q: i64) -> Scan {
             if (cc == 10i64) {
                 return Scan { j: (0i64).checked_sub(1i64).expect("revl: Int overflow"), out: String::from(""), nl: 0i64 };
             }
-            out.push_str(&({ source.chars().nth((j) as usize).unwrap().to_string() }));
+            out.push_str(&({ source_revl_cs[(j) as usize].to_string() }));
             j = (j).checked_add(1i64).expect("revl: Int overflow");
         }
     }
     return Scan { j: (0i64).checked_sub(1i64).expect("revl: Int overflow"), out: String::from(""), nl: 0i64 };
 }
 
-fn scan_string(source: &str, i: i64) -> Scan {
+fn scan_string(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
     let mut j = i;
     let n = source.revl_length();
     let mut out = String::from("");
     while (j < n) {
-        let c = { source.chars().nth((j) as usize).unwrap().to_string() };
-        let cc = { source.chars().nth((j) as usize).unwrap() as u32 as i64 };
+        let c = { source_revl_cs[(j) as usize].to_string() };
+        let cc = { source_revl_cs[(j) as usize] as u32 as i64 };
         if (cc == 34i64) {
             let jj = j;
             let text = out.clone();
@@ -5302,7 +5302,7 @@ fn is_triple_at(source: &str, j: i64) -> bool {
     return (code0(&(source.revl_slice((j).checked_add(2i64).expect("revl: Int overflow"), (j).checked_add(3i64).expect("revl: Int overflow")))) == 34i64);
 }
 
-fn scan_triple(source: &str, i: i64) -> Scan {
+fn scan_triple(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
     let mut j = i;
     let n = source.revl_length();
     let mut out = String::from("");
@@ -5318,8 +5318,8 @@ fn scan_triple(source: &str, i: i64) -> Scan {
             let lines = nl;
             return Scan { j: (jj).checked_add(3i64).expect("revl: Int overflow"), out: text.clone(), nl: lines };
         }
-        let c = { source.chars().nth((j) as usize).unwrap().to_string() };
-        if ({ source.chars().nth((j) as usize).unwrap() as u32 as i64 } == 10i64) {
+        let c = { source_revl_cs[(j) as usize].to_string() };
+        if ({ source_revl_cs[(j) as usize] as u32 as i64 } == 10i64) {
             nl = (nl).checked_add(1i64).expect("revl: Int overflow");
         }
         out.push_str(&c);
@@ -5351,13 +5351,13 @@ fn trim(s: &str) -> String {
     return s.revl_slice(aa, bb);
 }
 
-fn scan_interp(source: &str, i: i64) -> Scan {
+fn scan_interp(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
     let mut j = i;
     let n = source.revl_length();
     let mut depth = 1i64;
     let mut nl = 0i64;
     while (j < n) {
-        let cc = { source.chars().nth((j) as usize).unwrap() as u32 as i64 };
+        let cc = { source_revl_cs[(j) as usize] as u32 as i64 };
         if (cc == 123i64) {
             depth = (depth).checked_add(1i64).expect("revl: Int overflow");
         }
@@ -5378,15 +5378,15 @@ fn scan_interp(source: &str, i: i64) -> Scan {
     return Scan { j: (0i64).checked_sub(1i64).expect("revl: Int overflow"), out: String::from(""), nl: lines2 };
 }
 
-fn scan_template(source: &str, i: i64) -> Scan {
+fn scan_template(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
     let mut j = i;
     let n = source.revl_length();
     let mut parts = vec![];
     let mut buf = String::from("");
     let mut nl = 0i64;
     while (j < n) {
-        let c = { source.chars().nth((j) as usize).unwrap().to_string() };
-        let cc = { source.chars().nth((j) as usize).unwrap() as u32 as i64 };
+        let c = { source_revl_cs[(j) as usize].to_string() };
+        let cc = { source_revl_cs[(j) as usize] as u32 as i64 };
         if (cc == 96i64) {
             if (buf != "") {
                 parts.push(String::from("t:").revl_concat(&esc(&buf)));
@@ -5399,7 +5399,7 @@ fn scan_template(source: &str, i: i64) -> Scan {
         if (cc != 96i64) {
             let mut handled = false;
             if ((cc == 36i64) && (source.revl_slice((j).checked_add(1i64).expect("revl: Int overflow"), (j).checked_add(2i64).expect("revl: Int overflow")) == "{")) {
-                let inner = scan_interp(source, (j).checked_add(2i64).expect("revl: Int overflow"));
+                let inner = scan_interp(source, (j).checked_add(2i64).expect("revl: Int overflow"), source_revl_cs);
                 if (inner.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                     let lines2 = (nl).checked_add(inner.nl).expect("revl: Int overflow");
                     return Scan { j: (0i64).checked_sub(1i64).expect("revl: Int overflow"), out: String::from(""), nl: lines2 };
@@ -5431,10 +5431,10 @@ fn scan_template(source: &str, i: i64) -> Scan {
     return Scan { j: (0i64).checked_sub(1i64).expect("revl: Int overflow"), out: String::from(""), nl: lines };
 }
 
-fn scan_comment(source: &str, i: i64) -> Scan {
+fn scan_comment(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
     let mut j = i;
     let n = source.revl_length();
-    while ((j < n) && ({ source.chars().nth((j) as usize).unwrap() as u32 as i64 } != 10i64)) {
+    while ((j < n) && ({ source_revl_cs[(j) as usize] as u32 as i64 } != 10i64)) {
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
     let jj = j;
@@ -5454,12 +5454,12 @@ fn count_nl(s: &str) -> i64 {
     return c;
 }
 
-fn scan_host_body(source: &str, k: i64) -> Scan {
+fn scan_host_body(source: &str, k: i64, source_revl_cs: &[char]) -> Scan {
     let mut j = (k).checked_add(1i64).expect("revl: Int overflow");
     let n = source.revl_length();
     let mut depth = 1i64;
     while (j < n) {
-        let cc = { source.chars().nth((j.clone()) as usize).unwrap() as u32 as i64 };
+        let cc = { source_revl_cs[(j.clone()) as usize] as u32 as i64 };
         if (cc == 123i64) {
             depth = (depth).checked_add(1i64).expect("revl: Int overflow");
         }
@@ -5475,10 +5475,10 @@ fn scan_host_body(source: &str, k: i64) -> Scan {
     return Scan { j: (0i64).checked_sub(1i64).expect("revl: Int overflow"), out: String::from(""), nl: 0i64 };
 }
 
-fn step(source: &str, i: i64, line: i64) -> Step {
+fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
     let none = Token { kind: String::from(""), text: String::from(""), line: line };
-    let c = { source.chars().nth((i) as usize).unwrap().to_string() };
-    let cc = { source.chars().nth((i) as usize).unwrap() as u32 as i64 };
+    let c = { source_revl_cs[(i) as usize].to_string() };
+    let cc = { source_revl_cs[(i) as usize] as u32 as i64 };
     if (cc == 10i64) {
         return Step { i: (i).checked_add(1i64).expect("revl: Int overflow"), line: (line).checked_add(1i64).expect("revl: Int overflow"), tok: none.clone() };
     }
@@ -5486,7 +5486,7 @@ fn step(source: &str, i: i64, line: i64) -> Step {
         return Step { i: (i).checked_add(1i64).expect("revl: Int overflow"), line: line, tok: none.clone() };
     }
     if (source.revl_slice(i, (i).checked_add(2i64).expect("revl: Int overflow")) == "//") {
-        let sc = scan_comment(source, i);
+        let sc = scan_comment(source, i, source_revl_cs);
         return Step { i: sc.j, line: line, tok: none.clone() };
     }
     let op = op_at(source, i);
@@ -5496,32 +5496,32 @@ fn step(source: &str, i: i64, line: i64) -> Step {
     }
     if (cc == 34i64) {
         if is_triple_at(source, i) {
-            let ts = scan_triple(source, (i).checked_add(3i64).expect("revl: Int overflow"));
+            let ts = scan_triple(source, (i).checked_add(3i64).expect("revl: Int overflow"), source_revl_cs);
             if (ts.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                 return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated triple string"), line: line } };
             }
             return Step { i: ts.j, line: (line).checked_add(ts.nl).expect("revl: Int overflow"), tok: Token { kind: String::from("string"), text: ts.out.clone(), line: line } };
         }
-        let ss = scan_string(source, (i).checked_add(1i64).expect("revl: Int overflow"));
+        let ss = scan_string(source, (i).checked_add(1i64).expect("revl: Int overflow"), source_revl_cs);
         if (ss.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated string"), line: line } };
         }
         return Step { i: ss.j, line: line, tok: Token { kind: String::from("string"), text: ss.out.clone(), line: line } };
     }
     if (cc == 96i64) {
-        let st = scan_template(source, (i).checked_add(1i64).expect("revl: Int overflow"));
+        let st = scan_template(source, (i).checked_add(1i64).expect("revl: Int overflow"), source_revl_cs);
         if (st.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("bad template"), line: line } };
         }
         return Step { i: st.j, line: (line).checked_add(st.nl).expect("revl: Int overflow"), tok: Token { kind: String::from("template"), text: st.out.clone(), line: (line).checked_add(st.nl).expect("revl: Int overflow") } };
     }
     if is_alpha(&c) {
-        let sw = scan_word(source, i);
+        let sw = scan_word(source, i, source_revl_cs);
         let kind2 = if (keywords().revl_index_of(&sw.out) != (0i64).checked_sub(1i64).expect("revl: Int overflow")) { String::from("kw") } else { String::from("ident") };
         return Step { i: sw.j, line: line, tok: Token { kind: kind2, text: sw.out.clone(), line: line } };
     }
     if (cc == 39i64) {
-        let sq = scan_quoted(source, (i).checked_add(1i64).expect("revl: Int overflow"), 39i64);
+        let sq = scan_quoted(source, (i).checked_add(1i64).expect("revl: Int overflow"), 39i64, source_revl_cs);
         if (sq.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated string"), line: line } };
         }
@@ -5540,7 +5540,7 @@ fn step(source: &str, i: i64, line: i64) -> Step {
                 base = 8i64;
                 valid = String::from("01234567");
             }
-            let g = scan_grouped(source, (i).checked_add(2i64).expect("revl: Int overflow"), &valid);
+            let g = scan_grouped(source, (i).checked_add(2i64).expect("revl: Int overflow"), &valid, source_revl_cs);
             if (g.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                 return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
             }
@@ -5548,7 +5548,7 @@ fn step(source: &str, i: i64, line: i64) -> Step {
             let gj = g.j;
             return Step { i: gj, line: line, tok: Token { kind: String::from("int"), text: (val).to_string(), line: line } };
         }
-        let ip = scan_grouped(source, i, "0123456789");
+        let ip = scan_grouped(source, i, "0123456789", source_revl_cs);
         if (ip.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
         }
@@ -5556,7 +5556,7 @@ fn step(source: &str, i: i64, line: i64) -> Step {
         let mut isf = false;
         let mut fracpart = String::from("");
         if ((source.revl_slice(j, (j).checked_add(1i64).expect("revl: Int overflow")) == ".") && is_digit(&(source.revl_slice((j).checked_add(1i64).expect("revl: Int overflow"), (j).checked_add(2i64).expect("revl: Int overflow"))))) {
-            let fr = scan_grouped(source, (j).checked_add(1i64).expect("revl: Int overflow"), "0123456789");
+            let fr = scan_grouped(source, (j).checked_add(1i64).expect("revl: Int overflow"), "0123456789", source_revl_cs);
             if (fr.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                 return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
             }
@@ -5575,7 +5575,7 @@ fn step(source: &str, i: i64, line: i64) -> Step {
                 k = (k).checked_add(1i64).expect("revl: Int overflow");
             }
             if is_digit(&(source.revl_slice(k.clone(), (k).checked_add(1i64).expect("revl: Int overflow")))) {
-                let ex = scan_grouped(source, k.clone(), "0123456789");
+                let ex = scan_grouped(source, k.clone(), "0123456789", source_revl_cs);
                 if (ex.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                     return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
                 }
@@ -5597,19 +5597,19 @@ fn step(source: &str, i: i64, line: i64) -> Step {
         if ((nxt != "") && is_alpha(&nxt)) {
             let n1 = source.revl_length();
             let mut jb = (i).checked_add(1i64).expect("revl: Int overflow");
-            while ((jb < n1) && ({ let _rc: &str = &({ source.chars().nth((jb.clone()) as usize).unwrap().to_string() }); ("0" <= _rc && _rc <= "9") || ("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z") } || ({ source.chars().nth((jb.clone()) as usize).unwrap().to_string() } == "_"))) {
+            while ((jb < n1) && ({ let _rc: &str = &({ source_revl_cs[(jb.clone()) as usize].to_string() }); ("0" <= _rc && _rc <= "9") || ("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z") } || ({ source_revl_cs[(jb.clone()) as usize].to_string() } == "_"))) {
                 jb = (jb).checked_add(1i64).expect("revl: Int overflow");
             }
             let backend = source.revl_slice((i).checked_add(1i64).expect("revl: Int overflow"), jb.clone());
             let mut kb = jb.clone();
-            while (((kb < n1) && ({ source.chars().nth((kb.clone()) as usize).unwrap() as u32 as i64 } != 10i64)) && { let _rc: &str = &({ source.chars().nth((kb.clone()) as usize).unwrap().to_string() }); _rc == " " || _rc == "\t" || _rc == "\n" || _rc == "\r" }) {
+            while (((kb < n1) && ({ source_revl_cs[(kb.clone()) as usize] as u32 as i64 } != 10i64)) && { let _rc: &str = &({ source_revl_cs[(kb.clone()) as usize].to_string() }); _rc == " " || _rc == "\t" || _rc == "\n" || _rc == "\r" }) {
                 kb = (kb).checked_add(1i64).expect("revl: Int overflow");
             }
-            while ((kb < n1) && ({ source.chars().nth((kb.clone()) as usize).unwrap() as u32 as i64 } == 10i64)) {
+            while ((kb < n1) && ({ source_revl_cs[(kb.clone()) as usize] as u32 as i64 } == 10i64)) {
                 kb = (kb).checked_add(1i64).expect("revl: Int overflow");
             }
-            if ((kb < n1) && ({ source.chars().nth((kb.clone()) as usize).unwrap().to_string() } == "{")) {
-                let hb = scan_host_body(source, kb.clone());
+            if ((kb < n1) && ({ source_revl_cs[(kb.clone()) as usize].to_string() } == "{")) {
+                let hb = scan_host_body(source, kb.clone(), source_revl_cs);
                 if (hb.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                     return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated host body"), line: line } };
                 }
@@ -5626,12 +5626,13 @@ fn step(source: &str, i: i64, line: i64) -> Step {
 }
 
 pub fn lex_src(source: String) -> Vec<Token> {
+    let source_revl_cs: std::vec::Vec<char> = source.chars().collect();
     let mut out: Vec<Token> = vec![];
     let mut i = 0i64;
     let mut line = 1i64;
     let n = source.revl_length();
     while (i < n) {
-        let s = step(&source, i, line);
+        let s = step(&source, i, line, &source_revl_cs);
         if (s.tok.kind != "") {
             out.push(s.tok.clone());
         }
