@@ -228,6 +228,78 @@ def test_immediate_emission_prompts_then_fires_once(sink):
 
 
 # ---------------------------------------------------------------------------
+# F5: one ticket mints AT MOST one approval (the double-approve over-mint)
+#
+# `approve_ticket` used to neither retire nor mark the outstanding ticket, so
+# N calls against one still-outstanding ticket appended N unconsumed ledger
+# entries: one human "yes" bought N crossings. The fix makes a duplicate
+# `approve_ticket` call an idempotent no-op — it returns the SAME entry rather
+# than minting a second, so the per-entry single-use guarantee
+# (`_find_standing_approval`/`_consume_approval`) becomes a per-ticket
+# guarantee too.
+# ---------------------------------------------------------------------------
+
+@needs_cordis
+def test_double_approve_does_not_over_mint(sink):
+    from revl.mcp.approval import ApprovalRequired
+    session = _session()
+    session.load(_ir(), record=True)
+
+    with pytest.raises(ApprovalRequired) as exc:
+        session.call("ops", "shout", [sink, "hi"])
+    ticket_hash = exc.value.ticket["hash"]
+
+    # BEFORE the fix: two calls -> two unconsumed ledger entries for one
+    # ticket ("ledger entries for one ticket after double-approve: 2").
+    first = session.approve_ticket(ticket_hash)
+    second = session.approve_ticket(ticket_hash)          # the duplicate mint
+    assert first == second                                # idempotent no-op
+
+    entries = [e for e in session._ledger if e["hash"] == ticket_hash]
+    assert len(entries) == 1                              # AFTER the fix: 1
+    assert entries[0]["consumed"] is False
+
+    # fire 1: the one live entry fires and is consumed ("fire 1 ok")
+    out = session.call("ops", "shout", [sink, "hi"])
+    assert out["result"] is None
+    assert _lines(sink) == ["announce:hi"]
+    assert entries[0]["consumed"] is True
+
+    # fire 2: BEFORE the fix, the over-minted second entry let this replay
+    # through silently ("fire 2 FIRED -> ONE human yes bought TWO crossings").
+    # AFTER the fix, no unconsumed entry remains, so it is refused with a
+    # FRESH ticket exactly like any other unapproved class-(c) crossing.
+    with pytest.raises(ApprovalRequired) as exc2:
+        session.call("ops", "shout", [sink, "hi"])
+    assert exc2.value.ticket["hash"] == ticket_hash
+    assert _lines(sink) == ["announce:hi"]                # nothing new fired
+
+
+@needs_cordis
+def test_double_approve_before_a_swap_still_re_prompts_with_a_new_hash(sink):
+    # false positive: the F5 idempotent-mint path must not interfere with
+    # candidate-hash invalidation (F5 and the swap/replay chokepoint are
+    # orthogonal — a duplicate mint on the OLD ticket must not somehow keep it
+    # alive across a swap that moves the reach-closure candidate hash).
+    from revl.mcp.approval import ApprovalRequired
+    session = _session()
+    session.load(_ir(), record=True)
+    with pytest.raises(ApprovalRequired) as e1:
+        session.call("ops", "shout", [sink, "hi"])
+    session.approve_ticket(e1.value.ticket["hash"])
+    session.approve_ticket(e1.value.ticket["hash"])       # duplicate mint
+
+    swapped = _SOURCE.replace("emit announce(sink, msg)",
+                              "emit announce(sink, \"swapped\")")
+    session.swap(compile_source(swapped, "double_approve_swap.rvl"))
+    with pytest.raises(ApprovalRequired) as e2:
+        session.call("ops", "shout", [sink, "hi"])
+    assert e2.value.ticket["hash"] != e1.value.ticket["hash"]
+    assert e2.value.ticket["candidateHash"] != e1.value.ticket["candidateHash"]
+    assert _lines(sink) == []                             # nothing fired
+
+
+# ---------------------------------------------------------------------------
 # 4. a compensated emission still prompts (class (c) unchanged by 247)
 # ---------------------------------------------------------------------------
 
