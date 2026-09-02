@@ -173,8 +173,10 @@ def test_other_tiers_refuse_the_section_by_name(tier):
     assert "docs/fault-tests.md" in message
 
 
-# wasm is absent here for a reason unrelated to fault tests: this fixture's
-# services take `Str` params, which the wasm tier does not lower (i32 only).
+# wasm is absent here for a reason unrelated to fault tests: this fixture
+# carries a `config` block, and the cordis-wasm runtime has no
+# instantiation-config channel. It is NOT the `Str` params — that tier
+# lowers `Str` across the service boundary as a canonical-ABI pointer.
 @pytest.mark.parametrize("tier", ["typescript", "rust", "java"])
 def test_other_tiers_still_emit_the_same_document_without_the_section(tier):
     """The refusal is about the section, not about the document."""

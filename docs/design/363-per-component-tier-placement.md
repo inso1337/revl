@@ -458,14 +458,15 @@ a named, deliberate tier limit, `docs/conformance.md:171`):
 
 - declared function types: refused on java and wasm, escaping positions on
   rust (`docs/function-types.md:205-212`, `:242-269`; the refusal text at
-  `backends/java/emit.py:183-191`; the wasm i32/value gate at
-  `backends/wasm/emit.py:447-455`);
+  `backends/java/emit.py:183-191`; the wasm lowerability gate at
+  `backends/wasm/emit.py`, `_V3Emitter._check_type`);
 - a reached extern with no `@<tier>` body (each emitter refuses at emit);
 - a `config` extern off the injection tiers (`src/revl/lower.py:645`,
   refusal at `lower.py:2486-2490`) and a host-module `ref` off py/ts
   (`lower.py:2523-2540`), both already compile-time and tier-naming;
-- wasm's broader envelope: i32-only signatures, no config channel, no host
-  builtins on that tier (`docs/conformance.md:179`).
+- wasm's broader envelope: `Float`, `Map` and function-typed signatures, no
+  config channel, no host builtins on that tier (`docs/conformance.md`, the
+  per-tier refusal table).
 
 Mechanism: the emitters are the oracle, not a second list. At plan time,
 before anything spawns, the conductor dry-runs each process's slice through
