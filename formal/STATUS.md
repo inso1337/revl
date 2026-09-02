@@ -262,52 +262,93 @@ declares. No differential-oracle row references any of these definitions
 too: G9 is not covered by that gate.
 
 
-## Differential oracle (two re-statements, not the model)
+## Differential oracle (the proved model against the shipped checker)
 
 `harness/diff_corpus.py` + `harness/Oracle.lean`: parse every corpus
 `.rvl` with revl's real parser, export one TSV row per *fact*, then run
 `harness/Oracle.lean` over the same TSV and diff its verdicts against a
-plain-Python reference of the same semantics. A mismatch fails
-`make formal`.
+Python reference. A mismatch fails `make formal`.
 
-**What this checks, and what it does not (roadmap item 418, C4).** The
-oracle is *not* wired to the proved model. `Oracle.lean` imports
-`RevL.Manifest` but uses no definition from it: every verdict comes from
-its own unproved Lean (`disjointOK`, `closedOK`, `g4OK`, `capCovers`,
-`attenOK`), and `diff_corpus.reference_from_tsv` is a third independent
-re-implementation rather than a call into `src/revl/cap_order.py`. So the
-harness compares two hand-written re-statements of the rules against each
-other. That catches an extraction or transcription drift between them; it
-cannot catch a definitional error in L0. Step 1 of item 418 demonstrated
-this by accident: `ProvidesDisjoint` and `LinkOK` were restated over
-`(key, realm)` slots — a change to what the model *decides* — and the
-oracle's output was bit-identical, 343 of 343 agreeing before and after.
-Making the verdicts compute from `RevL.Manifest` and the proved `Covers`,
-and the Python reference call `src/revl/cap_order.py`, is item 418 step 6.
-Until then, "the differential oracle agrees" is a claim about the
-harness, not about the theorems.
+**What this checks (roadmap item 418, C4 / step 6 — was FALSE before,
+now wired).** Until step 6 the oracle was not connected to anything
+proved: `Oracle.lean` imported `RevL.Manifest` and used no definition
+from it (deleting the import compiled clean), every verdict came from
+private unproved Lean, and `diff_corpus.reference_from_tsv` was a third
+re-implementation rather than a call into `src/revl/cap_order.py`. Step 1
+of item 418 demonstrated the consequence by accident: `ProvidesDisjoint`
+and `LinkOK` were restated over `(key, realm)` slots — a change to what
+the model *decides* — and the oracle's output was bit-identical, 343 of
+343 agreeing before and after. The G2/`LinkOK` correction later in the
+item did it a second time, by construction.
 
-Facts exported: component manifests (M), require-binding resolutions (R),
-provide-key resolutions (C), per-statement classifications (T), call
+Both sides are now real:
+
+- the **Lean** side `decide`s the proved model. `V … disjoint=` is
+  `decide (RevL.Manifest.ProvidesDisjoint comps)`; `V … closed=` is
+  `decide (RevL.Manifest.RequiresClosed comps)`; `V … link=` is
+  `linkOKB`, with `RevLOracle.linkOKB_iff` proving
+  `linkOKB l = true ↔ RevL.Manifest.LinkOK l`; `W … atten=` is
+  `attenuatesB`, with `attenuatesB_iff` proving
+  `attenuatesB H R = true ↔ RevL.CapCeilings.Attenuates H R` — resource
+  half through the proved `RevL.Lemmas.Covers` over `stripCeilings`
+  (`coversB_iff`), ceiling half through the proved `budgetOf`
+  development, whose unbounded `∀ k` is discharged with
+  `RevL.Lemmas.budgetOf_attained`. The components are
+  `RevL.Manifest.LComponent` values, so `slots`/`needs` are the model's.
+- the **Python** side calls the shipped checker. Capabilities are parsed
+  and ordered by `src/revl/cap_order.py` (`parse_cap`, `covers_set`,
+  `split_ceilings`) — the one place the `(T, P)` algebra is implemented.
+  The harness carries no capability grammar and no `covers` of its own.
+
+The gate therefore bites, and this is the acceptance test for it: change
+`RevL.Manifest.needs` to ignore the realm and `lake build` still succeeds
+(27/27 targets, every theorem still proved) and the axioms gate is still
+clean, but `harness/diff_corpus.py` exits 1 with four mismatches
+(`examples/placement/caprealm_app.rvl`, `examples/tenants.rvl`,
+`tests/fixtures/canary_tenants.rvl`, `tests/fixtures/erase_realms.rvl`).
+The same edit against the pre-step-6 harness produced a bit-identical
+verdict file and exit 0.
+
+Facts exported: component manifests (M — with the component's `isolate`
+realm map and a `member`/`template` role), require-binding resolutions
+(R), provide-key resolutions (C), per-statement classifications (T), call
 facts with marker context (U), service-method emission bounds (B) and a
-scoped bound's declared entries (Q), and the **reachability** facts that
-let the model see past the marker — the capabilities a component's
-`requires` bindings grant it (K), its activation emit-step surface (A),
-the emission capabilities a provide method's body crosses (F), the
-activation-body spawn edges (S), and the spawn handles (H) through which
-`w.task.run(...)` resolves to the child's provision.
+scoped bound's declared entries (Q), the **reachability** facts that let
+the model see past the marker — the capabilities a component's `requires`
+bindings grant it (K), its activation emit-step surface (A), the emission
+capabilities a provide method's body crosses (F), the activation-body
+spawn edges (S), and the spawn handles (H) through which
+`w.task.run(...)` resolves to the child's provision — the canonical
+capability decompositions (Z/Y, straight out of `cap_order.parse_cap`),
+parse refusals (X) and componentless files (N).
+
+Two extraction facts on the `M` row are what make the corrected G2/G3
+rules observable:
+
+- the **realm map**, from the component's `isolate <key> in realm(<r>)`
+  clauses. `lower._realm` reads the same table, and the linker's
+  `provider_of` is keyed on `(key, realm)`. Without it the exporter could
+  not feed the model's slot. (`isolate <key> in realms(...)` — the
+  multi-realm ROUTE, item 162 — is a different construct and is not
+  folded in; no corpus file uses one.)
+- the **template flag**. A spawn target is a runtime instance, not a
+  static composition member: `lower._link` excludes it from the G2/G3
+  table and from `loadOrder` because each instance gets a fresh local
+  realm. Without it two per-tenant worker templates read as one G2
+  provision conflict, which is not what revl decides.
 
 Verdicts:
 
-- **V rows (per file, G2/G3)**: provision disjointness + requirement
-  closure. Two rules here are known to be wrong, and are step 6's work
-  rather than descriptions of revl. Disjointness is computed over bare
-  keys, where revl's G2 is per `(key, realm)` — `RevL.Manifest` now
-  models the real rule, but the exporter's `M` row carries no realm
-  column, so the oracle cannot yet see one. Closure is computed *within
-  a single file*, where revl closes requirements over the linked
-  composition. Between them these two account for every one of the 36
-  `formal-strict` files below.
+- **V rows (per file, G2/G3)**: provision disjointness over `(key,
+  realm)` slots, requirement closure, and linkability. `link=ok` means an
+  admission order was found AND `linkOKB` certified it, over the LOCAL
+  composition — requirements no in-file component provides are elided,
+  because `lower._link` resolves those against the whole composition and
+  adds no edge. Elided, not supplied by a fabricated provider: the
+  provision surface is untouched, so a component that requires a key it
+  provides *itself* keeps that requirement and is refused, which is the
+  linker's G3 self-provision refusal, and a cycle is refused because no
+  admission order exists.
 - **G rows (per component, G4-shaped)**: marker presence must equal the
   interface's declaration — a plain call to a declared emission method,
   or an `emit`'d call to a non-emission method, is refused. Receivers
@@ -316,36 +357,105 @@ Verdicts:
   bound on its providers. The method's reached capabilities must sit
   inside its declared bound — `plain` admits none, bare `emission` admits
   any, `emission[...]` admits exactly the declared entries.
-- **W rows (per activation spawn edge, G4/item 66/294)**: a spawned
-  child's transitively closed reach must be covered by the spawner's held
-  capabilities, comparing canonical `(token, params)` capabilities so a
-  child under `fs(path="/etc")` is refused beneath a parent holding
-  `fs(path="/tmp")`. Activation-body spawns only, matching
-  `lower._activation_spawn_sites`: a provide-method spawn is already
-  bounded by that method's `emission[...]` clause.
+- **W rows (per activation spawn edge, G4/item 66/294)**:
+  `RevL.CapCeilings.Attenuates` — the child's transitively closed reach
+  covered by the spawner's held capabilities on ceiling-stripped
+  capabilities, plus the ceiling budget check.
+- **X rows (per refused file)**: a verdict of RECORD, not a computed one.
+  revl's parser refused the file, so there is no manifest to model; the
+  row carries the refusal code so the file is counted and diffed rather
+  than dropped. Its agreement is tautological (both sides read the same
+  parser) and is reported separately from the computed verdicts for
+  exactly that reason. If a parser change ever makes one of these files
+  parse, it flows into the full model and the buckets move loudly.
 
-Current status over the corpus: **292 files → 182 components → 403
-statements → 130 manifest-bearing files → 343 verdicts compared
-(130 files + 182 components + 25 provide methods + 6 spawn edges), 343
-agree, 0 mismatches** (28 parse-error skips, loud). A mismatch is drift
-between the oracle and the reference — read the paragraph above for what
-that does and does not cover.
+**What is still a private restatement in `Oracle.lean`**, listed so the
+gate's reach is not overstated: `g4OK` (the G row — the G4 model is
+indexed by `RevL.Syntax.Stmt` and the export carries call facts, not
+statement terms), `methodBoundOK` (the P row — the model states no
+declaration-versus-reach bound at all; `RevL.Boundary.bodyBoundary`
+enumerates crossing heads but never compares them to a declaration), and
+`closeN` (the spawn-surface transitive closure feeding W —
+`RevL.CapCeilings.reachIn` *is* that closure, but it is indexed by a
+`Comp` carrying `body : List Stmt`, which the export cannot produce;
+only the closure is local, the judgment it feeds is the model's).
 
-Checker alignment (informational, not a gate — promoting
-`formal-strict` / `missed-G4` / `missed-G2` to gate failures is item 418
-step 7): each parsed file is also compiled with the real checker and its
-refusal code is compared against the formal verdicts. Current buckets: 52
-agree-accept, 2 agree-G2, 6 agree-G4, 36 formal-strict (the checker
-*accepts* the file but the oracle does not), 13 formal-found-other, 21
-out-of-fragment. **0 missed-G4**: the five
-previously missed files are now modeled, each by the verdict row its
-rejection comment names —
-`g4_emission_not_declared` and `g4_capability_not_declared` by a P row
-(provider exceeds its declared bound), `g4_spawn_widens_capability` and
-`g4_spawn_widens_parameter` by a W row (spawn widens authority), and
-`g4_unmarked_handle_emission` by a G row (unmarked crossing through a
-spawn handle). No other bucket changed membership, so nothing was
-manufactured: the only files that moved are the five.
+### Census
+
+Nothing is dropped and nothing is counted without being named. Over the
+corpus: **296 .rvl files → 182 components → 403 statements = 130 modeled
++ 138 componentless + 28 refused at parse**, and **371 verdicts compared
+(130 files + 182 components + 25 provide methods + 6 spawn edges + 28
+parse refusals), 371 agree, 0 mismatches**.
+
+- The 28 parse refusals are LISTED by name and code, not counted. The
+  previous "(28 parse-error skips, loud)" parenthesis hid
+  `examples/rejections/g4_missing_undo.rvl` — literally the shape G4
+  forbids, refused with code G4 — and both G6 fixtures
+  (`g6_closure_mutates_capture.rvl`, `g6_impure_statement.rvl`, both
+  G6), along with a G2, a G8 and an A8 fixture.
+- The 138 componentless files were previously in no bucket at all. They
+  are now reported by checker code, with every non-`accept` one named:
+  that surfaces `g1_template_undeclared.rvl` (a G1 the model never sees)
+  and five `g4_extern_*` fixtures whose refusals are extern-declaration
+  shapes, not composition shapes. The 83 accepted ones are backend emit
+  corpora with no composition in them. Full list in
+  `harness/out/no_manifest.txt`.
+
+Checker alignment: each modeled file is compiled with the real checker
+and its refusal code compared against the formal verdicts. `missed-G4`
+and `missed-G2` are **gate failures** (item 418 step 7), not findings:
+the checker refusing where the model sees nothing is the model being
+weaker than what revl enforces. `formal-strict` — the model refusing what
+the checker accepts — stays informational; it is the safe direction and
+names fragment gaps. Current buckets: 88 agree-accept, 2 agree-G2, 1
+agree-G3, 6 agree-G4, 33 out-of-fragment, and **0 missed-G4, 0 missed-G2,
+0 formal-strict, 0 formal-found-other**.
+
+Movements from the pre-step-6 buckets (52 agree-accept, 2 agree-G2, 6
+agree-G4, 36 formal-strict, 13 formal-found-other, 21 out-of-fragment),
+each explained:
+
+- **36 formal-strict → agree-accept**, emptying the bucket. 32 of them
+  were `V(ok, fail)` from reading the closure column as a checker-visible
+  refusal; it is not one. `compile_source` type-checks and links ONE
+  file, and `lower._link` reports nothing for a requirement with no
+  in-file provider — that key is resolved against the rest of the
+  composition at link time. Requirement closure is therefore reported in
+  the V row and excluded from the alignment comparison, which uses
+  `disjoint` and `link` (both genuinely checker-visible). The other 4 are
+  the realm/template fix: `examples/tenants.rvl`,
+  `tests/fixtures/canary_tenants.rvl` and `tests/fixtures/erase_realms.rvl`
+  were `disjoint=fail` under the bare-key rule and are admitted by the
+  slot rule, and `examples/tenant_attenuation.rvl` was `disjoint=fail`
+  because its two spawn *templates* both provide `worker` — templates are
+  not composition members.
+- **13 formal-found-other → out-of-fragment**, emptying the bucket. Every
+  one was a closure-only failure on a file the checker refuses for an
+  unrelated reason (7 A1, 1 A6, 2 T1, 1 G1, 2 REVL). With closure out of
+  the comparison the model is clean on them, and the refusal is honestly
+  out of the modeled fragment rather than a phantom "the model found
+  something else".
+- **1 out-of-fragment → agree-G3**: `examples/rejections/g3_dependency_cycle.rvl`.
+  This is the new bite, and it was not predicted by the step-6 brief. The
+  harness had no G3 verdict at all before; the `link` column derives no
+  admission order for the cycle, and the checker's G3 refusal now has a
+  model verdict to agree with. `G3` was added to the alignment's
+  guarantee-code arm for it.
+- **28 parse refusals and 138 componentless files** enter the census for
+  the first time. Verdicts compared rose 343 → 371 purely from the 28
+  refusal rows; the 138 componentless files get no verdict (a vacuous
+  `ok` over an empty composition would be inflation) and are reported by
+  name instead. (The corpus was 292 files with 134 componentless when
+  step 6 started; four more componentless fixtures landed on main during
+  the work, and no other number moved with them.)
+- Every G, P and W verdict is **unchanged**, 182 + 25 + 6 of them,
+  bit-for-bit. Routing the coverage relation through the proved `Covers`
+  and adding the ceiling half was expected to move nothing: the corpus
+  carries no integer-valued capability parameter, so `stripCeilings` is
+  the identity and `CeilingOK` is vacuous on it. The ceiling half is
+  still wired on both sides, so the first corpus file to declare one is
+  compared rather than ignored.
 
 Known fidelity limits of the shaped model, deliberately not papered over:
 
@@ -353,24 +463,15 @@ Known fidelity limits of the shaped model, deliberately not papered over:
   transitively-emitting named function contributes the unnameable `*`
   capability rather than a resolved boundary. That mirrors the checker's
   own `*`, but it is coarse: `*` is covered only by `*`.
-- Capability **ceilings** are not modeled. The checker runs the crossing-
-  coverage fold ceiling-blind (`_strip_ceilings`) and checks budgets
-  separately; the model compares whole canonical capabilities. The corpus
-  carries no integer-valued capability parameter today, so the two agree
-  on it vacuously — this is TODO 2's work, not a live divergence.
-- The 36 `formal-strict` files are **not** "the model being stricter than
-  the fragment it covers". Every one of them is one of the two wrong
-  rules in the oracle's V row, and the split is exactly: **32** files
-  `V(ok, fail)` from the intra-file closure rule; **3** files
-  `V(fail, ok)` from the bare-key disjointness rule
-  (`examples/tenants.rvl`, `tests/fixtures/canary_tenants.rvl`,
-  `tests/fixtures/erase_realms.rvl`); and **1**,
-  `examples/tenant_attenuation.rvl`, tripping both. No file in the bucket
-  is refused by a G, P or W row. Fixing the two rules in the oracle
-  (step 6) should empty the bucket. The L0 side of the realm rule is
-  already fixed — `RevL.Manifest.ProvidesDisjoint` admits all four of
-  those files — but that alone moves nothing here, because the oracle
-  does not read `RevL.Manifest` and the exporter emits no realm.
+- Capability **ceilings** are modeled on both sides now (the model's
+  `CeilingOK`, the checker's `split_ceilings`), but the corpus exercises
+  neither: no file declares an integer-valued capability parameter, so
+  the two agree on it vacuously.
+- The `closed` column of the V row is `RevL.Manifest.RequiresClosed` over
+  the file's own components. It is a real model predicate and a real
+  question about a composition, but a single `.rvl` is not necessarily a
+  composition, so it is reported and not aligned. 51 files carry
+  `closed=fail` for that reason and none of them is a finding.
 
 ## TODO (in dependency order)
 
@@ -433,11 +534,14 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    as strict as the checker, never looser. Still not modelled: parse-time
    canonicalization (upstream of the order), and `cap_order.disjoint`'s
    deferred (D2) same-token clause.
-   (b) *oracle side* — teach the oracle the checker's ceiling-blind
-   coverage fold plus its separate budget attenuation, so an
-   integer-valued capability parameter is compared the way the checker
-   compares it. The corpus has no such parameter today, so the two agree
-   vacuously; this closes that gap rather than resting on it.
+   (b) ~~*oracle side*~~ — **done** (item 418 step 6). The W verdict is
+   now `RevL.CapCeilings.Attenuates`: the ceiling-blind coverage fold
+   over `stripCeilings` plus the separate budget attenuation, on the Lean
+   side through `attenuatesB_iff` and on the Python side through
+   `cap_order.split_ceilings`/`covers_set`. The corpus still has no
+   integer-valued capability parameter, so the two agree vacuously — but
+   the comparison exists, so the first one to appear is checked rather
+   than ignored.
 3. **L3**: `Trusted[T]`/`Secret[T]` non-interference — **done**, see
    *G9* below — and WAL commit/abort discharge, still deferred (a runtime
    state-machine refinement). The taint half turned out **not** to need an

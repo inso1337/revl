@@ -22,17 +22,32 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    That is what lets the shaped model see a provider exceeding its
    declaration and a spawn widening a child's authority, not just a missing
    `emit` marker.
-3. compute reference verdicts in Python set logic (the G2/G3/G4-shaped
-   spec) AND run the Lean oracle (`formal/harness/Oracle.lean`, the
-   machine-checked models, coded independently) over the same TSV. The
-   formal-vs-reference diff is the HARD gate: a mismatch is definitional
-   drift between model and spec/extraction, and it fails `make formal`.
+3. compute reference verdicts here AND run the Lean oracle
+   (`formal/harness/Oracle.lean`) over the same TSV, then diff them. This
+   is the HARD gate, and since item 418 step 6 the two sides are no longer
+   two hand-written restatements of the same understanding:
+
+     - the LEAN side `decide`s the PROVED model — `RevL.Manifest`'s
+       `ProvidesDisjoint` / `RequiresClosed` / `LinkOK` over its
+       `(key, realm)` slots, and `RevL.CapCeilings.Attenuates` over the
+       proved `Covers`/`budgetOf` development. Change an L0 definition and
+       the verdicts move;
+     - the PYTHON side calls the SHIPPED checker's own algebra
+       (`src/revl/cap_order.parse_cap` / `covers` / `split_ceilings`) and
+       the real parser, and computes nothing about capabilities itself.
+
+   A mismatch is therefore drift between the machine-checked model and
+   what revl actually does, and it fails `make formal`.
 4. report checker alignment: compile each file with the real checker
    (`revl.compiler.compile_source`) and compare its refusal codes against
-   the formal verdicts. Informational in this version (STATUS.md):
-   mismatches here are findings, not gate failures.
+   the formal verdicts. Informational, EXCEPT `missed-G4` and `missed-G2`
+   (`FATAL_BUCKETS`) — the checker refusing where the model sees nothing
+   is the dangerous direction and fails the gate.
 
-Parse failures skip LOUDLY (counted, never silently dropped).
+Nothing is skipped. A parse-time REFUSAL is a verdict (revl rejecting the
+file IS the answer) and is carried through as an `X` row; a parsed file
+with no component has no composition to model and is named in the
+`no-manifest` report rather than dropped from every count.
 """
 
 import dataclasses
@@ -40,6 +55,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 REPO = Path(__file__).resolve().parents[2]
 FORMAL = Path(__file__).resolve().parents[1]
@@ -47,6 +63,7 @@ CORPUS_DIRS = ("examples", "tck", "tests")
 
 sys.path.insert(0, str(REPO / "src"))
 
+from revl import cap_order
 from revl.compiler import compile_source
 from revl.diagnostics import classify
 from revl.errors import RevlError
@@ -57,6 +74,7 @@ from revl.parser import (
     ExprCall,
     ExprField,
     ExprVar,
+    IsolateStmt,
     LetEffect,
     Parser,
     ProvideStmt,
@@ -100,68 +118,75 @@ def _route(callee: object) -> tuple[str, str] | None:
 
 
 # ---------------------------------------------------------------- caps
-# Canonical capability grammar (mirrors cap_order.py's (T, P) fold as a
-# string): `token` or `token(n1=v1,n2=v2)`; a value is `"string"`, `/a/b`
-# path components, or an int (a ceiling). Covers = same token (unless `*`),
-# per-param value <= (path: component-prefix; int: <=; discrete: equality) —
-# the same clauses cap_order.Cap.covers implements.
+#
+# There is NO capability grammar here (item 418 step 6). A canonical
+# capability string is read by `src/revl/cap_order.parse_cap` — the checker's
+# own parser, the one place the (T, P) algebra is implemented — and the
+# order is `cap_order.covers`. The harness used to carry a third
+# re-implementation of both; the point of the differential is to compare
+# the PROVED model against the SHIPPED checker, and a private Python copy
+# of the rules made the Python side a third opinion instead of the real one.
 
-def _split_canon_cap(s: str) -> tuple[str, dict[str, tuple[str, object]]]:
-    oi = s.find("(")
-    if oi < 0:
-        return s, {}
-    tok = s[:oi]
-    inner = s[oi + 1:]
-    if inner.endswith(")"):
-        inner = inner[:-1]
-    params: dict[str, tuple[str, object]] = {}
-    for chunk in inner.split(","):
-        if not chunk.strip():
-            continue
-        name, _, raw = chunk.partition("=")
-        raw = raw.strip()
-        if raw.startswith('"'):
-            params[name.strip()] = ("str", raw[1:-1])
-        elif raw.startswith("/"):
-            params[name.strip()] = ("path", tuple(raw.split("/")[1:]))
-        else:
-            params[name.strip()] = ("int", int(raw))
-    return tok, params
+_CAP_CACHE: dict[str, cap_order.Cap] = {}
 
 
-def _param_leq(narrow: tuple[str, object], wide: tuple[str, object]) -> bool:
-    (kn, vn), (kw, vw) = narrow, wide
-    if kn != kw:
+def parse_cap(s: str) -> cap_order.Cap:
+    """`cap_order.parse_cap`, memoized. A malformed capability is a hard
+    error: it means the exporter built a spelling the checker cannot read."""
+    hit = _CAP_CACHE.get(s)
+    if hit is None:
+        hit = _CAP_CACHE[s] = cap_order.parse_cap(s)
+    return hit
+
+
+def cap_decomposition_rows(caps: "set[str]") -> list[str]:
+    """Z/Y rows: the canonical caps the corpus mentions, decomposed by
+    `cap_order` into the model's `(token, valuation)` shape so the Lean
+    side never re-reads the grammar. A value's KIND comes from the closed
+    registry's own canonicalization: a path canonicalizes to a component
+    tuple, a ceiling to a base-unit int, a discrete resource to a str."""
+    rows: list[str] = []
+    for s in sorted(caps):
+        cap = parse_cap(s)
+        rows.append("\t".join(["Z", s, cap.token]))
+        for name, value in cap.params:
+            if isinstance(value, tuple):
+                rows.append("\t".join(["Y", s, name, "path", "/".join(value)]))
+            elif isinstance(value, bool):  # pragma: no cover - not a cap value
+                raise SystemExit(f"differential oracle: bool cap value in {s!r}")
+            elif isinstance(value, int):
+                rows.append("\t".join(["Y", s, name, "ceiling", str(value)]))
+            else:
+                rows.append("\t".join(["Y", s, name, "discrete", str(value)]))
+    return rows
+
+
+def attenuates(held: "set[str]", reach: "set[str]") -> bool:
+    """`RevL.CapCeilings.Attenuates`, computed with the checker's own
+    algebra: the resource fold over ceiling-stripped capabilities
+    (`covers_set` empty), AND the ceiling budget check — wherever the
+    parent declares a budget for the child's token and parameter, the child
+    must declare one too and no larger (a dropped ceiling is `+inf`, hence
+    a widening)."""
+    hcaps = [parse_cap(h) for h in held]
+    rcaps = [parse_cap(c) for c in reach]
+    hsplit = [cap_order.split_ceilings(h) for h in hcaps]
+    rsplit = [cap_order.split_ceilings(c) for c in rcaps]
+    if cap_order.covers_set([h for h, _ in hsplit], [c for c, _ in rsplit]):
         return False
-    if kn == "path":
-        return vn[: len(vw)] == vw
-    if kn == "int":
-        return vn <= vw
-    return vn == vw
-
-
-def cap_covers(held: str, reach: str) -> bool:
-    """`held` covers `reach` iff same token (unless `*`) and reach narrows
-    every param held binds — cap_order.covers clause-for-clause, on the
-    canonical string form."""
-    th, ph = _split_canon_cap(held)
-    tr, pr = _split_canon_cap(reach)
-    if th == "*":
-        return tr == "*"
-    if tr == "*":
-        return False
-    if th != tr:
-        return False
-    for k, av in ph.items():
-        if k not in pr or not _param_leq(pr[k], av):
-            return False
+    for cap, (_stripped, ceilings) in zip(rcaps, rsplit):
+        # budgetOf: the MOST GENEROUS declaration the parent holds under
+        # this token for this parameter (RevL.Lemmas.budgetOf).
+        budgets: dict[str, int] = {}
+        for hcap, (_hs, hceils) in zip(hcaps, hsplit):
+            if hcap.token != cap.token:
+                continue
+            for name, bound in hceils.items():
+                budgets[name] = max(budgets.get(name, bound), bound)
+        for name, bound in budgets.items():
+            if name not in ceilings or ceilings[name] > bound:
+                return False
     return True
-
-
-def cap_covers_set(held: set[str], reach: set[str]) -> list[str]:
-    """Reach elements NOT covered by any held element — the attenuation
-    check's `extra`. Empty means admitted."""
-    return sorted(c for c in reach if not any(cap_covers(h, c) for h in held))
 
 
 def _canon_cap(root: str, declared: str) -> str:
@@ -352,19 +377,81 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
             walk_calls(x, out, ctx)
 
 
-def export() -> tuple[list[str], dict[str, dict], dict[str, int]]:
+def _spawn_templates(prog) -> set[str]:
+    """Every component named by a `spawn` anywhere in the program — the
+    linker's `templates` set (`lower._link`). A spawn target is a RUNTIME
+    instance, not a static composition member: it is excluded from the
+    G2/G3 table and from `loadOrder`, because each instance is created in
+    its own fresh local realm. Without this the model would see two
+    per-tenant worker templates as one G2 provision conflict, which is not
+    what revl decides."""
+    found: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, SpawnExpr):
+            found.add(node.component)
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for f in dataclasses.fields(node):
+                walk(getattr(node, f.name))
+            return
+        if isinstance(node, (list, tuple)):
+            for x in node:
+                walk(x)
+
+    for c in prog.components:
+        walk(c.body)
+    for fn in prog.fn_decls:
+        walk(fn.body)
+    return found
+
+
+def _isolate_map(comp) -> dict[str, str]:
+    """The component's `isolate <key> in realm(<r>)` clauses — `lower._realm`'s
+    table. A key with no clause stays in the shared realm, which is
+    `RevL.Manifest.sharedRealm` (the empty string) on the model's side.
+
+    `isolate <key> in realms(...)` (the multi-realm ROUTE, item 162) is a
+    different construct and is NOT folded in here: a routed key resolves
+    per-realm at each leg rather than pinning one realm. No corpus file uses
+    one today; if one appears its route legs are simply not modeled, and the
+    key falls back to the shared realm."""
+    out: dict[str, str] = {}
+    for stmt in comp.body:
+        if isinstance(stmt, IsolateStmt):
+            out[stmt.key] = stmt.realm
+    return out
+
+
+def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     """Parse the corpus; return (tsv rows, per-file facts, census)."""
     tsv: list[str] = []
     file_facts: dict[str, dict] = {}
-    files = comps = stmts = skipped = 0
+    caps_seen: set[str] = set()
+    refusals: dict[str, str] = {}
+    componentless: list[str] = []
+    files = comps = stmts = 0
     for path in corpus_files():
         files += 1
+        rel = str(path.relative_to(REPO))
         try:
             prog = Parser(path.read_text(encoding="utf-8"), str(path)).parse()
-        except RevlError:
-            skipped += 1
+        except RevlError as e:
+            # A parse-time REFUSAL is a VERDICT, not a skip (item 418 step 7):
+            # revl rejecting the file IS the answer, and dropping it hid
+            # `g4_missing_undo.rvl` (literally the shape G4 forbids) and both
+            # G6 fixtures from every count in this harness.
+            refusals[rel] = classify(e).get("code") or "UNCODED"
+            tsv.append("\t".join(["X", rel, refusals[rel]]))
             continue
-        rel = str(path.relative_to(REPO))
+        if not prog.components:
+            # Parsed, but there is no composition to model. Recorded by name
+            # (item 418 step 7) rather than dropped: the file still reaches
+            # the checker-alignment report, where its refusal code — G1 for
+            # `g1_template_undeclared.rvl`, and five `g4_extern_*` fixtures —
+            # is named as OUTSIDE the model's fragment instead of vanishing.
+            componentless.append(rel)
+            tsv.append("\t".join(["N", rel]))
+            continue
         svc_objs = {svc.name: svc for svc in prog.services}
         services = {n: {m: md.emission for m, md in s.methods.items()}
                     for n, s in svc_objs.items()}
@@ -376,6 +463,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, int]]:
             for e in sorted(entries):
                 tsv.append("\t".join(["Q", rel, svc, meth, e]))
         emitting = _fn_emitting(prog)
+        templates = _spawn_templates(prog)
         # provide-key -> service, file-wide (children resolve handle receivers).
         psvc = {c.name: {k: s for k, s, _ln in c.provides} for c in prog.components}
 
@@ -384,11 +472,18 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, int]]:
             requires = [(local, svc) for local, svc, _line in c.requires]
             provides = [key for key, _svc, _line in c.provides]
             require_map = dict(requires)
+            realms = _isolate_map(c)
             comps += 1
+            # M carries the REALM map and the template flag, the two facts
+            # `RevL.Manifest` needs to state revl's actual G2/G3 rule: the
+            # unit is the `(key, realm)` SLOT, and a spawn target is not a
+            # member of the static composition at all.
             tsv.append(
                 "\t".join(["M", rel, c.name,
                            ",".join(r for r, _s in requires),
-                           ",".join(provides)])
+                           ",".join(provides),
+                           ",".join(f"{k}={v}" for k, v in sorted(realms.items())),
+                           "template" if c.name in templates else "member"])
             )
             for local, svc in requires:
                 tsv.append("\t".join(["R", rel, c.name, local, svc]))
@@ -412,6 +507,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, int]]:
                         for e in ents:
                             krows.append((local, _canon_cap(local, e)))
             for local, cap in sorted(krows):
+                caps_seen.add(cap)
                 tsv.append("\t".join(["K", rel, c.name, local, cap]))
 
             # spawn facts. S = attenuation edge, and ONLY an activation-body
@@ -438,6 +534,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, int]]:
             for stmt in c.body:
                 walk_reach(stmt, act_reach, "emit-step", require_map, handles,
                            psvc, bounds, em_set, emitting)
+            caps_seen.update(act_reach)
             for cap in sorted(act_reach):
                 tsv.append("\t".join(["A", rel, c.name, cap]))
 
@@ -454,6 +551,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, int]]:
                         for inner in pm.body:
                             walk_reach(inner, reach, "all", require_map, handles,
                                        psvc, bounds, em_set, emitting)
+                        caps_seen.update(reach)
                         for cap in sorted(reach):
                             tsv.append("\t".join(
                                 ["F", rel, c.name, stmt.key, svc, pm.name, cap]))
@@ -524,11 +622,12 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, int]]:
                             classify_stmt(inner)
             tsv.extend(f"T\t{rel}\t{c.name}\t{k}" for k in kinds)
             ff["components"][c.name] = {"calls": calls, "kinds": kinds}
-        if prog.components:
-            file_facts[rel] = ff
-    return tsv, file_facts, {
+        file_facts[rel] = ff
+    # Z/Y decomposition rows go FIRST so the oracle can build its table in
+    # one pass; the harness refuses a capability the checker cannot re-read.
+    return cap_decomposition_rows(caps_seen) + tsv, file_facts, {
         "files": files, "components": comps, "statements": stmts,
-        "parse_errors": skipped,
+        "refusals": refusals, "componentless": componentless,
     }
 
 
@@ -549,22 +648,33 @@ def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
     return out_path.read_text(encoding="utf-8")
 
 
-def parse_verdicts(text: str) -> tuple[dict[str, tuple[str, str]],
-                                       dict[tuple[str, str], str],
-                                       dict[tuple[str, str, str, str, str], str],
-                                       dict[tuple[str, str, str], str]]:
-    """Parse oracle output into verdict maps: V rows (file manifests), G
-    rows (per-component marker rule), P rows (per provide-method bound),
-    W rows (per spawn-edge attenuation)."""
-    files: dict[str, tuple[str, str]] = {}
+class Verdicts(NamedTuple):
+    """One side's verdicts. `files` are V rows (disjoint, closed, link),
+    `comps` G rows, `providers` P rows, `spawns` W rows, `refused` X rows."""
+    files: dict[str, tuple[str, str, str]]
+    comps: dict[tuple[str, str], str]
+    providers: dict[tuple[str, str, str, str, str], str]
+    spawns: dict[tuple[str, str, str], str]
+    refused: dict[str, str]
+
+    def total(self) -> int:
+        return (len(self.files) + len(self.comps) + len(self.providers)
+                + len(self.spawns) + len(self.refused))
+
+
+def parse_verdicts(text: str) -> Verdicts:
+    """Parse oracle output into verdict maps."""
+    files: dict[str, tuple[str, str, str]] = {}
     comps: dict[tuple[str, str], str] = {}
     providers: dict[tuple[str, str, str, str, str], str] = {}
     spawns: dict[tuple[str, str, str], str] = {}
+    refused: dict[str, str] = {}
     for line in text.splitlines():
         parts = line.split("\t")
-        if parts[0] == "V" and len(parts) == 4:
+        if parts[0] == "V" and len(parts) == 5:
             files[parts[1]] = (parts[2].split("=", 1)[1],
-                               parts[3].split("=", 1)[1])
+                               parts[3].split("=", 1)[1],
+                               parts[4].split("=", 1)[1])
         elif parts[0] == "G" and len(parts) == 4:
             comps[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
         elif parts[0] == "P" and len(parts) == 7:
@@ -572,30 +682,68 @@ def parse_verdicts(text: str) -> tuple[dict[str, tuple[str, str]],
                 parts[6].split("=", 1)[1]
         elif parts[0] == "W" and len(parts) == 5:
             spawns[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+        elif parts[0] == "X" and len(parts) == 3:
+            refused[parts[1]] = parts[2].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
-    return files, comps, providers, spawns
+    return Verdicts(files, comps, providers, spawns, refused)
 
 
-def reference_from_tsv(tsv: list[str]) -> tuple[dict[str, tuple[str, str]],
-                                                dict[tuple[str, str], str],
-                                                dict[tuple[str, str, str, str, str], str],
-                                                dict[tuple[str, str, str], str]]:
+def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
+    """`RevL.Manifest.slots` — the `(key, realm)` pairs a component fills.
+    An unisolated key sits in the shared realm (the empty string)."""
+    return [(k, realms.get(k, "")) for k in provides]
+
+
+def _link_ok(comps: list[tuple[list[str], list[str], dict[str, str]]]) -> bool:
+    """`RevL.Manifest.LinkOK` over the LOCAL composition, decided the same
+    way the oracle decides it (see `Oracle.linkVerdict`): elide the
+    requirements no in-file component provides — the linker adds no edge for
+    a key with no provider — then admit components one at a time, each with
+    distinct slots, none re-providing an admitted slot, and every consumed
+    slot already admitted. A component that requires a key it provides
+    itself keeps that requirement and can never be admitted, which is the
+    linker's G3 self-provision refusal."""
+    provided_all: set[tuple[str, str]] = set()
+    for _reqs, provs, realms in comps:
+        provided_all.update(_slots(provs, realms))
+    local = [
+        ([k for k in reqs if (k, realms.get(k, "")) in provided_all], provs, realms)
+        for reqs, provs, realms in comps
+    ]
+    admitted: set[tuple[str, str]] = set()
+    remaining = list(local)
+    while remaining:
+        for i, (reqs, provs, realms) in enumerate(remaining):
+            if all((k, realms.get(k, "")) in admitted for k in reqs):
+                mine = _slots(provs, realms)
+                if len(mine) != len(set(mine)) or admitted & set(mine):
+                    return False
+                admitted.update(mine)
+                remaining.pop(i)
+                break
+        else:
+            return False
+    return True
+
+
+def reference_from_tsv(tsv: list[str]) -> Verdicts:
     """Reference verdicts, recomputed from the same TSV the oracle
-    consumed — plain Python set logic, mirroring the Lean oracle's
-    semantics exactly so the diff is zero by construction unless one side
-    drifts.
+    consumed. The capability half calls `src/revl/cap_order.py` — the real
+    checker's algebra, not a restatement of it — so the diff compares the
+    PROVED model (the Lean side) against the SHIPPED checker.
 
-    V rows are FILE-WIDE (disjoint + closed over the manifest). G rows
-    are PER-COMPONENT marker-rule (marker presence == interface
-    declaration, incl. spawn-handle receivers). P rows are PER-PROVIDE-
-    METHOD: a service declaration is an upper bound — the method's
-    reached emission tokens must be within its declared bound (plain =>
-    none; any => free; scoped => the declared entries). W rows are
-    PER-SPAWN-EDGE attenuation: a spawned child's closed reach must be
-    covered by the spawner's held capabilities (item 66/294)."""
+    V rows are FILE-WIDE: provision disjointness over `(key, realm)` slots,
+    requirement closure, and linkability (`LinkOK`). G rows are
+    PER-COMPONENT marker-rule (marker presence == interface declaration,
+    incl. spawn-handle receivers). P rows are PER-PROVIDE-METHOD: a service
+    declaration is an upper bound — the method's reached emission tokens
+    must be within its declared bound (plain => none; any => free; scoped
+    => the declared entries). W rows are PER-SPAWN-EDGE attenuation
+    (item 66/294). X rows carry a parse refusal through."""
     rows = [r.split("\t") for r in tsv]
-    mrows = [r for r in rows if r and r[0] == "M"]
+    mrows = [r for r in rows if r and r[0] == "M" and len(r) == 7]
+    xrows = [r for r in rows if r and r[0] == "X" and len(r) == 3]
     urows = [r for r in rows if r and r[0] == "U" and len(r) == 7]
     brows = [r for r in rows if r and r[0] == "B" and len(r) == 5]
     qrows = [r for r in rows if r and r[0] == "Q" and len(r) == 5]
@@ -617,13 +765,29 @@ def reference_from_tsv(tsv: list[str]) -> tuple[dict[str, tuple[str, str]],
         mode, ents = bounds_by_file.get(key, ("plain", set()))
         bounds_by_file[key] = (mode, ents | {r[4]})
 
-    files: dict[str, tuple[str, str]] = {}
+    def _realms(row: list[str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for chunk in row[5].split(","):
+            if chunk:
+                k, _, r = chunk.partition("=")
+                out[k] = r
+        return out
+
+    files: dict[str, tuple[str, str, str]] = {}
     for rel in sorted({r[1] for r in mrows}):
-        fm = [r for r in mrows if r[1] == rel]
-        provides = [k for r in fm for k in r[4].split(",") if k]
-        requires = [k for r in fm for k in r[3].split(",") if k]
-        files[rel] = ("ok" if len(provides) == len(set(provides)) else "fail",
-                      "ok" if all(k in set(provides) for k in requires) else "fail")
+        # Spawn TEMPLATES are runtime instances, not composition members
+        # (`lower._link`'s `templates` exclusion), so they take no part in
+        # the static G2/G3 table.
+        fm = [r for r in mrows if r[1] == rel and r[6] != "template"]
+        shaped = [([k for k in r[3].split(",") if k],
+                   [k for k in r[4].split(",") if k], _realms(r)) for r in fm]
+        prov_slots = [s for _rq, pv, rl in shaped for s in _slots(pv, rl)]
+        need_slots = [s for rq, _pv, rl in shaped for s in _slots(rq, rl)]
+        files[rel] = (
+            "ok" if len(prov_slots) == len(set(prov_slots)) else "fail",
+            "ok" if all(s in set(prov_slots) for s in need_slots) else "fail",
+            "ok" if _link_ok(shaped) else "fail",
+        )
 
     comps: dict[tuple[str, str], str] = {}
     for r in mrows:
@@ -647,7 +811,7 @@ def reference_from_tsv(tsv: list[str]) -> tuple[dict[str, tuple[str, str]],
         elif mode == "plain":
             ok = not caps
         else:
-            ok = {_split_canon_cap(c)[0] for c in caps} <= ents
+            ok = {parse_cap(c).token for c in caps} <= ents
         providers[k] = "ok" if ok else "fail"
 
     owns: dict[tuple[str, str], set[str]] = {}
@@ -675,19 +839,37 @@ def reference_from_tsv(tsv: list[str]) -> tuple[dict[str, tuple[str, str]],
     spawns: dict[tuple[str, str, str], str] = {}
     for r in srows:
         rel, parent, child = r[1], r[2], r[3]
-        extra = cap_covers_set(held.get((rel, parent), set()),
-                               closed.get((rel, child), set()))
-        spawns[(rel, parent, child)] = "ok" if not extra else "fail"
+        ok = attenuates(held.get((rel, parent), set()),
+                        closed.get((rel, child), set()))
+        spawns[(rel, parent, child)] = "ok" if ok else "fail"
 
-    return files, comps, providers, spawns
+    refused = {r[1]: r[2] for r in xrows}
+    return Verdicts(files, comps, providers, spawns, refused)
 
 
-def checker_alignment(file_facts: dict, formal_files: dict,
-                      formal_comps: dict, formal_providers: dict,
-                      formal_spawns: dict) -> None:
+# The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
+# are the DANGEROUS direction: the real checker REFUSES a file and the model
+# sees nothing wrong with it, so the model is weaker than what revl enforces
+# and the "the model agrees with the checker" claim would be false.
+# `formal-strict` — the model refusing what the checker accepts — stays
+# informational: it is the safe direction and names fragment gaps.
+FATAL_BUCKETS = ("missed-G4", "missed-G2")
+
+
+def checker_alignment(file_facts: dict, componentless: list[str],
+                      v: Verdicts) -> list[str]:
     """Compile each file with the real checker and compare refusal codes
-    against the formal verdicts. Informational (STATUS.md): mismatches
-    here are findings to investigate, not gate failures."""
+    against the formal verdicts. Returns the fatal-bucket findings.
+
+    Requirement CLOSURE (and hence linkability, which subsumes it) is
+    deliberately NOT part of `formal_clean`. `compile_source` type-checks
+    and links ONE file: a requirement no in-file component provides is
+    resolved against the rest of the composition at `revl link` time, and
+    `lower._link` reports nothing for it. Reading the V row's `closed`
+    column as a checker-visible refusal made 32 files look like the model
+    being stricter than the checker when the model was answering a
+    different question. `disjoint` and `link` ARE checker-visible (G2
+    provision conflict, G3 self-provision and cycles) and are compared."""
     align: dict[str, int] = {}
     samples: dict[str, list[str]] = {}
 
@@ -695,19 +877,23 @@ def checker_alignment(file_facts: dict, formal_files: dict,
         align[key] = align.get(key, 0) + 1
         samples.setdefault(key, []).append(rel)
 
-    for rel in file_facts:
-        comp_rows = [(k, v) for k, v in formal_comps.items() if k[0] == rel]
-        prov_rows = [(k, v) for k, v in formal_providers.items() if k[0] == rel]
-        spawn_rows = [(k, v) for k, v in formal_spawns.items() if k[0] == rel]
-        formal_clean = formal_files.get(rel) == ("ok", "ok") and all(
-            v == "ok" for _, v in comp_rows + prov_rows + spawn_rows)
-        raw_found = any(v == "fail"
-                        for _, v in comp_rows + prov_rows + spawn_rows)
+    def checker_code(rel: str) -> str:
         try:
             compile_source((REPO / rel).read_text(encoding="utf-8"), rel)
-            code = "accept"
+            return "accept"
         except RevlError as e:
-            code = classify(e).get("code") or "UNCODED"
+            return classify(e).get("code") or "UNCODED"
+
+    for rel in file_facts:
+        comp_rows = [(k, x) for k, x in v.comps.items() if k[0] == rel]
+        prov_rows = [(k, x) for k, x in v.providers.items() if k[0] == rel]
+        spawn_rows = [(k, x) for k, x in v.spawns.items() if k[0] == rel]
+        vrow = v.files.get(rel, ("ok", "ok", "ok"))
+        formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
+            x == "ok" for _, x in comp_rows + prov_rows + spawn_rows)
+        raw_found = any(x == "fail"
+                        for _, x in comp_rows + prov_rows + spawn_rows)
+        code = checker_code(rel)
         if code == "accept":
             # `formal-strict`: the checker ACCEPTS the file but the shaped
             # model does not — the model is stricter than the fragment it
@@ -715,29 +901,69 @@ def checker_alignment(file_facts: dict, formal_files: dict,
             record("agree-accept" if formal_clean else "formal-strict", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
-        elif code == "G2":
-            disjoint_fail = formal_files.get(rel, ("ok",))[0] == "fail"
-            record("agree-G2" if disjoint_fail else "missed-G2", rel)
+        elif code in ("G2", "G3"):
+            manifest_fail = vrow[0] == "fail" or vrow[2] == "fail"
+            record(f"agree-{code}" if manifest_fail else f"missed-{code}", rel)
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
 
+    # Files with no composition to model, and files revl refused at parse:
+    # named, not omitted. Neither carries a computed verdict, so neither can
+    # agree or disagree with the model — but the code the checker gives them
+    # is reported, which is how `g1_template_undeclared.rvl` (a G1 the model
+    # never sees) and `g4_missing_undo.rvl` (the shape G4 forbids) stop being
+    # invisible.
+    nm_codes: dict[str, list[str]] = {}
+    for rel in componentless:
+        nm_codes.setdefault(checker_code(rel), []).append(rel)
+
     total = sum(align.values())
-    print(f"checker alignment ({total} files, informational):")
+    print(f"checker alignment ({total} modeled files, informational except "
+          f"{'/'.join(FATAL_BUCKETS)}):")
     for k in sorted(align):
-        print(f"  {k:20} {align[k]}")
-    for k in ("formal-strict", "missed-G4", "missed-G2"):
-        for rel in samples.get(k, [])[:5]:
-            print(f"  ALIGN-SAMPLE {k}: {rel}")
+        mark = "  FATAL" if k in FATAL_BUCKETS and align[k] else ""
+        print(f"  {k:20} {align[k]}{mark}")
+    for k in ("formal-strict", "formal-found-other", *FATAL_BUCKETS):
+        for rel in samples.get(k, []):
+            print(f"  ALIGN {k}: {rel}")
+
+    print(f"no-manifest ({len(componentless)} files parsed with no component, "
+          f"outside the model's fragment):")
+    for code in sorted(nm_codes):
+        names = sorted(nm_codes[code])
+        print(f"  checker={code:8} {len(names)}")
+        if code != "accept":
+            # An ACCEPTed componentless file is a backend emit corpus with no
+            # composition in it — nothing to say. A REFUSED one is a rejection
+            # fixture whose guarantee the model never gets to see, which is
+            # the interesting half, so those are named here in full.
+            for rel in names:
+                print(f"    NO-MANIFEST {code}: {rel}")
+    full = FORMAL / "harness" / "out" / "no_manifest.txt"
+    full.write_text("".join(
+        f"{code}\t{rel}\n" for code in sorted(nm_codes)
+        for rel in sorted(nm_codes[code])), encoding="utf-8")
+    print(f"  (complete list: {full.relative_to(FORMAL)})")
+
+    return [f"{k}: {rel}" for k in FATAL_BUCKETS for rel in samples.get(k, [])]
 
 
 def main() -> int:
     tsv, file_facts, census = export()
+    refusals: dict[str, str] = census["refusals"]
+    componentless: list[str] = census["componentless"]
     print(
         f"corpus census: {census['files']} .rvl files, "
-        f"{census['components']} components, {census['statements']} statements, "
-        f"{census['parse_errors']} parse-error skip(s)"
+        f"{census['components']} components, {census['statements']} statements "
+        f"= {len(file_facts)} modeled + {len(componentless)} componentless "
+        f"+ {len(refusals)} refused at parse"
     )
+    # Skips are LISTED, not counted (item 418 step 7). Counting them is how
+    # `g4_missing_undo.rvl` — literally the shape G4 forbids — and both G6
+    # fixtures sat inside a "(28 parse-error skips, loud)" parenthesis.
+    for rel in sorted(refusals):
+        print(f"  REFUSED-AT-PARSE {refusals[rel]:8} {rel}")
     if not tsv:
         print("differential oracle: nothing extracted — nothing to diff")
         return 0
@@ -750,40 +976,28 @@ def main() -> int:
     formal_text = run_oracle(tsv_path, out_dir / "formal_verdicts.tsv")
     if formal_text is None:
         return 0
-    formal_files, formal_comps, formal_providers, formal_spawns = parse_verdicts(formal_text)
-    ref_files, ref_comps, ref_providers, ref_spawns = reference_from_tsv(tsv)
+    formal = parse_verdicts(formal_text)
+    ref = reference_from_tsv(tsv)
 
     mismatches: list[str] = []
-    for rel, ref in ref_files.items():
-        got = formal_files.get(rel)
-        if got is None:
-            mismatches.append(f"file {rel}: no formal V row")
-        elif got != ref:
-            mismatches.append(f"file {rel}: reference={ref} formal={got}")
-    for key, ref in ref_comps.items():
-        got = formal_comps.get(key)
-        if got is None:
-            mismatches.append(f"comp {key}: no formal G row")
-        elif got != ref:
-            mismatches.append(f"comp {key}: reference={ref} formal={got}")
-    for key, ref in ref_providers.items():
-        got = formal_providers.get(key)
-        if got is None:
-            mismatches.append(f"provider {key}: no formal P row")
-        elif got != ref:
-            mismatches.append(f"provider {key}: reference={ref} formal={got}")
-    for key, ref in ref_spawns.items():
-        got = formal_spawns.get(key)
-        if got is None:
-            mismatches.append(f"spawn {key}: no formal W row")
-        elif got != ref:
-            mismatches.append(f"spawn {key}: reference={ref} formal={got}")
-    compared = (len(ref_files) + len(ref_comps) + len(ref_providers)
-                + len(ref_spawns))
+    for label, refmap, gotmap in (
+            ("file", ref.files, formal.files),
+            ("comp", ref.comps, formal.comps),
+            ("provider", ref.providers, formal.providers),
+            ("spawn", ref.spawns, formal.spawns),
+            ("refusal", ref.refused, formal.refused)):
+        for key, want in refmap.items():
+            got = gotmap.get(key)
+            if got is None:
+                mismatches.append(f"{label} {key}: no formal row")
+            elif got != want:
+                mismatches.append(f"{label} {key}: reference={want} formal={got}")
+    compared = ref.total()
     print(
         f"differential oracle: {compared} verdicts compared "
-        f"({len(ref_files)} files + {len(ref_comps)} comps + "
-        f"{len(ref_providers)} methods + {len(ref_spawns)} spawns) — "
+        f"({len(ref.files)} files + {len(ref.comps)} comps + "
+        f"{len(ref.providers)} methods + {len(ref.spawns)} spawns + "
+        f"{len(ref.refused)} parse refusals) — "
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     for m in mismatches[:10]:
@@ -791,9 +1005,10 @@ def main() -> int:
     if len(mismatches) > 10:
         print(f"  ... and {len(mismatches) - 10} more")
 
-    checker_alignment(file_facts, formal_files, formal_comps,
-                      formal_providers, formal_spawns)
-    return 1 if mismatches else 0
+    fatal = checker_alignment(file_facts, componentless, formal)
+    for f in fatal:
+        print(f"  GATE-FAILURE {f}")
+    return 1 if (mismatches or fatal) else 0
 
 
 if __name__ == "__main__":
