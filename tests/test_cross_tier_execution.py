@@ -14,21 +14,36 @@ The lesson is the project's own recurring one, one level up: "the emitter did
 not raise" never implied "the code is right", and "every emitter agreed on a
 shape" never implied "every tier agrees on a value".
 
-python, TypeScript and go execute here because all three are fast. rust and
-java are gated behind REVL_CROSS_TIER_SLOW=1 (cargo and javac make the default
-suite minutes rather than seconds), and their regression guards below are
-static and cheap.
+python and go execute by default because both are fast. rust and java are
+gated behind REVL_CROSS_TIER_SLOW=1 (cargo and javac make the default suite
+minutes rather than seconds), and their regression guards below are static
+and cheap.
 
-CI DOES NOT RUN THE FULL MATRIX, whatever this header used to say.
-`REVL_CROSS_TIER_SLOW` is set nowhere in this repository, so every `*_slow`
-test in this file executes in no CI job at all, and `RUNNERS["java"]` skips
-again on top of that wherever no JDK is installed. That is how item 433's
-riders R1 and R2 survived: `IEEE_FLOAT` below already contained assertions
-java fails, and java never ran them. Until the switch is on, the STATIC guards
-here are the ones actually holding the line, so add one alongside every probe
-that matters. Turning the switch on is worth doing in the `conformance` job,
-which is the one place every toolchain exists at once, and it needs the java
-record `equals` gap closed first (see item 433's rider section).
+WHICH TIERS ACTUALLY EXECUTE, AND WHERE (item 445; measured, not assumed).
+Three separate gates stack here, and for most of this file's history all
+three were shut in CI at once:
+
+  - `REVL_CROSS_TIER_SLOW` gates rust and java. It was set NOWHERE in this
+    repository, so every `*_slow` test executed in no CI job at all. That is
+    how item 433's riders R1 and R2 survived: `IEEE_FLOAT` below already
+    contained assertions java fails, and java never ran them.
+  - `RUNNERS["java"]` skips again on top wherever no JDK is installed.
+  - `RUNNERS["ts"]` needs `backends/typescript/node_modules/.bin/vitest`, and
+    NO job that runs `tests/` installs it. TypeScript is described in several
+    places as executing "by default"; in CI it has skipped exactly as hard as
+    java did. That gate is a filesystem probe rather than an env var, which is
+    why item 433's sweep for dead switches did not see it.
+
+The repair is the `conformance` job: the one place node, rust, java, go and
+wasmtime all exist at once, and the only job that runs `npm ci`. Measured on
+an arm64 laptop, this file alone: 30s under the default gates (93 pass, 94
+skip), 3m53 once node_modules exists (128 pass), 4m53 with the switch on and
+rust executing (156 pass), 6m31 with a working JDK as well (180 pass, 5 skip).
+87 tests newly execute at the far end. That is the honest price of the matrix,
+and it is why the switch exists at all.
+
+A `*_slow` skip means UNMEASURED. It has never meant passing, so keep adding
+a cheap STATIC guard alongside every probe that matters.
 """
 
 import importlib.util
