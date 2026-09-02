@@ -444,6 +444,98 @@ def _seam_refuses(ir: dict, service: str, host_backend: str = "py",
 
 
 # ===========================================================================
+# 2d. THE CACHE-APPLICABILITY ZOO (item 310, surface H) - one `Hive.go` declaring
+#     `cache capability`, whose PROVIDER CLOSURE reaches an uncacheable crossing
+#     through each kind. Distinct from the reach zoo: this fold does not ask what
+#     authority a call reaches (a plain emission is exactly what `cache
+#     capability` is FOR), it asks whether the reach may be memoized at all - so
+#     every kind here contributes an ESCROW-SHAPED crossing (or the `*`
+#     widening), each with a uniquely-named token so the visit set is probeable
+#     present/absent per kind.
+CACHE_KINDS = frozenset({"req", "spawn", "extern", "firstclass"})
+
+
+def _cache_zoo(kinds: frozenset[str]) -> str:
+    """revl source for a `cache capability` seam method whose closure reaches an
+    uncacheable crossing through exactly `kinds`:
+      extern     -> a `compensate`-declaring emission `c_ext`, reached
+                    TRANSITIVELY through the pure fn `reach_c`
+      firstclass -> an emitting extern handed to a dispatcher (the `*` widening)
+      req        -> a required provider reaching a `deferred` emission `d_req`
+      spawn      -> a spawned child reaching the `witnessed` extern `w_spawn`
+
+    With no kind selected the method still crosses the ordinary emission
+    `base_read` - the cacheable reach `cache capability` exists for - so the
+    without-kind probe is a real composition, not an empty one.
+    """
+    decl: list[str] = ["type W = { path: Str }", "type E = { msg: Str }",
+                       "extern pure fn restore(w: W) -> Unit = @py { pass }"]
+    hub_req: list[str] = []
+    act: list[str] = []
+    meth: list[str] = []
+
+    if "extern" in kinds:
+        decl += [
+            'extern emission[pay] fn undo_pay() -> Unit = @py { pass }',
+            'extern emission[pay] fn c_ext(r: Str) -> Int '
+            'compensate undo_pay() = @py { return 0 }',
+            'fn reach_c(r: Str) -> Int { return c_ext(r) }',
+        ]
+        meth.append("let a = reach_c(x)")
+    if "firstclass" in kinds:
+        decl += [
+            'extern emission fn fc_write(msg: Str) -> Str = @py { return msg }',
+            'fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }',
+        ]
+        meth.append("let b = indirect(fc_write, x)")
+    if "req" in kinds:
+        decl += [
+            'extern emission[mail] deferred fn d_req(row: Str) = @py { return }',
+            'service ReqSvc { emission fn put(row: Str) -> Int }',
+            'component ReqProv provides req_svc: ReqSvc '
+            '{ provide req_svc { fn put(row) { emit d_req(row) return 0 } } }',
+        ]
+        hub_req.append("requires req_svc: ReqSvc")
+        meth.append('emit req_svc.put("r")')
+    if "spawn" in kinds:
+        decl += [
+            'extern witnessed[cap_w] fn w_spawn(p: Str) -> Result[W, E] '
+            'undo restore(result) = @py { pass }',
+            'extern emission fn child_read(x: Str) -> Str = @py { return x }',
+            'service Worker { emission fn run(x: Str) -> Str }',
+            'component Child provides worker: Worker { provide worker { '
+            'fn run(x) { let w = w_spawn(x) return emit child_read(x) } } }',
+        ]
+        act.append("let c = effect spawn Child with { } undo c.dispose()")
+        meth.append("let d = emit c.worker.run(x)")
+
+    decl.append("extern emission[base] fn base_read(x: Str) -> Str "
+                "= @py { return x }")
+    decl.append("service Hive { emission fn go(x: Str) -> Str cache capability }")
+    src = "\n".join(decl) + "\n"
+    src += "component Hub " + " ".join(hub_req) + " provides hive: Hive {\n"
+    for step in act:
+        src += "  " + step + "\n"
+    src += "  provide hive {\n    fn go(x) {\n"
+    for step in meth:
+        src += "      " + step + "\n"
+    src += "      return emit base_read(x)\n    }\n  }\n}\n"
+    return src
+
+
+def _cache_applicability_reach(kinds: frozenset[str]) -> frozenset[str]:
+    """Surface: the item-310 applicability fold (surface H). The set of crossing
+    tokens the fold names as making `hive.go`'s provider closure uncacheable."""
+    from revl.mcp.approval import cache_applicability_findings
+    from revl.mcp.session import Session
+    ir = compile_source(_cache_zoo(kinds), "cache.rvl")
+    index = Session._build_cache_index(Session.__new__(Session), ir)
+    return frozenset(
+        token for _key, _m, _cls, token, _what, _why
+        in cache_applicability_findings(ClassMap(ir), index))
+
+
+# ===========================================================================
 # 3. THE MATRIX - every surface classifies every crossing kind.
 # ===========================================================================
 #
@@ -565,6 +657,28 @@ SURFACES: dict[str, dict[str, str]] = {
                       "in a record is the distribution-seam axis, and the blast "
                       "fold's own resource axis is the host/path/table VALUE cone "
                       "(exercised by the resource-scope cell below), not nesting",
+    },
+    # item 310 surface H: the cache APPLICABILITY fold - "may this callee's reach
+    # be memoized at all". A cache HIT re-delivers a result without re-running the
+    # reach that produced it, so a fold that missed one crossing kind would admit
+    # a cache that silently skips that kind's escrow registration (or, for the
+    # `*` widening, binds an entry to an authority it cannot name). It is a
+    # worst-over-reach fold over the SAME `Composition.closure` the approval
+    # ClassMap folds, precisely so the two can never disagree about what a cached
+    # call reaches.
+    "cache_applicability_310": {
+        "req": IN_SCOPE,         # an uncacheable crossing behind a requires edge
+        "spawn": IN_SCOPE,       # …and behind a spawn handle (no `req` target)
+        "extern": IN_SCOPE,      # …reached transitively through a pure fn
+        "firstclass": IN_SCOPE,  # the unnameable `*`: an entry cannot be scoped
+        "seam": "a `cache`-declaring method split across a PROCESS seam is "
+                "refused by `placement.cache_crossing_refusal` (the entry store "
+                "is single-process and WAL-ordered); this fold reads one "
+                "composition's reach and has no process or tier notion",
+        "nested_res": "a resource nested in a record/variant/generic is refused "
+                      "at COMPILE by the structural resource-in-entry walk "
+                      "(`lower._check_cache_resource`), which reads the method's "
+                      "TYPES; this fold reads its reach, not its signature",
     },
 }
 
@@ -857,3 +971,33 @@ def test_reach_surfaces_agree_on_the_full_zoo():
     # and as the unnameable `*` on the approval axis
     assert "launder_write" in full_boundary
     assert "*" in full_approval
+
+
+# --- item 310 surface H: the cache applicability fold -------------------------
+
+def test_cache_applicability_fold_visits_every_in_scope_kind():
+    """Each in_scope kind contributes a uniquely-named uncacheable crossing; the
+    fold's visit set must lose exactly that token when the kind is removed. A
+    fold that stopped following one seam would answer identically with and
+    without it - and would then admit a cache over that seam's crossing."""
+    scoped = _in_scope("cache_applicability_310")
+    assert scoped == CACHE_KINDS, (
+        f"cache in_scope kinds {sorted(scoped)} must match the cache-zoo kinds "
+        f"{sorted(CACHE_KINDS)}")
+    full = _cache_applicability_reach(CACHE_KINDS)
+    for kind in sorted(scoped):
+        without = _cache_applicability_reach(CACHE_KINDS - {kind})
+        introduced = full - without
+        assert introduced, (
+            f"the cache applicability fold did not change when {kind!r} "
+            f"({CROSSING_KINDS[kind]}) was removed - it does not visit this "
+            f"crossing kind, so a cache over it would be admitted")
+        assert not (introduced & without), (
+            f"cache fold: {kind!r}'s crossing leaked into the without-kind set")
+
+
+def test_cache_applicability_fold_admits_a_plain_emission_reach():
+    """The negative half: with every uncacheable kind removed, the method still
+    crosses an ordinary emission (`base_read`) - which is exactly what `cache
+    capability` is for - and the fold names nothing."""
+    assert _cache_applicability_reach(frozenset()) == frozenset()
