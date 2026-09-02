@@ -782,6 +782,7 @@ was before this feature.
 
 ```
 program     := use* decl*
+IDENT       := [A-Za-z_][A-Za-z0-9_]*        -- ASCII, see the note below
 use         := 'use' STRING ('{' IDENT (',' IDENT)* '}' | 'as' IDENT)
 decl        := ['pub'] (typedecl | fndecl | service | component | extern)
              | ['lifecycle'] test                              (§7.1)
@@ -804,6 +805,24 @@ lcstmt      := load | unload | call | 'assert' ('no_residue' | expr)   (§7.1)
 The full grammar remains small enough to include, in its entirety, in a
 model's system prompt — that property is a requirement, not an accident,
 and grammar growth that would break it needs this document amended first.
+
+**Identifiers are ASCII.** `IDENT` is `[A-Za-z_][A-Za-z0-9_]*`, and the lexer
+refuses anything else by name. This is a soundness rule, not a style rule. The
+host tiers do not agree about non-ASCII names: python NFKC-normalizes
+identifiers at parse time (PEP 3131), so `ｓend` (U+FF53) and `send` are the
+same function there, while the rust, java and typescript emitters reject the
+name outright. A permissive lexer therefore let the checker see two distinct
+functions where the python tier saw one, which is enough for a plain `fn` to
+capture an `extern emission fn`'s binding and reach an irreversible host call
+through a service declared plain. The ligature `ﬁlter`/`filter` and the
+superscript continuation `x²`/`x2` merge the same way. Restricting the alphabet
+makes every admitted identifier an NFKC fixed point, so two names distinct to
+the checker stay distinct on every tier, and it makes admission uniform: the
+refusal fires in the frontend, before a backend is chosen, so no tier can accept
+what another rejects. Strings, templates, comments and `@host` bodies stay full
+Unicode; only names are constrained. Widening later to a UAX-31 profile (XID_Start /
+XID_Continue plus an NFKC-stability check) is a compatible extension once the
+ASCII-only emitters gain a mangling scheme for non-ASCII names.
 
 ## 9. Migration from 1.x
 

@@ -429,16 +429,24 @@ rejection.
   typed and their misuse is refused, in `fn` bodies and (as of the setup op
   sweep) in component effect blocks alike.
 
-- **Arrow *values* have no type** (frontier, narrowed): an arrow's parameters
-  are un-annotated and no arrow type is reconstructed, so the arrow itself, and
-  anything obtained by calling one, infers to an unknown. Trigger: `let f = (x)
-  => "s"` then `f(1)` in an `Int` position. Blast radius: the call's result
-  flows anywhere unchecked, and the arrow's arity is not checked at the call
-  site. Narrowed, not open: the arrow's *body* is now type-checked against the
-  enclosing scope, so a captured variable misused inside a lambda (`(x) =>
-  o.name` on an `Opt`, `(x) => s[0]`, a wrong-arity call) is refused exactly as
-  it is outside one. Closing the rest needs arrow-parameter annotations in the
-  grammar.
+- **Arrow *values* have no type** — **CLOSED as of roadmap 75(a) slice 1**.
+  Arrow values have a type; its unknown components are `Any`, the documented
+  gradual frontier the rest of the checker already lives with. Every arrow
+  types as a function type, so its arity — which is syntactic and never in
+  doubt — is checked at every call through it (`examples/rejections/t33`), and
+  where the author annotates (`(v: Int): Int => …`, parameters or return) or
+  the body cannot depend on an un-annotated parameter, the result is known and
+  is checked wherever it flows (`examples/rejections/t32`, the entry's own
+  trigger). A written `Async[...]` return is refused: colour is positional and
+  an arrow may not self-declare it (`t34`, docs/function-types.md rule C1).
+
+  Two residuals, both named rather than latent: (1) stratum 3 — `infer_ir`,
+  the checker over component and `provide`-method bodies, still types no arrow
+  and no call through one (75(a) slice 3); (2) a result that *does* depend on
+  an un-annotated parameter stays unknown, deliberately — inferring it from a
+  body typed under unknown parameters yields half-solved types (`[x]` infers
+  `List[Never]`, `{ a: x }` infers `{a: Any}`), and widening the rule needs a
+  dependency analysis rather than the syntactic free-occurrence test.
 
 - **Type parameters cannot be bounded, and the implicit spelling still
   applies** (frontier, narrowed): instantiation is closed — a type parameter is

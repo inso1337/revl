@@ -147,7 +147,27 @@ fn lock_hash(rows: List[LockRow], name: Str) -> Str {
   return ""
 }
 
+// Does `name` have a truc.lock row at all? `lock_hash` returns "" both for a
+// name with no row and for a row whose pin is blank, so the two cases are told
+// apart here to make the refusal say which one happened.
+fn lock_has(rows: List[LockRow], name: Str) -> Bool {
+  for (r of rows) {
+    if (r.name == name) {
+      return true
+    }
+  }
+  return false
+}
+
 // Recompute sha256 of every vendored component.rvl and compare to the pin.
+// A PIN IS REQUIRED, not optional: every truc named in truc.toml must carry a
+// truc.lock row with a non-empty `sourceHash`, and a missing row or a blank
+// hash refuses exactly like a drifting one. Skipping an unpinned truc would
+// make the tamper check opt-out — deleting a lock row (or blanking its hash)
+// would swap the vendored bytes for anything at all and still assemble, which
+// is the one thing this check exists to stop. `truc add` is what mints a pin
+// (it re-verifies the fetched bytes against the registry index row before
+// anything is vendored, then commits the row); nothing else may skip it.
 // Drift is a refusal, not a warning (registry.verify's regenerate-or-red
 // discipline, applied to the vendor dir).
 fn plan_drift(lockJson: Str, gj: Str) -> Str {
@@ -160,8 +180,17 @@ fn plan_drift(lockJson: Str, gj: Str) -> Str {
   var ok = true
   var message = ""
   for (v of g.vendored) {
+    let pinned = lock_has(rows, v.name)
     let expected = lock_hash(rows, v.name)
-    if (expected != "") {
+    if (!pinned) {
+      ok = false
+      message = message.concat(`unpinned truc: vendored trucs/${v.name}/component.rvl has no truc.lock row — every truc named in truc.toml must carry a pin (run 'truc add ${v.name}' to pin its bytes)
+`)
+    } else if (expected == "") {
+      ok = false
+      message = message.concat(`unpinned truc: the truc.lock row for '${v.name}' carries a blank sourceHash — a pin is required, not optional (run 'truc add ${v.name}' to pin its bytes)
+`)
+    } else {
       let actual = sha256_hex(v.source)
       if (expected != actual) {
         ok = false

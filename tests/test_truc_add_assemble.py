@@ -63,6 +63,29 @@ def _lock_names(proj: Path) -> list[str]:
     return [r["name"] for r in lock["trucs"]]
 
 
+def _hand_vendor(proj: Path, name: str) -> None:
+    """Vendor a registry entry into the project WITHOUT going through `add`:
+    copy the entry, list it in truc.toml, and record its pin.
+
+    The pin is part of hand-vendoring, not an extra. Every truc named in
+    truc.toml must carry a truc.lock row with a non-empty `sourceHash`, and
+    `assemble` refuses an unpinned one before it ever reaches the admission
+    gate — so a fixture that skipped the pin would exercise the pin requirement
+    instead of the G2 refusal it means to test.
+    """
+    import shutil
+
+    shutil.copytree(REGISTRY / "components" / name, proj / "trucs" / name)
+    with (proj / "truc.toml").open("a") as handle:
+        handle.write(f'{name} = {{ registry = "local" }}\n')
+    index = json.loads((REGISTRY / "index.json").read_text())
+    lock = json.loads((proj / "truc.lock").read_text())
+    lock["trucs"].append({
+        "name": name, "registry": "local",
+        "sourceHash": index["components"][name]["sourceHash"]})
+    (proj / "truc.lock").write_text(json.dumps(lock, indent=2))
+
+
 # ---------------------------------------------------------------- add + assemble
 
 def test_add_then_assemble_is_admitted_and_composed(tmp_path):
@@ -116,11 +139,7 @@ def test_assemble_refuses_when_two_providers_of_a_key_join_g2(tmp_path):
     assert _truc(proj, "add", "pg_database").returncode == 0
 
     # hand-introduce a second `db` provider into the assembly, bypassing `add`
-    import shutil
-    shutil.copytree(REGISTRY / "components" / "mysql_database",
-                    proj / "trucs" / "mysql_database")
-    with (proj / "truc.toml").open("a") as handle:
-        handle.write('mysql_database = { registry = "local" }\n')
+    _hand_vendor(proj, "mysql_database")
 
     r = _truc(proj, "assemble")
     assert r.returncode == 1, r.stdout

@@ -27,6 +27,8 @@ from .typecheck import (
     FNS_KEY,
     _SIZED_HEADS,
     check_ast,
+    refuse_self_declared_async,
+    _mentions_async,
     collect_tparams,
     validate_explicit_tparams,
     render_type,
@@ -892,7 +894,12 @@ def _subst_body_annotations(stmts: list, subst) -> None:
     survived here would reach the checker as an undeclared type name."""
     def walk_expr(expr) -> None:
         if isinstance(expr, ExprArrow):
-            expr.param_types = [subst(t) for t in expr.param_types]
+            # the author's annotations — `(v: Handler): Handler => …`. The
+            # checker's resolved fields are still empty here (alias expansion
+            # runs before checking, which is the whole point: an alias must not
+            # reach the checker as an undeclared type name).
+            expr.written_param_types = [subst(t) for t in expr.written_param_types]
+            expr.written_returns = subst(expr.written_returns)
             walk_expr(expr.body)
         elif isinstance(expr, ExprBin):
             walk_expr(expr.left)
@@ -1522,9 +1529,45 @@ def _arrow_param_types(expr) -> list:
     (`typecheck.py::_resolve_arrow`), so this is either the author's `(v: Int)`
     annotations, the types the expected function type supplied, or Nones when
     the arrow is still on the unchecked frontier."""
-    written = list(getattr(expr, "param_types", None) or [])
-    written += [None] * (len(expr.params) - len(written))
-    return written[:len(expr.params)]
+    resolved = list(getattr(expr, "param_types", None) or [])
+    resolved += [None] * (len(expr.params) - len(resolved))
+    return resolved[:len(expr.params)]
+
+
+def _arrow_signature_known(expr) -> bool:
+    """May this arrow's signature go into the IR?
+
+    item 75(a) §4 — "the frontend gets stricter, the IR does not move". The two
+    keys go in iff EVERY parameter type is known, which keeps the node
+    byte-identical for every arrow that carries one today, keeps an arrow with
+    no signature carrying neither key, and stops a *partially* annotated arrow
+    from emitting `"param_types": ["Int", null], "returns": null` — a shape
+    docs/backend-ir-v3.md's "absent together" contract never admitted, and
+    which no emitter is written against.
+
+    The checker's richer partial knowledge stays in the frontend. Carrying a
+    partial signature into the IR is a separate, demand-driven change: it needs
+    a contract edit plus a decision per tier, and two tiers (java, wasm) have no
+    representation for `Any` at all."""
+    if getattr(expr, "param_types", None) is None:
+        return False  # the checker never resolved this arrow
+    return all(p is not None for p in _arrow_param_types(expr))
+
+
+def _assert_colour_is_positional(expr, filename: str | None) -> None:
+    """Rule C2, enforced where the `async` flag is set.
+
+    `node["async"]` is derived from `expr.returns`, which only the checker
+    writes and only from a checking position, so the flag stays the certificate
+    the leak scan and the callee-collection stop set read it as. The author's
+    `written_returns` must never be able to reach it. Rule C1 refuses the
+    annotation in the checker, but the component path (stratum 3) does not run
+    the checker over arrows at all, so the refusal is restated here rather than
+    assumed — an `assert` alone would strip under `-O` and would not cover that
+    path in the first place."""
+    refuse_self_declared_async(expr, filename)
+    assert not (filename and _mentions_async(getattr(expr, "written_returns", None))), (
+        "C2: a written arrow return annotation must never reach the async flag")
 
 
 def _expr_static_type(expr, type_env: dict, types: dict) -> str | None:
@@ -4681,15 +4724,26 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         _b1_capture_check(expr, type_env, types, filename, expr.line)
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": _lower_pure_expr(expr.body, inner, callables, alias_fns, filename, inner_type_env, types)}
-        # IR v3: an arrow that the checker typed carries its signature, so a
-        # backend can declare it instead of guessing (docs/function-types.md).
-        # Both keys are absent together when the arrow is still untyped.
-        if any(p is not None for p in param_types) or expr.returns:
+        # IR v3: an arrow whose signature the checker knows *completely* carries
+        # it, so a backend can declare it instead of guessing
+        # (docs/function-types.md). Both keys are absent together otherwise —
+        # including for a partially annotated arrow (item 75(a) §4, R3).
+        if _arrow_signature_known(expr):
             node["param_types"] = param_types
-            node["returns"] = expr.returns
+            node["returns"] = expr.returns or "Any"
         # item 92: an arrow the checker typed against `(…) -> Async[T]` carries
         # the async color into the IR, so every emitter reads one shape
         # (`.get("async")`) instead of parsing the `returns` string.
+        #
+        # item 75(a) rule C2: the colour comes from `expr.returns`, which only
+        # the checker writes and only from a checking position — never from the
+        # author's `written_returns`. The flag is a certificate that a
+        # declaration promised to await this arrow (`_refuse_leaky_pure_arrow`
+        # skips a flagged arrow; `_calls_in(stop_async_arrows=True)` stops
+        # descending at one), so a self-declared colour would forge it. Rule C1
+        # refuses the annotation in the checker; this is the invariant restated
+        # where the flag is actually set, so the two cannot drift apart.
+        _assert_colour_is_positional(expr, filename)
         if expr.returns and parse_type(expr.returns)[0] == "Async":
             node["async"] = True
         return node
@@ -6051,9 +6105,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": _lower_component_pure_expr(expr.body, env, inner, callables,
                                                    pure_only)}
-        if any(p is not None for p in param_types) or expr.returns:
+        # item 75(a) §4/§5.3: the same complete-signature condition as the
+        # pure-fn path. Stratum 3 does not *check* an arrow yet (slice 3), but
+        # the grammar and the R3 fix land everywhere at once — there is one
+        # parser and one lowering contract.
+        _assert_colour_is_positional(expr, filename)
+        if _arrow_signature_known(expr):
             node["param_types"] = param_types
-            node["returns"] = expr.returns
+            node["returns"] = expr.returns or "Any"
         return node
     if isinstance(expr, ExprOptField):
         return {
@@ -6948,6 +7007,86 @@ def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
             _refuse_leaky_pure_arrow(value, async_colored, decl, filename)
 
 
+# item 130 rule 3.5 — the IR kinds a `map`/`filter` transform may NOT contain.
+# `f`/`p` type in PURE mode (G6): a combinator chain is a pure derivation whose
+# only effects are the source's bracket and the consumer's body, so an effectful
+# transform is refused with the hint to move the effect into the consumer body
+# where it is capability- and lifecycle-checked (§4.7). `call` is the host-object
+# method call (`sub.next()`, `pool.query(…)`); a value-method call lowers as
+# `builtin` and stays admitted.
+_IMPURE_STAGE_KINDS = frozenset({
+    "host", "req", "call", "spawn", "subscribe", "lease-acquire", "lease-revoke",
+})
+
+
+def _first_impure_in_stage(node) -> str | None:
+    """The first effectful IR node a stream combinator's transform reaches, named
+    for a diagnostic, or None (item 130 rule 3.5)."""
+    if isinstance(node, dict):
+        kind = node.get("kind")
+        if kind in _IMPURE_STAGE_KINDS:
+            if kind == "call":
+                target = node.get("target") or {}
+                head = target.get("id") if isinstance(target, dict) else None
+                return f"{head}.{node.get('method')}" if head else str(node.get("method"))
+            if kind == "host":
+                return str(node.get("fn"))
+            if kind == "req":
+                return f"{node.get('req')}.{node.get('method')}"
+            return kind
+        for value in node.values():
+            hit = _first_impure_in_stage(value)
+            if hit is not None:
+                return hit
+    elif isinstance(node, list):
+        for value in node:
+            hit = _first_impure_in_stage(value)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _lower_stream_stages(sub_expr: "SubscribeExpr", env: "Env",
+                         filename: str) -> list:
+    """Lower the derived-stream combinator chain of a `subscribe` (item 130
+    Slice 2, §1) and enforce rule 3.5 (the transforms are pure).
+
+    Each stage is `{"stage": "map"|"filter"|"take", "fn"|"count": …}`. A stage is
+    a DERIVED stream: its `close` closes its upstream link, so the whole chain
+    rides the one bracket the `subscribe` registers and cancellation reaches the
+    provider end to end."""
+    stages: list = []
+    for stage in sub_expr.stages or []:
+        if stage.kind == "take":
+            stages.append({"stage": "take", "count": stage.arg.value})
+            continue
+        fn_ir = _lower_expr(stage.arg, env, mode="setup")
+        if fn_ir.get("kind") != "arrow":
+            raise RevlError(
+                filename, stage.line,
+                f"`{stage.kind}` needs a pure transform written as an arrow "
+                f"(rule 3.5)",
+                hint=f"write `{stage.kind}(x => …)` — the combinators are a pure "
+                     "derivation; effects belong in the consumer body, where they "
+                     "are capability- and lifecycle-checked (item 130 §3.5, §4.7)",
+                code="lifecycle", category="lifecycle")
+        impure = _first_impure_in_stage(fn_ir.get("body"))
+        if impure is None:
+            impure = _first_suspension(fn_ir.get("body"), env)
+        if impure is not None:
+            raise RevlError(
+                filename, stage.line,
+                f"`{stage.kind}`'s transform reaches `{impure}`, but a stream "
+                f"combinator is pure (rule 3.5)",
+                hint="move the effect into the consumer body, where it is "
+                     "capability-checked against the component's row and joins "
+                     "the OWNER's teardown accumulator; a combinator chain stays "
+                     "a pure derivation (item 130 §3.5, §4.7)",
+                code="lifecycle", category="lifecycle")
+        stages.append({"stage": stage.kind, "fn": fn_ir})
+    return stages
+
+
 def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
     """Build the `let-effect` IR step for a `subscribe <stream> undo sub.close()`
     bracket (item 130, docs/design/130-stream-reactive-types.md §5).
@@ -6963,7 +7102,8 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
       (the no-silent-vanish rule the core guarantee rests on, §9 Part B);
     * rule 3.1 — a source is subscribed at most once (single-consumer);
     * rule 3.4 — the `undo` (`close`) must not itself suspend (`close` is the
-      synchronous, non-suspending bracket inverse; a `next` in it is refused)."""
+      synchronous, non-suspending bracket inverse; a `next` in it is refused);
+    * rule 3.5 — a `map`/`filter` transform is pure (Slice 2, §3.5)."""
     sub_expr: SubscribeExpr = stmt.acquire
     stream_ir = _lower_expr(sub_expr.stream, env, mode="setup")
     # The stream must resolve to a host-local stream source (family `Stream`).
@@ -7013,6 +7153,21 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
         "undo": undo,
         "bind": safe,
     }
+    # Slice 2, all ADDITIVE and all omitted at their defaults, so a Slice 1
+    # program still lowers byte-identically (§5: the step carries the
+    # `policy`/`buffer`/`replay` triple; `replay` is §4.5, a later slice).
+    stages = _lower_stream_stages(sub_expr, env, filename)
+    if stages:
+        acquire["stages"] = stages
+    if sub_expr.buffer is not None:
+        acquire["buffer"] = sub_expr.buffer
+        step["buffer"] = sub_expr.buffer
+    if sub_expr.drain_ms is not None:
+        # §8: the `block`-policy drain window is the one time-windowed piece of
+        # stream behavior, and it fires on the deterministic test clock's
+        # `advance` — never wall-clock.
+        acquire["drain"] = sub_expr.drain_ms
+        step["drain"] = sub_expr.drain_ms
     undo_reach = _first_suspension(step["undo"], env)
     if undo_reach is not None:
         raise RevlError(

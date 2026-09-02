@@ -4311,7 +4311,13 @@ def _v3_match_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None
         pattern = ctx.match_pattern(arm)
         body = _render_expr(arm.get("body"), ctx, rename)
         bind = arm.get("bind")
-        if bind and (ctx.case_adt.get(arm.get("pattern")), arm.get("pattern")) \
+        # `bind == "_"` is a wildcarded payload (`Arrow(_) => ..`): the pattern
+        # already renders as `Expr::Arrow(_)` via `match_pattern`, and there is
+        # no name to reference in the body. `_` is not a value in Rust (E0425:
+        # "in expressions, `_` can only be used on the left-hand side of an
+        # assignment"), so it must never reach the unboxing `let` below or the
+        # `*_` dereference this branch would otherwise emit.
+        if bind and bind != "_" and (ctx.case_adt.get(arm.get("pattern")), arm.get("pattern")) \
                 in ctx.boxed_cases:
             # The payload of a recursive case is `Box<Payload>` (E0072), so the
             # bind is a `Box`, not the payload. Unbox it up front (`let b = *b;`)

@@ -2266,6 +2266,41 @@ def test_recursive_adt_cargo_builds(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+# A wildcarded payload on a *boxed* (recursive) case: `Arrow(_)` binds nothing,
+# so there is no name for the boxed-case unboxing step to dereference. Before
+# the fix, `_v3_match_expr` unboxed unconditionally whenever `arm["bind"]` was
+# truthy, and the parser records a wildcarded payload as `bind == "_"` (a real,
+# non-empty string) rather than `None` — so the emitter treated `_` as a real
+# binding name and wrote `let _ = *_;`, which cargo refuses: "in expressions,
+# `_` can only be used on the left-hand side of an assignment" (E0425-shaped).
+# Found via selfhost/lower.rvl and selfhost/parser.rvl, both of which worked
+# around it by binding the payload under a name they never use.
+_WILDCARD_BOXED_PAYLOAD_RVL = """
+pub type Expr = Arrow(Expr) | Lit(Int)
+
+pub fn is_arrow(e: Expr) -> Bool {
+  return match e { Arrow(_) => true, _ => false }
+}
+"""
+
+
+def test_wildcard_boxed_payload_emits_no_deref_of_underscore():
+    """A wildcarded payload on a recursive (boxed) case renders the bare `_`
+    pattern with no unboxing `let` at all -- there is nothing to unbox."""
+    src = emit.emit(compile_source(_WILDCARD_BOXED_PAYLOAD_RVL))
+    assert "Expr::Arrow(_) => true," in src
+    # the malformed construct this regression guards against, verbatim.
+    assert "let _ = *_;" not in src
+
+
+@needs_cargo
+def test_cargo_check_wildcard_boxed_payload_compiles(tmp_path):
+    """The payoff: a wildcarded payload on a recursive case now cargo-builds
+    (before the fix, `let _ = *_;` failed with a hard parse/expression error)."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(_WILDCARD_BOXED_PAYLOAD_RVL)))
+    assert result.returncode == 0, result.stderr
+
+
 # Two records with the IDENTICAL field->type shape, used interchangeably: `Bind`
 # is built and flows into a `List[Param]` slot. Rust sees distinct nominal types
 # (E0308) unless they unify to one struct.

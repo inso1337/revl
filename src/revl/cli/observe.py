@@ -259,9 +259,12 @@ def _run_attest(args) -> int:
     a composition was admitted; `revl attest --verify <att> [--against comp]`
     checks one (docs/revl-attest.md, roadmap item 127).
 
-    Sign mode exits 0 on success. Verify mode is a check: it exits nonzero when
-    the attestation is invalid (bad signature/key, tampered, or — with
-    --against — the composition changed)."""
+    Sign mode takes COMPOSITION SOURCE (signing runs the gate over it) and exits
+    0 on success; a composition the frontend refuses, and a pre-compiled IR
+    document with no source to check, both exit nonzero. Verify mode is a check:
+    it exits nonzero when the attestation is invalid (bad signature/key,
+    tampered, an envelope this build does not accept, or — with --against — the
+    composition changed)."""
     from .. import attest as _attest  # noqa: PLC0415
     from ..composition_diff import load_composition  # noqa: PLC0415 — READ-ONLY IR loader
 
@@ -294,17 +297,21 @@ def _run_attest(args) -> int:
             print(_attest.render_verify(ok, reason, att))
         return 0 if ok else 1
 
-    # sign mode
-    try:
-        ir = load_composition(args.target)
-    except RevlError as error:
-        print(f"error: cannot load composition {args.target}: {error}",
+    # Sign mode RUNS THE GATE. An attestation records a measurement, so the
+    # target must be a composition this toolchain compiles and admits; a
+    # pre-compiled IR document is refused rather than signed. `revl attest` used
+    # to accept one through `load_composition` and sign the whole guarantee list
+    # over an IR that nothing had ever checked (item 127 F2).
+    verdict = _attest.run_gate(paths=[args.target])
+    if not verdict.admitted:
+        print(f"error: nothing to attest for {args.target}: {verdict.reason}",
               file=sys.stderr)
         return 1
     import os  # noqa: PLC0415 — lazy: localized to this handler
     signer = args.signer or os.environ.get(_attest.SIGNER_ENV)
     try:
-        att = _attest.make_attestation(ir, key, signer=signer)
+        att = _attest.make_attestation(verdict.ir, key, verdict=verdict,
+                                       signer=signer)
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
