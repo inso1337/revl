@@ -96,6 +96,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      # `tests/` carries cross-tier probes that EXECUTE emitted Java on a JVM
+      # (test_insert_if_absent, test_total_field_surface, and every other
+      # `[java]` parameter), and the emitter compiles at `--release 21` because
+      # `match` lowers to Java 21 pattern switches. This job pinned no JDK, so
+      # those probes met whatever the runner image happened to carry. Same
+      # shape, same fix as the Go pin above: without it they do not measure the
+      # tier they claim to. The runner-side gate now SKIPS with a reason on an
+      # older JDK rather than failing, which makes an unpinned job silently
+      # unmeasured -- exactly what roadmap item 445 exists to prevent -- so the
+      # pin is what keeps this coverage real.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
       - run: pip install -e ".[test]"
       # roadmap 328: the README conformance + performance matrix is generated
       # from real emitter output, never authored. Fail the build if the
@@ -180,6 +194,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      # `tests/` carries cross-tier probes that EXECUTE emitted Java on a JVM
+      # (test_insert_if_absent, test_total_field_surface, and every other
+      # `[java]` parameter), and the emitter compiles at `--release 21` because
+      # `match` lowers to Java 21 pattern switches. This job pinned no JDK, so
+      # those probes met whatever the runner image happened to carry. Same
+      # shape, same fix as the Go pin above: without it they do not measure the
+      # tier they claim to. The runner-side gate now SKIPS with a reason on an
+      # older JDK rather than failing, which makes an unpinned job silently
+      # unmeasured -- exactly what roadmap item 445 exists to prevent -- so the
+      # pin is what keeps this coverage real.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
       # the same one-command setup `backend-python` uses: it clones cordis-py at
       # the pinned revision and installs revl editable beside it, so this venv's
       # interpreter can import both.
