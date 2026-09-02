@@ -9,6 +9,10 @@ pub fn take(s: Str, a: Int, b: Int) -> Str {
   return s.slice(a, b)
 }
 
+pub fn chars(s: Str) -> List[Str] {
+  return s.split("")
+}
+
 pub fn render(n: Int) -> Str {
   return n.to_str()
 }

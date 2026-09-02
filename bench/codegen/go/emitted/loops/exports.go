@@ -10,6 +10,17 @@ func SumIds(xs []int64) int64 { return sum_ids(xs) }
 // Scan is the emitted `scan`.
 func Scan(s string) int64 { return scan(s) }
 
+// FirstAt is the emitted `first_at`: a scan loop with a `return` out of it.
+func FirstAt(s string, c int64) int64 { return first_at(s, c) }
+
+// RunLen is the emitted `run_len`: a scan loop that `break`s and then reads the
+// index after the loop, which is what pins the rewritten loop's bookkeeping.
+func RunLen(s string, c int64) int64 { return run_len(s, c) }
+
+// Step2 is the emitted `step2`: an index that advances by 2, which the scan
+// rewrite must REFUSE. It is here as the negative control.
+func Step2(s string) int64 { return step2(s) }
+
 // Build is the emitted `build`.
 func Build(xs []string, sep string) string { return build(xs, sep) }
 
