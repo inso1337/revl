@@ -137,10 +137,15 @@ def test_a_card_result_cannot_reach_an_authority_sink():
     """The exit test for D-424c.9, and it is the CHECKER that enforces it: a
     generated client looks exactly like a local provider at every call site, so
     the taint qualifier is what keeps a remote value from reaching an outbound
-    send invisibly."""
+    send invisibly.
+
+    The consumer is `async` because the ts binding's operation is (issue #251):
+    a sync consumer is refused by the async-propagation rule (A1) BEFORE the
+    body is taint-checked, which would leave this exit test passing on the
+    wrong refusal."""
     consumer = """
 service Shell {
-  emission fn go() -> Str
+  emission async fn go() -> Str
 }
 
 extern emission[shell] fn run_cmd(cmd: Trusted[Str]) -> Str
@@ -148,7 +153,7 @@ extern emission[shell] fn run_cmd(cmd: Trusted[Str]) -> Str
 
 component Shell requires billing_agent: BillingAgent provides shell: Shell {
   provide shell {
-    fn go() {
+    async fn go() {
       let answer = emit billing_agent.invoice_lookup("INV-1")
       let out = emit run_cmd(answer)
       return out
@@ -468,3 +473,85 @@ def test_the_crossing_sends_no_credential():
     _text, calls = _run_py_body(reply, backend_source=source)
     assert b"s3cr3t" not in calls[0]
     assert b"alice" not in calls[0]
+
+
+# --------------------------------- 5. the crossing's colour (issue #251)
+
+def test_the_ts_backend_declares_the_crossing_async():
+    """`revl import a2a --backend ts` used to emit `await` inside a SYNCHRONOUS
+    ts function — output no `tsc` accepts, on the importer's DEFAULT backend.
+
+    JavaScript has no blocking fetch, so a synchronous body is not available on
+    that tier: the only answers were to declare the operation `async` or to
+    refuse the tier the way PR #250's `remote` row does. This importer declares
+    it, because unlike a `remote` row it writes the service, the extern and the
+    provider together and has no consumer-visible declaration it would have to
+    recolour behind someone's back.
+
+    All three declarations have to carry it or the file does not compile: a
+    sync provide method that reaches an async extern is refused by the
+    async-propagation rule (A1), and a sync service operation is refused for a
+    provider that declares itself async.
+    """
+    source = import_a2a(_card(), filename="card.json", backend="ts")
+    assert "  emission async fn invoice_lookup(" in source
+    assert "async fn a2a_billing_agent_invoice_lookup(" in source
+    assert "    async fn invoice_lookup(message) = " in source
+
+    ir = compile_source(source, "billing.rvl")
+    extern = next(e for e in ir["externs"]
+                  if e["name"] == "a2a_billing_agent_invoice_lookup")
+    assert extern["async"] is True, (
+        "the IR must carry the colour, or the emitters have nothing to read "
+        "and `await` lands in a plain `function` again")
+    method = ir["services"]["BillingAgent"]["methods"]["invoice_lookup"]
+    assert method["async"] is True, (
+        "asynchrony crosses a component boundary only by DECLARATION "
+        "(docs/design/async-extern.md §3) — a consumer reads it off the "
+        "service, it is never smuggled in by the provider")
+
+
+def test_the_py_backend_stays_sync():
+    """The colour a generated file declares is the colour of the ONE host body
+    it carries. The `@py` body is `urllib.request.urlopen`, which BLOCKS rather
+    than suspends, and py is a coloured tier — so declaring it `async` would
+    wrap a blocking call in an `async def`, stall the caller's loop, and colour
+    every py caller for a suspension that never happens."""
+    source = import_a2a(_card(), filename="card.json", backend="py")
+    assert "  emission fn invoice_lookup(" in source
+    assert "async" not in source.split("service BillingAgent")[1]
+
+    ir = compile_source(source, "billing.rvl")
+    extern = next(e for e in ir["externs"]
+                  if e["name"] == "a2a_billing_agent_invoice_lookup")
+    assert "async" not in extern
+
+
+def test_the_ts_backend_fixture_is_current():
+    """The a2a-to-ts typecheck fixture must be what this importer emits TODAY.
+
+    Issue #251's finding was not that the gate was unsound, it was that no
+    fixture reached this path — so the emitted output entered no typecheck.
+    `backends/typescript/tests/fixtures/a2a_agent.ir.json` is that input, and
+    it is a checked-in file: without this pin, an importer change would leave
+    the gate typechecking output nobody emits any more, which is the same hole
+    one step removed.
+
+    Regenerate with:
+        python3 backends/typescript/tests/fixtures/_gen_a2a_agent.py
+    """
+    fixtures = ROOT / "backends" / "typescript" / "tests" / "fixtures"
+    sys.path.insert(0, str(fixtures))
+    try:
+        import _gen_a2a_agent  # noqa: PLC0415
+    finally:
+        sys.path.remove(str(fixtures))
+
+    source, ir = _gen_a2a_agent.generate()
+    stale = ("is stale. Regenerate it with `python3 backends/typescript/tests/"
+             "fixtures/_gen_a2a_agent.py` and commit, or the ts typecheck gate "
+             "(issue #219) is pointed at output this importer no longer emits.")
+    assert _gen_a2a_agent.RVL.read_text(encoding="utf-8") == source, \
+        f"{_gen_a2a_agent.RVL.name} {stale}"
+    assert json.loads(_gen_a2a_agent.IR.read_text(encoding="utf-8")) == ir, \
+        f"{_gen_a2a_agent.IR.name} {stale}"
