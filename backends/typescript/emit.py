@@ -221,17 +221,41 @@ def _mangle(name: str) -> str:
     (roadmap item 165).
 
     The scheme is the A3 append-`_` rename `src/revl/lower.py::_safe_name` and
-    `backends/java/emit.py::_fn_name` already use for revl-keyword bindings:
-    append `_` until the name is free. It is a pure function of the name, so the
-    declaration site and every use site (and the `_Scope.locals` membership
-    checks, which store the mangled form) agree without threading a table
-    around. A non-reserved name is returned unchanged, so no existing program —
-    none of which can currently name a JS keyword, those crash today — changes
-    its emitted output. This is TARGET keywords only; the host roots stay
-    routed through `host.<name>` in `_v3_var` and the emitter scaffolding stays
-    rejected below."""
-    while name in JS_RESERVED:
-        name += "_"
+    `backends/java/emit.py::_fn_name` already use for revl-keyword bindings.
+    It is a pure function of the name, so the declaration site and every use
+    site (and the `_Scope.locals` membership checks, which store the mangled
+    form) agree without threading a table around, and it must ALSO be
+    INJECTIVE: two distinct revl identifiers may never land on one JS
+    identifier.
+
+    The naive "append `_` while the name is reserved" loop is a pure function
+    but NOT injective: it maps `function` to `function_` and leaves the equally
+    legal revl identifier `function_` alone, so both reach `function_` and the
+    two bindings collide. Here that is a LOUD break (`node --check` reports
+    "Identifier 'function_' has already been declared"), but on the python tier
+    the same shape silently CAPTURES, so the rule is fixed identically on every
+    tier rather than left to a downstream compiler that CI does not run.
+
+    The injective rule: escape a name iff the name OR any name reachable from
+    it by dropping trailing `_` is reserved, and escape it by exactly ONE `_`.
+    Names whose underscore-stripped root is reserved shift up one rung of the
+    `kw`/`kw_`/`kw__` ladder (`function` -> `function_`, `function_` ->
+    `function__`), which is injective; every other name is returned unchanged
+    and can never equal a shifted name, because a shifted name's root is
+    reserved and an unchanged name's root is not. The output is never itself
+    reserved: no member of `JS_RESERVED` ends in `_`.
+
+    Only a name whose root is reserved can change, so no existing program that
+    does not name a JS keyword changes its emitted output. This is TARGET
+    keywords only; the host roots stay routed through `host.<name>` in
+    `_v3_var` and the emitter scaffolding stays rejected below."""
+    root = name
+    while root:
+        if root in JS_RESERVED:
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
     return name
 
 
@@ -260,10 +284,32 @@ def _prop_key(name: object, role: str) -> str:
     declaration and every use — but a record field also has to match runtime
     data that a `json_parse` produced with the unrenamed key, so the two
     representations must agree on the raw word. A non-reserved, valid-identifier
-    name stays a bare key, so no existing program changes its output."""
+    name stays a bare key, so no existing program changes its output.
+
+    A property key is therefore NEVER `_mangle`d — not even the injective
+    ladder shift (`function_` -> `function__`). The key has to be the raw revl
+    field name whatever that name is, because that is the string the runtime
+    value is keyed by; a shifted key would read a field that does not exist.
+    Keeping the key raw is also what keeps the field space injective here: raw
+    is the identity, and distinct revl fields stay distinct keys."""
     if isinstance(name, str) and name in JS_RESERVED:
         return _string(name)
-    return _ident(name, role)
+    return _raw_field(name, role)
+
+
+def _raw_field(name: object, role: str) -> str:
+    """Validate a record FIELD name and return it verbatim.
+
+    Same validation as `_ident` (shape, emitter scaffolding) minus the
+    `_mangle` rename, which a field name must not get: the emitted key has to
+    stay the raw revl field name so it matches the runtime key (item 279)."""
+    if not isinstance(name, str) or not IDENT_RE.match(name):
+        raise EmitError(f"invalid {role} identifier: {name!r}")
+    if name in EMITTER_RESERVED:
+        raise EmitError(
+            f"{role} identifier collides with emitter scaffolding: {name!r}"
+        )
+    return name
 
 
 def _member(target: str, name: object, role: str, *, optional: bool = False) -> str:
@@ -273,12 +319,16 @@ def _member(target: str, name: object, role: str, *, optional: bool = False) -> 
     (`obj["function"]`), the counterpart to `_prop_key`: it targets the same
     unrenamed key, so it reaches both a revl-declared record and a dynamic
     JSON value whose runtime key is the raw word (item 279). Bare dot access
-    is kept for every ordinary field, so no existing program changes."""
+    is kept for every ordinary field, so no existing program changes.
+
+    The dot path goes through `_raw_field`, not `_ident`: a field READ must
+    name the same raw key `_prop_key` wrote, so it must not pick up `_mangle`'s
+    injective ladder shift either."""
     if isinstance(name, str) and name in JS_RESERVED:
         bracket = f"?.[{_string(name)}]" if optional else f"[{_string(name)}]"
         return f"{target}{bracket}"
     dot = "?." if optional else "."
-    return f"{target}{dot}{_ident(name, role)}"
+    return f"{target}{dot}{_raw_field(name, role)}"
 
 
 def _literal(value: object) -> str:

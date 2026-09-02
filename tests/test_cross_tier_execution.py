@@ -176,6 +176,63 @@ test "the pure fn a method body calls executes" { assert double(21) == 42 }
 test "match executes: the found arm"            { assert classify(Found(5)) == 5 }
 test "match executes: the missing arm"          { assert classify(Missing) == 0 }
 """,
+
+    # A revl identifier that is a keyword on SOME target is renamed by that
+    # tier's emitter. The rename used to be "append `_` while the name is
+    # reserved" — a pure function of the name, which is what decl/use agreement
+    # needs, but NOT injective: `lambda` mapped to `lambda_` and the equally
+    # legal revl identifier `lambda_` mapped to itself, so both landed on
+    # `lambda_`. Python then bound one name twice and `py_shadow()` returned
+    # 'SEKRIT-CANARY-416' where every other tier returned 'PUBLIC-VALUE': one
+    # program, a different VALUE on python than on five other tiers, which is
+    # exactly the agreement this file exists to hold. Each `*_shadow` names a
+    # keyword of a different target, so whichever tier does the renaming, the
+    # renaming has to stay injective; the `class`/`class_` pair does the same
+    # for top-level callables, whose collision changes the module's exported
+    # API rather than a local's value.
+    "reserved-word rename is injective": """
+pub fn py_shadow() -> Str {
+  let lambda = "PUBLIC-VALUE"
+  let lambda_ = "SEKRIT-CANARY-416"
+  return lambda
+}
+
+pub fn js_shadow() -> Str {
+  let function = "PUBLIC-VALUE"
+  let function_ = "SEKRIT-CANARY-416"
+  return function
+}
+
+pub fn go_shadow() -> Str {
+  let func = "PUBLIC-VALUE"
+  let func_ = "SEKRIT-CANARY-416"
+  return func
+}
+
+pub fn java_shadow() -> Str {
+  let double = "PUBLIC-VALUE"
+  let double_ = "SEKRIT-CANARY-416"
+  return double
+}
+
+pub fn rust_shadow() -> Str {
+  let const = "PUBLIC-VALUE"
+  let const_ = "SEKRIT-CANARY-416"
+  return const
+}
+
+pub fn class() -> Str { return "PUBLIC-VALUE" }
+pub fn class_() -> Str { return "SEKRIT-CANARY-416" }
+pub fn pick(flag: Bool) -> Str { if (flag) { return class() } return class_() }
+
+test "a python keyword does not capture its underscore twin" { assert py_shadow() == "PUBLIC-VALUE" }
+test "a js keyword does not capture its underscore twin"     { assert js_shadow() == "PUBLIC-VALUE" }
+test "a go keyword does not capture its underscore twin"     { assert go_shadow() == "PUBLIC-VALUE" }
+test "a java keyword does not capture its underscore twin"   { assert java_shadow() == "PUBLIC-VALUE" }
+test "a rust keyword does not capture its underscore twin"   { assert rust_shadow() == "PUBLIC-VALUE" }
+test "a keyword-named fn keeps its own body"                 { assert pick(true) == "PUBLIC-VALUE" }
+test "its underscore twin keeps its own body"                { assert pick(false) == "SEKRIT-CANARY-416" }
+""",
 }
 
 # go joins the fast set: the v3 tier is dependency-free Go, so `go test`
