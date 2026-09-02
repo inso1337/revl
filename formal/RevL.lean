@@ -7,6 +7,8 @@ import RevL.Lemmas.ListLemmas
 import RevL.Lemmas.ReachLemmas
 import RevL.Lemmas.ManifestLemmas
 import RevL.Lemmas.CapLemmas
+import RevL.Lemmas.TaintLemmas
+import RevL.Lemmas.WalLemmas
 import RevL.Theorems.G1_DeclaredOnlyAccess
 import RevL.Theorems.G2_ProvisionDisjoint
 import RevL.Theorems.G3_NoCycles
@@ -17,3 +19,6 @@ import RevL.Theorems.G7_LifoComplete
 import RevL.Theorems.G8_Boundary
 import RevL.Theorems.CrossTier
 import RevL.Theorems.CapCeilings
+import RevL.Theorems.G9_NoAuthorityFromUntrusted
+import RevL.Theorems.R4_NoResidue
+import RevL.Theorems.A8_WalDischarge
