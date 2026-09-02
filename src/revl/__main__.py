@@ -855,6 +855,68 @@ def compile_source_holes(source: str, filename: str) -> list[dict]:
     return compile_source(source, filename).get("holes") or []
 
 
+def _run_composition(args) -> int:
+    """`revl composition FILE` — resolve a composition document's ROW TABLE
+    (roadmap item 426, slice S1).
+
+    Header-only by default: every row id resolves and the whole wiring renders
+    without lowering a single component body (426 exit test 12). `--admit` also
+    compiles the rows the table names, which is where `_link` runs G2/G3 — the
+    resolver itself never calls the gate (§3.3)."""
+    from .composition import (  # noqa: PLC0415
+        claim_str, compile_composition, resolve_file)
+
+    try:
+        table = resolve_file(args.file, args.root)
+        document = compile_composition(args.file, args.root) if args.admit else None
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        out = table.to_ir()
+        if document is not None:
+            out["loadOrder"] = document["manifest"]["loadOrder"]
+        print(json.dumps(out, indent=2))
+        return 0
+
+    print(f"COMPOSITION  {table.name}  (origin `{table.origin}`, "
+          f"{len(table.rows)} rows)")
+    print(f"             {table.source}")
+    print()
+    print("ROWS")
+    for row in table.rows:
+        print(f"  {row.qualified:<24} {row.component}  ({row.source})")
+        if row.extra_claims:
+            # 426 §1.4: upstream ADDED a provision. The row keeps its label —
+            # that is decision 1 earning its keep — and the addition is loud
+            # rather than silent.
+            gained = ", ".join(claim_str(c) for c in row.extra_claims)
+            print(f"  {'':<24}   also provides {gained}, not asserted here")
+        if row.granted is not None:
+            listed = ", ".join(f"`{k}`" for k in row.granted) or "<empty>"
+            print(f"  {'':<24}   granted {listed}")
+    print()
+    print("WIRING")
+    for label, edges in table.wiring().items():
+        claims = ", ".join(edges["claims"]) or "nothing"
+        needs = ", ".join(f"`{k}`" for k in edges["requires"]) or "nothing"
+        print(f"  {label:<24} claims {claims}; requires {needs}")
+    if table.uses:
+        print()
+        print("USES")
+        for path in table.uses:
+            print(f"  {path}")
+    print()
+    if document is None:
+        print("RESOLVED     header-only: no component body was lowered. "
+              "Re-run with --admit to compile the rows.")
+    else:
+        print("ADMITTED     load order "
+              f"{' -> '.join(document['manifest']['loadOrder'])}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -868,6 +930,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify":
         from .bundle import run_verify  # noqa: PLC0415 — lazy
         return run_verify(args)
+    if args.command == "composition":
+        return _run_composition(args)
     if args.command == "emit":
         return _run_emit(args)
     if args.command == "explain":
