@@ -424,12 +424,10 @@ def _registry_policy(registry_dir: str) -> str:
     return policy if policy in ("gauntlet", "audit", "none") else "audit"
 
 
-def ship_context(project_dir: str) -> str:
-    """Everything the pure Shipper decides from: the component source (the
-    project's own entry, verbatim), its author-supplied discoverability
-    (description + tags), the TARGET registry (name + absolute path) and its
-    declared evidence policy, the names already claimed there (first-come), and
-    the facts of any supplied gauntlet dossier."""
+def _ship_target(project_dir: str) -> tuple[dict, str, str, str]:
+    """The `[ship]` table, the source being shipped, and the target registry
+    (name + absolute path). Shared by `ship_context` and `release_facts` so the
+    two can never disagree about WHICH registry or WHICH source is in play."""
     data = _ship_toml(project_dir)
     assembly = data.get("assembly") or {}
     ship = data.get("ship") or {}
@@ -451,14 +449,74 @@ def ship_context(project_dir: str) -> str:
     reg_path = reg.get("path")
     reg_abs = (os.path.abspath(os.path.join(project_dir, reg_path))
                if reg_path else reg.get("url", ""))
+    return ship, source, reg_name, reg_abs
+
+
+def release_facts(project_dir: str, name: str) -> str:
+    """The registry's own verdict on publishing `name` from this project, in the
+    shape the pure Shipper already reads a gate verdict in (`{ok, diagnostic}`).
+
+    Registry semantics belong to the registry: whether a name already published
+    may be REPUBLISHED, whether the declared release follows the one it
+    replaces, and whether it satisfies the bump item 64 computes from the
+    interface diff are all `revl.registry.release_facts`. truc cannot hold a
+    different opinion from revl about that any more than it can about admission
+    (`admit_all`) — same process, same module, same version.
+
+    The publisher's declarations come from `[ship]`: `version` (the release this
+    is), `version_scheme` (`semver`, the default, or `opaque` to publish
+    date/build-id versions with the bump check recorded UNVERIFIED), and
+    `publisher` (the label whose continuity an update must preserve).
+    """
+    from revl.registry import (  # noqa: PLC0415 — the registry owns this rule
+        BUMP_UNVERIFIABLE, SCHEME_SEMVER)
+    from revl.registry import release_facts as registry_release_facts
+
+    ship, source, _reg_name, reg_abs = _ship_target(project_dir)
+    version = str(ship.get("version", "") or "")
+    scheme = str(ship.get("version_scheme", SCHEME_SEMVER) or SCHEME_SEMVER)
+    publisher = str(ship.get("publisher", "") or "")
+
+    if not reg_abs or not os.path.isdir(reg_abs):
+        # no registry on disk yet: nothing is published, so nothing is being
+        # replaced. `publish` creates it, exactly as it did before.
+        return json.dumps({"ok": True, "diagnostic": "", "version": version,
+                           "scheme": scheme, "publisher": publisher,
+                           "previousVersion": "", "note": ""})
+
+    facts = registry_release_facts(reg_abs, name, source, version,
+                                   scheme=scheme, publisher=publisher)
+    note = ""
+    if not facts["isUpdate"] and not version:
+        note = (" Published UNVERSIONED: nothing pins which release this is, and "
+                "an unversioned entry can never be updated (there is no release "
+                "to bump from). Declare `[ship] version` in truc.toml.")
+    elif facts["bumpCheck"] == BUMP_UNVERIFIABLE and not facts["refusals"]:
+        note = (f" Bump NOT VERIFIED ({facts['bumpCheckReason']}); the release "
+                "records it as unverified for every consumer to see.")
+    return json.dumps({
+        "ok": not facts["refusals"],
+        "diagnostic": "; ".join(facts["refusals"]),
+        "version": version,
+        "scheme": scheme,
+        "publisher": publisher,
+        "previousVersion": facts["previousVersion"],
+        "note": note,
+    })
+
+
+def ship_context(project_dir: str) -> str:
+    """Everything the pure Shipper decides from: the component source (the
+    project's own entry, verbatim), its author-supplied discoverability
+    (description + tags), the TARGET registry (name + absolute path) and its
+    declared evidence policy, and the facts of any supplied gauntlet dossier.
+
+    Whether the NAME is free, and what may replace it if it is not, is not here:
+    that is registry semantics and it arrives through `release_facts`.
+    """
+    ship, source, reg_name, reg_abs = _ship_target(project_dir)
 
     policy = _registry_policy(reg_abs) if reg_abs and os.path.isdir(reg_abs) else "audit"
-
-    existing: list[str] = []
-    idx_path = pathlib.Path(reg_abs, "index.json") if reg_abs else None
-    if idx_path and idx_path.exists():
-        idx = json.loads(idx_path.read_text(encoding="utf-8"))
-        existing = sorted((idx.get("components") or {}).keys())
 
     # supplied evidence: [ship].evidence names the dossier the author produced.
     present, verdict, lifecycle = (False, "", "")
@@ -475,7 +533,6 @@ def ship_context(project_dir: str) -> str:
         "registryName": reg_name,
         "registryPath": reg_abs,
         "policy": policy,
-        "existingNames": existing,
         "evidencePresent": present,
         "evidenceVerdict": verdict,
         "evidenceLifecycle": lifecycle,
@@ -515,41 +572,36 @@ def gauntlet_evidence(source: str) -> str:
 
 
 def publish(plan_json: str) -> str:
-    """Execute a publish plan: write the component into the registry, REGENERATE
-    the index (manifest.json is produced by the current compiler, never copied
-    from the author — the reproducibility invariant does the honesty work,
-    docs/registry.md §1), then carry the discoverability fields the compiler
-    cannot derive (description + tags) into the published index row so
-    revl_resolve / registry search can find it.
+    """Execute a publish plan through `revl.registry.publish_release`: freeze the
+    release being replaced, install the component, record the declared version,
+    REGENERATE the index (manifest.json is produced by the current compiler,
+    never copied from the author — the reproducibility invariant does the
+    honesty work, docs/registry.md §1), attach the derived changelog, and carry
+    the discoverability fields the compiler cannot derive (description + tags)
+    into the published index row so revl_resolve / registry search can find it.
+
+    The registry re-runs its own release checks here rather than trusting the
+    plan, so the write path is not safe only because the Shipper looked first.
 
     An empty plan is a no-op: on any refusal the Shipper returns "", so the
     registry is untouched (all-or-nothing — the empty-guard, mirroring
     commit_add). This is the ONLY registry-mutating body in truc."""
     if not plan_json:
         return "skipped"
-    from revl.registry import build_index  # noqa: PLC0415 — the index regenerator
+    from revl.registry import publish_release  # noqa: PLC0415 — the write path
 
     plan = json.loads(plan_json)
     reg = plan["registryPath"]
-    name = plan["name"]
-    entry_dir = pathlib.Path(reg, "components", name)
-    entry_dir.mkdir(parents=True, exist_ok=True)
-    (entry_dir / "component.rvl").write_text(plan["source"], encoding="utf-8")
-    if plan.get("stampDossier") and plan.get("dossierText"):
-        (entry_dir / "dossier.json").write_text(plan["dossierText"], encoding="utf-8")
-
-    # regenerate manifest.json (all entries) + index.json from the sources.
-    build_index(reg)
-
-    # carry the discoverability fields build_index does not derive into the row.
-    idx_path = pathlib.Path(reg, "index.json")
-    idx = json.loads(idx_path.read_text(encoding="utf-8"))
-    row = (idx.get("components") or {}).get(name)
-    if row is not None:
-        row["description"] = plan.get("description", "")
-        row["tags"] = plan.get("tags") or []
-        idx_path.write_text(json.dumps(idx, indent=2, sort_keys=True) + "\n",
-                            encoding="utf-8")
+    pathlib.Path(reg, "components").mkdir(parents=True, exist_ok=True)
+    publish_release(
+        reg, plan["name"], plan["source"],
+        version=plan.get("version") or None,
+        scheme=plan.get("scheme") or "semver",
+        publisher=plan.get("publisher") or None,
+        description=plan.get("description", ""),
+        tags=plan.get("tags") or [],
+        dossier_text=(plan["dossierText"] if plan.get("stampDossier")
+                      and plan.get("dossierText") else None))
     return "published"
 
 

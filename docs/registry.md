@@ -1,7 +1,8 @@
-# The component registry — phase 0 design
+# The component registry
 
-**Status:** design (2026-08-23), spec-before-code · roadmap item 49 ·
-**Status:** phase 0 (the read path) **BUILT** (2026-08-23) · roadmap item 49 ·
+**Status:** phase 0 (the read path) **BUILT** (2026-08-23), phase 1
+(publish/gauntlet, `truc ship`) **BUILT**, phase 2 versioning (the update flow,
+§1.2) **BUILT** (2026-09-02) · roadmap item 49 ·
 companion to [service-compat.md](service-compat.md) (the search predicate),
 [queries.md](queries.md) (the envelope discipline), [holes.md](holes.md)
 (fill specs as queries), and the manifest format work (roadmap item 28).
@@ -13,9 +14,12 @@ Phase 0 lives in `src/revl/registry.py` (the git-backed index + loader +
 calls `admission._service_compatible`, the same predicate
 `refuse_admission -> _admit_service_replacement` bottoms out in, and adds no
 compatibility logic of its own (the search-as-admission probe made the case,
-[registry-probe.md](registry-probe.md)). Phase 1 (publish/gauntlet) and phase 2
-(hosted-index/versioning) remain deferred as §7 states; the reuse hint (§3,
-phase 0.5) is not yet wired.
+[registry-probe.md](registry-probe.md)). Phase 1 is `truc ship`
+([truc.md](truc.md#truc-ship)); phase 2's versioning half is the update flow in
+§1.2 (`registry.release_facts` / `registry.publish_release`,
+`tests/test_registry_releases.py`). What phase 2 still owes — a hosted index,
+accounts and tokens, authenticated publisher identity, key namespacing — is §7.
+The reuse hint (§3, phase 0.5) is not yet wired.
 
 The product decision in one line: **agents import existing components
 instead of regenerating them, and the whole loop costs two calls.** Every
@@ -37,9 +41,9 @@ repository with this layout:
 ```
 registry/
   components/
-    <name>/                    # single namespace, first-come (phase 0)
-      component.rvl            # source, canonical formatting
-      version                  # optional: the release this entry is, one line
+    <name>/                    # single namespace, first-come for a FREE name
+      component.rvl            # source, canonical formatting (the current release)
+      version                  # the release this entry is, one line (§1.1)
       manifest.json            # the compiled manifest (item 28 format)
       dossier.json             # evidence: audit --json today; the item 31
                                # gauntlet dossier when it exists
@@ -51,6 +55,12 @@ registry/
         inverse-roundtrip.json #   fault.roundtrip_dossier (item 26)
         capabilities.json      #   the G8 boundary surface
         provenance.json        #   assembled source/build provenance
+      releases/                # GENERATED at publish; append-only (§1.2)
+        <version>/
+          component.rvl        #   the bytes of that release, frozen
+          manifest.json        #   its manifest as published
+          release.json         #   what it is, what it replaced, what was checked
+          changelog.json       #   the derived changelog vs the release before it
       README.md                # optional, for humans
   index.json                   # GENERATED — never hand-edited
 ```
@@ -89,10 +99,65 @@ nothing is invented for it, and a consumer asking for a version is refused
 rather than answered about a different release
 ([truc.md](truc.md#truc-reproduce)).
 
-A component enters the registry by commit (phase 0) or by `revl_publish`
+A component enters the registry by commit (phase 0) or by `truc ship`
 (phase 1, gauntlet-gated). Either way the entry's `manifest.json` must be
 byte-reproducible from its `component.rvl` by the current compiler — CI
 checks that too, so an entry cannot lie about its own audit surface.
+
+### 1.2 Releases — the update flow
+
+Phase 0 published a name exactly once: a name already in `components/` was
+refused first-come, so there was no second release, nothing for item 64's
+*computed* bump to be checked against, and nothing for item 261's derived
+changelog to be derived *across*. `registry.publish_release` is that flow.
+
+A free name is still claimed first-come. A name already published may be
+**republished as a new release**, under rules that all fail closed:
+
+- **an update declares its release.** Replacing the published bytes without
+  naming a new release leaves every consumer pinned to a version that no longer
+  describes what it fetches.
+- **a published release is immutable.** Its bytes, manifest, record and derived
+  changelog stay frozen under `releases/<version>/`, so a substitution is
+  visible and diffable rather than silent.
+- **the declared version must satisfy the computed bump.** `version.derive`
+  (item 64) classifies the interface diff against the release being replaced;
+  declaring a patch where the diff requires a major is refused by name. An
+  *over*-bump is not a contradiction — it is conservative and misleads nobody.
+- **an unversioned entry cannot be replaced.** There is nothing to bump from and
+  nothing a new version could be checked against, so the publish is refused
+  rather than rounded down to a pass. This is also what protects every entry
+  published before this flow existed.
+- **where the bump cannot be computed, the publish is refused.** A date or a
+  build id cannot be compared against a computed bump. The publisher may opt out
+  explicitly (`[ship] version_scheme = "opaque"`), and then every release under
+  it records `bumpCheck: "cannot verify"` for consumers to read. The opt-out is
+  declared and recorded; it is never silent.
+- **a name does not change publisher silently.** Where the entry records a
+  publisher — in the release record it was published with, or in its evidence
+  provenance — an update must declare the same one. This is continuity of a
+  **self-asserted label, not authentication**: it catches a name quietly
+  changing hands, and it is not a substitute for the signed publisher identity
+  phase 2 still owes (§7). Where nothing records one, the release says
+  `publisherContinuity: "cannot verify"` rather than reading as a verified
+  handover.
+
+**Who may write.** Unchanged: whoever can write the registry directory. The
+registry is a git-backed repository, so that authority is the repository's — a
+commit, a review, a merge — and anyone holding it could always rewrite the whole
+tree. What this flow changes is that the same authority can now *replace* an
+existing name instead of only claiming a free one, which is why every
+replacement above is checked, why the replaced bytes are frozen rather than
+discarded, and why every release carries a record of what was and was not
+verified. Registry-side identity is still phase 2's remaining half.
+
+`index.json` carries the chain: an entry's row gains `releases`, the sorted list
+of frozen releases, so a consumer can see which releases exist and derive a
+changelog across them without opening the tree (`indexVersion` is `"2"`).
+
+The derived changelog (item 261) is stored as `releases/<version>/changelog.json`
+and its headline is item 64's computed bump. A *first* release has nothing to
+diff against and carries no changelog rather than an invented one.
 
 ## 2. `revl_resolve` — the one search verb
 
@@ -348,11 +413,20 @@ why.
       does not fire on partial overlap, and never changes the compile
       verdict.
 
-## 7. Non-goals (phase 0) — declined here so they are not relitigated
+## 7. Non-goals — declined here so they are not relitigated
 
-Namespacing, versioning, and update flows (phase 2, gated on item 9);
-hosting, accounts, tokens (phase 2); deletion/yanking policy (needs
-identity first); signatures (the dossier is evidence — signing arrives
-with phase 2 identity, and unsigned-but-gate-verified beats
-signed-but-unverified); popularity metrics (see §2); cross-registry
-federation (there is one registry until that is a problem worth having).
+Versioning and update flows were on this list; they are §1.2 now. What is still
+declined, and is what phase 2 still owes:
+
+**Key namespacing** (item 9's deferred half) — the collision argument gates
+publishing *at scale*; a single first-come namespace holds until there is one.
+**Hosting, accounts, tokens**, and with them **authenticated publisher
+identity**: §1.2's continuity check compares a self-asserted label, which
+catches a name changing hands but proves nothing about who is behind it.
+**Deletion/yanking policy** (needs identity first). **Signatures** as a
+publish gate (the dossier is evidence — signing arrives with that identity, and
+unsigned-but-gate-verified beats signed-but-unverified). **Resolving by version
+range** — a resolve reads the current release; the frozen history is a record,
+not yet a selectable set (item 9 / multi-version coexistence). **Popularity
+metrics** (see §2); **cross-registry federation** (there is one registry until
+that is a problem worth having).
