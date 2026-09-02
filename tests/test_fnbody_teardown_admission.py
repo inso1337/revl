@@ -73,11 +73,14 @@ def test_399_acquire_undo_allowed_in_provide_method():
     # effect position inside a provide method compiles, because the enclosing
     # activation's accumulator takes the entry. The site `undo` used to read
     # `r_close("h")` - a `Str` handed to an `(RHandle)` inverse, which compiled
-    # only because a component-body call was never argument-checked (item 423).
-    # It is now, so the slot names a declared callable at its declared
+    # only because a component-body call was never argument-checked (item 423
+    # is that general hole; the site `undo` slot of item 420 is one case of
+    # it). It is now, so the slot names a declared callable at its declared
     # signature. The acquired handle itself still cannot be named at a seam
     # (only `spawn` may be bound in a provide-method body, and `result` is not
-    # in scope in a site `undo`), which is item 420's design half.
+    # in scope in a site `undo`), which is item 420's design half; releasing
+    # exactly the acquired handle at a seam is what `witnessed` spells, covered
+    # in tests/test_site_undo_argument_typecheck.py.
     ir = _compile(_ACQ_UNDO + (
         "extern pure fn r_forget(tag: Str) = @py { return }\n"
         "service Res { fn take() }\n"

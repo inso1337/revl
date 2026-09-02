@@ -177,6 +177,27 @@ def test_ownership_b1_return_is_author_candidate():
 
 
 def test_ownership_o1_names_the_only_legal_undo_site():
+    # ACTIVATION-body position: the own-undo exemption is reachable here (the
+    # author can bind the acquisition and name the binding), so naming it is a
+    # fix the author can enact.
+    src = (_SOCK + "component P {\n"
+           "  let c = effect open_sock() undo close_sock(c)\n"
+           "  let d = effect open_sock() undo close_sock(c)\n"
+           "}\n")
+    err = _refuse(src)
+    rec = err.navigate
+    assert rec["family"] == "ownership" and rec["refused"]["kind"] == "o1"
+    assert "acquiring binding's own `undo`" in rec["alternatives"][0]["action"]
+
+
+def test_ownership_o1_at_a_seam_names_a_fix_reachable_there():
+    # PROVIDE-METHOD position. O1 used to offer the activation-body advice here
+    # too, and the author cannot take it: only `spawn` may be acquired inside a
+    # provide-method body, so no acquiring binding exists to carry an own-`undo`,
+    # and `result` is not in scope in a site `undo` either. Item 274's standard
+    # is that a refusal names a fix the author can ENACT where it fired, so at a
+    # seam the alternative is `witnessed`, whose declared inverse replays per
+    # acquisition with `result` bound to the handle.
     src = (_SOCK + "service S { fn shut(c: Sock) -> Int }\n"
            "component P provides s: S {\n"
            "  provide s { fn shut(c) { let x = close_sock(c)  return 1 } }\n"
@@ -184,7 +205,13 @@ def test_ownership_o1_names_the_only_legal_undo_site():
     err = _refuse(src)
     rec = err.navigate
     assert rec["family"] == "ownership" and rec["refused"]["kind"] == "o1"
-    assert "acquiring binding's own `undo`" in rec["alternatives"][0]["action"]
+    action = rec["alternatives"][0]["action"]
+    assert "witnessed" in action
+    assert "no acquiring binding" in action
+    # and the rendered hint does not send the author after an unreachable fix
+    assert "only the acquiring binding's own `undo` may name its inverse" \
+        not in str(err)
+    assert "only `spawn` may be acquired inside a provide-method body" in str(err)
 
 
 def test_ownership_r0_names_the_handle_type_to_declare():
