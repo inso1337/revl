@@ -443,3 +443,262 @@ def test_a_distributed_placement_refuses_cache():
         provides={"c": {"users": "Users"}},
         owner={"users": "c"})
     assert colocated is None
+
+
+# --------------------------------------------------- surface H: applicability
+# The applicability fold ("is this callee's reach cacheable?") is a 414 SURFACE
+# in its own right, so it is a worst-over-reach fold over the SAME provider
+# closure the class map folds — not a second reach walk that could disagree with
+# it — and it runs at LOAD, because the compile-time checks see only the
+# DECLARING method's reach shape while the clause is an interface contract every
+# provider inherits.
+
+
+def _surface_h(src: str) -> str | None:
+    """The fold's verdict for `src`, driven exactly as `Session.load` drives it
+    (the same index builder, the same class map). No cordis: `ClassMap` is
+    derived from the IR alone."""
+    from revl.mcp.approval import ClassMap, cache_applicability_refusal
+    from revl.mcp.session import Session
+    ir = compile_source(src, "h.rvl")
+    index = Session._build_cache_index(Session.__new__(Session), ir)
+    return cache_applicability_refusal(ClassMap(ir), index)
+
+
+_H_WITNESSED = (
+    "type W = { path: Str }\n"
+    "type E = { msg: Str }\n"
+    "extern pure fn restore(w: W) -> Unit = @py { pass }\n"
+    "extern witnessed[fs] fn rm(path: Str) -> Result[W, E] "
+    "undo restore(result) = @py { pass }\n")
+
+
+def test_surface_h_admits_a_plain_emission_read():
+    """The feature itself: a seam method whose closure crosses one ordinary
+    emission is exactly what `cache capability` is for."""
+    assert _surface_h(_CAP_SRC) is None
+
+
+def test_surface_h_admits_a_crossing_free_pure_method():
+    assert _surface_h(
+        "fn shade(n: Int) -> Int { return n * 2 }\n"
+        "service S { fn get(n: Int) -> Int cache pure }\n"
+        "component C provides s: S { provide s { fn get(n) = shade(n) } }\n"
+    ) is None
+
+
+def test_surface_h_is_inert_without_a_cache_clause():
+    assert _surface_h(_CAP_SRC.replace(" cache capability", "")) is None
+
+
+def test_surface_h_follows_the_transitive_service_closure():
+    """414 crossing kind 4. The escrow-shaped crossing is two seams away, in a
+    component the declaring one only REQUIRES — invisible to any check that
+    reads the declaration alone."""
+    problem = _surface_h(_H_WITNESSED + (
+        "service Inner { emission fn go(x: Str) -> Result[W, E] }\n"
+        "service Outer { emission fn get(x: Str) -> Result[W, E] cache capability }\n"
+        "component I provides inner: Inner { provide inner { fn go(x) = rm(x) } }\n"
+        "component O provides outer: Outer requires inner: Inner {\n"
+        "  provide outer { fn get(x) = emit inner.go(x) }\n"
+        "}\n"))
+    assert problem is not None
+    assert "`witnessed` extern `rm`" in problem and "I.inner.go" in problem
+    assert "outer.get" in problem and "surface H" in problem
+
+
+def test_surface_h_follows_the_spawn_seam():
+    """414 crossing kind 2: the crossing is reached through a spawn handle
+    (`w.inner.go`), which carries no `req` target — the seam a reach walk that
+    only follows `requires` edges misses entirely."""
+    problem = _surface_h(
+        "extern emission[mail] deferred fn send(msg: Str) = @py { return }\n"
+        "service Inner { emission fn go(msg: Str) -> Int }\n"
+        "service Svc { emission fn serve(msg: Str) -> Int cache capability }\n"
+        "component Worker provides inner: Inner {\n"
+        "  provide inner { fn go(msg) { emit send(msg) return 1 } }\n"
+        "}\n"
+        "component C provides svc: Svc {\n"
+        "  let w = effect spawn Worker with { } undo w.dispose()\n"
+        "  provide svc { fn serve(msg) { emit w.inner.go(msg) return 1 } }\n"
+        "}\n")
+    assert problem is not None
+    assert "`deferred` emission extern `send`" in problem
+    assert "Worker.inner.go" in problem and "svc.serve" in problem
+
+
+def test_surface_h_refuses_the_star_widening():
+    """414 crossing kind 8. An emitting callable handed on as a VALUE reaches a
+    boundary no `emission[...]` list can name, so an entry cannot be scoped to
+    the authority that covered its miss."""
+    problem = _surface_h(
+        "extern emission fn ship(x: Str) -> Str = @py { return x }\n"
+        "fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }\n"
+        "service S { emission fn loud(a: Str) -> Str cache capability }\n"
+        "component C provides s: S { provide s { fn loud(a) = indirect(ship, a) } }\n")
+    assert problem is not None
+    assert "as a VALUE" in problem and "(`*`)" in problem
+
+
+def test_surface_h_refuses_an_acquire_in_the_closure():
+    problem = _surface_h(
+        "type Sock = { fd: Int }\n"
+        "extern pure fn shut(s: Sock) -> Unit = @py { pass }\n"
+        "extern acquire fn open() -> Sock undo shut(result) = @py { pass }\n"
+        "extern emission fn ping(s: Sock) -> Str = @py { return 'ok' }\n"
+        "service S { emission fn get() -> Str cache capability }\n"
+        "component C provides s: S { provide s { fn get() { "
+        "let s = open() return emit ping(s) } } }\n")
+    assert problem is not None
+    assert "`acquire` extern `open`" in problem and "teardown would leak" in problem
+
+
+def test_surface_h_refuses_a_compensating_emission_in_the_closure():
+    problem = _surface_h(
+        "extern emission[pay] fn cleanup() -> Unit = @py { pass }\n"
+        "extern emission[pay] fn charge(x: Str) -> Str "
+        "compensate cleanup() = @py { return x }\n"
+        "service S { emission fn get(x: Str) -> Str cache capability }\n"
+        "component C provides s: S { provide s { fn get(x) = emit charge(x) } }\n")
+    assert problem is not None
+    assert "`compensate`-declaring emission extern `charge`" in problem
+
+
+def test_surface_h_refuses_cache_pure_over_component_state():
+    """The hole the fold closes. `cache pure` on a non-emission method passes
+    every compile-time check (it crosses nothing), but a provider whose body
+    reads its own effect-created state is not a function of its arguments: an
+    entry would serve a value the state has since moved past. The provider is
+    only known once the composition is linked, which is why this is surface H's
+    to catch and not the checker's."""
+    src = ("service Store {\n"
+           "  fn get(k: Str) -> Opt[Str] cache pure\n"
+           "  fn put(k: Str, v: Str)\n"
+           "}\n"
+           "component Cache provides cache: Store {\n"
+           "  let m = effect Map.new() undo m.drop()\n"
+           "  provide cache {\n"
+           "    fn get(k) = m.get(k)\n"
+           "    fn put(k, v) { effect m.insert(k, v) undo m.remove(k) }\n"
+           "  }\n"
+           "}\n")
+    problem = _surface_h(src)
+    assert problem is not None
+    assert "reads the component state `m`" in problem
+    assert "function of the arguments alone" in problem
+    # and the same method without the clause loads exactly as it always did
+    assert _surface_h(src.replace(" cache pure", "")) is None
+
+
+def test_surface_h_admits_an_immutable_component_binding():
+    """Only STATE refuses: a per-instance constant fixed at activation leaves the
+    method a function of its arguments, so it must not be swept up."""
+    assert _surface_h(
+        "service S { fn get(n: Int) -> Int cache pure }\n"
+        "component C provides s: S {\n"
+        "  config { base: Int = 10 }\n"
+        "  provide s { fn get(n) = n + config.base }\n"
+        "}\n") is None
+
+
+@needs_cordis
+def test_load_refuses_an_uncacheable_provider_closure():
+    """The fold is wired into the pre-boot gates, so an uncacheable composition
+    never reaches a runtime."""
+    from revl.mcp.session import Session, SessionError
+    ir = compile_source(
+        "service Store { fn get(k: Str) -> Opt[Str] cache pure\n"
+        "                fn put(k: Str, v: Str) }\n"
+        "component Cache provides cache: Store {\n"
+        "  let m = effect Map.new() undo m.drop()\n"
+        "  provide cache { fn get(k) = m.get(k)\n"
+        "                  fn put(k, v) { effect m.insert(k, v) undo m.remove(k) } }\n"
+        "}\n", "h.rvl")
+    s = Session()
+    with pytest.raises(SessionError, match="reads the component state"):
+        s.load(copy.deepcopy(ir))
+
+
+# ------------------------------------------------ body-level pure memoization
+# The seam gate memoizes a `cache pure` SERVICE METHOD at the call. A `cache
+# pure` plain `fn` is reached from inside a body, where there is no seam — so
+# its memo is emitted into the module, which is where the call happens.
+
+
+def _emitted(src: str):
+    """Compile `src`, emit the cordis-py module, and exec it."""
+    import types
+
+    import emit as py_emit
+    source = py_emit.emit(compile_source(src, "m.rvl"))
+    module = types.ModuleType("memo_probe")
+    exec(compile(source, "memo_probe.py", "exec"), module.__dict__)  # noqa: S102
+    return source, module
+
+
+_MEMO_SRC = (
+    'extern pure fn tick(sink: Str, n: Int) -> Int = @py {\n'
+    '    with open(sink, "a") as _f:\n'
+    '        _f.write("t\\n")\n'
+    '    return n * 2\n'
+    '}\n'
+    'fn double(sink: Str, n: Int) -> Int cache pure { return tick(sink, n) }\n')
+
+
+def test_cache_pure_fn_memoizes_in_the_emitted_body(tmp_path):
+    _, module = _emitted(_MEMO_SRC)
+    sink = str(tmp_path / "memo.log")
+    assert module.double(sink, 3) == 6
+    assert module.double(sink, 3) == 6          # served from the table
+    assert module.double(sink, 4) == 8
+    lines = Path(sink).read_text().splitlines()
+    assert len(lines) == 2                      # one host call per distinct args
+
+
+def test_a_first_class_reference_reaches_the_memo(tmp_path):
+    """The memo wraps the PUBLIC name, so there is no spelling — call site or
+    value reference — that reaches the un-memoized body by accident."""
+    _, module = _emitted(
+        _MEMO_SRC
+        + "fn apply(f: (Str, Int) -> Int, s: Str, n: Int) -> Int "
+          "{ return f(s, n) }\n")
+    sink = str(tmp_path / "fc.log")
+    assert module.apply(module.double, sink, 5) == 10
+    assert module.apply(module.double, sink, 5) == 10
+    assert len(Path(sink).read_text().splitlines()) == 1
+
+
+def test_an_unmemoizable_argument_shape_falls_back_to_the_call(tmp_path):
+    """The key is a whitelist over the shapes this backend emits; anything else
+    answers `_REVL_NOMEMO` and the call is simply not memoized. A miss always
+    recomputes a pure function, so an unknown shape costs speed, never
+    correctness."""
+    source, module = _emitted(_MEMO_SRC)
+    assert module._revl_memo_key((lambda: 1,)) is module._REVL_NOMEMO
+    assert module._revl_memo_key(object()) is module._REVL_NOMEMO
+    # structural, not identity: two equal records key the same
+    assert module._revl_memo_key({"a": 1, "b": [2, 3]}) \
+        == module._revl_memo_key({"b": [2, 3], "a": 1})
+    # and the types stay apart, so `1` and `True` are not one entry
+    assert module._revl_memo_key(1) != module._revl_memo_key(True)
+    assert "_revl_uncached_double" in source
+
+
+def test_a_cache_pure_fn_is_not_inlined():
+    """The py tier folds small pure fns into their call sites (item 231a). A
+    `cache pure` fn is excluded: inlining copies the body to call sites no memo
+    can see, which would make the declaration silently do nothing."""
+    src = ("fn twice(n: Int) -> Int cache pure { return n * 2 }\n"
+           "fn outer(n: Int) -> Int { return twice(n) + 1 }\n")
+    def outer_body(source: str) -> str:
+        return source.split("def outer(n):", 1)[1].split("\n\n", 1)[0]
+
+    assert "twice(n)" in outer_body(_emitted(src)[0])   # the call site survives
+    # …while the same fn without the clause still inlines
+    assert "twice(n)" not in outer_body(
+        _emitted(src.replace(" cache pure", ""))[0])
+
+
+def test_a_program_with_no_cache_pure_fn_emits_no_memo_table():
+    source, _ = _emitted("fn twice(n: Int) -> Int { return n * 2 }\n")
+    assert "_REVL_MEMO" not in source and "_revl_memo_key" not in source

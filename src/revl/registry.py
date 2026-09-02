@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,8 +42,28 @@ from .errors import RevlError
 from .lower import _service_compatible, _service_equal, _service_from_ir
 from .parser import MethodDecl, ServiceDecl
 
-INDEX_VERSION = "0"          # phase-0 index format; bumped only on a shape change
+INDEX_VERSION = "1"          # bumped for the per-entry `version` row (428 F12)
 INDEX_FILENAME = "index.json"
+
+# A published component's version, declared by the publisher in a one-line
+# `<entry>/version` file and recorded verbatim in the index row.
+#
+# It exists so that `name@version` can be a PIN rather than a label: without a
+# recorded version there is nothing for a requested `@version` to be checked
+# against, so `truc reproduce name@anything` could only ever answer a question
+# about whatever `name` is right now (roadmap item 428 F12). The version is
+# publisher-declared metadata, not a derived hash - it names WHICH release an
+# entry is, while `sourceHash`/`manifestHash` are what prove the bytes of that
+# release did not move. An entry that declares no version is honestly
+# unversioned: nothing is invented for it, and a consumer asking for a version
+# is refused rather than answered about a different one.
+ENTRY_VERSION_FILENAME = "version"
+
+# Deliberately narrow: one line, no whitespace, no path or shell metacharacters,
+# so a version is safe to print, compare and put in a lock row. Nothing here
+# imposes semver - a publisher may use dates or build ids - but it must be a
+# single stable token, because equality is the whole check.
+_VERSION_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 
 # The evidence bundle a component carries alongside its source + manifest
 # (roadmap item 293). Each file is the verbatim output of an existing producer,
@@ -488,7 +509,7 @@ def _audit_document(ir: dict) -> dict:
 
 
 def _entry_index_row(name: str, ir: dict, source: str, manifest: dict,
-                     manifest_text: str) -> dict:
+                     manifest_text: str, version: str | None = None) -> dict:
     """What the generated index records for one component — enough to rank and
     shortlist without opening its source."""
     provides: dict = {}
@@ -499,7 +520,7 @@ def _entry_index_row(name: str, ir: dict, source: str, manifest: dict,
     services = ir.get("services") or {}
     shapes = {svc: services.get(svc) for svc in sorted(set(provides.values()))}
     capabilities, emissions = _capabilities_of(manifest.get("boundary") or {})
-    return {
+    row = {
         "provides": provides,
         "requires": requires,
         "services": shapes,
@@ -508,6 +529,33 @@ def _entry_index_row(name: str, ir: dict, source: str, manifest: dict,
         "sourceHash": _sha256(source),
         "manifestHash": _sha256(manifest_text),
     }
+    # Only present when the publisher declared one. An absent key means "this
+    # entry is unversioned", which is a different statement from any version
+    # string this code could have made up, and consumers read it that way.
+    if version is not None:
+        row["version"] = version
+    return row
+
+
+def _entry_version(entry_dir: Path) -> str | None:
+    """The publisher-declared version of one entry, from `<entry>/version`.
+
+    Absent file -> None, an unversioned entry (honest degradation: `@version`
+    cannot be pinned against it and `truc reproduce` says so). A file that is
+    present but empty or malformed is a REFUSAL, not a shrug: a publisher who
+    meant to declare a version and wrote something unusable must not silently
+    publish an entry that a consumer can then never pin."""
+    path = entry_dir / ENTRY_VERSION_FILENAME
+    if not path.exists():
+        return None
+    value = _read(path).strip()
+    if not _VERSION_RE.match(value):
+        raise RevlError(
+            str(path), 0,
+            f"{entry_dir.name}: {ENTRY_VERSION_FILENAME} must be one token "
+            f"matching {_VERSION_RE.pattern} (got {value!r}); a version a "
+            "consumer cannot pin against is worse than none at all")
+    return value
 
 
 # --------------------------------------------------------------- build / verify
@@ -572,7 +620,8 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
         manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         if write:
             (entry_dir / "manifest.json").write_text(manifest_text, encoding="utf-8")
-        rows[name] = _entry_index_row(name, ir, source, manifest, manifest_text)
+        rows[name] = _entry_index_row(name, ir, source, manifest, manifest_text,
+                                      _entry_version(entry_dir))
     index = {"indexVersion": INDEX_VERSION, "components": rows}
     if write:
         index_text = json.dumps(index, indent=2, sort_keys=True) + "\n"
@@ -1580,4 +1629,5 @@ def resolve(registry, need, manifest: dict | None = None,
 __all__ = ["Registry", "RegistryEntry", "EvidenceBundle", "EvidenceAssessment",
            "build_index", "build_evidence", "verify", "resolve",
            "load_evidence_bundle", "assess_evidence", "INDEX_VERSION",
+           "ENTRY_VERSION_FILENAME",
            "EVIDENCE_DIRNAME", "EVIDENCE_FILES"]

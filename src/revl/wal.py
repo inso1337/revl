@@ -86,6 +86,49 @@ WAL_GUARANTEE = (
 )
 
 
+# ---------------------------------------------------------------------------
+# the step-kind vocabulary and the fork's scope gate (item 250, Slice 2)
+# ---------------------------------------------------------------------------
+#
+# Slice 1 classified a fork's tail from the LIVE timeline, so the vocabulary and
+# the scope gate lived on the py backend. Slice 2 reads the same partition back
+# out of a durable WAL with no backend on the path, so both are mirrored here —
+# the same split item 322 made for the reader, pinned the same way
+# (``test_wal_core_agrees_with_py_replay``) so the two copies cannot drift.
+
+KIND_EFFECT = "effect"
+KIND_PROVISION = "provision"
+KIND_EMISSION = "emission"
+KIND_COMPENSATION = "compensation"
+KIND_BOUNDARY = "boundary"
+KIND_HINGE = "hinge"
+KIND_OPAQUE = "opaque"
+
+KINDS = (KIND_EFFECT, KIND_PROVISION, KIND_EMISSION, KIND_COMPENSATION,
+         KIND_BOUNDARY, KIND_HINGE, KIND_OPAQUE)
+
+#: The capability tokens an inverse may declare and still be provably
+#: HOST-CONFINED, so a fork rewind may run it. Byte-identical to
+#: ``replay.HOST_CONFINED_CAPS``; item 250 Decision 2 says why `fs` is the only
+#: one.
+HOST_CONFINED_CAPS = frozenset({"fs"})
+
+
+def scope_host_confined(scope) -> bool:
+    """Whether a recorded capability SCOPE is provably host-confined (item 250,
+    Decision 2). Behaviourally identical to ``replay.scope_host_confined``: an
+    unknown token reads as CROSSING, the fail-safe direction — the honest move is
+    to enumerate an inverse, never to run one."""
+    if scope is None:
+        return True
+    if scope.get("sandbox") or scope.get("confined"):
+        return True
+    caps = tuple(scope.get("caps") or ())
+    if not caps:
+        return True
+    return all(cap in HOST_CONFINED_CAPS for cap in caps)
+
+
 def read_wal(path: str) -> dict:
     """Load a WAL from disk into ``{header, records, complete, torn}``.
 

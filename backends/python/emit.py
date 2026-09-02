@@ -166,7 +166,6 @@ _PY_ASYNC_SVC_OPS: set = set()      # {(service_name, method_name)} async operat
 _PY_AWAIT_LOCALS: set = set()       # async-typed parameter names of the body being rendered
 _PY_IN_ASYNC: bool = False          # is the body being rendered an `async def`
 _PY_IN_ARROW: bool = False          # is the body being rendered inside an arrow (item 141/264)
-_PY_INPLACE_LOCALS: dict = {}       # locals a persistent write may update in place (item 436)
 _PY_USES_AS_ASYNC: bool = False     # did any body need the `_revl_as_async` wrapper
 
 
@@ -452,16 +451,45 @@ def _uses_true_division(node) -> bool:
     return False
 
 
-def _uses_opt_field(node) -> bool:
-    """Does any field read carry the item-380 `opt` flag (an `Opt[T]`-declared
-    field, read TOTAL)? The `_revl_opt_field` helper is emitted only then, so a
-    module with no optional-field read stays byte-identical."""
+def _uses_builtin(node, *methods: str) -> bool:
+    """Does this IR call any of these stdlib builtins? The preamble helper each
+    one lowers to (item 436 F6) is emitted only where it is used, exactly as
+    `_revl_div` and `_revl_ftoa` already are."""
     if isinstance(node, dict):
-        if node.get("kind") == "field" and node.get("opt"):
+        # `?.m(..)` is an `optcall` node, NOT a `builtin` one, but it goes
+        # through the very same `_render_builtin` table, so it needs the very
+        # same helper emitted.
+        if node.get("kind") in ("builtin", "optcall") \
+                and node.get("method") in methods:
             return True
-        return any(_uses_opt_field(v) for v in node.values())
+        return any(_uses_builtin(v, *methods) for v in node.values())
     if isinstance(node, (list, tuple)):
-        return any(_uses_opt_field(v) for v in node)
+        return any(_uses_builtin(v, *methods) for v in node)
+    return False
+
+
+def _uses_opt_to_int(node) -> bool:
+    """Is a `to_int` reached through `?.`, whose node carries no receiver type?
+    Only then is the payload-dispatching wrapper emitted."""
+    if isinstance(node, dict):
+        if node.get("kind") == "optcall" and node.get("method") == "to_int":
+            return True
+        return any(_uses_opt_to_int(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_opt_to_int(v) for v in node)
+    return False
+
+
+def _uses_trunc_rem(node) -> bool:
+    """Does this IR take a truncated remainder (`%` on Int or Float)? Python's
+    own `%` floors, so this is the one operator the tier has to build."""
+    if isinstance(node, dict):
+        if (node.get("kind") == "bin" and node.get("op") == "%"
+                and node.get("operands") in ("Int", "Float")):
+            return True
+        return any(_uses_trunc_rem(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_trunc_rem(v) for v in node)
     return False
 
 
@@ -551,6 +579,65 @@ class _RevlRouter:
 
 def _revl_router(ctx, key, realms, strategy):
     return _RevlRouter(ctx, key, realms, strategy)'''
+
+
+# item 310, `cache pure`: the body-level memo table. The seam gate memoizes a
+# `cache pure` SERVICE METHOD at the call (mcp/session.py), but a `cache pure`
+# plain `fn` is reached from inside a body, where no seam exists — so the memo
+# for it lives in the emitted module, which is where the call actually happens.
+#
+# Sound by construction and by construction only: `_check_cache_declarations`
+# admits `cache pure` on a plain fn ONLY when the emission fixed point says its
+# reach crosses nothing, and G6 then gives equal-arguments-equal-result outright
+# (bodies outside effect forms are pure, captures are by value, no revl value is
+# ever mutated in place). There is no authority in the key because there is no
+# authority in the reach: a crossing-free result is not derived from anyone's
+# grant, so re-delivering it cannot launder one. That is the whole argument, and
+# it is why this is the one cache class with no ledger interaction at all.
+#
+# The key is a WHITELIST over the value shapes this backend emits, never a
+# fallback: an unrecognized shape answers `_REVL_NOMEMO` and the call is simply
+# not memoized. A missing entry is always sound (a miss recomputes a pure
+# function), so an unknown shape costs performance and never correctness.
+_REVL_MEMO_SRC = '''_REVL_MEMO = {}
+_REVL_NOMEMO = object()
+_REVL_MISS = object()
+
+
+def _revl_memo_key(v):
+    """A hashable STRUCTURAL key for a revl value, or `_REVL_NOMEMO`."""
+    if v is None or isinstance(v, (bool, int, float, str, bytes)):
+        return (type(v).__name__, v)
+    if isinstance(v, (list, tuple)):
+        parts = []
+        for item in v:
+            key = _revl_memo_key(item)
+            if key is _REVL_NOMEMO:
+                return _REVL_NOMEMO
+            parts.append(key)
+        return ("seq", tuple(parts))
+    if isinstance(v, dict):
+        parts = []
+        for name in v:
+            if not isinstance(name, str):
+                return _REVL_NOMEMO
+            key = _revl_memo_key(v[name])
+            if key is _REVL_NOMEMO:
+                return _REVL_NOMEMO
+            parts.append((name, key))
+        parts.sort()
+        return ("rec", tuple(sorted(parts)))
+    if callable(v) or getattr(v, "__dict__", None):
+        return _REVL_NOMEMO
+    slots = getattr(type(v), "__slots__", None)
+    if slots == ():
+        return ("adt", type(v).__name__)
+    if slots == ("value",):
+        key = _revl_memo_key(v.value)
+        if key is _REVL_NOMEMO:
+            return _REVL_NOMEMO
+        return ("adt", type(v).__name__, key)
+    return _REVL_NOMEMO'''
 
 
 _REVL_FTOA_SRC = '''def _revl_ftoa(x):
@@ -648,6 +735,62 @@ def _opt_bind(node: dict, target: Any, rendered: str) -> tuple[str, str]:
     return f"({name} := {rendered})", name
 
 
+# The bounded-arithmetic temp. A single name is enough for ANY nesting depth:
+# the walrus lives in the condition of a conditional expression, which python
+# evaluates before either branch, so an inner `+` has finished reading `_bi`
+# before the outer one rebinds it, and the outer branch reads the value the
+# outer bind just wrote. Nothing else in an emitted module touches the name.
+_BOUNDED_TMP = "_bi"
+
+
+def _bounded(operation: str, width: int) -> str:
+    """Impose the Int/Int32 bound on `operation` without a helper frame.
+
+    `_revl_i64(a + b)` entered a Python frame for every bounded `+`, `-` and
+    `*`, and the calls nest — `total + i * i - i` was three frames for one
+    statement (roadmap item 436 F5). The range test is two comparisons against
+    module constants, so it inlines as a chained comparison and the frame is
+    paid only on the trapping path, which raises anyway.
+    """
+    tmp = _BOUNDED_TMP
+    return (f"({tmp} if _REVL_I{width}_MIN <= ({tmp} := {operation}) "
+            f"<= _REVL_I{width}_MAX else _revl_i{width}({tmp}))")
+
+
+# The field-read temp; see `_field_read`. Same single-name argument as
+# `_BOUNDED_TMP`: the walrus sits in a condition python evaluates first, so a
+# nested read has finished with the name before the outer read rebinds it.
+_FIELD_TMP = "_fv"
+
+
+def _field_read(target: str, name: str, opt: bool = False,
+                rereadable: bool = False) -> str:
+    """`p.x`, rendered INLINE rather than through a `_revl_field` call.
+
+    Record literals are dicts and ADT payloads are objects, so the read has to
+    dispatch on the receiver's shape — but the dispatch is one `isinstance`,
+    which does not need a Python frame around it. `_revl_field(p, 'x')` cost a
+    frame per field read, on every record-shaped path in the program (roadmap
+    item 436 F4). What is left — the `isinstance` itself — is the part only a
+    frontend marker can remove, and item 445 owns that.
+
+    `opt` is the item-380 TOTAL read: an absent key (or a non-record receiver)
+    is the Opt's empty case, never a raise. `rereadable` says the caller has
+    already bound the target to a name (the `?.` chain has), so no temp is
+    needed.
+    """
+    if rereadable:
+        got, tmp = target, target
+    else:
+        tmp = _FIELD_TMP
+        got = f"({tmp} := {target})"
+    if opt:
+        return (f"({tmp}.get({name!r}) if isinstance({got}, dict) "
+                f"else getattr({tmp}, {name!r}, None))")
+    return (f"({tmp}[{name!r}] if isinstance({got}, dict) "
+            f"else getattr({tmp}, {name!r}))")
+
+
 def _render_builtin(method, target: str, args: list, recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), rendered as portable Python.
     `push`/`concat` are persistent (value semantics); `indexOf` returns -1
@@ -673,12 +816,12 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     if method == "concat":
         return f"({target} + {args[0]})"
     if method == "indexOf":
-        return (f"(lambda _v, _n: _v.find(_n) if isinstance(_v, str) "
-                f"else (_v.index(_n) if _n in _v else -1))({target}, {args[0]})")
+        # A preamble helper, not a lambda built and applied at every evaluation
+        # (item 436 F6): one frame, no function-object allocation.
+        return f"_revl_index_of({target}, {args[0]})"
     if method == "split":
         # JS-shape split: "" -> 1-char strings (py str.split("") raises).
-        return (f"(lambda _v, _s: list(_v) if _s == \"\" "
-                f"else _v.split(_s))({target}, {args[0]})")
+        return f"_revl_split({target}, {args[0]})"
     if method == "join":
         return f"{args[0]}.join({target})"
     if method == "repeat":
@@ -727,19 +870,21 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     if method == "keys":
         return f"sorted({target})"
     if method == "remove":
-        return (f"(dict((kk, vv) for kk, vv in {target}.items() "
-                f"if kk != {args[0]}))")
+        # A dict COMPREHENSION, not `dict(<generator>)`: the comprehension is
+        # one frame and builds the dict directly, where the generator form
+        # entered four (the `dict` call, the genexpr frame, and its resumes)
+        # for the same elements (roadmap item 436 F2).
+        return ("{" + f"kk: vv for kk, vv in {target}.items() "
+                f"if kk != {args[0]}" + "}")
     # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
     # and its `%` takes the divisor's sign, so div_floor is native and the
     # Euclidean remainder is `a % abs(b)`; truncation has to be built.
     if method == "div_trunc":
-        return (f"_revl_i64((lambda _a, _b: abs(_a) // abs(_b) if (_a < 0) == (_b < 0) "
-                f"else -(abs(_a) // abs(_b)))({target}, {args[0]}))")
+        return _bounded(f"_revl_div_trunc({target}, {args[0]})", 64)
     if method == "div_floor":
-        return f"_revl_i64({target} // {args[0]})"
+        return _bounded(f"{target} // {args[0]}", 64)
     if method == "div_euclid":
-        return (f"_revl_i64((lambda _a, _b: _a // _b if _b > 0 else -(_a // -_b))"
-                f"({target}, {args[0]}))")
+        return _bounded(f"_revl_div_euclid({target}, {args[0]})", 64)
     if method == "mod":
         return f"({target} % abs({args[0]}))"
     # Int/Int32 width conversions (docs/arithmetic.md). python has one int
@@ -752,18 +897,12 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
             # including out of the i64 range, which is None like every other
             # non-digit (the tier's ints are unbounded, so the bound must be
             # checked here rather than by int()).
-            parse = ("(None if (_s == \"\" or _s == \"-\" "
-                     "or not _s.isascii() "
-                     "or not (_s.isdigit() or (_s[0] == \"-\" and _s[1:].isdigit())) "
-                     "or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) "
-                     "else _n)")
             if recv == _RECV_VIA_OPT:
                 # reached through `?.`, whose node carries no receiver type:
                 # dispatch on the payload, the same split `indexOf` makes
                 # between a List and a Str receiver.
-                return (f"(lambda _s: {parse} if isinstance(_s, str) "
-                        f"else _s)({target})")
-            return f"(lambda _s: {parse})({target})"
+                return f"_revl_opt_to_int({target})"
+            return f"_revl_str_to_int({target})"
         return f"({target})"
     if method == "to_int32":
         return f"_revl_i32({target})"
@@ -773,20 +912,7 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     # as a value. Ok/Err are the tagged classes emitted when the IR uses
     # Result (gated in `_uses_builtin_result`).
     if method in _CHECKED_DIVS:
-        quotient = {
-            "checked_div_trunc":
-                "abs(_a) // abs(_b) if (_a < 0) == (_b < 0) else -(abs(_a) // abs(_b))",
-            "checked_div_floor": "_a // _b",
-            "checked_div_euclid": "_a // _b if _b > 0 else -(_a // -_b)",
-            "checked_mod": "_a % abs(_b)",
-        }[method]
-        if method == "checked_mod":
-            return (f"(lambda _a, _b: Ok({quotient}) if _b != 0 "
-                    f"else Err({_DIV_ZERO_MSG!r}))({target}, {args[0]})")
-        # a quotient of 2^63 (Int.MIN/-1) does not fit i64 -> Err, not a value
-        return (f"(lambda _a, _b: Err({_DIV_ZERO_MSG!r}) if _b == 0 "
-                f"else (Ok(_q) if -(2**63) <= (_q := {quotient}) <= 2**63 - 1 "
-                f"else Err('revl: Int overflow')))({target}, {args[0]})")
+        return f"_revl_{method}({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): python ints on
     # this tier are already i64-clamped, so str() is the exact decimal.
     if method == "to_str":
@@ -1085,8 +1211,17 @@ class _ComponentEmitter:
                 args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
                 rendered = f"{target}.{method}({args})"
             else:
-                callee = self._expr(expr.get("callee"), where)
-                args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
+                # `Some(x)` is the identity on this tier (item 436 F8) — the
+                # same special case the module-fn `_expr` makes, so a component
+                # body does not build and apply `(lambda _v: _v)` either.
+                callee_node = expr.get("callee")
+                call_args = expr.get("args") or []
+                if isinstance(callee_node, dict) \
+                        and callee_node.get("kind") == "var" \
+                        and callee_node.get("name") == "Some" and len(call_args) == 1:
+                    return self._expr(call_args[0], where)
+                callee = self._expr(callee_node, where)
+                args = ", ".join(self._expr(arg, where) for arg in call_args)
                 rendered = f"{callee}({args})"
             # item 141 await-seed: an emission of an async service op — through a
             # req key (`emit model.complete(p)`) or a spawn handle — produces a
@@ -1245,11 +1380,11 @@ class _ComponentEmitter:
                 # `len` node. The frontend marks this only on a sized target, so
                 # a record field literally named `length` still reads its slot.
                 return f"len({self._expr(expr.get('target'), where)})"
-            # record literals are dicts; ADT payloads are objects — the
-            # preamble helper reads either shape. An `Opt[T]`-declared field
-            # reads TOTAL (item 380): absent -> None, the Opt's empty case.
-            helper = "_revl_opt_field" if expr.get("opt") else "_revl_field"
-            return f"{helper}({self._expr(expr.get('target'), where)}, {name!r})"
+            # record literals are dicts; ADT payloads are objects — the read
+            # dispatches on the shape INLINE (item 436 F4). An `Opt[T]`-declared
+            # field reads TOTAL (item 380): absent -> None, the Opt's empty case.
+            return _field_read(self._expr(expr.get("target"), where), name,
+                               opt=bool(expr.get("opt")))
         if kind == "index":
             return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
         if kind == "bin":
@@ -1322,7 +1457,8 @@ class _ComponentEmitter:
             # `x?.name`: short-circuit on Opt-None.
             binder, reader = _opt_bind(
                 expr, expr.get("target"), self._expr(expr.get("target"), where))
-            return f"(None if {binder} is None else _revl_field({reader}, {name!r}))"
+            return (f"(None if {binder} is None else "
+                    f"{_field_read(reader, name, rereadable=True)})")
         if kind == "optcall":
             method = expr.get("method")
             if not isinstance(method, str) or not method.isidentifier():
@@ -2290,12 +2426,13 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
     `match`; payload arms bind the case's `.value` before the arm body runs.
     A wildcard arm becomes the chain's final `else`.
 
-    The scrutinee-once binding and each payload bind normally ride a one-shot
-    lambda. But a lambda is a SYNC frame: an arm body that crosses an async
+    The scrutinee is bound by a walrus carried in the first arm's test (item
+    436 F3); each payload bind normally rides a one-shot lambda. But a lambda
+    is a SYNC frame: an arm body that crosses an async
     boundary renders an `await`, and `await` inside a lambda is a py
     `SyntaxError` (item 263 — the arm helper hoisted out of an async body must
-    inherit its color). When `awaited` is set the binder switches to walrus
-    assignments carried by a `(<bind>, <body>)[1]` tuple instead, so every
+    inherit its color). When `awaited` is set the payload binder switches to a
+    walrus assignment carried by a `(<bind>, <body>)[1]` tuple instead, so every
     `await` lands directly in the enclosing `async def` and none is trapped in
     a lambda. The two forms are otherwise byte-identical.
     """
@@ -2312,7 +2449,11 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
             return f"(({bind} := {payload}), {body})[1]"
         return f"(lambda {bind}: {body})({payload})"
 
-    def branch(arm: dict, rest: str | None) -> str:
+    def branch(arm: dict, rest: str | None, head: str) -> str:
+        """`head` reads the scrutinee in THIS arm's condition — for the first
+        arm it carries the walrus that binds it, everywhere else it is `match`
+        itself. A conditional expression evaluates its condition FIRST, so the
+        bind is complete before any arm body (or any later arm's test) runs."""
         pattern = arm.get("pattern")
         body = _expr(arm.get("body"))
         if pattern == "_":
@@ -2322,27 +2463,37 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
         # on None, and Some binds the scrutinee itself. Result/user ADTs are
         # tagged (isinstance), binding the payload `.value`.
         if pattern == "None":
-            cond = f"{tmp} is None"
+            cond = f"{head} is None"
         elif pattern == "Some":
-            cond = f"{tmp} is not None"
+            cond = f"{head} is not None"
             if bind:
                 body = bind_payload(bind, body, tmp)
         else:
             if bind:
                 body = bind_payload(bind, body, f"{tmp}.value")
-            cond = f"isinstance({tmp}, {pattern})"
+            cond = f"isinstance({head}, {pattern})"
         if rest is None:
             return f"({body} if {cond} else (_ for _ in ()).throw(TypeError('non-exhaustive match')))"
         return f"({body} if {cond} else {rest})"
 
+    # The scrutinee bind rides the FIRST arm's test rather than a one-shot
+    # `lambda match: …` (roadmap item 436 F3): the lambda was a function object
+    # built and a frame entered at every evaluation, to bind one name. `match`
+    # is a revl keyword, so no user binding can collide with the walrus target,
+    # and a nested match inside an arm body may reuse the name freely — the
+    # outer chain has finished reading `match` before any body is evaluated.
+    # A leading wildcard arm (or no arm at all) has no test to carry the bind,
+    # so those keep the `(<bind>, <body>)[1]` tuple the awaited path uses.
+    folds = bool(arms) and arms[0].get("pattern") != "_"
     result = None
-    for arm in reversed(arms):
-        result = branch(arm, result)
+    for i, arm in reversed(list(enumerate(arms))):
+        head = f"({tmp} := {scrutinee})" if (folds and i == 0) else tmp
+        result = branch(arm, result, head)
     if result is None:
         result = "(_ for _ in ()).throw(TypeError('non-exhaustive match'))"
-    if awaited:
-        return f"(({tmp} := {scrutinee}), {result})[1]"
-    return f"(lambda {tmp}: {result})({scrutinee})"
+    if folds:
+        return result
+    return f"(({tmp} := {scrutinee}), {result})[1]"
 
 
 def _expr(node: dict) -> str:
@@ -2396,13 +2547,18 @@ def _expr(node: dict) -> str:
             # *impose* the bound rather than detect it — without this, a
             # program that overflows on every other tier quietly succeeds here,
             # which is the reference tier disagreeing with all five others.
-            return (f"_revl_i64({_expr(node['left'])} {node['op']} "
-                    f"{_expr(node['right'])})")
+            #
+            # The bound is imposed INLINE (roadmap item 436 F5): the in-range
+            # answer, which is every answer a correct program produces, no
+            # longer costs a Python frame. `_revl_i64` stays as the trapping
+            # tail, so the raise and its message are still written once.
+            return _bounded(f"{_expr(node['left'])} {node['op']} "
+                            f"{_expr(node['right'])}", 64)
         if node["op"] in ("+", "-", "*") and node.get("operands") == "Int32":
             # Int32 traps at the 32-bit edge, the same imposition at half the
             # width (docs/arithmetic.md).
-            return (f"_revl_i32({_expr(node['left'])} {node['op']} "
-                    f"{_expr(node['right'])})")
+            return _bounded(f"{_expr(node['left'])} {node['op']} "
+                            f"{_expr(node['right'])}", 32)
         if node["op"] == "/":
             # true division, IEEE at zero (docs/arithmetic.md)
             return f"_revl_div({_expr(node['left'])}, {_expr(node['right'])})"
@@ -2415,9 +2571,9 @@ def _expr(node: dict) -> str:
             # different operation with a different name (docs/arithmetic.md).
             # The same form serves Int and Float (it is `math.fmod` written
             # out), so an emitted module needs no import for it.
-            lhs, rhs = _expr(node["left"]), _expr(node["right"])
-            return (f"(lambda _a, _b: abs(_a) % abs(_b) if _a >= 0 "
-                    f"else -(abs(_a) % abs(_b)))({lhs}, {rhs})")
+            # A preamble helper, not a lambda built and applied at every
+            # evaluation (item 436 F6).
+            return f"_revl_rem({_expr(node['left'])}, {_expr(node['right'])})"
         if node["op"] in ("&", "|", "^"):
             # Int32 bitwise AND/OR/XOR (item 366). These are bit patterns, not
             # arithmetic, so they never trap. python's ints are signed and, for
@@ -2461,6 +2617,18 @@ def _expr(node: dict) -> str:
             return f"(-{_expr(node['operand'])})"
         raise EmitError(f"unsupported unary operator {node['op']!r}")
     if kind == "call":
+        # `Some(x)` is the identity on this tier (roadmap item 436 F8): `Opt[T]`
+        # is `T | None` at runtime, so the argument IS the answer. Rendering the
+        # callee first would build `(lambda _v: _v)` and immediately apply it —
+        # one function object and one frame to hand back what it was given.
+        # `Some` is a builtin case name the frontend never lets a user rebind,
+        # so the callee name settles this without a type environment. A BARE
+        # `Some` (passed as a value, e.g. `xs.map(Some)`) still needs the
+        # lambda, and the `var` arm below keeps emitting it.
+        callee_node = node["callee"]
+        if isinstance(callee_node, dict) and callee_node.get("kind") == "var" \
+                and callee_node.get("name") == "Some" and len(node["args"]) == 1:
+            return _expr(node["args"][0])
         call = f"{_expr(node['callee'])}({', '.join(_expr(a) for a in node['args'])})"
         # item 92: awaiting a colored fn or an async value local, in an async
         # body. item 115: an async extern is now an `async def` too, so it joins
@@ -2484,11 +2652,11 @@ def _expr(node: dict) -> str:
             # the code-point/element count, not a record `getattr`. python's
             # `len` counts code points.
             return f"len({_expr(node['target'])})"
-        # record literals are dicts; ADT payloads are objects — the preamble
-        # helper reads either shape. An `Opt[T]`-declared field reads TOTAL
-        # (item 380): absent -> None, the Opt's empty case.
-        helper = "_revl_opt_field" if node.get("opt") else "_revl_field"
-        return f"{helper}({_expr(node['target'])}, {node['name']!r})"
+        # record literals are dicts; ADT payloads are objects — the read
+        # dispatches on the shape INLINE (item 436 F4). An `Opt[T]`-declared
+        # field reads TOTAL (item 380): absent -> None, the Opt's empty case.
+        return _field_read(_expr(node["target"]), node["name"],
+                           opt=bool(node.get("opt")))
     if kind == "index":
         return f"{_expr(node['target'])}[{_expr(node['index'])}]"
     if kind == "if":
@@ -2548,7 +2716,8 @@ def _expr(node: dict) -> str:
         return _interp_fstring(node["parts"])
     if kind == "optfield":
         binder, reader = _opt_bind(node, node["target"], _expr(node["target"]))
-        return f"(None if {binder} is None else _revl_field({reader}, {node['name']!r}))"
+        return (f"(None if {binder} is None else "
+                f"{_field_read(reader, node['name'], rereadable=True)})")
     if kind == "optcall":
         # `?.m(..)`: the method is a STDLIB builtin (the checker types an
         # optcall through `builtin_check`, so there is no host-method row to
@@ -2619,7 +2788,7 @@ def _guard_frame_neutral_loop(body) -> None:
 
 
 # ---------------------------------------------------------------------------
-# In-place accumulation (item 436 F1)
+# In-place accumulation (item 436 F1, on item 445's frontend marker)
 # ---------------------------------------------------------------------------
 # `List.push`, `Map.set`, `Map.remove` and a functional record update are
 # PERSISTENT: each renders a whole copy of its receiver with one entry changed
@@ -2633,189 +2802,56 @@ def _guard_frame_neutral_loop(body) -> None:
 # `list_filter` and `list_dedup` as push loops, so `xs.map(f)` carries it.
 #
 # The rewrite is `out.append(v)`; all of its difficulty is proving the copy
-# unobservable. That proof is a UNIQUE-OWNERSHIP analysis over one fn body, and
-# NOT a per-builtin special case: a local may be written in place exactly when
-# the object it names is reachable through no other name, so no reader can hold
-# the pre-image. The rule is stated over the IR and holds on every tier: the go
-# backend's `_v3_self_rebind_locals` (item 434) is the same analysis written
-# again for that emitter, which is the argument for eventually lifting it to a
-# frontend `unique` marker instead of a seventh copy.
+# unobservable, and THAT PROOF NO LONGER LIVES HERE. It is an aliasing question
+# about the source — is the object this binding names reachable through any
+# other name — and item 436 answered it in this file while item 434 had already
+# answered the same question, independently, in `backends/go/emit.py`. Item 445
+# lifted the single answer into the frontend (`src/revl/ownership.py`), where it
+# is also FLOW-SENSITIVE, so a name that escapes at one point and is reborn from
+# a fresh literal before the next write is owned at that write — which is what
+# takes `stdlib/list.rvl`'s `list_sort` off its emitted cubic.
 #
-# Two clauses carry the whole proof:
+# What arrives here are two markers on the IR, and they state a FACT rather than
+# an instruction: this tier still decides what to do with them.
 #
-#   BIRTH. The name must be introduced by a `let` whose value allocates here
-#   (a list/map/record literal), or by a `let` off another name, which is then
-#   materialised as a DEFENSIVE COPY (`out = dict(m)`), one copy where the
-#   persistent form made one per step. A parameter is never a birth: it is the
-#   caller's object, and writing through it would destructively update a
-#   binding this function does not own.
+#   `assign` step, `"unique": True`
+#       the binding owns its object outright at this write, so `out.append(v)`
+#       is the faithful lowering of `out = out.push(v)`.
 #
-#   NO ESCAPE. Every other occurrence of the name must be a read that cannot
-#   retain the object: a receiver, an index, a field, a comparison operand.
-#   A call argument, a list or record element, an arrow capture, a `for`
-#   iterable or a plain alias (`let a = out`) all leave a second holder, and
-#   any of them disqualifies the name for the whole body.
-
-# What a solely-owned container is born from.
-_PY_FRESH_KINDS = frozenset({"list", "maplit", "record"})
-
-# The persistent methods with an in-place equivalent, and their arity. `concat`
-# is deliberately absent: it is defined on both Str and List and the receiver
-# type is not known at this node, and a python `str` cannot be mutated at all
+#   `assign` step, `"unique": "copy"`, with `"unique_birth": "List"|"Map"` on
+#   the `let` that introduced the name
+#       the local is born off ANOTHER name (`var out = m`), and is owned only
+#       because this tier materialises a defensive copy at that birth: ONE copy,
+#       where the persistent form made one per write. A parameter is the
+#       CALLER's object, so the copy is what makes writing through the local
+#       legitimate at all.
+#
+# Absent means "not proven", which is always the persistent form. `concat` is
+# deliberately never marked: it is defined on both Str and List, the receiver
+# type is not known at that node, and a python `str` cannot be mutated at all
 # (the same split the go tier hit, item 434).
-_PY_INPLACE_METHODS = {"push": 1, "set": 2, "remove": 1}
 
-# Slots in which a bare `var` is READ but not RETAINED: the value is consumed
-# on the spot (a length, an index, a field, a comparison, an interpolation) or
-# handed to a persistent builtin, every one of which returns a NEW container
-# rather than keeping its receiver. Every other position may leave a second
-# name holding the object.
-_PY_NON_RETAINING_SLOTS = {
-    "builtin": ("target",),
-    "index": ("target", "index"),
-    "len": ("target",),
-    "field": ("target",),
-    "optfield": ("target",),
-    "optcall": ("target",),
-    "bin": ("left", "right"),
-    "un": ("operand",),
-    "interp": ("parts",),
-    # `{**base, ..}` spreads the base's ENTRIES into a fresh dict; the base
-    # object itself is not kept, exactly as `(xs + [v])` does not keep `xs`
-    "record_update": ("base",),
-}
+# The container each `unique_birth` shape materialises as.
+_PY_BIRTH_CONTAINER = {"List": "list", "Map": "dict"}
 
 
-def _py_self_rebind(name: str, value: Any) -> bool:
-    """Is `value` a persistent copy of `name` with one entry changed, the
-    `out = out.push(v)` shape whose result rebinds its own receiver?"""
+def _py_inplace_write(node: dict) -> dict | None:
+    """The `out = out.push(v)` value this tier may render destructively, else
+    None. `"copy"` is honoured because `_fn_stmt` implements the birth copy the
+    marker is conditional on."""
+    if node.get("step") != "assign" or not node.get("unique"):
+        return None
+    value = node.get("value")
     if not isinstance(value, dict):
-        return False
-    if value.get("kind") == "builtin":
-        arity = _PY_INPLACE_METHODS.get(value.get("method"))
-        target = value.get("target")
-        return (arity is not None
-                and len(value.get("args") or []) == arity
-                and isinstance(target, dict)
-                and target.get("kind") == "var"
-                and target.get("name") == name)
+        return None
     if value.get("kind") == "record_update":
-        base = value.get("base")
-        return (isinstance(base, dict) and base.get("kind") == "var"
-                and base.get("name") == name and bool(value.get("updates")))
-    return False
+        return value
+    return value if value.get("method") in _PY_INPLACE_METHODS else None
 
 
-def _py_escaped_names(body: Any) -> set[str]:
-    """Every name whose object could outlive the expression that reads it, and
-    every name a nested binder shadows (an arrow parameter, a match arm's
-    payload bind), which is the same disqualification for a different reason."""
-    found: set[str] = set()
-
-    def walk(node: Any, escapes: bool) -> None:
-        if isinstance(node, list):
-            for item in node:
-                walk(item, escapes)
-            return
-        if not isinstance(node, dict):
-            return
-        if node.get("step") == "return":
-            # a `return` ENDS the function: whatever it hands out cannot be
-            # observed changing afterwards, because nothing here runs again
-            return
-        kind = node.get("kind")
-        if kind == "var":
-            name = node.get("name")
-            if escapes and isinstance(name, str):
-                found.add(name)
-            return
-        if kind == "arrow":
-            # a lambda captures by default-argument, which snapshots the
-            # OBJECT: a later in-place write would be visible through it
-            for name in node.get("captures") or []:
-                if isinstance(name, str):
-                    found.add(name)
-            for name in node.get("params") or []:
-                if isinstance(name, str):
-                    found.add(name)
-        elif kind == "match":
-            for arm in node.get("arms") or []:
-                bind = arm.get("bind") if isinstance(arm, dict) else None
-                if isinstance(bind, str):
-                    found.add(bind)
-        safe: tuple = _PY_NON_RETAINING_SLOTS.get(kind, ())
-        if kind == "bin" and node.get("op") == "??":
-            safe = ()  # `a ?? b` YIELDS `a`, so the operand IS retained
-        for key, child in node.items():
-            walk(child, key not in safe)
-
-    walk(body, True)
-    return found
-
-
-def _py_inplace_locals(fn: dict) -> dict:
-    """`{name: birth}` for the locals a persistent write may update in place.
-
-    `birth` is None when the name is born from a fresh literal (its `let` emits
-    unchanged), and `(source_node, "list"|"dict")` when it is born off another
-    name and needs the defensive copy. The container is named by the methods
-    that rebind the local (`push` is List-only, `set`/`remove` and a record
-    update are dict-shaped), so no receiver type has to be recovered.
-    """
-    body = fn.get("body") or []
-    spoiled: set[str] = {p.get("name") for p in fn.get("params") or []}
-    born: dict[str, Any] = {}
-    accum: set[str] = set()
-    pushes: set[str] = set()
-
-    def scan(steps: Any) -> None:
-        for node in steps or []:
-            if not isinstance(node, dict):
-                continue
-            step = node.get("step")
-            name = node.get("name")
-            if step == "let" and isinstance(name, str):
-                value = node.get("value")
-                kind = value.get("kind") if isinstance(value, dict) else None
-                if name in born or name in spoiled:
-                    spoiled.add(name)  # one python scope per fn: a second
-                    born.pop(name, None)  # declaration is a rebind
-                elif kind in _PY_FRESH_KINDS:
-                    born[name] = None
-                elif kind == "var":
-                    born[name] = value
-                else:
-                    spoiled.add(name)
-            elif step == "assign" and isinstance(name, str):
-                value = node.get("value")
-                if _py_self_rebind(name, value):
-                    accum.add(name)
-                    if value.get("method") == "push":
-                        pushes.add(name)
-                else:
-                    spoiled.add(name)
-            elif step == "let_pattern":
-                for bind in list(node.get("names") or []) + [node.get("rest")]:
-                    if isinstance(bind, str):
-                        spoiled.add(bind)
-            elif step == "for":
-                if isinstance(node.get("bind"), str):
-                    spoiled.add(node["bind"])
-                scan(node.get("body"))
-            elif step == "while":
-                scan(node.get("body"))
-            elif step == "if":
-                scan(node.get("then"))
-                scan(node.get("else"))
-
-    scan(body)
-    escaped = _py_escaped_names(body)
-    return {
-        name: (None if source is None
-               else (source, "list" if name in pushes else "dict"))
-        for name, source in born.items()
-        if name in accum and name not in spoiled and name not in escaped
-    }
+# The persistent methods with an in-place equivalent, and their arity, kept
+# here because `_py_inplace_stmts` renders one statement per method.
+_PY_INPLACE_METHODS = {"push": 1, "set": 2, "remove": 1}
 
 
 def _py_inplace_stmts(name: str, value: dict) -> list[str]:
@@ -2850,19 +2886,18 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
     step = node["step"]
     if step in ("let", "assign"):
         name = node["name"]
-        if name in _PY_INPLACE_LOCALS:
-            if step == "assign" and _py_self_rebind(name, node["value"]):
-                for line in _py_inplace_stmts(name, node["value"]):
-                    out.add(indent, line)
-                return
-            birth = _PY_INPLACE_LOCALS[name]
-            if step == "let" and birth is not None:
-                # born off another name: ONE copy here, where the persistent
-                # form made one per write
-                source, container = birth
-                out.add(indent,
-                        f"{_mangle(name)} = {container}({_expr(source)})")
-                return
+        write = _py_inplace_write(node)
+        if write is not None:
+            for line in _py_inplace_stmts(name, write):
+                out.add(indent, line)
+            return
+        container = _PY_BIRTH_CONTAINER.get(node.get("unique_birth"))
+        if step == "let" and container is not None:
+            # born off another name: ONE copy here, where the persistent form
+            # made one per write, and what makes writing through the local
+            # legitimate when the source is the caller's object
+            out.add(indent, f"{_mangle(name)} = {container}({_expr(node['value'])})")
+            return
         out.add(indent, f"{_mangle(node['name'])} = {_expr(node['value'])}")
     elif step == "let_pattern":
         _let_pattern_stmt(node, out, indent)
@@ -2938,8 +2973,48 @@ def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
     out.add(indent, f"assert {_expr(expr)}")
 
 
+def _is_cache_pure(decl: dict) -> bool:
+    """item 310: does this declaration carry `cache pure`? `pure_fn` is the only
+    class that reaches a plain `fn` (the checker refuses the other two there),
+    and it is the only one with no ledger interaction, so it is the only one a
+    backend may honour on its own."""
+    return ((decl.get("cache") or {}).get("class") == "pure_fn")
+
+
+def _uses_cache_pure(ir: dict) -> bool:
+    return any(_is_cache_pure(fn) for fn in ir.get("functions") or [])
+
+
+def _emit_memo_wrapper(name: str, params: list, is_async: bool) -> "_Lines":
+    """The public `cache pure` entry point: a structural-key memo in front of
+    the real body, which is emitted under `_revl_uncached_<name>`.
+
+    The public NAME keeps the wrapper, so a call site and a first-class value
+    reference reach the memo identically — there is no spelling that gets the
+    un-memoized body by accident. The key is namespaced by the fn name, so one
+    table serves the module without two fns ever colliding on equal arguments."""
+    inner = f"_revl_uncached_{name}"
+    args = ", ".join(_ident(p["name"], "parameter name") for p in params)
+    call = f"{'await ' if is_async else ''}{inner}({args})"
+    key_parts = ", ".join([repr(name)] + [_ident(p["name"], "parameter name")
+                                          for p in params])
+    out = _Lines()
+    out.add(0, f"{'async def' if is_async else 'def'} {name}({args}):")
+    out.add(1, '"""item 310 `cache pure`: memoized on the structural args key."""')
+    out.add(1, f"_revl_k = _revl_memo_key(({key_parts},))")
+    out.add(1, "if _revl_k is _REVL_NOMEMO:")
+    out.add(2, f"return {call}")
+    out.add(1, "_revl_v = _REVL_MEMO.get(_revl_k, _REVL_MISS)")
+    out.add(1, "if _revl_v is _REVL_MISS:")
+    out.add(2, f"_revl_v = {call}")
+    out.add(2, "_REVL_MEMO[_revl_k] = _revl_v")
+    out.add(1, "return _revl_v")
+    out.add(0)
+    return out
+
+
 def _emit_functions(functions: list) -> "_Lines":
-    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW, _PY_INPLACE_LOCALS
+    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
     out = _Lines()
     for fn in functions:
         name = _ident(fn["name"], "function name")
@@ -2955,19 +3030,24 @@ def _emit_functions(functions: list) -> "_Lines":
         _PY_IN_ARROW = False
         _PY_AWAIT_LOCALS = {p["name"] for p in fn["params"]
                             if _is_async_fn_type(p.get("type"))}
-        # item 436 F1: the accumulation locals whose persistent copies are
-        # provably unobservable, computed once over the whole body
-        _PY_INPLACE_LOCALS = _py_inplace_locals(fn)
+        # item 310: a `cache pure` fn renders its real body under a private name
+        # and gains a memo wrapper under the public one (below), so every caller
+        # — including a first-class value reference — goes through the table.
+        memoized = _is_cache_pure(fn)
+        if memoized:
+            name = f"_revl_uncached_{name}"
         out.add(0, f"{'async def' if is_async else 'def'} {name}({params}):")
         if not fn.get("body"):
             out.add(1, "pass")
         for stmt in fn.get("body") or []:
             _fn_stmt(stmt, out, 1)
         out.add(0)
+        if memoized:
+            out.extend(_emit_memo_wrapper(
+                _ident(fn["name"], "function name"), fn["params"], is_async))
     _PY_IN_ASYNC = False
     _PY_IN_ARROW = False
     _PY_AWAIT_LOCALS = set()
-    _PY_INPLACE_LOCALS = {}
     return out
 
 
@@ -3170,7 +3250,6 @@ def _emit_externs(externs: list) -> "_Lines":
 
 
 def _emit_tests(tests: list) -> "_Lines":
-    global _PY_INPLACE_LOCALS
     out = _Lines()
     out.add(0, "REVL_TESTS = []")
     out.add(0)
@@ -3186,12 +3265,8 @@ def _emit_tests(tests: list) -> "_Lines":
         out.add(0, f"def {fn_name}():")
         if not test.get("body"):
             out.add(1, "pass")
-        # a test body is a fn body with no parameters, so item 436's
-        # in-place accumulation applies to it on the same terms
-        _PY_INPLACE_LOCALS = _py_inplace_locals(test)
         for stmt in test.get("body") or []:
             _fn_stmt(stmt, out, 1)
-        _PY_INPLACE_LOCALS = {}
         out.add(0)
         out.add(0, f"REVL_TESTS.append(({test['name']!r}, {fn_name}))")
         out.add(0)
@@ -3778,6 +3853,13 @@ def _fn_inline_template(fn: dict) -> tuple[str | None, dict] | None:
     return shape, else None. The guards fold into one conditional expression."""
     if fn.get("async"):
         return None
+    # item 310: a `cache pure` fn is never inlined. The author declared that the
+    # call is worth a table lookup, and inlining would copy the body to every
+    # call site where no memo can see it — the declaration would silently do
+    # nothing. (Inlining is behaviour-preserving, so this costs speed, never
+    # correctness, on a fn small enough to have been a candidate.)
+    if _is_cache_pure(fn):
+        return None
     params = fn.get("params") or []
     if len(params) > 1:
         return None
@@ -4119,6 +4201,96 @@ def emit(ir: dict) -> str:
         out.add(0, "    return (_revl_math.copysign(float('inf'), a)")
         out.add(0, "            * _revl_math.copysign(1.0, b))")
         out.add(0)
+    # The stdlib lowerings that need more than one expression: a MODULE-LEVEL
+    # `def`, gated on use, rather than a lambda built and applied at every
+    # evaluation (item 436 F6). Same shape as `_revl_div` above — one frame, no
+    # function-object allocation — and each is emitted only where it is used.
+    if _uses_trunc_rem(ir):
+        out.add(0, "def _revl_rem(a, b):")
+        out.add(0, '    """The TRUNCATED remainder: it takes the sign of the '
+                   'DIVIDEND, as in"""')
+        out.add(0, '    """TypeScript. python\'s own `%` floors and takes the '
+                   'divisor\'s sign."""')
+        out.add(0, "    return abs(a) % abs(b) if a >= 0 else -(abs(a) % abs(b))")
+        out.add(0)
+    if _uses_builtin(ir, "div_trunc"):
+        out.add(0, "def _revl_div_trunc(a, b):")
+        out.add(0, '    """Division that TRUNCATES toward zero '
+                   '(docs/arithmetic.md)."""')
+        out.add(0, "    return (abs(a) // abs(b) if (a < 0) == (b < 0)")
+        out.add(0, "            else -(abs(a) // abs(b)))")
+        out.add(0)
+    if _uses_builtin(ir, "div_euclid"):
+        out.add(0, "def _revl_div_euclid(a, b):")
+        out.add(0, '    """Euclidean division: the remainder is never negative '
+                   '(docs/arithmetic.md)."""')
+        out.add(0, "    return a // b if b > 0 else -(a // -b)")
+        out.add(0)
+    if _uses_builtin(ir, "indexOf"):
+        out.add(0, "def _revl_index_of(v, n):")
+        out.add(0, '    """First index of `n`, -1 when absent — a Str receiver '
+                   'or a List one."""')
+        out.add(0, "    if isinstance(v, str):")
+        out.add(0, "        return v.find(n)")
+        out.add(0, "    return v.index(n) if n in v else -1")
+        out.add(0)
+    if _uses_builtin(ir, "split"):
+        out.add(0, "def _revl_split(v, s):")
+        out.add(0, '    """JS-shape split: an empty separator yields 1-char '
+                   'strings (py raises)."""')
+        out.add(0, "    return list(v) if s == \"\" else v.split(s)")
+        out.add(0)
+    if _uses_builtin(ir, "to_int"):
+        # FR-9, docs/stdlib-2.0.md §Str.to_int: total on the ASCII digits with
+        # an optional leading `-`, `None` otherwise — including out of the i64
+        # range, which is None like every other non-digit (the tier's ints are
+        # unbounded, so the bound must be checked here rather than by int()).
+        out.add(0, "def _revl_str_to_int(s):")
+        out.add(0, '    """Str.to_int: the ASCII digits with an optional '
+                   'leading `-`, else None."""')
+        out.add(0, "    if s == \"\" or s == \"-\" or not s.isascii():")
+        out.add(0, "        return None")
+        out.add(0, "    if not (s.isdigit() or (s[0] == \"-\" and s[1:].isdigit())):")
+        out.add(0, "        return None")
+        out.add(0, "    n = int(s)")
+        out.add(0, "    return n if -(2**63) <= n <= 2**63 - 1 else None")
+        out.add(0)
+        if _uses_opt_to_int(ir):
+            # reached through `?.`, whose node carries no receiver type:
+            # dispatch on the payload, the same split `indexOf` makes.
+            out.add(0, "def _revl_opt_to_int(v):")
+            out.add(0, '    """`?.to_int()`: the node carries no receiver type, '
+                       'so dispatch on the payload."""')
+            out.add(0, "    return _revl_str_to_int(v) if isinstance(v, str) else v")
+            out.add(0)
+    for checked in _CHECKED_DIVS:
+        if not _uses_builtin(ir, checked):
+            continue
+        # The total forms (docs/arithmetic.md): the same quotient as the
+        # faulting operation, but a zero divisor yields Err(reason) instead of
+        # raising — a pure fn cannot `fail`, so the error travels as a value.
+        quotient = {
+            "checked_div_trunc":
+                "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))",
+            "checked_div_floor": "a // b",
+            "checked_div_euclid": "a // b if b > 0 else -(a // -b)",
+            "checked_mod": "a % abs(b)",
+        }[checked]
+        out.add(0, f"def _revl_{checked}(a, b):")
+        out.add(0, f'    """Total `{checked[len("checked_"):]}`: a zero divisor '
+                   'is Err(reason), never a raise."""')
+        out.add(0, "    if b == 0:")
+        out.add(0, f"        return Err({_DIV_ZERO_MSG!r})")
+        out.add(0, f"    q = {quotient}")
+        if checked == "checked_mod":
+            # a remainder cannot leave the range its operands are already in
+            out.add(0, "    return Ok(q)")
+        else:
+            # a quotient of 2^63 (Int.MIN/-1) does not fit i64 -> Err, not a value
+            out.add(0, "    if -(2**63) <= q <= 2**63 - 1:")
+            out.add(0, "        return Ok(q)")
+            out.add(0, "    return Err('revl: Int overflow')")
+        out.add(0)
     if _uses_float_interp(ir):
         # Canonical Float -> Str (docs/strings.md): the ECMAScript
         # Number::toString shortest-round-trip form, so `${aFloat}` agrees with
@@ -4128,18 +4300,12 @@ def emit(ir: dict) -> str:
         for line in _REVL_FTOA_SRC.splitlines():
             out.add(0, line)
         out.add(0)
-    out.add(0, "def _revl_field(v, name):")
-    out.add(0, '    """Record literals are dicts, ADT payloads are objects."""')
-    out.add(0, "    return v[name] if isinstance(v, dict) else getattr(v, name)")
-    out.add(0)
-    if _uses_opt_field(ir):
-        # item 380: an `Opt[T]`-declared field reads TOTAL — an absent key (or a
-        # non-record receiver) is the Opt's empty case (`None`), never a raise.
-        # This is what makes `e.kind ?? default` mean the same on every tier
-        # (py's `_revl_field` raises `KeyError` here; ts is total by JS accident).
-        out.add(0, "def _revl_opt_field(v, name):")
-        out.add(0, '    """An `Opt[T]`-declared field: absent -> None, never a raise."""')
-        out.add(0, "    return v.get(name) if isinstance(v, dict) else getattr(v, name, None)")
+    if _uses_cache_pure(ir):
+        # item 310, `cache pure`: the body-level memo table and its structural
+        # key. Emitted only when some fn declares the clause, so every existing
+        # module is byte-identical.
+        for line in _REVL_MEMO_SRC.splitlines():
+            out.add(0, line)
         out.add(0)
     # built-in Result is a tagged ADT (so `match` can discriminate Ok/Err),
     # unless a user type shadows the name. Opt stays host-None, so it needs

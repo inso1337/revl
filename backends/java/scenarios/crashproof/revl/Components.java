@@ -398,9 +398,9 @@ public final class Components {
             Context.EffectScope fx = ctx.effect();
             RevlFrame frame = new RevlFrame();
             try {
-                var _revl_wit4419035648 = begin_row();
-                if (_revl_wit4419035648 instanceof RevlResult.Ok<?, ?> _revl_ok4419035648) {
-                    String result = (String) _revl_ok4419035648.value();
+                var _revl_wit1 = begin_row();
+                if (_revl_wit1 instanceof RevlResult.Ok<?, ?> _revl_ok1) {
+                    String result = (String) _revl_ok1.value();
                     revlRecordTransactional("begin_row", "delete_row", new String[]{String.valueOf(result)});
                     fx.track(frame.transactional("begin_row", "delete_row", () -> delete_row(result)));
                 }
