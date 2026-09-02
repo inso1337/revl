@@ -74,6 +74,7 @@ _ENTRY_STAMP = itertools.count()
 __all__ = [
     "Clock", "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
     "JobHandle", "LeaseHandle", "LeaseRefused", "Map", "Pool", "PoolError",
+    "EstopHalted", "EstopRefused",
     "SessionCommitError", "SessionOwner",
     "SpawnHandle", "StateIncompatible",
     "Stream", "StreamFaulted", "StreamSource", "Subscription", "STREAM_CLOSED",
@@ -83,6 +84,9 @@ __all__ = [
     "retry_idempotent", "schedule_after", "schedule_every", "session_owner",
     "set_session_owner", "set_trace", "spawn",
     "trace_observers",
+    # item 443: the operator E-Stop (docs/design/443-estop.md)
+    "arm_estop_latch", "clear_estop", "estop", "estop_engaged",
+    "estop_latch_path", "estop_residue", "estop_state",
 ]
 
 
@@ -587,6 +591,11 @@ def plug(ctx, component: dict, config=None):
     ctx.isolate(key, label) per entry BEFORE ctx.plugin — the fiber's
     context chain is fixed at plugin time, so isolation cannot happen
     inside apply."""
+    # item 443: an activation is a fresh batch of boundary crossings, so an
+    # engaged E-Stop refuses to start one. Placed here rather than deeper
+    # because refusing BEFORE `ctx.plugin` means no frame, no accumulator and
+    # nothing to strand — the cheapest possible halt.
+    _estop_check(f"plug {component.get('name') or '<component>'}")
     scoped = ctx
     for key, realm in (component.get("isolate") or {}).items():
         scoped = scoped.isolate(key, realm_label(realm))
@@ -1245,8 +1254,13 @@ class _Transactional:
     captured at registration, because whether the activation commits is not yet
     known when the effect runs — it depends on whether a LATER step aborts."""
 
+    # `_estop_stranded` (item 443): this entry is already on the halt
+    # inventory. The inventory is built in two halves — named at the halt, then
+    # completed at `Frame._guard` as the unwind hands disposers over — so the
+    # flag is what keeps an entry from being counted twice.
     __slots__ = ("frame", "witness", "_undo", "discharged", "replayed", "seq",
-                 "_escrowed", "stamp", "undo_idempotent", "component", "method")
+                 "_escrowed", "stamp", "undo_idempotent", "component", "method",
+                 "_estop_stranded")
 
     def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any,
                  undo_idempotent: bool = False) -> None:
@@ -1280,6 +1294,7 @@ class _Transactional:
         # pending (a mid-session withdrawal). Held once — neither discharged nor
         # replayed — until the owner settles the verdict and disposes it.
         self._escrowed = False
+        self._estop_stranded = False   # item 443
 
     def __call__(self) -> Any:
         if _hold_for_session(self):
@@ -1451,8 +1466,9 @@ class _Compensation:
     contract.md names as natural on a cordis tier, where the runtime unwinds
     every disposer in one synchronous stack-position pass."""
 
+    # `_estop_stranded`: see `_Transactional.__slots__` (item 443).
     __slots__ = ("frame", "fn", "discharged", "ran", "failed", "error", "seq",
-                 "_escrowed", "component", "method", "stamp")
+                 "_escrowed", "component", "method", "stamp", "_estop_stranded")
 
     def __init__(self, frame: "Frame", fn: Callable[[], Any],
                  method: Optional[str] = None) -> None:
@@ -1475,6 +1491,7 @@ class _Compensation:
         self.seq: Optional[int] = None
         # item 245: escrowed under a session owner with a pending verdict.
         self._escrowed = False
+        self._estop_stranded = False   # item 443
         # item 247 second-pass (F5): process-monotonic registration index, so an
         # escrow with no WAL (every seq is None) still replays LIFO.
         self.stamp = next(_ENTRY_STAMP)
@@ -1581,6 +1598,310 @@ def _hold_for_session(entry: Any) -> bool:
         entry._escrowed = True
         owner.escrow(entry)
     return True
+
+
+# ---------------------------------------------------------------------------
+# item 443: the operator E-Stop (docs/design/443-estop.md)
+# ---------------------------------------------------------------------------
+#
+# Every other stop revl has is COOPERATIVE: a teardown replays inverses LIFO
+# under the activation's verdict (`commit`/`abort`), faults route through
+# residue records, withdrawal propagates to dependents. That is right for a
+# composition fault and wrong for an operator emergency: when a human hits the
+# button during a runaway loop with irreversible effects in flight, unwinding
+# two hundred brackets first is not a safe answer, it is a long one.
+#
+# So the E-Stop is a THIRD verdict, `halted` (`formal/RevL/Semantics.lean`,
+# `Verdict.halted`), and its whole content is what it does NOT do:
+#
+#   * it replays no inverse             (`RevL.G7.estop_replays_nothing`)
+#   * it discharges no entry            (`RevL.G7.estop_discharges_nothing`)
+#   * it STRANDS every registered entry (`RevL.G7.estop_strands_everything`)
+#
+# Stranded is the third disposition: registered, not run, and NOT dropped —
+# the inverse descriptor and the witness are KEPT, which is the exact opposite
+# of a discharge, because `revl recover` is what reads them back. An E-Stop is
+# deliberately shaped to look like a CRASH to the recovery path, since revl
+# already has a proven answer for a crash.
+#
+# The halt violates G7's LIFO-completeness and R4's no-residue BY DESIGN, so
+# the system records what it did not unwind instead of pretending it did.
+
+_ESTOP_LATCH_ENV = "REVL_ESTOP_LATCH"
+
+#: The merged residue schema's two E-Stop `kind` discriminators (docs/design/
+#: teardown-contract.md, "The merged residue schema"). `estop-stranded` is a
+#: registered entry whose inverse or compensation was NEVER ATTEMPTED;
+#: `estop-ambiguous` is the at-most-one crossing that was already dispatched
+#: when the latch was read and whose outcome is therefore UNKNOWN — item 440's
+#: ambiguous tier, reached deliberately rather than by accident.
+_ESTOP_STRANDED = "estop-stranded"
+_ESTOP_AMBIGUOUS = "estop-ambiguous"
+
+#: The engaged halt, or None. Process-global by construction: an E-Stop that
+#: only stopped one activation would not be a stop.
+_ESTOP: Optional[dict] = None
+
+#: An explicit cross-process latch path (`revl run --estop-latch`), or None to
+#: fall back to `REVL_ESTOP_LATCH`. `revl estop` creates the file; every
+#: crossing seam stats it, so an operator in another terminal can halt a
+#: running composition without a control socket.
+_ESTOP_LATCH: Optional[str] = None
+
+#: The crossings currently DISPATCHED and unconfirmed, innermost last. At most
+#: one is unconfirmed per activation at any instant, which is what bounds the
+#: halt's ambiguity to a single record (`RevL.G7.halt_ambiguity_is_at_most_one`).
+_INFLIGHT: list = []
+
+#: Every live activation frame, weakly held so a torn-down one falls out. The
+#: halt walks this to build its inventory.
+_LIVE_FRAMES: "weakref.WeakSet" = weakref.WeakSet()
+
+
+class EstopRefused(RuntimeError):
+    """`estop()` was called without operator authority.
+
+    The whole point of the E-Stop is that a composition (or an agent driving
+    one) may not invoke it on itself: it is held as an OPERATOR authority
+    (item 55, `docs/operator-capabilities.md`, the `estop` verb). There is
+    deliberately no in-language surface for it — no extern, no stdlib binding
+    — and this refusal is the defensive twin for an embedding that reaches the
+    module function directly."""
+
+
+class EstopHalted(RuntimeError):
+    """Raised at a boundary-crossing seam once an E-Stop is engaged.
+
+    This is the "stop dispatching NEW crossings immediately" half. It is NOT a
+    fault the composition may catch and route through the normal teardown: the
+    halt is already engaged when this raises, so every disposer the unwind
+    reaches is stranded rather than replayed."""
+
+    def __init__(self, where: str) -> None:
+        halt = _ESTOP or {}
+        super().__init__(
+            f"E-STOP engaged — `{where}` was refused. "
+            f"reason: {halt.get('reason', 'operator halt')}; "
+            f"operator: {halt.get('operator', 'unknown')}. "
+            "The instance is dead: reconcile with `revl recover --wal <file>` "
+            "(item 443); there is no resume.")
+        self.where = where
+        self.halt = dict(halt)
+
+
+def arm_estop_latch(path: Optional[str]) -> None:
+    """Point the crossing seams at a cross-process E-Stop latch file.
+
+    `revl run --estop-latch PATH` calls this; `REVL_ESTOP_LATCH` is the
+    ambient equivalent for a host this flag does not reach (`revl mcp serve`,
+    an embedder). Passing None disarms the explicit path and falls back to the
+    environment."""
+    global _ESTOP_LATCH
+    _ESTOP_LATCH = path
+
+
+def estop_latch_path() -> Optional[str]:
+    """The latch file this process watches, or None."""
+    return _ESTOP_LATCH or (os.environ.get(_ESTOP_LATCH_ENV) or None)
+
+
+def _latch_record() -> Optional[dict]:
+    """The halt an operator wrote to the latch file, or None when the latch is
+    absent. A latch that exists but does not parse still HALTS: a malformed
+    emergency stop is still an emergency stop, and failing open here would be
+    the one failure mode this feature exists to prevent."""
+    path = estop_latch_path()
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    except (ValueError, TypeError):
+        return {"reason": "operator halt (unreadable latch file)",
+                "operator": "unknown"}
+    if not isinstance(record, dict):
+        return {"reason": "operator halt (unreadable latch file)",
+                "operator": "unknown"}
+    return record
+
+
+def estop_engaged() -> bool:
+    """Whether a halt is in force — in this process, or on the latch file an
+    operator in another terminal just wrote."""
+    if _ESTOP is not None:
+        return True
+    return _latch_record() is not None
+
+
+def estop_state() -> Optional[dict]:
+    """The engaged halt record, or None. The in-flight inventory lives here."""
+    return None if _ESTOP is None else dict(_ESTOP)
+
+
+def clear_estop() -> None:
+    """Drop the halt. For test isolation and for a host that has finished
+    reconciling and is starting a FRESH process-level session — never a
+    resume: the halted instance stays dead (item 443, open question 3)."""
+    global _ESTOP
+    _ESTOP = None
+    _INFLIGHT.clear()
+
+
+def _estop_check(where: str) -> None:
+    """The crossing seam. Refuse to dispatch anything new once the halt is
+    engaged, and engage it here when the latch file says an operator did.
+
+    Cost is one `open()` on the latch path per crossing, and nothing at all
+    when no latch is armed — which is the default, so a composition that never
+    arms one is byte-identical to the pre-443 runtime."""
+    if _ESTOP is None:
+        record = _latch_record()
+        if record is None:
+            return
+        estop(record.get("reason") or "operator halt",
+              operator=record.get("operator") or "unknown", _from_latch=True)
+    raise EstopHalted(where)
+
+
+class _InFlight:
+    """Marks one dispatched, unconfirmed crossing for the duration of the call.
+
+    If the halt lands inside the `with`, this descriptor becomes the halt's
+    single `estop-ambiguous` record: the call MAY have landed and the runtime
+    says so rather than guessing (item 440's ambiguous tier, item 309's spent
+    at-most-once attempt). It never becomes a stranded record — stranding
+    means "never attempted", and this one was."""
+
+    __slots__ = ("descriptor",)
+
+    def __init__(self, **descriptor: Any) -> None:
+        self.descriptor = descriptor
+
+    def __enter__(self) -> "_InFlight":
+        _INFLIGHT.append(self.descriptor)
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        try:
+            _INFLIGHT.remove(self.descriptor)
+        except ValueError:  # pragma: no cover — a halt already drained it
+            pass
+
+
+def _estop_record(kind: str, *, component: Optional[str], method: Optional[str],
+                  seq: Any, reason: str, entry_kind: str,
+                  referent: Optional[str] = None) -> dict:
+    """One E-Stop residue fact, in the merged residue schema (docs/design/
+    teardown-contract.md). `estop-stranded` is `not-attempted` with a null
+    `attempted.call`; `estop-ambiguous` is attempted with outcome `unknown`."""
+    ambiguous = kind == _ESTOP_AMBIGUOUS
+    return {
+        "kind": kind,
+        "state": "unresolved",
+        "component": component,
+        "method": method,
+        "seq": seq,
+        "entry": entry_kind,
+        "attemptedFlag": ambiguous,
+        "attempted": {"call": method, "phase": 0} if ambiguous else None,
+        "outcome": "unknown" if ambiguous else "not-attempted",
+        "referent": referent,
+        "error": {
+            "type": "estop",
+            "message": (f"operator halt: {reason} — this crossing was in "
+                        "flight when the latch was read, so it MAY have landed")
+            if ambiguous else
+            (f"operator halt: {reason} — registered and never unwound, "
+             "the obligation is still owed"),
+        },
+        "hint": ("re-issue only if the crossing declared an idempotency key "
+                 "(item 309); otherwise finish it by hand — a second attempt "
+                 "cannot be proven safe")
+        if ambiguous else
+        "replayed by `revl recover --wal <file>` from its WAL descriptor",
+    }
+
+
+def estop(reason: str = "operator halt", *, operator: Optional[str] = None,
+          _from_latch: bool = False) -> dict:
+    """Engage the E-Stop. Idempotent: a second call returns the first halt.
+
+    What this DOES: flips the process-global latch (so every crossing seam
+    refuses from the next instruction onward), marks every live frame halted
+    (so every disposer the unwind reaches is stranded, not replayed), snapshots
+    the crossings that were already dispatched as `estop-ambiguous`, and
+    enumerates every entry it can name as `estop-stranded`.
+
+    What this does NOT do, and must not: run an inverse, run a compensation,
+    flush a deferred emission, write a discharge record, or tear anything down.
+    Its cost is one latch flip plus the walk of the live frames — never the
+    cost of a teardown, which is the entire reason the verb exists."""
+    global _ESTOP
+    if _ESTOP is not None:
+        return dict(_ESTOP)
+    if not _from_latch and not (isinstance(operator, str) and operator.strip()):
+        raise EstopRefused(
+            "an E-Stop is an operator authority: it needs an operator token "
+            "(item 55's `estop` verb). A composition may not halt itself — "
+            "that is the whole point (item 443)")
+    now = time.time()
+    reason = reason or "operator halt"
+    # Snapshot BEFORE marking anything: these calls are already out.
+    ambiguous = [
+        _estop_record(_ESTOP_AMBIGUOUS, component=d.get("component"),
+                      method=d.get("method"), seq=d.get("seq"), reason=reason,
+                      entry_kind=d.get("entry") or "crossing",
+                      referent=d.get("referent"))
+        for d in list(_INFLIGHT)]
+    stranded: list = []
+    activations: list = []
+    for frame in list(_LIVE_FRAMES):
+        if getattr(frame, "_halted", False):
+            continue
+        frame._halted = True
+        records = frame._strand_registered(reason)
+        stranded.extend(records)
+        activations.append({"component": frame.name, "stranded": len(records)})
+    _ESTOP = {
+        "halted": True,
+        "verdict": "halted",
+        "reason": reason,
+        "operator": operator or "unknown",
+        "at": now,
+        "activations": activations,
+        "inFlight": ambiguous,
+        "stranded": stranded,
+        # item 443, open question 3: the instance is DEAD. The body was cut
+        # mid-step and the runtime cannot know whether the in-flight crossing
+        # landed, so re-entering it would be exactly the "pretend it did not
+        # happen" the honest semantics forbids.
+        "resumable": False,
+        "reconcile": "revl recover --wal <file>",
+    }
+    _record(f"estop {reason}")
+    return dict(_ESTOP)
+
+
+def estop_residue() -> list:
+    """Every E-Stop residue record accumulated so far: the entries named at the
+    halt, plus the ones the unwind stranded afterwards at `Frame._guard`.
+
+    The two halves are both real. A witnessed mutation, a compensation and an
+    acquired resource are NAMEABLE from the frame at halt time; an emitted
+    bracket disposer is a bare `lambda: <undo>` living in the cordis disposable
+    list, reachable only as the unwind hands it to the frame's guard. So the
+    inventory is built at the halt and COMPLETED as the process unwinds, and
+    this is the merged view."""
+    if _ESTOP is None:
+        return []
+    out = list(_ESTOP["inFlight"]) + list(_ESTOP["stranded"])
+    for frame in list(_LIVE_FRAMES):
+        out.extend(getattr(frame, "estop_residue", []))
+    return out
 
 
 class Frame:
@@ -1690,6 +2011,20 @@ class Frame:
         self._compensation_budget_s = _read_bound_seconds(
             _COMPENSATION_BUDGET_ENV, _COMPENSATION_BUDGET_DEFAULT_MS)
         self._compensation_per_call_ms = os.environ.get(_COMPENSATION_PER_CALL_ENV)
+        # item 443: the operator E-Stop. `_halted` is the THIRD verdict
+        # (`RevL.Semantics.Verdict.halted`), and unlike `_committed`/`_aborting`
+        # it does not select which entries replay — it selects that NONE do.
+        # Every disposer the unwind reaches while this is set is STRANDED:
+        # skipped without running and WITHOUT discharging, so the inverse
+        # descriptor and the witness survive for `revl recover` to read back.
+        self._halted: bool = False
+        # the E-Stop records this frame's unwind produced AFTER the halt, i.e.
+        # the disposers that were not nameable at halt time (an emitted bracket
+        # is a bare `lambda: <undo>` in the cordis disposable list). The
+        # halt-time half lives on the halt record itself; `runtime.estop_residue()`
+        # merges the two.
+        self.estop_residue: list = []
+        _LIVE_FRAMES.add(self)
         # stateful host resources this activation acquires (`Map.new()`, …), in
         # acquisition order — the instance's migratable state for a hot-swap
         # (see the state-migration section above). Populated by
@@ -1774,6 +2109,24 @@ class Frame:
         pending, self._pending_compensations = self._pending_compensations, []
         if not pending:
             return
+        # item 443: an E-Stop runs no compensation either. Phase 2 is the
+        # best-effort offset pass; "best effort" under an operator halt is zero
+        # effort, because every compensation is itself a boundary CROSSING and
+        # the halt's first guarantee is that no new crossing is dispatched.
+        # Each owed offset is stranded instead, so the report names it.
+        if self._halted:
+            reason = (_ESTOP or {}).get("reason", "operator halt")
+            for entry in pending:
+                if getattr(entry, "_estop_stranded", False):
+                    continue
+                entry._estop_stranded = True
+                self.estop_residue.append(_estop_record(
+                    _ESTOP_STRANDED,
+                    component=getattr(entry, "component", self.name),
+                    method=getattr(entry, "method", None),
+                    seq=getattr(entry, "seq", None), reason=reason,
+                    entry_kind="compensation"))
+            return
         budget = self._compensation_budget_s
         deadline = None if budget is None else time.monotonic() + budget
         for entry in pending:
@@ -1811,6 +2164,64 @@ class Frame:
             outcome="failed", attempted_flag=True,
             attempted={"phase": 1},
             error={"type": type(error).__name__, "message": str(error)}))
+
+    def _strand_registered(self, reason: str) -> list:
+        """Enumerate every entry this frame can NAME at halt time, as
+        `estop-stranded` residue (item 443).
+
+        Nameable means: the witnessed (`transactional`) entries, the
+        `compensation` entries, and the stateful host resources this activation
+        acquired. An emitted BRACKET inverse is a bare `lambda: <undo>` living
+        in the cordis disposable list with no entry object behind it, so it is
+        not reachable from here — it is stranded instead at `_guard`, as the
+        unwind hands it over. Both halves carry the same `kind`, and
+        `runtime.estop_residue()` is the merged view.
+
+        Each entry is flagged so the later `_guard` pass does not record it
+        twice."""
+        records: list = []
+        seen: list = []
+        for entry, entry_kind in ([(e, "transactional") for e in self._transactional]
+                                  + [(e, "compensation") for e in self._compensations]):
+            if getattr(entry, "_estop_stranded", False):
+                continue
+            entry._estop_stranded = True
+            seen.append(entry)
+            records.append(_estop_record(
+                _ESTOP_STRANDED, component=getattr(entry, "component", self.name),
+                method=getattr(entry, "method", None),
+                seq=getattr(entry, "seq", None), reason=reason,
+                entry_kind=entry_kind))
+        for resource in self._resources:
+            records.append(_estop_record(
+                _ESTOP_STRANDED, component=self.name,
+                method=getattr(resource, "_tag", lambda: type(resource).__name__)(),
+                seq=None, reason=reason, entry_kind="bracket",
+                referent=repr(resource)))
+        return records
+
+    def _record_estop_stranded(self, disposer: Any) -> None:
+        """Record ONE disposer the unwind reached while the halt was engaged.
+
+        This is the `_guard` half of the inventory: the inverse is NOT run and
+        NOT discharged, and the record says which. Deduplicated against the
+        halt-time pass by the entry's own flag, so an entry named at the halt
+        is not counted twice when cordis later hands its disposer over."""
+        entry = getattr(disposer, "_revl_entry", disposer)
+        if getattr(entry, "_estop_stranded", False):
+            return
+        try:
+            entry._estop_stranded = True
+        except AttributeError:  # pragma: no cover — a builtin/bound method
+            pass
+        halt = _ESTOP or {}
+        self.estop_residue.append(_estop_record(
+            _ESTOP_STRANDED, component=self.name,
+            method=_inverse_label(disposer), seq=getattr(entry, "seq", None),
+            reason=halt.get("reason", "operator halt"),
+            entry_kind=("transactional" if isinstance(entry, _Transactional)
+                        else "compensation" if isinstance(entry, _Compensation)
+                        else "bracket")))
 
     def _guard(self, value: Any) -> Any:
         """Wrap one disposer the activation body yielded so a raise out of it
@@ -1856,11 +2267,24 @@ class Frame:
         frame = self
 
         def _guarded(_disposer=value):
-            try:
-                return _disposer()
-            except BaseException as error:  # noqa: BLE001 — recorded, never re-raised
-                frame._record_phase1_residue(_disposer, error)
+            # item 443: under an E-Stop the inverse does NOT run. This is the
+            # runtime half of `RevL.G7.estop_replays_nothing` — the halt's
+            # replay set is empty by construction, at the one chokepoint every
+            # emitted disposer shape already passes through — and the entry is
+            # recorded as owed rather than dropped.
+            if frame._halted:
+                frame._record_estop_stranded(_disposer)
                 return None
+            with _InFlight(component=frame.name,
+                           method=_inverse_label(_disposer),
+                           seq=getattr(getattr(_disposer, "_revl_entry", _disposer),
+                                       "seq", None),
+                           entry="inverse"):
+                try:
+                    return _disposer()
+                except BaseException as error:  # noqa: BLE001 — recorded, never re-raised
+                    frame._record_phase1_residue(_disposer, error)
+                    return None
 
         _guarded._revl_entry = getattr(value, "_revl_entry", value)
         return _guarded
@@ -1909,6 +2333,7 @@ class Frame:
     def acquire(self, label: str, get: Callable[[], Any], undo: Callable[[Any], Any]) -> Any:
         """A ``let-effect`` step inside a provide-method body: run the
         acquisition through the effect protocol, adopt it, return the value."""
+        _estop_check(f"{self.name}.{label}")   # item 443
         holder: list = []
 
         frame = self
@@ -1971,6 +2396,10 @@ class Frame:
         site yields this only on the `Ok` branch (Ok-conditional), so a failed
         mutation that touched nothing schedules no rollback.
 
+        item 443: registration IS the crossing here (the emitted call site
+        yields this on the `Ok` branch, i.e. after the mutation landed), so an
+        engaged E-Stop refuses before a new one is accepted.
+
         Bridge slice: when a WriteAheadLog is attached, this ALSO writes the
         WAL discharge-descriptor for the entry at registration time (docs/
         design/teardown-contract.md, "WAL descriptor") — durably ahead of
@@ -1978,6 +2407,7 @@ class Frame:
         lets `revl recover` reconstruct and replay the inverse. `entry.seq`
         carries the assigned seq so `drain` can name it in the discharge
         record on a clean commit; it is `None` when no WAL is active."""
+        _estop_check(f"{self.name}.{_named_call_method(undo)}")   # item 443
         entry = _Transactional(self, undo, witness,
                                undo_idempotent=undo_idempotent)
         self._transactional.append(entry)
@@ -2027,6 +2457,7 @@ class Frame:
         discharge-descriptor is written at registration, durably ahead of the
         commit-vs-abort decision, so a crash before it lets `revl recover`
         reconstruct and replay the inverse (item 243 rule 4)."""
+        _estop_check(f"{self.name}.{_named_call_method(undo)}")   # item 443
         entry = _Transactional(self, undo, witness)
         self._transactional.append(entry)
         self._deferred_transactional.append(entry)
@@ -2085,6 +2516,7 @@ class Frame:
         `entry.seq` carries the assigned seq so `drain` can name it in the
         discharge record on a clean commit; it is `None` when no WAL is
         active."""
+        _estop_check(f"{self.name}.{_named_call_method(fn)}")   # item 443
         entry = _Compensation(self, fn, method=_named_call_method(fn))
         self._compensations.append(entry)
         wal = self._wal()
@@ -2144,6 +2576,7 @@ class Frame:
         (its `ctx` has no `_revl_timeline`), so this is a no-op there, byte-inert.
         The discharge-descriptor's `method` is read from the ORIGINAL `fn` before
         wrapping, so the WAL names the real offsetting call, not the wrapper."""
+        _estop_check(f"{self.name}.{_named_call_method(fn)}")   # item 443
         method_name = _named_call_method(fn)
         timeline = getattr(self.ctx, "_revl_timeline", None)
         if timeline is not None:
@@ -2181,6 +2614,7 @@ class Frame:
         the five ownerless tiers refuse at emit (Decision 2's tier gate); on py
         the driver is always the owner, so this refusal is a guard against a
         misconfigured embedding, never a normal path."""
+        _estop_check(f"{receiver}.{method}")   # item 443
         if self._owner is None:
             raise RuntimeError(
                 "a deferred emission needs a session owner runtime (the deferral "
@@ -2196,6 +2630,7 @@ class Frame:
         is enforced and no valid approval covers it (silence never approves). When
         the policy is off, or no owner is registered, returns a passthrough handle
         so a `with a` crossing fires normally (byte-identity)."""
+        _estop_check(f"approval[{capability}]")   # item 443
         owner = self._owner
         if owner is None or not owner.approval_enforced:
             return {"capability": capability, "requestId": None,
@@ -2247,6 +2682,10 @@ class Frame:
         `requestId`. A crash between spend and fire leaves consumed-but-unfired —
         an owed action needing a FRESH approval, fail-closed. When the policy is
         off (passthrough handle / no owner), the body fires unchanged."""
+        # item 443: this is THE class-(c) crossing seam, and a class-(c) storm
+        # is the scenario the E-Stop exists for. Refused before the token is
+        # spent, so a halt never leaves an approval consumed-but-unfired.
+        _estop_check(f"{self.name}.{capability}")
         owner = self._owner
         if owner is None or not owner.approval_enforced \
                 or (isinstance(handle, dict) and handle.get("passthrough")):
@@ -2272,7 +2711,13 @@ class Frame:
                 f"expired, or bound to another component/generation/session "
                 f"(item 246, invariants 1/3/4/5)")
         owner.consume_approval(entry)          # durable spend BEFORE the fire
-        result = fire()                         # the host body crosses now
+        # item 443: between the durable spend and the completion record is
+        # exactly the window an E-Stop lands in, and the crossing is then
+        # AMBIGUOUS — it may or may not have landed. Marking it in flight is
+        # what lets the halt say so instead of guessing (item 440's tier).
+        with _InFlight(component=self.name, method=capability,
+                       seq=entry.get("requestId"), entry="crossing"):
+            result = fire()                     # the host body crosses now
         wal = self._wal()
         if wal is not None:
             wal.record_approval_emission(entry.get("requestId"), capability,
@@ -2335,6 +2780,22 @@ class Frame:
         same durable discharge record — a compensation is never owed on a
         clean unload (teardown-contract.md's "Commit path"), so its seq joins
         the transactional seqs in the one discharge record written here."""
+        # item 443: under an E-Stop, `drain` does NOTHING. It does not flip
+        # `_committed` (the halt is a third verdict, not a commit), it writes no
+        # discharge record (a discharge would DROP the very descriptors the
+        # reconciliation path reads back), and it disposes no adopted effect
+        # (that would be a graceful unwind, which is exactly what an emergency
+        # stop is not). Every method-registered entry is stranded instead, and
+        # the cordis unwind's own disposers are stranded at `_guard`. This is
+        # `RevL.G7.estop_replays_nothing` and `estop_discharges_nothing`
+        # together, at the commit path.
+        if self._halted:
+            self.estop_residue.extend(self._strand_registered(
+                (_ESTOP or {}).get("reason", "operator halt")))
+            self._deferred_transactional = []
+            self._deferred_compensations = []
+            self._pending_compensations = []
+            return None
         # item 318: `_aborting` is the reject signal for an already-activated
         # component (a session-level abort of per-tool-call work). When set,
         # `drain` runs but does NOT commit: `_committed` stays False, so every
@@ -2578,10 +3039,17 @@ class _Deferred:
     def fire(self) -> None:
         """Invoke the host body once (flush). Best-effort — a raise is caught by
         the caller (continue-and-record), never here."""
+        # item 443: a deferred emission is a boundary crossing that has not yet
+        # happened, so an engaged E-Stop refuses it outright — nothing new
+        # crosses after the button. The queue entry is left owed and enumerated,
+        # never quietly dropped.
+        _estop_check(f"{self.receiver}.{self.method}")
         self.fired = True
         fire, self._fire = self._fire, None
         if fire is not None:
-            fire()
+            with _InFlight(component=self.receiver, method=self.method,
+                           seq=self.seq, entry="deferred"):
+                fire()
 
 
 class SessionOwner:

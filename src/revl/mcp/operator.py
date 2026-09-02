@@ -87,6 +87,20 @@ TOOL_VERB = {
     # deliberately ungated (absent from this map).
     "revl_apply_distillation": "approve",
     "revl_revoke_distillation": "approve",
+    # item 443: the operator E-Stop. Its own verb, never folded into `unload`
+    # or `commit`: an E-Stop is not a teardown and not a verdict on the work,
+    # it is the authority to STOP DISPATCHING, and an operator trusted to
+    # unload cleanly is not automatically trusted to strand two hundred
+    # brackets. It is also the one verb a composition or an agent must never
+    # be able to invoke on itself, which is what holding it here buys
+    # (docs/design/443-estop.md, docs/operator-capabilities.md).
+    #
+    # Its target set is the WHOLE running composition (`_targets`' fall-through
+    # to `_live_targets`), because a halt that stopped one component would not
+    # be a halt. So a subject-scoped `may estop on tenant_a*` authorizes only
+    # while every live component is in `tenant_a*`; an operator who must be
+    # able to hit the button always needs `may estop on *`.
+    "revl_estop": "estop",
 }
 
 # friendly verb aliases the profile author may write (canonical on the right)
