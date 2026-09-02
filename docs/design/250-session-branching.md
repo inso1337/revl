@@ -1,11 +1,13 @@
 # Design: session branching, fork a conversation with its side effects rewound (item 250)
 
-Status: design proposed. No implementation. This composes machinery that has
-already landed; the value here is composing it correctly and stating, exactly,
-what the composition can and cannot honestly claim. Slice 1 is the smallest
-landable workload-surface fork on the py runtime. The language `fork` form,
-parallel copy-on-write branches, and the LLM-aware replay modes of the item-121
-overlap are deferred with rationale.
+Status: Slice 1 landed 2026-09-01 (the live fork: `revl_fork` /
+`revl_fork_confirm`, the scope-gated rewind, the parent freeze). Slice 2 landed
+2026-09-02 (the durable lineage and the offline `revl branch` / `revl compare`
+surface). This composes machinery that has already landed; the value here is
+composing it correctly and stating, exactly, what the composition can and cannot
+honestly claim. The language `fork` form, parallel copy-on-write branches,
+`revl replay branch` and the LLM-aware replay modes of the item-121 overlap are
+deferred with rationale.
 
 ## Revision (adversarial review 2026-09-01)
 
@@ -658,8 +660,74 @@ in the py MCP session and the py replay/runtime, exactly where the timeline,
 owner, and recovery already live. No IR, no cross-tier golden, no language
 grammar changes. It does add the new py-side report golden in item 7.
 
+### Slice 2 (durable lineage + the offline branch surface)
+
+Slice 1 shipped the fork as a LIVE primitive, and everything it knew it knew from
+the in-process timeline. That left the roadmap item's second half (`revl branch`,
+`revl compare` over a recorded run) with no substrate: a WAL on disk could not say
+it was a branch, could not name where it diverged, and could not reproduce the
+partition a fork at step k produces. Slice 2 makes what the fork reasons about
+survive the process, then builds the two read surfaces on top.
+
+1. **The fork's classification inputs become durable.** `_wal_record` now writes
+   the recorded capability `scope`, an emission's `compensated` offset, and the
+   declared `undoIdempotent` register entry. All three are ABSENT BY DEFAULT, so
+   every record a pre-250 composition writes stays byte-identical and no WAL
+   golden moves. Without them an offline reader classifying a tail would be
+   GUESSING at the very axis Decision 2 keys on — the axis whose whole point is
+   that it decides which inverses may run.
+2. **`fork-branch`, the branch side of the lineage.** Slice 1 wrote the edge only
+   on the parent (`fork-complete {branch}`), so a branch WAL read on its own — the
+   artifact a post-mortem tool is handed first — was anonymous. The branch WAL's
+   first record now names the branch, its parent, the step it diverged at, the
+   parent's WAL, the residue it inherits, the provenance it PRESERVED
+   (composition, generation, IR digest, source digest, capability surface, WAL
+   position) and, listed explicitly, the provenance it did NOT (provider versions,
+   seeds and clock, model decisions). The item asks the branch to preserve that
+   whole set; the axes that are recorded are stated as facts, and the rest are
+   enumerated in `notPreserved` rather than quietly omitted — the honest partition
+   applied to lineage.
+3. **`revl.wal` gains the step-kind vocabulary and the scope gate**, mirrored from
+   the py backend exactly as item 322 mirrored the reader, and pinned by
+   `test_wal_core_agrees_with_py_replay` so the two copies cannot drift. A drift
+   would let one side offer an outbound inverse as rewindable, which is the
+   CRITICAL this design exists to close.
+4. **`src/revl/branch.py`**, tier-agnostic (no backend on the path):
+   `lineage` (what one WAL is), `topology` (the tree over a set of WALs, with the
+   edges it cannot close named as orphans and dangling children rather than
+   guessed at), `partition` (the fork partition of a recorded tail, with the three
+   Slice-1 refusals reported as findings — all of them, since offline nothing is
+   about to be touched and stopping at the first reason helps nobody), and
+   `compare` (two histories after the point they diverged).
+5. **`revl branch` / `revl compare`** CLI, and `recover` annotates a branch WAL's
+   verdict with its lineage so nobody reads a branch's rollback (which lands at
+   the fork point) as a fresh session's (which lands at an empty workspace). The
+   verdict logic itself is untouched, so every non-branch report is unchanged.
+
+The honesty line Slice 2 holds: an offline reader never RUNS anything. It has no
+live component, no workspace handle and no fiber, so the only verbs it offers are
+*enumerate* and *compare*, and `compare` refuses to invent a divergence point for
+two WALs whose durable records do not relate them. It also states its one blind
+spot on every partition document: over a WAL written before these inputs became
+durable, an absent `scope` cannot be distinguished from a scope that was never
+written down (both read as host-confined, which is exactly what the live
+classifier does with `None`).
+
+The headline test is that the offline classifier reproduces the LIVE partition,
+bucket for bucket, over a timeline touching all seven kinds. Without that pin the
+offline surface would be a second, drifting opinion about what a fork means.
+
 ### Deferred to later slices (with rationale)
 
+- **`revl replay branch` and the LLM-aware replay modes.** Re-executing a branch,
+  and the exact / tool-only / model-substitute / counterfactual modes, need a WAL
+  that records each model decision (model, provider, prompt/response digests, tool
+  calls, tokens, temperature, seed, latency). Item 121 Slice 1 landed that
+  vocabulary on the TRACE; it is not on the WAL, so a counterfactual replay has
+  nothing durable to substitute against. Slice 2 states the gap rather than
+  papering over it: every compare document carries `notComparable` (a diff of two
+  branches shows what each did, never why), and every branch's lineage carries
+  `modelDecisions` in `notPreserved`.
 - **Parallel branches with copy-on-write workspaces.** Needed for true concurrent
   N-branch exploration with isolated divergent fs state (self-review attack 3).
   Requires a per-branch workspace snapshot layer that does not exist yet; Slice 1
@@ -672,10 +740,12 @@ grammar changes. It does add the new py-side report golden in item 7.
   required to ship the primitive.
 - **LLM-aware replay modes (item 121 / external proposals 1 and 4 overlap).**
   Recording each model decision in the WAL and offering exact / tool-only /
-  model-substitute / counterfactual replay, plus `revl branch run --at`,
-  `revl replay branch`, `revl compare`. This is the counterfactual-history layer
-  on top of the branch primitive; it depends on Slice 1's honest fork existing and
-  on an LLM-aware WAL that is its own item. Deferred and cross-referenced, not
-  designed here.
+  model-substitute / counterfactual replay. This is the counterfactual-history
+  layer on top of the branch primitive; it depends on Slice 1's honest fork
+  existing and on an LLM-aware WAL that is its own item. Deferred and
+  cross-referenced, not designed here. (The read half of the CLI surface this
+  bullet named — `revl branch`, `revl compare` — landed in Slice 2 over the
+  durable lineage; the re-executing half, `revl replay branch`, is the bullet
+  above.)
 - **Non-idempotent rewound spans.** Open (self-review attack 4); Slice 1 refuses
   them.
