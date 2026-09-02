@@ -134,6 +134,7 @@ from .parser import (
     RouteStmt,
     ServiceDecl,
     SpawnExpr,
+    StreamIterStmt,
     StreamMergeExpr,
     SubscribeExpr,
     TestDecl,
@@ -639,6 +640,11 @@ class Env:
         # source is refused (rule 3.1, single-consumer).
         self.terminal_stream_sources: set[str] = set()
         self.subscribed_sources: set[str] = set()
+        # item 130 Slice 4: the subscriptions an `every … in` already iterates.
+        # A subscription is SINGLE-CONSUMER (rule 3.1), and an iteration consumes
+        # it to its terminal, so a second `every` on the same handle is a second
+        # consumer of one subscription and is refused.
+        self.iterated_subs: set[str] = set()
 
     def bind_local(self, name: str, line: int) -> str:
         if name in self.locals or name in self.requires or name in self.params:
@@ -5761,7 +5767,7 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     # `timer` body step it cannot schedule (docs/time-coeffect.md). ir_version
     # stays 3 — no bump beyond it.
     uses_timers = any(
-        isinstance(stmt, TimerStmt)
+        isinstance(stmt, (TimerStmt, StreamIterStmt))
         for comp in program.components
         for stmt in comp.body
     )
@@ -8384,6 +8390,14 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         raised here is caught one frame out, recorded, and the walk resumes at
         the next statement. It closes over the component's lowering state
         (`env`, `body`, `provides`, `provided_keys`, `filename`, `callables`)."""
+        if isinstance(stmt, StreamIterStmt) and provide_seen_line is not None:
+            raise RevlError(
+                filename, stmt.line,
+                "`every … in` after `provide` — the iteration runs until the "
+                "stream's terminal, so a provision below it would be reached "
+                "only once the stream ended",
+                hint="put the iteration above the `provide` block, or move the "
+                     "provision above the loop (linker rule A2; item 130 §4.7)")
         if isinstance(stmt, (LetEffect, EffectStmt, TimerStmt)) and provide_seen_line is not None:
             raise RevlError(
                 filename, stmt.line,
@@ -8547,6 +8561,13 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             body.append(emit_step)
         elif isinstance(stmt, TimerStmt):
             body.append(_lower_timer_step(stmt, env))
+        elif isinstance(stmt, StreamIterStmt):
+            # item 130 Slice 4: `every <x> in <sub> { … }` — the async-iteration
+            # form. Not an acquisition: the bracket it rides was registered by
+            # the `subscribe` above it, and the loop only pulls that handle to
+            # its terminal.
+            body.append(_lower_stream_iter_step(stmt, env, filename,
+                                                callables or set()))
         elif isinstance(stmt, AwaitStmt):
             body.append({"step": "await", "expr": _lower_expr(stmt.expr, env, mode="setup")})
         elif isinstance(stmt, ProvideStmt):
@@ -9454,6 +9475,96 @@ def _lower_endorse_approval(expr: "ExprEndorse", env: Env, scope: dict,
                  f"{expr.origin}] {{ ... }}` — nothing else produces an approval "
                  "(item 246/249)")
     return {"capability": edge_scope, "expr": appr_node}
+
+
+def _lower_stream_iter_step(stmt: "StreamIterStmt", env: Env, filename: str,
+                            callables: set | None = None) -> dict:
+    """`every <x> in <sub> { … }` -> a `stream-iter` body step (item 130 Slice 4,
+    docs/design/130-stream-reactive-types.md §1, §4.7, §5).
+
+    The step carries the item bind, the subscription it pulls, and the body the
+    consumer runs per item. The loop is the async-iteration form the roadmap's
+    v1 spec names, and it is defined by the three operations Slice 1 already
+    shipped: each turn awaits `<sub>.next()` (a suspension, §2.2), a `Closed`
+    terminal ENDS the loop, and a `Faulted` terminal raises out of it.
+
+    Nothing about the lifecycle is new, which is the point:
+
+    * the subscription's bracket is registered by the `subscribe` ABOVE the
+      loop, so the core guarantee (§0) is the one Slice 1 proved — unloading the
+      owner trips the cancel token, the parked `next` resolves as `Closed`, the
+      loop exits, and the bracket inverse `close` runs on the same LIFO stack;
+    * the body's emissions lower through the SAME `_lower_emit_step` and the
+      SAME `env` as a top-level `emit`, so the effectful callback is bounded by
+      exactly the component's declared capabilities (G1) and `_collect_emit_caps`
+      — which recurses into a nested `body` — surfaces its reach to the G8 audit
+      as component reach, exactly as a timer body's does;
+    * a `fail` in the body aborts the iteration (A8): the activation fails, the
+      accumulated prefix reverts LIFO, and because the subscription bracket is
+      on that prefix the failure CLOSES the subscription. That is the typed-
+      events obligation "a failed handler does not leave a subscription active"
+      (§6) delivered with no events-specific machinery.
+
+    Two admission rules are this step's own:
+
+    * the subject must name a LIVE subscription — a `Subscription` host-local
+      bound by a `subscribe` bracket. Iterating a stream SOURCE, a pool, or any
+      other value is refused, naming the `subscribe` that is missing;
+    * rule 3.1 extended to the handle: an iteration consumes its subscription to
+      the terminal, so a second `every` on the same subscription is a second
+      consumer of a single-consumer subscription and is refused."""
+    subject = stmt.subject
+    name = getattr(subject, "head", None)
+    safe = env.locals.get(name) if name else None
+    if safe is None or env.host_locals.get(safe) != "Subscription":
+        raise RevlError(
+            filename, stmt.line,
+            f"`every {stmt.bind} in {name}` needs a live subscription — "
+            f"`{name}` is not one",
+            hint="iterate the handle a `subscribe` bracket bound, not the stream "
+                 "source: `let sub = subscribe <stream> undo sub.close()` then "
+                 f"`every {stmt.bind} in sub {{ … }}` (item 130 §1). The "
+                 "subscription is what carries the cancellation token the "
+                 "iteration ends on.",
+            code="lifecycle", category="lifecycle")
+    if safe in env.iterated_subs:
+        raise RevlError(
+            filename, stmt.line,
+            f"subscription `{name}` is already iterated — a subscription is "
+            "single-consumer (rule 3.1)",
+            hint="one `every … in` pulls the subscription to its terminal; a "
+                 "second consumer would race it for items. Multicast is a later "
+                 "item; compose fan-out from an explicit bridge, one bracket per "
+                 "consumer (item 130 §4.1)",
+            code="lifecycle", category="lifecycle")
+    env.iterated_subs.add(safe)
+    # The item is bound for the BODY only. A saved/restored `locals`+`_taken`
+    # keeps the loop variable out of scope after the loop (it names one delivered
+    # item, and there is no last item once the terminal arrived) while still
+    # reserving its safe name against a later collision.
+    saved_locals = dict(env.locals)
+    item = env.bind_local(stmt.bind, stmt.line)
+    body: list = []
+    for inner in stmt.body:
+        if isinstance(inner, FailStmt):
+            body.append({
+                "step": "fail",
+                "message": _lower_component_pure_expr(
+                    inner.message, env, _component_scope(env),
+                    callables or set(), pure_only=True,
+                ),
+            })
+            continue
+        emit_step = _lower_emit_step(inner, env)
+        _admit_emit_async(inner, emit_step, env, filename)
+        body.append(emit_step)
+    env.locals = saved_locals
+    return {
+        "step": "stream-iter",
+        "bind": item,
+        "subject": {"kind": "name", "id": safe},
+        "body": body,
+    }
 
 
 def _lower_timer_step(stmt: TimerStmt, env: Env) -> dict:

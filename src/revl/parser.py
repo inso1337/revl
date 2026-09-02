@@ -241,6 +241,36 @@ class SubscribeExpr:
     drain_ms: object = None    # int ms (block policy only), or None
 
 
+@dataclass
+class StreamIterStmt:
+    """`every <x> in <sub> { <emit>* }` — the async-iteration form of item 130
+    Slice 4 (docs/design/130-stream-reactive-types.md §1, §4.7).
+
+    One consumer pulls the subscription to its terminal: each iteration awaits
+    `<sub>.next()`, binds the delivered item to `<x>`, and runs the body; a
+    `Closed` terminal (an orderly provider close, the owner's own `close`
+    tripping the cancel token, or a `take(n)` running out) ENDS the loop, and a
+    `Faulted` terminal raises out of it so the activation fails and the
+    accumulated prefix — subscription bracket included — reverts LIFO (A8).
+
+    The body is a setup-mode effect context (§4.7): its emissions are
+    capability-checked against the consumer's row (G1) and enumerable on its
+    boundary (G8), exactly as an activation-body `emit` is, because that is what
+    they are. What the body may NOT do is ACQUIRE: an `effect … undo …` inside
+    the loop pushes one bracket per item onto the owner's single LIFO
+    accumulator, which is unbounded in the length of the stream, and the
+    per-iteration discharge that would bound it does not exist. The refusal is
+    the parser's (see `stream_iter`), and it names the fix.
+
+    `bind` is the item name; `subject` names the subscription (a bare
+    identifier — a `Subscription` is a host-local with no nominal type, so it
+    can be spelled no other way)."""
+    bind: str
+    subject: object
+    body: list
+    line: int
+
+
 # item 130: the state index of `Stream[T, State]`. `subscribe` yields `Active`;
 # `close` yields `Closed`; `Paused` is the `block`-policy backpressure state
 # (Slice 2, §4.4); `Created` is the pre-subscribe state
@@ -2557,6 +2587,23 @@ class Parser:
                      "inverse `close` needs a name; bind it with `let` (item 130)",
             )
         if tok.kind == "kw" and tok.value in ("every", "after"):
+            # item 130 Slice 4: `every <x> in <sub> { … }` is stream iteration,
+            # `every <n><unit> { … }` is a timer. ONE token of lookahead past the
+            # bind separates them with no ambiguity — an IDENT-then-`in` is the
+            # stream form, a NUMBER-then-unit the timer — which is why the design
+            # reuses `every` rather than minting a keyword (§1, judgment call 1).
+            if tok.value == "every" and self._at_stream_iter():
+                if in_method:
+                    raise self.err(
+                        tok.line,
+                        "`every … in` stream iteration is only allowed in a "
+                        "component activation body",
+                        hint="a provide method runs while the component is ACTIVE; "
+                             "`next` is a suspension and the iteration is owned by "
+                             "the activation frame that holds the subscription "
+                             "bracket (item 130 §3.3, §4.7)",
+                    )
+                return self.stream_iter()
             if in_method:
                 raise self.err(
                     tok.line,
@@ -3090,6 +3137,108 @@ class Parser:
     # duration units -> milliseconds. `ms` before `m` and `s` in the lexer's
     # eyes is moot — the unit is a whole ident token here, matched verbatim.
     _DURATION_UNITS = {"ms": 1, "s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}
+
+    def _at_stream_iter(self) -> bool:
+        """True at the head of `every <IDENT> in …` — the item-130 Slice 4
+        stream-iteration form, as opposed to an `every <n><unit>` timer.
+
+        The whole disambiguation is one token of lookahead past the bind: the
+        timer's delay is a NUMBER, the iteration's bind is an IDENT followed by
+        `in`. Nothing else in the grammar can start that way, so `every` carries
+        two forms with no ambiguity and no new keyword (design §1)."""
+        bind = self.toks[self.pos + 1] if self.pos + 1 < len(self.toks) else None
+        sep = self.toks[self.pos + 2] if self.pos + 2 < len(self.toks) else None
+        return (bind is not None and bind.kind == "ident"
+                and sep is not None and sep.kind == "kw" and sep.value == "in")
+
+    def stream_iter(self) -> "StreamIterStmt":
+        """`every <x> in <sub> { <emit>* }` (item 130 Slice 4, §1, §4.7).
+
+        The subject is a BARE identifier naming a subscription binding. That is
+        not a shortcut: a `Subscription` is a host-local with no nominal type, so
+        it cannot be returned from a fn, stored in a record or passed anywhere —
+        a bare name is the only way to spell one, and admitting a general
+        expression here would only produce worse diagnostics for shapes the
+        lowering must refuse anyway.
+
+        The body is emissions (the effectful callback, G1/G8-checked) plus
+        `fail` (the A8 handler-failure path). Two shapes are refused by name:
+
+        * an ACQUISITION (`effect … undo …`, `subscribe`, a timer, `spawn`)
+          — one accumulator entry per delivered item is unbounded in the length
+          of the stream, and the per-iteration discharge that would bound it does
+          not exist (§4.7). Acquire once, before the loop.
+        * an `emit … compensate …` — a compensation registered per item has the
+          same unbounded shape, and the same refusal the timer body already makes
+          for the same reason.
+
+        A bare `await` inside the body is refused too: the loop IS the pull, and
+        a second `next` on the same subscription inside its own iteration would
+        be a second consumer of a single-consumer subscription (rule 3.1)."""
+        kw = self.expect("kw", "every")
+        bind = self.expect("ident", what="the item name after `every`").value
+        self.expect("kw", "in")
+        subj = self.peek()
+        if subj.kind != "ident":
+            found = subj.value if subj.kind in ("ident", "kw") else repr(subj.value)
+            raise self.err(
+                subj.line,
+                f"`every {bind} in …` needs the name of a subscription, found "
+                f"{found}",
+                hint=f"subscribe first, then iterate: `let sub = subscribe "
+                     f"<stream> undo sub.close()` then `every {bind} in sub "
+                     f"{{ … }}` (item 130 §1)")
+        self.next()
+        subject = Postfix(subj.value, [], subj.line)
+        self.expect("{")
+        body: list = []
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
+            inner = self.stmt(in_method=False)
+            if isinstance(inner, EmitStmt):
+                if inner.compensate is not None:
+                    raise self.err(
+                        inner.line,
+                        "an `every … in` body `emit` cannot declare `compensate`",
+                        hint="a per-item compensation would put one accumulator "
+                             "entry on the owner's LIFO stack per delivered item, "
+                             "unbounded in the length of the stream; the "
+                             "subscription's own `close` is the iteration's "
+                             "inverse (item 130 §4.7)")
+                body.append(inner)
+                continue
+            if isinstance(inner, FailStmt):
+                body.append(inner)
+                continue
+            if isinstance(inner, AwaitStmt):
+                raise self.err(
+                    inner.line,
+                    "an `every … in` body cannot `await` — the loop IS the pull",
+                    hint="each turn of the iteration already awaits "
+                         f"`{subj.value}.next()` and binds the item to `{bind}`; "
+                         "a second `next` inside the body would be a second "
+                         "consumer racing a single-consumer subscription for "
+                         "items (rule 3.1, item 130 §4.1)")
+            raise self.err(
+                getattr(inner, "line", kw.line),
+                "an `every … in` body records emissions (and `fail`) only",
+                hint="the body is a setup-mode effect context: its `emit`s are "
+                     "capability-checked against the component's row (G1) and "
+                     "enumerated on its boundary (G8), and a `fail` aborts the "
+                     "iteration so the prefix — subscription bracket included — "
+                     "reverts LIFO (A8). An ACQUISITION belongs before the loop: "
+                     "one bracket per delivered item is unbounded in the length "
+                     "of the stream (item 130 §4.7)")
+        self.expect("}")
+        if not body:
+            raise self.err(
+                kw.line,
+                f"an `every {bind} in {subj.value}` body is empty",
+                hint="an iteration that does nothing per item still pulls the "
+                     "subscription to its terminal; drop it, or give it work")
+        return StreamIterStmt(bind, subject, body, kw.line)
 
     def timer(self) -> "TimerStmt":
         """`every 30s { emit … }` / `after 5m { emit … }` (item 57).
