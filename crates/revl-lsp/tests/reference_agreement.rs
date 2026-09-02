@@ -14,7 +14,7 @@
 //! binary either declines the construct with a different message or has no
 //! check at all.
 //!
-//! Two tests, and they fail in different directions on purpose:
+//! The tests fail in different directions on purpose:
 //!
 //!   * `binary_matches_the_reference_byte_for_byte` compares whole reply
 //!     streams. A native engine that answered differently fails here.
@@ -22,6 +22,16 @@
 //!     shows the exact refusal code the reference shows on each off-frontier
 //!     document. A native engine that answered NOTHING (the silent
 //!     false-admit, the dangerous direction) fails here, loudly.
+//!   * `the_binary_never_shows_fewer_squiggles_than_the_reference` is the
+//!     slice-2 release blocker as an executable check: every diagnostic the
+//!     reference publishes is present in the binary's publish, byte for byte.
+//!     Zero rows in the fewer-than-reference direction, ever.
+//!   * `native_navigation_answers_and_never_disagrees` isolates the NATIVE
+//!     navigation answers (`REVL_LSP_NATIVE_ONLY`, which turns off the
+//!     reference fallback) and asserts each is either the reference's answer or
+//!     null — never a third thing. It also asserts the native path actually
+//!     answers a substantial share of the corpus, so "agrees" cannot be bought
+//!     by answering nothing.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -132,13 +142,44 @@ const CORPUS: &[Doc] = &[
     },
 ];
 
-/// Documents that exercise the protocol's edges rather than the language's.
+/// Documents that exercise the protocol's edges rather than the language's,
+/// plus the CLEAN in-frontier declarations slice 2's native navigation is
+/// allowed to answer. The clean ones are load-bearing in the other direction
+/// from `CORPUS`: `CORPUS` proves the native path cannot hide a squiggle, and
+/// these prove it actually answers rather than deferring everything.
 const INLINE: &[(&str, &str)] = &[
     ("empty", ""),
     ("syntax_error", "fn broken( {\n"),
     (
         "in_frontier_g1",
         "fn add(a: Int, b: Int) -> Int {\n  return a + c\n}\n",
+    ),
+    // every declaration kind the native table carries, with the parameter and
+    // return spellings (`Opt[T]` sugar, a type application) a native signature
+    // has to reproduce exactly
+    (
+        "clean_declarations",
+        // ordered so the probe budget below reaches each declared NAME, not
+        // just the keywords that precede it
+        "extern pure fn parse_port(raw: Str) -> Int = @py { return int(raw) }\n\
+         extern emission async fn publish(topic: Str, payload: Map[Str, Int]) = @py { pass }\n\
+         fn pick(rows: List[Str], fallback: Str?) -> Str {\n  return fallback ?? rows[0]\n}\n\
+         service Clock {\n  fn now() -> Int\n}\n\
+         fn describe(port: Int) -> Str {\n  return \"port\"\n}\n",
+    ),
+    // a top-level name that is ALSO a parameter: the reference resolves the
+    // innermost scope, and the native table cannot see scopes, so it must
+    // refuse the name outright rather than jump to the declaration
+    (
+        "clean_shadowed_name",
+        "fn total(total: Int) -> Int {\n  return total\n}\n",
+    ),
+    // a `type` declaration the self-host parser skips entirely, sharing a name
+    // with a `fn` it does parse: the reference resolves the type, so the native
+    // table must drop the name
+    (
+        "clean_type_shadows_fn",
+        "type Row = { id: Int }\n\nfn Row() -> Int {\n  return 1\n}\n",
     ),
 ];
 
@@ -248,10 +289,152 @@ fn the_gate_version_is_reachable_for_a_skew_check() {
     ];
     let replies = parse_stream(&context.run_binary(&frame_all(&messages)));
     let version = &replies[0]["result"];
-    assert_eq!(version["api"], "0");
+    assert_eq!(version["api"], "1");
+    // diagnostics — the answers a green depends on — are still the reference's
+    // over the whole language, so the binary's own frontier stays "reference"
     assert_eq!(version["frontier"], "reference");
-    assert_eq!(version["engine"], "reference-subprocess");
+    assert_eq!(version["engine"], "reference-diagnostics + native-navigation");
     assert!(version["language"].is_string(), "{version}");
+    // the native engine's pin, which is what a stale-binary audit compares
+    let native = &version["native"];
+    assert!(
+        native["frontier"].as_str().is_some_and(|id| id.starts_with("selfhost-admit:")),
+        "{native}"
+    );
+    assert_eq!(
+        native["answers"],
+        json!(["textDocument/definition", "textDocument/hover (symbol)"])
+    );
+    assert!(native["layer"].as_str().is_some_and(|l| l.contains("NOT the reference type layer")),
+            "the native pin must say what it does NOT decide: {native}");
+}
+
+/// The missing-squiggle rule, as a test. The binary may show MORE than
+/// `python -m revl.lsp`; it may never show fewer, and a native result with
+/// fewer diagnostics than the reference on the same input is release-blocking.
+#[test]
+fn the_binary_never_shows_fewer_squiggles_than_the_reference() {
+    let Some(context) = Context::new() else {
+        return;
+    };
+    let mut messages = vec![request(1, "initialize", json!({}))];
+    for (name, source) in context.documents() {
+        messages.push(did_open(&uri_for(&name), &source));
+    }
+    messages.push(notification("exit", json!({})));
+    let input = frame_all(&messages);
+
+    let native = published_diagnostics(&context.run_binary(&input));
+    let reference = published_diagnostics(&context.run_reference(&input));
+    assert_eq!(native.len(), reference.len(), "the two servers published different documents");
+
+    let mut compared = 0;
+    let mut added = 0;
+    for ((uri, mine), (_, theirs)) in native.iter().zip(reference.iter()) {
+        for diagnostic in theirs {
+            assert!(
+                mine.contains(diagnostic),
+                "{uri} LOST a reference diagnostic — the missing-squiggle direction, \
+                 which is release-blocking: {diagnostic}"
+            );
+            compared += 1;
+        }
+        added += mine
+            .iter()
+            .filter(|d| d["source"] == json!("revl-native"))
+            .count();
+    }
+    assert!(compared >= CORPUS.len() / 2,
+            "only {compared} reference diagnostics compared — too thin to prove anything");
+    // The other half of agree-or-add: on the covered corpus the native gate and
+    // the reference agree, so the ADD path stays silent and byte-identity
+    // holds. A non-zero count here is not unsound, but it is a divergence worth
+    // seeing rather than absorbing.
+    assert_eq!(added, 0, "the native gate added {added} diagnostic(s) on the corpus");
+}
+
+/// The slice-2 navigation soundness exit test: definition and symbol-hover on
+/// the native parser return either the reference's answer or nothing, never a
+/// wrong one.
+#[test]
+fn native_navigation_answers_and_never_disagrees() {
+    let Some(context) = Context::new() else {
+        return;
+    };
+    let session = build_session(&context);
+    let input = frame_all(&session);
+
+    let reference = by_id(&parse_stream(&context.run_reference(&input)));
+    let native = by_id(&parse_stream(&context.run_binary_native_only(&input)));
+
+    let mut answered = 0;
+    let mut deferred = 0;
+    for (id, mine) in &native {
+        let theirs = &reference
+            .iter()
+            .find(|(other, _)| other == id)
+            .expect("the reference answered every request")
+            .1;
+        if mine.is_null() {
+            deferred += 1;
+            continue;
+        }
+        assert_eq!(
+            mine, theirs,
+            "request {id}: the native navigation answer is not the reference's"
+        );
+        answered += 1;
+    }
+    assert!(
+        answered >= 40,
+        "the native path answered only {answered} of {} navigation requests \
+         ({deferred} deferred) — agreement bought by silence proves nothing",
+        answered + deferred
+    );
+
+    // ... and it answered every declaration kind the native table carries,
+    // signature and all. Without this the count above could be met by
+    // `service`/`component` hovers alone, leaving the native signature reader
+    // (parameters, `Opt[T]` sugar, a type application, `extern` flag order)
+    // unproven against the reference's spelling.
+    let hovers: Vec<&str> = native
+        .iter()
+        .filter_map(|(_, value)| value.get("contents")?.get("value")?.as_str())
+        .collect();
+    for expected in [
+        "```revl\nservice Counter\n```",
+        "```revl\ncomponent Heartbeat\n```",
+        "```revl\nfn pick(rows: List[Str], fallback: Opt[Str]) -> Str\n```",
+        "```revl\nextern pure fn parse_port(raw: Str) -> Int\n```",
+        "```revl\nextern emission async fn publish(topic: Str, payload: Map[Str, Int])\n```",
+    ] {
+        assert!(
+            hovers.contains(&expected),
+            "the native path never answered {expected:?}; it answered {hovers:?}"
+        );
+    }
+}
+
+/// Every `publishDiagnostics` in a stream as `(uri, diagnostics)`.
+fn published_diagnostics(bytes: &[u8]) -> Vec<(String, Vec<Value>)> {
+    parse_stream(bytes)
+        .into_iter()
+        .filter(|m| m.get("method") == Some(&json!("textDocument/publishDiagnostics")))
+        .map(|m| {
+            (
+                m["params"]["uri"].as_str().unwrap_or_default().to_string(),
+                m["params"]["diagnostics"].as_array().cloned().unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// The `result` of every hover/definition response in a stream, keyed by id.
+fn by_id(messages: &[Value]) -> Vec<(i64, Value)> {
+    messages
+        .iter()
+        .filter_map(|m| Some((m.get("id")?.as_i64()?, m.get("result")?.clone())))
+        .collect()
 }
 
 // ------------------------------------------------------------------ session
@@ -321,11 +504,14 @@ fn build_session(context: &Context) -> Vec<Value> {
     messages
 }
 
-/// Up to eight probe positions per document: the first three identifiers of
-/// each code line, which on a revl line is the keyword, the declared name, and
-/// the first parameter or type — so the probes land on real symbols (hover and
-/// definition resolve something) as well as on keywords (they resolve nothing).
-/// Deterministic, so both servers see exactly the same requests.
+/// Up to sixteen probe positions per document: the first five identifiers of
+/// each code line, which on a revl declaration line runs from the keywords
+/// through the declared name into its first parameter and type — so the probes
+/// land on real symbols (hover and definition resolve something) as well as on
+/// keywords (they resolve nothing). Five per line rather than three because an
+/// `extern emission async fn publish(...)` puts the NAME fifth, and a probe
+/// budget that never reached it would leave the native signature reader
+/// untested. Deterministic, so both servers see exactly the same requests.
 fn sample_positions(source: &str) -> Vec<(usize, usize)> {
     let mut positions = Vec::new();
     for (index, line) in source.split('\n').enumerate() {
@@ -333,14 +519,14 @@ fn sample_positions(source: &str) -> Vec<(usize, usize)> {
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
         }
-        for start in identifier_spans(line).into_iter().take(3) {
+        for start in identifier_spans(line).into_iter().take(5) {
             positions.push((index, start));
         }
-        if positions.len() >= 8 {
+        if positions.len() >= 16 {
             break;
         }
     }
-    positions.truncate(8);
+    positions.truncate(16);
     positions
 }
 
@@ -499,6 +685,16 @@ impl Context {
     fn run_binary(&self, input: &[u8]) -> Vec<u8> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_revl-lsp"));
         command.env("REVL_LSP_PYTHON", &self.python);
+        self.drive(command, input)
+    }
+
+    /// The binary with the reference fallback for navigation switched off, so
+    /// the NATIVE answers are observable on their own. Diagnostics are
+    /// unaffected — they never had a native path to fall back from.
+    fn run_binary_native_only(&self, input: &[u8]) -> Vec<u8> {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_revl-lsp"));
+        command.env("REVL_LSP_PYTHON", &self.python);
+        command.env("REVL_LSP_NATIVE_ONLY", "1");
         self.drive(command, input)
     }
 
