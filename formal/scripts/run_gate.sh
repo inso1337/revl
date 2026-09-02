@@ -71,6 +71,19 @@ python3 scripts/axioms_gate.py \
   RevL.G7.abort_runs_the_proof_pass_then_the_drain \
   RevL.G7.verdict_is_load_bearing \
   RevL.G7.commit_discharge_is_not_vacuous \
+  RevL.Semantics.disposition_trichotomy \
+  RevL.Semantics.halted_strands_every_kind \
+  RevL.Semantics.replayed_length \
+  RevL.Semantics.book_lengths_add \
+  RevL.G7.estop_replays_nothing \
+  RevL.G7.estop_discharges_nothing \
+  RevL.G7.estop_strands_everything \
+  RevL.G7.estop_strands_the_bracket \
+  RevL.G7.halt_inventory_is_total \
+  RevL.G7.halt_ambiguity_is_at_most_one \
+  RevL.G7.halt_books_are_total \
+  RevL.G7.estop_is_load_bearing \
+  RevL.G7.mid_abort_halt_cut_is_not_vacuous \
   RevL.G8.boundary_enumerates_emissions \
   RevL.G8.boundary_only_declared \
   RevL.CrossTier.cross_tier_agreement \
