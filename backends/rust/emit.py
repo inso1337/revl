@@ -5179,14 +5179,57 @@ def _v3_let_pattern(node: dict, ctx: _V3Ctx, out: list[str], indent: int) -> Non
 # at this node). The in-place value equals the clone-then-return value: a discard
 # of `HashMap::insert`/`remove`'s returned Option is the only difference, and the
 # resulting collection is identical.
-def _v3_inplace_persistent(method: str, recv: str, args: list[str]) -> str | None:
+def _v3_inplace_persistent(method: str, recv: str, args: list[str],
+                           recv_ty: str | None = None) -> str | None:
     if method == "push" and len(args) == 1:
         return f"{recv}.push({args[0]});"
     if method == "set" and len(args) == 2:
         return f"{recv}.insert({args[0]}, {args[1]});"
     if method == "remove" and len(args) == 1:
         return f"{recv}.remove(&{args[0]});"
+    # item 437(a): `out = out.concat(x)`. Item 284 left `concat` out with the
+    # note that "its receiver type is not known at this node", which is true of
+    # a receiver in general and NOT true of the SELF-ASSIGN shape: the receiver
+    # is the assignment target, a bare local, so `ctx.var_types` names it and
+    # `recv_ty` carries the answer here. Both persistent lowerings have an exact
+    # in-place equivalent, so the resulting value is identical:
+    #   Str  `format!("{}{}", self, other)`                 -> `self.push_str(other)`
+    #   List `{ let mut _v = self.clone();                   -> `self.extend(
+    #          _v.extend(other.iter().cloned()); _v }`           other.iter().cloned())`
+    # The measured gap is a complexity class, not a constant: the persistent
+    # form copies the whole accumulator per iteration, so an n-step loop is
+    # O(n^2) copies where the in-place form is O(n) amortised (729,599
+    # allocations and 97.2 MB against 2,425 and 212 KB hand-written).
+    if method == "concat" and len(args) == 1:
+        if recv_ty == "Str":
+            return f"{recv}.push_str({args[0]});"
+        # `List` bare and `List[T]` both qualify: `_v3_infer_type` answers the
+        # bare `List` for an empty-list `let` (`var out: List[Str] = []`), which
+        # is the accumulator idiom this rewrite exists for, and `extend` does not
+        # need the element type either way.
+        if isinstance(recv_ty, str) and recv_ty.split("[", 1)[0].strip() == "List":
+            return f"{recv}.extend(({args[0]}).iter().cloned());"
     return None
+
+
+def _v3_mentions_name(node: object, name: str) -> bool:
+    """Does `node` read the binding `name` anywhere inside it?
+
+    The in-place rewrite turns a value the receiver is rebound over into a
+    mutation OF the receiver, so an appended operand that reads the receiver
+    (`out = out.concat(out)`, `s = s + s`) would take a shared borrow of a value
+    already borrowed mutably (E0502) where the persistent form built a fresh
+    value and compiled. It is a rare shape and the guard is cheap, so it is
+    checked rather than reasoned away.
+    """
+    if isinstance(node, dict):
+        if node.get("kind") in ("var", "name", "req"):
+            if (node.get("name") or node.get("id")) == name:
+                return True
+        return any(_v3_mentions_name(v, name) for v in node.values())
+    if isinstance(node, list):
+        return any(_v3_mentions_name(v, name) for v in node)
+    return False
 
 
 def _v3_self_append_inplace(target_name, recv: str, value_node,
@@ -5210,8 +5253,26 @@ def _v3_self_append_inplace(target_name, recv: str, value_node,
 
     Restricted to a bare `var` receiver (what a plain-fn body produces) so no
     rename-map indirection can make the printed receiver differ from the target.
+
+    Item 437(a) added the two remaining spellings of the same statement, both
+    measured as O(n^2) copies: `out = out.concat(x)` (a `builtin` node, handled
+    below and lowered by receiver type in `_v3_inplace_persistent`) and
+    `s = s + p` (a `bin` node, which never reached this function at all and is
+    handled first). The go tier's item-434 fix for the same defect needed a
+    whole-body ownership analysis, `_v3_self_rebind_locals`, because a Go slice
+    header aliases silently and nothing in the language would catch a second
+    live owner. Rust needs none of it: a second live owner can only come from a
+    move, rustc REFUSES a move-then-reuse (E0382), and every by-value move this
+    backend emits clones first. So the uniqueness argument above is discharged
+    by the borrow checker on the code that already compiles, and the fix stays
+    the local rewrite item 437(a) proposed.
     """
-    if not isinstance(value_node, dict) or value_node.get("kind") != "builtin":
+    if not isinstance(value_node, dict):
+        return None
+    recv_ty = ctx.var_types.get(target_name)
+    if value_node.get("kind") == "bin":
+        return _v3_self_append_plus(target_name, recv, value_node, ctx)
+    if value_node.get("kind") != "builtin":
         return None
     tgt = value_node.get("target")
     if not isinstance(tgt, dict) or tgt.get("kind") != "var":
@@ -5228,7 +5289,56 @@ def _v3_self_append_inplace(target_name, recv: str, value_node,
     if method in ("push", "set"):
         rendered = [
             _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, rendered)]
-    return _v3_inplace_persistent(method, recv, rendered)
+    if method == "concat":
+        if not arg_nodes or _v3_mentions_name(arg_nodes[0], target_name):
+            return None
+        if recv_ty is None and _v3_is_str(arg_nodes[0], ctx):
+            # A receiver the emitter could not type, appending something that is
+            # certainly a `Str`. `concat` on a `List[T]` takes a `List[T]`, so a
+            # `Str` argument PROVES the `Str` overload and names the receiver
+            # without needing `var_types` to have it. This is what the last ten
+            # census sites are: a message accumulator seeded from an expression
+            # the emitter cannot type, appending literals.
+            recv_ty = "Str"
+        if recv_ty == "Str":
+            # `String::push_str` takes `&str`, so the appended operand is
+            # borrowed exactly as every other `&str` slot is (item 437b). The
+            # List arm needs no such wrapping: `x.iter().cloned()` already
+            # borrows, so a reused operand is never moved and never cloned
+            # whole.
+            rendered = [_borrow_str_arg(arg_nodes[0], rendered[0], ctx)]
+    return _v3_inplace_persistent(method, recv, rendered, recv_ty)
+
+
+def _v3_self_append_plus(target_name, recv: str, value_node,
+                         ctx: "_V3Ctx") -> str | None:
+    """`s = s + p` in place, or None (item 437a).
+
+    The `Str` spelling of the self-append never reached `_v3_inplace_persistent`
+    at all: `+` is a `bin` node, lowered to `format!("{}{}", s, p)`, which builds
+    a whole fresh `String` per iteration. Measured at 5,999 allocations and 84.3
+    MB against 13 and 32 KB hand-written, the same O(n^2)-against-O(n) gap the
+    `concat` spelling has.
+
+    The liveness and uniqueness argument is `_v3_self_append_inplace`'s, verbatim
+    and for the same reason: the assign rebinds the receiver over its own value.
+    Only the APPEND direction qualifies, so the target must be the LEFT operand;
+    `s = p + s` is a prepend, which `push_str` does not express.
+    """
+    if value_node.get("op") != "+":
+        return None
+    left, right = value_node.get("left"), value_node.get("right")
+    if not isinstance(left, dict) or left.get("kind") != "var":
+        return None
+    if left.get("name") != target_name:
+        return None
+    # The same test the `+` lowering itself uses to pick `format!` over the
+    # arithmetic path, so this fires on exactly the `+`s that build a String.
+    if not (_v3_is_str(left, ctx) or _v3_is_str(right, ctx)):
+        return None
+    if _v3_mentions_name(right, target_name):
+        return None
+    return f"{recv}.push_str({_borrow_str_arg(right, _render_expr(right, ctx), ctx)});"
 
 
 # item 379 (docs/design/379-break-continue.md): the frame-neutrality invariant is

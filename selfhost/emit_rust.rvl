@@ -614,6 +614,68 @@ fn eq_operand_borrowable(node: Any, ctx: Ctx) -> Bool {
   return t == "" || t == "Str"
 }
 
+// `_borrow_str_arg`: an argument bound for a `&str` slot. A `Str` LITERAL fills
+// the slot as the bare `&'static str` (item 437b); every other string
+// expression is borrowed with `&`, parenthesized when it is not atomic. The
+// reference also passes a borrowed `&str` PARAM straight through, which has no
+// mirror here: this port carries no item-282 borrow analysis, so it never has
+// one to pass.
+fn borrow_str_arg(arg_node: Any, rendered: Str) -> Str {
+  let lit = borrowed_str_lit(arg_node)
+  if (lit != "") { return lit }
+  if (is_atomic(node_kind(arg_node))) { return `&${rendered}` }
+  return `&(${rendered})`
+}
+
+// `_v3_mentions_name`: does this node read the binding `name` anywhere inside?
+// The in-place self-append turns a value the receiver is rebound over into a
+// mutation OF the receiver, so an appended operand that reads the receiver
+// (`s = s + s`) would take a shared borrow of a value already borrowed mutably
+// (E0502) where the `format!` form built a fresh value and compiled.
+fn mentions_name(v: Any, name: Str) -> Bool {
+  let k = value_kind(v)
+  if (k == "record") {
+    let nk = node_kind(v)
+    if (nk == "var" || nk == "name" || nk == "req") {
+      if (ref_name(v) == name) { return true }
+    }
+    for (key of value_keys(v)) {
+      if (mentions_name(value_field(v, key), name)) { return true }
+    }
+    return false
+  }
+  if (k == "list") {
+    for (child of value_list(v)) {
+      if (mentions_name(child, name)) { return true }
+    }
+    return false
+  }
+  return false
+}
+
+// `_v3_self_append_plus`: `s = s + p` rewritten in place, or "" (item 437a).
+//
+// The assign rebinds the receiver over its own value, so the pre-image is
+// unreachable after this statement, and the receiver is uniquely owned because
+// a second live owner could only come from a move and rustc refuses a
+// move-then-reuse (E0382). `format!("{}{}", s, p)` built a whole fresh String
+// per iteration, which makes an n-step accumulator loop O(n^2) copies where
+// `push_str` is O(n) amortised. Only the APPEND direction qualifies: the target
+// must be the LEFT operand, since `s = p + s` is a prepend and `push_str` does
+// not express it.
+fn self_append_plus(target: Str, recv: Str, valnode: Any, ctx: Ctx) -> Str {
+  if (node_op(valnode) != "+") { return "" }
+  let ln = value_field(valnode, "left")
+  let rn = value_field(valnode, "right")
+  if (node_kind(ln) != "var") { return "" }
+  if (value_str(value_field(ln, "name")) != target) { return "" }
+  // The same test the `+` lowering uses to pick `format!` over the arithmetic
+  // path, so this fires on exactly the `+`s that build a String.
+  if (!v3_is_str(ln, ctx) && !v3_is_str(rn, ctx)) { return "" }
+  if (mentions_name(rn, target)) { return "" }
+  return `${recv}.push_str(${borrow_str_arg(rn, render_expr(rn, ctx))});`
+}
+
 // `_by_value_arg`: wrap a by-value free-function/constructor argument so the call
 // cannot consume a value the caller still needs (E0382). A bare non-Copy variable
 // is `.clone()`d; a function-typed one is passed `&`; Copy scalars and fresh
@@ -992,7 +1054,12 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
       if (value_bool(value_field(node, "mutable"))) { kw = "let mut" }
       out = out.push(line(indent, `${kw} ${nm} = ${value};`))
     } else {
-      out = out.push(line(indent, `${nm} = ${value};`))
+      // item 437(a): a self-appending `assign` (`s = s + p`) becomes an
+      // in-place `push_str`. Only an `assign` qualifies -- a `let` introduces a
+      // NEW binding, so its RHS receiver is a different value that stays live.
+      let ip = self_append_plus(raw, nm, valnode, ctx)
+      if (ip != "") { out = out.push(line(indent, ip)) }
+      else { out = out.push(line(indent, `${nm} = ${value};`)) }
     }
     return { lines: out, ctx: nctx }
   }
