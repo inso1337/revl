@@ -279,6 +279,11 @@ def _space_between(prev: _Piece, cur: _Piece) -> bool:
     # the join changes nothing (both spellings lex to int + unit ident).
     if pk == _WORD and p[:1].isdigit() and ck == _WORD and c in ("ms", "s", "m", "h", "d"):
         return False
+    # a row label binds its sigil tight: `@db`, never `@ db` (item 426). A bare
+    # `@` piece exists only here — an `@backend { ... }` host body is scanned as
+    # one verbatim span — so this rule cannot reach any other construct.
+    if p == "@":
+        return False
     # never a space before a closing structural token or a separator
     if c in (",", ":", ";", ")", "]"):
         return False

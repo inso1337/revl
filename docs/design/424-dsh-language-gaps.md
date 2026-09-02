@@ -1,7 +1,9 @@
 # 424: the three language-side gaps from the deepseek-harness comparison
 
-Design note for roadmap item 424. Design only: no compiler change, no `src/`
-change, nothing implemented.
+Design note for roadmap item 424. Design only, with one exception: residual R2
+below (the `granted` clause, §1.2) is BUILT, because slice A1 folds it into item
+426's S1 and S1 has landed (`docs/composition-rows.md`). Gaps (b) and (c) are
+decided here and nothing of either is implemented.
 
 Item 424 records a full crawl of DSH's reference against revl and revl-harness.
 Most of what it found is harness-side and lives on the harness roadmap. Three

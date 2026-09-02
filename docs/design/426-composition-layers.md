@@ -1,7 +1,15 @@
 # 426: composition rows, layered patches, admitted extension (resolved)
 
-Design note for roadmap item 426, the resolution to item 424(a). Design only:
-no compiler change, no `src/` change, nothing implemented.
+Design note for roadmap item 426, the resolution to item 424(a).
+
+**Build status.** Slice S1 (§11), the row table, is BUILT: the `composition`
+document, label declaration with origin scoping, the claim assertion checked
+against the component header, header-only resolution, typed row config, and the
+row table in the IR and the manifest. `src/revl/composition.py`,
+`revl composition`, `docs/composition-rows.md`, `tests/test_composition_rows.py`.
+Item 424's residual R2 (the `granted` clause, its empty default and the
+`requires`-subset check) rode with it, which is where 424 slice A1 files it.
+S2 through S6 are still design only, and §11 says what each waits on.
 
 **This document supersedes two earlier notes and they are both kept:**
 
@@ -111,7 +119,7 @@ namespace and drops A's requirement that the local part be the component name.
 The label declaration **asserts** the claim set, and the assertion is checked
 against the component's header:
 
-```revl sketch
+```revl
 composition Harness {
   row @db from "trucs/pg_database/component.rvl" provides db
   row @cache from "src/cache.rvl" provides cache, index

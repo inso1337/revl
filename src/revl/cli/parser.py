@@ -119,6 +119,24 @@ def build_parser() -> argparse.ArgumentParser:
                           help="print the skeleton, its obligations, and each hole's fill spec "
                                "as one JSON document")
 
+    # item 426 S1: the row table of a declared composition.
+    composition = sub.add_parser(
+        "composition",
+        help="resolve a composition document's ROW TABLE (labels, claims, "
+             "config), header-only")
+    composition.add_argument("file", help="the .rvl document declaring the composition")
+    composition.add_argument(
+        "--json", action="store_true",
+        help="print the row table as JSON instead of the ROWS/WIRING panels")
+    composition.add_argument(
+        "--admit", action="store_true",
+        help="also COMPILE the rows the table names and print the resulting "
+             "load order (resolution alone lowers no component body)")
+    composition.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="the project root row provenance and origins are recorded "
+             "against (default: the working directory)")
+
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
