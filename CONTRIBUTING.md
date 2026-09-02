@@ -316,6 +316,41 @@ command behind it is the failure mode this project keeps hitting). The roadmap
 ([docs/v2.0-roadmap.md](docs/v2.0-roadmap.md)) is the ledger of what is done and
 what is in flight; keep it current when you land a roadmap item.
 
+## Tracking work: issues, the roadmap, and security findings
+
+The roadmap decays because its state is prose that somebody has to remember to
+edit. On 2026-09-02 twelve per-finding markers still read ``FIXING on
+`fix/<branch>` `` for branches that had already merged, five items were closed
+behind a stale in-progress marker, one open item was a duplicate of a landed
+one, and two agents fixed the same defect in parallel because neither could see
+the other's scope. `make roadmap-check` (`tools/check_roadmap_markers.py`, run
+in the `lint` CI job) now fails when a marker contradicts git. Three rules, and
+only three:
+
+1. **State lives in GitHub issues. The roadmap holds the reasoning.** Whether
+   something is open, assigned, in flight or closed is a tracker's job, and a
+   tracker updates itself. The roadmap keeps what a tracker is bad at: the
+   argument, the reproducer, the evidence, the negative results, and the
+   cross-references between findings. Once the migration is done,
+   `tools/check_roadmap_markers.py --require-issue` becomes mandatory and every
+   open or partial item has to cite its issue.
+
+2. **A fix records which instances it covers, and which it does not.** This is
+   the one thing no tracker fixes for you. A merged branch is not a closed
+   finding: a cordis guard closed one test while 47 files stayed exposed, and a
+   backend-suite fix de-collided one pair of roots while `pytest backends/`
+   still died at collection. When you land a fix, write down the scope you
+   actually swept and the instances you knowingly left, by name. "Fixed" with no
+   scope is the sentence that costs the next person a full re-investigation.
+
+3. **Security findings go to private GitHub Security Advisories, never public
+   issues.** See [SECURITY.md](SECURITY.md). This repository is public and the
+   roadmap already carries working reproducers, so this is a going-forward rule,
+   not a claim about what is already out there. Note plainly: deleting a
+   reproducer from HEAD does not unpublish it. Git history retains it, as do
+   forks, clones and mirrors. Treat anything already committed as published, and
+   decide about it on that basis rather than on a deletion that changes nothing.
+
 ## Reporting bugs and requesting features
 
 Use the issue templates (bug report / feature request). A bug report that
