@@ -1,0 +1,16 @@
+[package]
+name = "revl-lsp"
+version = "0.0.0"
+edition = "2021"
+
+# `preserve_order`: a Diagnostic/Hover/Location computed by the reference front
+# end travels through this binary as JSON and must come out in the SAME key
+# order it went in, byte for byte (see `pyjson`). Without it serde_json sorts
+# object keys and the wire bytes stop matching `python -m revl.lsp`.
+[dependencies]
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[[bin]]
+name = "revl-lsp"
+path = "src/main.rs"
