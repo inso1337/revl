@@ -40,7 +40,16 @@ STUB_SOURCES = sorted((HERE / "stubs").rglob("*.java"))
 
 def _tool(name: str) -> str | None:
     """A toolchain binary that actually works (macOS ships a `javac` shim
-    that errors when no JDK is installed)."""
+    that errors when no JDK is installed).
+
+    For `javac` "works" also means it accepts ``--release 21``: every compile
+    below targets 21 because the emitter lowers `match` to Java 21 pattern
+    switches (FR-10 / item 77(e)), so an older JDK responds to ``-version``
+    and then fails the compile with "release version 21 not supported". That
+    is an environment gap like a missing JDK and must read as a SKIP with a
+    reason, not a red suite — on a contributor's machine as much as in a CI
+    job that pins no JDK.
+    """
     exe = shutil.which(name)
     if exe is None:
         return None
@@ -48,11 +57,23 @@ def _tool(name: str) -> str | None:
         probe = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return exe if probe.returncode == 0 else None
+    if probe.returncode != 0:
+        return None
+    if name != "javac":
+        return exe
+    try:
+        release = subprocess.run([exe, "--release", "21", "-version"],
+                                 capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return exe if release.returncode == 0 else None
 
 
 JAVAC = _tool("javac")
 JAVA = _tool("java")
+
+# One reason string for both halves of the gate, so a skip says which one bit.
+NO_JDK = "no working JDK >= 21 (javac/java that respond, and javac --release 21)"
 
 
 def _javac_compile(tmp_path: Path, source: str) -> Path:
@@ -797,7 +818,7 @@ def test_runtime_values_on_real_cordis4j(tmp_path):
     assert "RUNTIME_VALUES_OK" in run.stdout
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_runs_runtime_values_on_stub_runtime(tmp_path):
     """Offline mirror of test_runtime_values_on_real_cordis4j: the same
     runtime-independent value checks (RuntimeValueChecks) plus method-time
@@ -825,7 +846,7 @@ def test_java_runs_runtime_values_on_stub_runtime(tmp_path):
     assert "RUNTIME_VALUES_OK" in run.stdout
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_method_witnessed_h1_on_stub_runtime(tmp_path):
     """item 318 — the per-tool-call H1 gate, proven at RUNTIME against REAL
     files on the JVM (stub EffectScope; provide/get/effect are the whole seam
@@ -857,7 +878,7 @@ def test_java_method_witnessed_h1_on_stub_runtime(tmp_path):
     assert "METHOD_WITNESSED_H1_OK" in run.stdout
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_runs_runtime_scenarios_on_stub_runtime(tmp_path):
     """G7/lifecycle scenarios: emitted components driven on the JVM by the
     stub reference runtime (LIFO EffectScope/composite). Shares fixtures
@@ -881,7 +902,7 @@ def test_java_runs_runtime_scenarios_on_stub_runtime(tmp_path):
     assert "SCENARIOS_OK" in run.stdout
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_two_phase_abort_and_bracket_fault_continue_stub_runtime(tmp_path):
     """docs/design/teardown-contract.md, exit test 3 (loop conformance),
     proven at RUNTIME against the stub EffectScope: two brackets and one
@@ -956,7 +977,7 @@ def test_java_two_phase_abort_and_bracket_fault_continue_stub_runtime(tmp_path):
     assert "TWO_PHASE_ABORT_OK" in run.stdout
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_compensation_discharges_on_clean_unload_stub_runtime(tmp_path):
     """TCK a5a (docs/design/teardown-contract.md exit test 1): a clean,
     successful unload DISCHARGES an activation-time compensation — it never
@@ -1008,7 +1029,7 @@ def test_java_compensation_discharges_on_clean_unload_stub_runtime(tmp_path):
     assert "COMMIT_DISCHARGE_OK" in run.stdout
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_witnessed_persists_on_commit_reverts_on_abort_stub_runtime(tmp_path):
     """item 243, proven at runtime: a witnessed effect's declared inverse is
     DISCHARGED on a clean commit (the mutation persists) and REPLAYED on a
@@ -1097,7 +1118,7 @@ def test_java_witnessed_persists_on_commit_reverts_on_abort_stub_runtime(tmp_pat
     assert "WITNESSED_TEARDOWN_OK" in run.stdout
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_activation_leaves_no_job_pending(tmp_path):
     """The A1 boundary must *close*: run the plugin, count the residue.
 
@@ -1149,7 +1170,7 @@ def test_java_activation_leaves_no_job_pending(tmp_path):
     assert "NO_PENDING_JOBS" in run.stdout
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_runs_emitted_stdlib_semantics(tmp_path):
     """Not just compiles: run the emitted test block (REVL_TESTS) on a JVM —
     persistent push, -1 when absent, spec-table semantics."""
@@ -1207,7 +1228,7 @@ def _run_revl_tests(tmp_path: Path, source: str):
     )
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_lifecycle_tests_run_on_the_jvm(tmp_path):
     """item 178(b): a `lifecycle test` RUNS on this tier — it is no longer a
     by-design refusal. examples/lifecycle_cache.rvl loads a composition on a
@@ -1225,7 +1246,7 @@ def test_lifecycle_tests_run_on_the_jvm(tmp_path):
     assert "REVL_TESTS_OK" in run.stdout
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_lifecycle_no_residue_catches_a_real_leak(tmp_path):
     """The negative half, without which the positive one proves nothing:
     examples/lifecycle_leak.rvl's `undo` runs a query instead of closing the
@@ -1238,7 +1259,7 @@ def test_lifecycle_no_residue_catches_a_real_leak(tmp_path):
     assert "a leaky undo leaves residue" in run.stderr
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_lifecycle_no_residue_catches_a_component_left_loaded(tmp_path):
     """The R4 half: a composition that is never unloaded still holds its
     fiber, so `assert no_residue` has to fail on that too, not only on a
@@ -1661,7 +1682,7 @@ def test_javac_compiles_record_map_value(tmp_path):
     _javac_compile(tmp_path, emit.emit(compile_source(RECORD_VALUE_SRC)))
 
 
-@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_java_runs_non_string_map_values_on_the_stub_runtime(tmp_path):
     """Runtime proof, not just a compile: a Map[Str, Int] and a Map[Str,
     List[Str]] host map are driven through the stub reference runtime —
