@@ -22,9 +22,12 @@ package bridge
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -169,6 +172,81 @@ type errReply struct {
 	Error string `json:"error"`
 }
 
+// --- what a failure may carry BACK across the seam (roadmap item 421 F5) -----
+//
+// Mirror of backends/python/bridge.py's seam_failure and the same helper in
+// backends/typescript/bridge.ts. The consumer is on the other side of a trust
+// boundary: a forward crossing into a declared Secret[T] receiver authorises
+// disclosure TO THE RECEIVER, and does not authorise the error channel to
+// perform the reverse crossing the checker refuses statically. The trigger needs
+// no author interpolation - a plain map miss produces a message quoting the key.
+//
+// So every argument value the call was made with is scrubbed out of the host
+// error text, while the sentence around it survives: the reply still says what
+// went wrong, just without the caller's bytes in it.
+
+// RedactedArg is the placeholder a caller's own argument becomes inside seam
+// error text. Must equal confidential.REDACTED_ARG on the python tier, so a
+// polyglot seam produces the SAME marker whichever tier answered.
+const RedactedArg = "<redacted:arg>"
+
+// minMatchableArg is the length below which an argument is left alone: a shorter
+// substring match is a coin flip against ordinary English and replacing it would
+// shred the diagnostic for no confidentiality gain. Same bound as python and ts.
+const minMatchableArg = 3
+
+// argNeedles collects the string forms a decoded argument can take inside host
+// error text. Booleans and null are skipped (their renderings are ordinary
+// words); a record's KEYS are skipped too, because they are field names the
+// author wrote rather than the caller's data.
+func argNeedles(value any, into map[string]struct{}) {
+	switch v := value.(type) {
+	case string:
+		if len(v) >= minMatchableArg {
+			into[v] = struct{}{}
+		}
+	case json.Number:
+		if len(v.String()) >= minMatchableArg {
+			into[v.String()] = struct{}{}
+		}
+	case []any:
+		for _, item := range v {
+			argNeedles(item, into)
+		}
+	case map[string]any:
+		for _, item := range v {
+			argNeedles(item, into)
+		}
+	}
+}
+
+// SeamFailure is the error text a provider-side failure is allowed to send back
+// to the consumer, with this call's own argument values replaced by RedactedArg.
+// Longest needle first, so one that contains another leaves no tail behind.
+func SeamFailure(err error, args []json.RawMessage) string {
+	text := err.Error()
+	needles := map[string]struct{}{}
+	for _, raw := range args {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		// UseNumber keeps an integer argument spelled the way the wire spelled
+		// it, so 8675309 is matched as "8675309" and not as "8.675309e+06".
+		decoder.UseNumber()
+		var value any
+		if decoder.Decode(&value) == nil {
+			argNeedles(value, needles)
+		}
+	}
+	ordered := make([]string, 0, len(needles))
+	for needle := range needles {
+		ordered = append(ordered, needle)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return len(ordered[i]) > len(ordered[j]) })
+	for _, needle := range ordered {
+		text = strings.ReplaceAll(text, needle, RedactedArg)
+	}
+	return text
+}
+
 // Serve accepts connections on ln and answers each request via invoke until ln
 // is closed. Each connection is handled on its own goroutine.
 func Serve(ln net.Listener, invoke Invoke) {
@@ -196,7 +274,9 @@ func serveConn(conn net.Conn, invoke Invoke) {
 				var out []byte
 				value, ierr := invoke(req.Key, req.Method, req.Args)
 				if ierr != nil {
-					out, _ = json.Marshal(errReply{Ok: false, Error: ierr.Error()})
+					// item 421 F5: never hand the consumer back the values it
+					// called with.
+					out, _ = json.Marshal(errReply{Ok: false, Error: SeamFailure(ierr, req.Args)})
 				} else {
 					out, _ = json.Marshal(okReply{Ok: true, Value: value})
 				}

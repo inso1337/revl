@@ -3351,6 +3351,17 @@ def _lower_externs(program: Program, filename: str, types: dict,
             # audit prints and the 290/309 policy floors read (partial order:
             # declared < keyed, declared < shape-proven; keyed/shape-proven are
             # peers) (docs/design/309-idempotent-inverse.md, §2, §"question 4").
+            # item 421 F6: this extern's DECLARED return carried `Secret[T]`, so
+            # its result is where a confidential value ENTERS the value world
+            # (item 256 §7a). `taint.py` strips the qualifier before lowering, so
+            # `returns` above no longer mentions it and this flag is the only
+            # surviving record, the counterpart of `params[i]["secret"]` for the
+            # return position. A backend reads it to register the value the
+            # instant it is produced, which is what lets the host trace scrub it
+            # (`runtime._record`). Absent unless the author wrote `Secret[...]`,
+            # so every existing extern's IR is byte-identical.
+            **({"secret_return": True} if getattr(decl, "secret_return", False)
+               else {}),
             **({"undo_idempotent": True} if decl.undo_idempotent else {}),
             **({"idempotent": True} if decl.idempotent else {}),
             **({"idempotency_key": decl.idempotency_key}
