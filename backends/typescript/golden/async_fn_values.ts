@@ -52,7 +52,7 @@ export const Agent = {
     ctx.effect(function* () {
       yield ctx.provide("runner", {
         async run(prompt: string) {
-          return (await agent_loop(prompt, (async (msgs: any) => (ctx.model.complete(msgs)))))
+          return (await agent_loop(prompt, ((msgs: any) => (ctx.model.complete(msgs)))))
         },
       } satisfies Runner)
     }, "Agent.body")

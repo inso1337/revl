@@ -45,6 +45,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -359,6 +360,69 @@ def test_stale_evidence_is_refused_even_with_a_valid_signature(staged):
     assert attest.verify_attestation(old, SIGNER_KEY)[0] is True  # authentic, stale
 
 
+# ------------------------------- freshness is bounded at BOTH ends (428 F7)
+#
+# The timestamp is signer-chosen and `attest._now_iso` passes an ISO string
+# straight through, so post-dating is a one-argument change. A TTL bounds only
+# the past: a 2099 stamp has a NEGATIVE age, which is not greater than any TTL.
+
+
+def test_a_post_dated_attestation_is_refused(staged):
+    bundle, _att = staged
+    future = deploy.make_deploy_attestation(bundle, SIGNER_KEY,
+                                            now="2099-01-01T00:00:00+00:00")
+    assert attest.verify_attestation(future, SIGNER_KEY)[0] is True
+    receipt = deploy.admit(bundle, trust=_trust(evidence_ttl_seconds=3600.0),
+                           attestation=future)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_EVIDENCE
+    assert "FUTURE" in receipt["reason"]
+
+
+def test_clock_skew_inside_the_tolerance_still_admits(staged):
+    """The future bound is a tolerance for two clocks disagreeing, not a window
+    the signer gets to choose, so it is small and it is the receiver's."""
+    bundle, _att = staged
+    trust = _trust(evidence_ttl_seconds=3600.0)
+    stamp = datetime(2001, 9, 9, 1, 46, 40, tzinfo=timezone.utc)
+    signed_at = stamp.timestamp()
+    att = deploy.make_deploy_attestation(bundle, SIGNER_KEY, now=stamp)
+    inside = signed_at - (trust.clock_skew_seconds / 2)
+    assert deploy.admit(bundle, trust=trust, attestation=att,
+                        now=inside)["verdict"] == deploy.ACCEPT
+    outside = signed_at - (trust.clock_skew_seconds + 60)
+    receipt = deploy.admit(bundle, trust=trust, attestation=att, now=outside)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_EVIDENCE
+
+
+def test_the_receiver_may_anchor_freshness_on_its_own_instant(staged):
+    """`not_before` is the anchor the receiver SUPPLIES rather than reads off
+    the record: evidence from before the last state it accepted is refused,
+    whatever the signer stamped and whatever the TTL allows."""
+    bundle, _att = staged
+    stamp = datetime(2001, 9, 9, 1, 46, 40, tzinfo=timezone.utc)
+    signed_at = stamp.timestamp()
+    att = deploy.make_deploy_attestation(bundle, SIGNER_KEY, now=stamp)
+    assert deploy.admit(bundle, trust=_trust(not_before=signed_at - 1000),
+                        attestation=att, now=signed_at + 100
+                        )["verdict"] == deploy.ACCEPT
+    receipt = deploy.admit(bundle, trust=_trust(not_before=signed_at + 500),
+                           attestation=att, now=signed_at + 600)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_EVIDENCE
+    assert "predates this receiver's own freshness anchor" in receipt["reason"]
+
+
+def test_an_unreadable_freshness_anchor_fails_closed(staged):
+    bundle, att = staged
+    receipt = deploy.admit(bundle, trust=_trust(not_before="not an instant"),
+                           attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_EVIDENCE
+    assert "refused fail-closed" in receipt["reason"]
+
+
 def test_cross_domain_deploy_on_a_symmetric_signature_is_refused(staged):
     """§2.4 / §5-A1: a verifier that holds the HMAC secret is also a forger, so
     `signer untrusted` would be a fiction across a trust domain. Slice 1 refuses
@@ -383,6 +447,305 @@ def test_conformance_cert_binding_is_rehashed(staged):
     receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
     assert receipt["verdict"] == deploy.REFUSE
     assert receipt["link"] == deploy.LINK_EVIDENCE
+
+
+# ------------------------------------------- the gauntlet VERDICT (428 F8)
+#
+# The facet was hashed and never read, so `admit` accepted a bundle carrying
+# its own evidence that it should not have been built, and accepted a genuine
+# `admissible` dossier graded over a DIFFERENT composition, because the
+# dossier named no composition at all.
+
+
+def _restage(bundle, dossier):
+    """Write `dossier` as the staged gauntlet evidence and re-sign the chain
+    over it, so nothing in these tests is a forgery: the attestation is honest
+    about exactly the bytes on disk."""
+    (bundle / "gauntlet.json").write_text(
+        json.dumps(dossier, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return deploy.make_deploy_attestation(bundle, SIGNER_KEY, signer="ci")
+
+
+def _dossier(bundle):
+    return json.loads((bundle / "gauntlet.json").read_text(encoding="utf-8"))
+
+
+def test_the_staged_gauntlet_dossier_names_the_composition_it_graded(staged):
+    bundle, att = staged
+    dossier = _dossier(bundle)
+    assert dossier["verdict"] == deploy.GAUNTLET_ADMISSIBLE
+    assert dossier[deploy.GAUNTLET_IDENTITY] == att["composition_hash"]
+
+
+@pytest.mark.parametrize("verdict", ["rejected", "", None, "ADMISSIBLE"])
+def test_a_dossier_whose_verdict_is_not_admissible_is_refused(staged, verdict):
+    bundle, _att = staged
+    dossier = _dossier(bundle)
+    dossier["verdict"] = verdict
+    receipt = deploy.admit(bundle, trust=_trust(),
+                           attestation=_restage(bundle, dossier))
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.FACET_GAUNTLET
+    assert "not 'admissible'" in receipt["reason"]
+
+
+def test_an_admissible_dossier_graded_over_another_composition_is_refused(
+        staged, tmp_path):
+    """The second half of F8: the record is genuine, `admissible`, and hashes
+    correctly into the chain. It is simply not evidence about THIS artifact."""
+    from revl.bundle import build_bundle
+
+    other_src = tmp_path / "other.rvl"
+    other_src.write_text(
+        "service Log { emission[pr] fn w(m: Str) }\n"
+        "extern emission fn pr(m: Str) = @py { pass }\n"
+        "component L provides log: Log { provide log { fn w(m) = emit pr(m) } }\n"
+        "component U requires log: Log { emit log.w(\"x\") }\n",
+        encoding="utf-8")
+    other = tmp_path / "other.revlbundle"
+    build_bundle([str(other_src)], str(other), backends=("python",), env={})
+    foreign = _dossier(other)
+    assert foreign["verdict"] == deploy.GAUNTLET_ADMISSIBLE
+
+    bundle, _att = staged
+    receipt = deploy.admit(bundle, trust=_trust(),
+                           attestation=_restage(bundle, foreign))
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.FACET_GAUNTLET
+    assert "graded over composition" in receipt["reason"]
+
+
+def test_a_dossier_naming_no_composition_is_refused_not_assumed(staged):
+    """Fail closed: an unidentified dossier is not evidence about this
+    composition, so it is refused rather than taken to be about it."""
+    bundle, _att = staged
+    dossier = _dossier(bundle)
+    del dossier[deploy.GAUNTLET_IDENTITY]
+    receipt = deploy.admit(bundle, trust=_trust(),
+                           attestation=_restage(bundle, dossier))
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.FACET_GAUNTLET
+    assert "names no composition" in receipt["reason"]
+
+
+def test_an_unreadable_dossier_is_refused_not_read_as_a_pass(staged):
+    """Fail closed on the input itself, item 428 F11's shape: bytes the
+    receiver cannot parse are a refusal, never an absent facet."""
+    bundle, _att = staged
+    (bundle / "gauntlet.json").write_text("{not json at all", encoding="utf-8")
+    att = deploy.make_deploy_attestation(bundle, SIGNER_KEY, signer="ci")
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.FACET_GAUNTLET
+    assert "cannot be read as JSON" in receipt["reason"]
+
+
+def test_a_receiver_may_require_gauntlet_evidence_to_exist(staged):
+    """Deleting the dossier and re-signing removes the facet, so the verdict
+    check has nothing to bite on. A receiver that demands the evidence refuses
+    the chain that carries none."""
+    bundle, _att = staged
+    (bundle / "gauntlet.json").unlink()
+    att = deploy.make_deploy_attestation(bundle, SIGNER_KEY, signer="ci")
+    assert deploy.FACET_GAUNTLET not in att["evidence_bindings"]
+    # off by default, an honestly degraded build still admits
+    assert deploy.admit(bundle, trust=_trust(),
+                        attestation=att)["verdict"] == deploy.ACCEPT
+    receipt = deploy.admit(bundle, trust=_trust(require_gauntlet=True),
+                           attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.FACET_GAUNTLET
+
+
+# ---------------------- what the artifact digest is a statement about (428 F11)
+
+
+def _resign_artifact(bundle):
+    """Re-sign the chain over the artifact tree as it stands. Used to make the
+    receiving half of each case honest: the attestation binds exactly the
+    digest of the tree at signing time, so nothing below is a forgery."""
+    return deploy.make_deploy_attestation(bundle, SIGNER_KEY, signer="ci")
+
+
+def test_an_empty_artifact_tree_is_refused_not_digested(staged):
+    """It folds nothing and yields sha256(b""), a value anyone can produce
+    without holding an artifact at all. Signing it is refused, and so is
+    admitting one against a chain signed over the real bytes."""
+    import hashlib
+
+    bundle, att = staged
+    emitted = bundle / "emitted" / "python"
+    saved = {p.name: p.read_bytes() for p in emitted.iterdir()}
+    for p in list(emitted.iterdir()):
+        p.unlink()
+
+    with pytest.raises(Exception) as signing:
+        _resign_artifact(bundle)
+    assert "empty" in str(signing.value)
+    assert hashlib.sha256(b"").hexdigest()[:12] in str(signing.value)
+
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_ARTIFACT
+
+    for name, data in saved.items():
+        (emitted / name).write_bytes(data)
+    assert deploy.admit(bundle, trust=_trust(),
+                        attestation=att)["verdict"] == deploy.ACCEPT
+
+
+def test_a_symlink_in_the_artifact_tree_is_refused_not_followed(staged, tmp_path):
+    """`p.is_file()` followed links, so bound bytes could live outside the
+    bundle and stay writable after signing. A digest over a path the bundle
+    does not own is not a statement about the bundle."""
+    bundle, _att = staged
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    payload = outside / "extra.py"
+    payload.write_text("VALUE = 1\n", encoding="utf-8")
+
+    link = bundle / "emitted" / "python" / "extra.py"
+    os.symlink(payload, link)
+    with pytest.raises(Exception) as signing:
+        _resign_artifact(bundle)
+    assert "symlink" in str(signing.value)
+
+    # and on the receiving side, against a chain signed over the real tree
+    link.unlink()
+    att = _resign_artifact(bundle)
+    os.symlink(payload, link)
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_ARTIFACT
+    assert "symlink" in receipt["reason"]
+
+
+def test_a_symlinked_backend_directory_is_refused(staged, tmp_path):
+    """Same defect one level up: `emitted/<backend>/` itself a link out of the
+    bundle, so the whole artifact lives somewhere the bundle does not own."""
+    bundle, att = staged
+    real = bundle / "emitted" / "python"
+    moved = tmp_path / "moved-emitted"
+    shutil.move(str(real), str(moved))
+    os.symlink(moved, real)
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_ARTIFACT
+    assert "symlink" in receipt["reason"]
+
+
+def test_repin_closes_the_window_between_admission_and_load(staged):
+    """`admit` is PREPARE and loads nothing, so the ACCEPT receipt described
+    bytes that could change or vanish before anything executed. `repin` is the
+    check a loader runs immediately before it runs them."""
+    bundle, att = staged
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.ACCEPT
+    assert deploy.repin(bundle, receipt) == (
+        True, "the staged bytes are still the admitted ones")
+
+    artifact = bundle / "emitted" / "python" / "components.py"
+    original = artifact.read_bytes()
+    artifact.write_bytes(original + b"\n# swapped after admission\n")
+    ok, reason = deploy.repin(bundle, receipt)
+    assert ok is False
+    assert "changed since admission" in reason
+
+    artifact.unlink()
+    ok, reason = deploy.repin(bundle, receipt)
+    assert ok is False
+    assert "no longer be digested" in reason
+    artifact.write_bytes(original)
+
+    ir_path = bundle / "ir" / "ir.json"
+    saved_ir = ir_path.read_bytes()
+    doc = json.loads(saved_ir)
+    doc["swappedAfterAdmission"] = True
+    ir_path.write_text(json.dumps(doc), encoding="utf-8")
+    ok, reason = deploy.repin(bundle, receipt)
+    assert ok is False
+    assert "changed since admission" in reason
+    ir_path.write_bytes(saved_ir)
+
+
+def test_repin_refuses_a_receipt_that_authorises_nothing(staged):
+    """Fail closed: a REFUSE receipt, and one with no hashes, authorise no
+    load at all, so neither is treated as a pass."""
+    bundle, _att = staged
+    refused = deploy._refusal(deploy.LINK_ARTIFACT, "no")
+    ok, reason = deploy.repin(bundle, refused)
+    assert ok is False
+    assert "nothing it authorises loading" in reason
+
+    ok, reason = deploy.repin(bundle, {"verdict": deploy.ACCEPT})
+    assert ok is False
+    assert "nothing to re-pin against" in reason
+
+
+# ------------------------------- a crash is not a refusal (428 F10)
+#
+# `json.loads` builds a lone surrogate out of a `"\ud800"` escape and
+# `str.encode("utf-8")` then refuses it, so a peer-supplied record made the
+# canonical spelling raise `UnicodeEncodeError` straight through contracts
+# whose whole point is to answer `(ok, reason)`. A crash escapes past every
+# caller written to read a verdict.
+
+LONE_SURROGATE = "\ud800"
+
+
+def test_a_lone_surrogate_is_refused_not_raised_by_verify_attestation():
+    key = b"k"
+    att = {"kind": "revl.attestation", "version": "2.0",
+           "signer": LONE_SURROGATE, "composition_hash": "0" * 64,
+           "verdict": "admitted", "key_id": attest.key_id(key),
+           "signature": "00"}
+    ok, reason = attest.verify_attestation(att, key)
+    assert ok is False
+    assert "no canonical byte spelling" in reason
+
+
+def test_a_lone_surrogate_in_the_signer_refuses_admission(staged, tmp_path):
+    bundle, att = staged
+    att = dict(att)
+    att["signer"] = LONE_SURROGATE
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_SIGNATURE
+
+
+def test_a_staged_ir_that_cannot_be_canonicalized_refuses(staged):
+    """The receiver's OWN input, one step later: `ir/ir.json` is read with
+    `json.loads`, so a `\\ud800` escape in it survives to `canonical_hash`.
+    An unmeasurable composition refuses rather than crashing."""
+    bundle, att = staged
+    ir = json.loads((bundle / "ir" / "ir.json").read_text(encoding="utf-8"))
+    ir["signerNote"] = LONE_SURROGATE
+    (bundle / "ir" / "ir.json").write_text(
+        json.dumps(ir, ensure_ascii=True), encoding="utf-8")
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_COMPOSITION
+    assert "cannot be canonically hashed" in receipt["reason"]
+
+
+def test_a_lone_surrogate_in_a_peer_envelope_is_malformed_not_a_crash():
+    """`_envelope_bytes` had the identical shape and is reachable from
+    `CorrelationGuard.admit` on ANY peer-supplied envelope, which makes the
+    crash a denial of service on the seam rather than only a verifier bug."""
+    guard = deploy.CorrelationGuard({"peer": b"s"})
+    wire = deploy.seal(_envelope("peer"), b"s")
+    wire["realm"] = LONE_SURROGATE
+    ok, reason = guard.admit(wire)
+    assert ok is False
+    assert reason == deploy.REJECT_MALFORMED
+
+
+def test_a_receipt_that_cannot_be_canonicalized_is_refused_not_raised():
+    receipt = {"kind": deploy.RECEIPT_KIND, "version": deploy.RECEIPT_VERSION,
+               "verdict": deploy.ACCEPT, "nonce": object(), "signature": "00"}
+    ok, reason = deploy.verify_receipt(receipt, b"host")
+    assert ok is False
+    assert "cannot be verified" in reason
 
 
 # ---------------------------------------------------------------------------
@@ -1005,6 +1368,28 @@ def test_a_contract_break_refuses_the_whole_federation_update(tmp_path):
                                          contracts=[(surface, "db")])
     assert broken["admitted"] is False
     assert broken["refusals"][0]["kind"] == deploy.REFUSE_CONTRACT
+
+
+def test_a_contract_naming_a_provider_outside_the_update_is_refused(tmp_path):
+    """428 F13. It used to be SKIPPED, so a typo'd or dropped provider left the
+    pin checked against nothing and the federation admitted, in a function
+    whose whole posture is refuse-as-one-unit."""
+    from revl.compiler import compile_source
+    from revl.federation import consumer_surface
+
+    provider_v1 = compile_source(PROVIDER_V1, str(tmp_path / "p1.rvl"))
+    surface = consumer_surface(
+        compile_source(CONSUMER, str(tmp_path / "c.rvl")), consumer="app")
+
+    verdict = deploy.federation_admission({"db": provider_v1},
+                                          contracts=[(surface, "typo-db")])
+    assert verdict["admitted"] is False
+    refusal = verdict["refusals"][0]
+    assert refusal["kind"] == deploy.REFUSE_UNKNOWN_PROVIDER
+    assert refusal["composition"] == "typo-db"
+    assert "carries no plan for it" in refusal["reason"]
+    # the refusal names what IS being updated, so the author can see the typo
+    assert "updating: db" in refusal["reason"]
 
 
 # --- roadmap 419b: the two shapes `reached_emissions` used to walk past ------

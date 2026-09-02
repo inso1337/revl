@@ -1,0 +1,112 @@
+name: "CodeQL Advanced"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '40 14 * * 0'
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # required for all workflows
+      security-events: write
+      # required to fetch internal or private CodeQL packs
+      packages: read
+      # only required for workflows in private repositories
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - language: actions
+          build-mode: none
+        - language: go
+          build-mode: autobuild
+        - language: java-kotlin
+          build-mode: none
+        - language: javascript-typescript
+          build-mode: none
+        - language: python
+          build-mode: none
+        - language: rust
+          build-mode: none
+        # Tailored to what this repository actually contains (tracked file
+        # counts at the time of writing): 555 .py, 93 .ts, 66 .go, 22 .rs,
+        # 22 .java, 12 .js/.mjs, plus the workflows themselves.
+        #
+        # `c-cpp` is deliberately ABSENT. The only C in the tree is
+        # tree-sitter-revl/src/{parser.c,scanner.c} and its three
+        # tree_sitter/*.h headers, which are GENERATED tree-sitter output
+        # vendored into the repo. Scanning generated parser tables produces
+        # findings nobody can act on without regenerating upstream, and a
+        # scanner people learn to ignore is worse than no scanner. Add the
+        # lane if hand-written C ever lands.
+        #
+        # `swift`, `csharp` and `ruby` are absent because the repository has
+        # no such sources. Note that if a lane is added for a language with
+        # no files, CodeQL fails the job rather than skipping it.
+        #
+        # go is `autobuild` because CodeQL REFUSES `none` for Go: the first
+        # run failed with "Go does not support the none build mode". This
+        # tree has FIVE independent go modules (backends/go/placement_runner,
+        # backends/go/scenarios, backends/go/v3, bench/codegen/go and
+        # forks/stc-go) and no root module.
+        #
+        # MEASURED PARTIAL COVERAGE, do not read this lane's green as full.
+        # The first successful run warned: package `revl.goplacement/emitted`
+        # could not be found. That is BY DESIGN and not fixable by a build
+        # step: `backends/go/placement_runner/emitted/*.go` is generated per
+        # COMPOSITION by `backends/go/emit.py` at `revl run --placement`
+        # build time and is gitignored (only `.gitkeep` is tracked). So a
+        # fresh checkout has no such package, `main.go` imports it, and
+        # CodeQL analyses that file only partially.
+        #
+        # What that costs: `placement_runner/main.go` is the seam-handling
+        # entry point, so the correlation guard (roadmap 421 F8) and the
+        # seam address judgement (337) live behind a partially-resolved
+        # import. `bridge/bridge.go` and the other four modules are analysed
+        # normally.
+        #
+        # Not worth "fixing" by generating a synthetic emitted package: the
+        # emitted code differs per composition, so a scan of one instance
+        # reports on generated output rather than on the runner, which is
+        # coverage theatre. If the placement runner ever needs real scanning,
+        # the honest route is a `manual` build that emits a REPRESENTATIVE
+        # composition and says which one, in the workflow, so a reader knows
+        # what was covered.
+        #
+        # Every other lane is `build-mode: none`, which analyses every
+        # tracked source file with no build. That matters for rust in
+        # particular: a build there resolves pinned cordis-rs from the
+        # registry, and a scanner that can go red on a network hiccup gets
+        # muted.
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v4
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix.build-mode }}
+        # `security-extended` over the default suite: this repository is a
+        # compiler whose own roadmap records executed reproducers for
+        # injection, path-traversal and confinement defects (items 416, 421,
+        # 422, 425, 428), so the extra precision is worth the extra noise.
+        # `security-and-quality` is deliberately not used: the quality rules
+        # would bury the security findings, and the repository already gates
+        # style with ruff.
+        queries: security-extended
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v4
+      with:
+        category: "/language:${{matrix.language}}"

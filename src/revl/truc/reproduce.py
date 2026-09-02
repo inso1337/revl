@@ -612,14 +612,25 @@ def reproduce(spec: str, *, project_dir: str = ".", registry: str | None = None,
     report = ReproduceReport(name=name, version=requested_version)
 
     # version: the registry index carries no per-component version today, so a
-    # requested `@version` is honestly unverifiable rather than a false match.
+    # requested `@version` cannot be checked against anything.
+    #
+    # It used to report UNVERIFIED, and an unverifiable tier contributes no
+    # MISMATCH, so `truc reproduce name@99.99.99-totally-different` reproduced
+    # whatever `name` is TODAY and answered `ok=True` (roadmap 428 F12). The
+    # report LINE was honest and the verdict was not: the caller asked about
+    # one version and got an answer about another. An input this registry
+    # cannot measure refuses; it does not quietly become a different question.
     recorded_version = row.get("version")
     if requested_version:
         if recorded_version is None:
             report.checks.append(Check(
-                "version", UNVERIFIED,
-                f"no version is recorded for '{name}' in this registry; "
-                f"reproduced the published '{name}' regardless"))
+                "version", MISMATCH,
+                f"no version is recorded for '{name}' in this registry, so "
+                f"'@{requested_version}' is not a pin and there is nothing to "
+                f"check it against. Reproducing the published '{name}' would "
+                "answer a different question than the one asked; run "
+                f"`truc reproduce {name}` if that is the question",
+                requested_version, "(no version recorded)"))
         elif recorded_version != requested_version:
             raise RevlError(str(entry_dir), 0,
                             f"'{name}@{requested_version}' is not published here "

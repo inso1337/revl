@@ -177,15 +177,33 @@ def test_missing_registry_row_is_a_clean_error(registry):
     assert "not in this registry" in excinfo.value.message
 
 
-def test_requested_version_with_no_recorded_version_is_unverifiable(registry):
-    """The registry index carries no per-component version, so `name@1.2.0`
-    reports the version tier as `cannot verify` and reproduces the published
-    component regardless, never a false version match."""
-    report = R.reproduce(f"{COMPONENT}@1.2.0", registry=str(registry))
+def test_a_requested_version_that_cannot_be_checked_refuses(registry):
+    """Roadmap 428 F12. The registry index carries no per-component version, so
+    `@version` is not a pin. It used to report the tier `cannot verify`, and an
+    unverifiable tier contributes no MISMATCH, so
+    `truc reproduce name@99.99.99-totally-different` reproduced whatever `name`
+    is TODAY and answered `ok=True`: an honest report line under a dishonest
+    verdict, because the caller asked about one version and was answered about
+    another.
+
+    This test previously pinned that behaviour as correct.
+    """
+    report = R.reproduce(f"{COMPONENT}@99.99.99-totally-different",
+                         registry=str(registry))
     version_check = _tier(report, "version")
     assert version_check is not None
-    assert version_check.status == R.UNVERIFIED
-    assert report.version == "1.2.0"
+    assert version_check.status == R.MISMATCH
+    assert "is not a pin" in version_check.detail
+    assert report.version == "99.99.99-totally-different"
+    assert report.ok is False
+    assert report.verdict == "not reproduced"
+
+
+def test_an_unversioned_request_still_reproduces(registry):
+    """The refusal is scoped to a version that was ASKED FOR and cannot be
+    checked. Asking for the component itself is unchanged."""
+    report = R.reproduce(COMPONENT, registry=str(registry))
+    assert _tier(report, "version") is None
     assert report.ok
 
 

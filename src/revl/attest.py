@@ -145,13 +145,48 @@ KEY_FILE_ENV = "REVL_ATTEST_KEY_FILE"
 SIGNER_ENV = "REVL_ATTEST_SIGNER"
 
 
+class NotCanonicalizable(ValueError):
+    """A document that has NO canonical byte spelling, so nothing about it can
+    be hashed, signed or verified.
+
+    The reachable case is a lone surrogate: `json.loads` happily produces one
+    from a `"\\ud800"` escape, and `str.encode("utf-8")` then refuses it, so a
+    peer-supplied record made `verify_attestation` raise `UnicodeEncodeError`
+    where its whole contract is `(ok, reason)` (roadmap 428 F10). A crash is
+    not a refusal: it escapes past every caller that was written to read a
+    verdict, so it is a denial of service on any surface that verifies what a
+    peer sent.
+
+    It is a distinct type rather than a silent re-encoding on purpose. Encoding
+    with `surrogatepass` would give the bytes a second spelling and quietly
+    weaken the canonicalization the MACs depend on. There is nothing to
+    canonicalize here, so the honest answer is a refusal, and every boundary
+    with an `(ok, reason)` contract turns this into one.
+    """
+
+
 def _canonical_bytes(obj) -> bytes:
     """The byte-stable canonical serialization used for both hashing and
     signing. Same spelling `formatter._canonical_ir` uses (sorted keys), with
-    compact separators so the bytes are unambiguous and whitespace-free."""
-    return json.dumps(
-        obj, sort_keys=True, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
+    compact separators so the bytes are unambiguous and whitespace-free.
+
+    Raises :class:`NotCanonicalizable` for anything with no canonical spelling
+    at all, so a caller with an `(ok, reason)` contract can refuse rather than
+    let a peer-supplied string crash it.
+    """
+    try:
+        return json.dumps(
+            obj, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise NotCanonicalizable(
+            "the document contains text with no UTF-8 encoding (a lone "
+            f"surrogate at position {error.start}), so it has no canonical "
+            "byte spelling and nothing about it can be hashed or signed"
+        ) from error
+    except (TypeError, ValueError) as error:
+        raise NotCanonicalizable(
+            f"the document has no canonical JSON spelling: {error}") from error
 
 
 def canonical_hash(ir: dict) -> str:
@@ -663,7 +698,14 @@ def verify_attestation(att: dict, key: bytes, ir: dict | None = None
     # altered, dropped, or added member — verdict, timestamp, hash, guarantees,
     # signer, or an injected field — makes the recomputed HMAC diverge, so all
     # tampering is caught here as a signature mismatch.
-    expected_sig = _sign(att, bytes(key))
+    # A record with no canonical spelling cannot be MAC'd, so it cannot be
+    # shown authentic: that is a refusal, not a crash. `verify_attestation`
+    # answers `(ok, reason)` and never raises, and a peer-supplied record must
+    # not be able to break that (roadmap 428 F10).
+    try:
+        expected_sig = _sign(att, bytes(key))
+    except NotCanonicalizable as error:
+        return False, (f"attestation cannot be verified: {error}")
     if not hmac.compare_digest(expected_sig, given_sig):
         return False, ("signature mismatch: wrong key, or the attestation was "
                        "tampered with after signing")
@@ -677,7 +719,10 @@ def verify_attestation(att: dict, key: bytes, ir: dict | None = None
         return False, envelope
 
     if ir is not None:
-        recomputed = canonical_hash(ir)
+        try:
+            recomputed = canonical_hash(ir)
+        except NotCanonicalizable as error:
+            return False, (f"the composition presented cannot be hashed: {error}")
         if not hmac.compare_digest(recomputed, att["composition_hash"]):
             return False, ("hash mismatch: the composition changed since it was "
                            "attested (attested "

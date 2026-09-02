@@ -166,6 +166,7 @@ _PY_ASYNC_SVC_OPS: set = set()      # {(service_name, method_name)} async operat
 _PY_AWAIT_LOCALS: set = set()       # async-typed parameter names of the body being rendered
 _PY_IN_ASYNC: bool = False          # is the body being rendered an `async def`
 _PY_IN_ARROW: bool = False          # is the body being rendered inside an arrow (item 141/264)
+_PY_INPLACE_LOCALS: dict = {}       # locals a persistent write may update in place (item 436)
 _PY_USES_AS_ASYNC: bool = False     # did any body need the `_revl_as_async` wrapper
 
 
@@ -575,6 +576,52 @@ _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
 _DIV_ZERO_MSG = "revl: division by zero"
 
+# The receiver type a builtin reached through `?.` has: the `optcall` IR node
+# carries no `recv` tag (unlike a `builtin` node, which lowering annotates for
+# exactly this reason), so the one lowering that dispatches on it (`to_int`,
+# whose Int32 row is the identity and whose Str row parses) decides at
+# runtime instead.
+_RECV_VIA_OPT = "?"
+
+
+# `??`, `?.` and `?.()` must evaluate their LEFT OPERAND ONCE
+# (docs/syntax-2.0.md §3.2). Rendering it twice, once for the presence test and
+# once for the result, calls a call-shaped operand twice: a semantic defect
+# before it is a cost (item 436 F7, measured at 1500 extern invocations per
+# 1000 `??`). The ts tier inherits single evaluation from JS's own `??` and the
+# rust tier from `unwrap_or_else`; this tier binds the operand with a walrus,
+# the technique already used for `is_alpha`'s receiver.
+#
+# The temp is named after the OPT-CHAIN HEIGHT of the whole `??`/`?.` node, so
+# a chain nested in an argument can never clobber the one above it: the outer
+# node's height is strictly greater than every opt node under it, and some
+# builtins (`join`, `has`) render the argument BEFORE the receiver. The height
+# is a function of the node alone, so no emitter state is threaded through the
+# expression walk and the self-host port needs none either.
+def _opt_height(node: Any) -> int:
+    """1 + the deepest `??`/`?.`/`?.()` nested under `node`; 0 if there is none."""
+    if isinstance(node, list):
+        return max((_opt_height(v) for v in node), default=0)
+    if not isinstance(node, dict):
+        return 0
+    inner = max((_opt_height(v) for v in node.values()), default=0)
+    if node.get("kind") in ("optfield", "optcall") or (
+            node.get("kind") == "bin" and node.get("op") == "??"):
+        return inner + 1
+    return inner
+
+
+def _opt_bind(node: dict, target: Any, rendered: str) -> tuple[str, str]:
+    """`(binder, reader)` for an optional chain's left operand: the binder goes
+    in the presence test, the reader wherever the value is used. An operand
+    that is trivially re-readable (a local, a literal, `Map.empty()`) keeps the
+    plain double render, which costs nothing and leaves the common spelling
+    byte-identical to what a developer writes."""
+    if isinstance(target, dict) and target.get("kind") in _INLINE_TRIVIAL:
+        return f"({rendered})", rendered
+    name = f"_ov{_opt_height(node)}"
+    return f"({name} := {rendered})", name
+
 
 def _render_builtin(method, target: str, args: list, recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), rendered as portable Python.
@@ -674,17 +721,24 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     # type, so widening Int32 -> Int is the identity; narrowing Int -> Int32
     # re-imposes the 32-bit bound through `_revl_i32`, which traps out of range.
     if method == "to_int":
-        if recv == "Str":
+        if recv in ("Str", _RECV_VIA_OPT):
             # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the
             # ASCII digits with an optional leading `-`, `None` otherwise —
             # including out of the i64 range, which is None like every other
             # non-digit (the tier's ints are unbounded, so the bound must be
             # checked here rather than by int()).
-            return (f"(lambda _s: (None if (_s == \"\" or _s == \"-\" "
-                    f"or not _s.isascii() "
-                    f"or not (_s.isdigit() or (_s[0] == \"-\" and _s[1:].isdigit())) "
-                    f"or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) "
-                    f"else _n))({target})")
+            parse = ("(None if (_s == \"\" or _s == \"-\" "
+                     "or not _s.isascii() "
+                     "or not (_s.isdigit() or (_s[0] == \"-\" and _s[1:].isdigit())) "
+                     "or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) "
+                     "else _n)")
+            if recv == _RECV_VIA_OPT:
+                # reached through `?.`, whose node carries no receiver type:
+                # dispatch on the payload, the same split `indexOf` makes
+                # between a List and a Str receiver.
+                return (f"(lambda _s: {parse} if isinstance(_s, str) "
+                        f"else _s)({target})")
+            return f"(lambda _s: {parse})({target})"
         return f"({target})"
     if method == "to_int32":
         return f"_revl_i32({target})"
@@ -1175,11 +1229,15 @@ class _ComponentEmitter:
             return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
         if kind == "bin":
             if expr.get("op") == "??":
-                lhs = self._expr(expr.get("left"), where)
-                rhs = self._expr(expr.get("right"), where)
                 # `x ?? d`: `Opt[T]` is represented as `T | None` at runtime
-                # (matching the TS backend's `T | undefined` shape).
-                return f"({rhs} if {lhs} is None else {lhs})"
+                # (matching the TS backend's `T | undefined` shape). The left
+                # operand is evaluated ONCE; see `_opt_bind`.
+                left = expr.get("left")
+                rhs = self._expr(expr.get("right"), where)
+                binder, reader = _opt_bind(expr, left, self._expr(left, where))
+                if binder == f"({reader})":
+                    return f"({rhs} if {reader} is None else {reader})"
+                return f"({reader} if {binder} is not None else {rhs})"
             op = _PY_BIN_OPS.get(expr.get("op"))
             if op is None:
                 raise EmitError(f"{where}: unsupported binary operator {expr.get('op')!r}")
@@ -1236,16 +1294,21 @@ class _ComponentEmitter:
             name = expr.get("name")
             if not isinstance(name, str) or not name.isidentifier():
                 raise EmitError(f"{where}: bad optional field name {name!r}")
-            target = self._expr(expr.get("target"), where)
             # `x?.name`: short-circuit on Opt-None.
-            return f"(None if ({target}) is None else _revl_field({target}, {name!r}))"
+            binder, reader = _opt_bind(
+                expr, expr.get("target"), self._expr(expr.get("target"), where))
+            return f"(None if {binder} is None else _revl_field({reader}, {name!r}))"
         if kind == "optcall":
             method = expr.get("method")
             if not isinstance(method, str) or not method.isidentifier():
                 raise EmitError(f"{where}: bad optional method name {method!r}")
-            target = self._expr(expr.get("target"), where)
-            args = ", ".join(self._expr(a, where) for a in expr.get("args") or [])
-            return f"(None if ({target}) is None else ({target}).{method}({args}))"
+            # the method is a stdlib builtin, rendered by the same table a
+            # plain `.m(..)` uses; see the fn-body `optcall` branch.
+            binder, reader = _opt_bind(
+                expr, expr.get("target"), self._expr(expr.get("target"), where))
+            args = [self._expr(a, where) for a in expr.get("args") or []]
+            body = _render_builtin(method, reader, args, _RECV_VIA_OPT)
+            return f"(None if {binder} is None else {body})"
         if kind == "spawn":
             # instance-parametric components (docs/design-v2-instances.md):
             # `spawn(_revl_ctx, <Component>, {config}, (realms,))` plugs a fresh child
@@ -2290,9 +2353,17 @@ def _expr(node: dict) -> str:
         return _mangle(name)
     if kind == "bin":
         if node["op"] == "??":
-            lhs = _expr(node["left"])
+            left = node["left"]
             rhs = _expr(node["right"])
-            return f"({rhs} if {lhs} is None else {lhs})"
+            binder, reader = _opt_bind(node, left, _expr(left))
+            if binder == f"({reader})":
+                # a bare local/literal: re-reading it is free and observable
+                # only as the same value, so keep the plain spelling
+                return f"({rhs} if {reader} is None else {reader})"
+            # the walrus binds in the presence test, which a conditional
+            # expression evaluates FIRST, so the `then` branch reads a value
+            # the operand produced exactly once
+            return f"({reader} if {binder} is not None else {rhs})"
         if node["op"] in ("+", "-", "*") and node.get("operands") == "Int":
             # Int is bounded 64-bit and overflow TRAPS (docs/arithmetic.md).
             # python is arbitrary precision, so it is the tier that has to
@@ -2450,12 +2521,20 @@ def _expr(node: dict) -> str:
     if kind == "interp":
         return _interp_fstring(node["parts"])
     if kind == "optfield":
-        target = _expr(node["target"])
-        return f"(None if ({target}) is None else _revl_field({target}, {node['name']!r}))"
+        binder, reader = _opt_bind(node, node["target"], _expr(node["target"]))
+        return f"(None if {binder} is None else _revl_field({reader}, {node['name']!r}))"
     if kind == "optcall":
-        target = _expr(node["target"])
-        args = ", ".join(_expr(a) for a in node.get("args") or [])
-        return f"(None if ({target}) is None else ({target}).{node['method']}({args}))"
+        # `?.m(..)`: the method is a STDLIB builtin (the checker types an
+        # optcall through `builtin_check`, so there is no host-method row to
+        # reach), and it must be rendered by the same table a plain `.m(..)`
+        # goes through. Emitting `payload.m(..)` instead put a method python
+        # values do not have on the receiver (`'str' object has no attribute
+        # 'length'`), which item 436 caught executing what the byte-agreement
+        # oracle only ever emitted.
+        binder, reader = _opt_bind(node, node["target"], _expr(node["target"]))
+        args = [_expr(a) for a in node.get("args") or []]
+        body = _render_builtin(node["method"], reader, args, _RECV_VIA_OPT)
+        return f"(None if {binder} is None else {body})"
     raise EmitError(f"unsupported expression kind {kind!r}")
 
 
@@ -2513,9 +2592,251 @@ def _guard_frame_neutral_loop(body) -> None:
                 "while/for body (docs/design/379-break-continue.md)")
 
 
+# ---------------------------------------------------------------------------
+# In-place accumulation (item 436 F1)
+# ---------------------------------------------------------------------------
+# `List.push`, `Map.set`, `Map.remove` and a functional record update are
+# PERSISTENT: each renders a whole copy of its receiver with one entry changed
+# (`(xs + [v])`, `{**m, k: v}`, `{**p, 'x': v}`). In the ordinary accumulation
+# loop, `var out = []; for (..) { out = out.push(..) }`, that is one full
+# container copy per step, so a loop the developer wrote as O(n) is EMITTED as
+# O(n^2). No opcode or profile counter can see it: `xs + [v]` is one bytecode
+# instruction that copies `len(xs)` pointers in C, and the audit measured this
+# exact loop at 0.96x in ops against 500x in elements copied at n=1000. It is
+# not a synthetic shape either: `stdlib/list.rvl` writes `list_map`,
+# `list_filter` and `list_dedup` as push loops, so `xs.map(f)` carries it.
+#
+# The rewrite is `out.append(v)`; all of its difficulty is proving the copy
+# unobservable. That proof is a UNIQUE-OWNERSHIP analysis over one fn body, and
+# NOT a per-builtin special case: a local may be written in place exactly when
+# the object it names is reachable through no other name, so no reader can hold
+# the pre-image. The rule is stated over the IR and holds on every tier: the go
+# backend's `_v3_self_rebind_locals` (item 434) is the same analysis written
+# again for that emitter, which is the argument for eventually lifting it to a
+# frontend `unique` marker instead of a seventh copy.
+#
+# Two clauses carry the whole proof:
+#
+#   BIRTH. The name must be introduced by a `let` whose value allocates here
+#   (a list/map/record literal), or by a `let` off another name, which is then
+#   materialised as a DEFENSIVE COPY (`out = dict(m)`), one copy where the
+#   persistent form made one per step. A parameter is never a birth: it is the
+#   caller's object, and writing through it would destructively update a
+#   binding this function does not own.
+#
+#   NO ESCAPE. Every other occurrence of the name must be a read that cannot
+#   retain the object: a receiver, an index, a field, a comparison operand.
+#   A call argument, a list or record element, an arrow capture, a `for`
+#   iterable or a plain alias (`let a = out`) all leave a second holder, and
+#   any of them disqualifies the name for the whole body.
+
+# What a solely-owned container is born from.
+_PY_FRESH_KINDS = frozenset({"list", "maplit", "record"})
+
+# The persistent methods with an in-place equivalent, and their arity. `concat`
+# is deliberately absent: it is defined on both Str and List and the receiver
+# type is not known at this node, and a python `str` cannot be mutated at all
+# (the same split the go tier hit, item 434).
+_PY_INPLACE_METHODS = {"push": 1, "set": 2, "remove": 1}
+
+# Slots in which a bare `var` is READ but not RETAINED: the value is consumed
+# on the spot (a length, an index, a field, a comparison, an interpolation) or
+# handed to a persistent builtin, every one of which returns a NEW container
+# rather than keeping its receiver. Every other position may leave a second
+# name holding the object.
+_PY_NON_RETAINING_SLOTS = {
+    "builtin": ("target",),
+    "index": ("target", "index"),
+    "len": ("target",),
+    "field": ("target",),
+    "optfield": ("target",),
+    "optcall": ("target",),
+    "bin": ("left", "right"),
+    "un": ("operand",),
+    "interp": ("parts",),
+    # `{**base, ..}` spreads the base's ENTRIES into a fresh dict; the base
+    # object itself is not kept, exactly as `(xs + [v])` does not keep `xs`
+    "record_update": ("base",),
+}
+
+
+def _py_self_rebind(name: str, value: Any) -> bool:
+    """Is `value` a persistent copy of `name` with one entry changed, the
+    `out = out.push(v)` shape whose result rebinds its own receiver?"""
+    if not isinstance(value, dict):
+        return False
+    if value.get("kind") == "builtin":
+        arity = _PY_INPLACE_METHODS.get(value.get("method"))
+        target = value.get("target")
+        return (arity is not None
+                and len(value.get("args") or []) == arity
+                and isinstance(target, dict)
+                and target.get("kind") == "var"
+                and target.get("name") == name)
+    if value.get("kind") == "record_update":
+        base = value.get("base")
+        return (isinstance(base, dict) and base.get("kind") == "var"
+                and base.get("name") == name and bool(value.get("updates")))
+    return False
+
+
+def _py_escaped_names(body: Any) -> set[str]:
+    """Every name whose object could outlive the expression that reads it, and
+    every name a nested binder shadows (an arrow parameter, a match arm's
+    payload bind), which is the same disqualification for a different reason."""
+    found: set[str] = set()
+
+    def walk(node: Any, escapes: bool) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item, escapes)
+            return
+        if not isinstance(node, dict):
+            return
+        if node.get("step") == "return":
+            # a `return` ENDS the function: whatever it hands out cannot be
+            # observed changing afterwards, because nothing here runs again
+            return
+        kind = node.get("kind")
+        if kind == "var":
+            name = node.get("name")
+            if escapes and isinstance(name, str):
+                found.add(name)
+            return
+        if kind == "arrow":
+            # a lambda captures by default-argument, which snapshots the
+            # OBJECT: a later in-place write would be visible through it
+            for name in node.get("captures") or []:
+                if isinstance(name, str):
+                    found.add(name)
+            for name in node.get("params") or []:
+                if isinstance(name, str):
+                    found.add(name)
+        elif kind == "match":
+            for arm in node.get("arms") or []:
+                bind = arm.get("bind") if isinstance(arm, dict) else None
+                if isinstance(bind, str):
+                    found.add(bind)
+        safe: tuple = _PY_NON_RETAINING_SLOTS.get(kind, ())
+        if kind == "bin" and node.get("op") == "??":
+            safe = ()  # `a ?? b` YIELDS `a`, so the operand IS retained
+        for key, child in node.items():
+            walk(child, key not in safe)
+
+    walk(body, True)
+    return found
+
+
+def _py_inplace_locals(fn: dict) -> dict:
+    """`{name: birth}` for the locals a persistent write may update in place.
+
+    `birth` is None when the name is born from a fresh literal (its `let` emits
+    unchanged), and `(source_node, "list"|"dict")` when it is born off another
+    name and needs the defensive copy. The container is named by the methods
+    that rebind the local (`push` is List-only, `set`/`remove` and a record
+    update are dict-shaped), so no receiver type has to be recovered.
+    """
+    body = fn.get("body") or []
+    spoiled: set[str] = {p.get("name") for p in fn.get("params") or []}
+    born: dict[str, Any] = {}
+    accum: set[str] = set()
+    pushes: set[str] = set()
+
+    def scan(steps: Any) -> None:
+        for node in steps or []:
+            if not isinstance(node, dict):
+                continue
+            step = node.get("step")
+            name = node.get("name")
+            if step == "let" and isinstance(name, str):
+                value = node.get("value")
+                kind = value.get("kind") if isinstance(value, dict) else None
+                if name in born or name in spoiled:
+                    spoiled.add(name)  # one python scope per fn: a second
+                    born.pop(name, None)  # declaration is a rebind
+                elif kind in _PY_FRESH_KINDS:
+                    born[name] = None
+                elif kind == "var":
+                    born[name] = value
+                else:
+                    spoiled.add(name)
+            elif step == "assign" and isinstance(name, str):
+                value = node.get("value")
+                if _py_self_rebind(name, value):
+                    accum.add(name)
+                    if value.get("method") == "push":
+                        pushes.add(name)
+                else:
+                    spoiled.add(name)
+            elif step == "let_pattern":
+                for bind in list(node.get("names") or []) + [node.get("rest")]:
+                    if isinstance(bind, str):
+                        spoiled.add(bind)
+            elif step == "for":
+                if isinstance(node.get("bind"), str):
+                    spoiled.add(node["bind"])
+                scan(node.get("body"))
+            elif step == "while":
+                scan(node.get("body"))
+            elif step == "if":
+                scan(node.get("then"))
+                scan(node.get("else"))
+
+    scan(body)
+    escaped = _py_escaped_names(body)
+    return {
+        name: (None if source is None
+               else (source, "list" if name in pushes else "dict"))
+        for name, source in born.items()
+        if name in accum and name not in spoiled and name not in escaped
+    }
+
+
+def _py_inplace_stmts(name: str, value: dict) -> list[str]:
+    """The in-place statements replacing a proven-unique persistent copy.
+    Operand evaluation order matches the copying form they replace."""
+    recv = _mangle(name)
+    if value.get("kind") == "record_update":
+        # `.update(<mapping>)` builds the whole replacement BEFORE writing any
+        # of it, so a swap (`{ p | x = p.y, y = p.x }`) stays simultaneous
+        # exactly as the `{**p, ..}` spread was
+        pairs = ", ".join(f"{n!r}: {_expr(v)}" for n, v in value["updates"])
+        return [f"{recv}.update({{{pairs}}})"]
+    args = value.get("args") or []
+    method = value["method"]
+    if method == "push":
+        return [f"{recv}.append({_expr(args[0])})"]
+    if method == "remove":
+        # `Map.remove` is TOTAL (an absent key is not an error), so `pop` with
+        # a default, never `del`
+        return [f"{recv}.pop({_expr(args[0])}, None)"]
+    # `set`: the spread evaluated receiver, then key, then value; a subscript
+    # assignment evaluates the VALUE first, so a key with an observable effect
+    # would move. Bind it first when it is not a bare read.
+    key_node, val_node = args
+    key = _expr(key_node)
+    if isinstance(key_node, dict) and key_node.get("kind") in _INLINE_TRIVIAL:
+        return [f"{recv}[{key}] = {_expr(val_node)}"]
+    return [f"_revl_key = {key}", f"{recv}[_revl_key] = {_expr(val_node)}"]
+
+
 def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
     step = node["step"]
     if step in ("let", "assign"):
+        name = node["name"]
+        if name in _PY_INPLACE_LOCALS:
+            if step == "assign" and _py_self_rebind(name, node["value"]):
+                for line in _py_inplace_stmts(name, node["value"]):
+                    out.add(indent, line)
+                return
+            birth = _PY_INPLACE_LOCALS[name]
+            if step == "let" and birth is not None:
+                # born off another name: ONE copy here, where the persistent
+                # form made one per write
+                source, container = birth
+                out.add(indent,
+                        f"{_mangle(name)} = {container}({_expr(source)})")
+                return
         out.add(indent, f"{_mangle(node['name'])} = {_expr(node['value'])}")
     elif step == "let_pattern":
         _let_pattern_stmt(node, out, indent)
@@ -2592,7 +2913,7 @@ def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
 
 
 def _emit_functions(functions: list) -> "_Lines":
-    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
+    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW, _PY_INPLACE_LOCALS
     out = _Lines()
     for fn in functions:
         name = _ident(fn["name"], "function name")
@@ -2608,6 +2929,9 @@ def _emit_functions(functions: list) -> "_Lines":
         _PY_IN_ARROW = False
         _PY_AWAIT_LOCALS = {p["name"] for p in fn["params"]
                             if _is_async_fn_type(p.get("type"))}
+        # item 436 F1: the accumulation locals whose persistent copies are
+        # provably unobservable, computed once over the whole body
+        _PY_INPLACE_LOCALS = _py_inplace_locals(fn)
         out.add(0, f"{'async def' if is_async else 'def'} {name}({params}):")
         if not fn.get("body"):
             out.add(1, "pass")
@@ -2617,6 +2941,7 @@ def _emit_functions(functions: list) -> "_Lines":
     _PY_IN_ASYNC = False
     _PY_IN_ARROW = False
     _PY_AWAIT_LOCALS = set()
+    _PY_INPLACE_LOCALS = {}
     return out
 
 
@@ -2819,6 +3144,7 @@ def _emit_externs(externs: list) -> "_Lines":
 
 
 def _emit_tests(tests: list) -> "_Lines":
+    global _PY_INPLACE_LOCALS
     out = _Lines()
     out.add(0, "REVL_TESTS = []")
     out.add(0)
@@ -2834,8 +3160,12 @@ def _emit_tests(tests: list) -> "_Lines":
         out.add(0, f"def {fn_name}():")
         if not test.get("body"):
             out.add(1, "pass")
+        # a test body is a fn body with no parameters, so item 436's
+        # in-place accumulation applies to it on the same terms
+        _PY_INPLACE_LOCALS = _py_inplace_locals(test)
         for stmt in test.get("body") or []:
             _fn_stmt(stmt, out, 1)
+        _PY_INPLACE_LOCALS = {}
         out.add(0)
         out.add(0, f"REVL_TESTS.append(({test['name']!r}, {fn_name}))")
         out.add(0)

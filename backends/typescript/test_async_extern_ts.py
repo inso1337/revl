@@ -78,9 +78,15 @@ def test_agent_loop_colored_fn_emits_awaited_async_ts():
     assert "decode((await model_complete(prompt)))" in out
     # the recursive self-call (a colored callee) is awaited too
     assert "await agent_loop(req.name, decode, revlI64(n - 1n))" in out
-    # the match IIFE and its arm arrows are async and awaited (else the await
-    # would land in a sync arrow — a tsc error)
+    # the match IIFE is async and awaited, because one arm awaits the recursive
+    # self-call (else that await would land in a sync arrow, a tsc error).
+    # Item 435(a): the colour is decided per rendered body, so the awaiting arm
+    # keeps `async` and the sync arm sheds it.
     assert "return (await (async ($revl_match_1) => {" in out
+    assert ("return (await (async (req) => ((await agent_loop(req.name, decode, "
+            "revlI64(n - 1n)))))($revl_match_1.value))") in out
+    assert ('return ((answer) => ({ kind: "Final", value: answer }))'
+            "($revl_match_1.value)") in out
     # the sync decoder stays a plain function — not every fn is colored
     assert "export function decode_response(resp: string): Step {" in out
 
@@ -100,16 +106,23 @@ def test_async_fn_value_callback_emits_awaited_promise_ts():
     """Item 92 exit test (finding #21) — the callback-arrow shape. The async
     color rides the declared function type `(Str) -> Async[Str]`: `agent_loop`
     colors async, its `complete` parameter types as `Promise<T>`, and the call
-    site awaits it; the call-site arrow renders `async` so its body may reach
-    the async op without an await landing in a sync arrow. tsc-validated by
+    site awaits it.
+
+    Item 435(b) narrowed the arrow's own colour. The arrow body here is the
+    un-awaited emission Promise `ctx.model.complete(msgs)`, so `async` only
+    added a resolution hop over a Promise the body already returns (2 excess
+    microtask turns and 2 excess Promise allocations per operation call). The
+    arrow now renders plain, which has the identical TS type `(p) =>
+    Promise<T>` and so stays assignable to `complete`. tsc-validated by
     `npm run typecheck`."""
     m = _load_ts_emit()
     out = m.emit(_fn_values_ir())
     assert ("export async function agent_loop(current: string, "
             "complete: ((a0: string) => Promise<string>)): Promise<string> {") in out
     assert "const resp = (await complete(current))" in out
-    # the callback arrow renders async and its call site is awaited
-    assert "(async (msgs: any) =>" in out
+    # the callback arrow forwards the emission Promise, so it is NOT async
+    assert "((msgs: any) => (ctx.model.complete(msgs)))" in out
+    assert "(async (msgs: any) =>" not in out
     assert "(await agent_loop(prompt," in out
 
 
@@ -117,3 +130,37 @@ def test_async_fn_values_golden_is_current():
     m = _load_ts_emit()
     golden = (BACKEND / "golden" / "async_fn_values.ts").read_text(encoding="utf-8")
     assert m.emit(_fn_values_ir()) == golden
+
+
+def _match_sync_arms_ir():
+    return json.loads((BACKEND / "tests" / "fixtures" / "match_sync_arms.ir.json")
+                      .read_text(encoding="utf-8"))
+
+
+def test_sync_armed_match_in_async_fn_emits_no_async_and_no_await():
+    """Item 435(a) exit test: the async colour follows the rendered body.
+
+    `classify` is coloured async (it calls an async extern once, at the top)
+    but its match has no suspending arm: every arm body is a bound variable or
+    a literal. Colouring the match by `ctx.in_async`, a property of the
+    ENCLOSING function, wrapped each arm's already-computed value in a Promise
+    and awaited it: 2 excess microtask turns and 4 excess Promise allocations
+    per evaluation, measured by
+    `bench/codegen/typescript/cases/match_sync_arms.ts`. The IIFE and the arm
+    arrows are unchanged in structure; only the keyword and its matching
+    `await` are gone.
+    """
+    m = _load_ts_emit()
+    out = m.emit(_match_sync_arms_ir())
+    # the enclosing fn is still coloured: the extern call is still awaited
+    assert "export async function classify(p: string): Promise<string> {" in out
+    assert "const resp = (await fetch_one(p))" in out
+    # the match IIFE and every arm arrow are plain
+    assert "return (($revl_match_1) => {" in out
+    assert "return ((a) => (a))($revl_match_1.value)" in out
+    assert "return ((t) => (t))($revl_match_1.value)" in out
+    assert "})(decode(resp))" in out
+    # nothing inside the match is coloured or awaited
+    match_text = out[out.index("return (($revl_match_1) => {"):]
+    assert "async " not in match_text
+    assert "await " not in match_text
