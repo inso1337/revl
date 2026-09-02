@@ -1,0 +1,9 @@
+service Convert {
+  fn double(x: Int) -> Int
+}
+
+component DoubleTool provides convert: Convert {
+  provide convert {
+    fn double(x) = x + x
+  }
+}

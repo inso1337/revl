@@ -256,6 +256,13 @@ jobs:
       # rides this job. The drift gate needs no toolchain and already runs in
       # the frontend job's plain `pytest tests/ -q`.
       - run: pytest tests/test_gate_crate_admit.py -q
+      # item 338: the committed rust CONSUMER example
+      # (examples/ecosystem-consumer-rs), built from outside the checkout with
+      # the crate as its only dependency. Its source-level contract checks run
+      # in the frontend job's plain `pytest tests/ -q`; the build-and-run half
+      # is toolchain-gated, so it rides this job or it executes nowhere (the
+      # item-445 rule: a skip is not a pass).
+      - run: pytest tests/test_gate_consumer_example_rs.py -q
       # item 336 slice 1: the rust LSP binary's byte-identity agreement against
       # `python -m revl.lsp`. REVL_LSP_PYTHON points it at this job's python.
       - run: PYTHONPATH=src REVL_LSP_PYTHON=$(which python) cargo test --manifest-path crates/revl-lsp/Cargo.toml

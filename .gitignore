@@ -9,6 +9,14 @@ __pycache__/
 # emitted cordis-ts module for a node-placed process, generated per run
 backends/typescript/_gen/
 
+# cargo build output for the in-repo crates and the rust consumer example
+# (examples/ecosystem-consumer-rs is a standalone cargo project; its lockfile is
+# resolved fresh, and tests/test_gate_consumer_example_rs.py builds a copy of it
+# outside the checkout anyway)
+crates/*/target/
+examples/ecosystem-consumer-rs/target/
+examples/ecosystem-consumer-rs/Cargo.lock
+
 # stray localhost access log (item 110a)
 .srv.log
 *.srv.log
