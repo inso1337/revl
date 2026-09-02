@@ -275,7 +275,7 @@ fn commajoin(nodes: List[Any]) -> Str {
 // `?.()` must evaluate their LEFT OPERAND ONCE, so a non-trivial operand is
 // bound with a walrus and the bound name is what the presence test and the
 // result both read. The temp is named after the opt-chain HEIGHT of the whole
-// node, which is strictly greater than every opt node beneath it — a chain
+// node, which is strictly greater than every opt node beneath it: a chain
 // nested in an ARGUMENT therefore cannot clobber the one above it, and some
 // builtins (`join`, `indexOf`) render the argument before the receiver.
 fn opt_height(n: Any) -> Int {
@@ -575,7 +575,7 @@ fn expr_inner(node: Any) -> Str {
   if (kind == "optcall") {
     // the method is a STDLIB builtin (the checker types an optcall through
     // `builtin_check`), so it goes through the same table a plain `.m(..)`
-    // does — rendering `payload.m(..)` put a method python values do not
+    // does. Rendering `payload.m(..)` put a method python values do not
     // have on the receiver.
     let tgt = value_field(node, "target")
     let t = expr(tgt)
@@ -793,7 +793,7 @@ fn inplace_stmts(name: Str, value: Any) -> List[Str] {
   let method = value_str(value_field(value, "method"))
   let args = value_list(value_field(value, "args"))
   if (method == "push") { return [`${recv}.append(${expr(args[0])})`] }
-  // `Map.remove` is TOTAL — an absent key is not an error — so `pop` with a
+  // `Map.remove` is TOTAL (an absent key is not an error), so `pop` with a
   // default, never `del`
   if (method == "remove") { return [`${recv}.pop(${expr(args[0])}, None)`] }
   // `set`: the spread evaluated receiver, then key, then value; a subscript
