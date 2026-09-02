@@ -404,3 +404,95 @@ def test_f6_no_policy_session_still_opens_no_wal(tmp_path):
     session = Session()
     session.load(copy.deepcopy(_base_ir()), record=True)
     assert session.recorder.wal is None
+
+
+# --------------------------------------------------------------------------- #
+# F6, the recorder half: a WAL a session opens must actually RECEIVE records,
+# and swapping one must not leave a live timeline bound to the closed log.
+# --------------------------------------------------------------------------- #
+
+# a witnessed step alongside the emission, so a call produces a WAL step record.
+_WITNESSED = (
+    "extern emission fn announce(sink: Str, msg: Str) = @py {\n"
+    "    with open(sink, 'a') as _f:\n"
+    "        _f.write('announce:' + msg + '\\n')\n"
+    "    return\n"
+    "}\n"
+    "service Ops { emission fn shout(sink: Str, msg: Str) }\n"
+    "component Agent provides ops: Ops {\n"
+    "  let seen = effect Map.new() undo seen.drop()\n"
+    "  provide ops {\n"
+    '    fn shout(sink, msg) { effect seen.insert("k", msg) undo seen.remove("k")\n'
+    "                          emit announce(sink, msg) }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+def _witnessed_session(tmp_path, wal=None):
+    from revl import compile_source
+    from revl.mcp.session import Session
+    session = Session()
+    session.approval_policy = "auto"
+    if wal is not None:
+        session._wal_path = str(wal)
+    session.load(compile_source(_WITNESSED, "w.rvl"), record=True)
+    return session
+
+
+@needs_cordis
+def test_a_wal_opened_after_activation_receives_step_records(tmp_path):
+    """A timeline binds the WAL at ACTIVATION. A log opened afterwards used to
+    receive no step records at all — durable in name only — because the live
+    timelines were built when `recorder.wal` was still None."""
+    from revl.mcp.approval import ApprovalRequired
+    from revl.wal import read_wal
+    session = _witnessed_session(tmp_path, wal=tmp_path / "first.wal")
+    # replace the log AFTER the component is live, the shape `fork_confirm` and
+    # a post-load `open_wal` both take.
+    later = str(tmp_path / "later.wal")
+    session.recorder.open_wal(later, session._generation)
+
+    sink = str(tmp_path / "w.log")
+    with pytest.raises(ApprovalRequired) as caught:
+        session.call("ops", "shout", [sink, "hi"])
+    session.approve_ticket(caught.value.ticket["hash"])
+    session.call("ops", "shout", [sink, "hi"])   # fires once, consumes it
+
+    records = read_wal(later)["records"]
+    assert any(r.get("record") == "approval-consumed" for r in records), records
+    # the witnessed step landed in the SAME log the approval spend did, which is
+    # what makes the audit join possible.
+    assert any(r.get("component") == "Agent" for r in records), records
+
+
+@needs_cordis
+def test_replacing_the_wal_does_not_strand_a_live_timeline(tmp_path):
+    """Swapping the log left every live timeline bound to the one just CLOSED,
+    so the next committed step raised `ReplayError: write-ahead log is not open`
+    from INSIDE the crossing — after the gate decided, with the effect in
+    flight. `Recorder.open_wal` rebinds, so the crossing completes."""
+    from revl.mcp.approval import ApprovalRequired
+    session = _witnessed_session(tmp_path, wal=tmp_path / "a.wal")
+    first = session.recorder.wal
+    session.recorder.open_wal(str(tmp_path / "b.wal"), session._generation)
+
+    sink = str(tmp_path / "swap.log")
+    with pytest.raises(ApprovalRequired) as caught:
+        session.call("ops", "shout", [sink, "hi"])
+    session.approve_ticket(caught.value.ticket["hash"])
+    session.call("ops", "shout", [sink, "hi"])   # must not raise ReplayError
+    assert _lines(sink) == ["announce:hi"]
+    assert not first.is_open, "the replaced log should have been closed"
+
+
+@needs_cordis
+def test_a_closed_wal_reads_as_absent_never_as_a_write_target(tmp_path):
+    """Failing DURING a spend is the worst failure mode available: the gate has
+    already decided and the effect is in flight. A closed log is not a durable
+    sink, so `_approval_wal` answers None rather than handing back something
+    whose next write raises."""
+    session = _gated_session(tmp_path)
+    assert session._approval_wal() is not None
+    session.recorder.wal.close()
+    assert session._approval_wal() is None

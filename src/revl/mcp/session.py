@@ -605,8 +605,9 @@ class Session:
         `clear_session_owner()` in a finally that covers the load."""
         runtime_mod = self._driver.runtime
         prev = self._owner
-        self._owner = runtime_mod.SessionOwner(
-            wal_getter=lambda: self.recorder.wal if self.recorder else None)
+        # through `_approval_wal`, so the owner sees an OPEN log or none — a
+        # closed one must never be written into from inside a crossing.
+        self._owner = runtime_mod.SessionOwner(wal_getter=self._approval_wal)
         # item 247 second-pass (F2, data loss): a hot-swap disposes the
         # PREDECESSOR generation (`swap`/`_abort_swap` run `_dispose_all` just
         # above) while the predecessor owner's verdict is still pending, so those
@@ -659,14 +660,13 @@ class Session:
         # opens it); a typed-approval composition needs it open BEFORE the
         # activation body's crossing, so the `approval-consumed`/`approval-emission`
         # pair is written and the audit can join them on `requestId`.
-        if self.recorder is not None and self.recorder.wal is None:
-            from ..wal import default_wal_path  # noqa: PLC0415
-            # item 413: default the approval WAL into a durable, owner-only
-            # per-user state directory, not the reboot-wiped/world-traversable
-            # tempdir. "The gate's authority is the WAL": it must outlive a
-            # reboot and stay unreadable to other local accounts.
-            path = self._wal_path or default_wal_path(self._session_id)
-            self.recorder.open_wal(path, self._generation)
+        #
+        # item 413 rides in `_ensure_wal_open`: the approval WAL defaults into a
+        # durable, owner-only per-user state directory, not the reboot-wiped/
+        # world-traversable tempdir. "The gate's authority is the WAL" — it must
+        # outlive a reboot and stay unreadable to other local accounts. Idempotent,
+        # so a policy session whose log `load` already opened is untouched.
+        self._ensure_wal_open()
 
     def grant_language_approval(self, capability: str, component: str,
                                 fields: dict | None = None,
@@ -1946,12 +1946,23 @@ class Session:
 
     def _ensure_wal_open(self) -> None:
         """Open this session's durable WAL if none is open (item 250): the fork
-        bracket (`fork-begin`/`fork-complete`/`fork-frozen`) must be durable, and
-        the MCP session otherwise leaves the WAL closed for a non-approval
-        composition."""
-        if self.recorder is not None and self.recorder.wal is None:
+        bracket (`fork-begin`/`fork-complete`/`fork-frozen`) must be durable, the
+        approval spend must be durable (item 246, Decision 2), and the MCP
+        session otherwise leaves the WAL closed.
+
+        "None is open" includes a WAL object whose handle was closed — a closed
+        log is not a durable sink. Only ever called on a LIVE session (load, and
+        `fork_confirm`); the terminal closers (`_commit_wal`, `_close_wal`) are
+        each followed by `_reset`, so this never re-opens past an
+        `activation-complete` marker. `Recorder.open_wal` rebinds the live
+        timelines, so a log opened here actually receives their step records."""
+        if self.recorder is None:
+            return
+        wal = self.recorder.wal
+        if wal is None or not getattr(wal, "is_open", True):
             from ..wal import default_wal_path  # noqa: PLC0415
-            path = self._wal_path or default_wal_path(self._session_id)
+            path = (getattr(wal, "path", None) if wal is not None else None) \
+                or self._wal_path or default_wal_path(self._session_id)
             self.recorder.open_wal(path, self._generation)
 
     def fork_confirm(self, fork_hash: str) -> dict:
@@ -2656,10 +2667,24 @@ class Session:
                 self._cache_inval_tokens.add(token)
 
     def _approval_wal(self):
-        """The session WAL, when recording (an enabled policy requires it). None
-        otherwise — the in-memory ledger still binds, but a policy load without
-        recording is refused up front, so this is None only with the policy off."""
-        return self.recorder.wal if self.recorder is not None else None
+        """The session's OPEN WAL, when recording (an enabled policy requires
+        one, and `load` now opens it). None otherwise — the in-memory ledger
+        still binds, but a policy load without recording is refused up front, so
+        during a live policy session this is never None.
+
+        A CLOSED log answers None too. `commit_confirm` stamps
+        `activation-complete` and closes (`_commit_wal`) and `abort` closes
+        (`_close_wal`); both are immediately followed by `_reset`, so no crossing
+        can follow and nothing is left unrecorded — but `self.recorder` survives
+        the reset, so without this check a stray later write would append past a
+        terminal marker or raise `ReplayError` from inside a consume. Failing
+        during a spend is the worst failure mode available: the gate has already
+        decided and the effect is in flight. A closed log is not a durable sink,
+        so it reads as absent."""
+        wal = self.recorder.wal if self.recorder is not None else None
+        if wal is None or not getattr(wal, "is_open", True):
+            return None
+        return wal
 
     def _operator_token(self) -> str:
         """The bound operator identity (item 55) attributed to a grant, so the

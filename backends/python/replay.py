@@ -1327,10 +1327,31 @@ class Recorder:
 
     def open_wal(self, path: str, generation: Optional[int] = None) -> "WriteAheadLog":
         """Open a durable write-ahead log; every step recorded from now on is
-        appended to it as it commits."""
+        appended to it as it commits.
+
+        A timeline binds the WAL at ACTIVATION (`_wrap_apply` attaches
+        `recorder.wal` as it builds the timeline), so opening a log after a
+        component is already live must REBIND every live timeline onto it. Two
+        defects live in not doing that:
+
+          * a log opened AFTER activation (item 250's `fork_confirm`, a policy
+            session's approval log) received no step records at all — the
+            timelines were built when `recorder.wal` was still None, so
+            `_wal_append` was a silent no-op and the log was durable in name
+            only;
+          * REPLACING a log left every live timeline bound to the one just
+            CLOSED, so the next committed step raised "write-ahead log is not
+            open" from inside the crossing — a failure after the gate had
+            decided, with the effect already in flight, which is the worst place
+            to discover it.
+
+        This is the single point where `self.wal` changes, so rebinding here is
+        what keeps every caller from having to remember."""
         if self.wal is not None:  # a prior generation's log (e.g. --watch reload)
             self.wal.close()
         self.wal = WriteAheadLog(path, self._ir, generation).open()
+        for timeline in self.timelines.values():
+            timeline.attach_wal(self.wal, self._ir)
         return self.wal
 
     def commit_wal(self, components: Optional[list] = None) -> None:
@@ -1634,6 +1655,13 @@ class WriteAheadLog:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    @property
+    def is_open(self) -> bool:
+        """Whether this log can still be appended to. A closed log is not a
+        durable sink, so a caller holding one must treat it as absent rather
+        than write into it and take `ReplayError` at the crossing."""
+        return self._handle is not None
 
     def close(self) -> None:
         if self._handle is not None:
