@@ -4,6 +4,7 @@ package timer
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 
 	stc "github.com/0xdenny218/stc-go"
@@ -136,8 +137,10 @@ func (m *Map[V]) Get(k string) (V, bool) {
 // as method calls on this object. `Size` is the entry count as the tier's
 // revl Int (int64, matching the service-method return type); `Keys`
 // yields the keys in ascending canonical Str order (UTF-8 byte lexicographic —
-// go string < is exactly code-point order, matching sort.Strings; the inline
-// insertion sort keeps it import-free, as revlMapKeys does). Both are
+// go string < is exactly code-point order, and slices.Sort on []string orders
+// by <, so the order is identical to the insertion sort this replaced, as it
+// is in revlMapKeys). keys() IS the Map iteration surface, so this sits on
+// every map traversal: O(n log n), not O(n^2) (item 434 (h)). Both are
 // read-only queries, no host trace — like Get.
 func (m *Map[V]) Size() int64 {
 	m.mu.Lock()
@@ -151,11 +154,7 @@ func (m *Map[V]) Keys() []string {
 		ks = append(ks, k)
 	}
 	m.mu.Unlock()
-	for i := 1; i < len(ks); i++ {
-		for j := i; j > 0 && ks[j] < ks[j-1]; j-- {
-			ks[j], ks[j-1] = ks[j-1], ks[j]
-		}
-	}
+	slices.Sort(ks)
 	return ks
 }
 
