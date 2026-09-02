@@ -81,3 +81,37 @@ import RevL
 #print axioms RevL.CapCeilings.derivation_non_vacuous
 #print axioms RevL.CapCeilings.derivation_refuses_unnameable
 #print axioms RevL.CapCeilings.derived_ceiling_check_not_subsumed
+
+-- TODO 3 / R4: the abort's residue surface is exactly what the runtime
+-- reports, stated over the small-step semantics that accumulates the log
+-- (soundness + completeness), plus the two runs that make it non-vacuous.
+#print axioms RevL.R4.residue_is_exactly_what_remains
+#print axioms RevL.R4.abort_leaves_no_residue
+#print axioms RevL.R4.residue_complete
+#print axioms RevL.R4.residue_sound
+#print axioms RevL.R4.txn_run
+#print axioms RevL.R4.emit_run
+#print axioms RevL.R4.residue_necessary
+#print axioms RevL.R4.emission_is_not_replayed
+
+-- TODO 3 / A8: WAL commit/abort discharge across a crash cut — L-Raise
+-- reverts, a commit replays nothing, the commit record is the decision
+-- and it converges, and an undeclared inverse is applied at most once
+-- however the crash cuts the fence/apply window. Witnesses included.
+#print axioms RevL.A8.revert_on_failure
+#print axioms RevL.A8.trace_reads_back_as_abort
+#print axioms RevL.A8.committed_transaction_is_retained
+#print axioms RevL.A8.commit_replays_no_inverse
+#print axioms RevL.A8.outcome_trichotomy
+#print axioms RevL.A8.crash_cut_converges
+#print axioms RevL.A8.commit_record_is_the_decision
+#print axioms RevL.A8.approved_decides_the_crash_window
+#print axioms RevL.A8.fence_before_apply_at_every_cut
+#print axioms RevL.A8.at_most_once_across_crash
+#print axioms RevL.A8.declared_idempotent_replay_free
+#print axioms RevL.A8.double_apply_observable
+#print axioms RevL.A8.crash_cut_witness
+#print axioms RevL.A8.commit_witness
+#print axioms RevL.A8.mixed_disposition_admitted
+#print axioms RevL.A8.revert_witness
+#print axioms RevL.A8.revert_witness_restores

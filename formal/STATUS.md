@@ -55,6 +55,31 @@ Rules of the layering (enforced by imports, not by hope):
 | `RevL.CapCeilings.derivation_non_vacuous` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | derived sets carry valuations; `g4_spawn_widens_parameter` refused from the text |
 | `RevL.CapCeilings.derivation_refuses_unnameable` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | a handle emission derives `*` and is not folded into the held key |
 | `RevL.CapCeilings.derived_ceiling_check_not_subsumed` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | both relations still load-bearing once the sets are derived |
+| `RevL.A8.revert_on_failure` | TODO 3 / A8 — L-Raise reverts | **proved** | `propext` | over the small-step semantics: the abort restores the world the body inherited |
+| `RevL.A8.trace_reads_back_as_abort` | TODO 3 / A8 | **proved** | `propext` | no body step writes a session marker, so a crashed run rolls back |
+| `RevL.A8.committed_transaction_is_retained` | TODO 3 / A8 — the central safety claim | **proved** | `propext` | a durable `discharge` record is never rolled back |
+| `RevL.A8.commit_replays_no_inverse` | TODO 3 / A8 | **proved** | `propext` | only the abort verdict replays; a commit touches nothing |
+| `RevL.A8.outcome_trichotomy` | TODO 3 / A8 — "never mixed" | **proved** | none | *definitional*: `Outcome` has three constructors; the content is in the two rows below |
+| `RevL.A8.crash_cut_converges` | TODO 3 / A8 — convergence | **proved** | `propext, Quot.sound` | a decided crash point stays decided at every later cut |
+| `RevL.A8.commit_record_is_the_decision` | TODO 3 / A8 — decision point | **proved** | `propext` | *specification agreement* with `recover`'s if-chain |
+| `RevL.A8.approved_decides_the_crash_window` | TODO 3 / A8 — item 245 D3 | **proved** | `propext` | terminal marker missing: `commit-approved` alone decides |
+| `RevL.A8.fence_before_apply_at_every_cut` | TODO 3 / A8 — item 309 §3a | **proved** | `propext` | crash BETWEEN the durable write and the effect: the window has no interior |
+| `RevL.A8.at_most_once_across_crash` | TODO 3 / A8 — item 309 §3a | **proved** | `propext, Quot.sound` | an undeclared inverse is never applied twice, across abort-then-crash |
+| `RevL.A8.declared_idempotent_replay_free` | TODO 3 / A8 — item 309 §3a | **proved** | `propext` | `recover` is idempotent over the declared subset (`DictWorld` pops) |
+| `RevL.A8.double_apply_observable` | TODO 3 / A8 — non-vacuity | **proved** | none | a non-idempotent inverse's second apply IS observable |
+| `RevL.A8.crash_cut_witness` | TODO 3 / A8 — non-vacuity | **proved** | `propext` | four cuts at one seq: clean abort, abort-then-crash, completed abort, committed |
+| `RevL.A8.commit_witness` | TODO 3 / A8 — non-vacuity | **proved** | `propext` | a witnessed inverse does NOT replay on clean commit (cf. item 418 on G7) |
+| `RevL.A8.mixed_disposition_admitted` | TODO 3 / A8 — non-vacuity | **proved** | `propext` | committed-and-retained beside rolled-back in one verdict, by design |
+| `RevL.A8.revert_witness` | TODO 3 / A8 — non-vacuity | **proved** | none | the step relation genuinely takes the run; the log is its trace |
+| `RevL.A8.revert_witness_restores` | TODO 3 / A8 — non-vacuity | **proved** | `propext` | replaying that trace empties the world again |
+| `RevL.R4.residue_is_exactly_what_remains` | TODO 3 / R4 — soundness + completeness | **proved** | `propext` | after the abort the world is `w₀` plus EXACTLY the reported residue |
+| `RevL.R4.abort_leaves_no_residue` | TODO 3 / R4 — headline | **proved** | `propext` | no boundary crossing ⇒ exact revert and an empty residue surface |
+| `RevL.R4.residue_complete` | TODO 3 / R4 | **proved** | `propext` | every reported seq really is still out (the report is not padding) |
+| `RevL.R4.residue_sound` | TODO 3 / R4 | **proved** | `propext` | nothing the body left behind goes unreported |
+| `RevL.R4.txn_run` | TODO 3 / R4 — non-vacuity | **proved** | none | the semantics takes the witnessed-only run |
+| `RevL.R4.emit_run` | TODO 3 / R4 — non-vacuity | **proved** | none | and the run that crosses the boundary |
+| `RevL.R4.residue_necessary` | TODO 3 / R4 — non-vacuity | **proved** | `propext` | one step apart: one reverts exactly, one leaves seq 2 out and says so |
+| `RevL.R4.emission_is_not_replayed` | TODO 3 / R4 — non-vacuity | **proved** | `propext` | an emission has no inverse; it moves to the residue surface |
 
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
@@ -226,10 +251,58 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    integer-valued capability parameter is compared the way the checker
    compares it. The corpus has no such parameter today, so the two agree
    vacuously; this closes that gap rather than resting on it.
-3. **L3, deliberately deferred**: `Trusted[T]`/`Secret[T]`
-   non-interference and WAL commit/abort discharge. Both extend L0 (taint
-   is a checker feature, not part of the current core; commit/abort is a
-   runtime state-machine refinement). Not near-term work.
+3. **L3**: `Trusted[T]`/`Secret[T]` non-interference (still deferred —
+   taint is a checker feature, not part of the current core) and **WAL
+   commit/abort discharge — the second half is now done**, as R4 and A8
+   in the table above.
+
+   The WAL half needed an operational semantics, which roadmap item 418
+   correctly says L0 does not have, so it was built additively in the L1
+   farm `RevL.Lemmas.WalLemmas` rather than by editing L0: **L0 is
+   untouched**. The farm carries (a) the record set, decision function
+   and roll-back walk of `src/revl/wal.py` + `src/revl/recovery.py`, (b)
+   a `Run`/`RunStep` model in which a crash is a *prefix*, and (c) a
+   five-form small-step relation `SemStep`/`SemSteps` in which taking an
+   effect step is what **appends its record and creates its referent** —
+   so R4/A8 are stated over the effects that actually ran, not over a
+   fabricated log. `Body.done` and `Body.fail` are stuck, and `fail` is
+   L-Raise's failing step (418 step 3's prerequisite; the log also
+   distinguishes a discharged transactional entry from a replayed one,
+   which is 418 step 5's distinction).
+
+   **Crash cuts covered:** between the durable write and the effect
+   (`fence_before_apply_at_every_cut`, quantified over every cut);
+   during teardown (abort-then-crash, fence durable, no `aborted`
+   record); inside the approved-to-discharged window
+   (`approved_decides_the_crash_window`).
+
+   **Crash cut NOT covered, and not claimed:** a *witnessed* mutation
+   logs its descriptor AFTER the forward extern returns `Ok`
+   (`backends/python/emit.py`), so a crash between the mutation and its
+   record leaves a mutation with no record at all. Every theorem here is
+   relative to the durable log, and `SemStep.witnessed` collapses that
+   window into one step. Durability is a floor, not a theorem: `WAFrom`
+   orders the fence append before the apply; that `fsync` reaches the
+   platter is a host obligation.
+
+   **Also not modelled:** the roll-forward window's `flush-residue`
+   surface (R4 is stated for the abort path), cascading abort,
+   compensation drain and escrow, and item 250's frozen fork beyond
+   being a third `Outcome` the commit/abort dichotomy is hypothesised
+   away from.
+
+   **Honest weighting of the rows**, per item 418's finding that a
+   statement can be true and empty: `revert_on_failure`,
+   `residue_is_exactly_what_remains`, `fence_before_apply_at_every_cut`,
+   `at_most_once_across_crash`, `declared_idempotent_replay_free` and
+   `crash_cut_converges` carry real content and each has a witness;
+   `commit_record_is_the_decision` and
+   `approved_decides_the_crash_window` are *specification agreement*
+   with `recover`'s if-chain; `outcome_trichotomy` is *definitional* and
+   is registered only so the weight of the "never a mixed state" claim
+   is visible. "Never mixed" is about the VERDICT: per-seq dispositions
+   are heterogeneous by design, and `mixed_disposition_admitted` pins
+   that reading.
 
 ## Conventions for worker sessions
 
