@@ -455,9 +455,19 @@ fn render_bin(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let left = lr.text
   let right = rr.text
   let c = rr.counter
-  if (op == "==" || op == "===") { return { text: `java.util.Objects.equals(${left}, ${right})`, counter: c } }
-  if (op == "!=" || op == "!==") { return { text: `!java.util.Objects.equals(${left}, ${right})`, counter: c } }
+  // revl has ONE equality and it is structural, EXCEPT that `==` on Float is
+  // IEEE 754 (docs/arithmetic.md), so `NaN != NaN` and `0.0 == -0.0`.
+  // `java.util.Objects.equals` boxes to Double, whose `equals` compares
+  // doubleToLongBits and gets both backwards; `revlEq` restores the rule.
+  if (op == "==" || op == "===") { return { text: `revlEq(${left}, ${right})`, counter: c } }
+  if (op == "!=" || op == "!==") { return { text: `!revlEq(${left}, ${right})`, counter: c } }
   let opnd = node_operands(node)
+  // `Int / Int` is TRUE division and yields `Float` (docs/arithmetic.md), so
+  // both sides widen before the divide. Java's `/` on two `long`s is INTEGER
+  // division, which made `1 / 2` be `0.0` here and `0.5` on every other tier.
+  if (op == "/" && is_int_operand(opnd)) {
+    return { text: `(((double) (${left})) / ((double) (${right})))`, counter: c }
+  }
   if (is_addsubmul(op) && is_int_operand(opnd)) {
     return { text: `Math.${exact_method(op)}(${left}, ${right})`, counter: c }
   }
@@ -1823,6 +1833,84 @@ fn component_needs_frame(comp: Any, wnames: List[Str]) -> Bool {
   return false
 }
 
+// `_uses_equality` / `_emit_eq_helper` (item 433 rider R2): revl has ONE
+// equality and it is structural, EXCEPT that `==` on Float is IEEE 754
+// (docs/arithmetic.md), so `NaN != NaN` and `0.0 == -0.0`. Java diverged from
+// every other tier because `java.util.Objects.equals` boxes to Double, whose
+// `equals` compares doubleToLongBits: it called NaN equal to itself and
+// negative zero unequal to zero. `revlEq` restores the rule, and is emitted
+// only for a document that actually compares (the same gating idiom as
+// `uses_revl_frame`).
+fn is_equality_op(op: Str) -> Bool {
+  return op == "==" || op == "===" || op == "!=" || op == "!=="
+}
+
+fn node_uses_equality(v: Any) -> Bool {
+  let k = value_kind(v)
+  if (k == "record") {
+    if (node_kind(v) == "bin" && is_equality_op(node_op(v))) { return true }
+    for (key of value_keys(v)) {
+      if (node_uses_equality(value_field(v, key))) { return true }
+    }
+    return false
+  }
+  if (k == "list") {
+    for (child of value_list(v)) {
+      if (node_uses_equality(child)) { return true }
+    }
+    return false
+  }
+  return false
+}
+
+fn uses_equality(ir: Any) -> Bool {
+  if (node_uses_equality(value_field(ir, "components"))) { return true }
+  if (node_uses_equality(value_field(ir, "functions"))) { return true }
+  if (node_uses_equality(value_field(ir, "tests"))) { return true }
+  return node_uses_equality(value_field(ir, "externs"))
+}
+
+fn revl_eq_helper() -> List[Str] {
+  return [
+    "// revl equality (docs/syntax-2.0.md §3.4): structural, EXCEPT that",
+    "// `==` on Float is IEEE 754 (docs/arithmetic.md), so NaN != NaN and",
+    "// 0.0 == -0.0. `Objects.equals` boxes to Double, whose `equals`",
+    "// compares doubleToLongBits and gets both of those backwards.",
+    "private static boolean revlEq(Object a, Object b) {",
+    "    if (a instanceof Double && b instanceof Double) {",
+    "        return ((Double) a).doubleValue() == ((Double) b).doubleValue();",
+    "    }",
+    "    if (a instanceof java.util.List<?> && b instanceof java.util.List<?>) {",
+    "        java.util.List<?> xs = (java.util.List<?>) a;",
+    "        java.util.List<?> ys = (java.util.List<?>) b;",
+    "        if (xs.size() != ys.size()) { return false; }",
+    "        for (int i = 0; i < xs.size(); i++) {",
+    "            if (!revlEq(xs.get(i), ys.get(i))) { return false; }",
+    "        }",
+    "        return true;",
+    "    }",
+    "    if (a instanceof java.util.Map<?, ?> && b instanceof java.util.Map<?, ?>) {",
+    "        java.util.Map<?, ?> xs = (java.util.Map<?, ?>) a;",
+    "        java.util.Map<?, ?> ys = (java.util.Map<?, ?>) b;",
+    "        if (xs.size() != ys.size()) { return false; }",
+    "        for (java.util.Map.Entry<?, ?> e : xs.entrySet()) {",
+    "            if (!ys.containsKey(e.getKey())) { return false; }",
+    "            if (!revlEq(e.getValue(), ys.get(e.getKey()))) { return false; }",
+    "        }",
+    "        return true;",
+    "    }",
+    "    if (a instanceof java.util.Optional<?> && b instanceof java.util.Optional<?>) {",
+    "        java.util.Optional<?> xs = (java.util.Optional<?>) a;",
+    "        java.util.Optional<?> ys = (java.util.Optional<?>) b;",
+    "        if (xs.isPresent() != ys.isPresent()) { return false; }",
+    "        return xs.isEmpty() || revlEq(xs.get(), ys.get());",
+    "    }",
+    "    return java.util.Objects.equals(a, b);",
+    "}",
+    ""
+  ]
+}
+
 // `_uses_revl_frame`: does any component in the document need the two-phase
 // loop — gates emitting the shared RevlFrame/RevlActivation helper once per file.
 fn uses_revl_frame(ir: Any) -> Bool {
@@ -2136,6 +2224,9 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
       if (needs_frame) { cargs = cargs.push("frame") }
       for (l of req_locals) { cargs = cargs.push(l) }
       for (b of bind_names) { cargs = cargs.push(b) }
+      for (f of provider_config_fields(comp)) {
+        cargs = cargs.push(mangle(value_str(value_field(f, "name"))))
+      }
       lines = lines.push(pad.concat(`fx.track(ctx.provide(ServiceKey.of(${svc}.class), new ${struct}(${cargs.join(", ")})));`))
     }
     if (kind == "if") {
@@ -2302,6 +2393,45 @@ fn contains_expr(node: Any) -> Bool {
   return false
 }
 
+// `_reads_config` / `_provider_config_fields` (item 433 rider R3): a `config`
+// node renders as the BARE field name, which resolves in `apply()` because that
+// is a method of `<Comp>Plugin` and the plugin holds the config fields. A
+// provide-method body lives in the separate `<Comp><Key>` provider class, which
+// carried ctx/fx/reqs/binds and no config at all, so `config.prefix` emitted a
+// `prefix` that names nothing and javac rejected the unit. A config read in a
+// provide method therefore forces the modern path, and the modern provider
+// takes the config fields it reads through its constructor.
+fn reads_config(node: Any) -> Bool {
+  let vk = value_kind(node)
+  if (vk == "record") {
+    if (value_str(value_field(node, "kind")) == "config") { return true }
+    for (k of value_keys(node)) {
+      if (reads_config(value_field(node, k))) { return true }
+    }
+    return false
+  }
+  if (vk == "list") {
+    for (item of value_list(node)) {
+      if (reads_config(item)) { return true }
+    }
+    return false
+  }
+  return false
+}
+
+fn provider_config_fields(comp: Any) -> List[Any] {
+  let cfg = value_list(value_field(comp, "config"))
+  if (cfg.length() == 0) { return [] }
+  for (step of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(step, "step")) == "provide") {
+      for (method of value_list(value_field(step, "methods"))) {
+        if (reads_config(value_field(method, "body"))) { return cfg }
+      }
+    }
+  }
+  return []
+}
+
 // `modern_supported`: the SLICE-3/4/5 subset gate. Every body step must be one
 // this slice can emit: a `provide` (each method step `return`/`effect`/`emit`), a
 // host `let-effect` bind (item 238 — a `host` acquisition only, no spawn/record/
@@ -2357,6 +2487,9 @@ fn step_forces_modern(step: Any) -> Bool {
       for (mstmt of value_list(value_field(method, "body"))) {
         if (value_str(value_field(mstmt, "step")) != "return") { return true }
         if (contains_expr(value_field(mstmt, "expr"))) { return true }
+        // A `config` read is v1-expressible in the activation body but not in
+        // a provide method (see `reads_config`).
+        if (reads_config(value_field(mstmt, "expr"))) { return true }
       }
     }
   }
@@ -2459,6 +2592,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   // transactional (witnessed) or compensation entry needs the RevlFrame two-
   // phase loop; a bracket-only component keeps emitting exactly as before.
   let needs_frame = component_needs_frame(comp, wnames)
+  let provider_cfg = provider_config_fields(comp)
   var req_locals = []
   if (!value_is_null(reqs_m)) { req_locals = value_keys(reqs_m) }
   let bind_names = binds(comp)
@@ -2492,6 +2626,11 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     for (b of bind_names) {
       out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${b};`)
     }
+    // A provide method that reads `config.<f>` needs the field HERE, not only
+    // on the plugin (see `provider_config_fields`).
+    for (f of provider_cfg) {
+      out = out.push(`    private final ${java_v3_type(value_field(f, "type"), false)} ${mangle(value_str(value_field(f, "name")))};`)
+    }
     var cparams = ["Context ctx", "Context.EffectScope fx"]
     if (needs_frame) { cparams = cparams.push("RevlFrame frame") }
     for (local of req_locals) {
@@ -2499,6 +2638,9 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     }
     for (b of bind_names) {
       cparams = cparams.push(`${bind_type(comp, b, base_ctx, map_values)} ${b}`)
+    }
+    for (f of provider_cfg) {
+      cparams = cparams.push(`${java_v3_type(value_field(f, "type"), false)} ${mangle(value_str(value_field(f, "name")))}`)
     }
     out = out.push(`    ${struct}(${cparams.join(", ")}) {`)
     out = out.push("        this.ctx = ctx;")
@@ -2509,6 +2651,10 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     }
     for (b of bind_names) {
       out = out.push(`        this.${b} = ${b};`)
+    }
+    for (f of provider_cfg) {
+      let cfn = mangle(value_str(value_field(f, "name")))
+      out = out.push(`        this.${cfn} = ${cfn};`)
     }
     out = out.push("    }")
     let svc_methods = value_field(value_field(services, srv), "methods")
@@ -2726,6 +2872,14 @@ pub fn emit_src(ir: Any) -> Str {
   // ftoa, checked-div, externs and spawn remain DEFERRED.
   for (l of emit_host_stubs(ir)) {
     if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+  }
+  // `revlEq` sits where the reference puts it: after the host stubs, ahead of
+  // the (deferred) stdlib block, so `==` in a function or a component body has
+  // it in scope.
+  if (uses_equality(ir)) {
+    for (l of revl_eq_helper()) {
+      if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+    }
   }
   if (functions.length() > 0) {
     for (l of emit_v3_functions(functions, ctx)) {
