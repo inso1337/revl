@@ -49,9 +49,9 @@ export const Supervisor = {
     const $revl_frame = new Frame(ctx, "Supervisor")
     ctx.effect(function* () {
       const w1 = spawn(ctx, Worker, {"seed": 7n}, ["counter"])
-      yield $revl_frame.bracket({ key: "w1", method: "undo", args: [], site: "Supervisor.body:w1" }, "dispose", () => w1.dispose())
+      yield $revl_frame.bracket({ key: "w1", method: "spawn", args: [], site: "Supervisor.body:w1" }, "dispose", () => w1.dispose())
       const w2 = spawn(ctx, Worker, {"seed": 9n}, ["counter"])
-      yield $revl_frame.bracket({ key: "w2", method: "undo", args: [], site: "Supervisor.body:w2" }, "dispose", () => w2.dispose())
+      yield $revl_frame.bracket({ key: "w2", method: "spawn", args: [], site: "Supervisor.body:w2" }, "dispose", () => w2.dispose())
       yield ctx.provide("ctl", {
         read_a() {
           return w1.get("counter").value()
