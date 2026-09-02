@@ -165,21 +165,25 @@ again?* (items 309 and 440):
 | register | what makes a re-issue safe | recovery does |
 |---|---|---|
 | `read` (`undo pure`) | the call changes nothing, so there is no outcome to be ambiguous about | re-dispatches on every run, spends no fence, never asks an operator |
-| `keyed` / `shape-proven` | the remote dedups on a stable key carried in the descriptor | re-dispatches freely; a duplicate is the remote's dedup CONTRACT, never a confirmed fact |
+| `keyed` (`idempotent(key: p)`) | the remote dedups on a stable key carried in the descriptor | re-dispatches freely; a duplicate is the remote's dedup CONTRACT, never a confirmed fact |
 | `declared` (`undo idempotent`, bare `idempotent`) | the author's claim, machine-checked for shape only | replays an inverse freely; re-issues an owed emission only under the operator's explicit knob, once, fenced |
 | absent | nothing is known | one fenced at-most-once attempt, then `outcome: "unknown"` for a human |
 
-`shape-proven` is a tier the order accepts and **nothing produces yet**. It is
-designed as a syntactic check over a restore-to-recorded-value inverse BODY
-(design 309 §2), and revl has no such body to read: every extern carries a
-`@backend` host body, so an inverse is G8-opaque by construction, and
-`stdlib/fs.rvl`'s inverses are `@py`. `lower.py::_idempotent_register` therefore
-returns `declared` for every native `undo idempotent`, which is the fail-closed
-direction; the row above says what recovery WILL do if the tier ever becomes
-reachable, not what any shipped declaration earns today. The one derivation that
-must not be taken to reach it is spelled out in the paragraph below, because it
-is the same trap: `stdlib/fs.rvl`'s `restore`/`unrm`/`rmdir_if_empty` are all
-`extern pure fn` and all unlink or rename real files.
+The register set is exactly these three. A fourth name, `shape-proven`, used to
+sit beside `keyed` in this table for a check that was never built; item 207
+removed it, and `requires register shape-proven` is now a parse error naming
+`strong`. It was proposed as a syntactic check over a restore-to-recorded-value
+inverse BODY (design 309 §2), and revl has no such body to read: every extern
+carries a `@backend` host body, so an inverse is G8-opaque by construction, and
+`stdlib/fs.rvl`'s inverses are `@py`. It could also never have been graded by
+anything that read the table: its provenance is an INVERSE, and every set that
+accepted it — `REDISPATCH_FREE`, the audit's `owed-emission` branch, the Temporal
+backend's retry classes — grades a forward deferred EMISSION, which cannot carry
+an inverse register. `docs/design/207-checkable-extern-body.md` has the walk.
+
+That leaves a real gap, and §4d says how to write around it: a local MUTATING
+inverse cannot reach a strong register, because `keyed` is emission-only and
+`read` requires the inverse to change nothing.
 
 The `read` tier is DECLARED, not derived. revl's `pure` extern *classification*
 means "not acquire/emission/witnessed" and is checked for shape only, and shipped
@@ -205,9 +209,8 @@ recovery may re-issue owed emissions
 recovery may re-issue owed emissions (strength: declared)
 ```
 
-The bare rule admits only the by-construction registers (`read`, `keyed`,
-`shape-proven`); `(strength: declared)` additionally accepts the author's
-unverified claim. An owed emission with **no** register is never auto-fired under
+The bare rule admits only the by-construction registers (`read`, `keyed`);
+`(strength: declared)` additionally accepts the author's unverified claim. An owed emission with **no** register is never auto-fired under
 any setting, because whether its pre-crash flush landed cannot be decided. A
 `declared` re-issue is fenced before it fires (consume-before-fire, exactly like
 item 309 §3a's `replay-fence`), so a crash between the fence and the fire leaves
@@ -233,6 +236,34 @@ before activation; each effect is appended as it commits; a clean activation
 stamps the marker.
 
 ---
+
+## 4d. "Verified, not merely claimed", for a local mutating inverse
+
+An operator who writes `requires idempotent-teardown(strength: strong)` means
+"auto-replay only what revl checked, not what the author asserted". A local
+mutating inverse cannot satisfy that floor and never will: `keyed` is
+emission-only, and `read` requires the inverse to change nothing, so
+`stdlib/fs.rvl`'s `restore`, `unrm`, `unmove` and `rmdir_if_empty` are
+permanently `declared`.
+
+The sentence is still writable, and the rule that writes it produces STRONGER
+evidence than a body-shape register could. Pair the register floor with an
+evidence floor:
+
+```
+capability fs requires register declared
+capability fs requires evidence [inverse-roundtrip pass, attestation valid]
+```
+
+The register says the claim was MADE. `inverse-roundtrip` says it was TESTED:
+item 309's value-aware fault sweep runs the double-undo against the real `@py`
+body and diverges on the second undo when the inverse is delta-shaped or
+refund-shaped rather than restore-to-recorded-value, which catches a lying `undo
+idempotent`. `attestation valid` roots the dossier, so the evidence is the
+operator's fact rather than the publisher's (290 §6.2). A syntactic rule over a
+declared body shape could not do this: it grades declared leaf algebras rather
+than behaviour, and its own "no reads of current state" condition rejects all
+four fs inverses, each of which branches on `lexists_confined`.
 
 ## 5. Roll forward vs roll back
 
