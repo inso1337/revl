@@ -45,6 +45,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -357,6 +358,69 @@ def test_stale_evidence_is_refused_even_with_a_valid_signature(staged):
     assert receipt["verdict"] == deploy.REFUSE
     assert receipt["link"] == deploy.LINK_EVIDENCE
     assert attest.verify_attestation(old, SIGNER_KEY)[0] is True  # authentic, stale
+
+
+# ------------------------------- freshness is bounded at BOTH ends (428 F7)
+#
+# The timestamp is signer-chosen and `attest._now_iso` passes an ISO string
+# straight through, so post-dating is a one-argument change. A TTL bounds only
+# the past: a 2099 stamp has a NEGATIVE age, which is not greater than any TTL.
+
+
+def test_a_post_dated_attestation_is_refused(staged):
+    bundle, _att = staged
+    future = deploy.make_deploy_attestation(bundle, SIGNER_KEY,
+                                            now="2099-01-01T00:00:00+00:00")
+    assert attest.verify_attestation(future, SIGNER_KEY)[0] is True
+    receipt = deploy.admit(bundle, trust=_trust(evidence_ttl_seconds=3600.0),
+                           attestation=future)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_EVIDENCE
+    assert "FUTURE" in receipt["reason"]
+
+
+def test_clock_skew_inside_the_tolerance_still_admits(staged):
+    """The future bound is a tolerance for two clocks disagreeing, not a window
+    the signer gets to choose, so it is small and it is the receiver's."""
+    bundle, _att = staged
+    trust = _trust(evidence_ttl_seconds=3600.0)
+    stamp = datetime(2001, 9, 9, 1, 46, 40, tzinfo=timezone.utc)
+    signed_at = stamp.timestamp()
+    att = deploy.make_deploy_attestation(bundle, SIGNER_KEY, now=stamp)
+    inside = signed_at - (trust.clock_skew_seconds / 2)
+    assert deploy.admit(bundle, trust=trust, attestation=att,
+                        now=inside)["verdict"] == deploy.ACCEPT
+    outside = signed_at - (trust.clock_skew_seconds + 60)
+    receipt = deploy.admit(bundle, trust=trust, attestation=att, now=outside)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_EVIDENCE
+
+
+def test_the_receiver_may_anchor_freshness_on_its_own_instant(staged):
+    """`not_before` is the anchor the receiver SUPPLIES rather than reads off
+    the record: evidence from before the last state it accepted is refused,
+    whatever the signer stamped and whatever the TTL allows."""
+    bundle, _att = staged
+    stamp = datetime(2001, 9, 9, 1, 46, 40, tzinfo=timezone.utc)
+    signed_at = stamp.timestamp()
+    att = deploy.make_deploy_attestation(bundle, SIGNER_KEY, now=stamp)
+    assert deploy.admit(bundle, trust=_trust(not_before=signed_at - 1000),
+                        attestation=att, now=signed_at + 100
+                        )["verdict"] == deploy.ACCEPT
+    receipt = deploy.admit(bundle, trust=_trust(not_before=signed_at + 500),
+                           attestation=att, now=signed_at + 600)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_EVIDENCE
+    assert "predates this receiver's own freshness anchor" in receipt["reason"]
+
+
+def test_an_unreadable_freshness_anchor_fails_closed(staged):
+    bundle, att = staged
+    receipt = deploy.admit(bundle, trust=_trust(not_before="not an instant"),
+                           attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_EVIDENCE
+    assert "refused fail-closed" in receipt["reason"]
 
 
 def test_cross_domain_deploy_on_a_symmetric_signature_is_refused(staged):

@@ -413,6 +413,15 @@ RECEIPT_VERSION = "1.0"
 #: entirely different things ("I admitted this" vs "this was admitted").
 RECEIPT_DOMAIN = b"revl.deploy.receipt/v1\x00"
 
+#: How far into the RECEIVER's future a signed timestamp may sit and still be
+#: read as a real instant rather than a post-date. Freshness was anchored on a
+#: signer-chosen field with a lower bound only, so a 2019 stamp was refused as
+#: stale and a 2099 stamp ACCEPTED — its age is negative, and nothing compared
+#: a negative age against anything (roadmap 428 F7). The bound exists because
+#: two clocks are never identical, not because a signer may choose its own
+#: window: it is a tolerance, and it is the receiver's, not the record's.
+DEFAULT_CLOCK_SKEW_SECONDS = 300.0
+
 
 def _receipt_mac(body: Mapping, host_key: bytes) -> str:
     """The receipt MAC: domain-tagged HMAC-SHA256 over the canonical body bytes
@@ -451,6 +460,17 @@ class TrustStore:
     False and HMAC is honest; the flag is the place the Ed25519 prerequisite
     lands when Slice 2 crosses a domain.
 
+    `clock_skew_seconds` and `not_before` are the receiver's half of freshness.
+    `evidence_ttl_seconds` alone bounded the PAST only, so post-dating an
+    attestation walked straight past it: the age came out negative and nothing
+    compared a negative age with anything. `clock_skew_seconds` is how far into
+    this receiver's future a signed instant may sit before it is read as a
+    post-date rather than as two clocks disagreeing. `not_before` is an
+    independent anchor the receiver SUPPLIES rather than reads off the record
+    (a unix timestamp or an ISO-8601 string, typically the instant of the last
+    deploy it accepted): evidence older than it is refused whatever its TTL
+    says, which is what makes replaying an old-but-in-window attestation fail.
+
     `require_gauntlet` demands that the signed chain actually carry item-31
     gauntlet evidence. Off (the default) a bundle built where the gauntlet
     machinery was unavailable still admits, since `build_bundle` degrades
@@ -477,6 +497,8 @@ class TrustStore:
     cross_domain: bool = False
     recheck_source: bool = False
     require_gauntlet: bool = False
+    clock_skew_seconds: float = DEFAULT_CLOCK_SKEW_SECONDS
+    not_before: Optional[float | str] = None
 
     def key_for(self, kid: str | None) -> Optional[bytes]:
         if not isinstance(kid, str):
@@ -805,7 +827,15 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
                     f"receiver admitted reaches {sorted(wanted)}")
 
     # (h) freshness: a signature proves authenticity, never current validity.
-    if trust.evidence_ttl_seconds is not None:
+    #
+    # The timestamp is SIGNER-CHOSEN and `attest._now_iso` passes an ISO string
+    # straight through, so post-dating is a one-argument change. A TTL alone
+    # bounds only the past: a 2099 stamp gave a NEGATIVE age, which is not
+    # greater than any TTL, so it was accepted while a 2019 stamp was refused.
+    # Both ends are bounded here, and both bounds are the RECEIVER's — its own
+    # clock, its own skew tolerance, its own `not_before` anchor.
+    if (trust.evidence_ttl_seconds is not None
+            or trust.not_before is not None):
         signed_at = _parse_timestamp(attestation.get("timestamp"))
         if signed_at is None:
             return _refusal(LINK_EVIDENCE,
@@ -813,12 +843,38 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
                             "its freshness cannot be checked; refused fail-closed")
         current = now if isinstance(now, (int, float)) else time.time()
         age = current - signed_at
-        if age > trust.evidence_ttl_seconds:
+        skew = max(float(trust.clock_skew_seconds), 0.0)
+        if age < -skew:
+            return _refusal(
+                LINK_EVIDENCE,
+                f"the attestation is dated {-age:.0f}s in this receiver's "
+                f"FUTURE, past its {skew:.0f}s clock-skew tolerance: the "
+                "timestamp is signer-chosen, so a post-dated record would "
+                "otherwise stay 'fresh' indefinitely and outlive any TTL")
+        if (trust.evidence_ttl_seconds is not None
+                and age > trust.evidence_ttl_seconds):
             return _refusal(
                 LINK_EVIDENCE,
                 f"the attestation is {age:.0f}s old, past this receiver's "
                 f"{trust.evidence_ttl_seconds:.0f}s freshness TTL; a valid "
                 "signature over stale evidence is still refused")
+        if trust.not_before is not None:
+            floor = (trust.not_before if isinstance(trust.not_before, (int, float))
+                     else _parse_timestamp(trust.not_before))
+            if floor is None:
+                return _refusal(
+                    LINK_EVIDENCE,
+                    "this receiver's `not_before` anchor is not a readable "
+                    f"instant ({trust.not_before!r}), so freshness cannot be "
+                    "checked against it; refused fail-closed rather than "
+                    "checked against no anchor")
+            if signed_at < float(floor):
+                return _refusal(
+                    LINK_EVIDENCE,
+                    "the attestation predates this receiver's own freshness "
+                    "anchor, so it is evidence from before the last state this "
+                    "receiver accepted; a replay of in-window evidence is "
+                    "still a replay")
 
     receipt = {
         "kind": RECEIPT_KIND,
