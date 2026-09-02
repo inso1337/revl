@@ -87,6 +87,19 @@
 //! the self-host emitters still carry `@py`-only helper externs and do not emit
 //! to rust at all.
 //!
+//! # The navigation surface
+//!
+//! [`symbols`] is a SECOND, independent surface over the same front end: the
+//! declarations a document contains and the line each sits on, which is what an
+//! editor needs for go-to-definition and hover (roadmap item 336 slice 2). It
+//! issues no verdicts and says nothing about whether a program may run — a
+//! refused program has declarations to navigate like any other — so it is
+//! versioned separately from the admission surface above, by
+//! [`SYMBOLS_API_VERSION`] rather than by [`GATE_API_VERSION`] (which is held in
+//! lockstep with `revl.gate` on py, and `revl.gate` has no navigation surface).
+//! Its own fail-closed rule is the mirror of this one: it answers only what it
+//! can answer EXACTLY, and every uncertainty is an absence rather than a guess.
+//!
 //! # Layer 2 is reserved, not implemented
 //!
 //! See [`session`]. That runtime half is roadmap item 334's deliverable; the
@@ -112,6 +125,7 @@ mod selfhost;
 
 mod frontier;
 pub mod session;
+pub mod symbols;
 
 pub use frontier::{FRONTIER_ID, MAX_SOURCE_BYTES};
 
@@ -123,6 +137,12 @@ pub const GATE_API_VERSION: &str = "1.0.0";
 
 /// The revl language/package version this gate's refusals are drawn from.
 pub const LANGUAGE_VERSION: &str = "2.0.0";
+
+/// The semver of the NAVIGATION surface ([`symbols`]), versioned on its own.
+/// It is not part of the admission surface [`GATE_API_VERSION`] names and has
+/// no twin on py, so the two move independently; the self-host pin both are
+/// drawn from is [`FRONTIER_ID`].
+pub const SYMBOLS_API_VERSION: &str = "0.1.0";
 
 /// What this gate actually decides, in one line. The reference type layer is
 /// deliberately absent — see the crate docs, "This gate issues no admissions".

@@ -106,6 +106,12 @@ REJECTIONS = {
     # gate (test_fmt) cannot round-trip a `#` file. Its redirect is proven by
     # test_foreign_hash_comment_redirects below instead.
     "a1_await_in_method.rvl": "`await` is only allowed in a component body",
+    # item 445 follow-up: a call whose callee is a bare name lowers to the same
+    # `var` node whether the name is a local or a module `fn`, and the tiers do
+    # not resolve it the same way (a Java local does not shadow a static
+    # method). A body that both BINDS such a name and CALLS it is refused; a
+    # binding that merely shares the name is not.
+    "shadowed_module_fn_call.rvl": "`helper` is bound here and called in this body",
     # roadmap item 80: a sync provide method that reaches an `async` extern is
     # refused with the twin of the emission-propagation diagnostic (async-
     # extern.md §3); declare the service operation `async fn` to admit it.

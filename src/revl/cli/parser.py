@@ -593,21 +593,23 @@ def build_parser() -> argparse.ArgumentParser:
                                 "(today's behaviour)")
     # roadmap 425 F3 / 427 F5: whether an approved crossing's CALLER-SUPPLIED
     # resource value (`host=`, `path=`, `table=`) is written into the durable
-    # cross-session approval WAL. Defaults to `bound` — item 251's N1, and what
-    # shipped; `withheld` closes the durable disclosure and gives up the
-    # distiller's fold over caller-argument targets. The ticket discloses that a
-    # target is caller-supplied either way, so the operator's yes is informed.
-    mcp_serve.add_argument("--approval-record-values", default="bound",
+    # cross-session approval WAL. Defaults to `withheld` — an operator who never
+    # reads this flag does not silently persist somebody else's values in
+    # plaintext; `bound` opts into recording them, which is what lets the
+    # distiller fold a series of approvals into a rule that NAMES the target
+    # (item 251's N1). The ticket discloses that a target is caller-supplied
+    # under both, so the operator's yes is informed either way.
+    mcp_serve.add_argument("--approval-record-values", default="withheld",
                            choices=("bound", "withheld"),
                            help="whether an approved class-(c) crossing's "
                                 "caller-supplied resource value is recorded in "
-                                "the durable approval log. `bound` (default) "
-                                "records it, so a distilled rule can name the "
-                                "target (item 251 N1). `withheld` records it as "
-                                "UNRECORDED, keeping caller values out of the "
-                                "cross-session WAL at the cost of that fold. An "
-                                "author-written literal target is recorded under "
-                                "both")
+                                "the durable approval log. `withheld` (default) "
+                                "records it as UNRECORDED, keeping caller values "
+                                "out of the cross-session WAL; the cost is that "
+                                "such approvals no longer fold into a distilled "
+                                "rule. `bound` records it verbatim so a rule can "
+                                "name the target (item 251 N1). An author-written "
+                                "literal target is recorded under both")
     # authoring trust: whether the AGENT driving this server may author host
     # code, and what filesystem it may name. Defaults CLOSED — an inline `@py`
     # body sent to revl_load/check/swap used to compile and RUN as host Python
@@ -826,6 +828,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--record", action="store_true",
                      help="record the effect accumulator so the REPL can step "
                           "backwards over it (`:timeline`, `:back k`) — see docs/replay.md")
+    run.add_argument("--estop-latch", default=None, metavar="FILE",
+                     help="watch FILE for an operator E-Stop (item 443). While "
+                          "armed, every boundary-crossing seam checks the latch, "
+                          "so `revl estop --latch FILE` from another terminal "
+                          "halts this run immediately — no unwind, an honest "
+                          "in-flight inventory instead. Equivalent to the "
+                          "REVL_ESTOP_LATCH environment variable")
     run.add_argument("--wal", default=None, metavar="FILE",
                      help="persist the effect accumulator as a durable write-ahead "
                           "log (implies --record). On restart, `revl recover --wal "
@@ -884,6 +893,40 @@ def build_parser() -> argparse.ArgumentParser:
                               "the item-440 re-issue seam (off by default)")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
 
+    estop = sub.add_parser(
+        "estop",
+        help="E-STOP (item 443): the operator's emergency halt. Arm the latch a "
+             "running composition watches, so it stops dispatching NEW boundary "
+             "crossings immediately and reports what was in flight — instead of "
+             "the graceful two-phase LIFO unwind every other stop performs "
+             "(docs/design/443-estop.md)")
+    estop.add_argument("--latch", default=None, metavar="FILE",
+                       help="the latch file the running process watches "
+                            "(`revl run --estop-latch FILE`, or the ambient "
+                            "REVL_ESTOP_LATCH). Required unless --wal is given, "
+                            "which derives FILE.estop")
+    estop.add_argument("--wal", default=None, metavar="FILE",
+                       help="the running session's write-ahead log. Derives the "
+                            "latch as FILE.estop when --latch is omitted, and "
+                            "names the log `revl recover` reconciles from")
+    estop.add_argument("--reason", default="operator halt", metavar="TEXT",
+                       help="why the button was hit. Carried into the halt "
+                            "record and into every residue record it produces")
+    estop.add_argument("--operator", default=None, metavar="TOKEN",
+                       help="the operator token accountable for the halt. An "
+                            "E-Stop is an operator authority (item 55's `estop` "
+                            "verb): it is never something a composition or an "
+                            "agent may invoke on itself")
+    estop.add_argument("--report", action="store_true",
+                       help="read the latch back and print what was halted, "
+                            "WITHOUT arming anything or touching the world")
+    estop.add_argument("--clear", action="store_true",
+                       help="remove the latch so a FRESH process may boot. This "
+                            "is not a resume: the halted instance stays dead and "
+                            "its stranded entries stay owed until `revl recover` "
+                            "reconciles them (item 443, open question 3)")
+    estop.add_argument("--json", action="store_true",
+                       help="machine-readable output")
     branch_cmd = sub.add_parser(
         "branch",
         help="session branch lineage over durable write-ahead logs (item 250): "
