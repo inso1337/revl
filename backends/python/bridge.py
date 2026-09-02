@@ -335,7 +335,13 @@ def _decode_value(value, module):
 def _connect(path: str, attempts: int = 100, delay: float = 0.05) -> socket.socket:
     """Connect to a Unix socket, retrying while the provider comes up. Under
     placement the provider and consumer processes start concurrently, so the
-    socket may not exist yet; retrying makes start order irrelevant."""
+    socket may not exist yet; retrying makes start order irrelevant.
+
+    "Irrelevant" holds for a DAG of processes and NOT for a cycle: `run` wires
+    every proxy before it serves, so two processes that proxy each other both
+    block here and neither ever listens. What makes that unreachable is a
+    plan-time gate, not this loop — `placement.process_cycle_refusal` proves
+    the process graph acyclic before any child is spawned (item 171)."""
     last: OSError | None = None
     for _ in range(attempts):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

@@ -1672,6 +1672,148 @@ def cross_tier_boundary_check(ir: dict, requires: dict, provides: dict,
     return None, lines
 
 
+def process_graph(requires: dict, provides: dict, owner: dict,
+                  remote_keys=()) -> dict[str, set[str]]:
+    """The quotient of the component dependency DAG by the placement partition:
+    one node per process, one edge ``consumer -> host`` per proxied key.
+
+    This is the same relation the spec loop in `run_placement` turns into
+    `spec["proxies"]`: a process proxies every key it requires and does not
+    itself provide, and the proxy's target is the process that owns the key.
+    A key served in-process is not an edge (no proxy, no socket), and neither
+    is a key with no local owner.
+
+    `remote_keys` is excluded deliberately: a `[remotes.<key>]` provider is a
+    *separate composition* on its own placement (item 151), reached by address
+    alone. Its boot order is not this composition's to reason about, and this
+    graph must not pretend to see it.
+    """
+    edges: dict[str, set[str]] = {p: set() for p in requires}
+    for consumer, keys in requires.items():
+        for key in keys:
+            if key in (provides.get(consumer) or {}):
+                continue                      # served locally: no proxy at all
+            if key in remote_keys:
+                continue                      # another composition (item 151)
+            host = owner.get(key)
+            if host is None or host == consumer:
+                continue                      # unprovided: its own refusal
+            edges[consumer].add(host)
+    return edges
+
+
+def _find_process_cycle(edges: dict) -> list[str] | None:
+    """The first cycle in `edges` as ``[n0, n1, ..., n0]``, or None.
+
+    The same coloured DFS `_link` runs over components one level down, walked
+    in sorted order so the reported cycle is deterministic for a given
+    placement rather than dependent on TOML key order.
+    """
+    state: dict[str, int] = {}
+    stack: list[str] = []
+    found: list[str] | None = None
+
+    def visit(node: str) -> bool:
+        nonlocal found
+        state[node] = 1
+        stack.append(node)
+        for succ in sorted(edges.get(node, ())):
+            if state.get(succ) == 1:
+                found = stack[stack.index(succ):] + [succ]
+                return True
+            if state.get(succ, 0) == 0 and visit(succ):
+                return True
+        stack.pop()
+        state[node] = 2
+        return False
+
+    for node in sorted(edges):
+        if state.get(node, 0) == 0 and visit(node):
+            return found
+    return None
+
+
+def process_cycle_refusal(requires: dict, provides: dict, owner: dict,
+                          placed: dict, components: dict,
+                          remote_keys=(), placement_path: str = "") -> str | None:
+    """Refuse a placement whose PROCESS graph has a cycle. Returns a diagnostic
+    naming the cycle and the proxied key that closes each hop, or None.
+
+    G3 proves the COMPONENT graph acyclic. Placement then quotients that graph
+    by a process partition, and **a quotient of a DAG can contain a cycle**:
+    four components in two disjoint chains, split crosswise, give two processes
+    that each require a key the other provides while the component graph stays
+    a pair of disjoint edges. G3 passes and `loadOrder` is produced.
+
+    The boot order is what makes a process edge a *wait* edge.
+    `_process_runner.run` is three steps in this order: (1) wire every proxy
+    for keys provided by other processes, (2) activate this process's own
+    components, (3) serve the keys other processes need. A process therefore
+    connects to all of its providers *before it starts listening*, so on a
+    cycle every process blocks in step 1 and none reaches step 3.
+    `bridge._connect`'s docstring states the assumption this breaks — the retry
+    loop "makes start order irrelevant", which is true of a DAG of processes
+    and false of a cycle. The failure is bounded (100 attempts at 50 ms, then a
+    `ConnectionError`) rather than eternal, so the composition dies at boot
+    instead of wedging; it is still a composition that admits and cannot run.
+
+    This **refuses** rather than warns, and the reason is that the check is
+    exact: the graph is finite, wholly derived from the placement, and there is
+    no approximation anywhere in it, so it has no false positives. Promoting
+    this one shape while a general liveness analysis stays warn-only is the
+    per-shape rule in `docs/design/438-petri-reachability.md` §9, not an
+    exception to it — and §8.1 is this function.
+
+    Two scoping decisions, recorded rather than left implicit:
+
+    * **`remote` seams are excluded** (`process_graph`): a `[remotes.<key>]`
+      provider is a separate composition on its own placement (item 151),
+      reached by address; this graph cannot see it and must not pretend to.
+    * **The check is on the PARTITION, not on the code.** The same components
+      in a different partition are fine, so the refusal names the placement
+      file and the processes, never the components' authors.
+    """
+    edges = process_graph(requires, provides, owner, remote_keys)
+    cycle = _find_process_cycle(edges)
+    if cycle is None:
+        return None
+
+    def _requirers(pname: str, key: str) -> str:
+        names = sorted(c for c, home in placed.items()
+                       if home == pname and key in (components.get(c, {}).get("requires") or {}))
+        return ", ".join(names) or pname
+
+    def _providers(pname: str, key: str) -> str:
+        names = sorted(c for c, home in placed.items()
+                       if home == pname and key in (components.get(c, {}).get("provides") or {}))
+        return ", ".join(names) or pname
+
+    hops: list[str] = []
+    for consumer, host in zip(cycle, cycle[1:]):
+        keys = sorted(k for k in requires.get(consumer) or {}
+                      if k not in (provides.get(consumer) or {})
+                      and k not in remote_keys and owner.get(k) == host)
+        for key in keys[:4]:
+            hops.append(f"  {consumer} proxies `{key}` from {host}  "
+                        f"(required by {_requirers(consumer, key)}, "
+                        f"provided by {_providers(host, key)})")
+        if len(keys) > 4:
+            hops.append(f"  ... and {len(keys) - 4} further key(s) on the same hop")
+
+    where = f" in {placement_path}" if placement_path else ""
+    return (
+        "process cycle: " + " -> ".join(cycle) + "\n"
+        + "\n".join(hops) + "\n"
+        "  a process wires every proxy before it serves, so none of these ever\n"
+        "  listens and each dies on its connect timeout.\n"
+        f"  this is a property of the PARTITION{where}, not of the components:\n"
+        "  the component graph is acyclic (G3 passed) and a quotient of a DAG\n"
+        "  can still have a cycle. `[remotes]` keys are excluded — a remote\n"
+        "  provider is a separate composition on its own placement (item 151).\n"
+        "  fix: co-locate one of the two chains in a single process, or split\n"
+        "  the partition along the component DAG instead of across it.")
+
+
 def _emit_ts_module(ir: dict, tmp: Path) -> str:
     """Emit the cordis-ts module for node processes into backends/typescript/
     _gen/ so its `../runtime.ts` / `cordis` imports resolve.
@@ -2065,6 +2207,21 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                              "port": int(rport), "rtt_ms": rconf.get("rtt_ms"),
                              "server_hostname": str(rconf.get("server_hostname", rhost))}
 
+    # --- the process graph must be acyclic (roadmap item 171,
+    # docs/design/438-petri-reachability.md §5.2/§8.1). G3 proved the COMPONENT
+    # graph acyclic; the partition above quotients that graph, and a quotient of
+    # a DAG can have a cycle. `_process_runner.run` wires every proxy before it
+    # serves, so a cycle of processes is a cycle of boot-time waits and nothing
+    # ever listens. Checked here, once `owner` and `remote_specs` are both known
+    # (a `[remotes]` key is another composition and is excluded), and before any
+    # TLS material is minted or any child is spawned — a `revl plan`-time
+    # refusal rather than five seconds into a boot.
+    problem = process_cycle_refusal(requires, provides, owner, placed, components,
+                                    remote_keys=set(remote_specs),
+                                    placement_path=placement_path)
+    if problem:
+        return abort(problem)
+
     # which processes take part in a network seam (as provider or consumer)?
     network_processes: set[str] = set(addresses)  # a provider serves remotely
     for pname in processes:
@@ -2303,7 +2460,10 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             # runtime). The runner activates independent branches concurrently
             # and serializes only along these edges. Cross-process edges are
             # already resolved as proxies before local activation, so they are
-            # (correctly) absent here. docs/parallel-activation.md.
+            # (correctly) absent here. docs/parallel-activation.md. That
+            # resolution is what makes the PROCESS graph a boot-order wait
+            # relation of its own, which is why `process_cycle_refusal` above
+            # has already proved it acyclic (item 171).
             "depends": local_prereqs(manifest_entries, subset=own),
             "config": own_config,
             "provides": list(provides[pname]),
