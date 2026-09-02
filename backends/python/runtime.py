@@ -303,7 +303,7 @@ def validate_response(value, schema, where: str = "", constructors=None):
 
 
 def validate_retry(make_call, budget: int, schema, where: str = "",
-                   constructors=None):
+                   constructors=None, site: "Optional[str]" = None):
     """Item 257 (Slice 2, §5.2): the read-with-a-cost validation-retry loop.
 
     Fire ``make_call`` — the model completion call, and ONLY it — and validate its
@@ -320,7 +320,13 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
     registered from it, so a re-issue doubles nothing the system executes (§5.3).
     This is keyed on ONE fault kind — the validation fault; a `TransientError` or
     any other host error is NOT retried here (a completion is not idempotent, §5.1)
-    and propagates immediately."""
+    and propagates immediately.
+
+    `site` (item 121 Slice 2) is the emitter's static identity for THIS
+    completion call. Present, a validated response mints the fiber-local
+    value-flow token under it (`revl_note_validated_completion`); absent — every
+    call site the emitter did not analyse — nothing is minted and `producedSeq`
+    honest-degrades to absent."""
     attempt = 0
     started = time.monotonic()
     while True:
@@ -341,11 +347,14 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
         # than by fiber). Off-path for a non-model retry loop only in that
         # nothing reads the entry there.
         _revl_record_model_call(started, attempt + 1, budget + 1, value)
+        # item 121 Slice 2: and mint the value-flow token for this static site,
+        # naming the crossing the recorder just made for the winning attempt.
+        revl_note_validated_completion(site)
         return validated
 
 
 async def validate_retry_async(make_call, budget: int, schema, where: str = "",
-                               constructors=None):
+                               constructors=None, site: "Optional[str]" = None):
     """Item 257 (Slice 2, §5.2): the async colour of :func:`validate_retry`.
 
     ``make_call`` returns a FRESH coroutine per attempt (the emitter passes the
@@ -368,6 +377,7 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
             attempt += 1
             continue
         _revl_record_model_call(started, attempt + 1, budget + 1, result)
+        revl_note_validated_completion(site)
         return validated
 
 
@@ -419,7 +429,9 @@ def revl_reset_run_trace_state() -> None:
     _revl_digest_nonce = None
     _revl_model_calls.set(())
     _revl_recorded_crossing.set(None)
-    _revl_last_validated_completion.set(None)
+    _revl_validated_completions.set(None)
+    _revl_last_emission_index.set(None)
+    _revl_pending_produced_by.set(None)
 
 
 # item 242: the model-hop observations live in THIS fiber, KEYED BY THE CROSSING
@@ -455,25 +467,64 @@ _revl_model_calls: "contextvars.ContextVar[tuple]" = \
 _revl_recorded_crossing: "contextvars.ContextVar[Optional[tuple]]" = \
     contextvars.ContextVar("_revl_recorded_crossing", default=None)
 
-# The fiber-local value-flow token gating `producedSeq` (§2.2, the NEW CRITICAL).
-# (activationId, completionSeq): the last VALIDATED model completion crossing in
-# THIS fiber. A downstream emit in the same fiber back-references it, and the
-# activationId gate rejects a token inherited by a DIFFERENT activation (a child
-# Task copies the parent context), so two live activations of one component never
-# cross-attribute — the edge honest-degrades to absent rather than being guessed.
-_revl_last_validated_completion: "contextvars.ContextVar[Optional[tuple]]" = \
-    contextvars.ContextVar("_revl_last_validated_completion", default=None)
+# ---------------------------------------------------------------------------
+# Slice 2: the value-flow token that gates `producedSeq` (§2.2, the NEW
+# CRITICAL), and the identity bridge it rides on.
+#
+# The token can hold neither a trace seq nor an activation id, because neither
+# exists on this side of the boundary: `_Driver._seq` is private to `run.py` and
+# the activation id is synthesised at step-back time. The one identity that
+# ALREADY crosses is `replay.Step.index` — assigned by the recorder during
+# forward execution and handed to the driver at step-back as `entry["index"]`.
+# So the token holds the completion emission's STEP INDEX, and the driver maps
+# step index -> trace seq as it records the crossings (`run._Driver._replay`).
+#
+# Three fiber-local registers make that work:
+#
+#   `_revl_last_emission_index`   the recorder publishes each crossing's step
+#                                 index here as it records it, so the seam can
+#                                 name the completion crossing it just made;
+#   `_revl_validated_completions` site id -> the step index of the completion
+#                                 that STATIC site last validated in this fiber.
+#                                 Keyed by SITE, not "last completion": with two
+#                                 completions live in one body, "last" would
+#                                 attribute the wrong one;
+#   `_revl_pending_produced_by`   the marker `revl_produced_emit` sets around a
+#                                 downstream crossing the EMITTER proved reads
+#                                 the completion's binding; the recorder consumes
+#                                 it and stamps `detail["producedBy"]`.
+#
+# All three are contextvars, so a child Task copies rather than shares them and
+# two live activations of one component never cross-attribute. The activation
+# check itself is the driver's: a `producedBy` naming a crossing outside the
+# activation being recorded resolves to nothing and the edge is OMITTED.
+# ---------------------------------------------------------------------------
+
+_revl_last_emission_index: "contextvars.ContextVar[Optional[int]]" = \
+    contextvars.ContextVar("_revl_last_emission_index", default=None)
+
+_revl_validated_completions: "contextvars.ContextVar[Optional[dict]]" = \
+    contextvars.ContextVar("_revl_validated_completions", default=None)
+
+_revl_pending_produced_by: "contextvars.ContextVar[Optional[int]]" = \
+    contextvars.ContextVar("_revl_pending_produced_by", default=None)
 
 
-def revl_note_emission_index(component: str, index: int) -> None:
+def revl_note_emission_index(component: "Optional[str]", index: "Optional[int]") -> None:
     """Item 242: publish the crossing being recorded RIGHT NOW in this fiber.
 
     Called by `replay.Timeline.record_emission` as it mints the `emit` step, so
     the completion seam below can bind its observation to the crossing that
     carried it instead of leaving the driver to infer one at read time. Pure
     bookkeeping: it records nothing, redacts nothing, and a timeline built
-    without a runtime (a hand-written test) simply never calls it."""
+    without a runtime (a hand-written test) simply never calls it.
+
+    Item 121 Slice 2 rides the same publication: the value-flow token holds the
+    completion crossing's STEP INDEX, so the bare index is published alongside
+    the `(component, index)` crossing key for `revl_note_validated_completion`
+    to name the crossing the recorder just made."""
     _revl_recorded_crossing.set((component, index))
+    _revl_last_emission_index.set(index)
 
 
 def revl_recorded_crossing() -> "Optional[tuple]":
@@ -533,29 +584,67 @@ def revl_take_model_call(crossing=_REVL_ANY_CROSSING) -> "Optional[tuple]":
     return obs
 
 
-def revl_note_validated_completion(activation_id: "Optional[str]", seq: int) -> None:
-    """Mint the fiber-local value-flow token: the seq of the model completion
-    this fiber just validated, tagged with the activation that produced it. The
-    downstream emit crossing back-references it (`revl_produced_seq`)."""
-    _revl_last_validated_completion.set((activation_id, seq))
+def revl_note_validated_completion(site: "Optional[str]",
+                                   step_index: "Optional[int]" = None) -> None:
+    """Mint the fiber-local value-flow token for completion `site`: the STEP
+    INDEX of the model completion that site just validated in this fiber.
+
+    `site` is the emitter's static identity for one `validated ... retry`
+    completion call; keying on it (rather than on "the last completion in this
+    fiber") is what keeps two completions in one body from cross-attributing.
+    `step_index` defaults to the crossing the recorder last published; `None`
+    (recording off, so no step index exists) CLEARS the site's token rather than
+    minting a bogus one — honest-degrade, §2.2."""
+    if site is None:
+        return
+    if step_index is None:
+        step_index = _revl_last_emission_index.get()
+    register = dict(_revl_validated_completions.get() or {})
+    if step_index is None:
+        register.pop(site, None)
+    else:
+        register[site] = step_index
+    _revl_validated_completions.set(register)
 
 
-def revl_produced_seq(activation_id: "Optional[str]") -> "Optional[list]":
-    """The `producedSeq` value-flow edge for an emission recorded under
-    `activation_id`, or None (honest-degrade, §2.2).
+def revl_produced_by(site: "Optional[str]") -> "Optional[int]":
+    """The step index of the completion that `site` last validated in this
+    fiber, or None (no token: recording off, a `Str`-returning non-validated
+    completion, or a sibling fiber's token that this context never inherited)."""
+    if site is None:
+        return None
+    return (_revl_validated_completions.get() or {}).get(site)
 
-    Present ONLY when this fiber holds a validated-completion token AND its
-    activation id matches this emission's — so a token inherited by a different
-    concurrent activation of the same component does NOT match and the edge is
-    OMITTED, never adjacency-guessed. A missing token (a non-validated
-    `Str`-returning completion, or no completion in this fiber) also omits."""
-    token = _revl_last_validated_completion.get()
+
+def revl_produced_emit(site: "Optional[str]", fn, *args, **kwargs):
+    """Fire one boundary crossing whose ARGUMENTS the emitter proved read the
+    binding produced by validated-completion `site` (§2.2, the static
+    value-flow fact only the emitter can see).
+
+    `fn` and `args` are already evaluated by the time this is called, so a
+    crossing nested inside the arguments records BEFORE the marker is set and
+    cannot consume it. The marker is fiber-local, consumed by the recorder at
+    `record_emission`, and cleared here either way: with no token for `site`
+    (recording off, or that site has not validated in this fiber) nothing is
+    marked and the crossing is byte-identical to an unmarked one."""
+    _revl_transparent_frame = True   # the recorder skips this frame for the site
+    token = revl_produced_by(site)
     if token is None:
-        return None
-    tok_activation, tok_seq = token
-    if tok_activation != activation_id:
-        return None
-    return [tok_seq]
+        return fn(*args, **kwargs)
+    restore = _revl_pending_produced_by.set(token)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _revl_pending_produced_by.reset(restore)
+
+
+def revl_take_produced_by() -> "Optional[int]":
+    """Consume this fiber's pending `producedBy` marker (or None). Consuming
+    clears it, so exactly ONE crossing is stamped per marked call."""
+    token = _revl_pending_produced_by.get()
+    if token is not None:
+        _revl_pending_produced_by.set(None)
+    return token
 
 
 def _revl_canonical_args_bytes(args) -> bytes:
