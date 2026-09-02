@@ -26,6 +26,7 @@ from .. import cap_order
 from .._paths import backends_root
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
+from ..taint import REDACTED_SECRET
 from .approval import ApprovalRequired
 from .approval import _args_digest as _cache_args_digest
 
@@ -3349,6 +3350,24 @@ class Session:
                 "provide a `capability` (+ `uses`/`ttlMs`) to mint a standing "
                 "grant, or a ticket `hash` to mint one from an outstanding "
                 "class-(c) ticket")
+
+        # item 416c: a resource dimension declared `Secret[T]` binds to the
+        # REDACTED placeholder (approval.bind_resource_scope), never the real
+        # value — an operator can never have SEEN the value to scope a grant to
+        # it. Every secret-valued crossing of that operation binds to the SAME
+        # placeholder token, so a grant minted against it would cover every
+        # future crossing regardless of the (different) real value each one
+        # actually carries — the exact over-authorization a resource-scoped
+        # grant exists to prevent. Refused rather than silently widened; the
+        # crossing keeps prompting single-use.
+        if capability is not None and REDACTED_SECRET in capability:
+            raise SessionError(
+                f"capability {capability!r} scopes a `Secret[T]` resource "
+                f"parameter — its value is never shown, so it cannot be named "
+                f"in a standing grant (item 416c: this would silently widen "
+                f"one approval to cover every future secret value at this "
+                f"position). Approve each crossing individually with "
+                f"`revl_approve(hash=...)` instead.")
 
         # item 294 Slice 2: erase a ceiling parameter (`calls=N`) from the
         # grant's stored valuation and translate it into the shipped
