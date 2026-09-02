@@ -1038,12 +1038,21 @@ export class Frame {
    * replay, commit-time discharge + witness GC. `witness` is the `Ok`
    * payload, captured once here at registration — never re-read at
    * teardown. Builds the WAL discharge-descriptor eagerly (in memory; see
-   * `DischargeDescriptor`'s docstring for why there is no durable sink yet). */
-  transactional(
+   * `DischargeDescriptor`'s docstring for why there is no durable sink yet).
+   *
+   * `W` is the witness type (issue #198). It was `unknown` on both parameters,
+   * which made the emitted call site — `(result) => undo(result)`, where `undo`
+   * takes the tier's concrete witness interface — a type error in EVERY module
+   * that registers a witnessed inverse: 20 of them across four emitted modules,
+   * unseen because `tsconfig.json` never included `tests/generated/`. Tying the
+   * two parameters together contextually types the emitted arrow's parameter as
+   * the witness the call also passes, which is what it always was at runtime.
+   */
+  transactional<W>(
     crossing: Crossing,
     undoMethod: string,
-    undo: (witness: unknown) => unknown,
-    witness: unknown,
+    undo: (witness: W) => unknown,
+    witness: W,
   ): () => unknown {
     const seq = this.nextSeq()
     this.descriptorList.push({
@@ -1086,12 +1095,14 @@ export class Frame {
    * the commit-vs-abort decision, so `descriptors()` enumerates every crossing
    * and `drain`'s discharge record names every committed one. Registration is
    * unconditional here; the emitted call site invokes it only on the `Ok`
-   * branch, so a failed mutation that touched nothing schedules no rollback. */
-  transactionalMethod(
+   * branch, so a failed mutation that touched nothing schedules no rollback.
+   *
+   * `W` is the witness type — see `transactional` above (issue #198). */
+  transactionalMethod<W>(
     crossing: Crossing,
     undoMethod: string,
-    undo: (witness: unknown) => unknown,
-    witness: unknown,
+    undo: (witness: W) => unknown,
+    witness: W,
   ): _DeferredTransactional {
     const seq = this.nextSeq()
     this.descriptorList.push({
@@ -1106,7 +1117,14 @@ export class Frame {
     const entry: _DeferredTransactional = {
       crossing,
       undoMethod,
-      undo,
+      // `deferredList` is heterogeneous — one frame accumulates witnesses of
+      // many shapes — so the STORED inverse is erased to `unknown`. `W` exists
+      // only to tie `undo`'s parameter to `witness` AT THE CALL SITE, which is
+      // the whole point: the emitted `(result) => unstash(result)` is
+      // contextually typed `Stash`, not `unknown`. Erasure here is sound
+      // because `witness` is stored alongside and is the only value ever fed
+      // to `undo` (see `drain`/`replay`).
+      undo: undo as (witness: unknown) => unknown,
       witness,
       discharged: false,
       replayed: false,

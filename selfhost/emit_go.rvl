@@ -55,6 +55,33 @@
 //     the `widen` Float/Int markers, and non-float `${..}` interpolation as a
 //     `+` chain over the inferred operand types (`fmt.Sprintf` only as the
 //     untyped fallback, item 434 (f)).
+//   * `_emit_v3_go_externs` — an extern as a Go `func` carrying its verbatim,
+//     leading-tab-spliced `@go` body (types, then externs, then the free
+//     functions), and the extern return types the `let` inference reads
+//     (`ctx.extern_ret`). It carries the DECLARED `Secret[T]` marking below,
+//     which is why it is in-slice at all; three reference shapes stay out and
+//     take a loud marker (see `emit_externs`): a missing `@go` body, a `config`
+//     schema, and a `//revl:import` hoist.
+//
+// ==================================== DECLARED Secret[T] (item 421 F6 / 429(d))
+// The ORIGIN end of a declared marking — an extern whose declared return was
+// `Secret[T]` — emits `revlSecretResult(revlSecret_<name>(..))` around the
+// verbatim body, exactly as the reference does. Ported per item 429(d), corpus
+// first (`tests/fixtures/emit_go_corpus/secrets.rvl`) and red before the port,
+// so the oracle is known to reach the logic rather than to agree around it.
+// The RECEIVER end (`revlMarkSecret` at the head of a provide method whose
+// service declares the parameter) and the `hostRecord` scrub funnel live in the
+// live stc-go COMPONENT world, which this slice does not emit at all; they are
+// covered by the first deferral below, not by a separate gap.
+//
+// NOT closed by this port: the self-host FRONTEND does not produce the stamp.
+// `src/revl/taint.py` is what strips the `Secret[...]` qualifier and sets
+// `externs[i].secret_return`, and nothing in selfhost/{lexer,parser,checker,
+// lower}.rvl mirrors it — so driven by the native `lower_to_ir` this emitter
+// sees `returns: "Secret[Str]"` with no stamp and renders the qualifier as a
+// TYPE NAME instead of marking the value. The oracle above cannot see that: it
+// feeds this emitter the REFERENCE IR. Fixing the emitter fixes the emitter;
+// only the frontend port fixes the program.
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on go-emitter slices, deliberately OUT of this slice —
@@ -88,7 +115,9 @@
 //   * structural equality over NON-scalars (`revlEq` / the `reflect` import) and
 //     the canonical Float->Str `revlFtoa` in interpolation (so a Float part is
 //     excluded — a Float part would pull the ftoa helper the scaffold omits).
-//   * externs (`_emit_v3_go_externs`, incl the `//revl:import` hoist), in-file
+//   * the parts of `_emit_v3_go_externs` listed above (a `config` schema and
+//     its `_revl_config` bind, the `//revl:import` hoist into the module import
+//     block, and the reference's raise on a missing `@go` body), in-file
 //     `test` emission, async coloring / lifecycle, and the astral reaches of
 //     `_go_string` beyond the ASCII/BMP core (the escaper is bridged verbatim,
 //     but such literals are not in-corpus).
@@ -106,7 +135,7 @@ use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field,
   value_list, value_at, value_str, value_int, value_bool, value_keys
 }
-use "../stdlib/str.rvl" { split_top, rstrip }
+use "../stdlib/str.rvl" { split_top, rstrip, trim, str_tab }
 // The list kit (item 194): `list_sort` is the codepoint-lexicographic `sorted(..)`
 // the reference uses to canonicalise a record's field set into a `record_by_fields`
 // key — no re-hand-roll (byte-fuzz-pinned against Python `sorted()`).
@@ -1070,6 +1099,108 @@ fn emit_v3_types(types: Any) -> List[Str] {
   return out
 }
 
+// `_emit_v3_go_externs`: each extern as a Go `func` carrying its verbatim `@go`
+// body, blank-line separated, in declaration order and BEFORE the free functions.
+//
+// item 421 F6 (ported per item 429(d)): an extern whose DECLARED return was
+// `Secret[T]` is the ORIGIN end of a declared marking — where a confidential
+// value enters the value world. `taint.py` strips the `Secret[...]` qualifier
+// before lowering, so `secret_return` is the only surviving record of it. The
+// verbatim `@go` body owns its own `return` statements, so it moves into an
+// inner `revlSecret_<name>` and the DECLARED name becomes a one-line
+// `revlSecretResult(..)` wrapper: every call site is covered without the body
+// being rewritten. Emitted only for an extern that carries the stamp, so every
+// other extern is byte-identical to the plain form.
+//
+// Three reference shapes are OUT of this slice and emit a loud marker rather
+// than a guess, so a fixture that reaches one diverges visibly instead of
+// shipping wrong Go: an extern with no `@go` body (the reference RAISES — a
+// portability boundary), an extern carrying a `config` schema (the reference
+// prepends the config scaffold and binds `_revl_config` as the first body line),
+// and a body carrying a `//revl:import` directive (hoisted to the module import
+// block, which is assembled in `emit_src` above these lines). The body splice
+// itself is LF-only: the reference splits with Python `splitlines()`, which also
+// breaks on CR and on the Unicode separators, so a body carrying one of those
+// takes the marker too rather than splitting differently.
+// Every code point Python `str.splitlines()` breaks on that a plain
+// `split("\n")` does not: VT, FF, CR, the three file/group/record separators,
+// NEL, and the two Unicode line/paragraph separators.
+fn is_extra_linebreak(code: Int) -> Bool {
+  if (code >= 11 && code <= 13) { return true }
+  if (code >= 28 && code <= 30) { return true }
+  if (code == 133) { return true }
+  return code == 8232 || code == 8233
+}
+
+fn has_extra_linebreak(s: Str) -> Bool {
+  let n = s.length()
+  var i = 0
+  while (i < n) {
+    if (is_extra_linebreak(s.charCodeAt(i))) { return true }
+    i = i + 1
+  }
+  return false
+}
+
+fn extern_body_defer(ext: Any, body: Str) -> Str {
+  if (!value_is_null(value_field(ext, "config"))) { return "config" }
+  if (body.indexOf("//revl:import") >= 0) { return "import" }
+  if (has_extra_linebreak(body)) { return "linebreak" }
+  return ""
+}
+
+fn emit_externs(externs: List[Any]) -> List[Str] {
+  var out = []
+  for (ext of externs) {
+    let raw_name = value_str(value_field(ext, "name"))
+    var name = v3_ident(raw_name)
+    var ps = []
+    var args = []
+    for (p of value_list(value_field(ext, "params"))) {
+      let pname = v3_ident(value_str(value_field(p, "name")))
+      ps = ps.push(`${pname} ${go_type(value_field(p, "type"))}`)
+      args = args.push(pname)
+    }
+    let params = ps.join(", ")
+    let arg_list = args.join(", ")
+    let ret = go_type(value_field(ext, "returns"))
+    var sigret = ""
+    if (ret != "") { sigret = " ".concat(ret) }
+    let bodies = value_field(ext, "bodies")
+    let go_body = value_field(bodies, "go")
+    if (value_is_null(go_body)) {
+      out = out.push(`<<EXTERN-NO-GO-BODY:${name}>>`)
+      out = out.push("")
+    } else {
+      let body = trim(value_str(go_body))
+      let defer = extern_body_defer(ext, body)
+      if (defer != "") {
+        out = out.push(`<<DEFER-EXTERN-${defer}:${name}>>`)
+        out = out.push("")
+      } else {
+        // The wrapper needs a result to hand back, so a `Unit` extern takes no
+        // marking (the reference gates on `ret` too).
+        if (value_bool(value_field(ext, "secret_return")) && ret != "") {
+          out = out.push(`func ${name}(${params})${sigret} {`)
+          out = out.push(line(1, `return revlSecretResult(revlSecret_${name}(${arg_list}))`))
+          out = out.push("}")
+          out = out.push("")
+          name = "revlSecret_".concat(name)
+        }
+        out = out.push(`func ${name}(${params})${sigret} {`)
+        if (body == "") {
+          out = out.push(line(1, "// (empty extern body)"))
+        } else {
+          for (bl of body.split(newline())) { out = out.push(tab().concat(rstrip(bl))) }
+        }
+        out = out.push("}")
+        out = out.push("")
+      }
+    }
+  }
+  return out
+}
+
 // `_emit_v3_go_functions`: each module fn as a Go `func`, blank-line separated.
 fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables) -> List[Str] {
   var out = []
@@ -1205,6 +1336,13 @@ pub fn emit_src(ir: Any) -> Str {
     let r = value_field(fnode, "returns")
     if (!value_is_null(r)) { fr = fr.set(value_str(value_field(fnode, "name")), value_str(r)) }
   }
+  // `ctx.extern_ret` on the reference: an extern's declared return is the
+  // callee type a `let` binding infers from, exactly as a module fn's is.
+  let externs = value_list(value_field(ir, "externs"))
+  for (enode of externs) {
+    let er_ret = value_field(enode, "returns")
+    if (!value_is_null(er_ret)) { er = er.set(value_str(value_field(enode, "name")), value_str(er_ret)) }
+  }
   let flags = collect_flags(functions)
   // The reference renders every body BEFORE assembling the import block, so a
   // flag a lowering only sets while rendering has settled by then. The `fmt`
@@ -1241,6 +1379,8 @@ pub fn emit_src(ir: Any) -> Str {
   // The reference's section order: user `type` items precede the free functions
   // (both after the header + feature preambles).
   if (value_keys(types).length() > 0) { out = out.concat(emit_v3_types(types)) }
+  // The reference's section order: types, then externs, then the free functions.
+  if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
   out = out.concat(fnlines)
   return rstrip(out.join(newline())).concat(newline())
 }
@@ -1312,6 +1452,30 @@ test "record_type_for_fields infers a nominal struct from its field set" {
   assert record_type_for_fields(ctx, ["x", "y"]) == "Point"
   assert record_type_for_fields(ctx, ["y", "x"]) == "Point"
   assert record_type_for_fields(ctx, ["q"]) == "<<DEFER-record>>"
+}
+
+test "a declared Secret[T] extern return wraps its verbatim body" {
+  // item 421 F6 / 429(d). The stamped extern splits into an exported one-line
+  // `revlSecretResult` wrapper and the inner `revlSecret_<name>` holding the
+  // verbatim body; an unstamped one is the plain single function. The
+  // end-to-end byte check lives in the corpus.
+  let plain = emit_externs([{ name: "tag", params: [], returns: "Str",
+                              bodies: { go: `return "n"` } }])
+  assert plain.join("|") == `func tag() string {|${str_tab()}return "n"|}|`
+  let marked = emit_externs([{ name: "mint", params: [], returns: "Str",
+                               secret_return: true, bodies: { go: `return "s"` } }])
+  assert marked[0] == "func mint() string {"
+  assert marked[1] == str_tab().concat("return revlSecretResult(revlSecret_mint())")
+  assert marked[4] == "func revlSecret_mint() string {"
+}
+
+test "a body Python splitlines would break differently takes a marker" {
+  // `split(newline())` and `splitlines()` agree only on LF; VT/FF/CR, the
+  // file/group/record separators, NEL and U+2028/U+2029 all break the second.
+  assert has_extra_linebreak(str_tab().concat("ok")) == false
+  assert is_extra_linebreak(10) == false
+  assert is_extra_linebreak(11) && is_extra_linebreak(12) && is_extra_linebreak(13)
+  assert is_extra_linebreak(8232) && is_extra_linebreak(133)
 }
 
 test "go_type passes user record/variant names through" {

@@ -34,6 +34,7 @@ a stable token:
     emit:<component>:<service.method>   an emission the component performs
     host:<component>:<extern-name>      host code the component reaches
     secret:<capability>:<name>          a secret bound to a capability (item 256)
+    env:<name>:<bound>                  a host-injected environment value (item 350)
 
 The same reach yields the same token across generations, so the whole diff is
 a set difference over these tokens.
@@ -50,6 +51,18 @@ semantics follow the same rule as every other crossing:
   is part of it), so the new binding appears as an addition (widening) while the
   old one appears as a removal (narrowing).
 - **Removing a secret binding** drops the token, a narrowing, always safe.
+
+The `env:` token (item 350) is composition-level too, drawn from the top-level
+`env` table — the `boot` component's config block, which is the environment
+contract the host must inject. The token carries the field's declared BOUND, so
+three distinct authority changes all land as an addition the gate flags as a
+widening: a new contract field, a bound REMOVED (`env:data_dir:under=./data`
+becomes `env:data_dir:*`), or a bound LOOSENED. Removing a field or tightening a
+bound drops the old token: a narrowing. `*` means UNBOUNDED — the host may
+inject any value of the declared type. The token names the field and the
+author-written bound; a VALUE is never in the audit at all (values arrive at
+`revl run --env` time and never enter the IR). See
+[environment-binding.md](environment-binding.md).
 
 ## The exit-code contract
 
