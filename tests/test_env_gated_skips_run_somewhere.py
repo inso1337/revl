@@ -351,30 +351,12 @@ def _steps_setting(name: str) -> list[tuple[str, str]]:
     return out
 
 
-# STAGED, and deliberately not green yet.
-#
-# REVL_CROSS_TIER_SLOW is read by test_cross_tier_execution.py and by
-# test_time_coeffect.py, and is still set nowhere: the `conformance` job carries
-# the flip COMMENTED OUT, because turning it on today reds the build on the java
-# v3 record `equals`/`hashCode` gap (item 433's rider section), which is being
-# fixed separately on fix/433-java-record-equality. `_ci_sets` ignores commented
-# lines on purpose, so this assertion still sees the truth.
-#
-# strict=True is the forcing function, and it is the point of doing it this way
-# rather than parking the name in _INTENTIONALLY_LOCAL with an excuse. The
-# moment somebody uncomments those two lines in ci.yml this test starts PASSING,
-# which under strict xfail is a FAILURE, so whoever lands the java fix cannot
-# avoid coming back here and deleting this marker. An excuse in the registry
-# would have gone quiet instead, which is the exact failure this file is about.
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "item 445: REVL_CROSS_TIER_SLOW's flip sits commented in the "
-        "`conformance` job until the java record equals/hashCode fix lands. "
-        "When this xfail starts failing because the test PASSED, the flip is "
-        "live -- delete this marker."
-    ),
-)
+# This assertion was xfail(strict=True) while the REVL_CROSS_TIER_SLOW flip sat
+# commented out in ci.yml behind the java v3 record equals/hashCode fix. That
+# fix landed, the flip went live in the `conformance` job, and the strict xfail
+# did its job: it turned red the moment the test started passing, which is what
+# forced this marker to be removed rather than left behind. The check now
+# stands on its own and any newly-dead switch reds it directly.
 def test_every_env_gate_in_tests_is_set_in_ci_or_declared_local():
     """The item-445 guard: no switch may be silently unset everywhere."""
     external = _external_switches()

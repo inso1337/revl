@@ -906,9 +906,110 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, counter: Int) -> Sout {
 }
 
 // -------------------------------------------------------------- type decls
+// `_JAVA_PRIMITIVE_COMPONENTS`: a component with one of these Java types is a
+// primitive, so the generated `equals` compares it with `==` directly instead
+// of boxing it through `revlEq`, and for `double` that primitive `==` IS the
+// IEEE rule the language wants.
+fn is_primitive_component(jt: Str) -> Bool {
+  return jt == "long" || jt == "int" || jt == "double" || jt == "boolean"
+}
+
+// `_v3_component_eq`: `double` compares with the PRIMITIVE `==`, never
+// `Double.equals`/`Double.compare`. Both hash doubleToLongBits, which makes
+// NaN equal to itself and 0.0 unequal to -0.0, the inversion item 433 rider R2
+// fixed at the top level. Every reference goes through `revlEq`, so a nested
+// record recurses into its own generated `equals`.
+fn v3_component_eq(jt: Str, left: Str, right: Str) -> Str {
+  if (is_primitive_component(jt)) { return `${left} == ${right}` }
+  return `revlEq(${left}, ${right})`
+}
+
+// `_v3_component_hash`: the term matching `v3_component_eq`. `Double.hashCode`
+// separates 0.0 from -0.0 even though `==` calls them equal, so fold every zero
+// to +0.0 first. NaN needs no care: all NaNs canonicalise to one bit pattern
+// there, and a NaN component is never equal to anything anyway.
+fn v3_component_hash(jt: Str, expr: Str) -> Str {
+  if (jt == "double") { return `java.lang.Double.hashCode(${expr} == 0.0d ? 0.0d : ${expr})` }
+  if (jt == "long") { return `java.lang.Long.hashCode(${expr})` }
+  if (jt == "int") { return `java.lang.Integer.hashCode(${expr})` }
+  if (jt == "boolean") { return `java.lang.Boolean.hashCode(${expr})` }
+  return `revlHash(${expr})`
+}
+
+// `_emit_v3_value_equality`: `equals`/`hashCode` for a record class or a
+// sealed-variant case class. Without them both inherit `Object.equals`, which
+// is REFERENCE IDENTITY, so `{ id: 1 } == { id: 1 }` answered false on this
+// tier alone. `revlEq`'s fallback is `Objects.equals`, i.e. that same inherited
+// method, so the helper could not fix it from outside: the structure has to
+// live on the class. Both classes are final, so `instanceof` is an exact type
+// test and the relation stays symmetric. The parameter is `__revl_o`, not
+// the canonical `o`, because a record may declare a field NAMED `o`.
+// There is deliberately NO
+// `if (this == o) { return true; }` fast path: `==` on Float is IEEE, so a NaN
+// component is not equal to itself, and the shortcut would make the answer
+// depend on whether the operands happen to share a reference. rust, the
+// precedent tier, derives `PartialEq`, a plain field-by-field `==` with no such
+// shortcut. `tag` is "" for a record and the case's qualified name for a
+// variant case, so two cases of one variant with the same payload do not
+// collide in the hash.
+fn emit_v3_value_equality(cls: Str, eq_terms: List[Str], hash_terms: List[Str], tag: Str) -> List[Str] {
+  var out = ["", "    @Override", "    public boolean equals(Object __revl_o) {"]
+  if (eq_terms.length() == 0) {
+    out = out.push(`        return __revl_o instanceof ${cls};`)
+  } else {
+    out = out.push(`        if (!(__revl_o instanceof ${cls})) { return false; }`)
+    out = out.push(`        ${cls} __revl_other = (${cls}) __revl_o;`)
+    out = out.push(`        return ${eq_terms.join(" && ")};`)
+  }
+  out = out.push("    }")
+  out = out.push("")
+  out = out.push("    @Override")
+  out = out.push("    public int hashCode() {")
+  var seed = "1"
+  if (tag != "") { seed = `"${tag}".hashCode()` }
+  if (hash_terms.length() == 0) {
+    out = out.push(`        return ${seed};`)
+  } else {
+    out = out.push(`        int h = ${seed};`)
+    for (t of hash_terms) {
+      out = out.push(`        h = 31 * h + ${t};`)
+    }
+    out = out.push("        return h;")
+  }
+  out = out.push("    }")
+  return out
+}
+
+// `_v3_types_need_value_helpers`: true when some generated `equals`/`hashCode`
+// will CALL `revlEq`/`revlHash`, i.e. some record field or variant payload is a
+// reference type. A record of nothing but Int/Float/Bool compares and hashes
+// with primitive operators and needs neither helper. Same gating idiom as
+// `uses_equality`: the helper is emitted exactly where it is called.
+fn v3_types_need_value_helpers(types: Any) -> Bool {
+  if (value_is_null(types)) { return false }
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    if (value_str(value_field(spec, "kind")) == "record") {
+      let fields = value_field(spec, "fields")
+      for (f of value_keys(fields)) {
+        if (!is_primitive_component(java_v3_type(value_field(fields, f), false))) { return true }
+      }
+    } else {
+      for (case of value_list(value_field(spec, "cases"))) {
+        let payload = value_field(case, "payload")
+        if (!value_is_null(payload)) {
+          if (!is_primitive_component(java_v3_type(payload, false))) { return true }
+        }
+      }
+    }
+  }
+  return false
+}
+
 // `_emit_v3_types`: a user `record` type as a `public static final class` (public
-// final fields + a canonical ctor), a `variant` type as a `public sealed
-// interface … permits …` with one `final class … implements` per case.
+// final fields + a canonical ctor + the structural `equals`/`hashCode` above), a
+// `variant` type as a `public sealed interface … permits …` with one
+// `final class … implements` per case, each with the same pair.
 fn emit_v3_types(types: Any) -> List[Str] {
   var out = []
   for (name of value_keys(types)) {
@@ -931,6 +1032,15 @@ fn emit_v3_types(types: Any) -> List[Str] {
         out = out.push(`        this.${mangle(f)} = ${mangle(f)};`)
       }
       out = out.push("    }")
+      var eq_terms = []
+      var hash_terms = []
+      for (f of fnames) {
+        let jt = java_v3_type(value_field(fields, f), false)
+        let mf = mangle(f)
+        eq_terms = eq_terms.push(v3_component_eq(jt, `this.${mf}`, `__revl_other.${mf}`))
+        hash_terms = hash_terms.push(v3_component_hash(jt, `this.${mf}`))
+      }
+      out = out.concat(emit_v3_value_equality(mn, eq_terms, hash_terms, ""))
       out = out.push("}")
     } else {
       let cases = value_list(value_field(spec, "cases"))
@@ -945,12 +1055,20 @@ fn emit_v3_types(types: Any) -> List[Str] {
         if (value_is_null(payload)) {
           out = out.push(`    final class ${cname} implements ${mn} {`)
           out = out.push(`        public ${cname}() {}`)
+          for (l of emit_v3_value_equality(cname, [], [], `${mn}.${cname}`)) {
+            if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+          }
           out = out.push("    }")
         } else {
           let ptype = java_v3_type(payload, false)
           out = out.push(`    final class ${cname} implements ${mn} {`)
           out = out.push(`        public final ${ptype} value;`)
           out = out.push(`        public ${cname}(${ptype} value) { this.value = value; }`)
+          let peq = [v3_component_eq(ptype, "this.value", "__revl_other.value")]
+          let phash = [v3_component_hash(ptype, "this.value")]
+          for (l of emit_v3_value_equality(cname, peq, phash, `${mn}.${cname}`)) {
+            if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+          }
           out = out.push("    }")
         }
       }
@@ -1906,6 +2024,42 @@ fn revl_eq_helper() -> List[Str] {
     "        return xs.isEmpty() || revlEq(xs.get(), ys.get());",
     "    }",
     "    return java.util.Objects.equals(a, b);",
+    "}",
+    ""
+  ]
+}
+
+// `_emit_hash_helper`: the hash that agrees with `revlEq`. `Objects.hashCode`
+// disagrees with it in three places. `Double.hashCode` hashes
+// doubleToLongBits, so it separates 0.0 from -0.0, and List/Map/Optional
+// delegate to the ELEMENT's hashCode, so a Float nested in one is hashed by
+// doubleToLongBits again. This mirrors `revlEq` arm for arm.
+fn revl_hash_helper() -> List[Str] {
+  return [
+    "// The hash that agrees with `revlEq`: 0.0 and -0.0 are one key, and",
+    "// a Float nested in a List/Map/Opt is hashed under the same rule.",
+    "private static int revlHash(Object a) {",
+    "    if (a instanceof Double) {",
+    "        double d = ((Double) a).doubleValue();",
+    "        return java.lang.Double.hashCode(d == 0.0d ? 0.0d : d);",
+    "    }",
+    "    if (a instanceof java.util.List<?>) {",
+    "        int h = 1;",
+    "        for (Object x : (java.util.List<?>) a) { h = 31 * h + revlHash(x); }",
+    "        return h;",
+    "    }",
+    "    if (a instanceof java.util.Map<?, ?>) {",
+    "        int h = 0;",
+    "        for (java.util.Map.Entry<?, ?> e : ((java.util.Map<?, ?>) a).entrySet()) {",
+    "            h += java.util.Objects.hashCode(e.getKey()) ^ revlHash(e.getValue());",
+    "        }",
+    "        return h;",
+    "    }",
+    "    if (a instanceof java.util.Optional<?>) {",
+    "        java.util.Optional<?> xs = (java.util.Optional<?>) a;",
+    "        return xs.isEmpty() ? 0 : revlHash(xs.get());",
+    "    }",
+    "    return java.util.Objects.hashCode(a);",
     "}",
     ""
   ]
@@ -2876,8 +3030,17 @@ pub fn emit_src(ir: Any) -> Str {
   // `revlEq` sits where the reference puts it: after the host stubs, ahead of
   // the (deferred) stdlib block, so `==` in a function or a component body has
   // it in scope.
-  if (uses_equality(ir)) {
+  // The generated record/case `equals`/`hashCode` call these too, so a document
+  // that declares a type with a reference-typed component needs them even when
+  // it never writes `==` itself.
+  let needs_value_helpers = v3_types_need_value_helpers(types)
+  if (uses_equality(ir) || needs_value_helpers) {
     for (l of revl_eq_helper()) {
+      if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+    }
+  }
+  if (needs_value_helpers) {
+    for (l of revl_hash_helper()) {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
     }
   }

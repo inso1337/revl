@@ -25,25 +25,41 @@ three were shut in CI at once:
 
   - `REVL_CROSS_TIER_SLOW` gates rust and java. It was set NOWHERE in this
     repository, so every `*_slow` test executed in no CI job at all. That is
-    how item 433's riders R1 and R2 survived: `IEEE_FLOAT` below already
-    contained assertions java fails, and java never ran them.
-  - `RUNNERS["java"]` skips again on top wherever no JDK is installed.
+    how item 433's riders R1 and R2 survived, and how the java v3 record
+    `equals` gap survived after them: `IEEE_FLOAT` and
+    `PROBES["structural equality"]` below already contained assertions java
+    fails, and java never ran them.
+  - `RUNNERS["java"]` skips again on top wherever no JDK is installed, and on
+    macOS that check is easy to get wrong (see below).
   - `RUNNERS["ts"]` needs `backends/typescript/node_modules/.bin/vitest`, and
-    NO job that runs `tests/` installs it. TypeScript is described in several
-    places as executing "by default"; in CI it has skipped exactly as hard as
-    java did. That gate is a filesystem probe rather than an env var, which is
-    why item 433's sweep for dead switches did not see it.
+    NO job that runs `tests/` installed it. TypeScript was described in
+    several places as executing "by default"; in CI it skipped exactly as hard
+    as java did. That gate is a filesystem probe rather than an env var, which
+    is why the sweep for dead env switches did not see it.
 
-The repair is the `conformance` job: the one place node, rust, java, go and
-wasmtime all exist at once, and the only job that runs `npm ci`. Measured on
-an arm64 laptop, this file alone: 30s under the default gates (93 pass, 94
-skip), 3m53 once node_modules exists (128 pass), 4m53 with the switch on and
-rust executing (156 pass), 6m31 with a working JDK as well (180 pass, 5 skip).
+ALL THREE ARE NOW ON, in the `conformance` job: the one place node, rust,
+java, go and wasmtime exist at once, and the only job that runs `npm ci`.
+Measured on an arm64 laptop, this file alone: 30s under the old default gates
+(93 pass, 94 skip), 3m53 once node_modules exists (128 pass), 4m53 with the
+switch on and rust executing (156 pass), 6m31 with a working JDK as well.
 87 tests newly execute at the far end. That is the honest price of the matrix,
 and it is why the switch exists at all.
 
 A `*_slow` skip means UNMEASURED. It has never meant passing, so keep adding
 a cheap STATIC guard alongside every probe that matters.
+
+FINDING A JDK ON macOS, because two agents in a row concluded there was none.
+`/usr/bin/java` and `/usr/bin/javac` always exist and are STUBS: they satisfy
+`shutil.which("java")` and then error with "Unable to locate a Java Runtime".
+A Homebrew openjdk is keg-only and therefore NOT on PATH. Look in
+`/opt/homebrew/opt/openjdk/bin` (and ask `/usr/libexec/java_home -V`) before
+recording "no JDK". Locally:
+
+    PATH=/opt/homebrew/opt/openjdk/bin:$PATH JAVA_HOME=/opt/homebrew/opt/openjdk \
+    REVL_CROSS_TIER_SLOW=1 pytest tests/test_cross_tier_execution.py
+
+runs the java column for real. Every java claim in this file has been executed
+that way on openjdk 26.0.2.
 """
 
 import importlib.util
@@ -76,6 +92,50 @@ test "lists compare by value" { assert list_eq() }
 test "list order matters" { assert !list_ne() }
 test "nesting composes" { assert nested() }
 test "inequality is the negation" { assert { id: 1, name: "a" } != { id: 2, name: "a" } }
+""",
+
+    # The probe above compares an ANONYMOUS record literal and a list; this one
+    # compares the values a v3 `type` declaration builds: a nested record, a
+    # variant case with a payload, a nullary case, and a record whose component
+    # is a Float. java answered `false` for every one of them: `_emit_v3_types`
+    # emitted each record class and each sealed-variant case class with fields
+    # and a ctor and NO `equals`, so `revlEq`'s `java.util.Objects.equals`
+    # fallback called the `equals` they inherited from `Object`, which is
+    # REFERENCE IDENTITY. `revlEq` could not fix that from outside, because its
+    # fallback IS the inherited method.
+    #
+    # The Float component is the part `equals` is easy to get wrong in the other
+    # direction: `Double.equals`/`Double.compare` compare `doubleToLongBits`, so
+    # a generated `equals` reaching for either would call NaN equal to itself and
+    # -0.0 unequal to 0.0, the same inversion item 433 rider R2 removed from the
+    # top level. Both floats arrive through a PARAMETER for the reason the probe
+    # above gives: a literal zero divisor is a checker rejection, and Go folds
+    # untyped float constants in arbitrary precision.
+    "declared value types compare structurally": """
+type Point = { x: Int, y: Int }
+type Seg = { a: Point, b: Point }
+type Weight = { w: Float }
+type Shape = Circle(Int) | Dot
+
+pub fn fdiv(a: Float, b: Float) -> Float { return a / b }
+pub fn scale(a: Float, b: Float) -> Float { return a * b }
+pub fn seg(p: Point, q: Point) -> Seg { return { a: p, b: q } }
+pub fn wt(v: Float) -> Weight { return { w: v } }
+pub fn circle(r: Int) -> Shape { return Circle(r) }
+pub fn dot() -> Shape { return Dot }
+
+test "a declared record compares by value" {
+  assert seg({ x: 1, y: 2 }, { x: 3, y: 4 }) == seg({ x: 1, y: 2 }, { x: 3, y: 4 })
+}
+test "nesting compares all the way down" {
+  assert seg({ x: 1, y: 2 }, { x: 3, y: 4 }) != seg({ x: 1, y: 2 }, { x: 3, y: 5 })
+}
+test "a payload case compares by value" { assert circle(2) == circle(2) }
+test "different payloads differ"        { assert circle(2) != circle(3) }
+test "a nullary case equals itself"     { assert dot() == dot() }
+test "different cases differ"           { assert circle(2) != dot() }
+test "a Float component stays IEEE"     { assert wt(fdiv(0.0, 0.0)) != wt(fdiv(0.0, 0.0)) }
+test "so negative zero is one value"    { assert wt(scale(0.0, 0.0 - 1.0)) == wt(0.0) }
 """,
 
     # The former pinned divergence "Int widens into a Float position": revl
@@ -437,6 +497,116 @@ def test_java_equality_goes_through_the_revl_helper():
         "the helper must travel with the module")
     assert "java.util.Objects.equals(a, b)" in emitted, (
         "structural equality is still the fallback for every non-Float value")
+
+
+def _java_value_classes(emitted: str) -> dict:
+    """Every class `_emit_v3_types` generates, mapped to its body text.
+
+    A v3 record is `public static final class X {` at one indent; a
+    sealed-variant case is `final class X implements Owner {` one level in.
+    Both are matched here so a future third shape cannot quietly opt out of the
+    sweep below by not looking like a record."""
+    out = {}
+    lines = emitted.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        opener = None
+        if stripped.startswith("public static final class "):
+            opener = stripped[len("public static final class "):].split()[0]
+        elif stripped.startswith("final class ") and " implements " in stripped:
+            opener = stripped[len("final class "):].split()[0]
+        if opener is None or "<" in opener:
+            continue
+        indent = len(line) - len(line.lstrip())
+        body = []
+        for rest in lines[i + 1:]:
+            if rest.strip() and (len(rest) - len(rest.lstrip())) <= indent:
+                break
+            body.append(rest)
+        out[opener] = "\n".join(body)
+    return out
+
+
+def test_java_declared_value_types_carry_a_structural_equals():
+    """The defect this file exists to catch, in its cheapest form.
+
+    `_emit_v3_types` emitted every record class and every sealed-variant case
+    class with fields and a ctor and NO `equals`, so each inherited
+    `Object.equals`, which is reference identity, and `revlEq`'s `Objects.equals`
+    fallback dispatched straight into it. `{ id: 1 } == { id: 1 }` was `false`
+    here and `true` on python, TypeScript, rust and go.
+
+    That is not an argument from the emitted source. With
+    REVL_CROSS_TIER_SLOW=1 and a JDK on PATH, the pre-fix emitter fails the
+    probe above on a real JVM (`java.lang.AssertionError` at
+    `testRecordsCompareByValue`, openjdk 26.0.2) and the fixed one passes it.
+
+    This static guard exists because that run is the one CI never does: the
+    executed probe sits behind REVL_CROSS_TIER_SLOW, which this repository
+    sets nowhere, and behind a JDK the `frontend` job does not install. A
+    guard that needs no toolchain is the only kind that was ever going to fire
+    here."""
+    emitted = _emit("java", PROBES["declared value types compare structurally"])
+    classes = _java_value_classes(emitted)
+    for name in ("Point", "Seg", "Weight", "Circle", "Dot"):
+        assert name in classes, f"{name} was not emitted as a class"
+    for name, body in classes.items():
+        assert "public boolean equals(Object __revl_o) {" in body, (
+            f"{name} inherits Object.equals, which is reference identity; "
+            "revl equality is structural (docs/syntax-2.0.md §3.4)")
+        assert "public int hashCode() {" in body, (
+            f"{name} defines equals without hashCode")
+
+
+def test_java_record_equals_compares_floats_with_ieee_equality():
+    """`Double.equals` and `Double.compare` both go through
+    `doubleToLongBits`, which calls NaN equal to itself and 0.0 unequal to
+    -0.0. Both are inverted against docs/arithmetic.md, and it is the bug item
+    433 rider R2 removed from the top level. A generated `equals` must compare
+    the PRIMITIVE `double`s, and its `hashCode` must fold -0.0 to 0.0 so that
+    two values `equals` calls equal cannot hash apart."""
+    emitted = _emit("java", PROBES["declared value types compare structurally"])
+    body = _java_value_classes(emitted)["Weight"]
+    assert "return this.w == __revl_other.w;" in body, (
+        "a Float component compares with the primitive `==`, which IS the "
+        "IEEE comparison")
+    assert "Double.compare" not in body and ".equals(__revl_other.w)" not in body
+    assert "java.lang.Double.hashCode(this.w == 0.0d ? 0.0d : this.w)" in body, (
+        "0.0 and -0.0 are equal under `==`, so they must hash alike")
+
+
+def test_java_nested_record_equals_recurses_structurally():
+    """A record whose component is a record must compare all the way down.
+    The component is a reference, so it routes through `revlEq`, whose
+    `Objects.equals` fallback now lands on the INNER class's generated
+    `equals` rather than on `Object`'s. Both halves of that chain are pinned
+    here, because either one missing silently restores identity comparison."""
+    emitted = _emit("java", PROBES["declared value types compare structurally"])
+    classes = _java_value_classes(emitted)
+    assert "return revlEq(this.a, __revl_other.a) && revlEq(this.b, __revl_other.b);" \
+        in classes["Seg"]
+    assert "return this.x == __revl_other.x && this.y == __revl_other.y;" \
+        in classes["Point"]
+    assert "private static boolean revlEq" in emitted, (
+        "the generated equals calls revlEq, so the helper must travel with the "
+        "module even though this document never writes `==` in a fn body")
+    assert "private static int revlHash" in emitted
+
+
+def test_java_nullary_variant_cases_are_not_all_one_value():
+    """A nullary case has no component, so its `equals` is the `instanceof`
+    alone, but its `hashCode` must still separate it from a sibling case, or
+    `Circle` and `Dot` collide in every hash container for no reason.
+
+    The parameter is `__revl_o`: a record may declare a field named `o`, and
+    the canonical spelling would shadow it. Nothing here reads a field
+    unqualified today, so `o` would still compile; the `frontend` job has no
+    javac, so the safe name is the one that cannot start failing there."""
+    emitted = _emit("java", PROBES["declared value types compare structurally"])
+    classes = _java_value_classes(emitted)
+    assert "return __revl_o instanceof Dot;" in classes["Dot"]
+    assert 'return "Shape.Dot".hashCode();' in classes["Dot"]
+    assert 'int h = "Shape.Circle".hashCode();' in classes["Circle"]
 
 
 def test_java_true_division_widens_both_operands():

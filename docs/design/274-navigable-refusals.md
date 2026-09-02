@@ -396,6 +396,18 @@ gates the op and the tenant topology. The revised rule:
    granted-service operations across every fireable family and asserts the
    emitted records are mutually indistinguishable by `family`, reason, and
    `proof` (§7).
+6. **The `refused` echo is filtered by the same rule.** Recovered from the v1
+   pass (`design/274-navigable-refusals`), whose §4 closed with: "the same
+   filter applies to the `refused` echo itself: it restates what the author
+   submitted, never what the policy matched it against beyond the matched
+   verdict." Points 1 to 5 collapse `family`, the reason, `proof` and
+   `alternatives`, but `refused` (§5's record shape: `{ "token": ...,
+   "origins": [...], ... }`, normalized PER FAMILY) is the one surviving field
+   that can still carry policy-matched content, and a per-family normalization
+   is itself a family tell. Under `untrusted_author` it must echo only what the
+   author submitted. Point 4's byte-identity assertion and the §7
+   indistinguishability matrix enumerate `family`, reason, `blocked`,
+   `alternatives` and `proof` but not `refused`; both need it added.
 
 The granted set itself may still be enumerated on the trusted view and on the
 `admit-profile` family's own no-extern/allowlist refusals (section 2.9): it is

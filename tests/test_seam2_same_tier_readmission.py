@@ -213,6 +213,34 @@ def test_re_admission_is_still_a_real_gate_not_a_same_tier_bypass(tmp_path):
     assert error is not None and "not a component of the running composition" in error
 
 
+def test_the_full_boot_decision_still_refuses_a_resource_crossing_at_a_py_py_seam(tmp_path):
+    """The same gate through the WHOLE merged decision, not just the predicate.
+    Both receiver-derived checks are made to PASS: `PgDatabase` really provides
+    `db` in this manifest, and the socket really is in this process's own
+    placement directory, and the provider tier is `py`, the consumer's own. So
+    nothing but `seam_readmission` can produce the refusal, and it still does:
+    the same-tier relaxation is about the sync/relocation clause only, never
+    about resources. An unknown component is refused through the same path."""
+    src = _write(tmp_path, "handle_seam.rvl", _HANDLE_SEAM_RVL)
+    running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
+    info = {"socket": str(plc / "provider.sock"), "methods": ["query", "execute"],
+            "service": "Database", "component": "PgDatabase", "backend": "py"}
+
+    ok, reason = _pr._boot_wiring_decision([src], running, "db", info, anchor)
+    assert ok is False
+    assert reason and "Sock" in reason and "resource" in reason
+
+    wired = []
+
+    async def wire():
+        wired.append(info["socket"])
+
+    assert asyncio.run(_pr._apply_boot_wiring("db", info, [src], running, wire,
+                                              anchor=anchor)) is False
+    assert wired == []
+
+
 # ---------------------------------------------------------------------------
 # 2. a refused boot proxy is a boot failure, not a log line
 # ---------------------------------------------------------------------------
@@ -250,6 +278,95 @@ def test_a_refused_boot_proxy_exits_non_zero_and_never_reports_up(tmp_path):
     assert "REFUSED (admission)" in result.stdout
     assert "BOOT REFUSED" in result.stdout and "db" in result.stdout
     assert "[consumer] UP" not in result.stdout
+
+
+# The two refusals the ADDRESS/BINDING half of item 337 adds. Neither existed
+# when the fatality above was written, and the fatality did not exist when they
+# were: that a boot refused for one of THESE reasons is equally fatal is a
+# property only the two together have, so it is pinned here. The socket in each
+# is inside this process's own placement directory (`tmp_path`, where its spec
+# is written) except where the point is that it is not.
+_ADDRESS_AND_BINDING_REFUSALS = [
+    # an honest selector with the address swapped underneath it
+    pytest.param({"component": "PgDatabase", "backend": "py",
+                  "socket": "/tmp/attacker-controlled.sock"},
+                 "placement directory", id="unsanctioned-address"),
+    # an admissible but unrelated component offered as a pass token for `db`
+    pytest.param({"component": "UserCache", "backend": "py"},
+                 "does not provide key 'db'", id="unrelated-selector"),
+]
+
+
+@needs_cordis
+@pytest.mark.parametrize("extra,expected", _ADDRESS_AND_BINDING_REFUSALS)
+def test_an_address_or_binding_refusal_is_equally_fatal_to_the_boot(tmp_path, extra,
+                                                                    expected):
+    """A seam refused because the receiver would not sanction its ADDRESS, or
+    because the selector is not bound to the key, leaves exactly the same
+    unwired dependency as any other refusal, so it must fail the boot the same
+    way, not degrade into a log line under a green exit."""
+    proxy = {"socket": str(tmp_path / "provider.sock")}
+    proxy.update(extra)
+    spec_file = tmp_path / "consumer.spec.json"
+    spec_file.write_text(json.dumps(_consumer_spec(proxy_extra=proxy)),
+                         encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+
+    result = subprocess.run(
+        [str(CORDIS_PY), "-m", "revl._process_runner", str(spec_file)],
+        capture_output=True, text=True, env=env, timeout=180)
+
+    assert result.returncode != 0, result.stdout
+    assert expected in result.stdout, result.stdout
+    assert "BOOT REFUSED" in result.stdout and "db" in result.stdout
+    assert "[consumer] UP" not in result.stdout
+
+
+_SEAM3_RVL = """
+service Cache {
+  async fn get(k: Str) -> Opt[Str]
+  async fn put(k: Str, v: Str)
+}
+service ApiSvc { async fn hit() -> Opt[Str] }
+
+component Api requires cache: Cache provides api: ApiSvc {
+  provide api { async fn hit() = cache.get("k") }
+}
+"""
+
+
+@needs_cordis
+def test_a_genuine_seam3_entry_is_not_gated_and_never_causes_a_boot_refusal(tmp_path):
+    """The other half of making a refusal fatal: it must not become fatal for
+    entries this seam does not judge. `cache` is provided by NO component of
+    this composition, which is how the receiver knows it is a genuine
+    cross-composition handoff (item 151, Seam 3) rather than a same-composition
+    seam wearing a `remote` flag. It is wired ungated, so it can never land in
+    the refused list, and no `BOOT REFUSED` is raised on its account.
+
+    The peer is not running here, so the process still dies, but at the CONNECT,
+    which is the honest failure and a different one. What is being pinned is
+    that Seam 2 neither judged nor refused it."""
+    src = _write(tmp_path, "seam3.rvl", _SEAM3_RVL)
+    spec = {"name": "consumer", "files": [src], "components": ["Api"],
+            "provides": ["api"], "config": {}, "probe": [],
+            "proxies": {"cache": {"socket": str(tmp_path / "peer.sock"),
+                                  "methods": ["get", "put"], "service": "Cache",
+                                  "remote": True}}}
+    spec_file = tmp_path / "consumer.spec.json"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+
+    result = subprocess.run(
+        [str(CORDIS_PY), "-m", "revl._process_runner", str(spec_file)],
+        capture_output=True, text=True, env=env, timeout=180)
+    trace = result.stdout + result.stderr
+
+    assert "Seam 3" in result.stdout, trace          # recognized, not gated
+    assert "REFUSED (admission)" not in trace, trace
+    assert "BOOT REFUSED" not in trace, trace
+    # it got as far as actually trying to reach the peer -- it WAS wired
+    assert "_connect" in trace or "OSError" in trace, trace
 
 
 # ---------------------------------------------------------------------------
