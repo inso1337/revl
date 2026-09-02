@@ -112,6 +112,36 @@
       ]
     },
     {
+      "name": "chars",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "List[Str]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "split",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": [
+              {
+                "kind": "lit",
+                "value": ""
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
       "name": "render",
       "params": [
         {

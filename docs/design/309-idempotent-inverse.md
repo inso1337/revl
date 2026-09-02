@@ -406,6 +406,51 @@ human-finish by default, with a policy knob (item 33-style) for operators
 who accept the claim; unmarked ones remain human-finish unconditionally.
 The window proof (`_window_proof`) says which rule fired per emission.
 
+**LANDED as item 440 §(b), with one change: the seam gates EVERYTHING.** The
+draft above made a keyed owed emission auto-fire by default and put only the
+bare-`idempotent` case behind the knob. Shipped, the knob (`recovery may
+re-issue owed emissions [(strength: <level>)]`, item 33) gates the whole seam:
+with no policy, `revl recover` auto-fires nothing and the owed-emission report
+is item 245's v1 wording byte-for-byte. Auto-firing an emission is a crossing an
+operator has to have asked for, and defaulting it on would have been the one
+optimistic default this module does not take. The bare rule then admits the
+by-construction registers, `(strength: declared)` the author's unverified claim,
+and an unregistered owed emission stays human-finish under every setting.
+
+The seam itself is `World.reissue(op)` — a forward re-dispatch of the named call
+against the same adapter that already carries `apply_inverse` and
+`apply_compensation`. Recover never re-invokes the dead runtime's host body,
+which is what the TODO said it lacked; it does not need to, for the same reason
+it never needed one to re-issue an inverse.
+
+### 3d. The read tier: the third register (item 440 §(a))
+
+This design's register was two-valued *from recovery's side*: `_roll_back`
+branched on `undo_idempotent` and never read `register` at all, so a call that
+CHANGES NOTHING was fenced on its first attempt and escalated to an operator on
+its second — fail-closed, and therefore safe, but asking a human about calls
+that never needed asking.
+
+`undo pure <inverse>(result)` is the third tier, `register: "read"`, ranked
+ABOVE `keyed` (a keyed call still crosses and leans on a remote's dedup
+contract; a read crosses nothing, so there is no outcome to be ambiguous about).
+Recovery re-dispatches it on every run, spends no fence, and never escalates it.
+
+**Negative result, and why the tier is declared rather than derived.** Roadmap
+item 440 proposed deriving the tier from the `pure` extern classification revl
+already has. That is NOT sound. `pure` is a classification slot, checked for
+shape only — its refusal wording ("`pure` means no observable effect") is the
+declaration's meaning, never a proof — and the language *requires* a witnessed
+inverse to be classified `pure` or `acquire` (rule 3), so the shipped idiom for
+a mutating restore is an `extern pure fn` (`extern pure fn close_ledger(h)`,
+docs/guide-ai-agents.md). Deriving "changes nothing" from "classified pure"
+would therefore promote mutating inverses into the free-replay tier: an
+optimistic resolution of an ambiguity, in the unsafe direction. The shipped
+design keeps the derivation as a CHECK instead of an inference — `undo pure` is
+the author's explicit claim and lowering refuses it unless the named inverse is
+itself a `pure`-classified extern — so the claim is anchored to the existing
+classification and stays reviewable in the diff.
+
 ### 3c. Compensations: the 247 hand-off, closed
 
 A keyed compensation's re-attempt (`recovery.py:566-579`) stays
