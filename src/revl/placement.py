@@ -53,6 +53,7 @@ import importlib.util
 import ipaddress
 import json
 import os
+import posixpath
 import re
 import secrets
 import shutil
@@ -446,6 +447,10 @@ def _normalize_sandbox_table(sb) -> tuple[dict | None, str | None]:
     if not isinstance(fs, list):
         return None, "`fs` must be a list of `path` or `path:mode` mount strings"
     fs = [str(m) for m in fs]
+    for mount in fs:
+        mount_err = _bad_fs_path(_parse_mount(mount)[0], f"mount {mount!r}")
+        if mount_err:
+            return None, mount_err
     image = sb.get("image")
     if iso in ("container", "microvm") and not image:
         return None, (f"the {iso!r} rung needs an `image` (pin by digest; the "
@@ -485,14 +490,90 @@ def _parse_mount(mount: str) -> tuple[str, str]:
     return path, mode
 
 
+def _canonical_fs_path(path: str) -> str | None:
+    """The one canonical spelling of an absolute mount/need path, or `None` when
+    the string is not one at all (roadmap 422 F5).
+
+    `posixpath.normpath` folds `.` and `..` lexically and collapses repeated
+    separators, except that POSIX reserves a leading exactly-double slash, which
+    `normpath` preserves and which no mount ever means — so it is folded here.
+    A relative path has no canonical form at this layer (relative to WHAT? the
+    conductor's cwd is not a thing the envelope can bind) and comes back `None`,
+    which every caller reads as fail-closed."""
+    if not path or not path.startswith("/"):
+        return None
+    canonical = posixpath.normpath(path)
+    while canonical.startswith("//"):
+        canonical = canonical[1:]
+    return canonical
+
+
+def _bad_fs_path(path: str, what: str) -> str | None:
+    """A diagnostic when `what`'s path is not already its canonical spelling,
+    or None when it is (roadmap 422 F5).
+
+    Refused rather than silently normalized, in BOTH directions, because the two
+    directions are wrong in different ways and neither is what the author meant.
+    A traversing NEED (`fs:/scratch/../../etc/shadow`) reads as covered by a
+    `/scratch:rw` mount while the same file spelled `/etc/shadow` is refused, so
+    normalizing silently would leave the author believing the gate had checked
+    the spelling they wrote. A traversing MOUNT (`/scratch/..`) is worse the
+    other way: it denotes `/`, so silently normalizing it would hand the runtime
+    the whole filesystem from a line that reads like a scratch grant.
+
+    The message names the canonical spelling, which is the nearest allowed
+    space: an author who meant the traversal writes the destination out, and one
+    who did not sees immediately that the two differ (item 274)."""
+    canonical = _canonical_fs_path(path)
+    if canonical is None:
+        return (f"{what} names {path!r}, which is not an absolute path; an "
+                f"fs mount and an fs need are both absolute host paths "
+                f"(`/scratch`, `/scratch:rw`) — there is no directory for a "
+                f"relative one to be relative to")
+    if canonical != path:
+        return (f"{what} names {path!r}, which is not its canonical spelling: "
+                f"it denotes {canonical!r}. Write {canonical!r}, so the mount "
+                f"list and the needs table say what they grant and reach — a "
+                f"`.`/`..`/`//` spelling is compared LITERALLY here, which is "
+                f"how `/scratch/../../etc/shadow` read as covered by a "
+                f"`/scratch:rw` mount")
+    return None
+
+
 def _fs_covers(mounts: list[str], path: str, mode: str) -> bool:
     """Does the envelope's mount list grant `path` at `mode`? A mount covers a
     path it equals or is a prefix of; `rw` is needed for a `rw` need, `ro`
-    suffices for a `ro` need."""
+    suffices for a `ro` need.
+
+    Both sides are canonicalized first (roadmap 422 F5). This used to be a raw
+    string prefix test, so `/scratch/../../etc/shadow` was COVERED by a
+    `/scratch:rw` mount while the direct `/etc/shadow` spelling was refused —
+    bounded while Slice 1 launches no jail and the needs gate is advisory, but
+    this function is what Slice 2 inherits for deriving real mounts. The
+    spellings are refused where they enter (`_normalize_sandbox_table` for a
+    mount, `sandbox_capability_gate` for a need), and canonicalized again here
+    so the coverage test is sound for a caller that reaches it another way.
+
+    The two sides fail closed differently, on purpose. A non-canonical NEED is
+    canonicalized and then tested, which can only narrow coverage (the path it
+    denotes is the path that must be granted). A non-canonical MOUNT covers
+    NOTHING, because canonicalizing it could only WIDEN the grant, and a
+    defense-in-depth pass must never be the thing that widens one.
+
+    Lexical, not resolved: no symlink on the target host is followed, and this
+    layer cannot follow one (the planning host need not even have the paths).
+    The ENVELOPE the runtime binds remains the security boundary; this gate
+    stays advisory, as the item-411 design says."""
+    want = _canonical_fs_path(path)
+    if want is None:
+        return False
     for mount in mounts:
         mpath, mmode = _parse_mount(mount)
-        prefix = mpath.rstrip("/")
-        covers_path = path == mpath or path.startswith(prefix + "/")
+        canonical = _canonical_fs_path(mpath)
+        if canonical is None or canonical != mpath:
+            continue
+        prefix = canonical.rstrip("/")
+        covers_path = want == canonical or want.startswith(prefix + "/")
         covers_mode = mmode == "rw" or mode != "rw"
         if covers_path and covers_mode:
             return True
@@ -600,6 +681,17 @@ def sandbox_capability_gate(ir: dict, processes: dict, sandboxes: dict,
                             f"authority are not confined by item 411). Remove the "
                             f"entry, or express the need as an fs/net resource "
                             f"(`net`, `fs:/path:rw`).")
+                    # roadmap 422 F5: the spelling is refused before it is
+                    # compared, because the comparison is LITERAL. A traversing
+                    # need read as covered by a mount that does not grant the
+                    # file it denotes, which is the wrong direction for a gate.
+                    if kind == "fs":
+                        path_err = _bad_fs_path(
+                            path or "",
+                            f"[sandbox.needs] entry {cap!r} names "
+                            f"{str(resource)!r}, whose fs path")
+                        if path_err:
+                            return path_err
                     if not _need_covered(kind, path, mode, env):
                         grant = (f'net = "{env["net"]}"' if kind == "net"
                                  else (f"fs = [{', '.join(repr(m) for m in env['fs'])}]"

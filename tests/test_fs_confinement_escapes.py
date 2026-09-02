@@ -274,20 +274,16 @@ def test_a_concurrent_writer_cannot_divert_a_write_out_of_the_root(workspace, ou
     thread.start()
     try:
         for _ in range(200):
-            # The swapper UNLINKS the target on purpose, so a write can land in
-            # the window where the leaf is gone and raise instead of returning.
-            # That is a liveness transient, not a confinement failure: what this
-            # test pins is that no write ever reaches an inode outside the root,
-            # and both assertions below still decide that whether this call
-            # returned or raised. Swallowing only OSError keeps a real refusal
-            # (which is not an OSError) failing the test. Seen as a FileNotFound
-            # on the undo-snapshot read in CI, where the timing differs from a
-            # dev box; whether `write` should instead be atomic against a
-            # concurrent unlink is a separate question, filed on the roadmap.
-            try:
-                mod.write("racy.txt", "RACED PAYLOAD")
-            except OSError:
-                pass
+            # The swapper UNLINKS the target on purpose, so a write regularly
+            # lands in the window where the leaf is gone. The call carries no
+            # `except` on purpose (item 431(b)): the guard's entry points are
+            # total (item 422 F6) and a parted name is a typed `Err(ERACE)`, so
+            # a raw exception escaping here is a real regression rather than a
+            # transient. It briefly needed `except OSError`, because in CI a
+            # `FileNotFoundError` escaped the undo-snapshot read; that path
+            # refuses with `ESNAPSHOT` now instead of raising.
+            result = mod.write("racy.txt", "RACED PAYLOAD")
+            assert isinstance(result, (mod.Ok, mod.Err))
             if victim.exists():
                 break
     finally:
@@ -298,3 +294,157 @@ def test_a_concurrent_writer_cannot_divert_a_write_out_of_the_root(workspace, ou
         "a concurrent writer diverted a witnessed write outside the workspace root"
     leaked = [p.name for p in outside.iterdir() if p.name != "canary.txt"]
     assert leaked == [], f"the race leaked outside the root: {leaked}"
+
+
+# ===========================================================================
+# item 422 F6: the guard's entry points are TOTAL
+# ===========================================================================
+
+def test_a_nul_byte_in_a_path_is_refused_not_raised(workspace):
+    """`os.path.realpath` calls `lstat`, which raises `ValueError` — not an
+    `OSError` — on an embedded NUL. The `@py` bodies catch `FsOpError` only, so
+    that escaped all four witnessed ops as a raw exception and broke fs.rvl's
+    declared `-> Result[_, FsError]` contract: a caller handling the `Err` arm
+    still crashed. `hostfile.py:189-196` already handled exactly this for the
+    item-396 jail; the workspace guard had not had the same treatment."""
+    mod = _fs_module()
+    for result in (mod.write("a\x00b.txt", "x"), mod.rm("a\x00b.txt"),
+                   mod.move("a\x00b.txt", "c.txt"), mod.mkdir("a\x00b")):
+        assert isinstance(result, mod.Err)
+        assert result.value["code"] == "EINVAL"
+        # item 274: the refusal names the nearest allowed space, and the NUL
+        # never survives verbatim into the message or a WAL witness.
+        assert "with the NUL removed" in result.value["message"]
+        assert "\x00" not in result.value["path"]
+
+
+def test_the_nul_refusal_reaches_the_guard_before_any_syscall(workspace):
+    """Refused at family 1, where every caller-supplied path enters, so one
+    check covers the forward ops AND every inverse endpoint."""
+    with pytest.raises(ws.FsOpError) as ei:
+        ws.resolve_within("a\x00b")
+    assert ei.value.code == "EINVAL"
+    with pytest.raises(ws.FsOpError) as ei:
+        ws.resolve_sidecar("a\x00b", "garbage")
+    assert ei.value.code == "EINVAL"
+
+
+def test_every_enumerated_guard_entry_point_is_total(workspace):
+    """The property, stated over the same enumeration that states the choke
+    point: an entry point a `@py` body can call raises `FsOpError` or nothing.
+    Driven by the table so a fifth entry point cannot be added without it."""
+    listed = [e for entries in ws.PATH_FAMILIES.values() for e in entries]
+    listed += list(ws.READ_HELPERS)
+    for name in listed:
+        assert getattr(getattr(ws, name), "is_total_guard", False), \
+            f"guard entry point `{name}` is not wrapped total (item 422 F6)"
+
+
+# ===========================================================================
+# item 431(b): a witnessed write never lies about where the bytes went
+# ===========================================================================
+
+def _unlink_during(monkeypatch, hook: str, target: Path):
+    """Drive the exact window item 431(b) names: unlink the leaf just before
+    `hook` runs, i.e. after `open_confined_write` already holds the fd. A hook
+    rather than a thread, because the question is what the RESULT says, and a
+    deterministic window answers that without a 200-trial race."""
+    original = getattr(ws, hook)
+
+    def hooked(*args, **kwargs):
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ws, hook, hooked)
+
+
+@pytest.mark.parametrize("hook", ["snapshot_preimage", "write_through"])
+def test_a_write_racing_an_unlink_refuses_rather_than_claiming_ok(
+        workspace, monkeypatch, hook):
+    """Before item 431(b) this returned **Ok** with a witness naming a path that
+    did not hold the bytes. Confinement held the whole way — the fd reached the
+    inode the check admitted — but the unlink had made that inode an ORPHAN, so
+    the discharge descriptor enumerated a successful witnessed write of a file
+    that was gone, and the registered undo would have restored a preimage over a
+    forward mutation that never became visible.
+
+    The answer is not to recreate the leaf (see the guard module's "a write
+    never lies": atomicity is a liveness promise a jail whose writer is
+    untrusted by premise cannot honour). It is that the RESULT must be true."""
+    target = workspace / "racy.txt"
+    target.write_text("v1", encoding="utf-8")
+    _unlink_during(monkeypatch, hook, target)
+
+    mod = _fs_module()
+    result = mod.write("racy.txt", "PAYLOAD")
+
+    assert isinstance(result, mod.Err), \
+        "a write whose target vanished mid-call reported Ok with a false witness"
+    assert result.value["code"] == "ERACE"
+    assert "Retry the write" in result.value["message"]   # item 274
+
+
+def test_a_lost_race_leaves_no_preimage_residue(workspace, monkeypatch):
+    """An `Err` registers no inverse, so anything the attempt left behind is
+    residue nothing enumerates. The snapshot is taken before the write, so the
+    refusal has to clear it — which the body cannot do itself (the family scan
+    admits only paths bound from a family 1-3 guard), hence the sidecar is
+    recorded on the handle and `discard_write` removes it."""
+    target = workspace / "racy.txt"
+    target.write_text("v1", encoding="utf-8")
+    _unlink_during(monkeypatch, "write_through", target)
+
+    mod = _fs_module()
+    assert isinstance(mod.write("racy.txt", "PAYLOAD"), mod.Err)
+
+    preimage_dir = workspace / ws.PREIMAGE_DIRNAME
+    left = sorted(p.name for p in preimage_dir.iterdir()) if preimage_dir.is_dir() else []
+    assert left == [], f"a refused write left preimage residue: {left}"
+
+
+def test_a_lost_race_does_not_delete_the_competing_writers_file(
+        workspace, monkeypatch):
+    """`discard_write` removed the created leaf BY NAME. After a lost race that
+    name is the competitor's file, not ours — ours is an unlinked orphan that
+    goes away with the fd — so removing by name deleted somebody else's data
+    while cleaning up our own. It is inode-checked now."""
+    target = workspace / "fresh.txt"          # does not exist: the open creates it
+    original = ws.write_through
+
+    def hooked(handle, contents):
+        os.unlink(target)                     # our created leaf becomes an orphan
+        target.write_text("THE OTHER WRITER", encoding="utf-8")
+        return original(handle, contents)
+
+    monkeypatch.setattr(ws, "write_through", hooked)
+
+    mod = _fs_module()
+    assert isinstance(mod.write("fresh.txt", "PAYLOAD"), mod.Err)
+
+    assert target.exists(), "the refusal deleted the competing writer's file"
+    assert target.read_text(encoding="utf-8") == "THE OTHER WRITER"
+
+
+def test_an_unraced_write_still_returns_ok_and_is_reversible(workspace):
+    """The truthfulness check must not cost the ordinary path: an uncontended
+    write is `Ok`, the bytes are visible under the name, and the witness
+    restores. Both the overwrite and the create branch, because `created`
+    decides whether a preimage exists at all."""
+    mod = _fs_module()
+
+    overwrite = mod.write("artifact.txt", "v2")
+    assert isinstance(overwrite, mod.Ok)
+    assert (workspace / "artifact.txt").read_text(encoding="utf-8") == "v2"
+
+    created = mod.write("brand-new.txt", "hello")
+    assert isinstance(created, mod.Ok)
+    assert created.value["created"] is True
+    assert (workspace / "brand-new.txt").read_text(encoding="utf-8") == "hello"
+
+    mod.restore(overwrite.value)
+    mod.restore(created.value)
+    assert (workspace / "artifact.txt").read_text(encoding="utf-8") == "v1"
+    assert not (workspace / "brand-new.txt").exists()
