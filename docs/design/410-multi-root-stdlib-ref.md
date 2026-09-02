@@ -279,6 +279,18 @@ should still add both keys explicitly (it sets NEITHER today, a pre-existing
 the stdlib kind and records for the user kind). The runner's per-ref hash
 check runs before the module is imported, per kind, unchanged in shape.
 
+**Reachability (item 225).** For a long while none of that ran. The spec's
+`refs` list is built from the externs the process's slice reaches, and
+`placement.ts_safe_ir` classified an extern by its `bodies` alone — so a
+`= @ts ref` extern (empty `bodies`, populated `refs`) counted as un-emittable
+by the ts tier, and `tier_capability_gate` refused the node tier to every
+component reaching one. The only compositions that could boot a node process
+were the ones with no ref, so `spec.refs` was empty every time and the hash
+check above walked nothing. The predicate now mirrors the emitter's own arms
+(`placement._ts_unemittable_externs`), and the check is proven to refuse a
+tampered module on a real node-placed spec rather than assumed correct because
+it is present (`tests/test_ts_ref_node_tier_225.py`).
+
 Sync colour holds: the fs externs are sync, the sync thunk loads through
 `createRequire` (`emit.py:3010`), `revl_fs_ts.ts` is an ESM graph of node
 builtins with no top-level await, and the bridge's node floor (>= 23.6,
