@@ -177,6 +177,357 @@
       ]
     },
     {
+      "name": "first_at",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        },
+        {
+          "name": "c",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "i",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "n",
+          "value": {
+            "kind": "builtin",
+            "method": "length",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": []
+          },
+          "mutable": true
+        },
+        {
+          "step": "while",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "i"
+            },
+            "right": {
+              "kind": "var",
+              "name": "n"
+            }
+          },
+          "body": [
+            {
+              "step": "if",
+              "cond": {
+                "kind": "bin",
+                "op": "==",
+                "left": {
+                  "kind": "builtin",
+                  "method": "charCodeAt",
+                  "target": {
+                    "kind": "var",
+                    "name": "s"
+                  },
+                  "args": [
+                    {
+                      "kind": "var",
+                      "name": "i"
+                    }
+                  ]
+                },
+                "right": {
+                  "kind": "var",
+                  "name": "c"
+                }
+              },
+              "then": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "var",
+                    "name": "i"
+                  }
+                }
+              ],
+              "else": null
+            },
+            {
+              "step": "assign",
+              "name": "i",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "i"
+                },
+                "right": {
+                  "kind": "lit",
+                  "value": 1
+                },
+                "operands": "Int"
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "bin",
+            "op": "-",
+            "left": {
+              "kind": "lit",
+              "value": 0
+            },
+            "right": {
+              "kind": "lit",
+              "value": 1
+            },
+            "operands": "Int"
+          }
+        }
+      ]
+    },
+    {
+      "name": "run_len",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        },
+        {
+          "name": "c",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "i",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "n",
+          "value": {
+            "kind": "builtin",
+            "method": "length",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": []
+          },
+          "mutable": true
+        },
+        {
+          "step": "while",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "i"
+            },
+            "right": {
+              "kind": "var",
+              "name": "n"
+            }
+          },
+          "body": [
+            {
+              "step": "if",
+              "cond": {
+                "kind": "bin",
+                "op": "!=",
+                "left": {
+                  "kind": "builtin",
+                  "method": "charCodeAt",
+                  "target": {
+                    "kind": "var",
+                    "name": "s"
+                  },
+                  "args": [
+                    {
+                      "kind": "var",
+                      "name": "i"
+                    }
+                  ]
+                },
+                "right": {
+                  "kind": "var",
+                  "name": "c"
+                }
+              },
+              "then": [
+                {
+                  "step": "break",
+                  "line": 32
+                }
+              ],
+              "else": null
+            },
+            {
+              "step": "assign",
+              "name": "i",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "i"
+                },
+                "right": {
+                  "kind": "lit",
+                  "value": 1
+                },
+                "operands": "Int"
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "i"
+          }
+        }
+      ]
+    },
+    {
+      "name": "step2",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "i",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "acc",
+          "value": {
+            "kind": "lit",
+            "value": 0
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "n",
+          "value": {
+            "kind": "builtin",
+            "method": "length",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": []
+          },
+          "mutable": true
+        },
+        {
+          "step": "while",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "i"
+            },
+            "right": {
+              "kind": "var",
+              "name": "n"
+            }
+          },
+          "body": [
+            {
+              "step": "assign",
+              "name": "acc",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "acc"
+                },
+                "right": {
+                  "kind": "builtin",
+                  "method": "charCodeAt",
+                  "target": {
+                    "kind": "var",
+                    "name": "s"
+                  },
+                  "args": [
+                    {
+                      "kind": "var",
+                      "name": "i"
+                    }
+                  ]
+                },
+                "operands": "Int"
+              }
+            },
+            {
+              "step": "assign",
+              "name": "i",
+              "value": {
+                "kind": "bin",
+                "op": "+",
+                "left": {
+                  "kind": "var",
+                  "name": "i"
+                },
+                "right": {
+                  "kind": "lit",
+                  "value": 2
+                },
+                "operands": "Int"
+              }
+            }
+          ]
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "acc"
+          }
+        }
+      ]
+    },
+    {
       "name": "build",
       "params": [
         {

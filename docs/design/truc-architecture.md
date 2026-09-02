@@ -304,6 +304,7 @@ not exist and is not worth building for a machine-only file.
   "trucs": {
     "user_cache": {
       "registry": "local",
+      "version": "1.0.0",
       "sourceHash":   "b782e70c…",
       "manifestHash": "d7d185fd…",
       "provides": {"cache": "Cache"},
@@ -406,10 +407,26 @@ present**: admitting truc's own components needs only the installed `revl`
 package, never a prior truc.
 
 - **Stage 0 (every boot).** The launcher compiles truc's composition from
-  the file list in truc's own committed `src/revl/truc/truc.lock`. That
-  compile *is* an admission (a cold-start `compile_files` runs G2/G3/A6
-  over the whole composition) — so every boot of truc is truc passing its
-  own gate. No pre-built artifact, no snapshot to trust.
+  truc's own committed `src/revl/truc/truc.lock`. That compile *is* an
+  admission (a cold-start `compile_files` runs G2/G3/A6 over the whole
+  composition) — so every boot of truc is truc passing its own gate. No
+  pre-built artifact, no snapshot to trust.
+
+  The lock is truc's stage-0 self-description and it is **mandatory and
+  pinned**: `lockVersion: 1`, one row per source carrying the sha256 of its
+  bytes. Every row is checked before it is compiled — the path must resolve
+  inside truc's package through no symlink, and the file's hash must equal the
+  recorded pin — and a lock that is absent, unparseable, stamped with another
+  version, unpinned, or that names a path leaving the package refuses to boot.
+  There is **no glob fallback**: deleting the lock is no harder than corrupting
+  it, and a check that can be turned off by deleting its input is not a check.
+  This is the same rule `planner.plan_drift` applies to a project's trucs (a
+  missing pin refuses exactly like a drifting one), applied to truc itself. The
+  trust root is still the installed package's own integrity — anyone who can
+  rewrite these sources can rewrite `registry.py` beside them — but that claim
+  is now *checked* rather than assumed. Regenerate with
+  `python -m revl.truc._relock`; `tests/test_truc_bootstrap.py` is the
+  regenerate-or-red gate.
 - **Stage 1 (the fixpoint test) — as shipped (S5).** truc's own source tree
   carries `bootstrap/truc.toml` describing *itself*: truc's eight components
   are the `[assembly].entry`. The dogfood exit test

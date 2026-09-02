@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# The cheap half of CI, run before you open a PR.
+#
+# These three checks take seconds and are the ones that most often redden the
+# `lint` job. Running the full suite locally is NOT the point and is explicitly
+# not done here: that is CI's job now (docs/process.md). This exists so a
+# fifteen-second mistake does not cost a CI round-trip.
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+fail=0
+
+echo "== ruff =="
+uvx ruff@0.16.4 check || fail=1
+
+echo "== python 3.11 syntax sweep =="
+# CI runs 3.11; the dev venv is newer, so 3.12+ syntax passes locally and reds CI.
+python3 - <<'PY' || fail=1
+import ast, pathlib, sys
+bad = []
+for p in pathlib.Path(".").rglob("*.py"):
+    if any(x in p.parts for x in (".git", "node_modules", ".venv", "target", "build")):
+        continue
+    try:
+        ast.parse(p.read_text(encoding="utf-8"), feature_version=(3, 11))
+    except SyntaxError as e:
+        bad.append(f"{p}:{e.lineno}: {e.msg}")
+    except Exception:
+        pass
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+print("py3.11 clean")
+PY
+
+echo "== roadmap markers =="
+python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan || fail=1
+
+# The frontend suite runs tests/test_gate_crate_drift.py on every PR, so a
+# stale crate is a hard red. crates/revl-gate embeds emitted rust, which means
+# ANY emitter change rewrites it. Regenerate with:
+#     python3 tools/build_gate_crate.py
+echo "== gate crate drift =="
+python3 tools/build_gate_crate.py --check || fail=1
+
+# The wasm gate crate is generated from the same sources and drifts for the
+# same reasons, but was not checked here, so its drift only ever surfaced in
+# CI as tests/test_gate_wasm_drift.py. Three PRs burned a full 13-job run on
+# that in one afternoon; both generated crates are checked together now.
+echo "== gate wasm crate drift =="
+python3 tools/build_gate_wasm.py --check || fail=1
+
+# The site wheel is deliberately NOT checked here. It vendors the whole of
+# src/revl, so a per-push gate reddened CI on every source change to a bundled
+# module (an outage class, not a defect). It is a deploy artifact checked at
+# merge and release time, and docs/process.md makes regenerating it the
+# orchestrator's job at merge.
+
+if [ "$fail" -ne 0 ]; then
+  echo
+  echo "pre-PR checks FAILED. Fix these before opening the PR."
+  exit 1
+fi
+echo
+echo "pre-PR checks passed. Open the PR."

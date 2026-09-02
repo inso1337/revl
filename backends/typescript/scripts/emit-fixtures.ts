@@ -41,6 +41,9 @@ export function emitFixtures(): void {
   emitFixture('spawn.ir.json', 'spawn.ts')
   emitFixture('instance_get.ir.json', 'instance_get.ts')
   emitFixture('fr1_loop.ir.json', 'fr1_loop.ts')
+  // item 435(c): index scans over a Str, so `str_scan_memo.test.ts` can count
+  // the code points the emitted `Str` helpers actually materialise
+  emitFixture('str_scan.ir.json', 'str_scan.ts')
   // item 165: identifiers that are JS/TS reserved words, renamed uniformly
   emitFixture('reserved_words.ir.json', 'reserved_words.ts')
   // item 279: a reserved-word JSON field on a DYNAMIC (json_parse/Any) value
@@ -60,6 +63,13 @@ export function emitFixtures(): void {
   // item 243 Slice 2b: the three-entry-kind teardown loop (bracket +
   // transactional + compensation on one LIFO stack, two-phase abort).
   emitFixture('witnessed_teardown.ir.json', 'witnessed_teardown.ts')
+  // item 421 F6: a declared `Secret[T]` must not reach the host trace verbatim
+  // — the origin (a `Secret[T]` extern return), the receiver (a `Secret[T]`
+  // provide-method parameter) and a `Secret[T]` config field, in one module.
+  // Carries no `test` blocks, so the alias keeps the pair off
+  // `generated_coverage.test.ts`'s regex scan, like `emitRouterModule` below.
+  const emitHostTraceSecret = emitFixture
+  emitHostTraceSecret('host_trace_secret.ir.json', 'host_trace_secret.ts')
   // item 318 -> 324: the per-tool-call H1 seam — a provide-method witnessed fs
   // mutation registered into the component activation frame
   // (`Frame.transactionalMethod`), persisting on a clean unload and reverting

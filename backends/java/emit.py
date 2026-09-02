@@ -654,6 +654,19 @@ class _V3Ctx:
                         )
                     self.case_owners[cname] = tname
         self._match_counter = 0
+        # Monotonic index handed to the destructure temporary and to a
+        # witnessed step's Result/Ok temporaries, so their names are a
+        # deterministic property of emission order rather than of object
+        # identity. They used to be `id(node)` — a host address — so the SAME
+        # IR emitted twice produced two different Java sources
+        # (`__revl_destructure_4313623040` vs `__revl_destructure_4391233664`),
+        # which is why backends/java/scenarios/crashproof/revl/Components.java
+        # had to be exempted from the golden drift check. Same rule and same
+        # remedy as item 179 on the reference tier
+        # (backends/python/emit.py's `_Lines._destructure_seq`) and as the rust
+        # tier's `env.wit_counter`. Kept separate from `_match_counter` so the
+        # existing `__revl_ignored_N` numbering is untouched.
+        self._gensym_counter = 0
         # local `let`s bound to an arrow literal, in the body being emitted:
         # {binding name: {"arrow": <arrow node>, "captures": {name: snapshot}}}.
         # See `_inline_arrow` for why an arrow has no Java declaration.
@@ -662,6 +675,11 @@ class _V3Ctx:
     def new_match_ignored(self) -> str:
         self._match_counter += 1
         return f"__revl_ignored_{self._match_counter}"
+
+    def next_gensym(self) -> int:
+        """The next emission-order index for a generated local name."""
+        self._gensym_counter += 1
+        return self._gensym_counter
 
     def record_type_for_fields(self, field_names: list[str]) -> str:
         wanted = set(field_names)
@@ -812,11 +830,13 @@ def _v3_builtin(method: object, target: str, args: list[str],
     raise EmitError(f"unknown builtin method {method!r}")
 
 
-def _emit_stdlib_helpers() -> list[str]:
-    """Static overloads backing the builtin surface — emitted once per file
-    when any builtin/len node is present. Overload resolution replaces
-    runtime `instanceof` dispatch; `revlPush`/`revlConcat`/`revlSlice`
-    return copies (persistent, docs/stdlib-2.0.md)."""
+def _stdlib_helper_source() -> list[str]:
+    """Every static overload backing the builtin surface, as one flat block.
+
+    Overload resolution replaces runtime `instanceof` dispatch;
+    `revlPush`/`revlConcat`/`revlSlice` return copies (persistent,
+    docs/stdlib-2.0.md). `_emit_stdlib_helpers` slices this into per-helper
+    groups and emits only the ones a document reaches (item 433 F6)."""
     return [
         "// revl stdlib surface (docs/stdlib-2.0.md) — typed static overloads.",
         "// A Str counts and indexes in Unicode code points (docs/strings.md);",
@@ -935,6 +955,89 @@ def _emit_stdlib_helpers() -> list[str]:
         "}",
         "",
     ]
+
+
+# The leading comment lines of `_stdlib_helper_source` describe the whole
+# surface rather than any one helper, so they ride with the block, not a group.
+_STDLIB_BLOCK_HEADER_LINES = 4
+
+
+def _stdlib_helper_groups() -> tuple[list[str], dict[str, list[str]]]:
+    """`(block header, helper name -> its lines)`.
+
+    item 433 F6. The helper block used to be all-or-nothing: `_uses_stdlib`
+    keyed on the NODE KIND (`builtin`, `len`, a `sized_length` field), never on
+    WHICH helper that node needs, so a program reaching one helper carried all
+    21 declarations under 16 names. MEASURED on openjdk 26.0.2:
+    `examples/java_match.rvl` reaches ZERO of the 16 (its only `builtin` node is
+    a `checked_div_trunc`, whose helper lives in the separate
+    `_emit_checked_div_helpers` block) and still carried 6049 source bytes /
+    6916 CLASS bytes of them, 42 percent of its compiled unit.
+
+    Each helper's own leading comment lines ride with it, so a group that is
+    not emitted takes its documentation with it.
+    """
+    lines = _stdlib_helper_source()
+    header = lines[:_STDLIB_BLOCK_HEADER_LINES]
+    groups: dict[str, list[str]] = {}
+    pending: list[str] = []
+    current: str | None = None
+    buf: list[str] = []
+    depth = 0
+    for line in lines[_STDLIB_BLOCK_HEADER_LINES:]:
+        text = line.strip()
+        if current is None:
+            if not text:
+                continue
+            if text.startswith("//"):
+                pending.append(line)
+                continue
+            match = re.search(r"\b(revl[A-Za-z0-9]*)\s*\(", text)
+            if match is None:  # pragma: no cover - the block is all declarations
+                raise EmitError(f"unparsable stdlib helper line: {text!r}")
+            current = match.group(1)
+            buf = [*pending, line]
+            pending = []
+            depth = text.count("{") - text.count("}")
+        else:
+            buf.append(line)
+            depth += text.count("{") - text.count("}")
+        if depth <= 0:
+            groups.setdefault(current, []).extend(buf)
+            current = None
+    return header, groups
+
+
+def _stdlib_helpers_reached(emitted: list[str]) -> set[str]:
+    """The helper names `emitted` actually calls, closed over helper-to-helper
+    calls so a selected helper never loses one it needs itself."""
+    _, groups = _stdlib_helper_groups()
+
+    def called_in(text: str) -> set[str]:
+        return {name for name in groups if re.search(r"\b" + name + r"\s*\(", text)}
+
+    reached = called_in("\n".join(emitted))
+    frontier = set(reached)
+    while frontier:
+        nxt: set[str] = set()
+        for name in frontier:
+            nxt |= called_in("\n".join(groups[name])) - reached
+        reached |= nxt
+        frontier = nxt
+    return reached
+
+
+def _emit_stdlib_helpers(names: set[str] | None = None) -> list[str]:
+    """The stdlib helper block, restricted to `names` (all of them when None)."""
+    header, groups = _stdlib_helper_groups()
+    wanted = [name for name in groups if names is None or name in names]
+    if not wanted:
+        return []
+    out = list(header)
+    for name in wanted:
+        out.extend(groups[name])
+    out.append("")
+    return out
 
 
 _EQUALITY_OPS = ("==", "===", "!=", "!==")
@@ -1576,10 +1679,19 @@ def _expr(
         ) + ")"
 
     if kind == "maplit":
-        # `Map.empty()` (docs/stdlib-2.0.md §Map). The diamond infers from
-        # the surrounding target type (return / declared variable /
-        # argument), which covers every typed position.
-        return "new java.util.HashMap<>()"
+        # `Map.empty()` (docs/stdlib-2.0.md §Map). Inference comes from the
+        # surrounding target type (return / declared variable / argument),
+        # which covers every typed position — `Map.of()` is a generic method
+        # and infers in exactly the poly positions the diamond did.
+        #
+        # item 433 F8: this used to be `new java.util.HashMap<>()`. Every value
+        # -map writer (`revlMapSet`, `revlMapRemove`) COPIES before it mutates,
+        # so no caller ever writes through the returned map, and
+        # `java.util.Map.of()` is a preallocated singleton. MEASURED on openjdk
+        # 26.0.2: 48 B per evaluation that escapes, against 0. (When the map
+        # does NOT escape, C2 scalar-replaces the HashMap and both are 0, so
+        # the win is exactly on the escaping path.)
+        return "java.util.Map.of()"
 
     if kind == "arrow":
         # reached only in *value* position — a called arrow is beta-reduced by
@@ -1603,9 +1715,25 @@ def _expr(
                 # docs/strings.md.
                 segs.append(f"revlFtoa({_expr(value, ctx, rename, env)})")
             else:  # ["expr", ir_node] — a full expression, stringified
-                segs.append(f"String.valueOf({_expr(value, ctx, rename, env)})")
+                # item 433 F9: no `String.valueOf` wrapper. Java string
+                # concatenation already applies `String.valueOf` to every
+                # operand, so the wrapper only built an intermediate `String`
+                # (and its `byte[]`) for the surrounding concatenation to copy
+                # again; `invokedynamic makeConcatWithConstants` takes the
+                # primitive directly. MEASURED on openjdk 26.0.2 over
+                # `` `hi ${name} x${n}!` ``: 56 B per interpolation with the
+                # wrapper, 32 B without. Parenthesized unless the node is
+                # already atomic, so an operand's own precedence cannot leak
+                # into the `+` chain.
+                rendered = _expr(value, ctx, rename, env)
+                if value.get("kind") not in _V3_POSTFIX_SAFE_KINDS:
+                    rendered = f"({rendered})"
+                segs.append(rendered)
         if not segs:
             return '""'
+        # The chain must open in String position or `+` reads as arithmetic.
+        if not segs[0].startswith('"'):
+            segs.insert(0, '""')
         return " + ".join(segs)
 
     if kind in ("optfield", "optcall"):
@@ -1941,7 +2069,7 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         out.append(f"{pad}continue;")
     elif step == "let_pattern":
         value = _expr(node.get("value"), ctx)
-        tmp = f"__revl_destructure_{id(node)}"
+        tmp = f"__revl_destructure_{ctx.next_gensym()}"
         keyword = "var" if node.get("mutable") else "final var"
         out.append(f"{pad}{keyword} {tmp} = {value};")
         names = [_ident(n, "binding") for n in node.get("names") or []]
@@ -2333,11 +2461,16 @@ _JAVA_EXTERN_CONFIG_SCAFFOLD = [
     "    java.util.Map<String, Object> cfg = _REVL_EXTERN_CONFIG.get(name);",
     "    if (cfg == null) {",
     "        if (required.length > 0) {",
-    "            String msg = \"\";",
-    "            for (int i = 0; i < required.length; i++) {",
-    "                if (i > 0) msg += \", \";",
-    "                msg += required[i];",
-    "            }",
+    # item 433 F10: this built the field list with `msg += \", \"` in a loop,
+    # justified in a comment by "avoids a dependency on String.join" — which is
+    # a method on java.lang.String and needs no import at all. This arm runs
+    # immediately before a throw, so the win is nil and the point is that the
+    # emitter chose the worse shape for a reason that does not hold. (The
+    # `missing` loop below KEEPS its `+=`: unlike this one it runs on every
+    # call, and its `+=` executes only for a field that is actually absent, so
+    # the happy path allocates nothing. Rewriting it around an ArrayList would
+    # allocate one per call and make the hot path worse.)
+    "            String msg = String.join(\", \", required);",
     "            throw new RuntimeException(\"config extern `\" + name +",
     "                \"` called before plug-time configuration was installed "
     "(required config: \" +",
@@ -2368,26 +2501,62 @@ _JAVA_EXTERN_CONFIG_SCAFFOLD = [
 ]
 
 
+def _java_extern_config_schema(ext: dict) -> tuple[list[str], dict] | None:
+    """`(required field names, defaults)` for a config extern, or None."""
+    schema = ext.get("config")
+    if not schema:
+        return None
+    required = [f["name"] for f in schema if f.get("default") is None]
+    defaults = {f["name"]: f["default"] for f in schema
+                if f.get("default") is not None}
+    return required, defaults
+
+
+def _java_extern_config_constants(externs: list) -> list[str]:
+    """item 433 F2: the required-field array and the defaults map of every
+    config extern, hoisted to `private static final` fields.
+
+    Both are fully determined at emit time. They used to be rebuilt inside the
+    call, so `_revlExternConfig("author", new String[]{..}, Map.of(..))`
+    allocated the `String[]`, the `ImmutableCollections.MapN` and its backing
+    `Object[]` on EVERY call, on top of the `HashMap` copy the resolved map
+    genuinely needs. Hoisting removes those three per call and changes nothing
+    about WHEN the config store is read, since `_revlExternConfig` still runs
+    per call and still reads `_REVL_EXTERN_CONFIG` there."""
+    lines: list[str] = []
+    for ext in externs:
+        schema = _java_extern_config_schema(ext)
+        if schema is None:
+            continue
+        required, defaults = schema
+        suffix = _fn_name(ext.get("name"))
+        req_lit = "new String[]{%s}" % ", ".join(_string(f) for f in required)
+        if defaults:
+            pairs = ", ".join(f"{_string(k)}, {_lit(v)}" for k, v in defaults.items())
+            def_lit = f"java.util.Map.<String, Object>of({pairs})"
+        else:
+            def_lit = "java.util.Map.<String, Object>of()"
+        lines.append(f"private static final String[] _REVL_CFG_REQUIRED_{suffix} = {req_lit};")
+        lines.append(f"private static final java.util.Map<String, Object> "
+                     f"_REVL_CFG_DEFAULTS_{suffix} = {def_lit};")
+    if lines:
+        lines.append("")
+    return lines
+
+
 def _java_extern_config_bind(ext: dict) -> str:
     """The `_revl_config = ...` first-body line for a config extern, or None.
     `_revl_config` is a `java.util.Map<String, Object>`; the verbatim @java body
     reads a field as `(Cast) _revl_config.get("field")`, exactly as the py body
-    reads the resolved dict."""
-    schema = ext.get("config")
-    if not schema:
+    reads the resolved dict. The schema arguments are the hoisted constants
+    `_java_extern_config_constants` emits (item 433 F2)."""
+    if _java_extern_config_schema(ext) is None:
         return None
     name = ext.get("name")
-    required = [f["name"] for f in schema if f.get("default") is None]
-    defaults = {f["name"]: f["default"] for f in schema
-                if f.get("default") is not None}
-    req_lit = "new String[]{%s}" % ", ".join(_string(f) for f in required)
-    if defaults:
-        pairs = ", ".join(f"{_string(k)}, {_lit(v)}" for k, v in defaults.items())
-        def_lit = f"java.util.Map.<String, Object>of({pairs})"
-    else:
-        def_lit = "java.util.Map.<String, Object>of()"
+    suffix = _fn_name(name)
     return (f"java.util.Map<String, Object> _revl_config = _revlExternConfig("
-            f"{_string(name)}, {req_lit}, {def_lit});")
+            f"{_string(name)}, _REVL_CFG_REQUIRED_{suffix}, "
+            f"_REVL_CFG_DEFAULTS_{suffix});")
 
 
 def _emit_v3_externs(externs: list) -> list[str]:
@@ -2396,6 +2565,7 @@ def _emit_v3_externs(externs: list) -> list[str]:
     # extern carries a config schema (byte-identical when none do).
     if any(ext.get("config") for ext in externs):
         lines.extend(_JAVA_EXTERN_CONFIG_SCAFFOLD)
+        lines.extend(_java_extern_config_constants(externs))
     for ext in externs:
         name = _fn_name(ext.get("name"))
         params = ", ".join(
@@ -2715,13 +2885,28 @@ class _Env:
 
 
 def _format_java(template: str, args: list[str]) -> str:
-    # `$0`/`$1` placeholders -> `%s`; `$$` -> literal `$` (A4). A literal `%`
-    # in the template text must become `%%` or String.format throws
-    # UnknownFormatConversionException at runtime (SQL LIKE patterns).
-    def literal(text: list[str]) -> str:
-        return "".join(text).replace("%", "%%")
+    """A `format` node (a `${..}` template literal in component position) as a
+    Java concatenation chain.
 
-    pieces, i, buf = [], 0, []
+    item 433 F1. This used to render `String.format("[req] %s #%s end", msg, n)`.
+    The only conversion this emitter ever produces is `%s`, which is defined as
+    `String.valueOf` for every non-`Formattable` argument, and no revl value is
+    `Formattable` — so the concatenation is output-identical, including for
+    null, and it is what a Java developer writes. MEASURED on openjdk 26.0.2
+    over `bench/codegen/java/cases/interp_format`: `String.format` allocates the
+    varargs `Object[]`, boxes each primitive, builds a `Formatter` and its
+    `StringBuilder` and re-parses the format string into a fresh
+    `FormatSpecifier` list on EVERY call; the concatenation compiles to one
+    `invokedynamic makeConcatWithConstants` whose linked handle writes the
+    primitive straight into the result buffer.
+
+    The chain always opens on a string literal (`""` when the template starts
+    with a placeholder), so `+` can never be read as arithmetic. `$$` is a
+    literal `$` (A4); `%` needs no escaping any more, which is the
+    `UnknownFormatConversionException` hazard on SQL LIKE patterns gone too.
+    """
+    pieces: list[str] = []          # alternating: literal text, arg index, ...
+    i, buf = 0, []
     while i < len(template):
         ch = template[i]
         if ch == "$":
@@ -2733,14 +2918,24 @@ def _format_java(template: str, args: list[str]) -> str:
             while j < len(template) and template[j].isdigit():
                 j += 1
             if j > i + 1:
-                pieces.append(literal(buf) + "%s")
+                pieces.append(("text", "".join(buf)))
+                pieces.append(("arg", int(template[i + 1 : j])))
                 buf = []
                 i = j
                 continue
         buf.append(ch)
         i += 1
-    pieces.append(literal(buf))
-    return f"String.format({_string(''.join(pieces))}, {', '.join(args)})"
+    pieces.append(("text", "".join(buf)))
+
+    # Collapse the alternation into a concatenation, dropping empty literal
+    # runs except the leading one, which anchors the chain in String position.
+    segs: list[str] = []
+    for index, (kind, value) in enumerate(pieces):
+        if kind == "arg":
+            segs.append(args[value] if value < len(args) else _string(""))
+        elif value or index == 0:
+            segs.append(_string(value))
+    return " + ".join(segs)
 
 
 def _emit_service_interfaces(services: dict) -> list[str]:
@@ -4099,6 +4294,13 @@ def _core_imports(ir: dict) -> list[str]:
         names.add("AsyncPlugin")
     if _ir_uses_component_step(ir, "fail"):
         names.add("CordisException")
+    # item 173: an emitted router class throws `CordisException` on an empty
+    # live set and on the unreachable tail, with no `fail` step anywhere in the
+    # document. Without this arm the emitted unit does not compile ("cannot
+    # find symbol: class CordisException"), which is what running `javac` over
+    # `bench/codegen/java/cases/router` surfaced.
+    if any(component.get("routes") for component in ir.get("components") or []):
+        names.add("CordisException")
     return [f"import io.cordis4j.core.{name};" for name in sorted(names)]
 
 
@@ -4264,7 +4466,7 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
         out.append(f"{pad}continue;")
     elif kind == "let_pattern":
         value = _expr(step.get("value"), v3_ctx, None, env)
-        tmp = f"__revl_destructure_{id(step)}"
+        tmp = f"__revl_destructure_{v3_ctx.next_gensym()}"
         keyword = "var" if step.get("mutable") else "final var"
         out.append(f"{pad}{keyword} {tmp} = {value};")
         names = [_ident(n, "binding") for n in step.get("names") or []]
@@ -4363,7 +4565,7 @@ def _emit_witnessed_step(
     `rename` maps requires/binds to `this.<name>` in method bodies (mirroring
     the bracket path); it is `None` in the activation body."""
     assert frame_expr is not None  # invariant: witnessed acquire => needs_frame
-    tag = id(step)
+    tag = v3_ctx.next_gensym()
     result_var = f"_revl_wit{tag}"
     ok_var = f"_revl_ok{tag}"
     witness_type = _java_v3_type(ext.get("witness"))
@@ -4545,11 +4747,12 @@ def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str
     strategy = route.get("strategy") or "round_robin"
     realm_lits = ", ".join(_string(r) for r in realms)
     methods = (services.get(service_name, {}) or {}).get("methods", {}) or {}
+    empty_msg = _string(
+        f"revl: router for {key} has no live worker (all realms withdrawn)")
 
     out.append(f"public static final class {struct} implements {service_name} {{")
     out.append("    private final Context ctx;")
     out.append(f"    private final String[] realms = {{{realm_lits}}};")
-    out.append(f"    private final String strategy = {_string(strategy)};")
     # `cursor` and `served` are MUTABLE router state, and the tier's placement
     # runner serves every bridge connection on its own thread
     # (backends/java/placement/PlacementRunner.java: `new Thread(() ->
@@ -4560,37 +4763,53 @@ def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str
     # mirror of go's whole-function mutex: every read and write of both fields
     # happens inside it.
     out.append("    private int cursor = 0;")
-    out.append("    private final java.util.Map<String, Long> served = new java.util.HashMap<>();")
+    # item 433 F3: served counts live in a `long[]` indexed by realm position,
+    # not a `Map<String, Long>`. The map boxed a `Long` on every call once a
+    # count passed the `Long.valueOf` cache at 127, and hashed the realm label
+    # to get there. The array indexes straight off the position the selection
+    # loop already has in hand.
+    out.append(f"    private final long[] served = new long[{len(realms)}];")
     out.append(f"    {struct}(Context ctx) {{ this.ctx = ctx; }}")
-    out.append("    private java.util.List<String> revlLive() {")
-    out.append("        java.util.List<String> out = new java.util.ArrayList<>();")
-    out.append("        for (String r : realms) {")
-    out.append(f"            if (ctx.serviceInRealm({service_name}.class, r).isPresent()) out.add(r);")
-    out.append("        }")
-    out.append("        return out;")
-    out.append("    }")
+    # item 433 F3: ONE resolution per call. This used to call a `revlLive()`
+    # that probed EVERY realm, threw away each handle it had just resolved and
+    # kept only the label in a fresh `ArrayList`, then scanned that list with
+    # `live.contains(cand)` inside the candidate loop (O(realms^2) string
+    # comparisons) and called `ctx.serviceInRealm(..)` a SECOND time for the
+    # winner. `backends/go/emit.py`'s `_revlLive` already returned the handles
+    # alongside the labels, so java was the tier out of step. The selection
+    # loop now keeps the handle it probed. The emitter also knows which
+    # strategy the route declares, so only that branch is emitted at all —
+    # there is no longer a `strategy` field or a per-call `String.equals`
+    # against it.
     out.append(f"    private synchronized {service_name} revlSelect() {{")
-    out.append("        java.util.List<String> live = revlLive();")
-    out.append("        if (live.isEmpty()) throw new CordisException("
-               "\"revl: router for " + key + " has no live worker (all realms withdrawn)\");")
-    out.append("        if (strategy.equals(\"least_loaded\")) {")
-    out.append("            String best = live.get(0);")
-    out.append("            for (String l : live) {")
-    out.append("                if (served.getOrDefault(l, 0L) < served.getOrDefault(best, 0L)) best = l;")
-    out.append("            }")
-    out.append("            served.merge(best, 1L, Long::sum);")
-    out.append(f"            return ctx.serviceInRealm({service_name}.class, best).get();")
-    out.append("        }")
     out.append("        int n = realms.length;")
-    out.append("        for (int off = 0; off < n; off++) {")
-    out.append("            String cand = realms[(cursor + off) % n];")
-    out.append("            if (live.contains(cand)) {")
-    out.append("                cursor = (cursor + off + 1) % n;")
-    out.append("                served.merge(cand, 1L, Long::sum);")
-    out.append(f"                return ctx.serviceInRealm({service_name}.class, cand).get();")
-    out.append("            }")
-    out.append("        }")
-    out.append("        throw new CordisException(\"revl: router selection unreachable\");")
+    if strategy == "least_loaded":
+        out.append(f"        {service_name} chosen = null;")
+        out.append("        int best = -1;")
+        out.append("        for (int i = 0; i < n; i++) {")
+        out.append(f"            java.util.Optional<{service_name}> hit = "
+                   f"ctx.serviceInRealm({service_name}.class, realms[i]);")
+        out.append("            if (hit.isEmpty()) continue;")
+        out.append("            if (best < 0 || served[i] < served[best]) {")
+        out.append("                best = i;")
+        out.append("                chosen = hit.get();")
+        out.append("            }")
+        out.append("        }")
+        out.append(f"        if (best < 0) throw new CordisException({empty_msg});")
+        out.append("        served[best]++;")
+        out.append("        return chosen;")
+    else:
+        out.append("        for (int off = 0; off < n; off++) {")
+        out.append("            int at = (cursor + off) % n;")
+        out.append(f"            java.util.Optional<{service_name}> hit = "
+                   f"ctx.serviceInRealm({service_name}.class, realms[at]);")
+        out.append("            if (hit.isPresent()) {")
+        out.append("                cursor = (at + 1) % n;")
+        out.append("                served[at]++;")
+        out.append("                return hit.get();")
+        out.append("            }")
+        out.append("        }")
+        out.append(f"        throw new CordisException({empty_msg});")
     out.append("    }")
     for mname, decl in methods.items():
         jname = _ident(mname, "method")
@@ -4997,14 +5216,19 @@ def _emit_v1(ir: dict, package_name: str) -> str:
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
     if _uses_equality(ir):
         out.extend(["    " + line if line else line for line in _emit_eq_helper()])
-    if _uses_stdlib(ir):
-        out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
+    # item 433 F6: reserve the slot, then splice in only the helpers the rest
+    # of the unit actually calls once it has all been emitted.
+    stdlib_at = len(out)
     if _uses_float_interp(ir):
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_revl_frame(ir):
         out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
+    out[stdlib_at:stdlib_at] = [
+        "    " + line if line else line
+        for line in _emit_stdlib_helpers(_stdlib_helpers_reached(out[stdlib_at:]))
+    ]
     out.append("}")
     return "\n".join(out).rstrip() + "\n"
 
@@ -5028,14 +5252,19 @@ def _emit_v2(ir: dict, package_name: str) -> str:
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
     if _uses_equality(ir):
         out.extend(["    " + line if line else line for line in _emit_eq_helper()])
-    if _uses_stdlib(ir):
-        out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
+    # item 433 F6: reserve the slot, then splice in only the helpers the rest
+    # of the unit actually calls once it has all been emitted.
+    stdlib_at = len(out)
     if _uses_float_interp(ir):
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_revl_frame(ir):
         out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
+    out[stdlib_at:stdlib_at] = [
+        "    " + line if line else line
+        for line in _emit_stdlib_helpers(_stdlib_helpers_reached(out[stdlib_at:]))
+    ]
     out.append("}")
     return "\n".join(out).rstrip() + "\n"
 
@@ -5209,8 +5438,9 @@ def _emit_v3(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_eq_helper()])
     if needs_value_helpers:
         out.extend(["    " + line if line else line for line in _emit_hash_helper()])
-    if _uses_stdlib(ir):
-        out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
+    # item 433 F6: reserve the slot, then splice in only the helpers the rest
+    # of the unit actually calls once it has all been emitted.
+    stdlib_at = len(out)
     if _uses_float_interp(ir):
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_checked_div(ir):
@@ -5247,6 +5477,10 @@ def _emit_v3(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_component(
             component, services, types, functions, externs, components,
             render_type=_java_v3_type)])
+    out[stdlib_at:stdlib_at] = [
+        "    " + line if line else line
+        for line in _emit_stdlib_helpers(_stdlib_helpers_reached(out[stdlib_at:]))
+    ]
     out.append("}")
     return "\n".join(out).rstrip() + "\n"
 

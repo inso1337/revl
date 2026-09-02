@@ -62,8 +62,25 @@ function revlCheckedMod(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | {
   return { kind: "Ok", value: ((a % m) + m) % m }
 }
 
+let revlCpsK0: string | undefined
+let revlCpsV0: string[] = []
+let revlCpsK1: string | undefined
+let revlCpsV1: string[] = []
+function revlCps(s: string): string[] {
+  if (s === revlCpsK0) return revlCpsV0
+  if (s === revlCpsK1) {
+    const k = revlCpsK1, v = revlCpsV1
+    revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0
+    revlCpsK0 = k; revlCpsV0 = v
+    return v
+  }
+  const v = Array.from(s)
+  revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0
+  revlCpsK0 = s; revlCpsV0 = v
+  return v
+}
 function revlLen(x: string | ArrayLike<unknown>): bigint {
-  return BigInt(typeof x === "string" ? Array.from(x).length : x.length)
+  return BigInt(typeof x === "string" ? revlCps(x).length : x.length)
 }
 function revlSlice(x: string, a: bigint, b: bigint): string
 function revlSlice(x: Uint8Array, a: bigint, b: bigint): Uint8Array
@@ -72,15 +89,15 @@ function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unkn
 function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[] {
   const i = Number(a), j = Number(b)
   return typeof x === "string"
-    ? Array.from(x).slice(i, j).join("")
+    ? revlCps(x).slice(i, j).join("")
     : (x as string | Uint8Array | unknown[]).slice(i, j)
 }
 function revlCharAt(s: string, i: bigint): string {
-  const c = Array.from(s)[Number(i)]
+  const c = revlCps(s)[Number(i)]
   return c === undefined ? "" : c
 }
 function revlCharCodeAt(s: string, i: bigint): bigint {
-  const c = Array.from(s)[Number(i)]
+  const c = revlCps(s)[Number(i)]
   return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))
 }
 function revlIndexOf(x: string | unknown[], v: unknown): bigint {
