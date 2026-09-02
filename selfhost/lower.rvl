@@ -172,23 +172,43 @@
 //     a key is pinned at most once. Code-less; tagged "G1" (the declared-wiring
 //     family, as `intercept` is).
 //
+// Item 186 (bounded pieces) then closed the last two SINGLE-SOURCE residues:
+//
+//   * multi-realm routing VALIDATION (item 162, lower.py's `RouteStmt` branch +
+//     its `_link` route loop): `isolate <key> in realms(...) [strategy(...)]` was
+//     parsed-but-unvalidated. Its prelude placement (PRELUDE), its target rules
+//     (a provision routed / an undeclared key), one-binding-per-key (pinned
+//     already / routed twice), the closed strategy set, and the link-time
+//     per-realm provider check are all mirrored. Code-less; the four
+//     routing-specific ones are tagged "ROUTE", the undeclared target IS the
+//     shared G1 diagnostic, and a routed key's G3 edges are drawn per realm.
+//
+//   * the async-coloring APPROXIMATION: callee collection and leak-reach now
+//     STOP at a nested COERCED arrow (`stop_async_arrows`) instead of descending
+//     into it. `abody_callees` feeds the coloring fixed point while `FnD.callees`
+//     (unpruned) still feeds the emission one, exactly as the reference runs the
+//     same walk with and without the flag. The inputs that reach it — an
+//     async-typed but UNCALLED parameter, so rule 2 does not mask it — are now
+//     in the corpus and in a five-switch fuzzer.
+//
 // ============================================================ WHAT REMAINS
 // Path C is COMPLETE for the SINGLE-SOURCE admission surface — every guarantee
 // `admit_src(src)` can decide from one program text is mirrored and cross-checked
-// (G1-G4, A1, PRELUDE, the spawn dimension, handoff, isolate). The residue below
-// is either NOT a single-source verdict (so it has no `admit_src` cross-check) or
-// a soundness approximation invisible to every cross-checked input:
+// (G1-G4, A1, PRELUDE, the spawn dimension, handoff, isolate, routing). The
+// residue below is either NOT a single-source verdict (so it has no `admit_src`
+// cross-check) or a shape the gate's verdict vocabulary cannot express:
 //   * The type/arg-checking spine (checker.rvl already cross-checks typing).
-//   * One async-coloring APPROXIMATION remains (documented at its site):
-//     leak-reach / callee-collection descends into a nested COERCED arrow rather
-//     than stopping at it (the reference's `stop_async_arrows`). Rule 2 masks it
-//     for every arrow whose callee actually calls its async-typed slot; the
-//     residual gap needs an async-typed-but-uncalled parameter and is reached by
-//     no cross-checked fixture. Closing it soundly needs per-nesting arrow-color
-//     state, so it stays DEFERRED.
-//   * Multi-realm routing (`isolate … in realms(...)`) — the routing FORM is
-//     parsed but left unvalidated: its component-level refusals plus the
-//     link-time per-realm provider check (item 162) are a self-contained follow-on.
+//   * Refusal ORDER against the reference's collect-all sink (item 386): the
+//     reference orders its collected diagnostics by LINE, so an earlier-line
+//     link (G2) refusal outranks a later-line component refusal, while this gate
+//     reports the first refusal it reaches. The two agree on every program with
+//     ONE refusal; only a multi-defect program can separate them, and closing it
+//     needs line numbers on every gate refusal plus a collecting sink.
+//   * The routing form's PARSE-level rules (an empty `realms()`, a dynamic label,
+//     a repeated label) stay unvalidated: the reference raises those from its
+//     parser, a family outside this gate's verdict vocabulary. The route clause
+//     is left unvalidated rather than guessed at when it is not the well-formed
+//     static-literal shape.
 //   * Spawn `with { … }` config-field validation and nested (non-statement)
 //     spawn discovery — the gate skips the config block structurally.
 //   * AMBIENT-input admission (no single-source cross-check via `admit_src`):
@@ -202,10 +222,10 @@
 //
 // Verdict shape: `admit_src` returns "" to admit, else a two-part string
 // "<G>|<message>" where <G> is the guarantee tag ("G1" | "G2" | "G3" | "G4" |
-// "A1" | "PRELUDE" | "SPAWN" | "HANDOFF") and <message> is the refusal spelled
-// exactly as the reference spells it. The cross-check compares both the tag and
-// the message; for the code-less refusals ("SPAWN"/"HANDOFF" and the code-less
-// "G1"/"PRELUDE" families) the message text is the ground truth.
+// "A1" | "PRELUDE" | "SPAWN" | "HANDOFF" | "ROUTE") and <message> is the refusal
+// spelled exactly as the reference spells it. The cross-check compares both the
+// tag and the message; for the code-less refusals ("SPAWN"/"HANDOFF"/"ROUTE" and
+// the code-less "G1"/"PRELUDE" families) the message text is the ground truth.
 
 use "./lexer.rvl" { Token, lex_src }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
@@ -271,9 +291,15 @@ type ProvKey = { key: Str, rlm: Str }
 // key -> realm. It scopes both a provided key (its provision's realm, for G2)
 // and a required key (the realm it resolves in, for G3 edges), exactly as
 // lower.py's `_realm(entry, key)` reads one isolate map for both roles.
+// A multi-realm bind (item 162, lower.py's `RouteStmt` branch):
+// `isolate <key> in realms("a","b") [strategy(<name>)]` distributes a REQUIRED
+// key across N backend realms. `rlms` is the realm list in declaration order (a
+// router's rotation is defined over it) and `strat` the strategy name ("" when
+// omitted — the router's default).
+type Route   = { key: Str, rlms: List[Str], strat: Str }
 type CompD   = { name: Str, provKeys: List[ProvKey], provs: List[Provide],
                  reqMap: List[Bind], setup: List[Stmt], iso: List[ProvKey],
-                 refuse: Str }
+                 routes: List[Route], refuse: Str }
 
 type Bind = { name: Str, ty: Str }
 
@@ -519,9 +545,9 @@ fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
 
 fn mk_compd(nm: Str, pks: List[ProvKey], pvs: List[Provide],
             rq: List[Bind], su: List[Stmt], iso: List[ProvKey],
-            refuse: Str) -> CompD {
+            rts: List[Route], refuse: Str) -> CompD {
   return { name: nm, provKeys: pks, provs: pvs, reqMap: rq, setup: su, iso: iso,
-           refuse: refuse }
+           routes: rts, refuse: refuse }
 }
 
 fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
@@ -757,6 +783,116 @@ fn body_callees(ss: List[Stmt], i: Int, acc: List[Str]) -> List[Str] {
   return body_callees(ss, i + 1, calls_in(ss[i].e, acc))
 }
 
+// ------------------------------------------------ callees, async-arrow-pruned
+//
+// `_calls_in(..., stop_async_arrows=True)` — the SECOND callee collection the
+// reference runs over the same bodies. An arrow that lands in an `Async[T]`
+// parameter slot is stamped async (`_coerce_async_args` on the component path,
+// `_resolve_arrow` on the pure path), and an async-colored arrow is a VALUE
+// whose suspension belongs to whoever awaits it, not to the body that
+// constructs it (item 92 §3, "the arrow owns its color"). So the async fixed
+// point (`_async_callables`) STOPS at such an arrow, while the emission fixed
+// point passes no flag and keeps bubbling.
+//
+// That is why `FnD.callees` (unpruned) still feeds `emit_caps` and this pruned
+// collection feeds `async_colored`: one walk cannot serve both. `slots` is the
+// callable -> `Async[T]` parameter-index table (`Ctx.fnAsyncSlots`), so the
+// pruning is decided exactly where the reference's stamp is placed — at the
+// argument position of a call to a fn with an async-typed parameter.
+//
+// Closing this was roadmap item 186's residual coloring approximation: without
+// it a fn whose ONLY async reach sits inside a coerced arrow is over-colored,
+// and every sync method calling it is falsely A1-refused.
+
+fn acalls_slots(slots: Map[Str, List[Int]], n: Str) -> List[Int] {
+  return match slots.lookup(n) { Some(v) => v, None => [] }
+}
+
+// Is this expression an arrow literal? (The payload is BOUND rather than
+// wildcarded: `Arrow(_)` lowers to a rust arm reading the discarded binding,
+// which cargo refuses — `is_bad` in parser.rvl binds for the same reason.)
+fn is_arrow(e: Expr) -> Bool {
+  return match e { Arrow(a) => true, _ => false }
+}
+
+fn aexprs_calls(xs: List[Expr], i: Int, sl: Map[Str, List[Int]],
+                acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return aexprs_calls(xs, i + 1, sl, acalls_in(xs[i], sl, acc))
+}
+
+fn ainits_calls(xs: List[InitN], i: Int, sl: Map[Str, List[Int]],
+                acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return ainits_calls(xs, i + 1, sl, acalls_in(xs[i].value, sl, acc))
+}
+
+fn aarms_calls(xs: List[ArmN], i: Int, sl: Map[Str, List[Int]],
+               acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return aarms_calls(xs, i + 1, sl, acalls_in(xs[i].body, sl, acc))
+}
+
+fn aparts_calls(xs: List[PartN], i: Int, sl: Map[Str, List[Int]],
+                acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return aparts_calls(xs, i + 1, sl, acalls_in(xs[i].e, sl, acc))
+}
+
+// The argument list of a call to `n`: an ARROW at one of `n`'s `Async[T]` slots
+// is the coerced (async-stamped) value — pruned. Every other argument, and a
+// non-arrow in an async slot (the reference refuses it separately), is walked.
+fn aargs_calls(xs: List[Expr], i: Int, asl: List[Int], sl: Map[Str, List[Int]],
+               acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  if (contains_int(asl, i) && is_arrow(xs[i])) {
+    return aargs_calls(xs, i + 1, asl, sl, acc)
+  }
+  return aargs_calls(xs, i + 1, asl, sl, acalls_in(xs[i], sl, acc))
+}
+
+fn acall_calls(tg: Expr, args: List[Expr], sl: Map[Str, List[Int]],
+               acc: List[Str]) -> List[Str] {
+  let cn = callee_name(tg)
+  if (cn != "") {
+    return aargs_calls(args, 0, acalls_slots(sl, cn), sl, acc.push(cn))
+  }
+  return aexprs_calls(args, 0, sl, acalls_in(tg, sl, acc))
+}
+
+fn acalls_in(e: Expr, sl: Map[Str, List[Int]], acc: List[Str]) -> List[Str] {
+  return match e {
+    IntLit(_)   => acc,
+    FloatLit(_) => acc,
+    StrLit(_)   => acc,
+    BoolLit(_)  => acc,
+    NullLit     => acc,
+    Var(_)      => acc,
+    Hole(_)     => acc,
+    Bad(_)      => acc,
+    Bin(b)      => acalls_in(b.r, sl, acalls_in(b.l, sl, acc)),
+    Un(u)       => acalls_in(u.e, sl, acc),
+    Emit(u)     => acalls_in(u.e, sl, acc),
+    Call(c)     => acall_calls(c.target, c.args, sl, acc),
+    Field(f)    => acalls_in(f.target, sl, acc),
+    OptField(f) => acalls_in(f.target, sl, acc),
+    OptCall(c)  => aexprs_calls(c.args, 0, sl, acalls_in(c.target, sl, acc)),
+    Index(x)    => acalls_in(x.idx, sl, acalls_in(x.target, sl, acc)),
+    If(x)       => acalls_in(x.els, sl, acalls_in(x.then_, sl, acalls_in(x.cond, sl, acc))),
+    Rec(r)      => ainits_calls(r.fields, 0, sl, acc),
+    Lst(l)      => aexprs_calls(l.items, 0, sl, acc),
+    Arrow(a)    => acalls_in(a.body, sl, acc),
+    Match(m)    => aarms_calls(m.arms, 0, sl, acalls_in(m.scrut, sl, acc)),
+    Templ(t)    => aparts_calls(t.parts, 0, sl, acc),
+  }
+}
+
+fn abody_callees(ss: List[Stmt], i: Int, sl: Map[Str, List[Int]],
+                 acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  return abody_callees(ss, i + 1, sl, acalls_in(ss[i].e, sl, acc))
+}
+
 // ================================================================ parsing
 //
 // The declaration layer. Modelled on checker.rvl's parser, extended to capture
@@ -946,11 +1082,12 @@ fn bind_has(env: List[Bind], n: Str) -> Bool { return bind_lookup(env, n, 0) != 
 // metadata validation (a G1 target/uniqueness refusal). It is distinct from
 // `ok: false`, which is a structural parse failure ("BAD").
 type ProvR = { provs: List[Provide], setup: List[Stmt], iso: List[ProvKey],
-               refuse: Str, i: Int, ok: Bool }
+               routes: List[Route], refuse: Str, i: Int, ok: Bool }
 
 fn mk_provr(pv: List[Provide], su: List[Stmt], iso: List[ProvKey],
-            refuse: Str, i: Int, ok: Bool) -> ProvR {
-  return { provs: pv, setup: su, iso: iso, refuse: refuse, i: i, ok: ok }
+            rts: List[Route], refuse: Str, i: Int, ok: Bool) -> ProvR {
+  return { provs: pv, setup: su, iso: iso, routes: rts, refuse: refuse,
+           i: i, ok: ok }
 }
 
 // The prelude rule (lower.py `_lower_component`): realm/metadata declarations
@@ -1003,6 +1140,110 @@ fn iso_has(iso: List[ProvKey], key: Str, i: Int) -> Bool {
   return iso_has(iso, key, i + 1)
 }
 
+// ---------------------------------------------- multi-realm routing (item 162)
+//
+// `isolate <key> in realms("a","b") [strategy(<name>)]` — lower.py's `RouteStmt`
+// branch. The routing FORM parses in the reference's frontend; these are its
+// component-level admission rules, each spelled exactly as the reference spells
+// it. All are code-less refusals: the prelude one reuses the PRELUDE wording
+// (with the routing form's own spelling of the keyword), the undeclared-key one
+// IS the shared G1 `is not a declared requirement of` diagnostic, and the four
+// routing-specific ones are tagged "ROUTE" so the oracle compares tag AND text.
+//
+// Routing distributes a CONSUMER's dependency, so it targets a required key: a
+// provision has one installed instance in one realm (G2), which is why a routed
+// provision, and a key both pinned and routed, are refusals rather than widenings.
+
+fn route_prelude_msg() -> Str {
+  return "`isolate ... in realms(...)` must precede every effect, emit, await, and provide statement"
+}
+
+fn route_provision_msg(key: Str, cname: Str) -> Str {
+  return "`isolate ... in realms(...)` routes a *required* key — `".concat(key)
+    .concat("` is a provision of ").concat(cname)
+}
+
+fn route_undeclared_msg(key: Str, cname: Str) -> Str {
+  return "`".concat(key).concat("` is not a declared requirement of ").concat(cname)
+}
+
+fn route_pinned_msg(key: Str, cname: Str) -> Str {
+  return "key `".concat(key)
+    .concat("` is already isolated to a single realm in ").concat(cname)
+    .concat(" — it cannot also be routed across `realms(...)`")
+}
+
+fn route_twice_msg(key: Str, cname: Str) -> Str {
+  return "key `".concat(key).concat("` is routed twice in ").concat(cname)
+}
+
+// The closed strategy set (lower.py's `KNOWN_STRATEGIES`): validated at compile
+// time so a typo is a refusal, not a silent runtime fallback. The diagnostic
+// lists the known names SORTED, exactly as `", ".join(sorted(...))` renders them.
+fn known_strategies() -> List[Str] {
+  return ["least_loaded", "random", "round_robin", "sticky"]
+}
+
+fn route_strategy_msg(strat: Str, key: Str, cname: Str) -> Str {
+  return "unknown routing strategy `".concat(strat).concat("` for `")
+    .concat(key).concat("` in ").concat(cname)
+}
+
+fn routes_has(rs: List[Route], key: Str, i: Int) -> Bool {
+  if (i >= rs.length()) { return false }
+  if (rs[i].key == key) { return true }
+  return routes_has(rs, key, i + 1)
+}
+
+fn route_of(rs: List[Route], key: Str, i: Int) -> Route {
+  if (i >= rs.length()) { return { key: "", rlms: [], strat: "" } }
+  if (rs[i].key == key) { return rs[i] }
+  return route_of(rs, key, i + 1)
+}
+
+// The token-level reader for the routing clause, entered at the `realms` ident.
+// `ok` is false when the clause is not the well-formed static-literal shape the
+// reference's `realms_route` accepts — every such input is a reference PARSE
+// error (an empty list, a dynamic label, a repeated label), a family outside
+// this gate's verdict vocabulary, so the clause is left unvalidated exactly as
+// it was before this slice rather than guessed at.
+type RouteP = { rlms: List[Str], strat: Str, i: Int, ok: Bool }
+
+fn ati(ts: List[Token], i: Int, w: Str) -> Bool {
+  let t = tkc(ts, i)
+  return t.kind == "ident" && t.text == w
+}
+
+fn p_realm_labels(ts: List[Token], i: Int, acc: List[Str]) -> RouteP {
+  if (!atk(ts, i, "string")) { return { rlms: acc, strat: "", i: i, ok: false } }
+  let label = tkc(ts, i).text
+  if (label == "" || contains(acc, label)) {
+    return { rlms: acc, strat: "", i: i, ok: false }
+  }
+  let xs = acc.push(label)
+  if (atk(ts, i + 1, ",")) {
+    if (atk(ts, i + 2, ")")) { return { rlms: xs, strat: "", i: i + 3, ok: true } }
+    return p_realm_labels(ts, i + 2, xs)
+  }
+  if (atk(ts, i + 1, ")")) { return { rlms: xs, strat: "", i: i + 2, ok: true } }
+  return { rlms: xs, strat: "", i: i + 1, ok: false }
+}
+
+fn p_route_clause(ts: List[Token], i: Int) -> RouteP {
+  if (!ati(ts, i, "realms") || !atk(ts, i + 1, "(")) {
+    return { rlms: [], strat: "", i: i, ok: false }
+  }
+  let r = p_realm_labels(ts, i + 2, [])
+  if (!r.ok) { return r }
+  // `strategy(<ident>)` is optional; `strategy` is an ordinary identifier that
+  // heads a clause only in this position.
+  if (ati(ts, r.i, "strategy") && atk(ts, r.i + 1, "(")
+      && atk(ts, r.i + 2, "ident") && atk(ts, r.i + 3, ")")) {
+    return { rlms: r.rlms, strat: tkc(ts, r.i + 2).text, i: r.i + 4, ok: true }
+  }
+  return r
+}
+
 // `handoff <key>: <Type>` (item 53, lower.py's `HandoffStmt` branch): the
 // verified state hand-off of a stateful provider. A prelude declaration (it
 // names the provider's live state before any effect creates it) that targets a
@@ -1020,35 +1261,43 @@ fn handoff_twice_msg(cname: Str) -> Str {
 
 fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                reqh: List[Bind], cname: Str, provs: List[Provide],
-               setup: List[Stmt], iso: List[ProvKey], icept: List[Str],
-               hoff: Bool, action: Bool) -> ProvR {
+               setup: List[Stmt], iso: List[ProvKey], rts: List[Route],
+               icept: List[Str], hoff: Bool, action: Bool) -> ProvR {
   if (i >= end || atk(ts, i, "}")) {
-    return mk_provr(provs, setup, iso, "", i, true)
+    return mk_provr(provs, setup, iso, rts, "", i, true)
   }
   if (atw(ts, i, "provide")) {
     let key = tkc(ts, i + 1).text
-    if (!atk(ts, i + 2, "{")) { return mk_provr(provs, setup, iso, "", i + 2, false) }
+    if (!atk(ts, i + 2, "{")) {
+      return mk_provr(provs, setup, iso, rts, "", i + 2, false)
+    }
     let pend = close_brace(ts, i + 2)
     if (pend == 0 - 1) {
-      return mk_provr(provs, setup, iso, "", ts.length(), false)
+      return mk_provr(provs, setup, iso, rts, "", ts.length(), false)
     }
     let ms = p_prov_methods(ts, i + 3, pend - 1, [])
-    if (!ms.ok) { return mk_provr(provs, setup, iso, "", pend, false) }
+    if (!ms.ok) { return mk_provr(provs, setup, iso, rts, "", pend, false) }
     // a `provide` block is an action: it counts against later prelude decls.
     return p_comp_body(ts, pend, end, provh, reqh, cname,
                        provs.push({ key: key,
                                     svcName: bind_lookup(provh, key, 0),
                                     methods: ms.xs }),
-                       setup, iso, icept, hoff, true)
+                       setup, iso, rts, icept, hoff, true)
   }
   // `isolate <key> in realm("<label>")` — the realm dimension G2/G3 read, the
-  // prelude ordering rule (after an action it is refused), and (this slice) the
-  // isolate TARGET validation: the key must be declared by the header, isolated
-  // at most once. The `isolate ... in realms(...)` routing form is a separate,
-  // deferred surface — it is left to the fallthrough (unvalidated).
+  // prelude ordering rule (after an action it is refused), and the isolate
+  // TARGET validation: the key must be declared by the header, isolated at most
+  // once. `isolate <key> in realms(...)` is the multi-realm ROUTING form (item
+  // 162), validated by `p_route_stmt` — it carries its own prelude wording, so
+  // the form is recognised BEFORE the ordering rule fires.
   if (atw(ts, i, "isolate")) {
+    if (atw(ts, i + 2, "in") && ati(ts, i + 3, "realms")) {
+      return p_route_stmt(ts, i, end, provh, reqh, cname, provs, setup, iso,
+                          rts, icept, hoff, action)
+    }
     if (action) {
-      return mk_provr(provs, setup, iso, tagged("PRELUDE", prelude_msg("isolate")),
+      return mk_provr(provs, setup, iso, rts,
+                      tagged("PRELUDE", prelude_msg("isolate")),
                       skip_line(ts, i), true)
     }
     let key = tkc(ts, i + 1).text
@@ -1056,39 +1305,49 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     if (atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
         && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")) {
       if (!bind_has(reqh, key) && !bind_has(provh, key)) {
-        return mk_provr(provs, setup, iso,
+        return mk_provr(provs, setup, iso, rts,
           tagged("G1", isolate_target_msg(key, cname)), skip_line(ts, i), true)
       }
+      // only the pin table is consulted, exactly as the reference's IsolateStmt
+      // branch does: the pin-after-route direction is NOT a refusal there (the
+      // routed key resolves through `routes`, which shadows the single-realm
+      // table at link), so mirroring it would over-refuse.
       if (iso_has(iso, key, 0)) {
-        return mk_provr(provs, setup, iso,
+        return mk_provr(provs, setup, iso, rts,
           tagged("G1", isolate_twice_msg(key, cname)), skip_line(ts, i), true)
       }
       let rlm = tkc(ts, i + 5).text
-      return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
-                         setup, iso.push(mk_provkey(key, rlm)), icept, hoff, action)
+      // advance past the closing `)` STRUCTURALLY (item 168): a line-based skip
+      // swallows the rest of a single-line component body, losing every
+      // declaration and `provide` block written after the pin.
+      let nx = atk(ts, i + 6, ")") ? i + 7 : skip_line(ts, i)
+      return p_comp_body(ts, nx, end, provh, reqh, cname, provs,
+                         setup, iso.push(mk_provkey(key, rlm)), rts, icept,
+                         hoff, action)
     }
     return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
-                       setup, iso, icept, hoff, action)
+                       setup, iso, rts, icept, hoff, action)
   }
   // `handoff <key>: <Type>` (item 53): a prelude declaration naming a PROVIDED
   // key's live state, at most once per component. Prelude order first, then the
   // target/uniqueness validation. It is not an action (the reference `continue`s).
   if (atw(ts, i, "handoff")) {
     if (action) {
-      return mk_provr(provs, setup, iso, tagged("PRELUDE", prelude_msg("handoff")),
+      return mk_provr(provs, setup, iso, rts,
+                      tagged("PRELUDE", prelude_msg("handoff")),
                       skip_line(ts, i), true)
     }
     let key = tkc(ts, i + 1).text
     if (!bind_has(provh, key)) {
-      return mk_provr(provs, setup, iso,
+      return mk_provr(provs, setup, iso, rts,
         tagged("HANDOFF", handoff_target_msg(key, cname)), skip_line(ts, i), true)
     }
     if (hoff) {
-      return mk_provr(provs, setup, iso,
+      return mk_provr(provs, setup, iso, rts,
         tagged("HANDOFF", handoff_twice_msg(cname)), skip_line(ts, i), true)
     }
     return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
-                       setup, iso, icept, true, action)
+                       setup, iso, rts, icept, true, action)
   }
   // `intercept <key> with { ... }` supplies metadata, not a realm; the prelude
   // rule applies first, then the target/uniqueness validation. Its block is
@@ -1096,17 +1355,18 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
   // in the reference), so `action` is threaded unchanged.
   if (atw(ts, i, "intercept")) {
     if (action) {
-      return mk_provr(provs, setup, iso, tagged("PRELUDE", prelude_msg("intercept")),
+      return mk_provr(provs, setup, iso, rts,
+                      tagged("PRELUDE", prelude_msg("intercept")),
                       skip_line(ts, i), true)
     }
     let key = tkc(ts, i + 1).text
     if (!bind_has(reqh, key)) {
-      return mk_provr(provs, setup, iso,
+      return mk_provr(provs, setup, iso, rts,
         tagged("G1", intercept_target_msg(key, cname, bind_has(provh, key))),
         skip_line(ts, i), true)
     }
     if (contains(icept, key)) {
-      return mk_provr(provs, setup, iso,
+      return mk_provr(provs, setup, iso, rts,
         tagged("G1", intercept_twice_msg(key, cname)), skip_line(ts, i), true)
     }
     var k = i + 1
@@ -1115,11 +1375,11 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
       let ce = close_brace(ts, k)
       if (ce != 0 - 1) {
         return p_comp_body(ts, ce, end, provh, reqh, cname, provs, setup, iso,
-                           icept.push(key), hoff, action)
+                           rts, icept.push(key), hoff, action)
       }
     }
     return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
-                       setup, iso, icept.push(key), hoff, action)
+                       setup, iso, rts, icept.push(key), hoff, action)
   }
   // `config { <field>: <Type> ... }` is a component-level declaration, not a
   // body action (the reference reads it off the component header, never the
@@ -1129,7 +1389,7 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     let ce = close_brace(ts, i + 1)
     if (ce != 0 - 1) {
       return p_comp_body(ts, ce, end, provh, reqh, cname, provs, setup, iso,
-                         icept, hoff, action)
+                         rts, icept, hoff, action)
     }
   }
   // component setup: a statement run (item 168: ended at a structural boundary,
@@ -1139,7 +1399,55 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
   let r = p_stmt_run(ts, i, le)
   let nx = r.i > i ? r.i : le
   return p_comp_body(ts, nx, end, provh, reqh, cname, provs,
-                     append_stmts(setup, r.ss), iso, icept, hoff, true)
+                     append_stmts(setup, r.ss), iso, rts, icept, hoff, true)
+}
+
+// `isolate <key> in realms("a","b") [strategy(<s>)]` — the multi-realm bind
+// (item 162), lower.py's `RouteStmt` branch, in the reference's own order:
+// prelude placement, then the target (a REQUIRED key — routing distributes a
+// consumer's dependency; a provision has one installed instance in one realm),
+// then one-binding-per-key (pinned already, or routed already), then the
+// strategy name against the closed set. The clause is advanced STRUCTURALLY
+// (past its `)`), not by line, so a one-line component body keeps its
+// following statements (item 168).
+fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
+                reqh: List[Bind], cname: Str, provs: List[Provide],
+                setup: List[Stmt], iso: List[ProvKey], rts: List[Route],
+                icept: List[Str], hoff: Bool, action: Bool) -> ProvR {
+  if (action) {
+    return mk_provr(provs, setup, iso, rts,
+                    tagged("PRELUDE", route_prelude_msg()), skip_line(ts, i), true)
+  }
+  let key = tkc(ts, i + 1).text
+  if (!bind_has(reqh, key)) {
+    if (bind_has(provh, key)) {
+      return mk_provr(provs, setup, iso, rts,
+        tagged("ROUTE", route_provision_msg(key, cname)), skip_line(ts, i), true)
+    }
+    return mk_provr(provs, setup, iso, rts,
+      tagged("G1", route_undeclared_msg(key, cname)), skip_line(ts, i), true)
+  }
+  if (iso_has(iso, key, 0)) {
+    return mk_provr(provs, setup, iso, rts,
+      tagged("ROUTE", route_pinned_msg(key, cname)), skip_line(ts, i), true)
+  }
+  if (routes_has(rts, key, 0)) {
+    return mk_provr(provs, setup, iso, rts,
+      tagged("ROUTE", route_twice_msg(key, cname)), skip_line(ts, i), true)
+  }
+  let rc = p_route_clause(ts, i + 3)
+  if (!rc.ok) {
+    return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
+                       setup, iso, rts, icept, hoff, action)
+  }
+  if (rc.strat != "" && !contains(known_strategies(), rc.strat)) {
+    return mk_provr(provs, setup, iso, rts,
+      tagged("ROUTE", route_strategy_msg(rc.strat, key, cname)),
+      skip_line(ts, i), true)
+  }
+  return p_comp_body(ts, rc.i, end, provh, reqh, cname, provs, setup, iso,
+                     rts.push({ key: key, rlms: rc.rlms, strat: rc.strat }),
+                     icept, hoff, action)
 }
 
 // The realm a component resolves `key` in: its isolate binding, else shared.
@@ -1176,7 +1484,7 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
              i: ts.length() }
   }
   let body = p_comp_body(ts, j + 1, end - 1, provh, reqs, nm, [], [], [], [],
-                         false, false)
+                         [], false, false)
   if (!body.ok) {
     return { pg: bad_prog(pg, "bad provide block in component ".concat(nm)),
              i: end }
@@ -1193,7 +1501,7 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
   }
   return mk_step(push_comp(pg,
                  mk_compd(nm, pks, body.provs, reqs, body.setup, body.iso,
-                          body.refuse)),
+                          body.routes, body.refuse)),
                  end)
 }
 
@@ -1283,17 +1591,39 @@ fn emit_caps(fs: List[FnD]) -> CapsT {
   return caps
 }
 
+// The `Async[T]` parameter-index table: callable name -> the slots an arrow
+// argument is coerced into (lower.py's `_is_async_fn_type` over each signature).
+// Built once and read by BOTH the async coloring (which prunes a coerced arrow)
+// and the arrow-color leak check (which admits one).
+fn async_slots_map(fs: List[FnD]) -> Map[Str, List[Int]] {
+  var m: Map[Str, List[Int]] = Map.empty()
+  var i = 0
+  while (i < fs.length()) {
+    if (fs[i].asyncSlots.length() > 0) { m = m.set(fs[i].name, fs[i].asyncSlots) }
+    i += 1
+  }
+  return m
+}
+
 // The async twin: a name is colored iff it is an `async` extern, its body calls
 // a colored callee, or (rule 2, item 92 §3) its body CALLS one of its own
 // parameters whose declared type is an async function type (`asyncParams`) — a
 // declaration-shaped seed the fixed point folds in exactly as
 // `_async_callables`'s `calls_async_param` does. Monotone closure over the same
 // finite name set.
-fn async_colored(fs: List[FnD]) -> List[Str] {
+//
+// The callee set is the ARROW-PRUNED one (`abody_callees`), not `FnD.callees`:
+// `_async_callables` passes `stop_async_arrows=True`, so a call that happens
+// only inside a coerced (async-stamped) arrow does not color the body that
+// constructs it. `FnD.callees` stays unpruned for the emission fixed point,
+// which deliberately keeps bubbling through those arrows.
+fn async_colored(fs: List[FnD], slots: Map[Str, List[Int]]) -> List[Str] {
   var colored: List[Str] = []
+  var reach: List[List[Str]] = []
   var i = 0
   while (i < fs.length()) {
     if (fs[i].isAsyncExtern) { colored = colored.push(fs[i].name) }
+    reach = reach.push(abody_callees(fs[i].body, 0, slots, []))
     i += 1
   }
   var changed = true
@@ -1303,7 +1633,7 @@ fn async_colored(fs: List[FnD]) -> List[Str] {
     while (i < fs.length()) {
       let f = fs[i]
       if (!contains(colored, f.name)) {
-        if (any_in(f.callees, colored) || any_in(f.callees, f.asyncParams)) {
+        if (any_in(reach[i], colored) || any_in(reach[i], f.asyncParams)) {
           colored = colored.push(f.name)
           changed = true
         }
@@ -1775,16 +2105,17 @@ fn build_maps(pg: Prog) -> Ctx {
     si += 1
   }
   let caps = emit_caps(pg.fns)
-  let colored = async_colored(pg.fns)
+  // the `Async[T]` slot table is built FIRST: the async coloring reads it to
+  // prune a coerced arrow, exactly as `_async_callables` does.
+  let slots = async_slots_map(pg.fns)
+  let colored = async_colored(pg.fns, slots)
   var emitting: List[Str] = []
   var ai: List[Str] = []
-  var slots: Map[Str, List[Int]] = Map.empty()
   var fi = 0
   while (fi < pg.fns.length()) {
     let f = pg.fns[fi]
     if (caps_of(caps, f.name).length() > 0) { emitting = emitting.push(f.name) }
     if (f.isAsyncExtern) { ai = ai.push(f.name) }
-    if (f.asyncSlots.length() > 0) { slots = slots.set(f.name, f.asyncSlots) }
     fi += 1
   }
   return mk_ctx(svcs, Map.empty(), caps, colored, emitting, ai,
@@ -1944,10 +2275,11 @@ fn has_await(ss: List[Stmt], i: Int) -> Bool {
 //     body — a required-key async service OP (`hasReq`, rule 3)? A pure module
 //     fn has no required keys, so it passes `checkReq = false` (names only,
 //     matching `_refuse_leaky_pure_arrow`'s named-callable reach). The walk
-//     descends every arrow: nesting a coerced arrow inside a leaky one is out of
-//     this slice's surface (no fixture reaches it) — the reference stops at an
-//     already-async-flagged inner arrow, an approximation this shares only where
-//     a nested arrow is BOTH coerced and the outer arrow's sole async reach.
+//     STOPS at a nested COERCED arrow (`reach_args`), mirroring the reference's
+//     prune at an already-async-flagged one: that arrow's suspension is its own
+//     value, awaited through the colored type, not the constructing body's. This
+//     was item 186's residual approximation — descending instead over-refused an
+//     outer sync arrow whose only async reach sat inside a coerced inner one.
 //
 //   * `leaky_scan` walks a body for arrows; a non-coerced arrow whose body
 //     reaches async is the refusal. In a provide method (`checkReq = true`) the
@@ -2000,14 +2332,32 @@ fn reach_reqcall(v: Str, meth: Str, args: List[Expr], cx: Ctx, cr: Bool,
   return reach_exprs(args, 0, cx, cr, a2)
 }
 
+// The argument list of a call to `n` while measuring async REACH: an arrow at
+// one of `n`'s `Async[T]` slots is the coerced (async-stamped) value, and the
+// reference's `_arrow_reaches_async` walk prunes at an async-flagged arrow —
+// its suspension is its own, awaited through the colored type, not the
+// constructing body's. Every other argument is walked. (Closing item 186's
+// residual coloring approximation: without the prune an outer sync arrow is
+// falsely reported as reaching async through a nested coerced one.)
+fn reach_args(args: List[Expr], i: Int, asl: List[Int], cx: Ctx, cr: Bool,
+              a: ReachAcc) -> ReachAcc {
+  if (i >= args.length()) { return a }
+  if (contains_int(asl, i) && is_arrow(args[i])) {
+    return reach_args(args, i + 1, asl, cx, cr, a)
+  }
+  return reach_args(args, i + 1, asl, cx, cr, reach_scan(args[i], cx, cr, a))
+}
+
 fn reach_call(tg: Expr, args: List[Expr], cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
   return match tg {
     Field(fl) => match fl.target {
       Var(v) => reach_reqcall(v, fl.name, args, cx, cr, a),
       _      => reach_exprs(args, 0, cx, cr, reach_scan(tg, cx, cr, a)),
     },
-    Var(n)  => reach_exprs(args, 0, cx, cr,
-                           contains(cx.colored, n) ? reach_add_name(a, n) : a),
+    Var(n)  => reach_args(args, 0,
+                          match cx.fnAsyncSlots.lookup(n) { Some(v) => v, None => [] },
+                          cx, cr,
+                          contains(cx.colored, n) ? reach_add_name(a, n) : a),
     _       => reach_exprs(args, 0, cx, cr, reach_scan(tg, cx, cr, a)),
   }
 }
@@ -2754,10 +3104,34 @@ fn add_edge(succ: Map[Str, List[Str]], src: Str, dst: Str) -> Map[Str, List[Str]
   return succ.set(src, succ_of(succ, src).push(dst))
 }
 
+// One edge per ROUTED realm (item 162): every backend provider must be active
+// before the consumer that routes to it (loadOrder), and each leg can still
+// surface in a cycle trace by its key. A realm with no provider is already the
+// `route_check` refusal above, so a missing leg simply adds no edge here.
+fn route_edges(rlms: List[Str], ri: Int, key: Str, cname: Str,
+               provs: List[Prov3], succ: Map[Str, List[Str]]) -> Map[Str, List[Str]] {
+  if (ri >= rlms.length()) { return succ }
+  let provider = find_provider(provs, key, rlms[ri], 0)
+  if (provider == "" || provider == cname) {
+    return route_edges(rlms, ri + 1, key, cname, provs, succ)
+  }
+  return route_edges(rlms, ri + 1, key, cname, provs,
+                     add_edge(succ, provider, cname))
+}
+
 fn scan_reqs(comp: CompD, provs: List[Prov3], keys: List[Str], ki: Int,
              succ: Map[Str, List[Str]]) -> EdgeR {
   if (ki >= keys.length()) { return { succ: succ, msg: "" } }
   let key = keys[ki]
+  // a ROUTED key resolves per-realm, not through the single-realm table — a
+  // stray shared-realm provider must not shadow the route's own targets, and
+  // the G3 self-provision check does not apply (a route targets a *required*
+  // key, never this component's own provision).
+  if (routes_has(comp.routes, key, 0)) {
+    return scan_reqs(comp, provs, keys, ki + 1,
+                     route_edges(route_of(comp.routes, key, 0).rlms, 0, key,
+                                 comp.name, provs, succ))
+  }
   let provider = find_provider(provs, key, realm_of(comp.iso, key, 0), 0)
   if (provider == comp.name) {
     return { succ: succ,
@@ -2847,12 +3221,58 @@ fn arrow_join(xs: List[Str]) -> Str {
   return out
 }
 
+// ---------------------------------------------- multi-realm bind (item 162)
+//
+// The link-time half of multi-realm routing, mirroring lower.py's `_link` loop
+// over `entry["routes"]`: a `realms(...)` route binds the key across N named
+// realms and the consumer routes across them at runtime, so EVERY named realm
+// must have a provider of the key — a route naming a realm with no provider
+// would dangle at that leg. This does not relax G2 (one provider per
+// (key, realm) is still enforced above); it is the dual existence check on the
+// consumption side, read off the SAME per-(key, realm) table.
+
+fn route_missing_msg(key: Str, cname: Str, rlm: Str) -> Str {
+  return "multi-realm bind of `".concat(key).concat("` in ").concat(cname)
+    .concat(" names realm `").concat(rlm).concat("`, but no component provides `")
+    .concat(key).concat("` in realm `").concat(rlm)
+    .concat("` (item 162: every routed realm needs a provider)")
+}
+
+fn route_realm_scan(rlms: List[Str], ri: Int, key: Str, cname: Str,
+                    provs: List[Prov3]) -> Str {
+  if (ri >= rlms.length()) { return "" }
+  if (find_provider(provs, key, rlms[ri], 0) == "") {
+    return route_missing_msg(key, cname, rlms[ri])
+  }
+  return route_realm_scan(rlms, ri + 1, key, cname, provs)
+}
+
+fn route_comp_scan(rts: List[Route], i: Int, cname: Str,
+                   provs: List[Prov3]) -> Str {
+  if (i >= rts.length()) { return "" }
+  let r = route_realm_scan(rts[i].rlms, 0, rts[i].key, cname, provs)
+  if (r != "") { return r }
+  return route_comp_scan(rts, i + 1, cname, provs)
+}
+
+fn route_scan(comps: List[CompD], ci: Int, provs: List[Prov3]) -> Str {
+  if (ci >= comps.length()) { return "" }
+  let r = route_comp_scan(comps[ci].routes, 0, comps[ci].name, provs)
+  if (r != "") { return r }
+  return route_scan(comps, ci + 1, provs)
+}
+
 fn link_g2_g3(pg: Prog) -> Str {
   // spawn templates are runtime instances, not static composition members — they
   // take no place in the G2/G3 table or loadOrder (decision 5/6).
   let live = non_template_comps(pg.comps, spawn_templates(pg.comps))
   let g2 = g2_scan(live, 0, [])
   if (g2.msg != "") { return tagged("G2", g2.msg) }
+  // the multi-realm bind verification (item 162) runs between G2 and the edges,
+  // exactly where the reference runs it: the dual EXISTENCE check on the
+  // consumption side, over the same per-(key, realm) provider table.
+  let rv = route_scan(live, 0, g2.provs)
+  if (rv != "") { return tagged("ROUTE", rv) }
   let edges = build_edges(live, 0, g2.provs, Map.empty())
   if (edges.msg != "") { return tagged("G3", edges.msg) }
   let cyc = find_cycle(live, 0, edges.succ, Map.empty())
@@ -2901,7 +3321,7 @@ pub fn admit_src(src: Str) -> Str {
 }
 
 // The bare verdict tag ("" | "G1" | "G2" | "G3" | "G4" | "A1" | "PRELUDE" |
-// "BAD") — the coarse oracle.
+// "SPAWN" | "HANDOFF" | "ROUTE" | "BAD") — the coarse oracle.
 pub fn admit_tag(src: Str) -> Str {
   let v = admit_src(src)
   if (v == "") { return "" }
@@ -5076,4 +5496,165 @@ component C requires kv: Kv {
   let v = effect kv.get("x") undo kv.get("x")
 }""")
   assert v == "G1|key `kv` is isolated twice in C"
+}
+
+// ---- multi-realm routing validation (item 162) ----------------------------
+//
+// `isolate <key> in realms(...)` was parsed-but-unvalidated before this slice.
+// The five component-level rules and the link-time per-realm provider check
+// below are lower.py's `RouteStmt` branch and its `_link` route loop, in the
+// reference's own order.
+
+test "a multi-realm bind whose realms all have providers composes" {
+  assert admit_src("""service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component StoreA provides kv: Kv {
+  isolate kv in realm("r1")
+  provide kv { fn get(k) { return k } }
+}
+component StoreB provides kv: Kv {
+  isolate kv in realm("r2")
+  provide kv { fn get(k) { return k } }
+}
+component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1", "r2") strategy(round_robin)
+  provide api { fn go(k) { return kv.get(k) } }
+}""") == ""
+}
+
+// the link-time dual of G2: every routed realm needs its own provider, else the
+// route dangles at that leg.
+test "a routed realm with no provider is refused (ROUTE)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component StoreA provides kv: Kv {
+  isolate kv in realm("r1")
+  provide kv { fn get(k) { return k } }
+}
+component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1", "r9")
+  provide api { fn go(k) { return kv.get(k) } }
+}""")
+  assert v == "ROUTE|multi-realm bind of `kv` in Router names realm `r9`, but no component provides `kv` in realm `r9` (item 162: every routed realm needs a provider)"
+}
+
+// the strategy name is validated against the closed set, so a typo is a
+// compile-time refusal and not a silent runtime fallback.
+test "an unknown routing strategy is refused (ROUTE)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component StoreA provides kv: Kv {
+  isolate kv in realm("r1")
+  provide kv { fn get(k) { return k } }
+}
+component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1") strategy(round_robbin)
+  provide api { fn go(k) { return kv.get(k) } }
+}""")
+  assert v == "ROUTE|unknown routing strategy `round_robbin` for `kv` in Router"
+}
+
+// routing distributes a CONSUMER's dependency; a provision has one installed
+// instance in one realm (G2), so routing one is meaningless.
+test "routing a provision is refused (ROUTE)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component StoreA provides kv: Kv {
+  isolate kv in realm("r1")
+  provide kv { fn get(k) { return k } }
+}
+component Router requires kv: Kv provides api: Api {
+  isolate api in realms("r1")
+  provide api { fn go(k) { return kv.get(k) } }
+}""")
+  assert v == "ROUTE|`isolate ... in realms(...)` routes a *required* key — `api` is a provision of Router"
+}
+
+// an undeclared route target is the shared declared-wiring (G1) diagnostic.
+test "routing an undeclared key is refused (G1)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component StoreA provides kv: Kv {
+  isolate kv in realm("r1")
+  provide kv { fn get(k) { return k } }
+}
+component Router requires kv: Kv provides api: Api {
+  isolate nope in realms("r1")
+  provide api { fn go(k) { return kv.get(k) } }
+}""")
+  assert v == "G1|`nope` is not a declared requirement of Router"
+}
+
+// one binding per key: pinned to a single realm OR routed across a set.
+test "a key both pinned and routed is refused (ROUTE)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component StoreA provides kv: Kv {
+  isolate kv in realm("r1")
+  provide kv { fn get(k) { return k } }
+}
+component Router requires kv: Kv provides api: Api {
+  isolate kv in realm("r1")
+  isolate kv in realms("r1")
+  provide api { fn go(k) { return kv.get(k) } }
+}""")
+  assert v == "ROUTE|key `kv` is already isolated to a single realm in Router — it cannot also be routed across `realms(...)`"
+}
+
+test "a key routed twice is refused (ROUTE)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component StoreA provides kv: Kv {
+  isolate kv in realm("r1")
+  provide kv { fn get(k) { return k } }
+}
+component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1")
+  isolate kv in realms("r1")
+  provide api { fn go(k) { return kv.get(k) } }
+}""")
+  assert v == "ROUTE|key `kv` is routed twice in Router"
+}
+
+// the prelude rule, in the routing form's own wording.
+test "a route after a provide block is refused (PRELUDE)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component StoreA provides kv: Kv {
+  isolate kv in realm("r1")
+  provide kv { fn get(k) { return k } }
+}
+component Router requires kv: Kv provides api: Api {
+  provide api { fn go(k) { return kv.get(k) } }
+  isolate kv in realms("r1")
+}""")
+  assert v == "PRELUDE|`isolate ... in realms(...)` must precede every effect, emit, await, and provide statement"
+}
+
+// ---- the closed coloring approximation (item 186) -------------------------
+//
+// Callee collection and leak-reach now STOP at a nested COERCED arrow, exactly
+// as the reference's `stop_async_arrows` does: an arrow in an `Async[T]` slot is
+// a value whose suspension belongs to whoever awaits it. Both programs need an
+// async-typed-but-UNCALLED parameter, so rule 2 does not color the callee and
+// mask the difference.
+
+test "a coerced arrow nested in a sync arrow does not leak (admits)" {
+  assert admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n }
+fn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }
+fn plain(f: (Str) -> Str) -> Str { return f("a") }
+service S { emission async fn go(y: Str) -> Str }
+component C provides s: S {
+  provide s { async fn go(y) { let r = plain(w => wrap(z => tick(z), w))   return r } }
+}""") == ""
+}
+
+test "a fn whose only async reach is a coerced arrow stays sync (admits)" {
+  assert admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n }
+fn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }
+fn h(y: Str) -> Str { return wrap(z => tick(z), y) }
+service S { emission fn go(y: Str) -> Str }
+component C provides s: S {
+  provide s { fn go(y) { let r = emit h(y)   return r } }
+}""") == ""
 }

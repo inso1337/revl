@@ -1,0 +1,27 @@
+// REJECTED — a result produced by an arrow value flowing into a position that
+// cannot hold it (roadmap item 75(a)). `f` has one parameter of unknown type,
+// so calling it admits any argument — but its body does not mention that
+// parameter, so its result is `Str` and is known. Before item 75(a) a single
+// un-annotated parameter threw the whole signature away, and this program
+// compiled in silence: a `Str` reached an `Int` position on every tier.
+//
+// This is the reproducer docs/contract-errata.md "Arrow *values* have no type"
+// was filed with. rust reports E0308 (mismatched types) and javac
+// "incompatible types: String cannot be converted to int"; python fails only at
+// run time, if at all.
+//
+// Legal spellings:
+//   * fix the body: `let f = (x) => 1`
+//   * fix the consumer: `takes_str(f(1))`
+//
+// expected error:
+//   argument 1 of `takes_int(...)` expects `Int`, got `Str`
+
+fn takes_int(n: Int) -> Int {
+  return n
+}
+
+fn demo() -> Int {
+  let f = (x) => "s"
+  return takes_int(f(1))
+}

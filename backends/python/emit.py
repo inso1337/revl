@@ -1032,7 +1032,28 @@ class _ComponentEmitter:
             # parked `next` resolves as `Closed` when the owner unloads (§9 Part
             # A) — the cancellation-first fix that keeps the bracket inverse
             # reachable and teardown deadlock-free on the event-loop tier.
-            return f"Stream.subscribe({stream}, {policy!r}, _revl_ctx)"
+            extra = ""
+            # item 130 Slice 2: the derived-stream combinator chain, the declared
+            # buffer capacity and the `block`-policy drain window. Each is
+            # appended only when DECLARED, so a Slice 1 subscription still emits
+            # the exact three-argument call (byte-identity, §10.9).
+            stages = expr.get("stages") or []
+            if stages:
+                rendered = []
+                for stage in stages:
+                    name = stage.get("stage")
+                    if name == "take":
+                        rendered.append(f"('take', {int(stage.get('count'))})")
+                    else:
+                        # a G6-pure arrow (rule 3.5) — a plain python lambda
+                        rendered.append(
+                            f"({name!r}, {self._expr(stage.get('fn'), where)})")
+                extra += f", stages=[{', '.join(rendered)}]"
+            if expr.get("buffer") is not None:
+                extra += f", capacity={int(expr.get('buffer'))}"
+            if expr.get("drain") is not None:
+                extra += f", drain_ms={int(expr.get('drain'))}"
+            return f"Stream.subscribe({stream}, {policy!r}, _revl_ctx{extra})"
         if kind == "fn":
             name = _ident(expr.get("name"), f"{where}: function")
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
