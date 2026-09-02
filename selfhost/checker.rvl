@@ -458,9 +458,10 @@ test "null is refused" {
 //     positions, so no `*` ever enters the capability sets.
 //   * bodies are parsed line-sensitively (one statement per line; the lexer's
 //     tokens carry line numbers). Multi-line statements are not recovered.
-//   * plain-fn call sites carry no signature checks at all — the reference
-//     checks none there either (only required-service receivers and builtins
-//     get arity/type checks); plain fn bodies feed the call graph only.
+//   * a bare named-call site in a COMPONENT body carries the declared
+//     signature: arity, then argument types (`fn_sig_check`, item 423). It
+//     carried nothing until the reference stopped carrying nothing either.
+//     Plain fn BODIES still feed the call graph only.
 //
 // Symbol tables are Map[Str, V] values — services, fns, requirement keys,
 // emission capabilities. Slice one's assoc-list environment stays (five
@@ -1408,10 +1409,25 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
   return walk_args(args, 0, marked, mk_ck2(ck.ctx, ck.env, ev, ""))
 }
 
-// A bare named-fn call. The reference checks neither its arity nor its
-// argument types at a provision call site (verified against lower.py: only
-// required-service receivers and builtins get that), so this collects G4
-// evidence only: reaching an emitting name labels `f()` with its caps.
+// A bare named-fn call in a component body: G4 evidence (reaching an emitting
+// name labels `f()` with its caps) AND the declared signature.
+//
+// The comment that stood here said the reference checks neither the arity nor
+// the argument types of such a call, verified against lower.py. That was true
+// and is no longer: item 423 closed the hole, so a component-body call to a
+// declared `fn` or extern is now held to its declaration on the reference side
+// too, and the port follows. The oracle did not ask for this and could not
+// have (item 429): the checker corpus spells only WELL-FORMED bare calls, so
+// both sides agreed while both were wrong. The corpus now spells the two
+// refusals as well.
+//
+// Order matters for byte agreement: the reference lowers the arguments before
+// it builds the call node, so an inner bad call reports first. `walk_args`
+// runs before the signature judgment for the same reason.
+//
+// Leniency is the reference's: a name that is not a declared callable is not
+// judged here, and an argument whose type is unknown ("") is admitted, exactly
+// as `infer_ir` admits a `None`.
 fn fn_call(name: Str, args: List[Expr], marked: Bool, ck: Ck) -> Ck {
   var ev = ck.ev
   if (ck.ctx.caps.has(name)) {
@@ -1419,7 +1435,39 @@ fn fn_call(name: Str, args: List[Expr], marked: Bool, ck: Ck) -> Ck {
     let lab = ev.labels.push(name.concat("()"))
     ev = mk_ev2(lab, union_into(ev.caps, cc))
   }
-  return walk_args(args, 0, marked, mk_ck2(ck.ctx, ck.env, ev, ""))
+  let wck = walk_args(args, 0, marked, mk_ck2(ck.ctx, ck.env, ev, ""))
+  if (wck.msg != "") { return wck }
+  return fn_sig_check(name, args, wck)
+}
+
+// The declared-signature half of `fn_call`, ported from `infer_ir`'s `fn` arm
+// (typecheck.py): one arity rule, then argument types left to right. The
+// message text is the reference's verbatim, since the differential oracle
+// compares diagnostics, not just verdicts.
+fn fn_sig_check(name: Str, args: List[Expr], ck: Ck) -> Ck {
+  if (!ck.ctx.fns.has(name)) { return ck }
+  let d = match ck.ctx.fns.lookup(name) {
+    Some(f) => f,
+    None    => mk_fn_d(name, [], false),
+  }
+  if (args.length() != d.params.length()) {
+    return refuse_ck(ck, "`".concat(name).concat("` takes ")
+      .concat(int_str(d.params.length())).concat(" argument(s), ")
+      .concat(int_str(args.length())).concat(" given"))
+  }
+  var k = 0
+  while (k < args.length()) {
+    let inf = infer(args[k], ck.env)
+    if (!inf.ok) { return refuse_ck(ck, inf.msg) }
+    let pt = d.params[k].ty
+    if (pt != "" && inf.ty != "" && !compatible(pt, inf.ty)) {
+      return refuse_ck(ck, "argument ".concat(int_str(k + 1)).concat(" of `")
+        .concat(name).concat("(...)` expects `").concat(pt)
+        .concat("`, got `").concat(inf.ty).concat("`"))
+    }
+    k += 1
+  }
+  return ck
 }
 
 // The upper-bound verdict for one provision method, ported from lower.py's
@@ -1536,6 +1584,21 @@ test "scoped declaration bounds which boundary" {
 test "wrong argument type at a required-service call site is refused" {
   let v = check_service_src("service Database { fn query(sql: Str) -> Int } component P requires db: Database { let r = effect db.query(42) undo db.query(msg) }")
   assert v == "`db.query` argument `sql` expects `Str`, got `Int`"
+}
+
+test "wrong arity at a bare component-body call is refused (item 423)" {
+  let v = check_service_src("fn tag(s: Str) -> Str { return s } service Cache { fn put(key: Str) } component C provides cache: Cache { provide cache { fn put(key) { let k = tag(key, key) } } }")
+  assert v == "`tag` takes 1 argument(s), 2 given"
+}
+
+test "wrong argument type at a bare component-body call is refused (item 423)" {
+  let v = check_service_src("fn tag(s: Str) -> Str { return s } service Cache { fn put(key: Str) } component C provides cache: Cache { provide cache { fn put(key) { let k = tag(42) } } }")
+  assert v == "argument 1 of `tag(...)` expects `Str`, got `Int`"
+}
+
+test "a well-formed bare component-body call stays admitted (item 423)" {
+  let v = check_service_src("fn tag(s: Str) -> Str { return s } service Cache { fn put(key: Str) } component C provides cache: Cache { provide cache { fn put(key) { let k = tag(key) } } }")
+  assert v == ""
 }
 
 test "clean provider accepted" {

@@ -413,6 +413,28 @@ component Probe requires db: Database {
 }
 ''',
      "`db.upsert` is not a method of service Database"),
+    # item 423, both halves. Until it landed, the corpus spelled only
+    # WELL-FORMED bare calls in a component body, so the oracle stayed green
+    # while BOTH sides admitted these (item 429: the oracle cannot demand a fix
+    # for a case the corpus never spells). These two spell it.
+    ("component-body extern call arity", '''
+type SecretHandle = Opaque
+extern acquire fn secret_put(v: Str) -> SecretHandle undo secret_release(result) = @py { return 1 }
+extern pure fn secret_release(h: SecretHandle) = @py { return }
+component C {
+  let s = effect secret_put("v", "w") undo secret_release(s)
+}
+''',
+     "`secret_put` takes 1 argument(s), 2 given"),
+    ("component-body extern call argument type", '''
+type SecretHandle = Opaque
+extern acquire fn secret_put(v: Str) -> SecretHandle undo secret_release(result) = @py { return 1 }
+extern pure fn secret_release(h: SecretHandle) = @py { return }
+component C {
+  let s = effect secret_put(42) undo secret_release(s)
+}
+''',
+     "argument 1 of `secret_put(...)` expects `Str`, got `Int`"),
 ]
 
 
