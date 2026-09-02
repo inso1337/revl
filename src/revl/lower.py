@@ -32,6 +32,7 @@ from .typecheck import (
     collect_tparams,
     validate_explicit_tparams,
     render_type,
+    widen_bottom,
     mark_tparams,
     check_type_wellformed,
     check_config_field_is_data,
@@ -4209,9 +4210,19 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
                       f"assignment to `{stmt.name}` (a `{render_type(declared)}` variable)")
         inferred = infer_ast(value, type_env, types, filename)
         if declared and inferred and not compatible(declared, inferred, types):
-            raise mismatch(filename, stmt.line,
-                           f"assignment to `{stmt.name}` (a `{render_type(declared)}` variable)",
-                           declared, inferred)
+            # `var m = Map.empty()` / `var xs = []` type the binding at the
+            # checker's inferred BOTTOM. The accumulator idiom names the
+            # element type at the first reassignment, so a value that only
+            # FILLS those bottoms widens the binding instead of being refused
+            # (`m = m.set(k, 1)` makes `m` a `Map[Str, Int]` from here on, and
+            # `return m` is then judged against the real element type).
+            widened = widen_bottom(declared, inferred, types)
+            if widened is None:
+                raise mismatch(filename, stmt.line,
+                               f"assignment to `{stmt.name}` (a `{render_type(declared)}` variable)",
+                               declared, inferred)
+            type_env[stmt.name] = widened
+            declared = widened
         if inferred is not None and declared is None:
             type_env[stmt.name] = inferred
         lowered_value = _lower_pure_expr(value, scope, callables, alias_fns, filename, type_env, types)
@@ -4439,11 +4450,7 @@ def _lower_hole(expr: ExprHole, filename: str) -> dict:
                  "an argument of a declared function (docs/holes.md)",
             code="T3", category="hole",
         )
-    # a hole's type is either written (`hole[T]`) or PINNED from the position it
-    # sits in, and a pinned type may be an inferred bottom (`List[Never]`), which
-    # the author never wrote — so the non-denotable-`Never` rule does not apply
-    check_type_wellformed(filename, expr.line, type_name,
-                          allow_never=expr.known_type is None)
+    check_type_wellformed(filename, expr.line, type_name)
     node = {"kind": "hole", "type": type_name, "file": filename, "line": expr.line}
     if expr.message is not None:
         node["message"] = expr.message

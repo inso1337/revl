@@ -24,9 +24,10 @@ and a declared service) and let everything else fall off its end, so
 a live callable invoked past every authority fold, which is the exact hole item
 378 closed for arrows. The walk is now an allowlist of data heads.
 
-Also here: `Never` is no longer denotable in a written annotation. It is a
-two-way `compatible` wildcard and uninhabited, so writing it was the same
-unchecked cast as F3 with a different spelling.
+Also here: `Never` is no longer a TWO-WAY wildcard. It is the checker's
+inferred bottom and uninhabited, so a value flowing INTO a `Never` position was
+the same unchecked cast as F3 with a different spelling. It is one-way now: a
+bottom flows out into any position, nothing flows in.
 """
 
 from __future__ import annotations
@@ -320,8 +321,8 @@ component C provides s: S {
 
 
 def test_f5_config_never_refused():
-    """`Never` is doubly refused — the non-denotable rule below runs first on
-    the same declaration, so assert the refusal, not which of the two spoke."""
+    """`Never` is uninhabited, so no config value could ever supply one: the
+    data walk refuses it with the rest of the non-data heads (item 378)."""
     err = _refused("""
 service S { fn go() -> Str }
 component C provides s: S {
@@ -329,7 +330,7 @@ component C provides s: S {
   provide s { fn go() -> Str = "x" }
 }
 """)
-    assert "cannot be written as a type" in err or "must be static data" in err
+    assert "must be static data" in err
 
 
 def test_f5_extern_config_any_refused():
@@ -383,31 +384,54 @@ component C provides s: S {
 """)
 
 
-# ------------------------------------------- `Never` is not denotable
+# ------------------------------------------- `Never` is a ONE-WAY bottom
 #
-# Same root as F3: `_is_wildcard` makes `Never` compatible with everything in
-# both directions, so a written `Never` annotation is an unchecked cast.
+# Same root as F3: `_is_wildcard` made `Never` compatible with everything in
+# BOTH directions, so any `Never` position was an unchecked cast. A bottom is
+# one-way: it flows OUT into any position (vacuously, nothing inhabits it) and
+# NOTHING flows in. That closes the cast without making the checker's own
+# inferred spellings (`List[Never]`, `Map[Str, Never]`) undenotable, which they
+# have to stay: they are what `[]` and `Map.empty()` infer.
 # `Any` and `Value` keep their DOCUMENTED laundering (the gradual frontier and
 # stdlib/value.rvl's erased dynamic type); `Never` never had one.
 
-def test_never_is_not_writable_as_an_annotation():
-    err = _refused("pub fn nv(x: Never) -> Int { return x }\n")
-    assert "`Never` cannot be written as a type" in err
+def test_nothing_flows_into_a_never_position():
+    err = _refused("pub fn nv(x: Never) -> Int { return x }\n"
+                   "pub fn caller() -> Int { return nv(\"s\") }\n")
+    assert "expects `Never`, got `Str`" in err
 
 
-def test_never_is_not_writable_nested_either():
-    err = _refused("pub fn nv(xs: List[Never]) -> Int { return 1 }\n")
-    assert "`Never` cannot be written as a type" in err
+def test_nothing_flows_into_a_nested_never_position():
+    """The same cast one level down: a `List[Int]` used to be admitted into a
+    `List[Never]` parameter, and its elements then read out as anything."""
+    err = _refused("pub fn nv(xs: List[Never]) -> Int { return 1 }\n"
+                   "pub fn caller() -> Int { return nv([1, 2]) }\n")
+    assert "expects `List[Never]`, got `List[Int]`" in err
+
+
+def test_a_bottom_still_flows_out_into_any_position():
+    """The other direction is sound and must stay: nothing inhabits `Never`, so
+    a `Never`-typed expression in any position is vacuously well typed."""
+    _ok("pub fn nv(x: Never) -> Int { return x }\n")
+    _ok("pub fn f() -> List[Int] { return [] }\n")
 
 
 def test_never_stays_available_as_the_inferred_bottom():
-    """`[]` and `Map.empty()` still infer `List[Never]` / `Map[Str, Never]`;
-    only the WRITTEN spelling is refused."""
+    """`[]` and `Map.empty()` still infer `List[Never]` / `Map[Str, Never]`,
+    and a binding that carries the bottom WIDENS at its first reassignment
+    instead of laundering."""
     _ok("""
 pub fn f() -> Int {
   let xs = []
   let m = Map.empty()
   return xs.length() + m.size()
+}
+""")
+    _ok("""
+pub fn build(n: Int) -> Map[Str, Int] {
+  var m = Map.empty()
+  m = m.set("k", n)
+  return m
 }
 """)
 
