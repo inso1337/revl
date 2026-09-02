@@ -329,6 +329,18 @@ jobs:
           node-version: "22"
       - run: cd backends/typescript && npm ci
       - run: cd backends/typescript && npx vitest run
+      # issue #198: `tsc --noEmit` below covers `runtime.ts`, `demo.ts` and
+      # `golden/**` — everything EXCEPT the modules the suite above just
+      # emitted into `tests/generated/` and executed. So the emitter could
+      # produce type-incorrect TypeScript and stay green as long as it happened
+      # to RUN, which is how 20 type errors across four emitted modules sat
+      # unseen. This step checks each emitted module as its own program (the
+      # shape `emit.py` actually produces); see tsconfig.generated.json for why
+      # it is a script and not `tsc -p`. It must run AFTER `vitest run`, which
+      # is what writes `tests/generated/` (gitignored); with that directory
+      # cold it FAILS with the command to run, rather than checking zero files
+      # and reporting success.
+      - run: cd backends/typescript && node scripts/typecheck-generated.mjs
       - run: cd backends/typescript && npx tsc --noEmit
 
   backend-wasm:
