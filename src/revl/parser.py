@@ -856,6 +856,13 @@ class ExprArrow:
     # only these two, and only emits a signature when every entry is known.
     param_types: list | None = None
     returns: str | None = None
+    # the same resolution as a function type, but in the CHECKER's spelling:
+    # `param_types`/`returns` go to the IR and so have the implicit-type-
+    # parameter marker stripped by `render_type`, which turns an unsolved `?B`
+    # into the opaque nominal `B`. Re-inferring an already-resolved arrow off
+    # the stripped fields would feed that `B` back into unification as a
+    # concrete type, so the marked spelling is kept here for the checker.
+    resolved_type: str | None = None
 
 
 @dataclass

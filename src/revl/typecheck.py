@@ -1758,15 +1758,19 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         # enclosing scope, and skipping it let every check above leak.
         # Parameters shadow into the unknown; free variables keep their types.
         refuse_self_declared_async(expr, filename)
-        already = getattr(expr, "param_types", None)
-        if already is not None:
-            # A checking position already resolved this node — `let g: (Int) ->
-            # Int = v => v + 1` checks the arrow and then *infers* it, the same
-            # object twice. The position wins over the annotation (§3.1) and its
-            # result is already recorded, so re-deriving from the written
-            # annotations alone here would throw it away again.
-            return format_type(FN_HEAD, [p or "Any" for p in already]
-                               + [expr.returns or "Any"])
+        if getattr(expr, "param_types", None) is not None:
+            # A checking position already resolved this node — a `let`, a
+            # `return` or a call argument is checked and then *inferred*, the
+            # same object twice. The position wins over the annotation (§3.1)
+            # and its result is already recorded, so re-deriving from the
+            # written annotations alone here would throw it away again.
+            #
+            # `resolved_type` and not a rebuild from `param_types`/`returns`:
+            # those two are the IR's spelling, with the implicit-type-parameter
+            # marker stripped, and this value goes back into `unify` at the
+            # enclosing call site. An unsolved `?B` rebuilt as `B` is a
+            # concrete opaque nominal, and unification binds it.
+            return expr.resolved_type
         annotations = arrow_annotations(expr)
         inner = dict(tenv)
         for param, ptype in zip(expr.params, annotations):
@@ -1921,11 +1925,19 @@ def _resolve_arrow(expr, param_types: list, returns: str | None) -> str:
     # the author's spelling, and the marker never leaves the checker (see
     # "type parameters" above). Without it, checking an arrow against an
     # uninstantiated `(T) -> T` would write `?T` into the IR.
-    resolved = [render_type(p) for p in param_types]
-    expr.param_types = resolved
+    expr.param_types = [render_type(p) for p in param_types]
     expr.returns = render_type(returns)
-    return format_type(FN_HEAD,
-                       [p or "Any" for p in resolved] + [expr.returns or "Any"])
+    # …and the checker's own view of the same resolution keeps the marker. An
+    # arrow checked against a generic position resolves to `?B`, which is a
+    # *wildcard*; it has to stay one, because a `return`/`let` is checked and
+    # then inferred — the same node twice — and the second pass hands this type
+    # to `unify`. Reconstructing it from the stripped fields instead offered
+    # unification the opaque nominal `B`, which it dutifully bound `?B := B`;
+    # that is how `map_([1, 2], n => n + 1)` came to check its arrow body
+    # against `B` and refuse an `Int`.
+    expr.resolved_type = format_type(
+        FN_HEAD, [p or "Any" for p in param_types] + [returns or "Any"])
+    return expr.resolved_type
 
 
 def _check_arrow_args(args, params, tenv: dict, types: dict,
