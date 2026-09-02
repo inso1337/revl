@@ -67,6 +67,15 @@ but not seen. Every instance was closed. Representative fixes:
   origin is argument-derived or minted inside the endorsing body.
 - The untrusted-author admission profile now refuses a host-extern reach through
   the whole transitive module closure, not only a direct import.
+- The MCP server no longer treats the driving agent as a trusted host-code
+  author. Source that arrives over the transport compiles under the
+  untrusted-author profile, so an inline `@py` body can no longer be loaded and
+  run. `revl mcp serve --author-trust`, `--provider` and `--grant` are the
+  operator's controls, and the trusted mode stamps every class-(c) ticket with
+  the unreviewed host bodies a yes would also let run.
+- Path arguments to the MCP verbs are jailed to the operator-sanctioned roots.
+  They were a filesystem oracle over every path on the machine, and a restore
+  plus snapshot round-trip returned an arbitrary file's whole content.
 - The host-file and host-ref jails gained a realpath-containment gate at every
   install-origin resolution site (the compiler and the bundle verifier), so a
   path that escapes the compile root cannot forge a first-party origin.
