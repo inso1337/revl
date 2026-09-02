@@ -1,9 +1,18 @@
 # Depending on revl: the security contract (`revl.gate`)
 
-This is for a host that does `pip install revl` and calls
-`from revl.gate import admit, gate_version, ...` directly — an MCP server, a
-CI system, an agent framework, a registry — rather than shelling out to the
-`revl` command. Read this before writing a line of integration code.
+This is for a host that depends on revl's admission gate as a LIBRARY — an
+MCP server, a CI system, an agent framework, a registry — rather than
+shelling out to the `revl` command. Read this before writing a line of
+integration code.
+
+Two dependency forms exist, and they do not give the same guarantee. Sections
+one to five below are the py wheel (`pip install revl`, then
+`from revl.gate import admit, gate_version, ...`), which is the full
+reference compiler and can both refuse and admit.
+["The rust tier"](#the-rust-tier-the-revl-gate-crate) is the native
+`revl-gate` crate, which can only REFUSE — it issues no admissions at all.
+The contract is the same asymmetric one in both; the crate simply has less of
+the admitting half, none of it.
 
 ## The contract, stated once
 
@@ -117,16 +126,72 @@ decision on `admitted`, record `frontier` with every verdict you keep, log
 as private and unversioned — you can import it, but a patch release may
 change it under you without warning.
 
+## The rust tier: the `revl-gate` crate
+
+Everything above describes the py wheel. There is a second dependency form —
+`crates/revl-gate`, the native gate as a rust library — and its contract is
+the SAME asymmetric contract with the asymmetry taken further. Read this
+before depending on it, because the difference is not a detail:
+
+**The rust gate issues no admissions at all.** It is `selfhost/lower.rvl`'s
+`admit_src` compiled to rust: the composition and guarantee layer (`G1`..`G4`,
+`A1`, `PRELUDE`, and parse failures as `BAD`), and **not** the reference type
+layer. A type-incorrect program is not something it can refuse. So its
+`Verdict` has three arms and no `Admitted`:
+
+| arm | meaning | what you may do with it |
+|---|---|---|
+| `Refused { code, message }` | the reference compiler refuses this source too, same code, same message verbatim | act on it: this is Clause 1, and it is the whole reason to depend on the crate |
+| `NoObjection` | "this gate found nothing it is able to refuse" | **not an admission.** Get a reference verdict before accepting or running anything |
+| `OutsideFrontier { reason }` | the gate is not entitled to decide this source (a construct outside its generated frontier table, an oversized source, an abort in the native front end) | same: ask the reference |
+
+The wire shape fails closed to match: `Verdict::to_json` reports
+`"admitted": false` on **every** arm, so a consumer written against the py
+tier's fixed `{admitted, code, message}` shape reads this gate as "never
+admits" rather than mistaking a no-objection for an admission. The real arm
+travels in an extra `"verdict"` field.
+
+`gate_version()` carries a fourth field here, `layer`, which says in prose
+what was decided (`"composition + guarantee layer … NOT the reference type
+layer"`). Read it before trusting a non-refusal. And the `frontier` differs
+from py's at the same `language` — `selfhost-admit:<hash>` versus
+`reference-full:<language>` — which is the frontier skew of §"The versioning
+obligations" made concrete: **never serve a verdict cached from one tier to a
+reader of the other.**
+
+What the crate buys, then, is not a second admission gate. It is a local,
+in-process, **Python-free refusal** that byte-agrees with the reference on the
+covered corpus: a cheap pre-filter in front of an expensive authoritative
+check. Refusing what the reference admits would be an inconvenience; admitting
+what the reference refuses is the defect class this arc exists to prevent, and
+a gate with no admission arm cannot commit it.
+
+Also absent, deliberately: `admit_into` (admission into a running composition
+spans a manifest the self-host pipeline has no parameter for), `compile_to`
+output (exported, refuses unconditionally), and layer 2 —
+`revl_gate::session` is a reserved, empty, documented module. The witnessed
+runtime half stays py-only.
+
+[`examples/ecosystem-consumer-rs/`](../examples/ecosystem-consumer-rs/) is a
+standalone rust project that demonstrates all of this: one dependency, four
+candidates covering all three arms plus a py-admitted case, a verdict cache
+keyed on the full `gate_version()` triple, and exactly two decisions —
+`REJECT` on a refusal and `ESCALATE` on everything else. It never invents an
+acceptance the gate did not give, and
+`tests/test_gate_consumer_example_rs.py` holds that as a test.
+
 ## What is and is not deliverable today
 
 The py surface above ships now: `pip install revl` and
 `from revl.gate import ...` works today, in-process, with no subprocess and
-no wire. `cargo add revl-gate` and `npm i` the wasm gate are named in
-`docs/design/338-revl-as-dependency.md` as the polyglot ecosystem exit and
-are frontier-gated on work items 332 (the rust crate) and 335 (wasm) that
-have not landed. This document describes the py contract only; a native gate
-will publish the identical asymmetric contract once it ships, with a
-narrower `frontier`.
+no wire. The rust crate ships as committed source in this repo and builds
+with no Python on the machine, so a rust consumer can depend on it via a path
+dependency today (see the example's `README.md`); what is NOT done is the
+PUBLISH step — `revl-gate` is not on crates.io, so `cargo add revl-gate` is
+the shape a consumer gets once revl's release path cuts it, not a command
+that works right now. `npm i` the wasm gate is named in
+`docs/design/338-revl-as-dependency.md` as the remaining polyglot exit and is
+frontier-gated on item 335 (cordis-rs on wasm32), which has not landed.
 
 See also: [`docs/design/338-revl-as-dependency.md`](design/338-revl-as-dependency.md)
 for the full design and its adversarial review;

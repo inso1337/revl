@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -110,6 +111,22 @@ func (m *Map[V]) Insert(k string, v V) {
 	m.m[k] = v
 	m.mu.Unlock()
 }
+
+// InsertIfAbsent is the atomic compare-and-set (item 397). The per-op mutex is
+// held across BOTH the membership test AND the insert, so the whole CAS is one
+// critical section: no concurrent caller can witness the probe and the write as
+// separable steps. Returns whether it inserted; a false (key already present)
+// leaves the existing value untouched. Under N concurrent callers on one map,
+// exactly one receives true.
+func (m *Map[V]) InsertIfAbsent(k string, v V) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.m[k]; ok {
+		return false
+	}
+	m.m[k] = v
+	return true
+}
 func (m *Map[V]) Remove(k string) {
 	m.mu.Lock()
 	delete(m.m, k)
@@ -127,8 +144,10 @@ func (m *Map[V]) Get(k string) (V, bool) {
 // as method calls on this object. `Size` is the entry count as the tier's
 // revl Int (int64, matching the service-method return type); `Keys`
 // yields the keys in ascending canonical Str order (UTF-8 byte lexicographic —
-// go string < is exactly code-point order, matching sort.Strings; the inline
-// insertion sort keeps it import-free, as revlMapKeys does). Both are
+// go string < is exactly code-point order, and slices.Sort on []string orders
+// by <, so the order is identical to the insertion sort this replaced, as it
+// is in revlMapKeys). keys() IS the Map iteration surface, so this sits on
+// every map traversal: O(n log n), not O(n^2) (item 434 (h)). Both are
 // read-only queries, no host trace — like Get.
 func (m *Map[V]) Size() int64 {
 	m.mu.Lock()
@@ -142,11 +161,7 @@ func (m *Map[V]) Keys() []string {
 		ks = append(ks, k)
 	}
 	m.mu.Unlock()
-	for i := 1; i < len(ks); i++ {
-		for j := i; j > 0 && ks[j] < ks[j-1]; j-- {
-			ks[j], ks[j-1] = ks[j-1], ks[j]
-		}
-	}
+	slices.Sort(ks)
 	return ks
 }
 
