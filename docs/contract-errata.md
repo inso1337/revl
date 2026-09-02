@@ -225,9 +225,12 @@ This goes in the compiler spec, not the runtimes.
   recurring lesson one level up — "the emitter did not raise" never implied
   "the code is right", and "every emitter agreed on a shape" never implied
   "every tier agrees on a value". `tests/test_cross_tier_execution.py` closes
-  the class by *running* the probe on each tier; python and TypeScript execute
-  by default, rust and java behind `REVL_CROSS_TIER_SLOW=1`, with cheap static
-  guards for all three lowerings.
+  the class by *running* the probe on each tier; python and go execute by
+  default, TypeScript wherever `backends/typescript/node_modules` exists, rust
+  and java behind `REVL_CROSS_TIER_SLOW=1`, with cheap static guards for all
+  three lowerings. Only the `conformance` job satisfies all three conditions
+  at once (item 445); everywhere else a missing tier is a skip, and a skip
+  here means unmeasured, not passing.
 
 ## Arithmetic divergences (open, pinned — one root cause)
 
