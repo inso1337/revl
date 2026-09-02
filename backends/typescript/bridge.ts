@@ -410,6 +410,66 @@ function publicMethods(service: unknown): Set<string> {
   return names
 }
 
+// --- what a failure may carry BACK across the seam (item 421 F5) -------------
+//
+// Mirror of `backends/python/bridge.py`'s `seam_failure` / `confidential.py`
+// `redact_call_text`, spelled locally because this file is loaded standalone by
+// the node consumer and imports nothing from the runtime.
+//
+// The consumer is on the other side of a trust boundary. A forward crossing into
+// a declared `Secret[T]` receiver authorises disclosure TO THE RECEIVER; it does
+// not authorise the error channel to perform the reverse crossing the checker
+// refuses statically. And the trigger needs no author interpolation: a plain
+// `store.get(token)` miss throws a message quoting the token. So every argument
+// value this call was made with is scrubbed out of the host error text, while the
+// error's TYPE and the sentence around it survive, so the reply is still worth
+// reading, just without the caller's bytes in it.
+
+/** The placeholder a caller's own argument is rendered as inside seam error
+ *  text. Must equal `confidential.REDACTED_ARG` on the python tier: a polyglot
+ *  seam should produce the SAME marker whichever tier answered. */
+export const REDACTED_ARG = '<redacted:arg>'
+
+// An argument shorter than this is left alone: below it a substring match is a
+// coin flip against ordinary English and replacing it would shred the
+// diagnostic for no confidentiality gain. Same bound as the python tier.
+const MIN_MATCHABLE_ARG = 3
+
+function argNeedles(value: unknown, into: Set<string>): void {
+  if (value === null || value === undefined || typeof value === 'boolean') return
+  if (typeof value === 'string') {
+    if (value.length >= MIN_MATCHABLE_ARG) into.add(value)
+    return
+  }
+  if (typeof value === 'number' || typeof value === 'bigint') {
+    const form = String(value)
+    if (form.length >= MIN_MATCHABLE_ARG) into.add(form)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) argNeedles(item, into)
+    return
+  }
+  if (typeof value === 'object') {
+    // Values only: a record's KEYS are field names the author wrote, not the
+    // caller's data, and erasing them would destroy the diagnostic's shape.
+    for (const item of Object.values(value as Record<string, unknown>)) argNeedles(item, into)
+  }
+}
+
+/** The error text a provider-side failure is allowed to send back to the
+ *  consumer, with this call's own argument values replaced by `REDACTED_ARG`.
+ *  Longest needle first, so one that contains another leaves no tail behind. */
+export function seamFailure(error: unknown, args: unknown[]): string {
+  let text = String(error)
+  const needles = new Set<string>()
+  argNeedles(args ?? [], needles)
+  for (const needle of [...needles].sort((a, b) => b.length - a.length)) {
+    if (needle && text.includes(needle)) text = text.split(needle).join(REDACTED_ARG)
+  }
+  return text
+}
+
 /** Provider side: export a declared surface from `ctx` over a Unix socket, so
  *  another process can proxy it. Dispatches each JSON call to the committed
  *  view `ctx[key][method](...args)` — but only after checking BOTH halves of
@@ -433,8 +493,13 @@ export async function serve(
         buf = buf.slice(nl + 1)
         if (!line) continue
         let reply: unknown
+        // Hoisted so the catch can scrub the failing call's own arguments out of
+        // the host error text (item 421 F5). A line that fails to parse never
+        // assigns it, and an empty needle set leaves the text alone.
+        let callArgs: unknown[] = []
         try {
           const req = JSON.parse(line)
+          callArgs = req.args ?? []
           if (!table.has(req.key)) {
             reply = { ok: false, error: `key ${req.key} is not exported by this process` }
           } else {
@@ -453,7 +518,7 @@ export async function serve(
             }
           }
         } catch (error) {
-          reply = { ok: false, error: String(error) }
+          reply = { ok: false, error: seamFailure(error, callArgs) }
         }
         sock.write(JSON.stringify(reply) + '\n')
       }

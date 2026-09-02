@@ -313,6 +313,14 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             # override at the bottom of this loop can still stamp `secret` for a
             # bound emission cap, but the two never collapse onto one token.
             model.sources[ext.name] = CONFIDENTIAL_ORIGIN
+            # ...and the stamp the IR carries into the runtime (item 421 F6).
+            # `ext.returns` is stripped a few lines below, so this attribute is
+            # the only surviving record that the RETURN position is confidential
+            # (the return-side counterpart of `secret_params`). A backend reads
+            # it off the IR to register the produced value at its origin, which
+            # is what lets a sink with no positional marking of its own (the host
+            # trace an operator console prints) scrub it.
+            ext.secret_return = True
         params = []
         for i, p in enumerate(ext.params):
             params.append((i, p.type, _fnparam_setter(p)))
