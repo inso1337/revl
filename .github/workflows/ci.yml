@@ -444,6 +444,83 @@ jobs:
       # `python -m revl.lsp`. REVL_LSP_PYTHON points it at this job's python.
       - run: PYTHONPATH=src REVL_LSP_PYTHON=$(which python) cargo test --manifest-path crates/revl-lsp/Cargo.toml
 
+  # Item 335: the admission gate as a wasm component, and the JS lane over it.
+  # Its own job because it is the only one needing all four of cargo WITH the
+  # wasm32 target, wasm-tools, wasmtime and node+jco. Before this job existed,
+  # tests/test_gate_wasm_vector.py — the item's OWN exit test — skipped on every
+  # runner for want of the wasm target, which is the hollow green the item-445
+  # rule forbids. The skip guard at the end is what keeps it from going back.
+  gate-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable branch @ 2026-08-05; still installs the stable toolchain
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: pip install -e ".[test]"
+      # wasm-tools wraps the core module into a component and reads the import
+      # section back off it. Pinned: the artifact under test is the thing this
+      # binary produces.
+      - name: Install wasm-tools (pinned)
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasm-tools/releases/download/v1.257.1/wasm-tools-1.257.1-x86_64-linux.tar.gz -o /tmp/wasm-tools.tar.gz
+          mkdir -p /tmp/wasm-tools
+          tar -C /tmp/wasm-tools -xzf /tmp/wasm-tools.tar.gz
+          echo "/tmp/wasm-tools/wasm-tools-1.257.1-x86_64-linux" >> "$GITHUB_PATH"
+      - name: Install wasmtime (pinned)
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v47.0.3/wasmtime-v47.0.3-x86_64-linux.tar.xz -o /tmp/wasmtime.tar.xz
+          mkdir -p /tmp/wasmtime
+          tar -C /tmp/wasmtime -xJf /tmp/wasmtime.tar.xz
+          echo "/tmp/wasmtime/wasmtime-v47.0.3-x86_64-linux" >> "$GITHUB_PATH"
+      # jco transpiles the component for the browser/worker lane (slice 4).
+      # Pinned to the version examples/ecosystem-consumer-js/package.json pins,
+      # because the transpiled bytes are a function of it.
+      - run: npm install --no-save --prefix /tmp/jco @bytecodealliance/jco@1.32.1
+      # Installing the four tools is only half of it: if any download breaks,
+      # every test below goes back to skipping and this job stays green. Prove
+      # each binary is there first.
+      - run: wasm-tools --version && wasmtime --version && /tmp/jco/node_modules/.bin/jco --version
+      # The item's exit test: the wasm-compiled `admit` under wasmtime returns
+      # the reference verdict, code AND message byte-identical, over the whole
+      # self-host corpus — plus the empty-import property read off the artifact.
+      # Then slice 4: the packaging narrows `admitted` to the literal `false`,
+      # and the committed JS consumer really runs under node.
+      - run: pytest tests/test_gate_wasm_vector.py tests/test_gate_consumer_example_js.py -q --junitxml=/tmp/gate-wasm-junit.xml
+        env:
+          REVL_JCO: /tmp/jco/node_modules/.bin/jco
+      - name: no gate-wasm test may skip in CI
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          report = pathlib.Path("/tmp/gate-wasm-junit.xml")
+          if not report.is_file():
+              print("::error::pytest wrote no junit report - the run did not start")
+              sys.exit(1)
+          text = report.read_text(encoding="utf-8", errors="replace")
+          reasons = re.findall(r'<skipped\b[^>]*?\bmessage="([^"]*)"', text)
+          counted = sum(int(n) for n in re.findall(r'<testsuite\b[^>]*?\bskipped="(\d+)"', text))
+          if len(reasons) != counted:
+              print(f"::error::junit reports {counted} skip(s) but {len(reasons)} "
+                    "skip message(s) - cannot audit them, refusing to pass")
+              sys.exit(1)
+          if reasons:
+              for reason in reasons:
+                  print(f"::error::gate-wasm test skipped in CI: {reason}")
+              print(f"::error::{len(reasons)} test(s) skipped - the wasm gate's "
+                    "coverage is not actually running")
+              sys.exit(1)
+          print("no gate-wasm test skipped: the component was built, run under "
+                "wasmtime, transpiled and run under node")
+          PY
+
   backend-java:
     runs-on: ubuntu-latest
     steps:
