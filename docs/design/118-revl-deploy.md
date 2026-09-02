@@ -1,5 +1,198 @@
 # `revl deploy` - composition as an attested distributed deployment (item 118)
 
+## Revision (adversarial review 2026-09-01)
+
+A second, independent adversarial review found a new top-severity defect and
+four supporting ones. All five are folded in below. **This section is
+authoritative and supersedes the sections that follow wherever they conflict**
+(chiefly the old S1.3/S2.4/S4.2/S5-A2 and the original Slice 1 in S6). The
+original text is kept for provenance, but the design of record is here.
+
+The single reframe that drives the rest: **Slice 1 is now one SINGLE trust
+domain - one host you reach with your own credentials - and the cross-trust-
+domain deploy is a separate, clearly-labeled future item that needs a new
+attestation primitive revl does not have.** The whole-composition signature that
+is landed today and per-host confidentiality are incompatible without that
+primitive; Slice 1 sidesteps the incompatibility by not requiring confidentiality
+from the host at all.
+
+### R1. The attested unit is the WHOLE composition; admission was specified PER-HOST SLICE (NEW, top severity)
+
+The landed attestation signs the whole composition, not a slice. In
+`bundle.py`, `composition_hash = attest.canonical_hash(norm_ir)` and
+`make_attestation(norm_ir, key, ...)` (lines ~418/421) sign over the WHOLE
+normalized IR; `_emit_files(backend, norm_ir)` (called at ~398/655) emits each
+backend over the WHOLE IR; and `evidence_bindings` are whole-composition facet
+hashes (item 290). There is **no per-slice attestation primitive** anywhere in
+item 127 or item 305.
+
+But the original S1.3 / Slice 1 had the host receive a *sliced* bundle and run
+`revl verify` locally on it. That cannot work: a host recomputing
+`canonical_hash` over a subset IR will never equal the bound whole-composition
+hash, so **every honest deploy would refuse itself.** The three ways out are all
+bad:
+
+- Re-sign per slice at the conductor. Then the conductor holds the signing key,
+  which is exactly the trust inversion S1.2/S2.4 forbid (the operator gets to
+  assert "trust me, it is admitted"), and under any asymmetric scheme it needs
+  the PRIVATE key.
+- Stage the whole source+IR to every host so the whole-composition hash checks.
+  Then every partially-trusted host sees the entire composition, contradicting
+  the different-trust-domain motivation that S2.4 leans on.
+- Invent a per-slice primitive. That is real new scope, not reuse.
+
+**Resolution - pin the unit.** Slice 1 takes the honest minimal path: a **single
+trust domain**. One host, reached with the operator's own credentials, receives
+the **whole attested bundle**, stages it, and verifies the whole-composition
+signature and chain as-is. "Slice" in Slice 1 means only the **activation set**
+(which components this host activates), never a cryptographic subset of the
+attested bytes. Because it is one trust domain, staging the whole composition to
+the host discloses nothing the operator was hiding from it, so the
+confidentiality objection does not arise.
+
+The **cross-trust-domain deploy** (a partially-trusted host that must NOT see the
+whole composition) is scoped as a distinct FUTURE item. It requires a new
+**segmented attestation primitive**: a Merkle root over per-component IR leaves
+and per-component artifact leaves, signed once, so a host can be handed only its
+own leaf plus the inclusion proof and verify membership without seeing the other
+components. That is a genuine EXTENSION of items 127/305, called out as new
+scope, not a reuse of what is landed. Stated plainly: **today's whole-composition
+signature and per-host confidentiality cannot both hold without that primitive.**
+
+### R2. The receipt must bind a load-time MEASUREMENT the conductor COMPARES, not echo PREPARE's verified hash (HIGH)
+
+The original A2 receipt bound "the artifact hash the host claims," which is a
+TOCTOU hole: PREPARE verifies bytes, then COMMIT loads bytes, and nothing forced
+the loaded bytes to equal the verified ones, nor forced the conductor to check.
+For "detectable" to hold even against an honest-but-buggy host, two things are
+now required:
+
+1. The COMMIT receipt binds `sha256` of the **exact artifact bytes `deploy-admit`
+   hands to the runtime, measured immediately before hand-off at COMMIT-load
+   time** - a fresh measurement, never an echo of the hash PREPARE verified.
+2. The **conductor COMPARES** that receipt hash against the signed
+   `artifact/<backend>` binding and **REFUSES on mismatch.** S2.3's refusal was
+   only during PREPARE's verify; the comparison must also gate COMMIT.
+
+The guarantee wording SPLITS accordingly:
+
+- **honest-but-buggy host -> DETECTABLE**, via the load-time measurement plus the
+  conductor comparison. A host that loads the wrong bytes by accident is caught.
+- **malicious host -> ATTRIBUTABLE / non-repudiable only.** The host signed a
+  statement about what it loaded; a lie is attributable to its key, but not
+  detectable without hardware (TPM/TEE), which is out of scope.
+
+The residual TOCTOU between the measurement and the runtime's own `exec` of those
+bytes is unclosable without hardware and is named, not papered over.
+
+### R3. Ed25519 is a real blocker AND under-scoped; it is dropped from Slice 1 (HIGH)
+
+Item 127 is symmetric: `attest.py:67` `SIGN_ALG = "hmac-sha256"`, `_sign` uses
+`hmac.new`, and `verify_attestation` needs the same secret. Calling this a "flip
+the alg member" change is wrong. The real migration surface, re-titled the
+**asymmetric-signing migration (item 127 v2)**:
+
+- **(a)** a NEW third-party dependency. The stdlib has no Ed25519, so this breaks
+  `attest.py`'s explicit "deliberately dependency-free / stdlib-only" invariant
+  (lines ~13-28); it needs `cryptography` or PyNaCl.
+- **(b)** `key_id(key)` (`attest.py:107`) fingerprints the SECRET; under
+  asymmetric signing it must fingerprint the PUBLIC key on both sides. That is a
+  semantic change the S2.4 trust-store lookup depends on.
+- **(c)** it ripples through ~6 call sites: `bundle.py` (~418/421 sign,
+  ~718/723 verify), `registry.py` (~245 verify, ~645 sign), `cli/observe.py`
+  (~246 verify, ~265 sign), `truc/reproduce.py` (~375 verify), and
+  `mcp/server.py` (~1017 `resolve_key`).
+- **(d)** `tools/conformance_cert.py:81` has a PARALLEL HMAC signer (its own
+  `_sign` at ~318/325). If a host verifies the cert's own signature, item 306
+  needs the same upgrade; if the host trusts the cert only transitively via the
+  bound `conformance/<backend>` hash, the doc must SAY SO and forbid independent
+  cert-signature trust. Slice 1 takes the transitive path (see R-slice below).
+
+Because Slice 1 is now a single trust domain (R1), **Ed25519 is dropped from
+Slice 1.** Slice 1 ships on HMAC with "signer untrusted" documented as NOT-yet-
+enforced (honest for a single domain: the operator who signs is the operator who
+deploys). The asymmetric migration becomes a **prerequisite of the cross-trust-
+domain future item**, not of Slice 1.
+
+### R4. The SSH orchestration target needs a pinned host key; the deploy map is outside the attested chain (MEDIUM/HIGH)
+
+Without a pinned SSH host key, a network MITM impersonates the target host, runs
+a fake `deploy-admit` that echoes the expected hash (the R2 hole if R2 is not
+enforced), and serves backdoored bytes - collapsing the "own the host" bar down
+to "sit on the network path." Separately, the `[deploy]` table (`host` / `runner`
+/ `trust`) in `--map` is **unauthenticated operator input**: only the build-time
+`topology.json` is inside the bundle, the deploy map is not.
+
+**Resolution.** Require an SSH host-key pin (`[deploy].host_key`, or a pinned
+`known_hosts`); forbid `StrictHostKeyChecking=no`. State plainly that without the
+pin the A2 blast-radius argument does not hold. The load-measured receipt (R2)
+plus a pinned receipt key (R5) are what backstop a MITM'd channel; the host-key
+pin is what stops the impersonation in the first place.
+
+### R5. The COMMIT-receipt signing key needs specified provenance (MEDIUM)
+
+The conductor must verify the receipt (R2), but the original doc never said where
+it gets the host's verify key. **Resolution.** The receipt key is bound to the
+host's **item-55 mTLS identity** (`bridge.py` `TlsConfig.identity` / `certfile`),
+or to an explicitly-pinned per-host verify key in the conductor's map.
+Receipt-signature verification is a **HARD conductor-side check, not advisory**:
+an unverifiable or wrong-key receipt fails the deploy.
+
+### Validated (kept): PREPARE is effect-free for Slice 1, with two named caveats
+
+The review confirmed PREPARE has no runtime effects for Slice 1: `revl verify`
+recompiles and re-emits via the pure in-repo emitters (`bundle._emit_files`), no
+bundle code runs, no extern fires, and no native toolchain is shelled. Two
+caveats are named explicitly, not hidden:
+
+1. PREPARE spawns the `deploy-admit` process on the host. That is itself an
+   effect, and it is the FIRST place attacker-controlled code could run.
+2. PREPARE writes the staged bundle to the host (reversible by deleting it).
+
+The effect-free claim breaks only for an impure or tool-invoking emitter, or for
+the deferred `via = container` path.
+
+### Re-sliced plan (supersedes S6 Slice 1)
+
+**Slice 1 - one single-trust-domain remote host, over pinned SSH.**
+- Exactly ONE remote host, in the operator's OWN trust domain, reached over SSH
+  with a **pinned host key** (R4).
+- The **whole** attested bundle is staged to that host (R1). "Slice" = activation
+  set only.
+- The host runs `revl verify` plus the whole-composition chain verify **on the
+  whole bundle**, on **HMAC** (R3), against the whole-composition
+  `composition_hash` and `evidence_bindings`.
+- The host does a LOCAL `apply` of its activation set, writing its own WAL.
+- The host returns a **load-measured** COMMIT receipt (R2); the **conductor
+  compares** the measured hash to the signed `artifact/<backend>` binding and
+  REFUSES on mismatch.
+- The **receipt key is the host's mTLS identity** (R5); receipt verification is a
+  hard conductor-side gate.
+- **Rollback** is that one host's local `apply`/`recover` LIFO - the exact
+  in-process theorem, no distributed orchestration.
+
+**Deferred (named boundaries):**
+- **Cross-trust-domain deploy**: needs the segmented per-slice attestation
+  primitive (R1) AND the asymmetric-signing migration / item 127 v2 (R3).
+- **Multi-host orchestration** and the two-phase cross-host commit/abort with the
+  `unresolved` residue verdict (original S3).
+- **Container / microVM targets** (`via = container|microvm`).
+- **Transactional multi-composition federation.**
+- **Hardware remote attestation** (TPM/TEE) - the only thing that upgrades a
+  malicious host from attributable to detectable (R2).
+
+
+### Unreconciled with the Addendum's slice math
+
+This pass puts a pinned-SSH control plane inside Slice 1; the Addendum at the
+foot of this document (from the `design/118-revl-deploy-review` pass) records
+that remote orchestration and the SSH/container launch are Slice 2+ and that
+Slice 1 rides a static item-56 TCP+mTLS endpoint. Both passes are recorded as
+they were written. Which control plane Slice 1 owns is open, and R4's host-key
+pin is a requirement of whichever one it turns out to be.
+
+---
+
 **Status: design, not implemented.** This document specifies `revl deploy`:
 `apply` (docs/apply.md, `src/revl/apply.py`) extended past a single process to
 remote hosts, each remote component reached over the item-56 network bridge
