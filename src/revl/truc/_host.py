@@ -260,6 +260,10 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     lock_row = {
         "name": name,
         "registry": reg_name,
+        # the registry's declared version, projected verbatim so the project
+        # pins WHICH release it admitted, not just which bytes (428 F12). An
+        # unversioned entry records "" and stays honestly unpinnable.
+        "version": row.get("version", ""),
         "sourceHash": row.get("sourceHash", ""),
         "manifestHash": row.get("manifestHash", ""),
         "provides": row.get("provides") or {},
