@@ -1,4 +1,7 @@
-// Wasm-tier example (backends/wasm): i32-only services, no host builtins.
+// Wasm-tier example (backends/wasm): no host builtins on that tier. The
+// tier refuses Float, Map and function types; Int crosses as an i64, and
+// Str, Bytes, lists, records, variants, Opt and Result cross the service
+// boundary as canonical-ABI pointers into linear memory.
 // Beacon writes its presence into a kv coeffect (with inverses) and provides
 // a status service; Auditor snapshots the status into kv when it activates.
 // The kv provider itself is not written in revl — in the demo it is a
