@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check demo pre-merge pre-merge-affected formal
+.PHONY: matrix matrix-check demo pre-merge pre-merge-affected formal roadmap-check
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -21,6 +21,16 @@ pre-merge:
 # release/CI gate. Override the base with: make pre-merge-affected BASE=<ref>
 pre-merge-affected:
 	sh tools/pre_merge.sh --affected $(if $(BASE),--base=$(BASE),)
+
+# The roadmap's in-progress markers, checked against git. The roadmap is the
+# state-of-record and its state is PROSE, so it rots silently: a marker reading
+# "FIXING on `fix/x`" for a branch that merged hours ago costs the next agent a
+# full re-investigation. Same contract as matrix-check: a claim that can be
+# checked mechanically must be. See tools/check_roadmap_markers.py for what it
+# can and cannot know, and CONTRIBUTING.md "Tracking work" for the discipline.
+# Add --require-issue once the GitHub-issue migration lands.
+roadmap-check:
+	python3 tools/check_roadmap_markers.py
 
 # Regenerate the docs/conformance.md conformance + performance matrix in place.
 matrix:
