@@ -643,6 +643,33 @@ fn mkstmt_spawn_unbound(target: Str) -> Stmt {
 
 fn int_lit0() -> Expr { return IntLit("0") }
 
+// `[await] <expr>` in an operand position. `await` is a keyword, so the
+// expression grammar stops dead on it: `let h = effect await fetch()` parsed as
+// a bad expression, the statement became a `skip`, and the reader jumped to the
+// end of the line — taking the operand, and every head in it, with it. Since a
+// suspension is exactly where a component reaches outside itself, that is the
+// last operand a gate should decline to read.
+//
+// `aw` is reported rather than folded away because `has_await` decides the A1
+// await-placement surface off a statement of kind "await"; `await_marker`
+// appends that statement so the placement rule sees the suspension it always
+// saw, while the operand itself is now walked like any other.
+type AwOperand = { e: Expr, i: Int, aw: Bool }
+
+fn operand_at(ts: List[Token], k: Int) -> AwOperand {
+  if (atw(ts, k, "await")) {
+    let r = expr_at(ts, k + 1)
+    return { e: r.e, i: r.i, aw: true }
+  }
+  let r2 = expr_at(ts, k)
+  return { e: r2.e, i: r2.i, aw: false }
+}
+
+fn await_marker(aw: Bool, ss: List[Stmt]) -> List[Stmt] {
+  if (aw) { return ss.push(mkstmt("await", int_lit0())) }
+  return ss
+}
+
 // One statement run and the index just PAST the tokens it consumed. Item 168:
 // the reader must end a run at a STRUCTURAL boundary, not only a newline, so a
 // single-line body (`let x = a() let y = b() isolate d …`) parses into the same
@@ -694,12 +721,14 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
       }
       return mk_srun([sp], sk)
     }
-    let r = expr_at(ts, j)
+    let r = operand_at(ts, j)
     if (is_bad(r.e)) { return mk_srun([mkstmt("skip", r.e)], hi) }
-    let out: List[Stmt] = [mkstmtb(kd, r.e, bn)]
+    let out: List[Stmt] = await_marker(r.aw, [mkstmtb(kd, r.e, bn)])
     if (atw(ts, r.i, "undo")) {
-      let u = expr_at(ts, r.i + 1)
-      if (!is_bad(u.e)) { return mk_srun(out.push(mkstmt("undo", u.e)), u.i) }
+      let u = operand_at(ts, r.i + 1)
+      if (!is_bad(u.e)) {
+        return mk_srun(await_marker(u.aw, out.push(mkstmt("undo", u.e))), u.i)
+      }
       return mk_srun(out, hi)
     }
     return mk_srun(out, r.i)
@@ -709,10 +738,27 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
     if (is_bad(rr.e)) { return mk_srun([mkstmt("skip", rr.e)], hi) }
     return mk_srun([mkstmt("return", rr.e)], rr.i)
   }
+  // `emit <expr> [compensate <expr>]`. The compensation is the emit's inverse
+  // and is read as its own statement, exactly as `undo` is read after
+  // `effect` — it is an ordinary expression in an ordinary position and its
+  // head resolves like any other. It carries the emit's MARKING (see
+  // `walk_stmts`): reversing an emission is itself an emission.
+  //
+  // Before this the `emit` branch stopped at its own expression and left the
+  // reader pointing at `compensate`, which matched no branch, parsed as a bad
+  // expression, and skipped to the end of the line.
   if (t.kind == "kw" && t.text == "emit") {
-    let re1 = expr_at(ts, lo + 1)
+    let re1 = operand_at(ts, lo + 1)
     if (is_bad(re1.e)) { return mk_srun([mkstmt("skip", re1.e)], hi) }
-    return mk_srun([mkstmt("emit", re1.e)], re1.i)
+    let oute: List[Stmt] = await_marker(re1.aw, [mkstmt("emit", re1.e)])
+    if (atw(ts, re1.i, "compensate")) {
+      let uc = operand_at(ts, re1.i + 1)
+      if (!is_bad(uc.e)) {
+        return mk_srun(await_marker(uc.aw, oute.push(mkstmt("compensate", uc.e))), uc.i)
+      }
+      return mk_srun(oute, hi)
+    }
+    return mk_srun(oute, re1.i)
   }
   // `await <expr>` is a statement of its own (the A1 await-outside-body surface
   // reads its kind). The expression is still walked for G4/A1/G1.
@@ -739,13 +785,39 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
     }
     return mk_srun([mkstmt_spawn_unbound(tgt)], sk)
   }
-  if (t.kind == "kw" && (t.text == "effect" || t.text == "undo")) {
-    let rf = expr_at(ts, lo + 1)
+  // `every <n><unit> { … }` / `after <n><unit> { … }` — a timer block. Its body
+  // is an ordinary statement sequence and the reference resolves the heads in
+  // it exactly as it resolves the statements around it, so the block's
+  // statements are READ OUT and returned inline: to this walk a timer body is
+  // simply more setup.
+  //
+  // Without this the reader had no case for the keyword at all, fell through
+  // to `expr_at`, got a Bad parse, and skipped to the end of the line — taking
+  // the whole block with it. A statement form the reader cannot read is a
+  // statement form the gate cannot check, and unreadable is not the same
+  // answer as clean. `close_brace` bounds the body; a malformed header or an
+  // unclosed brace still falls through to the old skip, since there is nothing
+  // to read out.
+  if (t.kind == "kw" && (t.text == "every" || t.text == "after")) {
+    var b = lo + 1
+    while (b < hi && !atk(ts, b, "{")) { b += 1 }
+    if (b < hi) {
+      let bend = close_brace(ts, b)
+      if (bend != 0 - 1) {
+        return mk_srun(p_stmts(ts, b + 1, bend - 1, []), bend)
+      }
+    }
+  }
+  if (t.kind == "kw" && (t.text == "effect" || t.text == "undo"
+                        || t.text == "compensate")) {
+    let rf = operand_at(ts, lo + 1)
     if (is_bad(rf.e)) { return mk_srun([mkstmt("skip", rf.e)], hi) }
-    let out2: List[Stmt] = [mkstmt(t.text, rf.e)]
+    let out2: List[Stmt] = await_marker(rf.aw, [mkstmt(t.text, rf.e)])
     if (atw(ts, rf.i, "undo")) {
-      let u2 = expr_at(ts, rf.i + 1)
-      if (!is_bad(u2.e)) { return mk_srun(out2.push(mkstmt("undo", u2.e)), u2.i) }
+      let u2 = operand_at(ts, rf.i + 1)
+      if (!is_bad(u2.e)) {
+        return mk_srun(await_marker(u2.aw, out2.push(mkstmt("undo", u2.e))), u2.i)
+      }
       return mk_srun(out2, hi)
     }
     return mk_srun(out2, rf.i)
@@ -1727,10 +1799,6 @@ fn any_in(xs: List[Str], set: List[Str]) -> Bool {
 // environment: a `root.<m>(...)` or `f(...)` head that is none of a
 // requirement, a scope name, a callable, `config`, or an Upper-cased host
 // constructor is an undeclared access.
-// `plainBody` is true while walking a provide-method body (lower.py's
-// `_plain_body`): only there does an unresolved bare value raise the G1
-// undeclared-access diagnostic this slice spells; a setup/activation body
-// reports a different, out-of-slice message, so its bare values are not gated.
 // `fnAsyncSlots` maps a callable name to its `Async[T]` parameter indices — the
 // call-site coercion table (lower.py's `_coerce_async_args`): an arrow argument
 // in one of these slots is stamped async and is exempt from the arrow-color
@@ -1750,7 +1818,7 @@ fn any_in(xs: List[Str], set: List[Str]) -> Bool {
 type Ctx = { svcs: Map[Str, SvcD], reqMap: Map[Str, Str], caps: CapsT,
              colored: List[Str], emittingNames: List[Str], asyncExterns: List[Str],
              scopeNames: List[Str], fnNames: List[Str], compName: Str,
-             plainBody: Bool, fnAsyncSlots: Map[Str, List[Int]],
+             fnAsyncSlots: Map[Str, List[Int]],
              underArrow: Bool, handles: Map[Str, Str],
              provKeySvc: Map[Str, Str] }
 
@@ -1788,10 +1856,18 @@ fn svc_of(cx: Ctx, svcName: Str) -> SvcD {
   }
 }
 
+// `marked` is the G4 emit-marking of the expression being walked. Both `emit`
+// and its `compensate` carry it: a compensation is the emission's INVERSE and
+// runs under the same marking, so `emit outbox.add(r) compensate db.execute(q)`
+// is a marked emission in both halves. Walking a compensation unmarked refuses
+// eighty-five programs in this repo's own corpus that the reference admits —
+// a compensation that reverses a write is the ordinary shape, not the exotic
+// one.
 fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (i >= ss.length() || a.msg != "") { return a }
   let s = ss[i]
-  return walk_stmts(ss, i + 1, cx, walk_expr(s.e, s.kind == "emit", cx, a))
+  let marked = s.kind == "emit" || s.kind == "compensate"
+  return walk_stmts(ss, i + 1, cx, walk_expr(s.e, marked, cx, a))
 }
 
 fn walk_exprs(xs: List[Expr], i: Int, marked: Bool, cx: Ctx, a: Ac) -> Ac {
@@ -2006,10 +2082,14 @@ fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
 //     reach cannot be statically named), exactly as `_method_emissions` does;
 //   * a first-class reference to an async-colored name is the `passed_async`
 //     A1 surface, recorded in `avals` for the value-use verdict;
-//   * G1: in a PLAIN (provide-method) body a name that resolves to no scope
-//     name and no callable is an undeclared access. In a setup/activation body
-//     the reference reports a different (out-of-slice) diagnostic, so the G1
-//     refusal is gated on `cx.plainBody` and left un-mirrored for setup.
+//   * G1: a name that resolves to no scope name and no callable is an
+//     undeclared access. This used to be gated on `cx.plainBody`, on the
+//     belief that a setup/activation body drew a different, out-of-slice
+//     diagnostic from the reference. It does not: `component C requires s: S
+//     { effect nope }` draws the same `` `nope` is not a declared requirement
+//     of C `` the provide-method case does. The gate was therefore not a slice
+//     boundary but a hole in one — the gate admitted an undeclared access in
+//     exactly the position a component reaches for its authority.
 // An emitting/colored name is always a callable (it is a declared fn/extern),
 // so it is `bare_declared` and never trips the G1 branch.
 fn var_check(name: Str, cx: Ctx, a: Ac) -> Ac {
@@ -2025,7 +2105,7 @@ fn var_check(name: Str, cx: Ctx, a: Ac) -> Ac {
            areach: na.areach, aops: na.aops,
            avals: union_into(na.avals, [name]) }
   }
-  if (cx.plainBody && !bare_declared(cx, name)) { return g1_refuse(cx, name, na) }
+  if (!bare_declared(cx, name)) { return g1_refuse(cx, name, na) }
   return na
 }
 
@@ -2045,7 +2125,7 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
   return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
            emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
            scopeNames: union_into(cx.scopeNames, names), fnNames: cx.fnNames,
-           compName: cx.compName, plainBody: cx.plainBody,
+           compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc }
 }
@@ -2056,7 +2136,7 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
   return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
            emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
-           compName: cx.compName, plainBody: cx.plainBody,
+           compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
            handles: cx.handles, provKeySvc: cx.provKeySvc }
 }
@@ -2196,7 +2276,7 @@ fn build_maps(pg: Prog) -> Ctx {
     fi += 1
   }
   return mk_ctx(svcs, Map.empty(), caps, colored, emitting, ai,
-                [], fn_names_of(pg.fns), "", false, slots, prov_key_svc(pg))
+                [], fn_names_of(pg.fns), "", slots, prov_key_svc(pg))
 }
 
 // The global (component `#` key -> service) table: every component's provided
@@ -2220,11 +2300,11 @@ fn prov_key_svc(pg: Prog) -> Map[Str, Str] {
 
 fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
           colored: List[Str], emitting: List[Str], ai: List[Str],
-          scope: List[Str], fnn: List[Str], cnm: Str, plain: Bool,
+          scope: List[Str], fnn: List[Str], cnm: Str,
           slots: Map[Str, List[Int]], pks: Map[Str, Str]) -> Ctx {
   return { svcs: svcs, reqMap: rm, caps: caps, colored: colored,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
-           fnNames: fnn, compName: cnm, plainBody: plain, fnAsyncSlots: slots,
+           fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks }
 }
 
@@ -2244,20 +2324,9 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
   return { svcs: base.svcs, reqMap: req_map_of(comp.reqMap), caps: base.caps,
            colored: base.colored, emittingNames: base.emittingNames,
            asyncExterns: base.asyncExterns, scopeNames: scope_names_of(comp),
-           fnNames: base.fnNames, compName: comp.name, plainBody: false,
+           fnNames: base.fnNames, compName: comp.name,
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc }
-}
-
-// The same context switched into a provide-method (plain) body, where G1
-// bare-value resolution applies.
-fn ctx_plain(cx: Ctx) -> Ctx {
-  return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
-           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
-           scopeNames: cx.scopeNames, fnNames: cx.fnNames, compName: cx.compName,
-           plainBody: true, fnAsyncSlots: cx.fnAsyncSlots,
-           underArrow: cx.underArrow, handles: cx.handles,
-           provKeySvc: cx.provKeySvc }
 }
 
 // The spawn handles a component binds: every `let h = effect spawn C …` in its
@@ -2694,12 +2763,15 @@ fn check_module_fns(fns: List[FnD], i: Int, base: Ctx) -> Str {
 
 // G4 + A1 over one component. "" = admitted, else a tagged refusal.
 fn check_component(comp: CompD, cx: Ctx) -> Str {
-  // setup gets G4/A1/G1 too (an undeclared access or unmarked emission in
-  // setup is refused exactly as in a provide body). Bare-value G1 is a
-  // provide-body-only diagnostic, so setup keeps `plainBody: false`.
+  // setup gets G4/A1/G1 too: an undeclared access or unmarked emission in
+  // setup is refused exactly as in a provide body, bare values included (see
+  // `var_check`). There is no longer a per-body-kind context: the two bodies
+  // resolve names identically, so a provide method walks under the very same
+  // `cx`. The `plainBody` flag that used to distinguish them is gone rather
+  // than left set-and-unread, so nothing can quietly gate a check on it again.
   let sa = walk_stmts(comp.setup, 0, cx, empty_ac())
   if (sa.msg != "") { return tagged(sa.tag, sa.msg) }
-  let pcx = ctx_plain(cx)
+  let pcx = cx
   var pi = 0
   while (pi < comp.provs.length()) {
     let pv = comp.provs[pi]
