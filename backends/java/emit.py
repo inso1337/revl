@@ -70,6 +70,13 @@ _LIFECYCLE_MODE = False
 # Set by `emit()`; empty for the v1/v2 dialects, which do not use that renderer.
 _V3_DECLARED_TYPES: frozenset[str] = frozenset()
 
+# The placeholder a confidential witness is written as in the durable WAL. Must
+# equal `revl.taint.REDACTED_SECRET` / `confidential.REDACTED`: it is part of the
+# log's on-disk contract, and `revl recover` reads it back to refuse a replay it
+# cannot honestly perform (src/revl/recovery.py `_has_redacted_arg`) rather than
+# addressing the wrong referent and reporting the miss as a clean rollback.
+_REDACTED_SECRET = "<redacted:secret>"
+
 TYPE_MAP = {
     "Str": "String",
     "Int": "long",
@@ -4587,9 +4594,18 @@ def _emit_witnessed_step(
         # way). Byte-identical default output: emitted only under `--record`.
         receiver = _string(_call_label(step["acquire"]))
         method = _string(_call_label(ext["undo"]))
+        # ...unless the author declared the witness position confidential
+        # (`Result[Secret[W], E]`, the shape a fallible lease has to use), in
+        # which case the descriptor carries the placeholder instead: the WAL is
+        # a plaintext file at rest, and a `Secret[T]` declaration authorises
+        # disclosure to the declared receiver, never a durable copy. The stamp
+        # is the compiler's (`secret_witness`), so the decision is made once,
+        # here, at the point that writes the record — never at each reader.
+        referent = (_string(_REDACTED_SECRET) if ext.get("secret_witness")
+                    else "String.valueOf(result)")
         out.append(
             f"{pad}    revlRecordTransactional({receiver}, {method}, "
-            f"new String[]{{String.valueOf(result)}});"
+            f"new String[]{{{referent}}});"
         )
     out.append(
         f"{pad}    fx.track({frame_expr}.{entry}({crossing}, {attempted}, "
