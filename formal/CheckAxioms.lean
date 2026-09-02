@@ -81,3 +81,24 @@ import RevL
 #print axioms RevL.CapCeilings.derivation_non_vacuous
 #print axioms RevL.CapCeilings.derivation_refuses_unnameable
 #print axioms RevL.CapCeilings.derived_ceiling_check_not_subsumed
+-- G9 (items 249/256/329): untrusted data gains no authority — the label is
+-- monotone except at an explicit declassifier, an authority sink admits a
+-- tainted value only through one that clears that very origin, a bound
+-- provider key has no declassifier at all, a `Secret[T]` value needs its
+-- declared downgrade, a self-minted declassifier does not count, the origin
+-- surface is bounded by the declared context, and the two non-vacuity
+-- witnesses.
+#print axioms RevL.G9.origin_persists_or_is_declassified
+#print axioms RevL.G9.no_authority_from_untrusted
+#print axioms RevL.G9.untrusted_gains_no_authority
+#print axioms RevL.G9.declassification_is_the_only_escape
+#print axioms RevL.G9.secret_persists
+#print axioms RevL.G9.secret_confined
+#print axioms RevL.G9.confidential_needs_declassification
+#print axioms RevL.G9.flow_declassifiers_granted
+#print axioms RevL.G9.untrusted_author_needs_granted_declassifier
+#print axioms RevL.G9.declassifier_must_be_declared
+#print axioms RevL.G9.taint_surface_within_declared_context
+#print axioms RevL.G9.no_untrusted_without_a_declared_source
+#print axioms RevL.G9.g9_not_vacuous
+#print axioms RevL.G9.secret_rules_not_vacuous
