@@ -1,0 +1,91 @@
+name: "CodeQL Advanced"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '40 14 * * 0'
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # required for all workflows
+      security-events: write
+      # required to fetch internal or private CodeQL packs
+      packages: read
+      # only required for workflows in private repositories
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - language: actions
+          build-mode: none
+        - language: go
+          build-mode: none
+        - language: java-kotlin
+          build-mode: none
+        - language: javascript-typescript
+          build-mode: none
+        - language: python
+          build-mode: none
+        - language: rust
+          build-mode: none
+        # Tailored to what this repository actually contains (tracked file
+        # counts at the time of writing): 555 .py, 93 .ts, 66 .go, 22 .rs,
+        # 22 .java, 12 .js/.mjs, plus the workflows themselves.
+        #
+        # `c-cpp` is deliberately ABSENT. The only C in the tree is
+        # tree-sitter-revl/src/{parser.c,scanner.c} and its three
+        # tree_sitter/*.h headers, which are GENERATED tree-sitter output
+        # vendored into the repo. Scanning generated parser tables produces
+        # findings nobody can act on without regenerating upstream, and a
+        # scanner people learn to ignore is worse than no scanner. Add the
+        # lane if hand-written C ever lands.
+        #
+        # `swift`, `csharp` and `ruby` are absent because the repository has
+        # no such sources. Note that if a lane is added for a language with
+        # no files, CodeQL fails the job rather than skipping it.
+        #
+        # Every lane is `build-mode: none`, including go and rust, which the
+        # upstream template would autobuild. Two reasons, both specific to
+        # this tree:
+        #   * go has FIVE independent modules (backends/go/placement_runner,
+        #     backends/go/scenarios, backends/go/v3, bench/codegen/go and
+        #     forks/stc-go). Autobuild picks one and the analysis silently
+        #     covers a fraction of the Go, which is the "green means the
+        #     tests that ran, ran" failure this project keeps finding.
+        #   * rust and go builds here resolve pinned third-party runtimes
+        #     (cordis-rs, stc-go) from their registries. A scanner that can
+        #     go red on a network hiccup gets muted.
+        # `none` analyses every tracked source file of the language with no
+        # build, which is what a security scan wants here.
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix.build-mode }}
+        # `security-extended` over the default suite: this repository is a
+        # compiler whose own roadmap records executed reproducers for
+        # injection, path-traversal and confinement defects (items 416, 421,
+        # 422, 425, 428), so the extra precision is worth the extra noise.
+        # `security-and-quality` is deliberately not used: the quality rules
+        # would bury the security findings, and the repository already gates
+        # style with ruff.
+        queries: security-extended
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{matrix.language}}"
