@@ -545,3 +545,66 @@ def test_explain_unknown_code_returns_the_roster():
 def test_explain_requires_a_code():
     payload = _call("revl_explain", {})
     assert payload["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# F4: `revl_call` must surface the approval two-step, not swallow it
+#
+# `ApprovalRequired` is not a `SessionError` (it is raised from the single
+# chokepoint `Session.call` shares with the load/swap activation gate), so
+# `_tool_call`'s broad `except Exception` used to catch it before it ever
+# reached `handle()`'s dedicated `except ApprovalRequired` renderer, turning a
+# class-(c) crossing into a generic "raised" diagnostic with no ticket/hash —
+# unapprovable. `_tool_load`/`_tool_swap` never had this bug: they only catch
+# `SessionError`, so `ApprovalRequired` was always free to propagate. This
+# drives the SAME module-level `SESSION` singleton `_tool_*` uses (the real
+# `revl mcp serve --approval-policy` wiring), so it restores approval_policy
+# and unloads afterward to leave no state for the other test modules that
+# import `revl.mcp.server`.
+# ---------------------------------------------------------------------------
+
+_APPROVAL_SOURCE = (
+    "extern emission fn announce(sink: Str, msg: Str) = @py {\n"
+    "    with open(sink, 'a') as _f:\n"
+    "        _f.write('announce:' + msg + '\\n')\n"
+    "    return\n"
+    "}\n"
+    "service Ops { emission fn shout(sink: Str, msg: Str) }\n"
+    "component Agent provides ops: Ops {\n"
+    "  provide ops { fn shout(sink, msg) { emit announce(sink, msg) } }\n"
+    "}\n"
+)
+
+
+def test_revl_call_surfaces_ticket_for_class_c_crossing(tmp_path):
+    from revl.mcp.server import SESSION
+
+    sink = str(tmp_path / "sink.log")
+    old_policy = SESSION.approval_policy
+    SESSION.approval_policy = "auto"
+    try:
+        loaded = _call("revl_load", {"source": _APPROVAL_SOURCE, "record": True})
+        assert loaded["ok"] is True
+
+        blocked = _call("revl_call", {"key": "ops", "method": "shout",
+                                      "args": [sink, "hi"]})
+        # F4, BEFORE the fix: {"ok": False, "raised": True, "diagnostics": [...
+        #   "message": "ApprovalRequired: approval required for a class-(c)
+        #   crossing"]} — no "ticket", no "hash", nothing to approve.
+        # AFTER the fix: the ticket two-step, exactly as revl_load/revl_swap
+        # already render it.
+        assert blocked["ok"] is False
+        assert blocked.get("approvalRequired") is True
+        assert "ticket" in blocked and "hash" in blocked["ticket"]
+        assert not Path(sink).exists()   # fail-closed: nothing fired either way
+
+        approved = _call("revl_approve", {"hash": blocked["ticket"]["hash"]})
+        assert approved["ok"] is True and approved["approved"] is True
+
+        fired = _call("revl_call", {"key": "ops", "method": "shout",
+                                    "args": [sink, "hi"]})
+        assert fired["ok"] is True
+        assert Path(sink).read_text(encoding="utf-8").splitlines() == ["announce:hi"]
+    finally:
+        SESSION.approval_policy = old_policy
+        _call("revl_unload", {})
