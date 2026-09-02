@@ -692,6 +692,84 @@ def test_cargo_check_compiles_non_ascii_in_format_position(tmp_path):
     assert "positional argument" not in result.stderr, result.stderr
 
 
+def _lifecycle_timer_doc(test_name: str) -> str:
+    """A minimal advance-based lifecycle test with *test_name* as its name,
+    the same shape `test_cargo_check_compiles_non_ascii_in_format_position`
+    uses -- factored out so the two item 106 regressions below (the
+    double-escape residual case and the literal-brace case) share it."""
+    return (
+        "service Counter { fn count() -> Int  emission fn tick() }\n"
+        "component TickCounter provides counter: Counter {\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide counter {\n"
+        "    fn count() = store.size()\n"
+        "    fn tick() {\n"
+        "      let key = `t-${store.size()}`\n"
+        "      effect store.insert(key, \"x\")\n"
+        "      undo store.remove(key)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+        "component Heartbeat requires counter: Counter {\n"
+        "  every 10s { emit counter.tick() }\n"
+        "}\n"
+        f'lifecycle test "{test_name}" {{\n'
+        "  load TickCounter\n"
+        "  load Heartbeat\n"
+        "  advance 25s\n"
+        "  let ticks = call counter.count()\n"
+        "  assert ticks == 2\n"
+        "  unload Heartbeat\n"
+        "  unload TickCounter\n"
+        "  assert no_residue\n"
+        "}\n"
+    )
+
+
+@needs_cargo
+def test_cargo_check_compiles_literal_brace_in_lifecycle_test_name(tmp_path):
+    """Item 106, finding #35, sibling (b): a lifecycle test name containing a
+    literal `{`/`}` -- no non-ASCII involved at all -- broke the SAME two
+    `assert!` message sites item 135's non-ASCII fix did not touch, because
+    `_string` never doubles a literal brace (it is meant for a plain string
+    position, not a format-string one). `format!`'s parser reads an
+    un-doubled `{curly}` as a named-argument reference:
+    `error[E0425]: cannot find value 'curly' in this scope`. Fixed by
+    `_escape_format_braces` (mirrors the existing `_v3_interp` idiom) at the
+    two lifecycle `assert!` message sites only."""
+    ir = compile_source(_lifecycle_timer_doc(
+        "an every-timer fires {curly} on each advanced tick"))
+    src = emit.emit(ir)
+    # the fix: the brace survives DOUBLED in source, single at runtime.
+    assert '{{curly}}' in src
+    result = _cargo_check(tmp_path, src, "--tests")
+    assert result.returncode == 0, result.stderr
+    assert "cannot find value" not in result.stderr, result.stderr
+
+
+@needs_cargo
+def test_cargo_check_compiles_double_escaped_unprintable_in_lifecycle_test_name(tmp_path):
+    """Item 106, finding #35, sibling (a): the lifecycle emitter built `where`
+    (the per-test label folded into every load/unload/call/assert/no_residue
+    message) via `_string(test['name'])`, then handed `where` to a SECOND
+    `_string(where + suffix)` at each use. For a test name that still needs
+    `_string`'s residual `\\u{XXXX}` escape (an unprintable scalar -- a
+    printable one no longer takes this path since item 135), the second
+    `_string` call re-escapes the first call's own backslash (`\\` ->
+    `\\\\`), stranding `u{XXXX}` as literal, un-escaped text in the compiled
+    string's runtime value -- and format!'s parser reads `{XXXX}` right back
+    out of it, `error: invalid reference to positional argument`. Fixed by
+    keeping `where` a raw, un-escaped label: `_string` runs exactly once, at
+    each downstream call site."""
+    ir = compile_source(_lifecycle_timer_doc(
+        "an every-timer fires \x7f on each advanced tick"))
+    src = emit.emit(ir)
+    assert "\\\\u{" not in src, "where must not be pre-escaped before reuse"
+    result = _cargo_check(tmp_path, src, "--tests")
+    assert result.returncode == 0, result.stderr
+    assert "positional argument" not in result.stderr, result.stderr
+
+
 @needs_cargo
 def test_cargo_test_runs_the_json_wire_roundtrip(tmp_path):
     """Item 140: the emitted @rs bodies must not merely typecheck — the JSON
