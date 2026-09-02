@@ -406,6 +406,64 @@ def test_a_multiline_mixed_union_still_refuses_honestly():
     assert "sum type with no tag" in str(excinfo.value)
 
 
+# ------- the whole DSH gateway chain at once (roadmap items 116/134/137/138)
+
+def test_the_real_dsh_gateway_shape_imports_with_every_hard_spelling_at_once():
+    """Items 116, 134, 137 and 138 each closed one refusal in DSH's real
+    `PluginInventoryGateway`, and each was found by re-running the importer after
+    the previous one landed. Every other fixture takes the hard spelling of ONE
+    layer and the friendly spelling of the rest, so the combination, which is
+    what the real gateway actually is, was never locked. This fixture takes the
+    hard spelling of all of them together:
+
+      * a base (`TypertRemoteService`) from ANOTHER package, with `@Remote`
+        decorated operations (116, 134a);
+      * a local import carrying the `.ts` extension, its brace list split across
+        lines (134b);
+      * `Branded` imported from another package too, so the branded id collapses
+        to `Str` through the documented fallback rather than a local alias (137a);
+      * a literal-only phase union closing in `| null` (137b), written
+        leading-pipe-per-line, and a second union in the bare-first-member
+        multiline shape that used to collapse to `Str` (138)."""
+    source = import_cordis_file(str(FIXTURES / "dsh_gateway.ts"))
+    assert ("class PluginInventoryGateway extends TypertRemoteService "
+            "(an external `*Service` base, treated as a Service root)") in source
+    # the brand is phantom: no `Branded`/`PluginEntryId` type survives
+    assert "Branded" not in source
+    assert "PluginEntryId" not in source
+    assert ("type PluginFiberPhase = "
+            "Pending | Loading | Active | Failed | Unloading") in source
+    assert "type PluginLoadKind = Eager | Lazy" in source
+    assert ("type PluginInventoryEntry = {"
+            " entry_id: Str, phase: Opt[PluginFiberPhase],"
+            " kind: PluginLoadKind, enabled: Bool }") in source
+    assert ("type PluginInventorySnapshot = {"
+            " total: Int, entries: List[PluginInventoryEntry],"
+            " generated_at: Str }") in source
+
+    ir = compile_source(source, "dsh_gateway.rvl")
+    phase = ir["types"]["PluginFiberPhase"]
+    assert phase["kind"] == "variant"
+    assert [c["name"] for c in phase["cases"]] == \
+        ["Pending", "Loading", "Active", "Failed", "Unloading"]
+    assert [c["name"] for c in ir["types"]["PluginLoadKind"]["cases"]] == \
+        ["Eager", "Lazy"]
+    methods = _methods(ir, "PluginInventory")
+    assert set(methods) == {"list", "schedule"}
+    assert methods["list"]["returns"] == "PluginInventorySnapshot"
+    # `@revl:pure` above a DECORATED op still reaches it through the decorator
+    assert methods["list"]["emission"] is False
+    assert _extern_classes(ir)["cordis_plugin_inventory_list"] == "pure"
+    # the branded id lands as `Str`, the synthesized variant as itself
+    assert methods["schedule"]["params"] == [
+        {"name": "id", "type": "Str"},
+        {"name": "kind", "type": "PluginLoadKind"},
+    ]
+    assert methods["schedule"]["emission"] is True
+    assert ir["components"][0]["provides"] == \
+        {"plugin_inventory": "PluginInventory"}
+
+
 # --------------------------------------------------------- the emission rule
 
 def test_untyped_ts_defaults_every_operation_to_emission():
