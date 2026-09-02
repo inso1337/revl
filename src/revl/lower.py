@@ -18,7 +18,7 @@ import keyword
 import os
 import re
 
-from . import holes
+from . import holes, ownership
 from .errors import RevlError, RevlErrors
 from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
@@ -6129,6 +6129,16 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     # fully-assembled IR (after every body is lowered and any declassifier
     # splice has run).
     _validate_no_loop_scoped_registration(result, program.filename)
+    # item 445: the unique-ownership fact behind in-place accumulation, proved
+    # ONCE here and stamped on the IR (`unique` on a self-rebinding `assign`,
+    # `unique_birth` on the `let` that would need the defensive copy) instead of
+    # re-derived per emitter — the go and python tiers had written the same
+    # aliasing rule twice, and ts/rust/java/wasm would have written it four more
+    # times. Runs last, over the fully-assembled IR, so the declassifier splice
+    # above cannot invalidate an answer. Additive and absent on every node that
+    # does not qualify, so an IR document for a program with no in-place
+    # accumulation is byte-identical to before. See src/revl/ownership.py.
+    ownership.annotate_ir(result)
     return result
 
 
