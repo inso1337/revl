@@ -1,0 +1,196 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [
+    {
+      "name": "Faulting",
+      "source": "phase1_bracket_fault.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "let-effect",
+          "acquire": {
+            "kind": "host",
+            "fn": "Pool.open",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "A"
+              },
+              {
+                "kind": "lit",
+                "value": 1
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "a"
+            },
+            "method": "close",
+            "args": []
+          },
+          "bind": "a"
+        },
+        {
+          "step": "let-effect",
+          "acquire": {
+            "kind": "host",
+            "fn": "Pool.open",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "B"
+              },
+              {
+                "kind": "lit",
+                "value": 1
+              }
+            ]
+          },
+          "undo": {
+            "kind": "fn",
+            "name": "blow",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "x"
+              }
+            ]
+          },
+          "bind": "b"
+        },
+        {
+          "step": "let-effect",
+          "acquire": {
+            "kind": "host",
+            "fn": "Pool.open",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "C"
+              },
+              {
+                "kind": "lit",
+                "value": 1
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "c"
+            },
+            "method": "close",
+            "args": []
+          },
+          "bind": "c"
+        }
+      ]
+    },
+    {
+      "name": "Clean",
+      "source": "phase1_bracket_fault.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "let-effect",
+          "acquire": {
+            "kind": "host",
+            "fn": "Pool.open",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "D"
+              },
+              {
+                "kind": "lit",
+                "value": 1
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "a"
+            },
+            "method": "close",
+            "args": []
+          },
+          "bind": "a"
+        },
+        {
+          "step": "let-effect",
+          "acquire": {
+            "kind": "host",
+            "fn": "Pool.open",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "E"
+              },
+              {
+                "kind": "lit",
+                "value": 1
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "b"
+            },
+            "method": "close",
+            "args": []
+          },
+          "bind": "b"
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Faulting",
+        "file": "phase1_bracket_fault.rvl",
+        "inject": [],
+        "provides": []
+      },
+      {
+        "name": "Clean",
+        "file": "phase1_bracket_fault.rvl",
+        "inject": [],
+        "provides": []
+      }
+    ],
+    "loadOrder": [
+      "Faulting",
+      "Clean"
+    ]
+  },
+  "externs": [
+    {
+      "name": "blow",
+      "class": "pure",
+      "params": [
+        {
+          "name": "x",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": " throw new Error(\"undo exploded\") "
+      }
+    }
+  ]
+}
