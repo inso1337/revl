@@ -414,6 +414,8 @@ def variant_fused_concat(core_wat: str) -> str:
     concat: one allocation and one copy per part, instead of k-1
     allocations that recopy the growing prefix each step.
     """
+    if _landed(core_wat, ";; item 432(d)"):
+        return core_wat           # the emitter already emits one k-ary concat
     out = core_wat
     arities: set[int] = set()
     for name, _exp, text, _b in _split_funcs(core_wat):
@@ -471,6 +473,36 @@ def variant_list_bulk(core_wat: str) -> str:
     return _replace_func(out, "$__canon_lower_list_Int", LIST_INT_ALIAS_LOWER)
 
 
+#: A fully-evaluated i64 operand followed by another and a checked helper --
+#: what the emitter wrote for `7 * 6` before 432(g).
+_CONST_CHAIN = re.compile(
+    r"\(i64\.const (-?\d+)\)\s*\n\s*\(i64\.const (-?\d+)\)"
+    r"\s*\n\s*\(call \$int_(add|sub|mul)\)")
+_FOLD = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b,
+         "mul": lambda a, b: a * b}
+
+
+def variant_const_fold(core_wat: str) -> str:
+    """Evaluate every constant `+ - *` the emitted body still spells out as
+    two constants and a call to the checked helper.
+
+    Applied repeatedly, so a nested constant expression collapses the whole
+    way down. A fold whose result does not fit i64 is left alone -- that is
+    the case whose runtime trap is the point.
+    """
+    out = core_wat
+    while True:
+        def repl(m: "re.Match") -> str:
+            value = _FOLD[m.group(3)](int(m.group(1)), int(m.group(2)))
+            if not -(1 << 63) <= value <= (1 << 63) - 1:
+                return m.group(0)
+            return f"(i64.const {value})"
+        nxt = _CONST_CHAIN.sub(repl, out)
+        if nxt == out:
+            return out
+        out = nxt
+
+
 def variant_combined(core_wat: str) -> str:
     """Every proposed fix at once, which is how they would actually ship."""
     out = variant_zerocopy_lift(core_wat)
@@ -480,6 +512,7 @@ def variant_combined(core_wat: str) -> str:
             out = extra(out)
         except RuntimeError:
             pass  # that shape is not in this program
+    out = variant_const_fold(out)
     return variant_prune_dead(out)
 
 
@@ -490,5 +523,6 @@ VARIANTS = {
     "static_return_area": variant_static_return_area,
     "fused_concat": variant_fused_concat,
     "list_bulk": variant_list_bulk,
+    "const_fold": variant_const_fold,
     "combined": variant_combined,
 }
