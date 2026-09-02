@@ -1,0 +1,45 @@
+{
+  "covered_layer": "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer",
+  "crate": "revl-gate",
+  "crate_version": "0.1.0",
+  "digest_inputs": [
+    "selfhost/lexer.rvl",
+    "selfhost/parser.rvl",
+    "selfhost/lower.rvl",
+    "backends/rust/emit.py",
+    "src/revl/lexer.py",
+    "src/revl/typecheck.py",
+    "tools/build_gate_crate.py"
+  ],
+  "frontier": "selfhost-admit:d70a76e3545e1c2f",
+  "frontier_excluded_builtins": [
+    "codepoint_at",
+    "field",
+    "is_alnum",
+    "is_alpha",
+    "is_digit",
+    "is_space",
+    "list",
+    "str"
+  ],
+  "frontier_excluded_keywords": [],
+  "gate_api_version": "1.0.0",
+  "generator": "tools/build_gate_crate.py",
+  "issues_admissions": false,
+  "language_version": "2.0.0",
+  "layer": "1 (verdict surface), admit-only",
+  "max_source_bytes": 262144,
+  "note": "Regenerate with `python3 tools/build_gate_crate.py`. The source_digest is a pure function of digest_inputs, not a git sha, so `--check` can verify the committed crate against the tree it was generated from. `issues_admissions` is false by construction: this gate decides the composition/guarantee layer, not the reference type layer, so its non-refusing arm is `no_objection` and never an admission.",
+  "selfhost_closure": [
+    "selfhost/lexer.rvl",
+    "selfhost/parser.rvl",
+    "selfhost/lower.rvl"
+  ],
+  "selfhost_root": "selfhost/lower.rvl",
+  "source_digest": "d70a76e3545e1c2fc91a5d9dfeb76ce89d3459fe01871b1e20401297c3ad94f2",
+  "verdict_arms": [
+    "refused",
+    "no_objection",
+    "outside_frontier"
+  ]
+}
