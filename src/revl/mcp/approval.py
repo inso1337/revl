@@ -142,6 +142,30 @@ class ApprovalRequired(Exception):
         self.ticket = ticket
 
 
+def two_step_payload(ticket: dict, *, how_to_approve: str) -> dict:
+    """Shape an `ApprovalRequired` into the ticket two-step RESULT (item 246).
+
+    Lives here, beside the exception, because more than one MCP surface can
+    raise it and the two have already drifted apart once: the compiler server
+    renders the ticket, while the composed server (`composed.py`) caught it in a
+    broad `except Exception` and returned an opaque `"ApprovalRequired: ..."`
+    runtime diagnostic with no ticket and no hash (roadmap 425 F4's shape, on
+    its second surface). Both fail CLOSED — the crossing does not fire either
+    way — but a caller that never receives a hash can never get the crossing
+    APPROVED, so the refusal is a dead end instead of a step.
+
+    `how_to_approve` is the surface's own answer to "what can I do instead"
+    (item 274): the two servers mint a yes through different channels.
+    """
+    return {
+        "ok": False,
+        "approvalRequired": True,
+        "note": ("a class-(c) crossing (an irreversible emission with no checked "
+                 "inverse) needs a human yes — nothing fired. " + how_to_approve),
+        "ticket": ticket,
+    }
+
+
 class ClassMap:
     """The per-generation call classifier (Decision 2). Built at load/swap over
     EVERY scope of every component — each provide-method AND each activation

@@ -83,7 +83,7 @@ from . import quarantine as _quarantine
 from . import repair as _repair
 from . import ship as _ship
 from .persist import RestoreError
-from .approval import ApprovalRequired
+from .approval import ApprovalRequired, two_step_payload
 from .. import query as Q
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
@@ -1002,15 +1002,11 @@ def _approval_required(exc: ApprovalRequired) -> dict:
             f"whatever it contains. This server is running "
             f"`--author-trust trusted`; the default refuses agent-authored "
             f"host code outright.")
-    return {
-        "ok": False,
-        "approvalRequired": True,
-        "note": "a class-(c) crossing (an irreversible emission with no checked "
-                "inverse) needs a human yes — nothing fired. Relay the ticket, "
-                "then call revl_approve with its `hash`; the identical re-issue "
-                "then fires once and consumes the approval.",
-        "ticket": ticket,
-    }
+    return two_step_payload(
+        ticket,
+        how_to_approve="Relay the ticket, then call revl_approve with its "
+                       "`hash`; the identical re-issue then fires once and "
+                       "consumes the approval.")
 
 
 def _tool_approve(arguments: dict) -> dict:
