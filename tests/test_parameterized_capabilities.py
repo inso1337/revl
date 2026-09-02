@@ -96,10 +96,13 @@ def _atten(kid_token: str):
 
 def test_bridge_narrower_path_admits():
     by = _atten('fs.write(path="/tmp/job-42")')
-    assert by["Kid"]["granted"] == ['fs(path="/tmp/job-42")']
-    assert by["Kid"]["holds"] == ['fs(path="/tmp")']
+    # the chain names the DECLARED boundary (`fs.write`), never the local
+    # wiring key it was reached through (here `fs`): the key is a per-component
+    # spelling, the token is the boundary (F1).
+    assert by["Kid"]["granted"] == ['fs.write(path="/tmp/job-42")']
+    assert by["Kid"]["holds"] == ['fs.write(path="/tmp")']
     # the dropped breadth is shown on the chain (the parent's wider cone).
-    assert by["Kid"]["attenuated"] == ['fs(path="/tmp")']
+    assert by["Kid"]["attenuated"] == ['fs.write(path="/tmp")']
 
 
 def test_bridge_wider_path_is_refused():
@@ -109,7 +112,7 @@ def test_bridge_wider_path_is_refused():
     with pytest.raises(RevlError) as exc:
         _atten('fs.write(path="/etc")')
     msg = str(exc.value)
-    assert 'fs(path="/etc")' in msg
+    assert 'fs.write(path="/etc")' in msg
     assert "never widen them" in msg
 
 
@@ -119,7 +122,7 @@ def test_bridge_dropped_parameter_is_refused():
     with pytest.raises(RevlError) as exc:
         _atten("fs.write")
     msg = str(exc.value)
-    assert "granting it `fs`" in msg
+    assert "granting it `fs.write`" in msg
     assert "a capability parameter only narrows" in msg
 
 
