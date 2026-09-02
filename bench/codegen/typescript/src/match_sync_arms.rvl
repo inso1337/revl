@@ -1,0 +1,26 @@
+// The async-colour question in its purest form: an async-coloured function
+// whose match has NO suspending arm. Every arm body is a plain expression, so
+// a competent developer writes a bare `switch` here. The emitter still emits
+// an awaited `async` IIFE plus an awaited `async` arrow per bound arm, so each
+// evaluation pays microtask turns that the program's own semantics never asked
+// for.
+type Step = Final(Str) | NeedTool(Str) | Retry
+
+extern emission async fn fetch_one(p: Str) -> Str = @ts { return p }
+
+pub fn decode(resp: Str) -> Step {
+  if (resp == "f") { return Final("done") }
+  if (resp == "r") { return Retry }
+  return NeedTool(resp)
+}
+
+// async-coloured (it calls the async extern), but the match itself is fully
+// synchronous: no arm awaits anything.
+pub fn classify(p: Str) -> Str {
+  let resp = fetch_one(p)
+  return match decode(resp) {
+    Final(a) => a,
+    NeedTool(t) => t,
+    Retry => "retry",
+  }
+}
