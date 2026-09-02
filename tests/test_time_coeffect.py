@@ -279,7 +279,13 @@ def test_typescript_emit_schedules_and_yields_cancel():
     src = _emitter("typescript").emit(ir)
     assert "host.scheduleEvery(30000" in src
     assert "host.scheduleAfter(300000" in src
-    assert ".cancel()" in src and "yield () =>" in src
+    # the derived inverse joins the same LIFO disposer stack as every effect,
+    # now routed through `Frame.bracket` so a raising `cancel` is caught and
+    # recorded (`bracket-fault`) instead of breaking cordis' sequential
+    # disposal chain and starving every earlier-registered (later-disposed)
+    # inverse. See docs/design/teardown-contract.md's uniform Phase-1 rule. The
+    # cancel arrow itself is unchanged; it moved inside the call.
+    assert ".cancel()" in src and "yield $revl_frame.bracket(" in src
 
 
 def test_emitted_python_body_reverts_cleanly():
@@ -955,11 +961,18 @@ def test_py_async_timer_wrong_firing_count_is_caught(tmp_path):
 
 def test_ts_emits_a_sync_timer_byte_identically():
     """A sync timer body still emits the plain `() => {…}` firing closure + a
-    `() => handle.cancel()` inverse — no Set, no tracked Promise (item 223)."""
+    `() => handle.cancel()` inverse — no Set, no tracked Promise (item 223).
+
+    The inverse is registered through `Frame.bracket` (the Phase-1 continue-
+    and-record guard), so the pinned bytes are the whole registration, not a
+    bare `yield`. The cancel ARROW is byte-identical to the pre-guard one;
+    that is what item 223 pins here; the guard only decides who calls it."""
     src = _emitter("typescript").emit(compile_source(_SYNC_TIMER, "<t>"))
     assert "const $revl_timer_1 = () => {" in src
     assert "host.scheduleEvery(30000, $revl_timer_1)" in src
-    assert "yield () => $revl_timer_1_h.cancel()" in src
+    assert ('yield $revl_frame.bracket({ key: "$revl_timer_1_h", '
+            'method: "scheduleEvery", args: [], site: "Beat.body:$revl_timer_1_h" }, '
+            '"cancel", () => $revl_timer_1_h.cancel())') in src
     assert "_inflight" not in src                 # no in-flight set for a sync timer
     assert "Promise.resolve" not in src
 
@@ -973,8 +986,13 @@ def test_ts_emits_an_async_timer_with_a_tracked_in_flight_window():
     assert 'Promise.resolve(ctx.agent.run_in("cron", "brief"))' in src
     assert "$revl_timer_1_inflight.add(_revl_task)" in src
     assert "$revl_timer_1_inflight.delete(_revl_task)" in src
-    # the inverse cancels the schedule and drops the in-flight window
-    assert "yield () => { $revl_timer_1_h.cancel(); $revl_timer_1_inflight.clear() }" in src
+    # the inverse cancels the schedule and drops the in-flight window, and is
+    # registered through the Phase-1 guard (`Frame.bracket`) like every other
+    # bracket inverse. The arrow itself is byte-identical to the pre-guard one
+    assert ('yield $revl_frame.bracket({ key: "$revl_timer_1_h", '
+            'method: "scheduleEvery", args: [], site: "Cron.body:$revl_timer_1_h" }, '
+            '"cancel", () => { $revl_timer_1_h.cancel(); '
+            '$revl_timer_1_inflight.clear() })') in src
     # the async emission is NOT fired un-awaited/inline
     assert "\n        ctx.agent.run_in(" not in src
 
