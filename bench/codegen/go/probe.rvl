@@ -1,0 +1,44 @@
+pub fn sum_ids(xs: List[Int]) -> Int {
+  var n = 0
+  for (x of xs) { n += x }
+  return n
+}
+
+pub fn scan(s: Str) -> Int {
+  var i = 0
+  var acc = 0
+  var n = s.length()
+  while (i < n) {
+    acc += s.charCodeAt(i)
+    i += 1
+  }
+  return acc
+}
+
+pub fn build(xs: List[Str], sep: Str) -> Str {
+  var out = ""
+  for (x of xs) { out = out + x + sep }
+  return out
+}
+
+pub fn label(name: Str, n: Int) -> Str {
+  return `item ${name} #${n}`
+}
+
+pub fn collect(n: Int) -> List[Int] {
+  var out: List[Int] = []
+  var i = 0
+  while (i < n) {
+    out = out.push(i)
+    i += 1
+  }
+  return out
+}
+
+pub fn tag(a: Str, b: Str) -> Str {
+  return `${a}/${b}`
+}
+
+pub fn joined(a: Str, b: Str) -> Str {
+  return a + "/" + b
+}
