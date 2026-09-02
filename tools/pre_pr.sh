@@ -35,6 +35,19 @@ PY
 echo "== roadmap markers =="
 python3 tools/check_roadmap_markers.py --check-contradiction || fail=1
 
+# The frontend suite runs tests/test_gate_crate_drift.py on every PR, so a
+# stale crate is a hard red. crates/revl-gate embeds emitted rust, which means
+# ANY emitter change rewrites it. Regenerate with:
+#     python3 tools/build_gate_crate.py
+echo "== gate crate drift =="
+python3 tools/build_gate_crate.py --check || fail=1
+
+# The site wheel is deliberately NOT checked here. It vendors the whole of
+# src/revl, so a per-push gate reddened CI on every source change to a bundled
+# module (an outage class, not a defect). It is a deploy artifact checked at
+# merge and release time, and docs/process.md makes regenerating it the
+# orchestrator's job at merge.
+
 if [ "$fail" -ne 0 ]; then
   echo
   echo "pre-PR checks FAILED. Fix these before opening the PR."
