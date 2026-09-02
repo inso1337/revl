@@ -1811,8 +1811,11 @@ fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
 // call `h.<key>.<op>(…)` where `h` is a handle bound to `spawn <Comp>`. `<key>`
 // must be a provision of `<Comp>`, and if the resolved op is an `emission` it
 // crosses the boundary exactly as a required-service emission — an unmarked
-// call is the same G4 refusal, spelled `h.<key>.<op>`. A non-handle head, or an
-// op that is not an emission, is nothing special: it is walked as a value.
+// call is the same G4 refusal, spelled `h.<key>.<op>`. If the resolved op is
+// `async` it suspends exactly as a required-service async op does, so it
+// contributes to `aops` on the same terms (roadmap item 98 — the reference's
+// `_async_service_op` reads both receiver shapes). A non-handle head, or an op
+// that is neither an emission nor async, is walked as a value.
 fn handle_call(inner: FieldN, op: Str, args: List[Expr], tg: Expr,
                marked: Bool, cx: Ctx, a: Ac) -> Ac {
   return match inner.target {
@@ -1823,17 +1826,33 @@ fn handle_call(inner: FieldN, op: Str, args: List[Expr], tg: Expr,
   }
 }
 
-fn handle_emit(h: Str, key: Str, op: Str, args: List[Expr], marked: Bool,
-               cx: Ctx, a: Ac) -> Ac {
+// The `MSig` a `h.<key>.<op>` head resolves to: the handle's spawn target, that
+// component's provision key, the service it yields, and the op on it. Empty
+// (`name == ""`) when any hop is unknown.
+fn handle_msig(h: Str, key: Str, op: Str, cx: Ctx) -> MSig {
   let comp = match cx.handles.lookup(h) { Some(c) => c, None => "" }
   let svcName = match cx.provKeySvc.lookup(comp.concat("#").concat(key)) {
     Some(s) => s, None => "" }
-  let decl = find_msig(svc_of(cx, svcName), op, 0)
+  return find_msig(svc_of(cx, svcName), op, 0)
+}
+
+fn handle_emit(h: Str, key: Str, op: Str, args: List[Expr], marked: Bool,
+               cx: Ctx, a: Ac) -> Ac {
+  let decl = handle_msig(h, key, op, cx)
   if (decl.isEm && !marked) {
     return ac_refuse(a, "G4", "call to emission `".concat(h).concat(".")
       .concat(key).concat(".").concat(op).concat("` must be marked `emit` (G4)"))
   }
-  return walk_exprs(args, 0, marked, cx, a)
+  var na = a
+  // the same arrow prune the `req` path applies: an op reached only THROUGH an
+  // arrow value is the leak surface's concern, not the method's own reach.
+  if (decl.isAsync && !cx.underArrow) {
+    na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps, areach: na.areach,
+           aops: union_into(na.aops, [h.concat(".").concat(key).concat(".")
+                                       .concat(op)]),
+           avals: na.avals }
+  }
+  return walk_exprs(args, 0, marked, cx, na)
 }
 
 // A head whose first character is upper-cased is a host/stdlib constructor
@@ -2332,6 +2351,23 @@ fn reach_reqcall(v: Str, meth: Str, args: List[Expr], cx: Ctx, cr: Bool,
   return reach_exprs(args, 0, cx, cr, a2)
 }
 
+// The handle twin of `reach_reqcall` (roadmap item 98): `h.<key>.<op>(…)` on a
+// spawn handle whose provision op is `async` is a suspension exactly as a
+// required-key async op is, so an arrow reaching one carries a colour its sync
+// type does not declare. Without this the arrow was admitted and the py tier
+// handed its caller an unawaited coroutine.
+fn reach_handlecall(inner: FieldN, op: Str, args: List[Expr], tg: Expr,
+                    cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
+  return match inner.target {
+    Var(h) => (cr && cx.handles.has(h))
+      ? reach_exprs(args, 0, cx, cr,
+                    handle_msig(h, inner.name, op, cx).isAsync
+                      ? reach_set_req(a) : a)
+      : reach_exprs(args, 0, cx, cr, reach_scan(tg, cx, cr, a)),
+    _ => reach_exprs(args, 0, cx, cr, reach_scan(tg, cx, cr, a)),
+  }
+}
+
 // The argument list of a call to `n` while measuring async REACH: an arrow at
 // one of `n`'s `Async[T]` slots is the coerced (async-stamped) value, and the
 // reference's `_arrow_reaches_async` walk prunes at an async-flagged arrow —
@@ -2351,8 +2387,9 @@ fn reach_args(args: List[Expr], i: Int, asl: List[Int], cx: Ctx, cr: Bool,
 fn reach_call(tg: Expr, args: List[Expr], cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
   return match tg {
     Field(fl) => match fl.target {
-      Var(v) => reach_reqcall(v, fl.name, args, cx, cr, a),
-      _      => reach_exprs(args, 0, cx, cr, reach_scan(tg, cx, cr, a)),
+      Var(v)       => reach_reqcall(v, fl.name, args, cx, cr, a),
+      Field(inner) => reach_handlecall(inner, fl.name, args, tg, cx, cr, a),
+      _            => reach_exprs(args, 0, cx, cr, reach_scan(tg, cx, cr, a)),
     },
     Var(n)  => reach_args(args, 0,
                           match cx.fnAsyncSlots.lookup(n) { Some(v) => v, None => [] },
