@@ -84,10 +84,20 @@ So, whenever you change logic that a `selfhost/*` file mirrors:
 4. **Add the corpus case before the fix, and watch it FAIL.** A corpus entry
    that was never seen red proves nothing.
 
-`tools/selfhost_coverage.py --check` (run by `tests/test_selfhost_coverage.py`)
-measures what the corpus does not reach and refuses to let that set grow
-silently. It is a floor, not a substitute for the rule above: it cannot see
-inside a branch the corpus already reaches.
+Two gates measure what the corpus does not reach and refuse to let that set
+grow silently, both run by `tests/test_selfhost_coverage.py`:
+
+* `tools/selfhost_line_coverage.py --check` — which STATEMENTS of the mirrored
+  emitters no corpus document executes, on both sides. This is the one the
+  surface rests on. Measured today: the corpus runs 46.7% of the reference
+  emitter statements and 75.2% of the ported ones.
+* `tools/selfhost_coverage.py --check` — the cheap construct-level check over
+  dispatch arms. Kept because it is fast and names constructs rather than
+  functions, but it is a proxy: it reported 20% blind where statements say 53%.
+
+Both are floors, not substitutes for the rule above. Neither can see inside a
+branch the corpus already reaches, and neither knows whether a covered line is
+a correct one.
 
 ## What CI covers
 

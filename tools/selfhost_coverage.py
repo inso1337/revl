@@ -17,6 +17,16 @@ DOES NOT REDACT — and every oracle stayed green, because the corpus contained 
 `Secret[` at all. A green oracle over a corpus that never spells a construct is
 not evidence about that construct. It is silence.
 
+THIS IS THE CHEAP CHECK, NOT THE GATE THE SURFACE RESTS ON. A construct is a
+DISPATCH ARM, and an arm the corpus reaches can have nearly all of its body
+unexercised, so a construct table is itself a proxy — a signal that certifies
+less than it appears to, which is the failure mode this item is about, one level
+up. Measured both ways: this file reports 20% of the mirrored constructs blind
+where `tools/selfhost_line_coverage.py` reports 53% of the reference emitter
+STATEMENTS never executed. Keep this one for what it is good at — it is fast and
+it names a construct (`kind=optfield`) rather than a function — and read the
+line gate for the size of the hole.
+
 WHAT THIS GATE DOES. It measures that silence and refuses to let it grow.
 
 For each tier it extracts a CONSTRUCT TABLE from both sides: every discriminant
