@@ -162,8 +162,12 @@ def test_ts_cas_undo_is_result_guarded_at_both_sites():
     <undo>` and the method-body `return () => <undo>` were unconditional. Both
     must now be a result ternary whose false arm is a no-op disposer."""
     src = _emit_tier("typescript", compile_source(_BOOT_CLAIM, "boot.rvl"))
-    # activation body: `yield fresh ? () => ledger.remove(...) : () => {}`
-    assert "yield fresh ? () =>" in src and 'ledger.remove("boot")' in src
+    # activation body: the result ternary is the `inverse` argument of the
+    # Phase-1 guard the bracket now registers through (`Frame.bracket`,
+    # docs/design/teardown-contract.md): the ternary itself is unchanged.
+    assert ("bracket({ key: \"fresh\", method: \"insert_if_absent\", args: [], "
+            "site: \"Boot.body:fresh\" }, \"remove\", "
+            "fresh ? () => ledger.remove(\"boot\") : () => {})") in src
     # method body: `return won ? () => ledger.remove(ticket) : () => {}`
     assert "return won ? () =>" in src and "ledger.remove(ticket)" in src
     # the false arm is the identity (a no-op disposer), never a bare remove
